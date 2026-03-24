@@ -23,6 +23,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-push-ci-cleanup.sh",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

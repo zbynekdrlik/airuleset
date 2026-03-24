@@ -9,6 +9,7 @@ modules/core/complete-planned-work.md
 modules/core/git-fetch-first.md
 modules/core/version-bumping.md
 modules/core/completion-report.md
+modules/core/ci-push-discipline.md
 modules/git/two-branch-workflow.md
 modules/git/commit-conventions.md
 modules/ci/test-strictness.md
