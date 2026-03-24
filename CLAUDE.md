@@ -32,3 +32,12 @@ python airuleset.py status     # Show current managed config state
 - Rules must have YAML `paths:` frontmatter
 - Skills use the SKILL.md format with YAML frontmatter
 - Test with `python -m pytest tests/` before committing
+
+## Skill Ownership — DO NOT manage skills belonging to other projects
+
+airuleset only manages skills it created: `ci-monitor`, `deploy-ssh`, `windows-remote-gui`.
+
+These skills are NOT managed by airuleset — do not add, symlink, or modify them:
+
+- `win-mcp.md` — belongs to `winremote-setup` project
+- `test-contact-form.md` — belongs to `website-bakerion.ai` project
