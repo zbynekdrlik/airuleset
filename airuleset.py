@@ -445,6 +445,65 @@ def cmd_status(args):
 
 
 # ---------------------------------------------------------------------------
+# Remote deployment
+# ---------------------------------------------------------------------------
+
+# Remote machines that should receive airuleset updates
+REMOTE_HOSTS = [
+    {
+        "name": "dev2",
+        "host": "10.77.8.134",
+        "user": "newlevel",
+        "repo_path": "~/devel/airuleset",
+    },
+]
+
+
+def cmd_push(args):
+    """Push to GitHub and deploy to all remote machines."""
+    import subprocess
+
+    # 1. Push to GitHub
+    print("Pushing to GitHub...")
+    result = subprocess.run(
+        ["git", "push", "origin", "main"],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"  FAILED: {result.stderr.strip()}")
+        sys.exit(1)
+    print(f"  {result.stdout.strip() or result.stderr.strip()}")
+
+    # 2. Install locally
+    print("\nInstalling locally...")
+    cmd_install(args)
+
+    # 3. Deploy to each remote
+    for remote in REMOTE_HOSTS:
+        print(f"\n{'=' * 50}")
+        print(f"Deploying to {remote['name']} ({remote['host']})...")
+        remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+        ssh_result = subprocess.run(
+            [
+                "sshpass", "-p", "newlevel",
+                "ssh", "-o", "StrictHostKeyChecking=no",
+                f"{remote['user']}@{remote['host']}",
+                remote_cmd,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if ssh_result.returncode != 0:
+            print(f"  FAILED: {ssh_result.stderr.strip()}")
+        else:
+            print(f"  {ssh_result.stdout.strip()}")
+    print("\nAll deployments complete.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -460,6 +519,7 @@ def main():
     sub.add_parser("diff", help="Show what install would change")
     sub.add_parser("validate", help="Check all files exist and resolve")
     sub.add_parser("status", help="Show current managed config")
+    sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
 
     args = parser.parse_args()
 
@@ -472,6 +532,7 @@ def main():
         "diff": cmd_diff,
         "validate": cmd_validate,
         "status": cmd_status,
+        "push": cmd_push,
     }
 
     commands[args.command](args)

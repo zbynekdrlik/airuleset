@@ -19,11 +19,22 @@ Centralized management of Claude Code rules, skills, and hooks shared across mul
 ## Commands
 
 ```bash
-python airuleset.py install    # Deploy to ~/.claude/ (CLAUDE.md + skills + hooks)
-python airuleset.py diff       # Preview changes before installing
-python airuleset.py validate   # Check all files exist and resolve
-python airuleset.py status     # Show current managed config state
+python3 airuleset.py install    # Deploy to ~/.claude/ (CLAUDE.md + skills + hooks)
+python3 airuleset.py diff       # Preview changes before installing
+python3 airuleset.py validate   # Check all files exist and resolve
+python3 airuleset.py status     # Show current managed config state
+python3 airuleset.py push       # Push to GitHub + install locally + deploy to ALL remote machines
 ```
+
+## Deployment Policy — BOTH MACHINES
+
+**After ANY change to airuleset, you MUST deploy to ALL machines.** Use `python3 airuleset.py push` instead of `git push` — it pushes to GitHub, installs locally, AND deploys to all remote machines automatically.
+
+Remote machines:
+
+- **dev2**: 10.77.8.134 (user: newlevel) — `~/devel/airuleset/`
+
+**Never use bare `git push` for airuleset changes.** Always use `python3 airuleset.py push`.
 
 ## Development Rules
 
