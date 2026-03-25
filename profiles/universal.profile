@@ -15,6 +15,7 @@ modules/git/commit-conventions.md
 modules/ci/test-strictness.md
 modules/ci/no-continue-on-error.md
 modules/ci/coverage-thresholds.md
+modules/ci/browser-console-zero-errors.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
 modules/deploy/ssh-deployment.md
