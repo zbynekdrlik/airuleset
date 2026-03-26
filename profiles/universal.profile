@@ -26,3 +26,4 @@ modules/quality/mvp-philosophy.md
 modules/quality/security-basics.md
 modules/quality/script-failure-policy.md
 modules/quality/rust-web-stack.md
+modules/quality/no-timeout-band-aids.md
