@@ -20,6 +20,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-sensitive-staging.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/pre-push-lint.sh",
+            "timeout": 120
           }
         ]
       }

@@ -125,7 +125,11 @@ def load_hooks_json() -> dict:
 
 
 def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> dict:
-    """Merge airuleset hooks into existing settings.json, preserving other keys."""
+    """Merge airuleset hooks into existing settings.json, preserving other keys.
+
+    Strategy: remove all airuleset-managed hooks (identified by 'airuleset/hooks/' in command),
+    then add all hooks from hooks.json. This ensures hooks.json is always the source of truth.
+    """
     result = dict(existing_settings)
 
     if "hooks" not in hooks_config:
@@ -138,21 +142,20 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
         if event_type not in result["hooks"]:
             result["hooks"][event_type] = []
 
-        existing_commands = set()
+        # Remove existing airuleset-managed hooks
+        cleaned = []
         for entry in result["hooks"][event_type]:
+            is_ours = False
             for hook in entry.get("hooks", []):
-                if "command" in hook:
-                    existing_commands.add(hook["command"])
-
-        for new_entry in event_hooks:
-            # Check if any hook command in this entry already exists
-            dominated = False
-            for hook in new_entry.get("hooks", []):
-                if hook.get("command") in existing_commands:
-                    dominated = True
+                if "airuleset/hooks/" in hook.get("command", ""):
+                    is_ours = True
                     break
-            if not dominated:
-                result["hooks"][event_type].append(new_entry)
+            if not is_ours:
+                cleaned.append(entry)
+        result["hooks"][event_type] = cleaned
+
+        # Add all airuleset hooks from config
+        result["hooks"][event_type].extend(event_hooks)
 
     return result
 
