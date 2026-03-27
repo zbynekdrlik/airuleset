@@ -13,13 +13,17 @@
 
 If ANY of these are not true, you are NOT done. Keep working.
 
-**Banned stopping phrases:**
+**Banned stopping phrases (including all rewordings):**
 
-- "I'll fix this in the next session" → **NO.** Fix it NOW. There is no "next session" — you finish what you started.
+- "I'll fix this in the next session" → **NO.** Fix it NOW.
+- "Remaining for future iteration" → **NO.** This is the same as "next session" with different words. Do it NOW.
 - "The remaining issue is..." → **NO.** If there's a remaining issue, it's YOUR issue. Fix it.
 - "This is a good stopping point" → **NO.** The only good stopping point is a green PR with verified deployment.
 - "I'll continue this later" → **NO.** Continue it now.
 - "The core fix is done, the test issue is separate" → **NO.** If the test fails, the fix is not done.
+- "Planned but requires..." → **NO.** If it was in the plan, it requires doing. Do it.
+- "Out of scope for this PR" → **NO.** If it was in YOUR plan, it is in scope.
+- Any section labeled "Remaining", "Future", "TODO", "Follow-up" in a completion report → **NO.** These are admissions of incomplete work disguised as deliverables.
 
 **The user asked you to do a job. Do the entire job. Do not invent stopping points.**
 

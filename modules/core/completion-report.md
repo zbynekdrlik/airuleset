@@ -38,3 +38,4 @@ Before sending the report, re-read your plan and the original user prompt. Mark 
 - **Never send a partial report** with "CI is still running" — that means you are not done yet.
 - **Never omit the plan fulfillment checklist** — this is how you and the user verify nothing was skipped.
 - **If all steps are not `[x]`, you are not done.** Go back and complete them.
+- **NEVER include a "Remaining" / "Future" / "TODO" / "Follow-up" section.** If something is remaining, you are not done. Go back and do it. A completion report with a "Remaining" section is a contradiction — it is an incomplete-work report, not a completion report.
