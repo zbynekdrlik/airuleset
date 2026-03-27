@@ -40,6 +40,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-ci.sh",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
