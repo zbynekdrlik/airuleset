@@ -8,4 +8,4 @@
 - No squash merge, no rebase merge — merge commits only.
 - If a branch other than `main` and `dev` exists, it is a mistake and should be deleted.
 
-Note: Some projects use `master` instead of `main`. Follow the existing convention in each project.
+Note: Some projects use `master` instead of `main`. Follow the existing convention in each project. Some projects (e.g., Odoo) use a 3-branch model (develop/staging/main) — check the project CLAUDE.md for branch policy overrides.
