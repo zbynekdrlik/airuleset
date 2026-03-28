@@ -28,3 +28,4 @@ modules/quality/script-failure-policy.md
 modules/quality/rust-web-stack.md
 modules/quality/no-timeout-band-aids.md
 modules/quality/no-destructive-remote-actions.md
+modules/quality/approval-scope.md
