@@ -13,3 +13,5 @@
 **Never stop at partial green.** Celebrating "lint and tests pass!" while the deploy job is failing or pending is a critical error.
 
 **Never dismiss CI failures** as "flaky", "pre-existing", or "known issue". Every failure must be investigated and fixed.
+
+**Never ask the user "want me to wait?"** — the answer is always yes. CI monitoring is not optional. Just do it.
