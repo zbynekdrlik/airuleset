@@ -35,7 +35,7 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"]
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
