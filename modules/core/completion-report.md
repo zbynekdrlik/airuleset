@@ -1,8 +1,8 @@
 ### Completion Report
 
-When work is complete, provide the completion report as the **LAST thing in your message** (not the beginning — the user should not need to scroll up to find it).
+IMPORTANT: When work is complete, YOU MUST provide the completion report in EXACTLY this format as the **LAST thing in your message** (not the beginning — the user should not need to scroll up to find it).
 
-#### Format
+#### Format (MANDATORY — use this EXACT structure, do not substitute your own)
 
 ```
 ## ✅ Work Complete
@@ -19,6 +19,8 @@ When work is complete, provide the completion report as the **LAST thing in your
 ```
 
 Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but then you are NOT done — do not send the report yet).
+
+**Do NOT use a different format.** Do NOT skip the plan fulfillment checklist. Do NOT write a prose summary instead. Use the exact template above with emoji status indicators.
 
 #### Plan fulfillment checklist
 
