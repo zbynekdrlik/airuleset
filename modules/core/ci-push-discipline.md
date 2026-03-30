@@ -27,6 +27,8 @@ npm run lint
 
 **If any check fails, fix it BEFORE pushing.** Do not push and "hope CI catches it" — you already know it will fail. Pushing code that fails local lint is wasting a 15-minute CI run on something you could have fixed in 5 seconds.
 
+**Local lint (fmt + clippy) is allowed. Full builds are NOT** (unless the project CLAUDE.md says otherwise). Do NOT run `cargo build`, `trunk build`, `cargo tauri build`, or any release compilation locally. These waste disk space (20GB+) and belong on CI runners. Check the project CLAUDE.md for machine-specific build policies.
+
 #### Before pushing — review and batch
 
 1. **Review ALL code holistically** — do not push one fix at a time. Read through your changes, check for dead code and test gaps. Batch everything into one clean commit.
