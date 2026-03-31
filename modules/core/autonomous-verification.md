@@ -12,6 +12,8 @@ Anti-patterns that violate this directive:
 - "Is the buffer duration dropping to zero?" → **WRONG.** Check it yourself.
 - "Can you describe what happens when you click...?" → **WRONG.** Click it yourself with Playwright.
 - "Can you send me a screenshot?" → **WRONG.** Take the screenshot yourself.
+- "Should I open the dashboard in Playwright?" → **WRONG.** Don't ask permission to use your own tools. Just use them.
+- "Let me know if you want me to verify with Playwright" → **WRONG.** Verification is not optional and not a proposal.
 
 **If a dashboard URL exists, open it. If a UI exists, interact with it. If data is visible somewhere, read it. You have the tools. Use them.**
 
