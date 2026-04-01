@@ -28,15 +28,8 @@ if [ -f "Cargo.toml" ]; then
         echo "BLOCKED: cargo fmt check failed. Run 'cargo fmt --all' to fix."
         FAILED=1
     fi
-
-    if [ "$FAILED" -eq 0 ]; then
-        echo "Pre-push lint: running clippy..."
-        if ! cargo clippy --workspace --all-targets -- -D warnings 2>&1; then
-            echo ""
-            echo "BLOCKED: cargo clippy found warnings. Fix them before pushing."
-            FAILED=1
-        fi
-    fi
+    # NOTE: clippy is NOT run here — it compiles the project (10-20GB).
+    # Clippy runs on CI only. Project CLAUDE.md can override this.
 fi
 
 # Python project (pyproject.toml or setup.py or *.py in root)

@@ -10,8 +10,9 @@ For Rust projects:
 
 ```bash
 cargo fmt --all --check    # Fix: cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+**Do NOT run `cargo clippy`, `cargo test`, `cargo build`, or `cargo check` locally** unless the project CLAUDE.md explicitly allows it. These compile the project and generate 10-20GB of build artifacts. Clippy and tests run on CI.
 
 For Python projects:
 
@@ -27,7 +28,7 @@ npm run lint
 
 **If any check fails, fix it BEFORE pushing.** Do not push and "hope CI catches it" — you already know it will fail. Pushing code that fails local lint is wasting a 15-minute CI run on something you could have fixed in 5 seconds.
 
-**Local lint (fmt + clippy) is allowed. Full builds are NOT** (unless the project CLAUDE.md says otherwise). Do NOT run `cargo build`, `trunk build`, `cargo tauri build`, or any release compilation locally. These waste disk space (20GB+) and belong on CI runners. Check the project CLAUDE.md for machine-specific build policies.
+**Only `cargo fmt` runs locally by default.** Everything that compiles Rust (`clippy`, `test`, `build`, `check`, `trunk build`, `cargo tauri build`) belongs on CI unless the project CLAUDE.md says otherwise. Check project-specific build policies.
 
 #### Before pushing — review and batch
 
