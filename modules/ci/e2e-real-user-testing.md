@@ -2,6 +2,18 @@
 
 **An E2E test that calls an API with curl and checks for 200 is NOT an E2E test. It is an API smoke test. Real E2E tests open the browser and interact with the UI the way a user does.**
 
+#### Playwright must be installed — no excuses
+
+If a project needs E2E tests and Playwright is not installed, **install it immediately**:
+
+```bash
+npm init -y && npm install -D @playwright/test && npx playwright install chromium
+```
+
+**"Playwright isn't installed" is NOT a reason to skip E2E tests or write curl tests instead.** Install it and write the real test. If CI needs Playwright, add it to the CI workflow. If the deploy target needs verification, use the Playwright MCP plugin or install Playwright there.
+
+The user interacts with apps through a browser — not curl. Your tests must do the same.
+
 #### Why this matters — the cost of shallow tests
 
 When you skip comprehensive E2E testing and report "all green", the user finds the bug in seconds of clicking. Then you spend DAYS in a loop:
