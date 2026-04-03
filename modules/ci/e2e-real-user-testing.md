@@ -4,26 +4,7 @@
 
 #### Playwright must be installed — no excuses
 
-If a project needs E2E tests and Playwright is not installed, **install it immediately**:
-
-```bash
-npm init -y && npm install -D @playwright/test && npx playwright install chromium
-```
-
-**"Playwright isn't installed" is NOT a reason to skip E2E tests or write curl tests instead.** Install it and write the real test. If CI needs Playwright, add it to the CI workflow. If the deploy target needs verification, use the Playwright MCP plugin or install Playwright there.
-
-The user interacts with apps through a browser — not curl. Your tests must do the same.
-
-#### Why this matters — the cost of shallow tests
-
-When you skip comprehensive E2E testing and report "all green", the user finds the bug in seconds of clicking. Then you spend DAYS in a loop:
-
-1. User reports bug → you "fix" it → you skip real E2E again → user finds it's still broken
-2. This repeats 3-5 times over a week
-
-A comprehensive E2E test that takes 10 minutes in CI would have caught the bug in ONE run. You would have known your fix was wrong and kept iterating AUTOMATICALLY without wasting the user's time.
-
-**A 15-minute CI run is ALWAYS cheaper than a week of back-and-forth with the user acting as your tester.**
+If Playwright is not installed, **install it immediately** (`npm init -y && npm install -D @playwright/test && npx playwright install chromium`). "Playwright isn't installed" is NOT a reason to write curl tests instead.
 
 #### The Rule
 
@@ -38,33 +19,9 @@ A curl call that returns 200 proves the server is running. It does NOT prove the
 
 #### "The test would take too long" is NOT a valid excuse
 
-If you find yourself thinking:
-
-- "This E2E test would make CI take 15 minutes" → **GOOD. Write it anyway.** 15 minutes of CI is nothing compared to days of user testing.
-- "I'll write a quick API check instead of a full Playwright flow" → **WRONG.** That's the shortcut that causes week-long debugging loops.
-- "The feature is simple, a curl test is enough" → **WRONG.** If it has a UI, test the UI. Simple features have UI bugs too.
-- "I'll verify manually with Playwright after deploy instead of writing a CI test" → **WRONG.** One-time checks don't catch regressions. Write the permanent test.
+**A 15-minute CI run is ALWAYS cheaper than a week of back-and-forth with the user acting as your tester.**
 
 **The comprehensive E2E test is not optional overhead — it is the primary deliverable.** The feature is not done until the E2E test proves it works by clicking through it like a user.
-
-#### What a comprehensive E2E test looks like
-
-```
-// Test: EQ changes propagate to REAPER
-// This test takes 2 minutes. That's fine. It catches real bugs.
-
-1. Navigate to mixer page
-2. Locate the EQ section for the target channel
-3. Drag band 3 gain slider to +6dB
-4. Assert: UI shows +6dB on the slider label
-5. Assert: API GET /eq returns band 3 gain = +6dB
-6. Assert: REAPER HTTP API shows gn=0.440000 on the target track
-7. Drag band 3 gain slider back to 0dB
-8. Assert: all three (UI, API, REAPER) show 0dB
-9. Repeat for at least one other control (e.g., frequency, Q)
-```
-
-This is what "tested" means. Not `curl /api/eq → 200`.
 
 #### Every UI feature MUST have a permanent Playwright CI test
 

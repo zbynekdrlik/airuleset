@@ -1,5 +1,6 @@
 # Universal profile — modules imported into ~/.claude/CLAUDE.md
 # These apply to ALL projects via the global config.
+# Target: <200 lines, <20KB total resolved content.
 
 modules/core/pr-merge-policy.md
 modules/core/ci-monitoring.md
@@ -20,13 +21,10 @@ modules/ci/browser-console-zero-errors.md
 modules/ci/e2e-real-user-testing.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
-modules/deploy/ssh-deployment.md
-modules/deploy/windows-desktop-session.md
 modules/quality/architecture-first.md
 modules/quality/mvp-philosophy.md
 modules/quality/security-basics.md
 modules/quality/script-failure-policy.md
-modules/quality/rust-web-stack.md
 modules/quality/no-timeout-band-aids.md
 modules/quality/no-localhost-urls.md
 modules/quality/no-destructive-remote-actions.md
