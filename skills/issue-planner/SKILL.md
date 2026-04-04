@@ -1,10 +1,34 @@
 ---
 name: issue-planner
-description: Select GitHub issues, check for already-solved ones, and create an implementation plan. Use when starting work on a project to pick what to work on next.
+description: Select GitHub issues, check for already-solved ones, audit CI health, and create an implementation plan. Use when starting work on a project to pick what to work on next.
 user-invocable: true
 ---
 
 # Issue Planner
+
+## Step 0: CI Health Audit
+
+Before looking at issues, check if the project's CI meets airuleset standards:
+
+```bash
+# Check for mutation testing in CI
+grep -r "cargo-mutants\|cargo mutants\|stryker\|StrykerJS" .github/workflows/ 2>/dev/null
+# Check for Playwright E2E tests
+ls e2e/ tests/e2e/ playwright/ 2>/dev/null
+# Check for assertion density or test quality gates
+grep -r "assertion\|mutation\|test-integrity" .github/workflows/ 2>/dev/null
+```
+
+If ANY of these are missing, report it FIRST using AskUserQuestion:
+
+> "This project is missing CI quality gates that airuleset requires:
+> - [ ] Mutation testing (cargo-mutants / StrykerJS) — catches shallow tests
+> - [ ] Playwright E2E tests — verifies features work as a user
+> - [ ] Test integrity scanning — catches #[ignore], assume(), skip patterns
+>
+> Should I add these before working on issues?"
+
+If user approves, add the missing gates as the first task before any issue work.
 
 ## Step 1: Fetch open issues
 
@@ -49,7 +73,8 @@ For each selected issue:
 
 ## Rules
 
-- Always check for already-solved issues FIRST — don't plan work that's already done
+- Always run the CI health audit FIRST — missing quality gates are more important than any single issue
+- Always check for already-solved issues — don't plan work that's already done
 - Never close an issue without user confirmation via AskUserQuestion
 - Present structured choices, not walls of text
 - If no issues exist, say so and ask if the user wants to create one
