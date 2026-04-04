@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Hook: PreToolUse (Bash matcher)
-# Warns if UI/feature code was changed but no test files were modified.
-# Does NOT block (exit 0) — just injects a warning into Claude's context.
+# BLOCKS git push if feature code changed but no test files were modified.
+# Bypass: include [no-test] in the latest commit message.
+# Exit code 2 = block the tool call.
 
 INPUT="${TOOL_INPUT:-}"
 
@@ -17,32 +18,43 @@ if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0
 fi
 
-# Get the default branch (main or master)
+# Check if latest commit has [no-test] bypass
+LAST_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
+if echo "$LAST_MSG" | grep -q '\[no-test\]'; then
+    exit 0
+fi
+
+# Detect default branch
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
 
-# Get files changed compared to the default branch
+# Get files changed compared to default branch (or last commit if no remote)
 CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
 
 if [ -z "$CHANGED_FILES" ]; then
     exit 0
 fi
 
-# Check if UI/feature code was changed
-UI_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(rs|ts|tsx|js|jsx|svelte|vue|py)$' | grep -vE '(test|spec|e2e|playwright)' | head -5)
+# Feature code files (these REQUIRE test changes)
+FEATURE_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(rs|ts|tsx|js|jsx|py)$' | grep -vE '(test|spec|e2e|playwright|_test\.|\.test\.)' || echo "")
 
-# Check if test files were changed
-TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' | head -5)
+# Test/E2E files
+TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' || echo "")
 
-if [ -n "$UI_CHANGES" ] && [ -z "$TEST_CHANGES" ]; then
+if [ -n "$FEATURE_CHANGES" ] && [ -z "$TEST_CHANGES" ]; then
     echo ""
-    echo "⚠️ TEST CHECK: You modified feature code but NO test files:"
-    echo "  Changed: $(echo "$UI_CHANGES" | tr '\n' ', ' | sed 's/,$//')"
-    echo "  Tests:   NONE modified"
+    echo "🚫 BLOCKED: Feature code changed but NO test files modified."
     echo ""
-    echo "  Did you write a Playwright E2E test for this change?"
-    echo "  Did you verify the feature works by clicking through it in a real browser?"
-    echo "  If this is a UI feature, a permanent Playwright CI test is REQUIRED."
+    echo "  Changed feature files:"
+    echo "$FEATURE_CHANGES" | head -10 | sed 's/^/    /'
     echo ""
+    echo "  Test files modified: NONE"
+    echo ""
+    echo "  Every feature/fix MUST have a corresponding test."
+    echo "  If this is genuinely a config-only change, add [no-test] to your commit message."
+    echo ""
+    echo "  To fix: write a Playwright E2E test or unit test for your changes."
+    echo ""
+    exit 2
 fi
 
 exit 0
