@@ -19,6 +19,7 @@ modules/ci/no-continue-on-error.md
 modules/ci/coverage-thresholds.md
 modules/ci/browser-console-zero-errors.md
 modules/ci/e2e-real-user-testing.md
+modules/ci/mutation-testing.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
 modules/quality/architecture-first.md
