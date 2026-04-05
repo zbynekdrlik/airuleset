@@ -62,14 +62,13 @@ if [ -n "$OPEN_PR" ]; then
     fi
 fi
 
+if [ "$SHOULD_BLOCK" -eq 1 ]; then
+    echo -e "STOP BLOCKED: CI is running or red on ${BRANCH}. Monitor CI to completion before stopping. Run: gh run list --branch ${BRANCH}" >&2
+    exit 2
+fi
+
 if [ -n "$WARNINGS" ]; then
-    echo -e "\n🚨 STOP BLOCKED — INCOMPLETE WORK:${WARNINGS}"
-    echo ""
-    if [ "$SHOULD_BLOCK" -eq 1 ]; then
-        echo "You cannot stop while CI is running or red. Monitor CI: gh run list --branch $BRANCH"
-        exit 2
-    fi
-    echo "Unresolved issues found. Explain to the user what is blocking you."
+    echo -e "${WARNINGS}"
 fi
 
 exit 0
