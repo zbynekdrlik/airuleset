@@ -19,16 +19,12 @@ ls e2e/ tests/e2e/ playwright/ 2>/dev/null
 grep -r "assertion\|mutation\|test-integrity" .github/workflows/ 2>/dev/null
 ```
 
-If ANY of these are missing, report it FIRST using AskUserQuestion:
+If ANY of these are missing, you MUST use the AskUserQuestion tool to ask the user before proceeding. Do NOT skip this. Do NOT just mention it and move on. Use AskUserQuestion with these options:
 
-> "This project is missing CI quality gates that airuleset requires:
-> - [ ] Mutation testing (cargo-mutants / StrykerJS) — catches shallow tests
-> - [ ] Playwright E2E tests — verifies features work as a user
-> - [ ] Test integrity scanning — catches #[ignore], assume(), skip patterns
->
-> Should I add these before working on issues?"
+- **"Yes, add missing gates first"** — Add mutation testing / Playwright / test-integrity as the first task before any issue work
+- **"Skip for now, show issues"** — Proceed to issues without adding gates (user explicitly chose to skip)
 
-If user approves, add the missing gates as the first task before any issue work.
+**Do NOT proceed to Step 1 until the user has answered this question.** A one-line mention like "mutation testing is missing" without AskUserQuestion is NOT acceptable — you must block and ask.
 
 ## Step 1: Fetch open issues
 
