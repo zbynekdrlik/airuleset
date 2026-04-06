@@ -23,7 +23,7 @@ RUN_ID=$(echo "$LATEST" | python3 -c "import sys,json; d=json.load(sys.stdin); p
 
 # Block if the LATEST run is still going
 if [ "$STATUS" = "in_progress" ] || [ "$STATUS" = "queued" ]; then
-    echo "STOP BLOCKED: CI run #${RUN_ID} is ${STATUS}. Do NOT output empty messages. Run this command and wait for it to complete: gh run watch ${RUN_ID} --exit-status" >&2
+    echo "STOP BLOCKED: CI run #${RUN_ID} is ${STATUS}. Run in background: sleep 300 && gh run view ${RUN_ID} --json status,conclusion" >&2
     exit 2
 fi
 
