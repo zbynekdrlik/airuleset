@@ -3,7 +3,7 @@
 **After every push, you MUST monitor CI until ALL jobs reach a terminal state.** Do not move on to other tasks or claim work is done while CI is running.
 
 1. Check status: `gh run list --limit 3`
-2. Watch the run: `gh run view <run-id>` (poll until terminal state — success or failure)
+2. Watch the run: `gh run watch <run-id> --exit-status` — this blocks until the run completes. Run it in the background if needed. Do NOT spam empty "Waiting" messages — use `gh run watch` and let it complete.
 3. If any job fails: `gh run view <run-id> --log-failed` — investigate and fix immediately
 4. Push fixes and monitor again until green
 5. After merge to main: monitor the main branch CI run AND any release/deploy workflows until they complete
