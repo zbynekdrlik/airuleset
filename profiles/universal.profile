@@ -9,7 +9,6 @@ modules/core/autonomous-verification.md
 modules/core/complete-planned-work.md
 modules/core/git-fetch-first.md
 modules/core/version-bumping.md
-modules/core/completion-report.md
 modules/core/ci-push-discipline.md
 modules/core/ask-before-assuming.md
 modules/git/two-branch-workflow.md
@@ -30,3 +29,4 @@ modules/quality/no-timeout-band-aids.md
 modules/quality/no-localhost-urls.md
 modules/quality/no-destructive-remote-actions.md
 modules/quality/approval-scope.md
+modules/core/completion-report.md
