@@ -28,6 +28,11 @@ The **E2E test coverage table** is mandatory for any work that touches features 
 
 Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but then you are NOT done — do not send the report yet).
 
+**✅ means CONFIRMED WORKING. Do not use ✅ on a line that has caveats, excuses, or "will pass when...":**
+- `✅ PR: url — created, CI runners stuck` → **WRONG.** That's not ✅, that's ⏳ or ❌.
+- `✅ CI: Tier 1 green` + `⏳ CI: PR run stuck` → **WRONG.** If ANY CI is not green, the whole CI line is ⏳.
+- **If you have ANY ⏳ or ❌ line, do NOT send the report.** Wait until everything is ✅, then send.
+
 **Do NOT use a different format.** Do NOT skip the plan fulfillment checklist. Do NOT write a prose summary instead. Use the exact template above with emoji status indicators.
 
 #### Plan fulfillment checklist
