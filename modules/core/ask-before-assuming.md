@@ -21,6 +21,7 @@ Use AskUserQuestion with 2-4 concrete options. Include a description for each op
 
 - **Executing an approved plan** — if the user approved a plan with phases 1-6, execute ALL phases without stopping to ask "should I continue with phase N?" The answer is always yes. Do the entire plan in one run.
 - **Visual companion / browser mockups** — the answer is always YES. Do not ask for consent to use the visual companion. Just use it when diagrams or mockups would help.
+- **Plan execution approach** — always use subagent-driven execution. Do not ask "subagent or inline?" The answer is always subagent-driven.
 - Obvious next steps in a plan you already agreed on — just do them.
 - Technical decisions within your expertise that don't affect the user's workflow.
 - Questions you could answer by reading the code or documentation.
