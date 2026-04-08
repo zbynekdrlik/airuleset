@@ -29,4 +29,5 @@ modules/quality/no-timeout-band-aids.md
 modules/quality/no-localhost-urls.md
 modules/quality/no-destructive-remote-actions.md
 modules/quality/approval-scope.md
+modules/quality/database-migrations.md
 modules/core/completion-report.md
