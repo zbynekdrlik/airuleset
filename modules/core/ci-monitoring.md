@@ -15,3 +15,7 @@
 **Never dismiss CI failures** as "flaky", "pre-existing", or "known issue". Every failure must be investigated and fixed.
 
 **Never ask the user "want me to wait?"** — the answer is always yes. CI monitoring is not optional. Just do it.
+
+**Never blindly rerun failed CI.** If a job fails, investigate WHY it failed (`gh run view --log-failed`). Rerunning without fixing the root cause is wasting time — if it failed once, it will fail again. One rerun is acceptable to rule out transient issues. Two reruns of the same failure means the problem is real — investigate and fix.
+
+**Self-hosted runners are YOUR responsibility.** If you set up or configured a local runner (GitHub Actions self-hosted, Playwright on LAN, etc.) and it has issues (offline, stale, misconfigured), YOU must diagnose and fix it. Do not ask the user to fix runner infrastructure you maintain. SSH to the runner machine, check logs, restart the service, fix the config.
