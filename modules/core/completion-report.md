@@ -26,6 +26,13 @@ IMPORTANT: When work is complete, YOU MUST provide the completion report in EXAC
 
 The **E2E test coverage table** is mandatory for any work that touches features or fixes. Each row must name the specific test file and describe what user workflow it exercises. If a feature has no E2E test row, it is not done.
 
+**E2E table validation rules:**
+- Each feature/fix you implemented MUST have its own row — not shared with other features
+- The test file MUST exist in the repo (committed, not just run once)
+- "What It Verifies" must describe a SPECIFIC user workflow (click X → see Y → backend confirms Z)
+- Generic tests like "page loads" or "API returns 200" do NOT count as feature E2E coverage
+- **If you cannot fill a row with a specific Playwright test file → you are not done. Write the test first.**
+
 Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but then you are NOT done — do not send the report yet).
 
 **✅ means CONFIRMED WORKING. Do not use ✅ on a line that has caveats, excuses, or "will pass when...":**

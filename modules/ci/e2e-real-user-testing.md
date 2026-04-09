@@ -31,6 +31,17 @@ A curl call that returns 200 proves the server is running. It does NOT prove the
 - The CI test must exercise the SAME user workflow you would verify manually: navigate, click, type, assert.
 - **If the user can find a bug in 5 seconds of clicking that your test doesn't catch, your test is incomplete.**
 
+#### Per-feature E2E — not per-app
+
+**Each feature you implement or fix gets its OWN E2E test (or test block) that exercises THAT specific feature.** A generic "dashboard loads" test does NOT count as E2E coverage for a playlist feature, a settings change, or a playback control.
+
+- Implemented playlist sync → E2E test that syncs a playlist, verifies songs appear in UI
+- Implemented play/pause → E2E test that clicks play, verifies playback state changes
+- Fixed a settings form → E2E test that changes a setting, saves, reloads, verifies it persisted
+- Added a download feature → E2E test that triggers download, waits, verifies progress/completion in UI
+
+**"Dashboard loads and shows title" is a liveness test, not a feature test.** It proves the app starts. It does NOT prove any feature works. Every feature you ship must have its own Playwright test proving that specific feature works end-to-end.
+
 #### When curl/API tests ARE appropriate
 
 - Pure API endpoints with no UI (health checks, data APIs, WebSocket protocols)
