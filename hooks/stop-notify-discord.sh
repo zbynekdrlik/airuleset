@@ -5,6 +5,9 @@ set -euo pipefail
 # Sends a Discord notification via n8n webhook when Claude stops.
 # Fire-and-forget — never blocks Claude (exit 0 always).
 
+# Source env file (bashrc has interactive guard, hooks run non-interactively)
+[ -f ~/.claude/env ] && source ~/.claude/env
+
 WEBHOOK_URL="${CLAUDE_DISCORD_WEBHOOK_URL:-}"
 [ -z "$WEBHOOK_URL" ] && exit 0
 
