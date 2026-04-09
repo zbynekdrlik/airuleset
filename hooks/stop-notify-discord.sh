@@ -13,8 +13,13 @@ WEBHOOK_URL="${CLAUDE_DISCORD_WEBHOOK_URL:-}"
 
 command -v jq &>/dev/null || exit 0
 
-# Read stdin JSON from Claude Code (cwd, transcript_path, session_id)
+# Read stdin JSON from Claude Code
 INPUT=$(cat)
+
+# Only notify on end_turn (Claude truly idle, waiting for user)
+# Skip tool_use (Claude still working), max_tokens, stop_sequence
+STOP_REASON=$(echo "$INPUT" | jq -r '.stop_reason // empty' 2>/dev/null || echo "")
+[ "$STOP_REASON" != "end_turn" ] && exit 0
 
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
