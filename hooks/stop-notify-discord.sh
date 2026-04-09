@@ -16,6 +16,11 @@ command -v jq &>/dev/null || exit 0
 # Read stdin JSON from Claude Code
 INPUT=$(cat)
 
+# Skip if background tasks still running (e.g., CI monitoring shell)
+# stop_hook_active=true means Claude has async work in progress — not truly idle
+ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
+[ "$ACTIVE" = "true" ] && exit 0
+
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
