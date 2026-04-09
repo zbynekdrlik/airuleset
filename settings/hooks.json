@@ -54,6 +54,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-ci.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-notify-discord.sh",
+            "timeout": 10
           }
         ]
       }
