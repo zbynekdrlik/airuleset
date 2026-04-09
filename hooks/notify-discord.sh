@@ -14,7 +14,23 @@ command -v jq &>/dev/null || exit 0
 
 INPUT=$(cat)
 
+# Debug: log stdin (leave enabled until stable)
+echo "$INPUT" >> /tmp/claude-notify-debug.log
+
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+
+# Skip if background Claude shells are running in this project's directory
+# Claude background shells (CI monitoring etc.) source shell-snapshots
+# Their CWD is readable via /proc/PID/cwd
+if [ -n "$CWD" ]; then
+    for pid in $(pgrep -f "shell-snapshots" 2>/dev/null); do
+        SHELL_CWD=$(readlink /proc/$pid/cwd 2>/dev/null || echo "")
+        if [ "$SHELL_CWD" = "$CWD" ]; then
+            exit 0
+        fi
+    done
+fi
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 MESSAGE=$(echo "$INPUT" | jq -r '.message // "Waiting for input"' 2>/dev/null || echo "Waiting for input")
 MESSAGE="${MESSAGE:0:500}"
