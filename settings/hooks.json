@@ -32,16 +32,6 @@
             "timeout": 10
           }
         ]
-      },
-      {
-        "matcher": "AskUserQuestion",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/pre-ask-notify-discord.sh",
-            "timeout": 10
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -64,10 +54,17 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-ci.sh",
             "timeout": 15
-          },
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/stop-notify-discord.sh",
+            "command": "bash ~/devel/airuleset/hooks/notify-discord.sh",
             "timeout": 10
           }
         ]
