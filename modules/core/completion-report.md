@@ -1,5 +1,11 @@
 ### Completion Report
 
+**Context gate — related rules you MUST also apply:**
+- `complete-planned-work.md` — no "Remaining/Future/TODO" sections; finish the job before reporting
+- `autonomous-verification.md` — ✅ means functional verification (clicked, confirmed), not just liveness
+- `e2e-real-user-testing.md` — E2E table rows must reference real Playwright tests, not API smokes
+- `pr-merge-policy.md` — green PR ≠ permission to merge; wait for explicit user instruction
+
 IMPORTANT: When work is complete, YOU MUST provide the completion report in EXACTLY this format as the **LAST thing in your message** (not the beginning — the user should not need to scroll up to find it).
 
 #### Format (MANDATORY — use this EXACT structure, do not substitute your own)
@@ -40,24 +46,14 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but th
 - `✅ CI: Tier 1 green` + `⏳ CI: PR run stuck` → **WRONG.** If ANY CI is not green, the whole CI line is ⏳.
 - **If you have ANY ⏳ or ❌ line, do NOT send the report.** Wait until everything is ✅, then send.
 
-**Do NOT use a different format.** Do NOT skip the plan fulfillment checklist. Do NOT write a prose summary instead. Use the exact template above with emoji status indicators.
-
 #### Plan fulfillment checklist
 
-Before sending the report, re-read your plan and the original user prompt. Mark each step:
-
+Before sending, re-read your plan and the original prompt. Mark each step:
 - `[x]` — done, with evidence (commit hash, test file, verification output)
-- `[ ]` — skipped, with explicit reason
-
-**If any step is marked `[ ]` SKIPPED — go back and do it before sending the report.** The only acceptable skip reasons are: "user explicitly told me to skip this" or "turned out to be impossible because [specific technical reason]."
-
-"I forgot" and "ran out of time" are not valid skip reasons — they mean you are not done.
+- `[ ]` — only if user explicitly told you to skip OR technically impossible (with reason). "Forgot" and "ran out of time" are NOT valid skips — go back and do it.
 
 #### Rules
 
-- **Report goes at the END of your message**, not the beginning.
-- **Never claim done without this report.**
-- **Never send a partial report** with "CI is still running" — that means you are not done yet.
-- **Never omit the plan fulfillment checklist** — this is how you and the user verify nothing was skipped.
-- **If all steps are not `[x]`, you are not done.** Go back and complete them.
-- **NEVER include a "Remaining" / "Future" / "TODO" / "Follow-up" section.** If something is remaining, you are not done. Go back and do it. A completion report with a "Remaining" section is a contradiction — it is an incomplete-work report, not a completion report.
+- Report at the END of your message, not the beginning.
+- Never send a partial report ("CI still running" means you are not done).
+- Never include a "Remaining / Future / TODO / Follow-up" section — that's incomplete work disguised as a deliverable (see `complete-planned-work.md`).

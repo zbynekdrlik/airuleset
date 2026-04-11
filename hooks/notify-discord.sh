@@ -27,6 +27,7 @@ if [ -n "$CWD" ]; then
     for pid in $(pgrep -f "shell-snapshots" 2>/dev/null); do
         SHELL_CWD=$(readlink /proc/$pid/cwd 2>/dev/null || echo "")
         if [ "$SHELL_CWD" = "$CWD" ]; then
+            echo "SKIPPED (bg shell PID=$pid CWD=$SHELL_CWD)" >> /tmp/claude-notify-debug.log
             exit 0
         fi
     done
@@ -42,6 +43,8 @@ fi
 [ -z "$PROJECT" ] && PROJECT="unknown"
 
 MACHINE=$(hostname -s 2>/dev/null || echo "unknown")
+
+echo "SENT: $PROJECT ($MACHINE)" >> /tmp/claude-notify-debug.log
 
 curl -s --max-time 5 -X POST "$WEBHOOK_URL" \
     -H "Content-Type: application/json" \

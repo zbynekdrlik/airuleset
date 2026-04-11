@@ -1,5 +1,11 @@
 ### Post-Deploy Verification
 
+**Context gate — related rules you MUST also apply:**
+- `autonomous-verification.md` — YOU have Playwright; never ask the user to test or screenshot
+- `e2e-real-user-testing.md` — functional verification must use browser, not curl
+- `no-localhost-urls.md` — use the real IP, never localhost
+- `approval-scope.md` — "merge it" ≠ "deploy to production"; ask separately
+
 After every deployment, verify the target machine responds correctly before reporting success. **Verification has TWO mandatory layers — liveness AND functional.**
 
 #### Layer 1: Liveness (necessary but NOT sufficient)

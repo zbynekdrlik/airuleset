@@ -21,18 +21,4 @@ Wait for explicit approval. "Merge it" ≠ "deploy to production."
 
 #### The principle
 
-Each action that has its own consequences requires its own approval:
-
-- Merging a PR → affects the git history
-- Deploying to staging → affects the staging environment
-- Deploying to production → affects real users/customers
-
-These are three separate approvals, not one. Do not chain them.
-
-#### Anti-patterns
-
-- User says "merge it" → Claude merges, syncs, deploys to staging, deploys to production, all in one turn → **WRONG**
-- User says "looks good" → Claude interprets this as approval for everything → **WRONG**
-- User says "go ahead" → Claude does 5 things, only the first was what the user meant → **WRONG**
-
-**When in doubt about the scope of an approval, ask.** "You said 'merge it' — should I also trigger the production deployment?"
+Each action with its own consequences needs its own approval. Merging a PR, deploying to staging, and deploying to production are three separate approvals — do not chain them. "Merge it", "looks good", and "go ahead" approve ONE thing, not everything downstream. When in doubt, ask.

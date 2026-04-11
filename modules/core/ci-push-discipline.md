@@ -1,5 +1,10 @@
 ### CI Push Discipline
 
+**Context gate — related rules you MUST also apply:**
+- `ci-monitoring.md` — after push, monitor CI until ALL jobs reach terminal state
+- `version-bumping.md` — bump version BEFORE first push, not after CI fails on version check
+- `test-strictness.md` — don't rerun failed CI blindly; investigate root cause first
+
 **Every push to `dev` triggers a CI run that may take 15-20 minutes. Wasted CI runs cost time and delay feedback.**
 
 #### Before pushing — MANDATORY local checks

@@ -1,5 +1,10 @@
 ### Test-Driven Development
 
+**Context gate — related rules you MUST also apply:**
+- `e2e-real-user-testing.md` — UI features need Playwright (browser), not curl
+- `test-strictness.md` — no `#[ignore]`, no `skip`, no `assume()`, no mocked dependencies
+- `browser-console-zero-errors.md` — Playwright tests must assert zero console errors
+
 Every implementation plan MUST follow RED-GREEN-REFACTOR:
 
 1. **Write failing tests** that describe expected behavior

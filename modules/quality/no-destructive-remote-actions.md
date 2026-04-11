@@ -22,11 +22,8 @@ Wait for explicit "yes", "go ahead", or "approved". Silence is NOT approval.
 
 #### Context does not matter
 
-- "I need to test if it survives a reboot" → **Ask first.** Testing does not justify unannounced production reboots.
-- "It's just a dev machine" → **Ask first.** You might be wrong about which machine is production.
-- "The user asked if it survives reboots" → **Asking IF it survives ≠ approval to reboot.** The user asked a question, not gave an instruction.
-- "It will come back in 2 minutes" → **Ask first.** Those 2 minutes might affect 25 stores.
+"Just testing", "just a dev machine", "the user asked about it", "it'll come back in 2 minutes" — none of these justify unannounced destructive actions. Asking IF something works ≠ approval to do it. You might be wrong about which machine is production.
 
 #### The rule
 
-**You can READ anything on remote machines. You can DEPLOY pre-approved artifacts. But you NEVER reboot, stop services, kill processes, or delete data on remote machines without asking first.**
+**You can READ anything. You can DEPLOY pre-approved artifacts. But you NEVER reboot, stop services, kill processes, or delete data on remote machines without asking first.**
