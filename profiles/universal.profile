@@ -1,6 +1,7 @@
 # Universal profile — modules imported into ~/.claude/CLAUDE.md
 # These apply to ALL projects via the global config.
-# Target: <200 lines, <20KB total resolved content.
+# Target: <800 lines, <50KB total resolved content.
+# Current (2026-04-11): 781 lines, 44.5 KB. Use /rules-audit to review periodically.
 
 modules/core/pr-merge-policy.md
 modules/core/ci-monitoring.md
