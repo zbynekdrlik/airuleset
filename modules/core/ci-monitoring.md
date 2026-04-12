@@ -1,6 +1,11 @@
 ### CI Pipeline Monitoring
 
-**After every push, you MUST monitor CI until ALL jobs reach a terminal state.** Do not move on to other tasks or claim work is done while CI is running.
+**Context gate — related rules you MUST also apply:**
+- `ci-push-discipline.md` — local checks before push, batch fixes, one push per cycle
+- `complete-planned-work.md` — CI monitoring is part of the plan; skipping it = incomplete work
+- `completion-report.md` — never send completion report while CI is still running
+
+**After every push, you MUST monitor CI until ALL jobs reach a terminal state.** Do not move on to other tasks or claim work is done while CI is running. **This includes brainstorming, issue selection, or any "next task" planning — NOTHING starts until CI reaches terminal state.**
 
 1. Check status: `gh run list --limit 3`
 2. Watch the run: `gh run view <run-id>` (poll until terminal state — success or failure). Do NOT use `gh run watch` — it polls every 3 seconds and causes GitHub API rate limiting on long runs. Instead, run `gh run view` in the background with a reasonable sleep: `sleep 300 && gh run view <run-id>`. Do NOT spam empty "Waiting" messages.
