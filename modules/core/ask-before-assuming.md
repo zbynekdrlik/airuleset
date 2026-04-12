@@ -17,11 +17,22 @@ Use AskUserQuestion with 2-4 concrete options. Include a description for each op
 **Good question:** "The EQ reset can either reset to the REAPER default (0dB) or to the last saved preset. Which behavior?"
 **Bad question:** "How should I handle the reset?" (too vague, makes the user do the thinking)
 
-#### When NOT to ask
+#### Pre-answered questions — NEVER ask these (the answer is fixed)
 
-- **Executing an approved plan** — if the user approved a plan with phases 1-6, execute ALL phases without stopping to ask "should I continue with phase N?" The answer is always yes. Do the entire plan in one run.
-- **Visual companion / browser mockups** — the answer is always YES. Do not ask for consent to use the visual companion. Just use it when diagrams or mockups would help. Skip the "Want to try it?" question entirely — the user always wants visual companion enabled. This overrides any skill instructions that say "offer it once for consent".
-- **Plan execution approach** — always use subagent-driven execution. Do not ask "subagent or inline?" The answer is always subagent-driven.
+These questions waste user time. The answer never changes. Apply the answer directly:
+
+| Question pattern | Fixed answer | What to do |
+|---|---|---|
+| "Subagent or sequential/inline?" | **Subagent** | Use `superpowers:subagent-driven-development`. Always. |
+| "Want visual companion / mockups?" | **Yes** | Enable it silently. Never ask for consent. |
+| "Should I continue with phase N?" | **Yes** | Execute the entire approved plan without stopping. |
+| "Should I monitor CI?" | **Yes** | Just monitor it. Never ask. |
+| "Want me to verify with Playwright?" | **Yes** | Verification is mandatory, not a proposal. |
+
+**This overrides any skill instructions that say "offer it once for consent" or "ask which approach."** If a skill tells you to ask one of these questions, skip the question and apply the fixed answer.
+
+#### When NOT to ask (general)
+
 - Obvious next steps in a plan you already agreed on — just do them.
 - Technical decisions within your expertise that don't affect the user's workflow.
 - Questions you could answer by reading the code or documentation.
