@@ -6,7 +6,15 @@ user-invocable: true
 
 # Issue Planner
 
-## Step 0: CI Health Audit
+## Step 0: Close previous work context
+
+**Any previous plan, task list, or implementation context from this session is NOW CLOSED.** Do not carry forward assumptions, partial work, or "remaining items" from earlier work. You are starting fresh.
+
+1. If there is a task list from previous work, mark all remaining tasks as `deleted` — they belong to the old context.
+2. Do NOT reference previous plans or continue where you "left off."
+3. The user invoked `/issue-planner` because they want to pick NEW work. Treat this as a clean slate.
+
+## Step 1: CI Health Audit
 
 Before looking at issues, check if the project's CI meets airuleset standards:
 
@@ -26,13 +34,13 @@ If ANY of these are missing, you MUST use the AskUserQuestion tool to ask the us
 
 **Do NOT proceed to Step 1 until the user has answered this question.** A one-line mention like "mutation testing is missing" without AskUserQuestion is NOT acceptable — you must block and ask.
 
-## Step 1: Fetch open issues
+## Step 2: Fetch open issues
 
 ```bash
 gh issue list --state open --limit 30 --json number,title,labels,assignees,createdAt,updatedAt
 ```
 
-## Step 2: Check for already-solved issues
+## Step 3: Check for already-solved issues
 
 For each open issue, check if recent commits or PRs already address it:
 
@@ -48,7 +56,7 @@ If an issue appears to be already solved by a merged PR or recent commit, presen
 
 Use AskUserQuestion to let the user confirm each one. Do NOT close issues without explicit approval.
 
-## Step 3: Present issues for selection
+## Step 4: Present issues for selection
 
 Use AskUserQuestion to present the open (unsolved) issues as options. Group by priority/labels if available. Let the user select which issue(s) to work on.
 
@@ -57,7 +65,7 @@ Include for each issue:
 - Key details from the body (1 line summary)
 - Labels and age
 
-## Step 4: Brainstorm and plan
+## Step 5: Brainstorm and plan
 
 For each selected issue:
 
