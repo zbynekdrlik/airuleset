@@ -42,6 +42,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "CronCreate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-cron-ci-monitor.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [
