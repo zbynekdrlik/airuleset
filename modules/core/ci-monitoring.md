@@ -9,6 +9,8 @@
 
 1. Check status: `gh run list --limit 3`
 2. Watch the run: `gh run view <run-id>` (poll until terminal state — success or failure). Do NOT use `gh run watch` — it polls every 3 seconds and causes GitHub API rate limiting on long runs. Instead, run `gh run view` in the background with a reasonable sleep: `sleep 300 && gh run view <run-id>`. Do NOT spam empty "Waiting" messages.
+
+**Do NOT use `/loop`, `CronCreate`, or any scheduled/recurring polling for CI monitoring.** These create 30-minute gaps where failures go unnoticed, and they interfere with Discord idle notifications. Use a single `sleep N && gh run view` background command — this is the ONLY acceptable method.
 3. If any job fails: `gh run view <run-id> --log-failed` — investigate and fix immediately
 4. Push fixes and monitor again until green
 5. After merge to main: monitor the main branch CI run AND any release/deploy workflows until they complete
