@@ -23,4 +23,10 @@ if echo "$TOOL_INPUT" | grep -qi "subagent.*or.*sequential\|subagent.*or.*inline
     exit 2
 fi
 
+# Check for "ready to proceed / say go" style questions
+if echo "$TOOL_INPUT" | grep -qi "say.*go\|shall.*i.*proceed\|ready.*to.*execute\|ready.*when.*you.*are\|if.*good.*say\|if.*looks.*good\|want.*me.*to.*proceed\|proceed.*to.*next.*step\|ready.*for.*next.*step\|invoke.*superpowers:writing-plans\|invoke.*superpowers:executing-plans"; then
+    echo "BLOCKED: Chain directly to the next step — do not stop to ask. If the user approved the design/plan, proceed autonomously. See ask-before-assuming.md pre-answered questions table." >&2
+    exit 2
+fi
+
 exit 0
