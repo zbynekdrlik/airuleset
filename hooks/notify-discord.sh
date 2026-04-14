@@ -13,12 +13,12 @@ if [ -f ~/.claude/channels/discord/.env ]; then
 fi
 [ -z "$BOT_TOKEN" ] && exit 0
 
-# Read DM channel ID from env file
-DM_CHANNEL_ID=""
+# Read notification channel ID from env file
+CHANNEL_ID=""
 if [ -f ~/.claude/channels/discord/.env ]; then
-    DM_CHANNEL_ID=$(grep -E '^DISCORD_DM_CHANNEL_ID=' ~/.claude/channels/discord/.env | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\n')
+    CHANNEL_ID=$(grep -E '^DISCORD_NOTIFICATION_CHANNEL_ID=' ~/.claude/channels/discord/.env | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '\n')
 fi
-[ -z "$DM_CHANNEL_ID" ] && exit 0
+[ -z "$CHANNEL_ID" ] && exit 0
 
 command -v jq &>/dev/null || exit 0
 
@@ -52,11 +52,11 @@ PROJECT_UPPER=$(echo "$PROJECT" | tr '[:lower:]' '[:upper:]')
 
 CONTENT="**${PROJECT_UPPER}** waiting (${MACHINE})"
 
-echo "SENT: $PROJECT ($MACHINE) → DM channel $DM_CHANNEL_ID" >> /tmp/claude-notify-debug.log
+echo "SENT: $PROJECT ($MACHINE) → DM channel $CHANNEL_ID" >> /tmp/claude-notify-debug.log
 
 # Send DM directly via Discord REST API (fire and forget, background)
 (curl -s --max-time 5 -X POST \
-    "https://discord.com/api/v10/channels/${DM_CHANNEL_ID}/messages" \
+    "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
     -H "Authorization: Bot ${BOT_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
