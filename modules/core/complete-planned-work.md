@@ -23,6 +23,8 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **The user asked you to do a job. Do the entire job. Do not invent stopping points.**
 
+**Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
+
 **If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), create a GitHub issue for it immediately:
 ```bash
 gh issue create --title "TODO: <description>" --body "<context and why it matters>"

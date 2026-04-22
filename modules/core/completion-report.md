@@ -55,5 +55,6 @@ Before sending, re-read your plan and the original prompt. Mark each step:
 #### Rules
 
 - Report at the END of your message, not the beginning.
+- One or two sentences of preamble before the report is fine — a full narrative is not.
 - Never send a partial report ("CI still running" means you are not done).
 - Never include a "Remaining / Future / TODO / Follow-up" section — that's incomplete work disguised as a deliverable (see `complete-planned-work.md`).

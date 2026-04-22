@@ -35,6 +35,8 @@ These questions waste user time. The answer never changes. Apply the answer dire
 
 **This also applies to prose questions.** Do not work around the rule by asking in your message text instead of AskUserQuestion. "Say go to start" and "Ready when you are" are the same violation as using AskUserQuestion — you are stopping to ask a pre-answered question.
 
+**The table covers INTENTS, not exact phrasings.** Any semantic rewording of the questions above is covered — "wanna try the mockup thing?", "proceed when ready", "dispatching or not?", "should we kick off?". If the intent matches a row, apply the fixed answer.
+
 #### When NOT to ask (general)
 
 - Obvious next steps in a plan you already agreed on — just do them.

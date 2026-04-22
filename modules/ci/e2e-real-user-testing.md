@@ -1,60 +1,44 @@
 ### E2E Tests Must Simulate Real Users (MANDATORY)
 
-**An E2E test that calls an API with curl and checks for 200 is NOT an E2E test. It is an API smoke test. Real E2E tests open the browser and interact with the UI the way a user does.**
+**An E2E test that curls an API and checks for 200 is NOT an E2E test — it's an API smoke test.** Real E2E opens a browser and interacts with the UI like a user.
 
-#### Playwright must be installed — no excuses
+#### Install Playwright if missing
 
-If Playwright is not installed, **install it immediately** (`npm init -y && npm install -D @playwright/test && npx playwright install chromium`). "Playwright isn't installed" is NOT a reason to write curl tests instead.
+```bash
+npm init -y && npm install -D @playwright/test && npx playwright install chromium
+```
 
-#### The Rule
+"Playwright isn't installed" is NOT a reason to write curl tests.
 
-If a feature has a UI, its E2E test MUST:
+#### The rule
 
-1. **Open the page in Playwright** (a real browser, not curl)
-2. **Interact with UI elements** — click buttons, drag sliders, type in inputs, select options
-3. **Verify the visible result** — text changed, element appeared, value updated in the UI
-4. **Verify the backend effect** — the action propagated to the target system (API, database, REAPER, etc.)
+A UI feature's E2E test MUST:
+1. Open the page in Playwright (real browser, not curl)
+2. Interact with UI elements (click, drag, type, select)
+3. Verify the visible result (text changed, element appeared, value updated)
+4. Verify the backend effect (DB updated, API state propagated, target system confirmed)
 
-A curl call that returns 200 proves the server is running. It does NOT prove the UI works, the button is clickable, the slider drags, or the value reaches the target.
+A 200 response proves the server runs. It does NOT prove the button works, the slider drags, or the value reaches the target.
 
-#### "The test would take too long" is NOT a valid excuse
+#### Per-feature, committed, in CI
 
-**A 15-minute CI run is ALWAYS cheaper than a week of back-and-forth with the user acting as your tester.**
+- Each feature gets its OWN Playwright test exercising THAT feature — not a shared "dashboard loads" test.
+- Must be committed to the repo and run on every push in CI.
+- A 15-min CI run is cheaper than a week of you acting as tester.
 
-**The comprehensive E2E test is not optional overhead — it is the primary deliverable.** The feature is not done until the E2E test proves it works by clicking through it like a user.
+Examples:
+- playlist sync → test syncs, verifies songs in UI
+- play/pause → test clicks play, verifies state change
+- settings form → test edits, saves, reloads, verifies persistence
 
-#### Every UI feature MUST have a permanent Playwright CI test
-
-- The test must be committed to the repository, not just run once manually.
-- It runs on every push in CI — regressions are caught automatically.
-- One-time manual Playwright verification is NOT a substitute for a permanent CI test.
-- The CI test must exercise the SAME user workflow you would verify manually: navigate, click, type, assert.
-- **If the user can find a bug in 5 seconds of clicking that your test doesn't catch, your test is incomplete.**
-
-#### Per-feature E2E — not per-app
-
-**Each feature you implement or fix gets its OWN E2E test (or test block) that exercises THAT specific feature.** A generic "dashboard loads" test does NOT count as E2E coverage for a playlist feature, a settings change, or a playback control.
-
-- Implemented playlist sync → E2E test that syncs a playlist, verifies songs appear in UI
-- Implemented play/pause → E2E test that clicks play, verifies playback state changes
-- Fixed a settings form → E2E test that changes a setting, saves, reloads, verifies it persisted
-- Added a download feature → E2E test that triggers download, waits, verifies progress/completion in UI
-
-**"Dashboard loads and shows title" is a liveness test, not a feature test.** It proves the app starts. It does NOT prove any feature works. Every feature you ship must have its own Playwright test proving that specific feature works end-to-end.
-
-#### When curl/API tests ARE appropriate
-
-- Pure API endpoints with no UI (health checks, data APIs, WebSocket protocols)
-- Backend integration tests (database, external service calls)
-- These are unit/integration tests, NOT E2E tests. Do not label them as E2E.
+**"Dashboard loads" is a liveness test, not a feature test.** Every shipped feature needs its own.
 
 #### Post-deploy verification
 
-After CI deploys, verification must ALSO use Playwright against the live system:
+After CI deploys, open the live app in Playwright, click through the changed feature, verify UI + backend. Report what Playwright observed, not what curl returned.
 
-1. Open the deployed app URL in Playwright
-2. Click through the feature you changed
-3. Verify the UI and backend effect
-4. Report with evidence from what Playwright observed, not from curl
+#### When curl/API tests ARE appropriate
 
-**If you find yourself writing `curl` where Playwright should be — STOP. You are taking a shortcut that will pass CI but fail when the user clicks the same button.**
+Pure API endpoints (health checks, WebSocket protocols) and backend integration tests. Label them as unit/integration tests, NOT E2E.
+
+**If you're writing curl where Playwright should be — STOP. Any shortcut that passes CI but fails a real user click is not a test.**

@@ -200,7 +200,8 @@ def fix_session(path: Path) -> bool:
                 f.write(lines[i] if lines[i].endswith('\n') else lines[i] + '\n')
 
     new_size = path.stat().st_size / (1024 * 1024)
-    print(f"  Truncated: {result['total_lines']} → {len(kept)} lines ({result['size_mb']}MB → {round(new_size, 1)}MB)")
+    old_size = sum(len(l) for l in lines) / (1024 * 1024)
+    print(f"  Truncated: {result['total_lines']} → {len(kept)} lines ({round(old_size, 1)}MB → {round(new_size, 1)}MB)")
     return True
 
 
