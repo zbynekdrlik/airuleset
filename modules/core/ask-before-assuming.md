@@ -23,7 +23,7 @@ These questions waste user time. The answer never changes. Apply the answer dire
 
 | Question pattern | Fixed answer | What to do |
 |---|---|---|
-| "Subagent or sequential/inline?" | **Subagent** | Use `superpowers:subagent-driven-development`. Always. |
+| "Subagent or sequential/inline?" / "Two execution options: Subagent-Driven vs Inline / Which approach?" | **Subagent** | Use `superpowers:subagent-driven-development`. Always. Do NOT present options. Do NOT ask "Which approach?". Just dispatch subagents. |
 | "Want visual companion / mockups?" | **Yes** | Enable it silently. Never ask for consent. |
 | "Should I continue with phase N?" | **Yes** | Execute the entire approved plan without stopping. |
 | "Should I monitor CI?" | **Yes** | Just monitor it. Never ask. |
