@@ -46,6 +46,13 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but th
 - `✅ CI: Tier 1 green` + `⏳ CI: PR run stuck` → **WRONG.** If ANY CI is not green, the whole CI line is ⏳.
 - **If you have ANY ⏳ or ❌ line, do NOT send the report.** Wait until everything is ✅, then send.
 
+**ALWAYS paste the full clickable URL — never just `PR #11` or `pull/11`.** The user works remotely and copies URLs into a browser. Anti-patterns:
+- `✅ PR #11 — mergeable clean` → **WRONG.** Missing the URL. Write `✅ PR: https://github.com/owner/repo/pull/11 — mergeable, clean`.
+- `Awaiting your "merge it" per pr-merge-policy` (no URL anywhere in message) → **WRONG.** Always include the full `https://` PR URL.
+- Prose summary instead of the template above → **WRONG.** Use the EXACT template — emoji status lines, full URLs, no substitution.
+
+This applies to ALL completion-style messages, including interrupted or paused work. If you tell the user a PR is ready, the message MUST contain the clickable PR URL. If you announce a deployed dashboard, the message MUST contain the clickable dashboard URL (real IP, not localhost — see `no-localhost-urls.md`).
+
 #### Plan fulfillment checklist
 
 Before sending, re-read your plan and the original prompt. Mark each step:
