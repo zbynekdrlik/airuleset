@@ -18,21 +18,58 @@ user-invocable: true
 
 Before looking at issues, check if the project's CI meets airuleset standards:
 
+### 1a. Quality gates
+
 ```bash
-# Check for mutation testing in CI
-grep -r "cargo-mutants\|cargo mutants\|stryker\|StrykerJS" .github/workflows/ 2>/dev/null
-# Check for Playwright E2E tests
+# Mutation testing
+grep -rE "cargo-mutants|cargo mutants|stryker|StrykerJS" .github/workflows/ 2>/dev/null
+# Playwright E2E tests
 ls e2e/ tests/e2e/ playwright/ 2>/dev/null
-# Check for assertion density or test quality gates
-grep -r "assertion\|mutation\|test-integrity" .github/workflows/ 2>/dev/null
+# Assertion density / test-integrity gates
+grep -rE "assertion|mutation|test-integrity" .github/workflows/ 2>/dev/null
 ```
 
-If ANY of these are missing, you MUST use the AskUserQuestion tool to ask the user before proceeding. Do NOT skip this. Do NOT just mention it and move on. Use AskUserQuestion with these options:
+### 1b. Build cache audit (CRITICAL — every minute of CI counts)
 
-- **"Yes, add missing gates first"** — Add mutation testing / Playwright / test-integrity as the first task before any issue work
-- **"Skip for now, show issues"** — Proceed to issues without adding gates (user explicitly chose to skip)
+**Cold-compile CI is one of the top sources of wasted developer time.** A Rust workspace with no cache costs 5–15 min per push; with cache it's 30s–2 min. Detect by language and verify cache is wired up on EVERY job that compiles, not just one.
 
-**Do NOT proceed to Step 1 until the user has answered this question.** A one-line mention like "mutation testing is missing" without AskUserQuestion is NOT acceptable — you must block and ask.
+```bash
+# Detect project language(s)
+ls Cargo.toml package.json pyproject.toml go.mod 2>/dev/null
+
+# Inspect ALL workflow files
+ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null
+
+# Rust: needs Swatinem/rust-cache@v2 on every Rust job (test, build, coverage, mutants, tauri, wasm)
+grep -E "Swatinem/rust-cache|actions/cache.*\.cargo|actions/cache.*target" .github/workflows/*.y*ml 2>/dev/null
+
+# Node.js: needs setup-node with cache: 'npm'|'yarn'|'pnpm', OR actions/cache for node_modules / .pnpm-store
+grep -E "setup-node.*cache|cache: ['\"](npm|yarn|pnpm)|actions/cache.*node_modules|actions/cache.*pnpm-store" .github/workflows/*.y*ml 2>/dev/null
+
+# Python: needs setup-python with cache: 'pip'|'poetry', OR actions/cache for ~/.cache/pip / .venv
+grep -E "setup-python.*cache|cache: ['\"](pip|poetry|pipenv)|actions/cache.*\.cache/pip|actions/cache.*\.venv" .github/workflows/*.y*ml 2>/dev/null
+
+# Go: needs setup-go with cache: true (default in v4+) OR actions/cache for ~/go/pkg/mod and ~/.cache/go-build
+grep -E "setup-go|actions/cache.*go-build|actions/cache.*go/pkg" .github/workflows/*.y*ml 2>/dev/null
+
+# Per-job verification: count compile jobs vs cache steps
+grep -cE "runs-on:|^  [a-z].*:$" .github/workflows/*.y*ml | head
+```
+
+**Audit each compile-heavy job individually.** A workflow can have cache on the test job but not the coverage job — that means coverage still cold-compiles every run. For Rust: every job that calls `cargo` (build, test, clippy, llvm-cov, mutants, tauri build, trunk build, cross) MUST have `Swatinem/rust-cache@v2` BEFORE the cargo step.
+
+If cache is missing or partial, present the gap with concrete numbers:
+
+> "CI cache audit: 4 of 5 Rust jobs missing `Swatinem/rust-cache@v2` (Test ✅, Build Windows ❌, Coverage ❌, Build Tauri ❌, Build WASM ❌). Estimated waste: ~12 min per push. Fix proposal: add `Swatinem/rust-cache@v2` step before each cargo invocation, with `key: ${{ runner.os }}-${{ matrix.target }}` so different targets don't collide."
+
+### 1c. Block on missing gates or missing cache
+
+If quality gates OR cache are missing, you MUST use AskUserQuestion before proceeding:
+
+- **"Yes, fix CI first"** — Add missing gates / cache as the first task BEFORE any issue work (recommended — pays back within 1-2 PRs)
+- **"Skip for now, show issues"** — Proceed without fixing CI (user explicitly chose to skip)
+
+**Do NOT proceed to Step 2 until the user has answered.** A one-line mention like "cache is missing" without AskUserQuestion is NOT acceptable — block and ask. Bad CI compounds: every issue you plan will pay the cold-compile tax until the cache is fixed.
 
 ## Step 2: Fetch open issues
 
@@ -40,21 +77,41 @@ If ANY of these are missing, you MUST use the AskUserQuestion tool to ask the us
 gh issue list --state open --limit 30 --json number,title,labels,assignees,createdAt,updatedAt
 ```
 
-## Step 3: Check for already-solved issues
+## Step 3: Per-issue "already overcome by other work" check (MANDATORY)
 
-For each open issue, check if recent commits or PRs already address it:
+**This step runs FOR EVERY OPEN ISSUE — not a sample, not a spot-check.** Old issues are the most common to be silently solved by unrelated refactors, dependency bumps, or feature work. Skipping this wastes a planning cycle.
+
+For each open issue from Step 2:
 
 ```bash
-gh issue view <number> --json title,body,comments
-git log --oneline -20 --grep="<keyword from issue title>"
-gh pr list --state merged --limit 10 --json title,number,mergedAt
+# 1. Read the full issue (title, body, recent comments)
+gh issue view <number> --json title,body,comments,labels,createdAt
+
+# 2. Extract 2–4 keywords from the title and body (function names, file paths, error strings)
+
+# 3. Search recent commits that touched the relevant area
+git fetch origin
+git log --oneline --since="$(gh issue view <number> --json createdAt -q .createdAt)" -- <relevant-paths>
+git log --oneline -50 --grep="<keyword>" --all
+
+# 4. Search merged PRs since the issue was opened
+gh pr list --state merged --limit 30 --search "<keyword>" --json number,title,mergedAt,body
+gh pr list --state merged --search "fixes #<number> OR closes #<number> OR resolves #<number>" --json number,title,mergedAt
+
+# 5. If the issue references specific code (file:line, function name), VERIFY the current state
+#    — old issue says "function X panics on empty input"; check if X still exists, still panics
+grep -rn "<function or symbol>" src/ 2>/dev/null
+# For Rust: cargo check; for behavioral claims: write a quick repro test
 ```
 
-If an issue appears to be already solved by a merged PR or recent commit, present it to the user for confirmation:
+**Decision rules per issue:**
 
-> "Issue #X '<title>' appears to be solved by PR #Y / commit abc123. Should I close it?"
+- **Likely solved** (matching PR title/body, code area changed since issue opened, behavior may have changed) → AskUserQuestion: "Issue #X looks solved by PR #Y (merged YYYY-MM-DD). Close it?"
+- **Partially overlaps** (related work happened, scope may have shrunk) → AskUserQuestion: "Issue #X scope has shifted because of PR #Y. Update scope, close as obsolete, or work as-is?"
+- **Stale but unsolved** (>90 days old, no related work) → flag in Step 4 presentation: `#X (180d old, no related work)` so the user can deprioritize
+- **Clean active issue** (no related work, recent or actively referenced) → present in Step 4 for selection
 
-Use AskUserQuestion to let the user confirm each one. Do NOT close issues without explicit approval.
+**Block before Step 4:** if any issues are flagged "likely solved" or "partially overlaps", resolve them via AskUserQuestion FIRST. Do not present issues for selection while there are unconfirmed-solved ones in the queue. Never close an issue without explicit user approval.
 
 ## Step 4: Present issues for selection
 
@@ -77,8 +134,9 @@ For each selected issue:
 
 ## Rules
 
-- Always run the CI health audit FIRST — missing quality gates are more important than any single issue
-- Always check for already-solved issues — don't plan work that's already done
+- Always run the CI health audit FIRST — missing quality gates AND missing build cache are more important than any single issue
+- The build-cache audit (Step 1b) is per-job, not per-workflow — one cached job ≠ healthy CI
+- The "already overcome" check (Step 3) runs for EVERY open issue, not a sample
 - Never close an issue without user confirmation via AskUserQuestion
 - Present structured choices, not walls of text
 - If no issues exist, say so and ask if the user wants to create one
