@@ -27,6 +27,11 @@ if echo "$MSG" | grep -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when
     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2
 fi
 
+# Check for spec/plan/design review handoff prose
+if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before"; then
+    echo "VIOLATION: You stopped to ask the user to review the spec/plan/design before handing off. This is a pre-answered question — always proceed autonomously to the next step. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, chain directly into writing-plans → executing-plans without pausing. See ask-before-assuming.md pre-answered table." >&2
+fi
+
 # Check for PR completion message missing the PR URL
 # Signal: completion language about a PR but no https://github.com/.../pull/N URL anywhere in message
 if echo "$MSG" | grep -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mergeable[, ]+(clean|all)|all checks (are )?green|ready to merge|per pr-merge-policy|awaiting.*\"merge it\""; then

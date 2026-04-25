@@ -31,4 +31,12 @@ if echo "$TOOL_INPUT" | grep -qiE "say.*go|shall.*(i|we).*proceed|ready.*to.*(ex
     exit 2
 fi
 
+# Spec / plan / design review handoff — always proceed autonomously
+# Catches: "review the spec/plan/design and let me know", "before I hand off to writing-plans",
+# "any changes before I proceed", "before moving on to implementation"
+if echo "$TOOL_INPUT" | grep -qiE "review.*the.*(spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before.*(i|we).*(hand.?off|move.?on|continue|proceed)|before.*(handing|moving).?(off|on)|hand.?off.*to.*writing.?plans|review.*before.*(implementation|implement|next)|(any|need) (changes?|edits?|tweaks?).*before"; then
+    echo "BLOCKED: Spec/plan/design review handoffs are pre-answered — always proceed autonomously to the next step (writing-plans → executing-plans). The user already approved the workflow when they invoked brainstorming. Do NOT stop to ask 'any changes before I hand off?'. See ask-before-assuming.md pre-answered questions table." >&2
+    exit 2
+fi
+
 exit 0
