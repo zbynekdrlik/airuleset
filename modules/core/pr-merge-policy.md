@@ -17,3 +17,5 @@ Your responsibility:
 6. Provide the green PR URL and WAIT for the user's explicit merge instruction.
 
 **Never provide a PR URL that has failing checks or merge conflicts.**
+
+**NEVER use `gh pr merge --admin` or any branch-protection bypass.** Branch protection exists to keep main green. If a gate is failing, the answer is to fix the failure — never to bypass the gate. Do not propose admin-merge as an option, do not list it in a "realistic options" menu, do not even mention it. If you find yourself thinking "this is unrelated, we could just admin-merge" — STOP. Fix the gate. See `autonomous-quality-discipline.md`.

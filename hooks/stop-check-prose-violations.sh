@@ -32,6 +32,11 @@ if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|le
     echo "VIOLATION: You stopped to ask the user to review the spec/plan/design before handing off. This is a pre-answered question — always proceed autonomously to the next step. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, chain directly into writing-plans → executing-plans without pausing. See ask-before-assuming.md pre-answered table." >&2
 fi
 
+# Check for quality-bypass shortcut menus or "your call" delegation
+if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite.*(failing|red|broken)|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|your call|realistic options.*[12]\.|cheaper option|quicker option|easier path"; then
+    echo "VIOLATION: You offered quality-bypass shortcuts (admin-merge / close PR / your call / realistic options menu). These are NEVER options. A failing gate = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions — do not interrupt the user with shortcut menus. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
+fi
+
 # Check for PR completion message missing the PR URL
 # Signal: completion language about a PR but no https://github.com/.../pull/N URL anywhere in message
 if echo "$MSG" | grep -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mergeable[, ]+(clean|all)|all checks (are )?green|ready to merge|per pr-merge-policy|awaiting.*\"merge it\""; then

@@ -39,4 +39,12 @@ if echo "$TOOL_INPUT" | grep -qiE "review.*the.*(spec|plan|design|brainstorm|app
     exit 2
 fi
 
+# Quality-bypass shortcut menus — NEVER offer these as options
+# Catches: "admin-merge", "your call", "realistic options" with bypass options,
+# "merge despite failing", "close and roll into next PR", "stop the runner to merge"
+if echo "$TOOL_INPUT" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate|check)|merge.*despite.*(failing|red|broken)|merge.*broken.*(code|ci)|skip.*(failing|broken).*(test|check|gate)|disable.*(failing|broken).*check|close.*pr.*roll.*into|roll.*into.*next.*pr|your.?call|how.*should.*(we|i).*handle.*(failing|gated|broken|stuck)|stop.*runner.*(to|so).*merge"; then
+    echo "BLOCKED: Quality-bypass shortcuts are NEVER options. Failing CI = fix the root cause. Branch protection cannot be bypassed. NEVER propose admin-merge, 'close and roll into next PR', 'merge despite failing checks', or any other shortcut menu. The agent makes the quality call autonomously: investigate, fix, push, monitor. See autonomous-quality-discipline.md and pr-merge-policy.md." >&2
+    exit 2
+fi
+
 exit 0

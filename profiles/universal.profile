@@ -14,6 +14,7 @@ modules/core/git-fetch-first.md
 modules/core/version-bumping.md
 modules/core/ci-push-discipline.md
 modules/core/ask-before-assuming.md
+modules/core/autonomous-quality-discipline.md
 modules/git/two-branch-workflow.md
 modules/git/commit-conventions.md
 modules/ci/test-strictness.md

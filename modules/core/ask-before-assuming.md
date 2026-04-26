@@ -31,6 +31,8 @@ These questions waste user time. The answer never changes. Apply the answer dire
 | "Ready to execute — say go" / "shall I proceed?" | **Yes** | If the user approved a plan, execute it. Do not stop to ask "go". |
 | "If good, say so and I'll invoke X" / "ready for next step?" | **Yes** | Chain directly into the next step (writing-plans, implementation, etc.). Do not stop mid-workflow. |
 | "Please review the spec/plan/design and let me know if you want changes before I hand off to writing-plans" | **Proceed autonomously** | The user approved the workflow when they kicked off brainstorming/spec-writing. Do NOT pause for review handoff. Chain: spec → writing-plans → executing-plans without stopping. The user can interrupt at any time if they want changes. |
+| "How should we handle this gated PR?" / "CI is failing — your call?" / "Realistic options: admin-merge / close PR / stop runner" | **Fix the gate** | A failing gate = stop-the-line. Always investigate the failure (`gh run view --log-failed`), fix the root cause, push, monitor. NEVER propose admin-merge, "close and roll into next PR", or any quality bypass. See `autonomous-quality-discipline.md`. |
+| "Should I merge despite the failing check?" / "Want me to admin-merge?" | **No — fix the failure** | Bypassing branch protection is banned. The failing check IS the work. Don't ask, fix it. |
 
 **This overrides any skill instructions that say "offer it once for consent" or "ask which approach."** If a skill tells you to ask one of these questions, skip the question and apply the fixed answer.
 
