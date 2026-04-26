@@ -27,6 +27,8 @@ IMPORTANT: When work is complete, YOU MUST provide the completion report in EXAC
 ✅ PR: <url> — mergeable, clean
 ✅ CI: green (N jobs)
 ✅ Deploy: verified on <target> (<what you confirmed>)
+✅ /plan-check: N/N fulfilled (no NOT DONE items)
+✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)
 🌐 Dashboard: <url>
 ```
 
@@ -52,6 +54,22 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (but th
 - Prose summary instead of the template above → **WRONG.** Use the EXACT template — emoji status lines, full URLs, no substitution.
 
 This applies to ALL completion-style messages, including interrupted or paused work. If you tell the user a PR is ready, the message MUST contain the clickable PR URL. If you announce a deployed dashboard, the message MUST contain the clickable dashboard URL (real IP, not localhost — see `no-localhost-urls.md`).
+
+#### Pre-completion gate (MANDATORY — run BEFORE writing the report)
+
+**You MUST run two self-audits autonomously and fix every finding before sending the completion report. Do not wait for the user to remind you.**
+
+**1. Plan-fulfillment audit — invoke the `plan-check` skill.** Use the Skill tool: `Skill(skill: "plan-check")`. The skill audits whether the original prompt + your plan were 100% fulfilled. If any item comes back `[ ]` NOT DONE, go complete it. Do not rationalize "out of scope" or "next session". See `complete-planned-work.md`.
+
+**2. Code-review pass — apply `/review` standards.** Run a strict code-review pass on the diff. The standards live in `~/.claude/plugins/marketplaces/claude-workflow/commands/review.md`: Correctness, Security, Performance, Maintainability, Style. Output 🔴 critical / 🟡 warnings / 🔵 suggestions. If `/review` is available as a slash command, invoke it; otherwise apply the standards inline. Either way, the diff MUST be reviewed before completion.
+
+**3. Address findings — fix and re-run.** For every NOT DONE item, every 🔴 critical, every 🟡 warning: write a fix, commit, push, monitor CI. Then re-run plan-check and the review pass. Repeat until both come back clean. 🔵 suggestions can be deferred only if explicitly out of scope.
+
+The completion report must include both audit lines:
+- `✅ /plan-check: N/N fulfilled (no NOT DONE items)`
+- `✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)`
+
+If the report does not contain these two lines, you are NOT done. Run the gate, fix the findings, then send the report.
 
 #### Plan fulfillment checklist
 

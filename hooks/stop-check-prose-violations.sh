@@ -32,6 +32,18 @@ if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|le
     echo "VIOLATION: You stopped to ask the user to review the spec/plan/design before handing off. This is a pre-answered question — always proceed autonomously to the next step. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, chain directly into writing-plans → executing-plans without pausing. See ask-before-assuming.md pre-answered table." >&2
 fi
 
+# Check completion report has plan-check + /review audit lines
+if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
+    HAS_REVIEW=$(echo "$MSG" | grep -qiE "/review|review.*(clean|0 🔴|no critical|no warnings|addressed in commit)|✅.*review" && echo 1 || echo 0)
+    if [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
+        echo "VIOLATION: You sent a Work Complete report without running the mandatory pre-completion gate. completion-report.md REQUIRES two audit lines BEFORE the report:" >&2
+        [ "$HAS_PLAN_CHECK" = "0" ] && echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2
+        [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 and 🟡 finding, then add the line." >&2
+        echo "Run the gate autonomously — the user shouldn't have to ask. See completion-report.md → 'Pre-completion gate (MANDATORY)'." >&2
+    fi
+fi
+
 # Check for quality-bypass shortcut menus or "your call" delegation
 if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|your call|realistic options.*[12]\.|cheaper option|quicker option|easier path|you decide(.*merge)?|your decision|up to you.*merge|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
     echo "VIOLATION: You offered quality-bypass shortcuts (admin-merge / close PR / 'your call' / 'merge despite' / 'you decide on merge' / 'functionally ready' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
