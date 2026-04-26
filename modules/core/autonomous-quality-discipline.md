@@ -27,8 +27,16 @@ By design, by architecture, by SOTA practice, the harder path is correct. Time-s
 - `git push --force` to a protected branch — **NEVER.** See `commit-conventions.md`.
 - "Disable the check" / `continue-on-error: true` / "make this advisory" — **NEVER.** See `no-continue-on-error.md`.
 - "Cheaper option" / "quicker option" / "easier path" when paired with a quality bypass — **NEVER.**
+- "Merge despite [anything]" — `merge despite the failing check`, `merge despite UNSTABLE`, `merge despite codecov noise`, `merge despite the warning` — **NEVER.** "Despite" means "ignoring a real signal". If there is a signal to ignore, you investigate it, you don't ignore it.
+- "Project precedent: PR #N merged with the same status" — **NEVER cite past sloppy merges to justify current sloppy merges.** A previous bypass does not authorize the next one. The rule is the same regardless of history.
+- "Functionally ready" / "essentially clean" / "good enough to merge" / "PR is functionally ready but I won't claim it's clean" — **NEVER.** Either the PR meets `mergeable: true` AND `mergeable_state: "clean"`, or it doesn't. There is no "almost clean" state.
+- "Informational check" / "non-blocking failure" / "advisory only" used to dismiss a failed check — **NEVER.** A check is a check. If it ran and failed, it failed. Investigate. See `no-continue-on-error.md`.
 
 These are not options. Do not present them in a numbered list. Do not even mention them. If a shortcut is technically possible but quality-degrading, it must not appear in your message at all.
+
+#### Mergeable means CLEAN — UNSTABLE is not mergeable
+
+The PR is ready ONLY when both `mergeable: true` AND `mergeable_state: "clean"`. **UNSTABLE is not clean.** If `mergeStateStatus` reports anything other than `CLEAN` (e.g. UNSTABLE, BLOCKED, BEHIND, DIRTY), the PR is NOT ready — investigate and fix the cause. Do not minimize with "mergeable: MERGEABLE but UNSTABLE due to..." — that is reporting an unfinished PR as ready. Fix it first, report it after.
 
 #### When CI fails during autonomous work — KEEP WORKING
 
@@ -56,6 +64,9 @@ Do NOT write any of these — or any rewording of the same intent — in message
 - "Realistic options: 1) admin-merge ... 2) close PR ..." (when one option is the obvious quality-correct path)
 - "Cheaper / quicker / easier" paired with a quality-degrading shortcut
 - "Same options as before" (when "before" included shortcuts that are banned)
+- "You decide on merge" / "You decide" / "Your decision" / "Up to you" — same intent as "your call"
+- "Want me to investigate ... or merge despite ...?" — investigation is not an option, it's the only path. Don't offer "merge despite" as the alternative.
+- "Functionally ready" / "essentially mergeable" / "I won't claim it's clean but..." — minimizing language for an unfinished PR
 
 The intent is banned: shifting a decision back to the user when the goals already determine the answer.
 
