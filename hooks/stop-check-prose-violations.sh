@@ -32,15 +32,39 @@ if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|le
     echo "VIOLATION: You stopped to ask the user to review the spec/plan/design before handing off. This is a pre-answered question — always proceed autonomously to the next step. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, chain directly into writing-plans → executing-plans without pausing. See ask-before-assuming.md pre-answered table." >&2
 fi
 
-# Check completion report has plan-check + /review audit lines
+# Check completion report has Goal + What changed + plan-check + /review lines
 if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    HAS_GOAL=$(echo "$MSG" | grep -qiE "\*\*Goal:?\*\*|^Goal:" && echo 1 || echo 0)
+    HAS_OUTCOME=$(echo "$MSG" | grep -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:" && echo 1 || echo 0)
     HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
     HAS_REVIEW=$(echo "$MSG" | grep -qiE "/review|review.*(clean|0 🔴|no critical|no warnings|addressed in commit)|✅.*review" && echo 1 || echo 0)
-    if [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
-        echo "VIOLATION: You sent a Work Complete report without running the mandatory pre-completion gate. completion-report.md REQUIRES two audit lines BEFORE the report:" >&2
+    if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
+        echo "VIOLATION: Work Complete report is missing required user-facing or audit lines. completion-report.md MANDATES this exact structure (in this order):" >&2
+        [ "$HAS_GOAL" = "0" ] && echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — the user manages many projects and needs the ask restated, not technical jargon." >&2
+        [ "$HAS_OUTCOME" = "0" ] && echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — describe the user-facing outcome, not the technical mechanism." >&2
         [ "$HAS_PLAN_CHECK" = "0" ] && echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2
         [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 and 🟡 finding, then add the line." >&2
-        echo "Run the gate autonomously — the user shouldn't have to ask. See completion-report.md → 'Pre-completion gate (MANDATORY)'." >&2
+        echo "Lead with Goal + What changed BEFORE any technical detail. Run audits autonomously — the user shouldn't have to ask. See completion-report.md." >&2
+    fi
+fi
+
+# Check completion report uses bare PR/issue numbers without titles.
+# Wrong: 'PR #54 — mergeable, clean'  (em-dash status, no title between # and dash)
+# Right: 'PR #54: Refactor driver.rs and add lyrics test'  (colon + title)
+# Also detects: 'Fixes #234' / 'Closes #99' / 'Resolves #N' not followed by a parenthetical title.
+if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    BARE_PR=0
+    BARE_ISSUE=0
+    echo "$MSG" | grep -qE "(PR|pull|Pull Request) #[0-9]+ *(—|--|-)" && BARE_PR=1
+    # Use grep -P for negative lookahead — match "fixes #N" NOT followed by " (" (a parenthetical title)
+    if echo "$MSG" | grep -qPi "(fixes|closes|resolves) #[0-9]+(?! *\()" 2>/dev/null; then
+        BARE_ISSUE=1
+    fi
+    if [ "$BARE_PR" = "1" ] || [ "$BARE_ISSUE" = "1" ]; then
+        echo "VIOLATION: Bare issue/PR number without a title. The user manages many projects in parallel and cannot decode #N references in their head. completion-report.md MANDATES titles on every reference:" >&2
+        echo "  - WRONG: 'PR #54 — mergeable, clean' / 'Fixes #234'" >&2
+        echo "  - RIGHT: 'PR #54: Refactor driver.rs and add lyrics error-path test' / 'Fixes #234 (driver.rs over 1000-line cap)'" >&2
+        echo "Add the title — copy it from 'gh pr view' or 'gh issue view'. See completion-report.md → 'Issue / PR references'." >&2
     fi
 fi
 
