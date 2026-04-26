@@ -39,12 +39,25 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
     HAS_REVIEW=$(echo "$MSG" | grep -qiE "/review|review.*(clean|0 🔴|no critical|no warnings|addressed in commit)|✅.*review" && echo 1 || echo 0)
     if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
-        echo "VIOLATION: Work Complete report is missing required user-facing or audit lines. completion-report.md MANDATES this exact structure (in this order):" >&2
-        [ "$HAS_GOAL" = "0" ] && echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — the user manages many projects and needs the ask restated, not technical jargon." >&2
-        [ "$HAS_OUTCOME" = "0" ] && echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — describe the user-facing outcome, not the technical mechanism." >&2
+        echo "VIOLATION: Work Complete report is missing required lines. completion-report.md MANDATES this structure (audits at TOP, Goal/What changed/PR URL at BOTTOM — terminal scrolls, last lines are what the user sees):" >&2
+        [ "$HAS_GOAL" = "0" ] && echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2
+        [ "$HAS_OUTCOME" = "0" ] && echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2
         [ "$HAS_PLAN_CHECK" = "0" ] && echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2
         [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 and 🟡 finding, then add the line." >&2
-        echo "Lead with Goal + What changed BEFORE any technical detail. Run audits autonomously — the user shouldn't have to ask. See completion-report.md." >&2
+        echo "See completion-report.md for the exact template." >&2
+    fi
+
+    # Check ORDER: Goal/What changed must appear AFTER audit lines (audits at top, Goal at bottom)
+    GOAL_LINE=$(echo "$MSG" | grep -nE "\*\*Goal:?\*\*" | head -1 | cut -d: -f1)
+    AUDIT_LINE=$(echo "$MSG" | grep -nE "✅.*(/plan.?check|review.*clean|review.*0 🔴)" | head -1 | cut -d: -f1)
+    if [ -n "$GOAL_LINE" ] && [ -n "$AUDIT_LINE" ] && [ "$GOAL_LINE" -lt "$AUDIT_LINE" ]; then
+        echo "VIOLATION: 'Goal' line appears BEFORE the audit lines. Wrong order. The terminal scrolls — the user only sees the LAST visible passage without scrolling back. Put audits/CI/plan-check/review at the TOP, then a '---' separator, then Goal + What changed + PR URL + ❓Question at the BOTTOM. See completion-report.md → 'Why this order'." >&2
+    fi
+
+    # Check trailing question is clearly marked with ❓
+    LAST_CHAR=$(echo "$MSG" | tr -d '[:space:]' | tail -c 1)
+    if [ "$LAST_CHAR" = "?" ] && ! echo "$MSG" | grep -qE "❓"; then
+        echo "VIOLATION: Your message ends with '?' but no ❓ marker is present. Questions must be clearly marked so the user spots them in the terminal scroll — they can't tell a question from a status line at a glance. Use '❓ **Question:** <concise 1-2 sentence question>' as the very last line. If it isn't actually a question for the user, rephrase as a statement. See completion-report.md → 'Pending question'." >&2
     fi
 fi
 
