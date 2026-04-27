@@ -184,7 +184,37 @@ Both audit lines (`✅ /plan-check: N/N fulfilled` and `✅ /review: clean — 0
 
 #### Length budget — ~20 lines
 
-The whole report fits in ~20 lines (audits block + optional plan steps + Goal + What changed + PR URL + maybe one question). If you're writing more, you're over-explaining. The diff has the technical detail; the report is a summary.
+The whole report fits in ~20 lines (audits block + optional plan steps + Goal + What changed + 🌐 URLs + PR URL + maybe one question). If you're writing more, you're over-explaining. The diff has the technical detail; the report is a summary.
+
+#### Full template every time — no truncation, no prose substitutes
+
+**If you write `## ✅ Work Complete` ANYWHERE in your message, you MUST include EVERY required field.** No "I'll skip Goal because the user already knows", no "the audit lines are obvious so I'll abbreviate", no prose-style shorthand instead of the structured fields. The template is one-shot — write all of it the first time.
+
+**Banned shortcuts (intent — any rewording counts):**
+- `STOP at green PR URL. Awaiting your "merge it" per pr-merge-policy.` → **WRONG.** That's prose shorthand for what the template specifies. The template puts the PR URL on its own line; the "awaiting merge" is implicit (your job ends at green PR per `pr-merge-policy.md`).
+- `Phase 2 (...) remains gated on Phase 1 merge per the original plan.` → **WRONG.** That's a "Future / Remaining" mention disguised as plan continuity. If the user originally agreed to a multi-phase plan, the next phase is the next session's prompt — do NOT explain the gating in this report. See `complete-planned-work.md`.
+- `## ✅ Work Complete` followed by 3 status lines and a PR URL → **WRONG.** Missing Goal, What changed, /review, 🌐 URLs. The header is a contract — using it commits you to the full template.
+- A free-form summary that mentions "PR is mergeable", "all checks green", "ready to merge" without the structured template → **WRONG.** Those phrases trigger the template — use it.
+
+**The Stop hook fires when these are missing — but you should never need the warning. Write the full template the first time.** The warning lands AFTER your message is in front of the user, who has already read the incomplete report. The first impression cannot be undone by a next-turn correction.
+
+#### Pre-send checklist (read silently before you submit)
+
+Before sending any message that includes `## ✅ Work Complete` or any phrase like "PR is ready", "mergeable, clean", "awaiting your merge it", run this checklist:
+
+- [ ] `## ✅ Work Complete` header present
+- [ ] `**Audits & deploy:**` block with all 4 lines: `✅ CI`, `✅ /plan-check: N/N`, `✅ /review: clean — 0 🔴 0 🟡 0 🔵`, `✅ Deploy: <verified behavior>`
+- [ ] `---` separator after the audits block
+- [ ] `**Goal:**` line (1 sentence, plain language, the user's ask restated)
+- [ ] `**What changed:**` line (1-2 sentences, user-visible outcome)
+- [ ] `🌐` URL lines (every env × every service touched; read project CLAUDE.md for declared URLs)
+- [ ] `**[<project>] PR #<N>: <title>**` line (project name + number + actual title, never bare `#N`)
+- [ ] PR URL on its own line, followed by `— mergeable, clean`
+- [ ] `❓ **Question:**` line if (and only if) you need an answer
+- [ ] No trailing prose after the report — the PR URL or ❓ Question is the LAST line of the message
+- [ ] No "Phase N remains gated" / "next session" / "Remaining" / "Future" sections anywhere
+
+If any box is unchecked, fix it before sending. If you cannot fill a box (e.g. don't know URLs), STOP and either find the answer (read CLAUDE.md, gh pr view) or ask the user with `❓ Question:`.
 
 #### Rules
 
@@ -192,5 +222,7 @@ The whole report fits in ~20 lines (audits block + optional plan steps + Goal + 
 - One or two sentences of preamble before the report is fine — a full narrative is not.
 - Never send a partial report ("CI still running" means you are not done).
 - Never include a "Remaining / Future / TODO / Follow-up" section — that's incomplete work disguised as a deliverable (see `complete-planned-work.md`).
+- Use the FULL template every time. The header `## ✅ Work Complete` is a contract — using it commits you to every required field.
+- No trailing prose after the report. The PR URL or ❓ Question is the LAST line.
 - Most important content goes at the BOTTOM (Goal, What changed, PR URL, Question). Audit lines go at the TOP. The terminal scrolls — write for what's visible last.
 - Questions for the user: `❓` marker, 1-2 sentences, very last line. No buried prose questions.

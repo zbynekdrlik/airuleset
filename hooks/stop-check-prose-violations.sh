@@ -94,6 +94,20 @@ if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(b
     echo "VIOLATION: You offered quality-bypass shortcuts (admin-merge / close PR / 'your call' / 'merge despite' / 'you decide on merge' / 'functionally ready' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
 fi
 
+# Detect "STOP at green PR URL" / "Awaiting your merge it" / "Phase N remains gated" prose
+# These are template-bypass shorthands. If they appear, the message must use the full template.
+if echo "$MSG" | grep -qiE "STOP at (the )?green pr|stop at green pr url|stop at green-pr"; then
+    if ! echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+        echo "VIOLATION: 'STOP at green PR URL' is template-bypass prose. Any 'we're done, PR is ready, awaiting merge' message MUST use the full Completion Report template (## ✅ Work Complete with audits, Goal, What changed, 🌐 URLs, PR title/URL). Replace the prose with the template. See completion-report.md → 'Full template every time'." >&2
+    fi
+fi
+
+# Detect "Phase N remains gated on Phase M merge" / "Phase N is gated on" / "next phase awaits"
+# This is a "Remaining/Future" mention disguised as plan continuity — banned per complete-planned-work.md.
+if echo "$MSG" | grep -qiE "phase [0-9]+ (remains|is) gated on|phase [0-9]+ awaits|phase [0-9]+ blocked on .*(merge|phase)|next phase (awaits|gated|blocked)|gated on phase [0-9]+ merge"; then
+    echo "VIOLATION: 'Phase N remains gated on Phase M' is a 'Remaining / Future' mention disguised as plan continuity. complete-planned-work.md and completion-report.md ban these in the report. The next phase is the next session's prompt — do NOT explain gating here. Cut the line. See completion-report.md → 'Banned shortcuts'." >&2
+fi
+
 # Check for PR completion message missing the PR URL
 # Signal: completion language about a PR but no https://github.com/.../pull/N URL anywhere in message
 if echo "$MSG" | grep -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mergeable[, ]+(clean|all)|all checks (are )?green|ready to merge|per pr-merge-policy|awaiting.*\"merge it\""; then
