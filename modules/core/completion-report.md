@@ -33,9 +33,13 @@
 **Goal:** <1 sentence — restate the user's ask in their words, no jargon>
 **What changed:** <1-2 sentences — user-visible outcome in plain language>
 
+🌐 Dev frontend:  <url>     ← every environment × every service, one URL per line
+🌐 Dev backend:   <url>
+🌐 Prod frontend: <url>
+🌐 Prod backend:  <url>
+
 **[<project>] PR #<N>: <full PR title>**
 <full PR URL> — mergeable, clean
-🌐 Dashboard: <url>       ← only if a deployed UI exists
 
 ❓ **Question:** <concise 1-2 sentence question>   ← only if you actually need an answer
 ```
@@ -46,10 +50,36 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress (then y
 
 The terminal shows the LAST lines of output. The user reads upward only if needed. Put what they need at the bottom:
 1. Did it work? → Goal + What changed (plain language)
-2. Where do I click? → PR URL
-3. Anything I need to decide? → ❓ Question (clearly marked)
+2. Where do I verify? → 🌐 dashboard URLs (every env × every service)
+3. Where do I click to merge? → PR URL
+4. Anything I need to decide? → ❓ Question (clearly marked)
 
 Audits and technical detail go ABOVE the `---` separator. They prove correctness but the user already trusts you to run them — they're context, not the headline.
+
+#### Dashboards & URLs — list EVERY clickable URL
+
+The user works remotely and copies URLs from the terminal. Bury a URL in prose (e.g. `curl http://10.77.8.134:8000/api/system/info returned 200`) and they cannot click it — it's evidence, not an action.
+
+**MANDATORY** — list every URL the user could click to verify the work, each on its own `🌐` line. For a full-stack project with both dev and prod environments and both frontend and backend services, that's typically 4 URLs:
+
+```
+🌐 Dev frontend:  http://10.77.8.134:3000
+🌐 Dev backend:   http://10.77.8.134:8000
+🌐 Prod frontend: https://app.example.com
+🌐 Prod backend:  https://api.example.com
+```
+
+For a project with only one environment or one service, list whatever applies — but never less than 1 `🌐` line if a UI/API was deployed.
+
+**Where to find the URL set:** before sending the report, read the project's CLAUDE.md and look for a `## Dashboards`, `## URLs`, or `## Endpoints` section. If it exists, list ALL declared URLs in the report — do not pick a subset. If no section exists, list at minimum: every environment you deployed to × every service you touched. If you cannot determine the URL set, ask the user with `❓ Question:` rather than ship a report missing URLs.
+
+**Anti-patterns:**
+- Single `🌐 Dashboard: <url>` line for a multi-environment project → **WRONG.** List dev AND prod, frontend AND backend separately.
+- URL in prose like `curl http://...` or `verified at https://...` → **WRONG.** Inline URLs are verification evidence, not clickable actions. Add a separate `🌐` line so the user can click it.
+- Skipping URLs because "the user already knows them" → **WRONG.** They manage many projects in parallel — they don't remember which IP/port goes with which project.
+- Mentioning a deploy in `✅ Deploy:` line without a corresponding `🌐` line → **WRONG.** If you say you verified it, paste the URL you verified at.
+
+**localhost is banned** — see `no-localhost-urls.md`. Use the real IP. Verify each URL returns 200 before pasting (a stale URL is worse than no URL).
 
 #### Goal & What changed — MANDATORY (placed at the bottom)
 

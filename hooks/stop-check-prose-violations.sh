@@ -102,11 +102,31 @@ if echo "$MSG" | grep -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mer
     fi
 fi
 
-# Check for deploy verification claim missing dashboard/target URL
-if echo "$MSG" | grep -qiE "deploy.*(verified|complete|done|success)|verified.*deploy|deployed.*(to|successfully)" \
-   && echo "$MSG" | grep -qiE "dashboard|frontend|ui|app"; then
-    if ! echo "$MSG" | grep -qE "https?://[^[:space:]]+"; then
-        echo "VIOLATION: You announced a verified deploy with a dashboard/UI but provided no URL. completion-report.md mandates '🌐 Dashboard: <url>' on completion. Always include the live URL the user can click. See no-localhost-urls.md — verify it returns 200 first, never paste localhost." >&2
+# Check deploy verification has 🌐 URL lines.
+# Single UI/API deploy ⇒ require ≥1 🌐 line.
+# Multi-context (dev+prod OR frontend+backend) ⇒ require ≥2 🌐 lines.
+# 🌐 lines are clickable URLs; URLs buried in prose (e.g. `curl http://...`) don't count.
+if echo "$MSG" | grep -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
+    GLOBE_COUNT=$(echo "$MSG" | grep -cE "🌐.*https?://" || true)
+    [ -z "$GLOBE_COUNT" ] && GLOBE_COUNT=0
+
+    HAS_DEV=$(echo "$MSG" | grep -qiE "\bdev\b|\bdevelopment\b" && echo 1 || echo 0)
+    HAS_PROD=$(echo "$MSG" | grep -qiE "\bprod\b|\bproduction\b" && echo 1 || echo 0)
+    HAS_STAGING=$(echo "$MSG" | grep -qiE "\bstaging\b|\bstage\b" && echo 1 || echo 0)
+    HAS_FRONTEND=$(echo "$MSG" | grep -qiE "frontend|web.?ui|dashboard|web app" && echo 1 || echo 0)
+    HAS_BACKEND=$(echo "$MSG" | grep -qiE "backend|\bapi\b|api endpoint|api server" && echo 1 || echo 0)
+    HAS_UI=$(echo "$MSG" | grep -qiE "frontend|dashboard|\bui\b|web app|browser" && echo 1 || echo 0)
+
+    MULTI=0
+    [ "$HAS_DEV" = "1" ] && [ "$HAS_PROD" = "1" ] && MULTI=1
+    [ "$HAS_DEV" = "1" ] && [ "$HAS_STAGING" = "1" ] && MULTI=1
+    [ "$HAS_PROD" = "1" ] && [ "$HAS_STAGING" = "1" ] && MULTI=1
+    [ "$HAS_FRONTEND" = "1" ] && [ "$HAS_BACKEND" = "1" ] && MULTI=1
+
+    if [ "$MULTI" = "1" ] && [ "$GLOBE_COUNT" -lt 2 ]; then
+        echo "VIOLATION: Deploy mentions multiple environments (dev/staging/prod) or services (frontend/backend) but the report has only $GLOBE_COUNT clickable 🌐 URL line(s). The user works remotely and copies URLs from the terminal — list EVERY relevant URL on its own '🌐 <name>: <url>' line. For a project with both dev and prod, both frontend and backend, that means 4 URLs. Read the project's CLAUDE.md for a '## Dashboards' / '## URLs' section and list ALL declared URLs. URLs in prose ('curl http://...') do NOT count — they're evidence, not clickable actions. See completion-report.md → 'Dashboards & URLs'." >&2
+    elif [ "$HAS_UI" = "1" ] && [ "$GLOBE_COUNT" -lt 1 ]; then
+        echo "VIOLATION: Deploy mentions a UI/frontend/dashboard but the report has no clickable 🌐 URL line. The user cannot click URLs buried in prose. Add at least one '🌐 <name>: <url>' line. See completion-report.md → 'Dashboards & URLs', and no-localhost-urls.md." >&2
     fi
 fi
 
