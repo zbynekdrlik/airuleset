@@ -37,13 +37,15 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     HAS_GOAL=$(echo "$MSG" | grep -qiE "\*\*Goal:?\*\*|^Goal:" && echo 1 || echo 0)
     HAS_OUTCOME=$(echo "$MSG" | grep -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:" && echo 1 || echo 0)
     HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
-    HAS_REVIEW=$(echo "$MSG" | grep -qiE "/review|review.*(clean|0 🔴|no critical|no warnings|addressed in commit)|✅.*review" && echo 1 || echo 0)
+    # /review audit must include all THREE counters (🔴 🟡 🔵) — no skipping minor findings.
+    # Accept either explicit "0 🔴 0 🟡 0 🔵" or "all findings addressed" with 🔵 mentioned.
+    HAS_REVIEW=$(echo "$MSG" | grep -qE "/review.*0 🔴.*0 🟡.*0 🔵|/review.*all (findings|issues|items).*addressed|review.*0 🔴.*0 🟡.*0 🔵.*addressed in commit|✅.*review.*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
     if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
         echo "VIOLATION: Work Complete report is missing required lines. completion-report.md MANDATES this structure (audits at TOP, Goal/What changed/PR URL at BOTTOM — terminal scrolls, last lines are what the user sees):" >&2
         [ "$HAS_GOAL" = "0" ] && echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2
         [ "$HAS_OUTCOME" = "0" ] && echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2
         [ "$HAS_PLAN_CHECK" = "0" ] && echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2
-        [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 and 🟡 finding, then add the line." >&2
+        [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. The 🔵 counter is required — '0 🔴 0 🟡' alone is incomplete (no skipping minor findings). Then add the line." >&2
         echo "See completion-report.md for the exact template." >&2
     fi
 
@@ -79,6 +81,12 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
         echo "  - RIGHT: 'PR #54: Refactor driver.rs and add lyrics error-path test' / 'Fixes #234 (driver.rs over 1000-line cap)'" >&2
         echo "Add the title — copy it from 'gh pr view' or 'gh issue view'. See completion-report.md → 'Issue / PR references'." >&2
     fi
+fi
+
+# Check for "skip 🔵 review findings" / "🔵 deferred / out of scope / minor" patterns.
+# The user wants every review finding fixed inside the diff — no skipping minor issues.
+if echo "$MSG" | grep -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then
+    echo "VIOLATION: You're skipping or deferring 🔵 (suggestion) review findings. The user wants the highest-quality code possible — fix EVERY review finding inside this PR's diff, including 🔵. Phrases like '🔵 deferred', '🔵 out of scope', '🔵 minor — leaving them', '🔵 stylistic — skip', '🔵 nice-to-have — defer', or 'won't address the suggestions' are banned. The ONLY allowed exception is a 🔵 finding that points at code OUTSIDE the diff — for that, file a GitHub issue with a title and reference it. NEVER silently skip a 🔵 inside the diff. See completion-report.md → 'Pre-completion gate'." >&2
 fi
 
 # Check for quality-bypass shortcut menus or "your call" delegation

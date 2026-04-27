@@ -16,7 +16,7 @@
 **Audits & deploy:**
 ✅ CI: green
 ✅ /plan-check: N/N fulfilled
-✅ /review: clean — 0 🔴 0 🟡
+✅ /review: clean — 0 🔴 0 🟡 0 🔵
 ✅ Deploy: <user-visible behavior you verified on the live target>
 
 **Plan steps:**           ← OPTIONAL — only for multi-step work, terse one-liners
@@ -146,9 +146,11 @@ Run two self-audits autonomously and fix every finding before the report. Do not
 
 1. **Plan-fulfillment audit** — invoke the `plan-check` skill (`Skill(skill: "plan-check")`). It audits whether the original prompt + plan were 100% fulfilled. If any item comes back `[ ]` NOT DONE, complete it. Don't rationalize "out of scope".
 2. **Code-review pass** — apply `/review` standards (Correctness, Security, Performance, Maintainability, Style). Standards live in `~/.claude/plugins/marketplaces/claude-workflow/commands/review.md`. Output 🔴 critical / 🟡 warnings / 🔵 suggestions.
-3. **Address findings — fix and re-run.** For every NOT DONE / 🔴 / 🟡: write a fix, commit, push, monitor CI. Re-run both audits. Repeat until both come back clean. 🔵 suggestions can be deferred only if explicitly out of scope.
+3. **Address EVERY finding — fix and re-run.** For every NOT DONE item, every 🔴 critical, every 🟡 warning, AND every 🔵 suggestion that lives inside this PR's diff: write a fix, commit, push, monitor CI. Re-run both audits. Repeat until both come back clean — `0 🔴 0 🟡 0 🔵`. **The user wants the highest-quality code possible. Do NOT skip 🔵 findings as "minor", "stylistic", "nice-to-have", "low priority", or "out of scope".** That loophole is closed.
+   - The ONLY allowed exception: a 🔵 finding that points at code OUTSIDE this PR's diff (e.g., the reviewer noticed an unrelated module could be refactored). For that case, file a GitHub issue with a clear title (per the Issue/PR title rule) and reference the issue number in the report. NEVER silently skip a 🔵 finding inside the diff.
+   - Banned phrases (intent, not just wording): "🔵 deferred", "🔵 out of scope", "🔵 left for next session/PR", "🔵 are minor — leaving them", "🔵 stylistic — skip", "🔵 nice-to-have — defer", "won't address the suggestions", "blue findings can wait". If you're tempted to write any of these — STOP and fix the finding instead.
 
-Both audit lines (`✅ /plan-check: N/N fulfilled` and `✅ /review: clean — 0 🔴 0 🟡`) MUST appear in the audits block. If they don't, you are NOT done — run the gate, fix the findings, then send the report.
+Both audit lines (`✅ /plan-check: N/N fulfilled` and `✅ /review: clean — 0 🔴 0 🟡 0 🔵`) MUST appear in the audits block. The 🔵 counter is non-negotiable — `0 🔴 0 🟡` without 🔵 is a failed audit. If they don't, you are NOT done — run the gate, fix the findings, then send the report.
 
 #### Length budget — ~20 lines
 
