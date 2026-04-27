@@ -71,6 +71,47 @@ If quality gates OR cache are missing, you MUST use AskUserQuestion before proce
 
 **Do NOT proceed to Step 2 until the user has answered.** A one-line mention like "cache is missing" without AskUserQuestion is NOT acceptable — block and ask. Bad CI compounds: every issue you plan will pay the cold-compile tax until the cache is fixed.
 
+### 1d. Foundation gate — version display on dashboard (web projects only)
+
+If the project has a web UI (frontend, dashboard, admin panel), check whether it displays the deployed version. This is a global rule — see `version-on-dashboard.md`. Without a visible version label, post-deploy verification is impossible and frontend/backend drift ships silently.
+
+**Detection (run silently):**
+
+```bash
+# Heuristic: project has a web UI?
+HAS_FRONTEND=$(test -d frontend -o -d web -o -d ui -o -f index.html -o -f vite.config.* -o -f next.config.* && echo yes || echo no)
+[ -f package.json ] && grep -qE '"(react|vue|svelte|leptos|preact|next|nuxt|remix|astro)"' package.json && HAS_FRONTEND=yes
+[ -f Cargo.toml ] && grep -qE '(leptos|yew|dioxus|sycamore)' Cargo.toml && HAS_FRONTEND=yes
+
+# If web UI: check if a version display exists
+if [ "$HAS_FRONTEND" = "yes" ]; then
+  HAS_VERSION_DISPLAY=$(grep -rE 'data-testid="version"|class="version"|id="version"|build_version|gitDescribe|GIT_VERSION|VERSION_LABEL' --include='*.tsx' --include='*.jsx' --include='*.ts' --include='*.js' --include='*.html' --include='*.rs' --include='*.svelte' --include='*.vue' . 2>/dev/null | head -1 | wc -l)
+  HAS_VERSION_TEST=$(grep -rE 'version.*toMatch.*\\\\d.*\\\\d.*\\\\d|expect.*version.*v\\\\d' --include='*.spec.*' --include='*.test.*' tests/ e2e/ 2>/dev/null | head -1 | wc -l)
+fi
+```
+
+**Decision rules:**
+
+- **Web UI + version display present + Playwright assertion present** → silent pass. No action.
+- **Web UI + version display missing** → AskUserQuestion BEFORE Step 2:
+  - **"Yes, file foundation issue first"** — Create the issue per `version-on-dashboard.md` template, plan that as the next PR before feature work
+  - **"Skip for now, show issues"** — Proceed without fixing (user explicitly chose to skip)
+- **Web UI + version display present but NO Playwright test** → propose adding the test as part of the next PR's work (does not block; just a note in Step 4 presentation).
+
+**Issue body template (when filing the foundation issue):**
+
+```
+Add a version display to the dashboard per the global version-on-dashboard.md rule.
+
+Format: `v<semver>(-dev.<n>)?` (e.g. `v1.0.97-dev.9`), build-time injected from `git describe`, matching the deployed binary. Place it in a footer or navbar visible on every route.
+
+Add a Playwright test asserting the label exists, is visible, and matches the format. The frontend version must equal the backend `/api/version` (or equivalent) — single git-tag source.
+
+Without this, post-deploy verification cannot confirm new code is live and frontend/backend drift ships invisibly. See ~/devel/airuleset/modules/quality/version-on-dashboard.md.
+```
+
+**Do NOT proceed to Step 2 until the foundation gate is resolved** (either issue filed and queued, or user explicitly chose skip).
+
 ## Step 2: Fetch open issues
 
 ```bash
