@@ -33,10 +33,8 @@
 **Goal:** <1 sentence — restate the user's ask in their words, no jargon>
 **What changed:** <1-2 sentences — user-visible outcome in plain language>
 
-🌐 Dev frontend:  <url>     ← every environment × every service, one URL per line
-🌐 Dev backend:   <url>
-🌐 Prod frontend: <url>
-🌐 Prod backend:  <url>
+🌐 Dev:  <url>      ← USER-CLICKABLE web URLs only (one per environment / per UI surface)
+🌐 Prod: <url>      ← never list backend/API URLs — those are evidence, not actions
 
 **[<project>] PR #<N>: <full PR title>**
 <full PR URL> — mergeable, clean
@@ -58,26 +56,40 @@ Audits and technical detail go ABOVE the `---` separator. They prove correctness
 
 #### Dashboards & URLs — list EVERY clickable URL
 
-The user works remotely and copies URLs from the terminal. Bury a URL in prose (e.g. `curl http://10.77.8.134:8000/api/system/info returned 200`) and they cannot click it — it's evidence, not an action.
+The user works remotely and copies URLs from the terminal. The 🌐 list is for URLs the USER would click in a browser — frontend dashboards, admin panels, marketing pages. **Backend / API URLs do NOT belong in this list** — they're for agent verification (curl them as evidence in the `✅ Deploy:` line), not human use.
 
-**MANDATORY** — list every URL the user could click to verify the work, each on its own `🌐` line. For a full-stack project with both dev and prod environments and both frontend and backend services, that's typically 4 URLs:
+**MANDATORY** — list every USER-CLICKABLE web URL relevant to the work, each on its own `🌐` line. For a project with both dev and prod environments, that's usually 2 URLs:
 
 ```
-🌐 Dev frontend:  http://10.77.8.134:3000
-🌐 Dev backend:   http://10.77.8.134:8000
-🌐 Prod frontend: https://app.example.com
-🌐 Prod backend:  https://api.example.com
+🌐 Dev:  http://10.77.8.134:3000
+🌐 Prod: https://app.example.com
 ```
 
-For a project with only one environment or one service, list whatever applies — but never less than 1 `🌐` line if a UI/API was deployed.
+If the project has multiple user-facing UI surfaces (e.g. a customer dashboard AND a separate admin panel AND a marketing site), list each one for each environment:
 
-**Where to find the URL set:** before sending the report, read the project's CLAUDE.md and look for a `## Dashboards`, `## URLs`, or `## Endpoints` section. If it exists, list ALL declared URLs in the report — do not pick a subset. If no section exists, list at minimum: every environment you deployed to × every service you touched. If you cannot determine the URL set, ask the user with `❓ Question:` rather than ship a report missing URLs.
+```
+🌐 Dev dashboard:  http://10.77.8.134:3000
+🌐 Dev admin:      http://10.77.8.134:3000/admin
+🌐 Prod dashboard: https://app.example.com
+🌐 Prod admin:     https://app.example.com/admin
+```
+
+The bar is: would the user open this URL in a browser to verify the deploy? If yes → list it. If it's only useful via curl/API client → don't list it.
+
+**Where to find the URL set:** before sending the report, read the project's CLAUDE.md for a `## Dashboards` or `## URLs` section. If it exists, list ALL declared **user-facing** URLs — do not pick a subset, do not include API endpoints from the same section. If no section exists, list at minimum: every environment you deployed to × every user-facing UI surface you touched. If you cannot determine the URL set, ask the user with `❓ Question:` rather than ship a report missing URLs.
+
+**Backend evidence belongs in the `✅ Deploy:` line, not the 🌐 list:**
+
+- RIGHT: `✅ Deploy: dev backend redeployed; v1.0.97-dev.9 verified via /api/version` + `🌐 Dev: http://10.77.8.134:3000` (one user URL, backend mentioned only as evidence)
+- WRONG: `🌐 Dev backend: http://10.77.8.134:8000/api/system/info` (the user has no reason to click an API endpoint — that's noise)
 
 **Anti-patterns:**
-- Single `🌐 Dashboard: <url>` line for a multi-environment project → **WRONG.** List dev AND prod, frontend AND backend separately.
-- URL in prose like `curl http://...` or `verified at https://...` → **WRONG.** Inline URLs are verification evidence, not clickable actions. Add a separate `🌐` line so the user can click it.
+
+- Listing `🌐 ... backend:` or `🌐 ... API:` URLs → **WRONG.** Those waste user space and aren't human-clickable. Backend URLs go in `✅ Deploy:` as verification evidence only.
+- Single `🌐 Dashboard: <url>` line when both dev and prod environments exist → **WRONG.** List both.
+- URL in prose like `curl http://...` or `verified at https://...` → **WRONG.** Inline URLs are evidence, not clickable actions. If it's user-facing, add a separate `🌐` line.
 - Skipping URLs because "the user already knows them" → **WRONG.** They manage many projects in parallel — they don't remember which IP/port goes with which project.
-- Mentioning a deploy in `✅ Deploy:` line without a corresponding `🌐` line → **WRONG.** If you say you verified it, paste the URL you verified at.
+- Mentioning a UI/dashboard deploy in `✅ Deploy:` without a corresponding `🌐` line → **WRONG.** If you say you verified the dashboard, paste its URL.
 
 **localhost is banned** — see `no-localhost-urls.md`. Use the real IP. Verify each URL returns 200 before pasting (a stale URL is worse than no URL).
 
