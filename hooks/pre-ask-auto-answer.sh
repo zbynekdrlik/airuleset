@@ -25,9 +25,12 @@ if echo "$TOOL_INPUT" | grep -qiE "subagent.?driven|subagent.*(or|vs).*(sequenti
     exit 2
 fi
 
-# "Ready to proceed / say go / which approach" style questions
-if echo "$TOOL_INPUT" | grep -qiE "say.*go|shall.*(i|we).*proceed|ready.*to.*(execute|start)|ready.*when.*you.*are|if.*good.*say|if.*(looks|seems).*good|want.*me.*to.*proceed|proceed.*to.*next.*step|ready.*for.*next.*step|invoke.*superpowers:writing-plans|invoke.*superpowers:executing-plans|which.*approach\?|which.*do.*you.*prefer|how.*would.*you.*like.*to.*proceed"; then
-    echo "BLOCKED: Chain directly to the next step — do not stop to ask. If the user approved the design/plan, proceed autonomously. See ask-before-assuming.md pre-answered questions table." >&2
+# "Ready to proceed / say go / which approach" style questions — process only.
+# IMPORTANT: keep these patterns narrow — UX/copy/wording/design preference questions
+# (e.g. "which wording do you prefer") are LEGITIMATE ambiguous-scope questions and
+# MUST NOT be blocked. Match only process/workflow phrasings.
+if echo "$TOOL_INPUT" | grep -qiE "say.*go|shall.*(i|we).*proceed|ready.*to.*(execute|start|proceed|continue|move on)|ready.*when.*you.*are|if.*good.*say|if.*(looks|seems).*good|want.*me.*to.*proceed|proceed.*to.*next.*step|ready.*for.*next.*step|invoke.*superpowers:writing-plans|invoke.*superpowers:executing-plans|which (approach|execution|strategy|workflow|method|path forward)\??|how.*would.*you.*like.*to.*proceed|which (approach|execution|strategy|workflow|method).*do you (prefer|want)"; then
+    echo "BLOCKED: This is a process / chain-stop question — pre-answered. Chain directly to the next step. If the user approved the design/plan, proceed autonomously. See ask-before-assuming.md pre-answered questions table. (NOTE: UX/copy/wording/design preference questions are legitimate — ask those freely.)" >&2
     exit 2
 fi
 

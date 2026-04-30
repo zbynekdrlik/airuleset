@@ -6,6 +6,7 @@
 
 - **Ambiguous scope** — "fix this" could mean multiple things. Ask which interpretation.
 - **Multiple valid approaches** — two architectures could work. Ask which the user prefers.
+- **UX / copy / wording / design choices** — "Which wording for this label?", "Which color for the alert?", "Which icon style?". The user owns these — ask freely. The pre-answered table covers PROCESS questions ("which execution approach"), NOT content questions.
 - **Destructive or irreversible actions** — already covered by no-destructive-remote-actions, but also applies to: deleting files, major refactors, changing APIs.
 - **Dependencies on user context** — you don't know which environment, which instance, which config. Ask.
 - **Before stopping early** — if you think you can't finish, ask what the user wants instead of inventing a stopping point.
