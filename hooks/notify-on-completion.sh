@@ -38,12 +38,25 @@ fi
 if [ -n "$BOT_TOKEN" ] && [ -n "$CHANNEL_ID" ] && command -v jq &>/dev/null; then
     MACHINE=$(hostname -s 2>/dev/null || echo "unknown")
     PROJECT=$(git rev-parse --show-toplevel 2>/dev/null 2>/dev/null | xargs -I{} basename {} 2>/dev/null || basename "$PWD")
-    CONTENT=$(printf '%s **%s** — %s (%s, %ss, exit %s)\n```\n%s\n```' \
-        "$EMOJI" "$PROJECT" "$TITLE" "$MACHINE" "$DURATION" "$EXIT" "$TAIL")
+    PROJECT_UPPER=$(echo "$PROJECT" | tr '[:lower:]' '[:upper:]')
 
-    # Discord message limit is 2000 chars; truncate safely
-    if [ ${#CONTENT} -gt 1900 ]; then
-        CONTENT="${CONTENT:0:1900}..."
+    # Format duration human-readable: 67s → 1m 7s; 3725s → 1h 2m
+    if [ "$DURATION" -ge 3600 ]; then
+        H=$((DURATION / 3600)); M=$(((DURATION % 3600) / 60))
+        DUR_HUMAN="${H}h ${M}m"
+    elif [ "$DURATION" -ge 60 ]; then
+        M=$((DURATION / 60)); S=$((DURATION % 60))
+        DUR_HUMAN="${M}m ${S}s"
+    else
+        DUR_HUMAN="${DURATION}s"
+    fi
+
+    # Title-only message — clean, scannable. No raw output dump in Discord.
+    # The agent reads full output via BashOutput when it returns.
+    if [ "$EXIT" -eq 0 ]; then
+        CONTENT=$(printf '%s **%s** — %s (%s, %s)' "$EMOJI" "$PROJECT_UPPER" "$TITLE" "$MACHINE" "$DUR_HUMAN")
+    else
+        CONTENT=$(printf '%s **%s** — %s FAILED (%s, %s, exit %s)' "$EMOJI" "$PROJECT_UPPER" "$TITLE" "$MACHINE" "$DUR_HUMAN" "$EXIT")
     fi
 
     curl -s --max-time 10 -X POST \
