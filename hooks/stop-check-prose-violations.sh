@@ -40,9 +40,10 @@ if echo "$MSG" | grep -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when
     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2
 fi
 
-# Check for spec/plan/design review handoff prose
-if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before"; then
-    echo "VIOLATION: You stopped to ask the user to review the spec/plan/design before handing off. This is a pre-answered question — always proceed autonomously to the next step. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, chain directly into writing-plans → executing-plans without pausing. See ask-before-assuming.md pre-answered table." >&2
+# Check for spec/plan/design review handoff prose, including
+# "Does this design look right? If yes, I'll commit/write/spec ..."
+if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)"; then
+    echo "VIOLATION: You stopped to ask 'does this design look right?' / 'if yes I'll commit' / 'review the spec'. This is a pre-answered question — always proceed autonomously. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, just commit / write the spec / chain to next step. See ask-before-assuming.md pre-answered table." >&2
 fi
 
 # Check completion report has Goal + What changed + plan-check + /review lines

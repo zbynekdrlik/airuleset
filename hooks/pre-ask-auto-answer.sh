@@ -36,9 +36,10 @@ fi
 
 # Spec / plan / design review handoff — always proceed autonomously
 # Catches: "review the spec/plan/design and let me know", "before I hand off to writing-plans",
-# "any changes before I proceed", "before moving on to implementation"
-if echo "$TOOL_INPUT" | grep -qiE "review.*the.*(spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before.*(i|we).*(hand.?off|move.?on|continue|proceed)|before.*(handing|moving).?(off|on)|hand.?off.*to.*writing.?plans|review.*before.*(implementation|implement|next)|(any|need) (changes?|edits?|tweaks?).*before"; then
-    echo "BLOCKED: Spec/plan/design review handoffs are pre-answered — always proceed autonomously to the next step (writing-plans → executing-plans). The user already approved the workflow when they invoked brainstorming. Do NOT stop to ask 'any changes before I hand off?'. See ask-before-assuming.md pre-answered questions table." >&2
+# "any changes before I proceed", "before moving on to implementation",
+# "Does this design/spec/plan look right/good/ok?", "If yes, I'll commit/write/save"
+if echo "$TOOL_INPUT" | grep -qiE "review.*the.*(spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before.*(i|we).*(hand.?off|move.?on|continue|proceed)|before.*(handing|moving).?(off|on)|hand.?off.*to.*writing.?plans|review.*before.*(implementation|implement|next)|(any|need) (changes?|edits?|tweaks?).*before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|(does|is) (this|the).*(look|seem|sound) (right|good|ok|fine|correct|reasonable).*(specifically|specifically the)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)"; then
+    echo "BLOCKED: Spec/plan/design review handoffs are pre-answered — always proceed autonomously to the next step (writing-plans → executing-plans → commit). 'Does this design look right? If yes, I'll commit' is a process pause; the user already approved the workflow when they invoked brainstorming/spec-writing. Just commit and move on. See ask-before-assuming.md pre-answered questions table." >&2
     exit 2
 fi
 
