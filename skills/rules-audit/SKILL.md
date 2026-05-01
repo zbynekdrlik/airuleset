@@ -2,6 +2,7 @@
 name: rules-audit
 description: Periodic audit of airuleset modules, project CLAUDE.md files, and memory.md to find duplicates, bloat, contradictions, and orphans. Run monthly or when rule count/token budget grows.
 user-invocable: true
+disable-model-invocation: true
 ---
 
 # Rules & Memory Audit

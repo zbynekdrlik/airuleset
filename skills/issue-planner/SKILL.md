@@ -2,6 +2,7 @@
 name: issue-planner
 description: Select GitHub issues, check for already-solved ones, audit CI health, and create an implementation plan. Use when starting work on a project to pick what to work on next.
 user-invocable: true
+disable-model-invocation: true
 ---
 
 # Issue Planner

@@ -2,6 +2,7 @@
 name: mdreview
 description: Web-research-driven audit of CLAUDE.md, memory, hooks, settings, skills across dev1+dev2. Fetches latest best practices from Anthropic, Karpathy, Claude Code community in last 7-14 days, then cross-references against current rules to find model-evolution drift, caveman-incompatible rules, broken Discord notifier, dead bash backgrounds, and bloat. Run weekly or after major model release.
 user-invocable: true
+disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUserQuestion, Skill
 ---
 
@@ -23,9 +24,27 @@ Rules optimized for older models (Opus 4.6, Sonnet 4.5) can degrade newer-model 
 - Detect duplicate / contradictory / orphan rules across dev1 + dev2
 - Detect drift between dev1 and dev2 (airuleset push should keep them in sync)
 
-## Step 1: Web research — fetch current week (MANDATORY)
+## Step 1: Web research + official Anthropic skill audit (MANDATORY)
+
+### Step 1a: Web research — fetch current week
 
 Use WebSearch then WebFetch to gather published material from the last 7-14 days. Record sources + URLs + summaries.
+
+### Step 1b: Official Anthropic claude-md-management skills (MANDATORY)
+
+The `claude-md-management` plugin (enabled in `~/.claude/settings.json`) ships two official Anthropic skills with built-in CLAUDE.md quality criteria. Invoke them as additional knowledge sources BEFORE judging current rules — they encode Anthropic's own published quality framework.
+
+```
+Skill(skill: "claude-md-management:claude-md-improver")  # audit/improve repo CLAUDE.md
+Skill(skill: "claude-md-management:revise-claude-md")    # update with session learnings
+```
+
+Capture from each:
+- Quality criteria they apply (length budgets, scope rules, anti-patterns)
+- Section templates they expect
+- How they merge new learnings without bloat
+
+Tag findings from these as `[anthropic-official]` in research notes — they outrank community blog posts when they conflict.
 
 ### Search queries (use ALL)
 

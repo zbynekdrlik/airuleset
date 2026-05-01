@@ -2,15 +2,28 @@
 set -euo pipefail
 
 # Hook: Stop
-# WARNING-ONLY: detects when Claude asked a pre-answered question in prose
-# instead of applying the fixed answer. Warns Claude for the next turn.
-# Does NOT block (exit 0) — blocking Stop causes infinite loops.
+# Blocks on HARD violations (missing required completion-report fields)
+# via {"decision":"block",...} JSON output, with retry limit (max 2 per session)
+# to avoid runaway loops if a violation is genuinely unfixable.
+# Warns on SOFT violations (banned phrases, prose questions) via stderr.
 
 command -v jq &>/dev/null || exit 0
 
 INPUT=$(cat 2>/dev/null || echo "")
 MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$MSG" ] && exit 0
+
+# HARD violations collected here trigger {"decision":"block"} response.
+# SOFT violations go to stderr as warnings. Both can fire in the same hook run.
+HARD_VIOLATIONS=""
+add_hard() { HARD_VIOLATIONS="${HARD_VIOLATIONS}- $1\n"; }
+
+# Retry limiter: max 2 blocks per session to avoid loops.
+# State stored in /tmp under per-session counter file.
+RETRY_FILE="/tmp/airuleset-stop-block-${SESSION_ID}"
+RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
+MAX_RETRIES=2
 
 # Check for subagent vs inline prose question
 if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)"; then
@@ -42,10 +55,10 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     HAS_REVIEW=$(echo "$MSG" | grep -qE "/review.*0 🔴.*0 🟡.*0 🔵|/review.*all (findings|issues|items).*addressed|review.*0 🔴.*0 🟡.*0 🔵.*addressed in commit|✅.*review.*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
     if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
         echo "VIOLATION: Work Complete report is missing required lines. completion-report.md MANDATES this structure (audits at TOP, Goal/What changed/PR URL at BOTTOM — terminal scrolls, last lines are what the user sees):" >&2
-        [ "$HAS_GOAL" = "0" ] && echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2
-        [ "$HAS_OUTCOME" = "0" ] && echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2
-        [ "$HAS_PLAN_CHECK" = "0" ] && echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2
-        [ "$HAS_REVIEW" = "0" ] && echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. The 🔵 counter is required — '0 🔴 0 🟡' alone is incomplete (no skipping minor findings). Then add the line." >&2
+        [ "$HAS_GOAL" = "0" ] && { echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2; add_hard "Missing **Goal:** line"; }
+        [ "$HAS_OUTCOME" = "0" ] && { echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2; add_hard "Missing **What changed:** line"; }
+        [ "$HAS_PLAN_CHECK" = "0" ] && { echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2; add_hard "Missing ✅ /plan-check audit line"; }
+        [ "$HAS_REVIEW" = "0" ] && { echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. The 🔵 counter is required — '0 🔴 0 🟡' alone is incomplete (no skipping minor findings). Then add the line." >&2; add_hard "Missing ✅ /review audit line with 0 🔴 0 🟡 0 🔵"; }
         echo "See completion-report.md for the exact template." >&2
     fi
 
@@ -144,9 +157,24 @@ if echo "$MSG" | grep -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|
 
     if [ "$MULTI_ENV" = "1" ] && [ "$GLOBE_COUNT" -lt 2 ]; then
         echo "VIOLATION: Deploy mentions multiple environments (dev/staging/prod) but the report has only $GLOBE_COUNT clickable 🌐 URL line(s). List every USER-CLICKABLE web URL on its own '🌐 <env>: <url>' line — typically one per environment. Read the project's CLAUDE.md '## Dashboards' / '## URLs' section. Do NOT list backend/API URLs — only user-facing browser URLs. URLs in prose ('curl http://...') do NOT count. See completion-report.md → 'Dashboards & URLs'." >&2
+        add_hard "Multi-env deploy with <2 🌐 URL lines"
     elif [ "$HAS_UI" = "1" ] && [ "$GLOBE_COUNT" -lt 1 ]; then
         echo "VIOLATION: Deploy mentions a UI/frontend/dashboard but the report has no clickable 🌐 URL line. The user cannot click URLs buried in prose. Add at least one '🌐 <env>: <url>' line for the user-facing dashboard (NOT backend/API). See completion-report.md → 'Dashboards & URLs', and no-localhost-urls.md." >&2
+        add_hard "UI deploy with no 🌐 URL line"
     fi
 fi
 
+# Final: if HARD violations found AND retry budget not exhausted, output JSON to block Stop.
+# Per Claude Code hooks docs: {"decision":"block","reason":"..."} prevents Claude from stopping.
+# Retry limit prevents loops if a violation is genuinely unfixable in this session.
+if [ -n "$HARD_VIOLATIONS" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    echo "$((RETRIES+1))" > "$RETRY_FILE"
+    REASON="Completion report has hard violations:\n${HARD_VIOLATIONS}\nFix the report and resend in this turn. See completion-report.md for the exact template."
+    jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
+    exit 0
+fi
+
+# Either no hard violations, or retry budget exhausted — let Stop succeed.
+# Clear the counter on clean stop so next session starts fresh.
+[ -z "$HARD_VIOLATIONS" ] && rm -f "$RETRY_FILE"
 exit 0
