@@ -19,12 +19,6 @@
 Bash(command: "sleep 300 && gh run view <run-id> --json status,conclusion,jobs", run_in_background: true)
 ```
 When done, Claude reads the output via `BashOutput`, acts on it, and goes idle → Discord fires. No other pattern is acceptable.
-
-**For long bg waits where the agent might stop before completion (>5min):** wrap the command with `notify-on-completion.sh` so the Discord ping fires even if the agent has already stopped (Claude Code's idle_prompt only fires while the session is active):
-```
-Bash(command: "bash ~/devel/airuleset/hooks/notify-on-completion.sh 'sleep 600 && gh run view <run-id> --json status,conclusion,jobs' 'CI run <run-id>'", run_in_background: true)
-```
-The wrapper runs the command in foreground inside the bg shell, fires Discord on completion (✅ on exit 0, ❌ otherwise) with a tail of the output, and returns the result to Claude via BashOutput.
 3. If any job fails: `gh run view <run-id> --log-failed` — investigate and fix immediately
 4. Push fixes and monitor again until green
 5. After merge to main: monitor the main branch CI run AND any release/deploy workflows until they complete
