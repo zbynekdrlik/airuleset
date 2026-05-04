@@ -27,6 +27,7 @@ modules/ci/mutation-testing.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
 modules/quality/architecture-first.md
+modules/quality/investigate-existing-first.md
 modules/quality/mvp-philosophy.md
 modules/quality/security-basics.md
 modules/quality/script-failure-policy.md
