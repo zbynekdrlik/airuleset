@@ -36,4 +36,5 @@ modules/quality/no-destructive-remote-actions.md
 modules/quality/approval-scope.md
 modules/quality/database-migrations.md
 modules/quality/version-on-dashboard.md
+modules/quality/comprehensive-logging.md
 modules/core/completion-report.md
