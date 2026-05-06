@@ -32,6 +32,7 @@ modules/quality/mvp-philosophy.md
 modules/quality/security-basics.md
 modules/quality/script-failure-policy.md
 modules/quality/no-timeout-band-aids.md
+modules/quality/no-local-builds.md
 modules/quality/no-localhost-urls.md
 modules/quality/no-destructive-remote-actions.md
 modules/quality/approval-scope.md

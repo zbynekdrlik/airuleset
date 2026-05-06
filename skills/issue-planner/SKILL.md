@@ -113,6 +113,50 @@ Without this, post-deploy verification cannot confirm new code is live and front
 
 **Do NOT proceed to Step 2 until the foundation gate is resolved** (either issue filed and queued, or user explicitly chose skip).
 
+### 1e. Disk hygiene — purge stale local build artifacts (MANDATORY)
+
+**Per `no-local-builds.md`, the dev machine is for editing — CI compiles. Stale `target/`, `node_modules/`, `dist/` directories are silent disk hogs that fill the machine over time. Audit them before any new work.**
+
+```bash
+# Per-project waste (current project)
+du -sh target node_modules dist .next .nuxt build 2>/dev/null
+
+# Cross-project waste (entire ~/devel)
+du -sh ~/devel/*/target ~/devel/*/node_modules ~/devel/*/dist ~/devel/*/.next ~/devel/*/build 2>/dev/null | sort -h
+
+# Total disk pressure on home
+df -h ~ | tail -1
+```
+
+**Decision rules:**
+
+- **Current project's `target/` (or equivalent) exists AND is older than 24 h** → propose purge.
+- **Cross-project total exceeds 10 GB across `~/devel/*/target` etc.** → propose multi-project purge.
+- **Home partition has < 20 GB free** → BLOCK and force purge regardless of age.
+
+If any of the above triggers, AskUserQuestion BEFORE Step 2:
+
+- **"Purge stale build artifacts now"** — run the appropriate `rm -rf` (current project only, OR cross-project sweep if total > 10 GB), report freed space, then continue
+- **"Skip for now, show issues"** — proceed without purging (user explicitly chose to skip; record the disk waste in Step 4 presentation as a known cost)
+
+**Purge commands (run after explicit user approval — `rm -rf` is destructive):**
+
+```bash
+# Current project
+rm -rf target/ node_modules/ dist/ .next/ .nuxt/ build/ .turbo/ .svelte-kit/
+
+# Cross-project Rust sweep
+find ~/devel -maxdepth 3 -type d -name target -exec rm -rf {} +
+
+# Cross-project Node sweep
+find ~/devel -maxdepth 3 -type d \( -name node_modules -o -name dist -o -name .next -o -name build \) -exec rm -rf {} +
+
+# Python caches
+find ~/devel -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -exec rm -rf {} +
+```
+
+**Do NOT proceed to Step 2 until disk hygiene is resolved** (either purged or user explicitly chose skip). Cross-project waste compounds — every issue you plan adds more if the baseline isn't clean.
+
 ## Step 2: Fetch open issues
 
 ```bash
@@ -178,6 +222,7 @@ For each selected issue:
 
 - Always run the CI health audit FIRST — missing quality gates AND missing build cache are more important than any single issue
 - The build-cache audit (Step 1b) is per-job, not per-workflow — one cached job ≠ healthy CI
+- Disk hygiene (Step 1e) is non-negotiable — stale `target/` / `node_modules/` directories must be purged or explicitly skipped before issue selection
 - The "already overcome" check (Step 3) runs for EVERY open issue, not a sample
 - Never close an issue without user confirmation via AskUserQuestion
 - Present structured choices, not walls of text
