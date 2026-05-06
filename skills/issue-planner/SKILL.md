@@ -117,22 +117,43 @@ Without this, post-deploy verification cannot confirm new code is live and front
 
 **Per `no-local-builds.md`, the dev machine is for editing — CI compiles. Stale `target/`, `node_modules/`, `dist/` directories are silent disk hogs that fill the machine over time. Audit them before any new work.**
 
+#### Detect per-project override first
+
+Before any purge, identify projects with `<!-- airuleset:local-builds=allowed -->` in their CLAUDE.md — those are EXEMPT from purge (their `target/` is a working asset, not waste).
+
 ```bash
-# Per-project waste (current project)
+# Find exempt projects (the HTML comment is the canonical machine-readable marker)
+EXEMPT=$(grep -rlE '<!--\s*airuleset:local-builds=allowed\s*-->' \
+  ~/devel/*/CLAUDE.md ~/devel/*/repo/CLAUDE.md ~/devel/*/.claude/CLAUDE.md 2>/dev/null \
+  | xargs -I{} dirname {} | sort -u)
+echo "Exempt projects (local builds allowed):"
+echo "$EXEMPT"
+```
+
+#### Audit waste (excluding exempt projects)
+
+```bash
+# Per-project waste (current project) — only if NOT in $EXEMPT
 du -sh target node_modules dist .next .nuxt build 2>/dev/null
 
-# Cross-project waste (entire ~/devel)
-du -sh ~/devel/*/target ~/devel/*/node_modules ~/devel/*/dist ~/devel/*/.next ~/devel/*/build 2>/dev/null | sort -h
+# Cross-project waste (entire ~/devel) — exclude exempt
+for d in ~/devel/*/target ~/devel/*/node_modules ~/devel/*/dist ~/devel/*/.next ~/devel/*/build; do
+  proj=$(echo "$d" | awk -F/ '{print "/" $2 "/" $3 "/" $4 "/" $5}')
+  echo "$EXEMPT" | grep -q "$proj" && continue
+  [ -d "$d" ] && du -sh "$d" 2>/dev/null
+done | sort -h
 
 # Total disk pressure on home
 df -h ~ | tail -1
 ```
 
-**Decision rules:**
+**Decision rules (applied to NON-exempt projects only):**
 
 - **Current project's `target/` (or equivalent) exists AND is older than 24 h** → propose purge.
-- **Cross-project total exceeds 10 GB across `~/devel/*/target` etc.** → propose multi-project purge.
-- **Home partition has < 20 GB free** → BLOCK and force purge regardless of age.
+- **Cross-project total exceeds 10 GB across non-exempt `~/devel/*/target` etc.** → propose multi-project purge.
+- **Home partition has < 20 GB free** → BLOCK and force purge regardless of age (exempt projects still skipped).
+
+**Exempt-project handling:** If the CURRENT project is exempt, skip the purge gate entirely for it — but still audit cross-project waste in OTHER non-exempt projects, and still block on the < 20 GB free rule (purging non-exempt projects).
 
 If any of the above triggers, AskUserQuestion BEFORE Step 2:
 

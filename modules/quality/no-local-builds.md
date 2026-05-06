@@ -66,6 +66,31 @@ You may compile locally when:
 
 In all three cases: document why in a comment, and **delete `target/` (or equivalent) when done**. Don't leave the artifacts behind for the next session to wonder about.
 
+#### Project-level override (opt-out per project)
+
+Some projects legitimately need local compilation — heavy ML / GPU / CUDA workloads, embedded toolchains, or projects where the dev machine IS the powerful build machine and CI would be slower or impossible. Such a project MAY opt out, but ONLY by declaring it explicitly in its `CLAUDE.md`:
+
+```markdown
+## Local Build Policy
+
+<!-- airuleset:local-builds=allowed -->
+
+**Local Rust builds (cargo build, cargo clippy, cargo test) are ALLOWED on this machine.**
+Reason: <one-line justification — e.g. "GPU-bound RF-DETR training requires local CUDA toolchain
+and the dev machine is the production build target.">
+The global airuleset default (CI-only) does NOT apply to this project.
+```
+
+Both markers MUST appear: the `## Local Build Policy` heading AND the `<!-- airuleset:local-builds=allowed -->` HTML comment. Tooling (`/issue-planner` Step 1e, future linters) detects the HTML comment as the canonical machine-readable signal; the heading + reason exists for human readers.
+
+When the override is present:
+- Local `cargo build` / `cargo test` / equivalent are allowed for that project.
+- The 24 h `target/` purge rule does NOT apply — `target/` is a working asset, not waste.
+- Cross-project disk audits SKIP this project's `target/` from the waste calculation.
+- The override does NOT extend to OTHER projects on the same machine — each project declares its own exception.
+
+Without both markers, the global rule applies. Saying "this is a dev machine, builds are fine" in a chat message is NOT an override — the override lives in the project's `CLAUDE.md`, version-controlled, reviewable.
+
 #### Anti-patterns (all banned)
 
 - "I'll just `cargo build` to check it compiles before pushing" — **WRONG.** That's what CI is for. Push, CI runs in 5 min.
