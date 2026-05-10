@@ -95,8 +95,55 @@ After all selected issues are committed locally:
 - Pausing between bundled issues to "let the user verify the first one" — **WRONG.** That's three CI cycles + three review rounds for work that fits in one.
 - Stopping the batch when CI fails on issue #2's commit — **WRONG.** Investigate, fix, continue. CI failure inside a batch is the same as CI failure at the end — debug the root cause and keep going.
 
+#### Single feature = single PR (NEVER propose progressive multi-PR rollouts)
+
+A single feature is ONE PR. Schema + module + route + UI + tests + verification all ship together. The user runs MVP-stage projects (`mvp-philosophy.md`) — there is no enterprise change-management process to satisfy.
+
+**BANNED rollout pattern (the "progressive split"):**
+
+```
+PR1: migration v16 + new column + admin toggle. NO route yet. Ship + verify.
+PR2: backend module behind disabled flag. NO real device. Ship + verify.
+PR3: route + UI + E2E. Enable in prod.
+PR4: enable feature for first batch of users.
+```
+
+This is WRONG. It is four review cycles, four CI runs, four merge approvals, four deploys for one feature. The user explicitly rejected this pattern. **Combine into ONE PR with all code changes.** Production rollout (env vars, user enablement, allow-list) is configuration, NOT a code PR.
+
+**Banned justifications (intent — all rewordings apply):**
+
+- "Each PR is independently revertable" — `git revert` works on any commit; you don't need separate PRs for revertability
+- "Ship and verify schema first" — CI verifies schema in test env; production deploy verifies it on prod; one PR is enough
+- "Behind a disabled flag for safety" — flags are config, set them after merge
+- "Stage-and-verify" / "deploy in phases" / "incremental delivery" / "progressive rollout" — none of these justify splitting code PRs for an MVP feature
+- "Easier to review in smaller pieces" — for trivial code, ONE PR with a clear diff is easier than 4 PRs with cross-PR context
+- "Reduces blast radius" — feature flags + dev/main two-branch already handle blast radius; multiple PRs do not
+
+**Acceptable splits (rare, real reasons only):**
+
+- **Live-DB schema migration that requires backfill** before code reads the new column. The migration PR ships first, the backfill runs, then the code-using-column PR ships. This applies ONLY when backfill is non-trivial AND the project has real production data on a live DB. NOT for MVP projects with no users yet.
+- **Third-party prod-credential rotation** that must propagate before code uses it. Config PR (env vars in GitHub Secrets) lands first, code PR follows. Even here, the code PR is ONE PR — not "module PR" + "route PR" + "enable PR".
+- **Genuinely independent issues from `/issue-planner`** that happen to have ≥1 fail the bundling gate (per the gate criteria above).
+
+**Default decision:** schema + module + route + UI + tests + E2E = ONE PR. If you find yourself drawing a 4-PR rollout diagram for a single feature, STOP — collapse it.
+
+#### Banned phrases (single-feature multi-PR rollout)
+
+NEVER write any of these or rewordings when designing a single feature's delivery:
+
+- "Rollout plan: PR1 schema, PR2 module, PR3 route, PR4 enable"
+- "Three PRs for code, one config PR"
+- "Each PR independently revertable / mergeable / reviewable"
+- "Ship and verify before next PR"
+- "Stage-and-verify rollout"
+- "Phased deployment" / "phase 1 / phase 2 / phase 3 PRs"
+- "Behind a disabled flag, enable in a follow-up PR"
+- Any rewording that splits a single feature's code into multiple sequential PRs
+
+The intent is banned: turning one feature into a queue of PRs that block on user merges.
+
 #### The principle
 
-The user picked agentic development to AVOID being interrupted for trivial process gates. They explicitly want fewer PRs, fewer review cycles, fewer "ready to proceed?" pings. **Bundling small issues into one PR is the default model — splitting is the exception.** When in doubt, batch and proceed.
+The user picked agentic development to AVOID being interrupted for trivial process gates. They explicitly want fewer PRs, fewer review cycles, fewer "ready to proceed?" pings. **One feature = one PR. Many small issues = one bundled PR. Splitting is the exception, never the default.** When in doubt, combine and proceed.
 
 Applies to all rewordings and semantic equivalents of the patterns above.
