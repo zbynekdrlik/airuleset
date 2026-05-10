@@ -18,6 +18,7 @@
 ✅ /plan-check: N/N fulfilled
 ✅ /review: clean — 0 🔴 0 🟡 0 🔵
 ✅ Deploy: <user-visible behavior verified on the live target — include version label read from DOM>
+✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>   ← REQUIRED for bug-fix PRs (see regression-test-first.md); OMIT for non-bug PRs
 
 **Plan steps:**           ← OPTIONAL: multi-step work only; terse user-visible one-liners
 - <step 1>
@@ -57,6 +58,7 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — the
 - **No "Remaining / Future / TODO / Follow-up" sections** — that's incomplete work disguised as a deliverable. If you discover genuinely-out-of-scope work, file a GitHub issue with a clear title and reference it; don't add it to the report.
 - **🔵 review findings inside the diff = MUST FIX.** No skipping as "minor / stylistic / nice-to-have / out of scope / deferred". The audit line `0 🔴 0 🟡 0 🔵` is non-negotiable. Only allowed exception: a 🔵 pointing at code OUTSIDE the diff → file a GitHub issue, reference it.
 - **localhost is banned in URLs** — see `no-localhost-urls.md`. Use real IPs. Verify each URL returns 200 before pasting.
+- **Bug-fix PR ⇒ `✅ Regression test:` line is REQUIRED.** Triggered when the PR closes/fixes a `bug`-labeled issue, the title contains `fix`/`bugfix`/`hotfix`/`patch`/`regression`, or the work fixed a defect. The line MUST cite the test file path, line number, the test commit SHA (RED — test failing without the fix), and the fix commit SHA (GREEN — test passing with the fix). Stop hook blocks bug-fix reports missing this line. See `regression-test-first.md`.
 
 #### Pre-completion gate (run BEFORE writing the report)
 

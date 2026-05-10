@@ -64,6 +64,30 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
         echo "See completion-report.md for the exact template." >&2
     fi
 
+    # Bug-fix PRs MUST include a regression-test evidence line.
+    # Triggered when the report mentions: Closes/Fixes/Resolves #N, or fix:/bug:/regression: in title,
+    # or PR title starts with "fix" / contains "bugfix" / "hotfix" / "patch".
+    IS_BUGFIX_REPORT=0
+    if echo "$MSG" | grep -qiE '(closes|fixes|resolves)\s+#[0-9]+'; then IS_BUGFIX_REPORT=1; fi
+    if echo "$MSG" | grep -qiE 'PR.*:.*\b(fix|bugfix|hotfix|patch|regression|repair)\b|^(fix|bugfix|hotfix|patch|regression):'; then IS_BUGFIX_REPORT=1; fi
+    if echo "$MSG" | grep -qiE '\b(bug fix|bug-fix|regression fix|fixed (the )?(bug|regression|issue|defect))\b'; then IS_BUGFIX_REPORT=1; fi
+
+    if [ "$IS_BUGFIX_REPORT" = "1" ]; then
+        # Required line format examples:
+        #   ✅ Regression test: tests/foo_test.rs:42 — RED on a1b2c3d, GREEN on e4f5g6h
+        #   ✅ Regression test: e2e/login.spec.ts:15 — failed before fix (a1b2c3d), passes after fix (e4f5g6h)
+        HAS_REGRESSION=$(echo "$MSG" | grep -qiE '✅\s*regression test:.*[a-f0-9]{7}' && echo 1 || echo 0)
+        if [ "$HAS_REGRESSION" = "0" ]; then
+            echo "VIOLATION: Bug-fix completion report missing the '✅ Regression test:' evidence line. Per regression-test-first.md, every bug fix needs a test commit BEFORE the fix commit, and the report must cite both SHAs:" >&2
+            echo "  Required line:" >&2
+            echo "    ✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>" >&2
+            echo "  Or:" >&2
+            echo "    ✅ Regression test: <test_path>:<line> — failed before fix (<test_sha>), passes after fix (<fix_sha>)" >&2
+            echo "  See regression-test-first.md and completion-report.md." >&2
+            add_hard "Missing ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha> line on bug-fix PR"
+        fi
+    fi
+
     # Check ORDER: Goal/What changed must appear AFTER audit lines (audits at top, Goal at bottom)
     GOAL_LINE=$(echo "$MSG" | grep -nE "\*\*Goal:?\*\*" | head -1 | cut -d: -f1)
     AUDIT_LINE=$(echo "$MSG" | grep -nE "✅.*(/plan.?check|review.*clean|review.*0 🔴)" | head -1 | cut -d: -f1)
