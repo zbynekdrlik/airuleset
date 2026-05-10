@@ -220,24 +220,63 @@ grep -rn "<function or symbol>" src/ 2>/dev/null
 
 **Block before Step 4:** if any issues are flagged "likely solved" or "partially overlaps", resolve them via AskUserQuestion FIRST. Do not present issues for selection while there are unconfirmed-solved ones in the queue. Never close an issue without explicit user approval.
 
-## Step 4: Present issues for selection
+## Step 4: Present issues for selection (MULTI-SELECT BY DEFAULT)
 
-Use AskUserQuestion to present the open (unsolved) issues as options. Group by priority/labels if available. Let the user select which issue(s) to work on.
+Use AskUserQuestion with **`multiSelect: true`** — always, no exceptions. Selecting one issue is a deliberate user choice, not the default. Group by priority/labels if available.
 
 Include for each issue:
 - Number and title
 - Key details from the body (1 line summary)
 - Labels and age
+- Estimated bundling-gate verdict (see Step 4a below)
 
-## Step 5: Brainstorm and plan
+### 4a. Pre-classify each issue against the bundling gate
 
-For each selected issue:
+Before presenting, label each issue with its bundle eligibility per `autonomous-batch-issue-development.md`:
 
-1. Read the full issue body and comments: `gh issue view <number>`
-2. Explore the relevant code areas
-3. Invoke `/superpowers:brainstorming` to design the approach
-4. After brainstorming approval, invoke `/superpowers:writing-plans` to create the implementation plan
-5. After plan approval, the user can invoke `/superpowers:executing-plans` to start work
+- **🟢 Bundle-safe** — ≤300 LoC est., no schema, no API break, no security boundary, no cross-cut refactor
+- **🔴 Solo-PR** — fails ≥1 gate criterion (schema migration, public API change, auth/security, large refactor)
+
+Show the verdict next to each issue in the question options so the user understands which selections will batch vs split.
+
+Example option label: `#42 — Add log line to deploy script (🟢 bundle-safe, 5d old)`
+
+### 4b. After selection — auto-decide batch vs split
+
+- All selected = 🟢 → ONE batch, ONE PR (default flow)
+- Mix of 🟢 and 🔴 → bundle the 🟢 set into one PR; the 🔴 issue(s) get their own PR each. AskUserQuestion ONCE: "Order — solo PR(s) first or bundled batch first?"
+- All selected = 🔴 → process sequentially, one PR per issue, no batching
+
+Do NOT ask "should I bundle?" — apply the rule per `autonomous-batch-issue-development.md`.
+
+## Step 5: Execute the batch (NO PAUSE BETWEEN ISSUES)
+
+For the bundled set, run a single chained loop on the same `dev` branch:
+
+```
+for issue in selected_bundle:
+    1. gh issue view <N>                        # read full body + comments
+    2. explore relevant code (subagent: Explore)
+    3. brainstorm if non-trivial (superpowers:brainstorming)
+    4. write plan if multi-step (superpowers:writing-plans)
+    5. implement + tests (TDD per tdd-workflow.md)
+    6. local lint/format only (no compile per no-local-builds.md)
+    7. git commit -m "fix(...): ... \n\nCloses #<N>"
+    # NO push, NO PR, NO completion report yet — go to next issue
+```
+
+After ALL bundled issues committed locally:
+
+8. `git push origin dev` — single push, single CI cycle
+9. Monitor CI per `ci-monitoring.md` until ALL jobs green
+10. Open ONE PR (dev → main) with title `Bundle: fix #N1 + #N2 + #N3 — <summary>` and body listing each `Closes #<N>` on its own line
+11. Verify PR `mergeable: true` AND `mergeable_state: "clean"`
+12. Send ONE completion report per `completion-report.md` listing all bundled issues
+13. Wait for explicit user merge instruction per `pr-merge-policy.md`
+
+**Banned between bundled issues:** "ready for #N+1?", "should I continue?", "approve before next?", "commit and move on?". See `ask-before-assuming.md` table.
+
+For SOLO 🔴 issues: run the same cycle but push + PR + completion report after that single issue, then move to the next solo issue (or batch).
 
 ## Rules
 
@@ -245,6 +284,8 @@ For each selected issue:
 - The build-cache audit (Step 1b) is per-job, not per-workflow — one cached job ≠ healthy CI
 - Disk hygiene (Step 1e) is non-negotiable — stale `target/` / `node_modules/` directories must be purged or explicitly skipped before issue selection
 - The "already overcome" check (Step 3) runs for EVERY open issue, not a sample
+- Step 4 ALWAYS uses `multiSelect: true` — single-select is a violation of `autonomous-batch-issue-development.md`
+- Step 5 NEVER pauses between bundled issues — chain them on the same `dev` branch, single push at the end
 - Never close an issue without user confirmation via AskUserQuestion
 - Present structured choices, not walls of text
 - If no issues exist, say so and ask if the user wants to create one
