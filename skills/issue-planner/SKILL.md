@@ -119,11 +119,11 @@ Without this, post-deploy verification cannot confirm new code is live and front
 
 #### Detect per-project override first
 
-Before any purge, identify projects with `<!-- airuleset:local-builds=allowed -->` in their CLAUDE.md — those are EXEMPT from purge (their `target/` is a working asset, not waste).
+Before any purge, identify projects with Tier 1 (`<!-- airuleset:local-builds=allowed -->`) OR Tier 2 (`<!-- airuleset:local-builds=fast-iterate -->`) in their CLAUDE.md — both are EXEMPT from purge (their `target/` is a working asset, not waste).
 
 ```bash
-# Find exempt projects (the HTML comment is the canonical machine-readable marker)
-EXEMPT=$(grep -rlE '<!--\s*airuleset:local-builds=allowed\s*-->' \
+# Find exempt projects (both Tier 1 and Tier 2 markers exempt target/ from purge)
+EXEMPT=$(grep -rlE '<!--\s*airuleset:local-builds=(allowed|fast-iterate)\s*-->' \
   ~/devel/*/CLAUDE.md ~/devel/*/repo/CLAUDE.md ~/devel/*/.claude/CLAUDE.md 2>/dev/null \
   | xargs -I{} dirname {} | sort -u)
 echo "Exempt projects (local builds allowed):"

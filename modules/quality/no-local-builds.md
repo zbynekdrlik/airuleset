@@ -1,38 +1,136 @@
-### No Local Heavy Builds — CI Compiles, Local Lints
+### Local Build Policy — Three Tiers
 
-**Compilation runs in CI, not on the developer machine. The local checkout exists for editing, lint, and verification — not for `cargo build`, `cargo test`, `npm run build`, `cargo tauri build`, `trunk build`, or any compile-heavy command.** This rule complements `ci-push-discipline.md` ("Only lint/format runs locally by default") by making the disk-space consequences explicit.
+**Compilation runs in CI; local checkouts run lint + cheap-compile checks. Heavy builds (release binaries, bundles, Tauri/Trunk) run in CI by default, but per-project escalation tiers exist for legitimate needs.** This rule complements `ci-push-discipline.md`.
 
 #### Why this matters
 
-- A single Rust workspace's `target/` reaches 5–15 GB. Five projects = 50+ GB. The dev machine fills up silently.
-- CI runs are reproducible (clean image, pinned toolchain). Local builds aren't — they hide "works on my machine" bugs.
-- Local compile artifacts go stale within hours; reusing them while CI rebuilds anyway just costs disk.
-- `target/`, `node_modules/`, `dist/`, `.next/`, `build/` are all in `.gitignore` for a reason — they're disposable.
+- A single Rust workspace's `target/` reaches 5–15 GB in full-build mode. Five projects = 50+ GB. The dev machine fills up silently.
+- CI runs are reproducible (clean image, pinned toolchain). Full local builds aren't — they can hide "works on my machine" bugs.
+- But: pushing for every compile-error roundtrip wastes 15 min per CI cycle when `cargo check` would catch it in 90s locally. Default tier permits cheap-compile checks for exactly this reason.
 
-#### What runs locally (allowed)
+#### Tier 0 — DEFAULT (no marker in project CLAUDE.md)
 
-| Language | Local-allowed commands |
+**Allowed locally — REQUIRED before push after multi-file changes:**
+
+| Language | Cheap-compile commands (run before push) |
 |---|---|
-| Rust | `cargo fmt --all --check`, `cargo fmt --all`, `cargo check` ONLY when explicitly debugging a type error |
-| Python | `ruff check .`, `ruff format`, `mypy --no-incremental` for type checks |
-| Node.js | `npm run lint`, `prettier --check`, `tsc --noEmit` for type checks |
+| Rust | `cargo fmt --all --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --no-run --workspace` |
+| Python | `ruff check .`, `ruff format`, `mypy --no-incremental` |
+| Node.js | `npm run lint`, `prettier --check`, `tsc --noEmit` |
 | Go | `gofmt -l .`, `go vet ./...` |
 
-Anything that produces a deployable artifact (binary, bundle, container image) runs in CI.
+`cargo check` parses + typechecks + borrow-checks (no codegen, no linking). Cost: ~90s cold, ~15s warm. Disk delta ~150-200 MB. `cargo clippy --workspace -- -D warnings` adds ~50 MB. `cargo test --no-run` compiles tests without running them, adds ~300 MB. Total Tier-0 disk: ~500 MB per Rust project — acceptable trade-off vs 15-min CI roundtrips.
 
-#### What does NOT run locally (banned without explicit user approval)
+**MANDATORY pre-push gate after multi-file refactor:**
 
-- `cargo build`, `cargo build --release`, `cargo tauri build`, `trunk build`, `wasm-pack build`
-- `cargo test` — use CI; if you must repro a single test locally, `cargo nextest run --test <single>` is the only acceptable form, and you delete `target/` after
+```bash
+# Rust
+cargo fmt --all --check && \
+cargo check --workspace && \
+cargo clippy --workspace --all-targets -- -D warnings && \
+cargo test --no-run --workspace
+```
+
+If ANY of these fail → fix locally, NEVER push the broken code. Each E0xxx caught locally saves a 15-min CI cycle.
+
+**Banned locally (Tier 0):**
+
+- `cargo build`, `cargo build --release` — produces deployable binary; CI builds it
+- `cargo tauri build`, `trunk build`, `wasm-pack build` — heavy bundler builds
+- `cargo test` (runs the tests; compile-only via `--no-run` is allowed) — let CI run them
 - `npm run build`, `vite build`, `next build`, `webpack`, `rollup`, `esbuild --bundle`
-- `docker build` of project images (use CI-built images via `docker pull`)
+- `docker build` of project images
 - `pyinstaller`, `nuitka`, any Python freezer
 
-If you find yourself reaching for a compile command "just to check", STOP. Push and let CI run. CI is what ships, so CI is what you trust.
+If a Tier-0 ban blocks you and the work genuinely needs full builds → escalate to Tier 1 (permanent) or Tier 2 (temporary fast-iterate).
 
-#### Purge stale build artifacts AGGRESSIVELY
+#### Tier 1 — `=allowed` (permanent opt-in)
 
-**When you encounter a `target/`, `node_modules/`, `dist/`, `.next/`, or `build/` directory in a project — and you didn't just create it for a documented reason — purge it.** The user's machine is not a build cache.
+For projects that legitimately need local compilation forever — heavy ML/GPU/CUDA, embedded toolchains, or projects where the dev machine IS the build target.
+
+Declare in the project's `CLAUDE.md`:
+
+```markdown
+## Local Build Policy
+
+<!-- airuleset:local-builds=allowed -->
+
+**Local builds (Tier 1) ENABLED.** Full `cargo build` / `cargo test` / `cargo tauri build` allowed.
+Reason: <one-line — e.g. "GPU-bound CUDA training requires local toolchain.">
+```
+
+Both markers MUST appear: heading + HTML comment. Tooling detects the comment as canonical signal.
+
+When Tier 1 is active:
+- All Tier-0 commands stay mandatory pre-push (still cheap, still fast)
+- Full builds allowed
+- 24h `target/` purge rule does NOT apply
+- Disk audits SKIP this project
+
+#### Tier 2 — `=fast-iterate` (temporary fast-iteration mode)
+
+For when a single project needs aggressive local iteration to avoid 10-20 min CI cycles for small UI/code tweaks. Example: restreamer multi-arch (Linux + Windows) where free GitHub Windows runners take 10-15 min cold and dwarf 1-3 min local cross-compile time.
+
+Declare in the project's `CLAUDE.md`:
+
+```markdown
+## Local Build Policy
+
+<!-- airuleset:local-builds=fast-iterate -->
+
+**Fast-iterate mode (Tier 2) ENABLED.** Iterate locally; push to CI only when feature works end-to-end.
+Reason: <one-line — e.g. "GitHub free Windows runner cold-start is 10+ min vs 2 min local cargo-xwin.">
+Activated: <YYYY-MM-DD>. Revert with `/fast-iterate off` once feature stabilises.
+```
+
+Use `/fast-iterate on` slash command to add the marker; `/fast-iterate off` to remove.
+
+When Tier 2 is active, agent MUST:
+
+1. **Iterate locally — no push between iterations.** Build → test → fix → build → test → fix. Only push when feature works end-to-end (compiles + tests pass + manual verify if applicable).
+2. **Use cross-compile for foreign targets.** Linux → Windows: `cargo xwin build --target x86_64-pc-windows-msvc --release` (install: `cargo install cargo-xwin`). Avoid the GitHub free Windows runner whenever possible.
+3. **Run the full pre-push gate before pushing** — same as Tier 0 (fmt + check + clippy + test) PLUS the actual build + test commands.
+4. **Disk hygiene still applies but relaxed** — `target/` may grow to 10+ GB during a fast-iterate session; that's expected. After feature ships and `/fast-iterate off` runs, agent should purge `target/` and return to Tier 0.
+5. **Revert when stable** — fast-iterate is TEMPORARY. After the feature merges to main and stabilises (≥1 day of green CI on dev), run `/fast-iterate off` to revert. Don't leave it on permanently — that's what Tier 1 is for.
+
+**Cross-compile cookbook (Rust, Linux → Windows):**
+
+```bash
+# Install once
+cargo install cargo-xwin
+rustup target add x86_64-pc-windows-msvc
+
+# Build (faster than cross because it uses MSVC stdlib via xwin)
+cargo xwin build --target x86_64-pc-windows-msvc --release
+
+# Output: target/x86_64-pc-windows-msvc/release/<binary>.exe
+# Smoke test in Wine OR scp to Windows machine for verification
+```
+
+Alternative for GNU toolchain:
+
+```bash
+sudo apt install mingw-w64
+rustup target add x86_64-pc-windows-gnu
+cargo build --target x86_64-pc-windows-gnu --release
+```
+
+When CI is still needed for Tier 2: only push when the local build + test green. CI does the FINAL verification (real Windows runner, real artifacts, deploy). Don't push to "let CI build it for me" — that defeats the point.
+
+#### Tier escalation decision tree
+
+```
+Touching only fmt/comments/text?              → Tier 0 (no compile needed)
+Multi-file refactor of types/traits?          → Tier 0 (cargo check + clippy catches)
+Need to run tests with side effects locally?  → Tier 0 → Tier 2 if recurring
+Iterating on Windows binary repeatedly?       → Tier 2 (cross-compile)
+Project IS the build target (GPU/CUDA)?       → Tier 1 (permanent)
+Feature stable, no longer iterating?          → /fast-iterate off → Tier 0
+```
+
+#### Purge `target/` AGGRESSIVELY (Tier 0 only)
+
+When you encounter a `target/`, `node_modules/`, `dist/`, `.next/`, or `build/` directory in a Tier-0 project that's older than 24 h, delete it. CI rebuilds. The artifact is disposable.
 
 ```bash
 # Rust
@@ -43,68 +141,33 @@ rm -rf node_modules/ dist/ .next/ .nuxt/ build/ .turbo/ .svelte-kit/
 
 # Python
 rm -rf __pycache__/ .pytest_cache/ .mypy_cache/ .ruff_cache/ build/ dist/ *.egg-info/
-find . -name __pycache__ -type d -exec rm -rf {} +
 
-# Multi-project sweep (run from ~/devel)
+# Multi-project sweep (excludes Tier 1 + Tier 2 — see /issue-planner step 1e)
 du -sh ~/devel/*/target ~/devel/*/node_modules ~/devel/*/dist 2>/dev/null | sort -h
 ```
 
-**Decision rule:** if `target/` (or equivalent) is older than 24 hours, delete it. If it's newer but you don't remember creating it intentionally, delete it. CI rebuilds. The artifact is disposable.
+Tier 1 + Tier 2 projects are EXEMPT — their `target/` is a working asset, not waste.
 
 #### Cargo / global caches
 
-- `~/.cargo/registry/` and `~/.cargo/git/` are SHARED across all projects — leave them alone unless they exceed 5 GB. To trim: `cargo cache --autoclean` (install `cargo-cache` once).
+- `~/.cargo/registry/` and `~/.cargo/git/` are SHARED across all projects — leave alone unless they exceed 5 GB. Trim: `cargo cache --autoclean`.
 - `~/.npm/`, `~/.cache/pnpm/`, `~/.cache/pip/` — same rule, shared, only purge if oversized.
-- The per-project `target/` / `node_modules/` is the part that bloats. Purge those, leave the global caches.
-
-#### When local compile is justified (rare)
-
-You may compile locally when:
-1. The user explicitly asked you to ("can you reproduce X locally?")
-2. CI is broken and you need to reproduce the failure to fix CI itself
-3. You're debugging a runtime bug that requires a local debugger (`lldb`, `gdb`, `dlv`) attached to a binary
-
-In all three cases: document why in a comment, and **delete `target/` (or equivalent) when done**. Don't leave the artifacts behind for the next session to wonder about.
-
-#### Project-level override (opt-out per project)
-
-Some projects legitimately need local compilation — heavy ML / GPU / CUDA workloads, embedded toolchains, or projects where the dev machine IS the powerful build machine and CI would be slower or impossible. Such a project MAY opt out, but ONLY by declaring it explicitly in its `CLAUDE.md`:
-
-```markdown
-## Local Build Policy
-
-<!-- airuleset:local-builds=allowed -->
-
-**Local Rust builds (cargo build, cargo clippy, cargo test) are ALLOWED on this machine.**
-Reason: <one-line justification — e.g. "GPU-bound RF-DETR training requires local CUDA toolchain
-and the dev machine is the production build target.">
-The global airuleset default (CI-only) does NOT apply to this project.
-```
-
-Both markers MUST appear: the `## Local Build Policy` heading AND the `<!-- airuleset:local-builds=allowed -->` HTML comment. Tooling (`/issue-planner` Step 1e, future linters) detects the HTML comment as the canonical machine-readable signal; the heading + reason exists for human readers.
-
-When the override is present:
-- Local `cargo build` / `cargo test` / equivalent are allowed for that project.
-- The 24 h `target/` purge rule does NOT apply — `target/` is a working asset, not waste.
-- Cross-project disk audits SKIP this project's `target/` from the waste calculation.
-- The override does NOT extend to OTHER projects on the same machine — each project declares its own exception.
-
-Without both markers, the global rule applies. Saying "this is a dev machine, builds are fine" in a chat message is NOT an override — the override lives in the project's `CLAUDE.md`, version-controlled, reviewable.
 
 #### Anti-patterns (all banned)
 
-- "I'll just `cargo build` to check it compiles before pushing" — **WRONG.** That's what CI is for. Push, CI runs in 5 min.
-- "I ran `cargo test` locally, all green, ready to push" — **WRONG.** Push and let CI run; local toolchain may differ from CI's.
-- "Let me `npm run build` and serve `dist/` to verify the bundle" — **WRONG.** Use the deployed dev environment via `no-localhost-urls.md`. Don't bundle locally.
-- Leaving `target/` / `node_modules/` behind after one-off debug work — **WRONG.** Purge when done. Disk space is a finite resource.
-- Treating `target/` as a cache to speed up future builds — **WRONG.** CI is the build environment. Local `target/` is junk.
-- "5 GB is fine, I have 500 GB" — **WRONG.** Across 10 projects this is 50 GB of silently-accumulating waste. Then 100 GB. Then a full disk.
+- **Tier 0:** "Skip `cargo check`, just push and let CI tell me" — **WRONG.** 90s local vs 15 min CI cycle. Run check + clippy first.
+- **Tier 0:** "I'll just `cargo build` to verify it compiles" — **WRONG.** Use `cargo check` (no codegen, no linking, 10× faster).
+- **Tier 0:** "I ran `cargo test` locally, ready to push" — **WRONG.** Use `cargo test --no-run` (compile-only). Let CI run the tests.
+- **Tier 2:** "Push each iteration to let CI build the Windows binary" — **WRONG.** Cross-compile locally with `cargo-xwin`. Push when feature works end-to-end.
+- **Tier 2:** Leaving fast-iterate on after feature stabilises — **WRONG.** `/fast-iterate off` once green on dev for ≥1 day.
+- "5 GB target/ is fine, I have 500 GB" — **WRONG.** Across 10 projects = 50 GB silently accumulating. Purge per Tier-0 rules.
 
 #### Enforcement
 
-- `/issue-planner` step 1e audits `~/devel/*/target`, `~/devel/*/node_modules` etc. before issue selection. If totals exceed 10 GB, blocks via AskUserQuestion to purge first.
-- The expectation is that a healthy dev machine has near-zero per-project build artifacts. The default state of `target/` should be "doesn't exist".
+- `/issue-planner` step 1e audits `~/devel/*/target` etc. before issue selection. Tier 1 (`=allowed`) AND Tier 2 (`=fast-iterate`) projects are EXEMPT from the waste calculation.
+- `/fast-iterate` skill toggles the Tier 2 marker on/off in the current project's CLAUDE.md.
+- Pre-push hook runs Tier-0 fmt check; agent runs `cargo check` + `cargo clippy` + `cargo test --no-run` manually before invoking `git push`.
 
 #### The principle
 
-**The dev machine is for editing. CI is for compiling.** Disk space wasted on stale artifacts is disk space not available for new projects, recordings, datasets, or anything else the user actually needs. Purge aggressively, push frequently, trust CI.
+**Default is fast-feedback locally + reproducible CI for shipping artifacts.** Tier 0 gives 90s compile-check vs 15-min CI roundtrip — use it. Tier 2 gives temporary full-build escape hatch when CI is the bottleneck (Windows runners) — use it sparingly, turn it off when done. The dev machine is for fast iteration; CI is the source of shipping truth.
