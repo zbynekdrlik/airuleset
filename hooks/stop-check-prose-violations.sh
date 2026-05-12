@@ -122,6 +122,18 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     fi
 fi
 
+# Check for follow-up issue filings in completion reports.
+# Per complete-planned-work.md "Follow-up gate", same-PR small cleanups (enum migration,
+# type tightening, magic-number extraction, <100 LoC same-file polish) MUST land in the
+# current PR — NOT in a follow-up issue. Follow-ups are reserved for genuinely
+# out-of-scope work that fails the bundling gate (>300 LoC, schema change, API break,
+# security boundary, cross-cut refactor).
+if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    if echo "$MSG" | grep -qiE "follow.?up (filed|issue|tracked|created|opened|logged)[:= ]+#[0-9]+|filed (as|under) #[0-9]+ for (next|follow.?up|separate|dedicated)|tracked (in|as) #[0-9]+ (as|for) (separate|follow.?up|next|dedicated)|(will|to) address.*(in (a )?(next|follow.?up|dedicated|separate) pr|in (the )?next session)|(opened|created) #[0-9]+ (for|to track) (the )?(follow.?up|cleanup|tidy|polish|migration|refactor|migrate)"; then
+        echo "VIOLATION: You filed a follow-up issue from a completion report. Per complete-planned-work.md 'Follow-up gate', same-PR small cleanups (<100 LoC, same-file polish, enum migration, type tightening, magic-number extraction, missing test on touched path) MUST land in the CURRENT PR — not a follow-up. Follow-ups are reserved for work that FAILS the bundling gate (>300 LoC, DB schema change, API break, security boundary, cross-cut refactor). If the discovered task does NOT meet one of those criteria, close the follow-up issue and add a commit to THIS PR. See complete-planned-work.md → 'Follow-up gate' and ask-before-assuming.md pre-answered table." >&2
+    fi
+fi
+
 # Check for "skip 🔵 review findings" / "🔵 deferred / out of scope / minor" patterns.
 # The user wants every review finding fixed inside the diff — no skipping minor issues.
 if echo "$MSG" | grep -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then

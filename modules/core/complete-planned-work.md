@@ -31,6 +31,50 @@ gh issue create --title "TODO: <description>" --body "<context and why it matter
 ```
 This is the ONLY acceptable way to "postpone" work — by creating a tracked issue. Mentioning it in chat or the completion report without creating an issue means it will be forgotten.
 
+#### Follow-up gate — "genuinely out of scope" has STRICT criteria
+
+Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-issue-development.md`). A discovered task qualifies for follow-up ONLY when ALL of these are true:
+
+- Estimated change > 300 LoC, OR
+- Requires DB schema change / migration, OR
+- Public API breaking change, OR
+- Security boundary modification, OR
+- Cross-cutting refactor (rename across >5 files, dep major bump, framework upgrade), OR
+- Genuine design dependency on a separate decision the user must make
+
+If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. File it, fix it, ship it in the same PR.
+
+**Things that DO NOT qualify as "genuinely out of scope" (must be done in current PR):**
+
+- "Migrate string to enum" / "tighten type" / "use typed constant instead of literal" — same file, <50 LoC = DO NOW
+- "Extract magic number to constant" — 5-line change = DO NOW
+- "Rename variable for clarity" — single file = DO NOW
+- "Add missing test for the path I just touched" — required anyway per `regression-test-first.md` = DO NOW
+- "Replace inline literal with imported type" — trivial = DO NOW
+- "Tidy up the duplicated condition I noticed" — single function = DO NOW
+- "Add docstring/comment where I changed code" — trivial = DO NOW
+- Any change <100 LoC that touches files already in the current diff — DO NOW
+
+**Banned justifications (intent — all rewordings apply):**
+
+- "Out of scope for this PR" applied to a <100 LoC same-file cleanup — **WRONG**
+- "Keeping this PR focused" used to dump trivial polish into a follow-up — **WRONG**
+- "Easier to review separately" for a 10-line type tightening — **WRONG**
+- "File a follow-up for the enum migration" when the enum touches 1-2 files — **WRONG**
+- "I'll do it in the next PR" — **WRONG.** Add a commit to THIS PR.
+
+The follow-up gate exists for REAL out-of-scope work (schema migrations, framework upgrades, multi-day refactors), NOT for small cleanups the agent noticed while touching the file. Filing a follow-up issue for a 20-line refactor wastes a PR cycle, a CI cycle, and a review round.
+
+**Banned phrases (intent, all rewordings):**
+
+- "Follow-up filed: #N — <small cleanup>"
+- "Filed as #N for next PR"
+- "Tracked in #N as separate work"
+- "Will address in dedicated PR"
+- Any phrasing that defers a sub-300-LoC discovered cleanup to a new issue
+
+The intent is banned: punting small same-PR work to a follow-up to send a completion report sooner.
+
 #### Self-audit before completion
 
 When you believe work is finished, BEFORE sending the completion report:
