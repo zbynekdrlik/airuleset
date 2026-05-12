@@ -134,6 +134,41 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     fi
 fi
 
+# Check for "ghost deferral" — completion report mentions deferred work but no #N issue reference.
+# Per complete-planned-work.md, ANY deferral phrase in a completion report MUST cite a filed issue
+# number. Without #N, the deferred work is permanently lost.
+if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    # Detect deferral phrases (broad — many rewordings)
+    DEFER_HIT=0
+    if echo "$MSG" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
+        DEFER_HIT=1
+    fi
+    if [ "$DEFER_HIT" = "1" ]; then
+        # Require an EXPLICIT tracking-issue reference. A bare PR title with #N does NOT count
+        # (PR #195 in the title doesn't prove the deferred work was filed). Require:
+        #   "Filed as #N" / "Filed: #N" / "Tracked as #N" / "Tracking issue #N" /
+        #   "Issue #N" / "Tracker: #N" / "TODO #N" / "filed under #N" / etc.
+        if ! echo "$MSG" | grep -qiE "\b(filed|tracked|tracking|tracker|opened|created|logged|recorded)\b[^.]{0,60}#[0-9]+|issue\s+#[0-9]+\b|todo[: ]+#[0-9]+|see\s+#[0-9]+|follow.?up\s+(in|at|as)\s+#[0-9]+|deferred[^.]{0,60}#[0-9]+|root.?cause[^.]{0,60}#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+"; then
+            echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was filed as its own tracked issue." >&2
+            echo "" >&2
+            echo "  Per complete-planned-work.md, any deferred work MUST be filed as a tracked GitHub issue BEFORE sending the completion report, and the report MUST cite it explicitly:" >&2
+            echo "    • 'Filed as #<N>: <title>'" >&2
+            echo "    • 'Tracked as #<N>'" >&2
+            echo "    • 'Root-cause fix tracked in #<N>'" >&2
+            echo "    • 'Address in #<N>'" >&2
+            echo "" >&2
+            echo "  Without that, the deferred work is permanently lost (the ghost-deferral failure mode)." >&2
+            echo "" >&2
+            echo "  Fix NOW:" >&2
+            echo "    1. gh issue create --title 'TODO: <description of deferred work>' --body '<context>'" >&2
+            echo "    2. Add a line to the completion report: 'Filed as #<returned-N>: <title>'" >&2
+            echo "" >&2
+            echo "  See complete-planned-work.md → 'CRITICAL — deferral phrases MUST cite the issue number'." >&2
+            add_hard "Deferral phrase in completion report without explicit 'Filed as #N' / 'Tracked as #N' reference"
+        fi
+    fi
+fi
+
 # Check for "skip 🔵 review findings" / "🔵 deferred / out of scope / minor" patterns.
 # The user wants every review finding fixed inside the diff — no skipping minor issues.
 if echo "$MSG" | grep -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then

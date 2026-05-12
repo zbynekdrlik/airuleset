@@ -25,11 +25,37 @@ If ANY of these are not true, you are NOT done. Keep working.
 
 **Intent, not wording.** The examples above are representative. ANY phrase that shifts incomplete work to a later time, a different session, or a new issue — under any wording — is banned. If you're about to say something that means "I'll do this later," STOP and do it now.
 
-**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), create a GitHub issue for it immediately:
+**If you discover something genuinely out of scope** (not in the plan, not in the original prompt, but important), create a GitHub issue for it BEFORE sending the completion report:
 ```bash
 gh issue create --title "TODO: <description>" --body "<context and why it matters>"
 ```
-This is the ONLY acceptable way to "postpone" work — by creating a tracked issue. Mentioning it in chat or the completion report without creating an issue means it will be forgotten.
+This is the ONLY acceptable way to "postpone" work — by creating a tracked issue.
+
+**CRITICAL — deferral phrases MUST cite the issue number:**
+
+If the completion report contains ANY of these deferral patterns (or rewordings):
+- "X is deferred"
+- "deferred to <future>"
+- "actual fix later"
+- "real fix is..." / "root-cause fix later"
+- "will be addressed in <next PR / next session / follow-up>"
+- "X remains outstanding"
+- "this PR doesn't fix Y"
+- "the actual root-cause for X is not yet fixed"
+
+…then the SAME paragraph MUST include the filed issue reference in the format `#N` with a title (per completion-report.md). NO `#N` reference = the issue was never filed = the deferred work is now permanently lost. The hook will block the completion report.
+
+**Banned pattern (the "ghost deferral"):**
+
+> "The actual root-cause fix for X is deferred — you'll see the real value once Y happens."
+
+NO ISSUE NUMBER → the work has been declared incomplete with NO tracking. This is the failure mode the rule exists to prevent. NEVER write a deferral phrase in a completion report without first running `gh issue create` and citing the returned issue number.
+
+**Correct pattern:**
+
+> "Root-cause fix for X is filed as #287: Resolve ytbb push failure (`videoIngestionStarved`). This PR adds diagnostic surface; #287 fixes the actual misconfiguration once we see what `top_issue` reports."
+
+The issue number proves the work is tracked. Without it, "deferred" is just abandonment.
 
 #### Follow-up gate — "genuinely out of scope" has STRICT criteria
 
