@@ -17,6 +17,7 @@
 ✅ CI: green
 ✅ /plan-check: N/N fulfilled
 ✅ /review: clean — 0 🔴 0 🟡 0 🔵
+✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)
 ✅ Deploy: <user-visible behavior verified on the live target — include version label read from DOM>
 ✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>   ← REQUIRED for bug-fix PRs (see regression-test-first.md); OMIT for non-bug PRs
 
@@ -57,6 +58,7 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — the
 - **✅ means CONFIRMED WORKING.** ⏳ or ❌ on any line = NOT done; do not send the report yet.
 - **No "Remaining / Future / TODO / Follow-up" sections** — that's incomplete work disguised as a deliverable. If you discover genuinely-out-of-scope work, file a GitHub issue with a clear title and reference it; don't add it to the report.
 - **🔵 review findings inside the diff = MUST FIX.** No skipping as "minor / stylistic / nice-to-have / out of scope / deferred". The audit line `0 🔴 0 🟡 0 🔵` is non-negotiable. Only allowed exception: a 🔵 pointing at code OUTSIDE the diff → file a GitHub issue, reference it.
+- **`/requesting-code-review` MUST also pass clean.** `/review` is a fast first-pass; `superpowers:requesting-code-review` is the deep second-pass that historically catches issues `/review` misses. Both audit lines are required. Run BOTH skills; fix every 🔴/🟡/🔵 from BOTH; only then send the report. Skipping the deep pass to "save time" is banned — the user always runs it afterwards and the missed issues come back as rework.
 - **localhost is banned in URLs** — see `no-localhost-urls.md`. Use real IPs. Verify each URL returns 200 before pasting.
 - **Bug-fix PR ⇒ `✅ Regression test:` line is REQUIRED.** Triggered when the PR closes/fixes a `bug`-labeled issue, the title contains `fix`/`bugfix`/`hotfix`/`patch`/`regression`, or the work fixed a defect. The line MUST cite the test file path, line number, the test commit SHA (RED — test failing without the fix), and the fix commit SHA (GREEN — test passing with the fix). Stop hook blocks bug-fix reports missing this line. See `regression-test-first.md`.
 
@@ -64,9 +66,13 @@ Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — the
 
 1. Invoke `plan-check` skill — fix any `[ ]` NOT DONE items.
 2. Apply `/review` standards (Correctness / Security / Performance / Maintainability / Style) — fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff.
-3. Both audit lines (`✅ /plan-check: N/N fulfilled` and `✅ /review: clean — 0 🔴 0 🟡 0 🔵`) MUST appear in the audits block.
+3. Invoke `superpowers:requesting-code-review` skill — the DEEP pass. Fix every 🔴/🟡/🔵 it surfaces. This historically catches issues `/review` misses; the user always runs it after the report, so skipping = guaranteed rework.
+4. All THREE audit lines MUST appear in the audits block:
+   - `✅ /plan-check: N/N fulfilled`
+   - `✅ /review: clean — 0 🔴 0 🟡 0 🔵`
+   - `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵`
 
-If either audit fails, you are NOT done — fix the findings, re-run, then send.
+If ANY audit fails, you are NOT done — fix the findings, re-run, then send.
 
 #### Length budget — ~20 lines
 

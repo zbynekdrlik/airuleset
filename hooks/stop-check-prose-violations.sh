@@ -57,12 +57,16 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     # /review audit must include all THREE counters (🔴 🟡 🔵) — no skipping minor findings.
     # Accept either explicit "0 🔴 0 🟡 0 🔵" or "all findings addressed" with 🔵 mentioned.
     HAS_REVIEW=$(echo "$MSG" | grep -qE "/review.*0 🔴.*0 🟡.*0 🔵|/review.*all (findings|issues|items).*addressed|review.*0 🔴.*0 🟡.*0 🔵.*addressed in commit|✅.*review.*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
-    if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ]; then
+    # requesting-code-review (superpowers skill, deep pass) — must also pass clean.
+    # Distinguish from /review by requiring the literal token "requesting-code-review" or "request.*code.?review" or "superpowers:requesting".
+    HAS_RCR=$(echo "$MSG" | grep -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
+    if [ "$HAS_GOAL" = "0" ] || [ "$HAS_OUTCOME" = "0" ] || [ "$HAS_PLAN_CHECK" = "0" ] || [ "$HAS_REVIEW" = "0" ] || [ "$HAS_RCR" = "0" ]; then
         echo "VIOLATION: Work Complete report is missing required lines. completion-report.md MANDATES this structure (audits at TOP, Goal/What changed/PR URL at BOTTOM — terminal scrolls, last lines are what the user sees):" >&2
         [ "$HAS_GOAL" = "0" ] && { echo "  - MISSING: '**Goal:** <1 sentence restating the user's ask in plain language>' — placed at the bottom, after audits." >&2; add_hard "Missing **Goal:** line"; }
         [ "$HAS_OUTCOME" = "0" ] && { echo "  - MISSING: '**What changed:** <1-2 sentences in user-visible language>' — placed at the bottom, after audits." >&2; add_hard "Missing **What changed:** line"; }
         [ "$HAS_PLAN_CHECK" = "0" ] && { echo "  - MISSING: '✅ /plan-check: N/N fulfilled' — invoke the plan-check skill, fix any NOT DONE items, then add the line." >&2; add_hard "Missing ✅ /plan-check audit line"; }
         [ "$HAS_REVIEW" = "0" ] && { echo "  - MISSING: '✅ /review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — apply /review standards (Correctness/Security/Performance/Maintainability/Style), fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. The 🔵 counter is required — '0 🔴 0 🟡' alone is incomplete (no skipping minor findings). Then add the line." >&2; add_hard "Missing ✅ /review audit line with 0 🔴 0 🟡 0 🔵"; }
+        [ "$HAS_RCR" = "0" ] && { echo "  - MISSING: '✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)' — invoke the superpowers:requesting-code-review skill (the DEEP pass), fix every 🔴/🟡/🔵 it surfaces, then add the line. The user ALWAYS runs this after the completion report and it catches issues that /review misses — skipping = guaranteed rework. Both /review AND /requesting-code-review are required." >&2; add_hard "Missing ✅ /requesting-code-review audit line with 0 🔴 0 🟡 0 🔵"; }
         echo "See completion-report.md for the exact template." >&2
     fi
 
