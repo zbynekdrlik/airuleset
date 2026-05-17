@@ -25,9 +25,10 @@ RETRY_FILE="/tmp/airuleset-stop-block-${SESSION_ID}"
 RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
 MAX_RETRIES=2
 
-# Check for subagent vs inline prose question
-if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)"; then
-    echo "VIOLATION: You asked 'subagent or inline' in prose. This is a pre-answered question — always use subagent-driven. Next time, just dispatch subagents without asking. See ask-before-assuming.md pre-answered table." >&2
+# Check for subagent vs inline prose question (HARD block — repeat offender pattern).
+if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
+    echo "VIOLATION: You asked 'subagent or inline' / 'two execution options' / 'dispatch now or skim' in prose at the end of your message. This is a pre-answered question — always use subagent-driven, dispatch immediately. The pre-ask-auto-answer hook blocks the structured AskUserQuestion form; writing the same question in prose is the same violation. Rewrite this message: cut the question entirely, and proceed with subagent-driven dispatch. See ask-before-assuming.md pre-answered table." >&2
+    add_hard "Pre-answered prose question: subagent-vs-inline / two execution options / dispatch-now-or-skim"
 fi
 
 # Check for visual companion prose question
@@ -44,7 +45,8 @@ fi
 # "Does this design look right? If yes, I'll commit/write/spec ..."
 # AND "dispatch via subagent now, or hold for your review of the plan"
 if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)|(dispatch|kick.?off|launch|start|begin|fire|trigger).*(subagent|implement|impl|task|work|run).*(now|immediately).*(or|vs).*(hold|wait|pause|review|stop|skim|check)|(hold|wait|pause).*(for|on).*(your|user) review|(go|proceed|now).*(or|vs).*review (first|the plan)|pre.implementation.*(pause|skim|review|check)|(skim|review).*(plan|spec).*before.*(dispatch|kick.?off|launch|implement)"; then
-    echo "VIOLATION: You stopped to ask 'does this design look right?' / 'if yes I'll commit' / 'dispatch now or hold for review' / 'review the spec'. These are all pre-answered — always proceed autonomously. The user approved the workflow when they invoked brainstorming/spec-writing. Next time, just commit / dispatch / chain to next step. See ask-before-assuming.md pre-answered table." >&2
+    echo "VIOLATION: You stopped to ask 'does this design look right?' / 'if yes I'll commit' / 'dispatch now or hold for review' / 'review the spec' / 'dispatch now or skim plan first'. These are all pre-answered — always proceed autonomously. The user approved the workflow when they invoked brainstorming/spec-writing. Rewrite this message: cut the question, commit / dispatch / chain to next step directly. See ask-before-assuming.md pre-answered table." >&2
+    add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
 
 # Check completion report has Goal + What changed + plan-check + /review lines
@@ -242,7 +244,7 @@ fi
 # Retry limit prevents loops if a violation is genuinely unfixable in this session.
 if [ -n "$HARD_VIOLATIONS" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
-    REASON="Completion report has hard violations:\n${HARD_VIOLATIONS}\nFix the report and resend in this turn. See completion-report.md for the exact template."
+    REASON="Hard violations detected in your message:\n${HARD_VIOLATIONS}\nFix the message (rewrite or trim the offending content) and resend in this turn. See ask-before-assuming.md (pre-answered questions) and completion-report.md (report template) for details."
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
 fi
