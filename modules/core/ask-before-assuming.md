@@ -25,7 +25,7 @@ These questions waste user time. The answer never changes. Apply the answer dire
 | Question pattern | Fixed answer | What to do |
 |---|---|---|
 | "Subagent or sequential/inline?" / "Two execution options: Subagent-Driven vs Inline / Which approach?" | **Subagent** | Use `superpowers:subagent-driven-development`. Always. Do NOT present options. Do NOT ask "Which approach?". Just dispatch subagents. |
-| "Want visual companion / mockups?" | **Yes** | Enable it silently. Never ask for consent. |
+| "Want visual companion / mockups?" / "Should I use visual companion for this design question?" / "Use terminal ASCII or visual companion for this layout question?" | **MANDATORY — start visual companion, never use ASCII art** | Visual companion is REQUIRED for ANY layout / position / UI-design / component-placement / wizard-step / dashboard-layout / page-header-footer / "where should X go" question. ASCII / box-drawing / text-mockup is BANNED for those questions — the user has repeatedly stated it's unreadable and causes wrong iterations. The brainstorming skill's "decide per question — terminal for conceptual, browser for visual" escape DOES NOT apply to layout/position questions; those are ALWAYS visual. Start the companion ONCE at brainstorming start, then USE IT for every layout question without re-asking. Stop hook blocks ASCII-art layout mockups. |
 | "Should I continue with phase N?" | **Yes** | Execute the entire approved plan without stopping. |
 | "Should I monitor CI?" | **Yes** | Just monitor it. Never ask. |
 | "Want me to verify with Playwright?" | **Yes** | Verification is mandatory, not a proposal. |

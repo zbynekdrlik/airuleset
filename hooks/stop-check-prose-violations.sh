@@ -38,6 +38,28 @@ if echo "$MSG" | grep -qiE "want to try.*(visual|mockup|browser)|easier to expla
     echo "VIOLATION: You offered visual companion in prose. This is a pre-answered question — always yes. Next time, just use it without asking. See ask-before-assuming.md pre-answered table." >&2
 fi
 
+# Detect ASCII-art / box-drawing UI layout mockup paired with layout/position keywords.
+# When agent draws UI layout in terminal text, visual companion MUST be used instead.
+# The brainstorming skill's "use terminal for conceptual questions" escape DOES NOT apply
+# to layout/position/component-placement questions — those are always visual.
+HAS_BOXDRAW=$(echo "$MSG" | grep -qE "[┌┐└┘─│├┤┬┴┼╔╗╚╝═║█▓▒░▀▄■□]{3,}" && echo 1 || echo 0)
+HAS_LAYOUT_KW=$(echo "$MSG" | grep -qiE "\b(header|footer|navbar|sidebar|toolbar|titlebar|status.?bar|menu.?bar|top border|bottom border|top.right|top.left|bottom.right|bottom.left|version label|version display|logo placement|page header|page footer|presenter (panel|view|placement)|top of (the )?(page|screen|window|view|border)|bottom of (the )?(page|screen|window|view|border)|above (the )?(header|footer|button|panel)|below (the )?(header|footer|button|panel)|position (of|the)|place (the )?[a-z]+ (on|in|at)|move (the )?[a-z]+ to|layout option|wizard step|dashboard layout|side.by.side layout|column layout|grid layout|component placement|fixed (top|bottom|header|footer)|sticky (top|header|footer))\b" && echo 1 || echo 0)
+HAS_COMPANION_URL=$(echo "$MSG" | grep -qE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+|visual companion (live|running|started|at)|start-server\.sh" && echo 1 || echo 0)
+if [ "$HAS_LAYOUT_KW" = "1" ] && [ "$HAS_BOXDRAW" = "1" ] && [ "$HAS_COMPANION_URL" = "0" ]; then
+    echo "VIOLATION: You drew a UI layout in ASCII / box-drawing text-art for a LAYOUT/POSITION question. The user has explicitly stated terminal ASCII art is UNREADABLE for visual design decisions, causing repeated wrong iterations. Visual companion is MANDATORY for layout/position/UI-design questions — not optional." >&2
+    echo "" >&2
+    echo "  Start it NOW:" >&2
+    echo "    bash ~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills/brainstorming/scripts/start-server.sh --project-dir <project-root>" >&2
+    echo "  Then render mockups via the visual companion API and post the http://<ip>:<port> URL for the user." >&2
+    echo "" >&2
+    echo "  Banned: ASCII art layouts (┌─┐│└┘ etc.), text-mockup grids, '+--+' boxes for ANY layout/position question." >&2
+    echo "  Allowed terminal output: prose descriptions, code snippets, data tables (without layout keywords)." >&2
+    echo "" >&2
+    echo "  The brainstorming skill's 'decide per question — terminal for conceptual, browser for visual' escape DOES NOT apply to layout/position/component-placement questions. Those are ALWAYS visual." >&2
+    echo "  See ask-before-assuming.md pre-answered table (visual companion row)." >&2
+    add_hard "ASCII-art / box-drawing UI layout mockup for layout question — start visual companion, render mockups in browser"
+fi
+
 # Check for tester-handoff prose (HARD block per autonomous-verification.md).
 # The user is NEVER the agent's tester. Hand-off phrases shift verification from agent's
 # tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks — banned.
