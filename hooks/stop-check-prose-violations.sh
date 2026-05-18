@@ -19,11 +19,13 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 HARD_VIOLATIONS=""
 add_hard() { HARD_VIOLATIONS="${HARD_VIOLATIONS}- $1\n"; }
 
-# Retry limiter: max 2 blocks per session to avoid loops.
+# Retry limiter: max 5 blocks per session to avoid runaway loops.
+# Was 2; bumped to 5 because completion-report violations are deterministically
+# fixable and agent needs more room to iterate before the hook gives up.
 # State stored in /tmp under per-session counter file.
 RETRY_FILE="/tmp/airuleset-stop-block-${SESSION_ID}"
 RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
-MAX_RETRIES=2
+MAX_RETRIES=5
 
 # Check for subagent vs inline prose question (HARD block — repeat offender pattern).
 if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
@@ -92,7 +94,9 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
     # /review audit must include all THREE counters (🔴 🟡 🔵) — no skipping minor findings.
     # Accept either explicit "0 🔴 0 🟡 0 🔵" or "all findings addressed" with 🔵 mentioned.
-    HAS_REVIEW=$(echo "$MSG" | grep -qE "/review.*0 🔴.*0 🟡.*0 🔵|/review.*all (findings|issues|items).*addressed|review.*0 🔴.*0 🟡.*0 🔵.*addressed in commit|✅.*review.*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
+    # MUST disambiguate from /requesting-code-review which contains "/review" as substring.
+    # Use perl negative lookbehind: /review preceded by NOT "code-" (rules out requesting-code-review).
+    HAS_REVIEW=$(echo "$MSG" | grep -qP '(?<!code-)/review[: ].*0 🔴.*0 🟡.*0 🔵|(?<!code-)/review[: ].*all (findings|issues|items).*addressed|(?<!code-)/review[: ].*addressed in commit' && echo 1 || echo 0)
     # requesting-code-review (superpowers skill, deep pass) — must also pass clean.
     # Distinguish from /review by requiring the literal token "requesting-code-review" or "request.*code.?review" or "superpowers:requesting".
     HAS_RCR=$(echo "$MSG" | grep -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
