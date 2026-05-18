@@ -36,6 +36,30 @@ if echo "$MSG" | grep -qiE "want to try.*(visual|mockup|browser)|easier to expla
     echo "VIOLATION: You offered visual companion in prose. This is a pre-answered question — always yes. Next time, just use it without asking. See ask-before-assuming.md pre-answered table." >&2
 fi
 
+# Check for tester-handoff prose (HARD block per autonomous-verification.md).
+# The user is NEVER the agent's tester. Hand-off phrases shift verification from agent's
+# tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks — banned.
+# Escape: if the message contains "UNVERIFIED:" explicitly stating WHAT cannot be tested
+# and WHY (true user-only access), allow it — that is the documented exception.
+if echo "$MSG" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
+    # Allow if explicitly marked UNVERIFIED with a reason (the documented exception)
+    if ! echo "$MSG" | grep -qE "UNVERIFIED:"; then
+        echo "VIOLATION: You handed verification to the user ('please test', 'let me know if it works', 'ping me when', 'tell me what you see', 'on your end', 'next user test', 'using you as tester', etc.). The user is NEVER your tester. You have Playwright, curl, SSH, MCP tools, your own test harness — use them. A blocker (MCP auth failure, timeout, 500 error, opaque reference ID) is YOUR work to debug, not a hand-off trigger." >&2
+        echo "" >&2
+        echo "  Correct protocol when a tool fails:" >&2
+        echo "    1. Read the full error (body, stack, ref ID) — do not paraphrase to user yet" >&2
+        echo "    2. Search root cause (recent commits, server logs, third-party status)" >&2
+        echo "    3. Build local reproduction (curl / unit test / Playwright script)" >&2
+        echo "    4. Fix locally, verify locally, then verify on the live target" >&2
+        echo "    5. Only THEN escalate — and only if the blocker requires user-only access" >&2
+        echo "" >&2
+        echo "  If a flow GENUINELY requires user-only access (their browser session, their org admin, hardware you can't reach), state it EXPLICITLY:" >&2
+        echo "    UNVERIFIED: <what cannot be tested> — <why no tool exists>" >&2
+        echo "  That is the ONLY allowed form of test handoff. See autonomous-verification.md → 'Hitting a blocker is NOT a hand-off trigger'." >&2
+        add_hard "Tester-handoff phrase (user-as-tester) without UNVERIFIED: escape — debug the blocker yourself"
+    fi
+fi
+
 # Check for "say go / ready to proceed" prose questions
 if echo "$MSG" | grep -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when you are|ready for.?next|ready to execute"; then
     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2
