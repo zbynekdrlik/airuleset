@@ -249,7 +249,11 @@ fi
 # Single UI deploy ⇒ require ≥1 🌐 line.
 # 🌐 lines list USER-clickable URLs (frontend / dashboard / admin) — NEVER backend/API URLs.
 # Backend URLs are agent verification evidence, not human clickables.
-if echo "$MSG" | grep -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
+# Gate: only fire on COMPLETION REPORTS or messages with explicit `✅ Deploy:` line.
+# Casual "deployed to dev1+dev2" mentions (admin chitchat) must NOT trigger this rule.
+IS_COMPLETION=$(echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
+HAS_DEPLOY_LINE=$(echo "$MSG" | grep -qE "✅ Deploy:" && echo 1 || echo 0)
+if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && echo "$MSG" | grep -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
     GLOBE_COUNT=$(echo "$MSG" | grep -cE "🌐.*https?://" || true)
     [ -z "$GLOBE_COUNT" ] && GLOBE_COUNT=0
 
