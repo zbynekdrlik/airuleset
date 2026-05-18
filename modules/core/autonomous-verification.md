@@ -90,14 +90,57 @@ These phrases all mean "user, you are my tester now" and are FORBIDDEN. The Stop
 
 The intent is banned: shifting verification from your tools to the user's eyes/clicks.
 
-#### The single exception — true user-only access
+#### Before giving up — ASK FOR THE TOOL, not the test
 
-If a flow legitimately requires the user's personal account, browser session, hardware, or admin permission YOU CANNOT obtain, state EXACTLY what you cannot verify and why:
+The handoff banned above is "user, run this and tell me if it works". The **opposite** of that is also mandatory: **when you genuinely lack a tool, ask the user to give you that tool — do NOT silently give up and write `UNVERIFIED:`**.
+
+Most blockers have a tool-shaped fix. The user has access to install / configure / share what you need. Ask for the SPECIFIC missing capability — never for a test.
+
+**Tool requests you SHOULD make (correct hand-off direction):**
+
+- "I don't have Playwright MCP installed in this session. Install `plugin:playwright` so I can drive the browser myself." → user installs → you test
+- "MCP server `win-resolume` is unreachable. Restart it on the Windows host (or share the new host/port)." → user restarts → you test
+- "I can't authenticate to claude.ai — the OAuth flow needs a real browser session against your account. Install Chrome DevTools MCP / Playwright with persistent profile, OR paste a session cookie / bearer token from your active session." → user provides credential → you test
+- "I need read access to the production Postgres instance to verify the migration landed. Share connection string in 1Password / set `PROD_DB_URL` env / open SSH tunnel." → user provides → you test
+- "I need a screenshot of the iOS Safari rendering — I only have Chromium. Install BrowserStack MCP, or share access to Sauce Labs / LambdaTest." → user provides → you test
+- "I can't reach the staging Discord webhook. Either share the webhook URL or grant me access to the channel via the discord plugin." → user provides → you test
+- "I need to run a desktop-session UI action on the Windows machine — schtasks /it requires an interactive session. Set up the win-mcp server (see winremote-setup) so I can drive the desktop directly." → user sets up → you test
+- "I can't read the binary log from the hardware device — need vendor's USB driver. Install `<package>` on dev2, or share serial output via socat / picocom." → user provides → you test
+
+**Correct request shape:**
+
+> I need `<specific capability>` to verify `<specific flow>` myself. Options to give me that: (a) `<concrete option 1>`, (b) `<concrete option 2>`. Until then I cannot test `<flow>` end-to-end.
+
+Notice what's NOT in that template: "could you test it instead?" The user provides the TOOL; you do the TEST.
+
+**Wrong shape (still banned, even when blocker is real):**
+
+- "I can't reach claude.ai. Could you test the flow and let me know?" — **WRONG.** Ask for the AUTH/SESSION/MCP, not the test.
+- "MCP win-resolume is down. Want to verify it manually?" — **WRONG.** Ask for MCP restart, not manual verification.
+- "Playwright isn't installed. Could you click through it?" — **WRONG.** Ask for Playwright install, not user clicks.
+- "I don't have prod DB access. Please run this query and paste the result." — **WRONG.** Ask for prod DB credential / tunnel, not query results.
+
+**The decision tree:**
+
+```
+Hit a blocker?
+├── Can you debug it yourself with existing tools? → YES → debug it (do NOT mention to user)
+├── Do you lack a specific tool/access/credential?
+│   ├── YES → Ask for the TOOL/ACCESS/CREDENTIAL with concrete options
+│   └── User provides → YOU test
+└── Is it genuinely user-only (their personal account, their hardware in their hands)?
+    └── State UNVERIFIED with specific reason. NEVER as default — only after exhausting tool-request path.
+```
+
+#### The single LAST-RESORT exception — true user-only access
+
+After you've asked for the tool and the user confirms it's impossible to give you (their personal claude.ai account, their physical hardware, their org-restricted credential), state EXACTLY what you cannot verify and why:
 
 ```
 UNVERIFIED: Cannot simulate the claude.ai OAuth flow — requires the user's authenticated browser session
 against their actual claude.ai account. I have verified the MCP server returns valid tokens locally
-(see test_oauth.py). Final end-to-end check needs user.
+(see test_oauth.py). Tool-request asked + rejected (user confirmed personal-account-only).
+Final end-to-end check needs user.
 ```
 
-This is acceptable. "Can you test it on your end?" is not.
+This is acceptable AFTER tool-request was attempted. "Can you test it on your end?" — never. Skipping tool-request and going straight to `UNVERIFIED:` — wrong, ask first.

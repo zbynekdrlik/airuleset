@@ -46,17 +46,29 @@ if echo "$MSG" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm
     if ! echo "$MSG" | grep -qE "UNVERIFIED:"; then
         echo "VIOLATION: You handed verification to the user ('please test', 'let me know if it works', 'ping me when', 'tell me what you see', 'on your end', 'next user test', 'using you as tester', etc.). The user is NEVER your tester. You have Playwright, curl, SSH, MCP tools, your own test harness — use them. A blocker (MCP auth failure, timeout, 500 error, opaque reference ID) is YOUR work to debug, not a hand-off trigger." >&2
         echo "" >&2
-        echo "  Correct protocol when a tool fails:" >&2
-        echo "    1. Read the full error (body, stack, ref ID) — do not paraphrase to user yet" >&2
-        echo "    2. Search root cause (recent commits, server logs, third-party status)" >&2
-        echo "    3. Build local reproduction (curl / unit test / Playwright script)" >&2
-        echo "    4. Fix locally, verify locally, then verify on the live target" >&2
-        echo "    5. Only THEN escalate — and only if the blocker requires user-only access" >&2
+        echo "  Decision tree:" >&2
+        echo "    1. Can you debug with existing tools? → DEBUG IT YOURSELF, do not mention the blocker to user" >&2
+        echo "       (read full error, search root cause, build local repro, fix locally, verify locally)" >&2
+        echo "    2. Do you LACK a tool/access/credential to verify? → ASK FOR THE TOOL, not the test:" >&2
+        echo "       • 'Install Playwright MCP / Chrome DevTools MCP so I can drive the browser myself'" >&2
+        echo "       • 'Restart MCP server <name> on host <X>, or share new host/port'" >&2
+        echo "       • 'Share session cookie / bearer token / webhook URL so I can call <service> myself'" >&2
+        echo "       • 'Open SSH tunnel / set <ENV_VAR> so I can reach <resource>'" >&2
+        echo "       • 'Install BrowserStack/Sauce MCP for iOS Safari rendering'" >&2
+        echo "       • 'Set up win-mcp on the Windows host so I can drive the desktop session'" >&2
+        echo "       The user provides the TOOL — YOU run the test." >&2
+        echo "    3. Is the blocker GENUINELY user-only (their personal account, their physical hardware)?" >&2
+        echo "       → ONLY AFTER asking for tool and user confirms impossible:" >&2
+        echo "         UNVERIFIED: <what cannot be tested> — <why no tool exists>" >&2
+        echo "         (state user-only reason + that tool-request was attempted)" >&2
         echo "" >&2
-        echo "  If a flow GENUINELY requires user-only access (their browser session, their org admin, hardware you can't reach), state it EXPLICITLY:" >&2
-        echo "    UNVERIFIED: <what cannot be tested> — <why no tool exists>" >&2
-        echo "  That is the ONLY allowed form of test handoff. See autonomous-verification.md → 'Hitting a blocker is NOT a hand-off trigger'." >&2
-        add_hard "Tester-handoff phrase (user-as-tester) without UNVERIFIED: escape — debug the blocker yourself"
+        echo "  Banned shapes (still — even when blocker is real):" >&2
+        echo "    • 'I can't reach X. Could you test it?' — WRONG. Ask for AUTH/MCP, not test." >&2
+        echo "    • 'MCP is down. Want to verify manually?' — WRONG. Ask for MCP restart, not manual verify." >&2
+        echo "    • 'Playwright not installed. Could you click through?' — WRONG. Ask for install." >&2
+        echo "" >&2
+        echo "  See autonomous-verification.md → 'Before giving up — ASK FOR THE TOOL, not the test'." >&2
+        add_hard "Tester-handoff phrase (user-as-tester) — ask for the TOOL/ACCESS/MCP, not for the test. Or write 'UNVERIFIED:' after attempting tool-request."
     fi
 fi
 
