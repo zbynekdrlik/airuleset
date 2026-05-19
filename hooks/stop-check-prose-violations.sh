@@ -109,8 +109,73 @@ if echo "$MSG" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|le
     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
 
+# === Unified completion-report detection ===
+# Agents sometimes write prose completion reports without the canonical heading,
+# silently bypassing every audit check below (slovnormal-mcp session shipped
+# a report with NO heading → all audits skipped → user saw missing /requesting-code-review,
+# missing 🌐, missing /plan-check). Fix: detect completion-report INTENT via signals
+# even when the heading is absent, then force the agent to use the full template.
+#
+# Signal-based detection (any-of, combined with PR URL present):
+#   - "awaiting merge" / "awaiting your merge" / "awaiting merge it"
+#   - "mergeable, clean" / "mergeable=MERGEABLE" / "mergeStateStatus=CLEAN"
+#   - "all N/N checks green" / "all checks green"
+#   - "ready to merge"
+#   - "Plan steps (N/N done)"
+#   - "Work Complete" anywhere in message (catches lowercase / no heading prefix)
+#   - Both **Goal:** AND **What changed:** present (clear completion-report markers in prose form)
+IS_COMPLETION_HEADING=$(echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
+HAS_PR_URL=$(echo "$MSG" | grep -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+" && echo 1 || echo 0)
+HAS_COMPLETION_PHRASE=$(echo "$MSG" | grep -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy" && echo 1 || echo 0)
+HAS_GOAL_AND_OUTCOME=0
+if echo "$MSG" | grep -qiE "\*\*Goal:?\*\*|^Goal:" && echo "$MSG" | grep -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:"; then
+    HAS_GOAL_AND_OUTCOME=1
+fi
+
+IS_COMPLETION_SIGNAL=0
+if [ "$HAS_PR_URL" = "1" ] && { [ "$HAS_COMPLETION_PHRASE" = "1" ] || [ "$HAS_GOAL_AND_OUTCOME" = "1" ]; }; then
+    IS_COMPLETION_SIGNAL=1
+fi
+
+IS_COMPLETION=0
+if [ "$IS_COMPLETION_HEADING" = "1" ] || [ "$IS_COMPLETION_SIGNAL" = "1" ]; then
+    IS_COMPLETION=1
+fi
+
+# HARD: completion-report intent detected but canonical heading missing.
+# This is the slovnormal-mcp failure mode — prose report bypassed all audits.
+if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
+    echo "VIOLATION: Your message is a completion report (PR URL + completion-signal phrase or Goal/What changed prose) but does NOT start with the canonical heading '## ✅ Work Complete'. completion-report.md MANDATES the FULL template every time — heading + audits block + --- separator + Goal + What changed + 🌐 URLs + PR title/URL. Prose substitutes ('PR clean. 8/8 checks green. mergeable=MERGEABLE...') are BANNED — they bypass the audit gates the user relies on (per slovnormal-mcp PR #9 incident: missing /requesting-code-review, missing 🌐 URLs, missing /plan-check all slipped through because no heading was present)." >&2
+    echo "" >&2
+    echo "  Rewrite the message NOW using the EXACT template:" >&2
+    echo "" >&2
+    echo "    ## ✅ Work Complete" >&2
+    echo "" >&2
+    echo "    **Audits & deploy:**" >&2
+    echo "    ✅ CI: green" >&2
+    echo "    ✅ /plan-check: N/N fulfilled" >&2
+    echo "    ✅ /review: clean — 0 🔴 0 🟡 0 🔵" >&2
+    echo "    ✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵" >&2
+    echo "    ✅ Deploy: <verified behavior on live target>   (omit if no deploy)" >&2
+    echo "    ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha>   (bug-fix only)" >&2
+    echo "" >&2
+    echo "    ---" >&2
+    echo "" >&2
+    echo "    **Goal:** <user's ask in plain language>" >&2
+    echo "    **What changed:** <user-visible outcome, 1-2 sentences>" >&2
+    echo "" >&2
+    echo "    🌐 Dev:  <url>" >&2
+    echo "    🌐 Prod: <url>" >&2
+    echo "" >&2
+    echo "    **[<project>] PR #N: <full title>**" >&2
+    echo "    <full PR URL> — mergeable, clean" >&2
+    echo "" >&2
+    echo "  See completion-report.md → 'MANDATORY structure (use this EXACT template)'." >&2
+    add_hard "Prose completion report missing canonical '## ✅ Work Complete' heading — use the full template, not a prose summary"
+fi
+
 # Check completion report has Goal + What changed + plan-check + /review lines
-if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+if [ "$IS_COMPLETION" = "1" ]; then
     HAS_GOAL=$(echo "$MSG" | grep -qiE "\*\*Goal:?\*\*|^Goal:" && echo 1 || echo 0)
     HAS_OUTCOME=$(echo "$MSG" | grep -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:" && echo 1 || echo 0)
     HAS_PLAN_CHECK=$(echo "$MSG" | grep -qiE "/plan.?check|plan-check.*(fulfilled|passed|clean|complete)|✅.*plan.?check" && echo 1 || echo 0)
@@ -157,8 +222,8 @@ if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
     fi
 
     # Check ORDER: Goal/What changed must appear AFTER audit lines (audits at top, Goal at bottom)
-    GOAL_LINE=$(echo "$MSG" | grep -nE "\*\*Goal:?\*\*" | head -1 | cut -d: -f1)
-    AUDIT_LINE=$(echo "$MSG" | grep -nE "✅.*(/plan.?check|review.*clean|review.*0 🔴)" | head -1 | cut -d: -f1)
+    GOAL_LINE=$(echo "$MSG" | grep -nE "\*\*Goal:?\*\*" 2>/dev/null | head -1 | cut -d: -f1 || echo "")
+    AUDIT_LINE=$(echo "$MSG" | grep -nE "✅.*(/plan.?check|review.*clean|review.*0 🔴)" 2>/dev/null | head -1 | cut -d: -f1 || echo "")
     if [ -n "$GOAL_LINE" ] && [ -n "$AUDIT_LINE" ] && [ "$GOAL_LINE" -lt "$AUDIT_LINE" ]; then
         echo "VIOLATION: 'Goal' line appears BEFORE the audit lines. Wrong order. The terminal scrolls — the user only sees the LAST visible passage without scrolling back. Put audits/CI/plan-check/review at the TOP, then a '---' separator, then Goal + What changed + PR URL + ❓Question at the BOTTOM. See completion-report.md → 'Why this order'." >&2
     fi
@@ -174,7 +239,7 @@ fi
 # Wrong: 'PR #54 — mergeable, clean'  (em-dash status, no title between # and dash)
 # Right: 'PR #54: Refactor driver.rs and add lyrics test'  (colon + title)
 # Also detects: 'Fixes #234' / 'Closes #99' / 'Resolves #N' not followed by a parenthetical title.
-if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+if [ "$IS_COMPLETION" = "1" ]; then
     BARE_PR=0
     BARE_ISSUE=0
     echo "$MSG" | grep -qE "(PR|pull|Pull Request) #[0-9]+ *(—|--|-)" && BARE_PR=1
@@ -196,7 +261,7 @@ fi
 # current PR — NOT in a follow-up issue. Follow-ups are reserved for genuinely
 # out-of-scope work that fails the bundling gate (>300 LoC, schema change, API break,
 # security boundary, cross-cut refactor).
-if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+if [ "$IS_COMPLETION" = "1" ]; then
     if echo "$MSG" | grep -qiE "follow.?up (filed|issue|tracked|created|opened|logged)[:= ]+#[0-9]+|filed (as|under) #[0-9]+ for (next|follow.?up|separate|dedicated)|tracked (in|as) #[0-9]+ (as|for) (separate|follow.?up|next|dedicated)|(will|to) address.*(in (a )?(next|follow.?up|dedicated|separate) pr|in (the )?next session)|(opened|created) #[0-9]+ (for|to track) (the )?(follow.?up|cleanup|tidy|polish|migration|refactor|migrate)"; then
         echo "VIOLATION: You filed a follow-up issue from a completion report. Per complete-planned-work.md 'Follow-up gate', same-PR small cleanups (<100 LoC, same-file polish, enum migration, type tightening, magic-number extraction, missing test on touched path) MUST land in the CURRENT PR — not a follow-up. Follow-ups are reserved for work that FAILS the bundling gate (>300 LoC, DB schema change, API break, security boundary, cross-cut refactor). If the discovered task does NOT meet one of those criteria, close the follow-up issue and add a commit to THIS PR. See complete-planned-work.md → 'Follow-up gate' and ask-before-assuming.md pre-answered table." >&2
     fi
@@ -205,7 +270,7 @@ fi
 # Check for "ghost deferral" — completion report mentions deferred work but no #N issue reference.
 # Per complete-planned-work.md, ANY deferral phrase in a completion report MUST cite a filed issue
 # number. Without #N, the deferred work is permanently lost.
-if echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+if [ "$IS_COMPLETION" = "1" ]; then
     # Detect deferral phrases (broad — many rewordings)
     DEFER_HIT=0
     if echo "$MSG" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
@@ -251,7 +316,7 @@ fi
 # Detect "STOP at green PR URL" / "Awaiting your merge it" / "Phase N remains gated" prose
 # These are template-bypass shorthands. If they appear, the message must use the full template.
 if echo "$MSG" | grep -qiE "STOP at (the )?green pr|stop at green pr url|stop at green-pr"; then
-    if ! echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete"; then
+    if [ "$IS_COMPLETION_HEADING" = "0" ]; then
         echo "VIOLATION: 'STOP at green PR URL' is template-bypass prose. Any 'we're done, PR is ready, awaiting merge' message MUST use the full Completion Report template (## ✅ Work Complete with audits, Goal, What changed, 🌐 URLs, PR title/URL). Replace the prose with the template. See completion-report.md → 'Full template every time'." >&2
     fi
 fi
@@ -277,7 +342,6 @@ fi
 # Backend URLs are agent verification evidence, not human clickables.
 # Gate: only fire on COMPLETION REPORTS or messages with explicit `✅ Deploy:` line.
 # Casual "deployed to dev1+dev2" mentions (admin chitchat) must NOT trigger this rule.
-IS_COMPLETION=$(echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
 HAS_DEPLOY_LINE=$(echo "$MSG" | grep -qE "✅ Deploy:" && echo 1 || echo 0)
 if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && echo "$MSG" | grep -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
     GLOBE_COUNT=$(echo "$MSG" | grep -cE "🌐.*https?://" || true)
