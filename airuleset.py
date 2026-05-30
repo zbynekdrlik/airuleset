@@ -154,8 +154,10 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
                 cleaned.append(entry)
         result["hooks"][event_type] = cleaned
 
-        # Add all airuleset hooks from config
-        result["hooks"][event_type].extend(event_hooks)
+        # Add all airuleset hooks from config (skip exact duplicates already present)
+        for entry in event_hooks:
+            if entry not in result["hooks"][event_type]:
+                result["hooks"][event_type].append(entry)
 
     return result
 
