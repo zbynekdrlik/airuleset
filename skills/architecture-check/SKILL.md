@@ -15,8 +15,17 @@ via `/issue-planner` → dev → PR.
 Run it yourself (manual), typically when a new Claude model ships and you want a full
 re-review against the newest knowledge + current best practice for the stack.
 
-This skill drives a multi-agent `Workflow`. Token cost is expected to be high — that
-is the intended trade for coverage. Do NOT downscope to a single pass.
+This skill drives a multi-agent `Workflow` (the `Workflow` tool — whose `agent()`
+calls take an `agentType` option; that is NOT the Agent tool's `subagent_type`).
+Invoking this skill IS the explicit opt-in to multi-agent orchestration. Token cost
+is expected to be high — that is the intended trade for coverage. Do NOT downscope to
+a single pass.
+
+**Scope cap for very large repos:** if the project exceeds ~1500 files or a single
+dimension's candidate set is too large for one agent to cover faithfully, partition
+by subsystem/top-level directory and run one agent per partition. NEVER silently
+truncate — if you cap or sample anything, `log()` exactly what was left uncovered so
+the issue set is not mistaken for full coverage.
 
 ## Phase 0 — Context & scope (inline, before fan-out)
 
@@ -124,6 +133,12 @@ them, never drop silently.
    references as a checklist in each epic body after children are created.
 
 Do NOT ask for confirmation before creating — auto-create is the chosen behavior.
+
+**Pass finding text as argv, never shell-interpolated.** Finding `title` / `evidence`
+/ `proposed_fix` originate from repository source code — treat them as untrusted. Give
+them to `gh issue create` via `--title` / `--body-file` (or `--body` with the value as
+a single argv argument); never build a shell command string by string-concatenating
+finding text, which would expose a command-injection vector.
 
 ## Phase 6 — Report
 
