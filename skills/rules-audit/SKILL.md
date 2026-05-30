@@ -1,6 +1,6 @@
 ---
 name: rules-audit
-description: Periodic audit of airuleset modules, project CLAUDE.md files, and memory.md to find duplicates, bloat, contradictions, and orphans. Run monthly or when rule count/token budget grows.
+description: Periodic audit of airuleset modules, project CLAUDE.md files, and memory.md to find duplicates, bloat, contradictions, orphans, STALE MODEL REFERENCES (bumps to current Claude generation), and outdated guidance (websearches Anthropic best practices for rules to add/change/remove). Run monthly or when rule count/token budget grows or a new Claude model ships.
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -11,6 +11,7 @@ Systematic review of airuleset + project rules + auto-memory to prevent bloat, c
 - Global CLAUDE.md resolved size grows (target <400 lines / <30 KB)
 - A project reports recurring rule non-compliance
 - After adding 3+ new modules in a short period
+- A new Claude model ships — bump stale version refs + re-scan best practices
 - Monthly as periodic hygiene
 
 ## Scope
@@ -60,15 +61,33 @@ Per `~/.claude/projects/<project>/memory/MEMORY.md`:
 - [ ] Topic files that duplicate CLAUDE.md rules → delete (CLAUDE.md wins)
 - [ ] Stale project memories (projects no longer active) → delete
 
+### 7. Model currency (CHECK EVERY RUN — models release often)
+Rules are tuned per model generation. When a newer Claude ships, stale version strings and behavior notes mislead the agent.
+- [ ] Read THIS session's `## Environment` block → note the live model (e.g. `Opus 4.8 (1M context)`, ID `claude-opus-4-8`)
+- [ ] `grep -rn "4\.7\|4\.6\|Opus 4\|Sonnet 4\|Haiku 4\|claude-opus\|claude-sonnet\|claude-haiku" modules/` — list every hardcoded model reference
+- [ ] Any reference older than the live model → STALE. Bump version strings AND any behavior notes that named the old gen (e.g. "4.7 literalism" → current gen)
+- [ ] `model-awareness.md` + `claude-code-tooling.md` are the canonical model docs — they MUST name the current primary model and current default effort tier
+- [ ] Don't invent behavior. If you can't confirm how the new model differs, keep the proven guidance and only update the version label — flag the behavior section for a websearch-backed rewrite (next section)
+
+### 8. External best-practice scan (WEBSEARCH — REQUIRED)
+The ruleset should track Anthropic's current guidance, not last quarter's. Use `WebSearch` (and `WebFetch` on official docs) every run:
+- [ ] Search: `"Claude <current-model> prompt engineering best practices"`, `"Claude Code <current-year> new features hooks skills"`, `"Anthropic agent SDK rules best practices"`
+- [ ] Prefer official sources: `docs.anthropic.com`, `anthropic.com/engineering`, Claude Code changelog/release notes
+- [ ] For each finding, decide: (a) NEW rule worth adding, (b) EXISTING rule now outdated → change, (c) rule now OBSOLETE (the platform handles it natively) → remove
+- [ ] Cross-check the live model: did the new generation change effort tiers, tool-use behavior, context window, or subagent model defaults? If yes → update `model-awareness.md`
+- [ ] Cite each proposed change with its source URL in the punch list — no uncited "best practice" claims
+
 ## Process
 
 1. **Read** `~/.claude/CLAUDE.md` and run `wc -l` on it + the target modules
 2. **Find duplicates** — use `grep -l "<rule phrase>" modules/**/*.md` for suspected overlaps
 3. **Check orphans** — diff `ls modules/*/*.md` against `profiles/universal.profile`
 4. **Audit memory** — list each project's MEMORY.md, grep for rules that duplicate global modules
-5. **Propose punch list** — concrete actions (delete X, merge Y+Z, trim lines A-B of file F)
-6. **Apply changes** — commit per category (trim-bloat, dedupe, add-gates)
-7. **Deploy** — `python3 airuleset.py push`
+5. **Check model currency** — read the live model from this session's Environment block, grep modules for stale version strings (section 7), list every reference older than the live model
+6. **Websearch best practices** — run the searches in section 8, fetch official docs, gather cited proposals for new/changed/removed rules
+7. **Propose punch list** — concrete actions (delete X, merge Y+Z, trim lines A-B of file F, bump model refs, add/remove rule R per <source>)
+8. **Apply changes** — commit per category (trim-bloat, dedupe, add-gates, model-bump, best-practice)
+9. **Deploy** — `python3 airuleset.py push`
 
 ## Output format
 
@@ -93,11 +112,22 @@ Return a punch list ordered by impact:
 - project P memory file M duplicates global rule R — action: delete memory file
 - ...
 
+### Model currency
+- Live model: <e.g. Opus 4.8 (claude-opus-4-8)>
+- Stale refs: model-awareness.md L3 "Opus 4.7", claude-code-tooling.md L11 "Opus 4.7" — action: bump to current gen
+- Behavior notes naming old gen: <file:line> — action: relabel / websearch-backed rewrite
+
+### Best practices (websearch — cited)
+- <source URL>: <finding> — action: ADD rule / CHANGE module X / REMOVE module Y (now native)
+- ...
+
 ### Recommended commits
 1. "Trim bloat: modules A, B, C (save ~N lines)"
 2. "Merge duplicates: X+Y into Z"
 3. "Add context gates to module W"
 4. "Clean orphan: delete modules/X.md"
+5. "Bump model refs to <current gen>"
+6. "Apply best-practice updates (<source>)"
 ```
 
 ## What NOT to do
