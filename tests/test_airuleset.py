@@ -95,8 +95,12 @@ class TestSkillsExist(TestCase):
     def test_architecture_check_is_user_invocable(self):
         path = airuleset.REPO_DIR / "skills" / "architecture-check" / "SKILL.md"
         content = path.read_text()
-        self.assertIn("user-invocable: true", content)
-        self.assertIn("disable-model-invocation: true", content)
+        # Keys MUST live in the YAML frontmatter block (between the first two '---'
+        # fences), not merely somewhere in the prose body.
+        self.assertTrue(content.startswith("---"), "SKILL.md missing frontmatter fence")
+        frontmatter = content.split("---", 2)[1]
+        self.assertIn("user-invocable: true", frontmatter)
+        self.assertIn("disable-model-invocation: true", frontmatter)
 
 
 class TestHookScriptsExist(TestCase):
