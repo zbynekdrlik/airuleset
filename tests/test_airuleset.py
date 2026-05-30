@@ -92,6 +92,12 @@ class TestSkillsExist(TestCase):
             path = airuleset.REPO_DIR / "skills" / skill / "SKILL.md"
             self.assertTrue(path.exists(), f"Missing SKILL.md: {path}")
 
+    def test_architecture_check_is_user_invocable(self):
+        path = airuleset.REPO_DIR / "skills" / "architecture-check" / "SKILL.md"
+        content = path.read_text()
+        self.assertIn("user-invocable: true", content)
+        self.assertIn("disable-model-invocation: true", content)
+
 
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
