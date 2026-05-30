@@ -8,12 +8,13 @@ Permission-classifier that auto-approves safe commands and pauses on risky ones.
 
 #### Effort levels
 
-Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. Default is `xhigh` (Opus 4.7). Guidance:
-- `max` — deep debugging, complex architecture, multi-file refactors
-- `xhigh` — default for most coding work (keep as-is)
+Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Default is `high`** on Opus 4.8 (all surfaces, incl. Claude Code). Guidance:
+- `max` — deep debugging, complex architecture, multi-file refactors (frontier problems only — overthinks structured tasks)
+- `xhigh` — recommended starting point for coding/agentic work (repeated tool calls, deep search); meaningfully higher token use than `high`
+- `high` — default; complex reasoning, difficult coding, agentic tasks
 - `low`/`medium` — trivial edits, formatting fixes, simple commits
 
-Set with `/model` in CLI.
+Set with `/model` in CLI. **ultracode** mode = `xhigh` + standing permission to launch multi-agent workflows (not a separate API tier).
 
 #### `/fewer-permission-prompts` skill
 
@@ -29,7 +30,7 @@ Brief summaries of agent activity. Enabled by default. Review before resuming wo
 
 #### Verification tools
 
-4.7 benefits from explicit verification paths:
+4.8 benefits from explicit verification paths:
 - **Frontend**: Chromium extension or Playwright MCP
 - **Backend**: test runners, DB inspectors
 - **Desktop**: Computer Use

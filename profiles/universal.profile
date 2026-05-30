@@ -1,7 +1,7 @@
 # Universal profile — modules imported into ~/.claude/CLAUDE.md
 # These apply to ALL projects via the global config.
 # Target: <800 lines, <50KB total resolved content.
-# Current (2026-04-16): Opus 4.7 literalism-optimized. Use /rules-audit to review periodically.
+# Current (2026-05-30): Opus 4.8 literalism-optimized. Use /rules-audit to review periodically.
 
 modules/core/model-awareness.md
 modules/core/claude-code-tooling.md
