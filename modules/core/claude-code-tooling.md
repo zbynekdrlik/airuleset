@@ -16,6 +16,19 @@ Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **De
 
 Set with `/model` in CLI. **ultracode** mode = `xhigh` + standing permission to launch multi-agent workflows (not a separate API tier).
 
+#### Dynamic Workflows (the `Workflow` tool)
+
+The `Workflow` tool runs a deterministic JS script that orchestrates many subagents — `parallel()` fan-out, `pipeline()` per-item stages, adversarial-verify loops, loop-until-dry. It is DISTINCT from `subagent-driven-development` (which dispatches sequential `Task` subagents one per plan task). Use a Workflow when the work is fan-out-shaped:
+
+- **Reviews / audits** — N dimensions scanned in parallel, each finding verified by skeptics before it counts.
+- **Research** — multi-modal search fan-out → deep-read → synthesize (see `deep-research`).
+- **Migrations / sweeps** — discover sites → transform each (worktree isolation) → verify, across many files.
+- **Design** — N independent attempts → judge panel → synthesize the winner.
+
+**Opt-in is harness-level, not rule-level** — a Workflow only fires when ultracode is ON, the user types "workflow"/"fan out", or a skill calls it. So when a task is fan-out-shaped and ultracode is OFF, **proactively suggest `/effort ultracode`** (or offer to author a one-off Workflow) — do NOT silently fall back to a single sequential pass and leave the parallel tool unused. Naming the lever is the rule; the user opts in.
+
+Anti-patterns: riding the `brainstorming → writing-plans → subagent-driven-development` chain for a review/audit/migration without noting that a Workflow would cover it in parallel; treating "ultracode off" as "Workflows unavailable" (you can still author a one-off when the user asks). Applies to all rewordings and semantic equivalents.
+
 #### `/fewer-permission-prompts` skill
 
 Analyzes session history, identifies safe Bash/MCP commands that keep triggering prompts, and suggests allowlist additions. Run periodically (monthly) to reduce friction.
