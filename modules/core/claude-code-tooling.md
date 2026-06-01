@@ -25,7 +25,11 @@ The `Workflow` tool runs a deterministic JS script that orchestrates many subage
 - **Migrations / sweeps** — discover sites → transform each (worktree isolation) → verify, across many files.
 - **Design** — N independent attempts → judge panel → synthesize the winner.
 
-**Opt-in is harness-level, not rule-level** — a Workflow only fires when ultracode is ON, the user types "workflow"/"fan out", or a skill calls it. So when a task is fan-out-shaped and ultracode is OFF, **proactively suggest `/effort ultracode`** (or offer to author a one-off Workflow) — do NOT silently fall back to a single sequential pass and leave the parallel tool unused. Naming the lever is the rule; the user opts in.
+**Opt-in is harness-level, not rule-level** — a Workflow only fires when ultracode is ON, the user types "workflow"/"fan out", or a skill calls it. The agent CANNOT enable ultracode itself; only the user can (`/effort ultracode`).
+
+**STOP and ASK for ultracode when you'd benefit from it.** When a task is fan-out-shaped and would materially benefit from Workflow orchestration (parallel dimensions, pipeline + adversarial verify, loop-until-dry, scale beyond one context) but ultracode is OFF, **stop and ask the user to switch to ultracode before proceeding** — do NOT silently fall back to a single sequential pass and leave the parallel tool unused. Use `AskUserQuestion` with a one-line why, e.g. "This audit fans out across N dimensions — switch to ultracode so I run it as a parallel Workflow?" The user has explicitly said: when you'd like ultracode, stop and ask for it.
+
+This ask is NOT a banned "shall I proceed?" process-pause. It is a request for a **capability only the user can grant** (same shape as "ask for the missing tool" in `autonomous-verification.md`) — so it is exempt from the `ask-before-assuming.md` / `autonomous-quality-discipline.md` bans on process questions. Scale the response to the work: for small/cheap fan-out just dispatch parallel `Agent` calls inline (no interruption needed); reserve the stop-and-ask for work where Workflow's orchestration genuinely beats inline parallel agents.
 
 Anti-patterns: riding the `brainstorming → writing-plans → subagent-driven-development` chain for a review/audit/migration without noting that a Workflow would cover it in parallel; treating "ultracode off" as "Workflows unavailable" (you can still author a one-off when the user asks). Applies to all rewordings and semantic equivalents.
 
