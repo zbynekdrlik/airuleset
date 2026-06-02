@@ -48,6 +48,8 @@ The evaluator reads ONLY the conversation transcript — it does NOT run command
 
 Do NOT use `/goal` for ambiguous-scope work needing user decisions (the loop has no one to ask) or anything gated on a destructive action. It is for verifiable execution, not design. Applies to all rewordings and semantic equivalents.
 
+For the specific case of working a whole GitHub issue backlog hands-off — pick → implement (TDD) → PR → CI green → merge → next, until empty — use the **`/autopilot` skill**. It emits a repo-tuned `/goal` line, governs the per-batch loop body, gates auto-merge on the per-project `airuleset:autopilot=auto-merge` opt-in (`pr-merge-policy.md`), and pings the user at each milestone (`milestone-notifications.md`). Without the opt-in marker it runs one batch to a green PR and stops for the merge.
+
 #### `/fewer-permission-prompts` skill
 
 Analyzes session history, identifies safe Bash/MCP commands that keep triggering prompts, and suggests allowlist additions. Run periodically (monthly) to reduce friction.

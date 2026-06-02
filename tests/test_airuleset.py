@@ -102,6 +102,14 @@ class TestSkillsExist(TestCase):
         self.assertIn("user-invocable: true", frontmatter)
         self.assertIn("disable-model-invocation: true", frontmatter)
 
+    def test_autopilot_is_user_invocable(self):
+        path = airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md"
+        content = path.read_text()
+        self.assertTrue(content.startswith("---"), "SKILL.md missing frontmatter fence")
+        frontmatter = content.split("---", 2)[1]
+        self.assertIn("user-invocable: true", frontmatter)
+        self.assertIn("disable-model-invocation: true", frontmatter)
+
 
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):

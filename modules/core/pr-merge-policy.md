@@ -19,3 +19,20 @@ Your responsibility:
 **Never provide a PR URL that has failing checks or merge conflicts.**
 
 **NEVER use `gh pr merge --admin` or any branch-protection bypass.** Branch protection exists to keep main green. If a gate is failing, the answer is to fix the failure — never to bypass the gate. Do not propose admin-merge as an option, do not list it in a "realistic options" menu, do not even mention it. If you find yourself thinking "this is unrelated, we could just admin-merge" — STOP. Fix the gate. See `autonomous-quality-discipline.md`.
+
+#### Autonomous auto-merge — opt-in, per-project ONLY
+
+The default above is absolute: no merge without an explicit instruction. The ONE exception is the `/autopilot` backlog loop on a project the user has pre-authorized. A project opts in by placing this marker in its OWN `CLAUDE.md`:
+
+```
+<!-- airuleset:autopilot=auto-merge -->
+```
+
+That marker IS the user's explicit, standing merge instruction for that repo — the same authority as typing "merge it", granted once instead of per-PR. When (and ONLY when) the marker is present, `/autopilot` MAY merge `dev`→`main` itself — but ONLY after EVERY gate is green:
+
+- CI: all jobs green (not partial, not "lint passed")
+- `mergeable: true` AND `mergeable_state: "clean"` (UNSTABLE / BLOCKED / BEHIND / DIRTY = NOT ready)
+- `/review` AND `/requesting-code-review` both clean — 0 🔴 0 🟡 0 🔵
+- No destructive action, and no production deploy bundled into the merge (deploy stays a separate approval per `approval-scope.md`)
+
+Any gate not green → fix it or stop and ask. The opt-in relaxes WHO triggers the merge, NEVER the quality bar: still no `--admin`, no branch-protection bypass, no "merge despite". Absent marker → the manual gate above stands; `/autopilot` runs one batch to a green PR and waits for "merge it". The agent NEVER adds this marker itself — only the user opts in. See the `autopilot` skill.
