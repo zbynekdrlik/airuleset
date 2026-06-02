@@ -84,39 +84,46 @@ Emit the ready-to-paste `/goal` line and let the native loop drive. Print exactl
 Tune the label exclusions and turn bound to the repo before printing. Then run the
 loop body (Step 3 + Step 4 + Step 5) every cycle until the condition holds.
 
-## Step 3 — Per-issue cycle (fresh subagent per issue)
+## Step 3 — Per-issue cycle (main-loop implementer)
 
-**Context hygiene — why a subagent, not inline.** Auto-compaction fires when context
-fills, NOT at a task boundary, so an inline loop accumulates every file-read / edit /
-debug cycle across all issues and may compact MID-issue → lossy summary → messy
-continuation. The agent CANNOT self-`/compact` (no tool — it is a user command), and
-`/clear` would cancel the `/goal`. So the boundary is enforced structurally: **each
-issue's implementation runs in a FRESH subagent** (`superpowers:subagent-driven-development`;
-dispatch with `Agent` `subagent_type: general-purpose` per `subagent-type-discipline.md`).
-The orchestrator (the `/goal` loop) keeps its own context lean — it holds the issue
-list + each subagent's short return, never the implementation churn. Result: pristine
-context per issue, and orchestrator compaction (if any) lands cleanly between batches,
-never mid-implementation.
+**The implementer is the main loop — NEVER a degraded in-session subagent.** Each
+issue's implementation runs in the primary Opus 4.8 `/goal` loop itself, so every
+commit is written at full main-loop quality (full system prompt, all rules loaded,
+can ask the user, can itself dispatch `superpowers:subagent-driven-development` one
+supported level deep). An in-session `Agent`/`Task` subagent boots with a REDUCED
+system prompt, isolated fresh context, and no user channel — a different harness, not
+a replica of the main loop — and it cannot spawn `subagent-driven-development` (no
+`Agent` tool inside a subagent). So implementation is NEVER routed through a subagent.
+
+**Context hygiene comes from GitHub-as-state, not a subagent boundary.** The backlog,
+commit SHAs, and PR/CI status are re-derived with `gh` every cycle, so the loop carries
+almost no cross-issue memory and re-reads each issue fresh — mush can't accumulate. See
+`## Compaction & resume` for why this is safe under auto-compact.
 
 For each issue in the batch, no prompts between issues (`autonomous-batch-issue-development.md`):
 
-1. Orchestrator: `gh issue view <N>` — read body + comments; decide it fits the bundling gate.
-2. **Dispatch a fresh implementer subagent** with the issue context + the standing
-   rules it must follow:
-   - **TDD** — bug fix → RED test commit first, then GREEN fix commit (`regression-test-first.md`);
-     feature → tests alongside; UI → Playwright E2E (`e2e-real-user-testing.md`).
-   - Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests (`no-local-builds.md`).
+1. `gh issue view <N>` — read body + comments; confirm it fits the bundling gate
+   (≤300 LoC, no schema/API/security/cross-cut, independent). On inspection it
+   doesn't → stop-and-ask or file solo (Step 5); never silently absorb the surprise.
+2. **Implement on the main loop** (this is the quality-critical work):
+   - **TDD** — bug fix → RED test commit first, then GREEN fix commit
+     (`regression-test-first.md`); feature → tests alongside; UI → Playwright E2E
+     (`e2e-real-user-testing.md`).
+   - For a multi-step issue, the main loop MAY dispatch
+     `superpowers:subagent-driven-development` directly — its implementer/reviewer
+     subagents are first-level children of the main loop (supported, one level deep).
+   - Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests
+     (`no-local-builds.md`).
    - Commit on `dev` with `Closes #<N>`.
-   - Return a SHORT structured summary: issue #, commit SHA(s), files touched, test
-     names (RED→GREEN), anything the orchestrator must know (conflict, scope surprise).
-3. Orchestrator reads the summary (NOT the full transcript), records it, immediately
-   dispatches the next issue's subagent. A subagent that reports a real scope surprise
-   (schema change, API break, design fork) → orchestrator stops-and-asks (Step 5);
-   it does NOT silently absorb the surprise.
+3. Record ONE terse line for the issue (issue #, commit SHA(s), RED→GREEN test names,
+   any scope note) — NOT the file-reads/edit churn. Then immediately start the next
+   issue. Re-derive remaining state from `gh`, never from accumulated transcript.
 
-If the implementer's design question is genuinely ambiguous, the subagent surfaces it
-to the orchestrator, which escalates per Step 5 — subagents never block on the user
-directly.
+**Read-only fan-out is the ONLY allowed in-session subagent use.** Heavy, low-value
+exploration (multi-file code search, cross-issue triage, dependency mapping) MAY be
+delegated to read-only `Explore` subagents so their token churn never lands in the
+loop's context. Quality-critical implementation NEVER goes to a subagent — only to the
+main loop (or, per `## Compaction & resume`, a full-Opus `claude -p` process).
 
 ## Step 4 — Push, CI, merge
 
@@ -195,27 +202,54 @@ manual. The agent does NOT add this marker on its own — the user opts in delib
 
 ## Compaction & resume
 
-The per-issue subagent boundary (Step 3) is the PRIMARY context-hygiene mechanism —
-not auto-compaction. Keep the orchestrator lean so its context grows slowly:
+**Context hygiene = GitHub-as-state, not a structural subagent boundary.** The loop
+re-derives its state from `gh` each cycle, so it holds almost no long-lived memory:
 
-- Push all implementation into subagents; the orchestrator only reads short returns.
-- CI: poll `gh run view --json status,conclusion,jobs` — do NOT dump full logs into the
-  orchestrator unless a job failed (then `--log-failed` for the fix decision).
-- Record one terse line per merged batch; don't re-summarize the whole history each turn.
+- **Backlog** — `gh issue list --state open` every cycle; the open set IS the to-do
+  list. Closed issues vanish from it — that's the durable progress signal.
+- **CI** — poll `gh run view --json status,conclusion,jobs`; dump full logs ONLY on a
+  failure (`--log-failed`, for the fix decision). Never tail green-run logs into context.
+- **Per issue** — record ONE terse line (issue #, commit SHA(s), RED→GREEN test names,
+  merge status). Don't re-summarize the whole history each turn.
 
-With that, the orchestrator rarely fills — and if auto-compact does fire, it lands
-between batches (clean) rather than mid-implementation. Auto-compact keeps the session
-alive and the active `/goal` persists; no manual `/compact` needed (the agent cannot
-invoke `/compact` anyway). If the session ends, `--resume` restores the goal (turn/timer/
-token counters reset; re-bound if needed). **Never `/clear` mid-loop** — `/clear` and
-`/goal stop` cancel the goal. Compaction-survival is not yet documented by Anthropic;
-`--resume` restores regardless, so the loop is recoverable either way.
+Because the working set stays small, the auto-compact threshold is rarely approached.
+And when compaction DOES fire it is harmless here: it lands where the only state is the
+terse summary, and even a lossy summary loses nothing real — commits, PR, and CI are all
+re-readable from GitHub. (Note: auto-compaction is checked MID-request, NOT at safe task
+boundaries, and is lossy — so a design that depended on in-transcript working memory
+would be fragile. This design does not; GitHub holds the truth, which is what makes
+mid-issue compaction non-catastrophic.)
 
-**Heavier alternative — true process isolation.** If even the orchestrator must stay
-pristine (very large backlog, long unattended run), drive workers as separate headless
-processes: an outer script loops `claude -p "work issue #N to a green PR" --output-format json`
-per issue, each a brand-new process = zero carryover. This is your "another Claude sends
-prompts to working Claudes" idea in its strongest form, but it gives up the in-session
-`/goal` loop + live Discord bridge and needs its own merge/CI plumbing. Prefer in-session
-subagents (above); reach for headless only when a single session genuinely can't hold the
-backlog even as a lean orchestrator.
+The agent CANNOT self-`/compact` mid-turn (it is a user/SDK command, not an in-turn
+tool) and MUST NEVER `/clear` mid-loop (`/clear` and `/goal stop` both cancel the goal).
+If the session ends, `--resume` restores the `/goal` (turn/timer/token counters reset;
+re-bind the goal line if needed). The loop is recoverable either way: in-flight work is
+already committed on `dev`, so a killed session just re-dispatches the unclosed issues.
+
+**Escape hatch — headless full-Opus process per issue (true isolation, still gold-standard
+quality).** For a backlog too large to hold even as a lean GitHub-as-state loop, drive
+each issue in a fresh `claude -p` PROCESS instead of inline:
+
+```bash
+claude -p "Work issue #$N to a green PR on dev, TDD, Closes #$N." \
+  --output-format json --permission-mode bypassPermissions
+# parse .result for the issue's summary line; .session_id to chain if needed
+# bypassPermissions = unattended headless; scope tool access per the project's risk
+```
+
+Each `claude -p` boots the SAME main loop — full Opus 4.8, full system prompt, all
+skills — so it is NOT a degraded subagent; quality is identical to inline. It starts
+with fresh conversation context (clean by construction, no compaction inheritance) and
+can itself dispatch `superpowers:subagent-driven-development` (first-level children of
+that process — no nesting violation). The outer driver stays lean: it holds only the
+open-issue list + one parsed summary line per child, monitors each child's PR to green,
+and (auto-merge mode) owns the merge + milestone ping + version bump. Trade-offs: the
+children don't share the in-session `/goal` loop or the live Discord bridge (pings fire
+from the outer driver after each child returns), each child is a cold start (re-reads
+CLAUDE.md/skills — seconds, negligible vs a TDD+CI cycle), and user-slash skills like
+`/review` do NOT run in `-p` — dispatch the review as a subagent instead. Bound
+concurrency to one child at a time on shared `dev`, or give each child its own `git
+worktree` to parallelize later. **This is NOT the default** — prefer the in-session
+main-loop body above; reach for headless only when a single session genuinely can't hold
+the backlog even as a lean GitHub-as-state loop. Either way, implementation is full-Opus,
+never a degraded subagent.
