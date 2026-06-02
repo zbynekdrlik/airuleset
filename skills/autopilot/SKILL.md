@@ -84,17 +84,39 @@ Emit the ready-to-paste `/goal` line and let the native loop drive. Print exactl
 Tune the label exclusions and turn bound to the repo before printing. Then run the
 loop body (Step 3 + Step 4 + Step 5) every cycle until the condition holds.
 
-## Step 3 — Per-issue cycle (inside a batch)
+## Step 3 — Per-issue cycle (fresh subagent per issue)
 
-For each issue, no prompts between issues (`autonomous-batch-issue-development.md`):
+**Context hygiene — why a subagent, not inline.** Auto-compaction fires when context
+fills, NOT at a task boundary, so an inline loop accumulates every file-read / edit /
+debug cycle across all issues and may compact MID-issue → lossy summary → messy
+continuation. The agent CANNOT self-`/compact` (no tool — it is a user command), and
+`/clear` would cancel the `/goal`. So the boundary is enforced structurally: **each
+issue's implementation runs in a FRESH subagent** (`superpowers:subagent-driven-development`;
+dispatch with `Agent` `subagent_type: general-purpose` per `subagent-type-discipline.md`).
+The orchestrator (the `/goal` loop) keeps its own context lean — it holds the issue
+list + each subagent's short return, never the implementation churn. Result: pristine
+context per issue, and orchestrator compaction (if any) lands cleanly between batches,
+never mid-implementation.
 
-1. `gh issue view <N>` — read body + comments.
-2. Brainstorm only if genuinely non-trivial; plan only if multi-step. These may ask
-   **design** questions when scope is ambiguous — never **process** questions.
-3. **TDD** — bug fix → RED test commit first, then GREEN fix commit (`regression-test-first.md`).
-   Feature → tests alongside. UI → Playwright E2E (`e2e-real-user-testing.md`).
-4. Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests (`no-local-builds.md`).
-5. Commit with `Closes #<N>`. Immediately start the next issue in the batch.
+For each issue in the batch, no prompts between issues (`autonomous-batch-issue-development.md`):
+
+1. Orchestrator: `gh issue view <N>` — read body + comments; decide it fits the bundling gate.
+2. **Dispatch a fresh implementer subagent** with the issue context + the standing
+   rules it must follow:
+   - **TDD** — bug fix → RED test commit first, then GREEN fix commit (`regression-test-first.md`);
+     feature → tests alongside; UI → Playwright E2E (`e2e-real-user-testing.md`).
+   - Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests (`no-local-builds.md`).
+   - Commit on `dev` with `Closes #<N>`.
+   - Return a SHORT structured summary: issue #, commit SHA(s), files touched, test
+     names (RED→GREEN), anything the orchestrator must know (conflict, scope surprise).
+3. Orchestrator reads the summary (NOT the full transcript), records it, immediately
+   dispatches the next issue's subagent. A subagent that reports a real scope surprise
+   (schema change, API break, design fork) → orchestrator stops-and-asks (Step 5);
+   it does NOT silently absorb the surprise.
+
+If the implementer's design question is genuinely ambiguous, the subagent surfaces it
+to the orchestrator, which escalates per Step 5 — subagents never block on the user
+directly.
 
 ## Step 4 — Push, CI, merge
 
@@ -173,8 +195,27 @@ manual. The agent does NOT add this marker on its own — the user opts in delib
 
 ## Compaction & resume
 
-Auto-compact keeps the session alive — the active `/goal` persists; no manual `/compact`
-needed. If the session ends, `--resume` restores the goal (turn/timer/token counters
-reset; bound it again if needed). **Never `/clear` mid-loop** — `/clear` and `/goal stop`
-cancel the goal. Compaction-survival is not yet documented by Anthropic; `--resume`
-restores regardless, so the loop is recoverable either way.
+The per-issue subagent boundary (Step 3) is the PRIMARY context-hygiene mechanism —
+not auto-compaction. Keep the orchestrator lean so its context grows slowly:
+
+- Push all implementation into subagents; the orchestrator only reads short returns.
+- CI: poll `gh run view --json status,conclusion,jobs` — do NOT dump full logs into the
+  orchestrator unless a job failed (then `--log-failed` for the fix decision).
+- Record one terse line per merged batch; don't re-summarize the whole history each turn.
+
+With that, the orchestrator rarely fills — and if auto-compact does fire, it lands
+between batches (clean) rather than mid-implementation. Auto-compact keeps the session
+alive and the active `/goal` persists; no manual `/compact` needed (the agent cannot
+invoke `/compact` anyway). If the session ends, `--resume` restores the goal (turn/timer/
+token counters reset; re-bound if needed). **Never `/clear` mid-loop** — `/clear` and
+`/goal stop` cancel the goal. Compaction-survival is not yet documented by Anthropic;
+`--resume` restores regardless, so the loop is recoverable either way.
+
+**Heavier alternative — true process isolation.** If even the orchestrator must stay
+pristine (very large backlog, long unattended run), drive workers as separate headless
+processes: an outer script loops `claude -p "work issue #N to a green PR" --output-format json`
+per issue, each a brand-new process = zero carryover. This is your "another Claude sends
+prompts to working Claudes" idea in its strongest form, but it gives up the in-session
+`/goal` loop + live Discord bridge and needs its own merge/CI plumbing. Prefer in-session
+subagents (above); reach for headless only when a single session genuinely can't hold the
+backlog even as a lean orchestrator.
