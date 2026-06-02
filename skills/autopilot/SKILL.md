@@ -32,6 +32,26 @@ backlog is empty or a **genuine** question is needed.
    hands-off mode this skill PRINTS the exact, repo-tuned `/goal` line; you paste it
    once and step away. That single paste is the only manual step.
 
+## Arguments & mode (auto vs manual)
+
+`/autopilot` accepts an optional first argument that sets the mode FOR THIS RUN:
+
+- `/autopilot auto` (aliases `auto-merge`, `hands-off`) → **auto-merge** — the loop
+  merges `dev`→`main` itself when every gate is green. Typing it IS your explicit merge
+  authorization for this run (`pr-merge-policy.md`), the same as the persistent marker.
+- `/autopilot manual` → **manual** — run one batch to a green PR, stop for your merge.
+- `/autopilot` (no arg) → mode comes from the project marker if present, else **manual**.
+- `/autopilot status` → print mode + marker + backlog count and STOP (run nothing).
+
+**Mode resolution precedence:** explicit argument > project marker
+(`airuleset:autopilot=auto-merge` in the repo's `CLAUDE.md`) > default **manual**.
+
+The default is manual on purpose — auto-merge to `main` unattended is safety-sensitive,
+so it must be opted into deliberately (per-run arg, or per-repo marker), never assumed
+just because `/autopilot` was invoked. Prefer the marker for low-risk MVPs you always
+run hands-off; use the `auto` arg for a one-off hands-off run; keep manual for anything
+with real production data.
+
 ## Step 1 — Preflight (always)
 
 ```bash
@@ -42,12 +62,21 @@ gh auth status                           # must be authenticated
 gh run list -L 3                         # no run we'd fight; note in-progress
 ```
 
-- **Mode detection** — read the project's own `CLAUDE.md`:
+- **Resolve mode** (precedence: arg > marker > manual):
   ```bash
-  grep -n "airuleset:autopilot=auto-merge" CLAUDE.md
+  grep -n "airuleset:autopilot=auto-merge" CLAUDE.md   # marker check
   ```
-  Present → `MODE=auto-merge` (hands-off loop). Absent → `MODE=manual` (one batch,
-  stop at green PR).
+  Explicit `auto`/`manual` arg wins; else marker present → `MODE=auto-merge`; else
+  `MODE=manual`.
+- **PRINT the mode banner FIRST** (before any work) so the resolved mode is always
+  visible and the user knows how to change it — e.g.:
+  ```
+  autopilot · MODE=manual  (source: default — no `auto` arg, no marker)
+  → switch: `/autopilot auto` for this run, or add `<!-- airuleset:autopilot=auto-merge -->`
+    to CLAUDE.md to make it permanent. manual = one batch → green PR → stop for your merge.
+  ```
+  State the source explicitly (arg / marker / default) so "why this mode?" is answered
+  on screen, not hidden in a file.
 - **Load the decision log** — `cat docs/autopilot-log.md` if it exists (create it on the
   first run). This + the project `CLAUDE.md` re-load the conventions and decisions from
   earlier work so the loop never re-litigates a settled call (see `## Compaction & resume`).

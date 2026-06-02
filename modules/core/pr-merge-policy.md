@@ -28,7 +28,7 @@ The default above is absolute: no merge without an explicit instruction. The ONE
 <!-- airuleset:autopilot=auto-merge -->
 ```
 
-That marker IS the user's explicit, standing merge instruction for that repo — the same authority as typing "merge it", granted once instead of per-PR. When (and ONLY when) the marker is present, `/autopilot` MAY merge `dev`→`main` itself — but ONLY after EVERY gate is green:
+That marker IS the user's explicit, standing merge instruction for that repo — the same authority as typing "merge it", granted once instead of per-PR. The user may also authorize a SINGLE run explicitly by invoking `/autopilot auto` (no marker needed — typing it that moment is the same explicit authorization, scoped to that run). When (and ONLY when) the marker is present OR the `auto` arg was given, `/autopilot` MAY merge `dev`→`main` itself — but ONLY after EVERY gate is green:
 
 - CI: all jobs green (not partial, not "lint passed")
 - `mergeable: true` AND `mergeable_state: "clean"` (UNSTABLE / BLOCKED / BEHIND / DIRTY = NOT ready)
