@@ -48,6 +48,9 @@ gh run list -L 3                         # no run we'd fight; note in-progress
   ```
   Present → `MODE=auto-merge` (hands-off loop). Absent → `MODE=manual` (one batch,
   stop at green PR).
+- **Load the decision log** — `cat docs/autopilot-log.md` if it exists (create it on the
+  first run). This + the project `CLAUDE.md` re-load the conventions and decisions from
+  earlier work so the loop never re-litigates a settled call (see `## Compaction & resume`).
 - **Version-on-dashboard foundation gate** (web projects) — per `version-on-dashboard.md`
   / issue-planner Step 1d. If the dashboard has no version label, the foundation issue
   is the FIRST work item; file it before anything else.
@@ -115,15 +118,18 @@ For each issue in the batch, no prompts between issues (`autonomous-batch-issue-
    - Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests
      (`no-local-builds.md`).
    - Commit on `dev` with `Closes #<N>`.
-3. Record ONE terse line for the issue (issue #, commit SHA(s), RED→GREEN test names,
-   any scope note) — NOT the file-reads/edit churn. Then immediately start the next
-   issue. Re-derive remaining state from `gh`, never from accumulated transcript.
+3. **Append ONE terse line to `docs/autopilot-log.md`** (issue #, commit SHA(s),
+   RED→GREEN test names, any scope/decision note) — NOT the file-reads/edit churn. If the
+   issue established a lasting project convention, also write it to `CLAUDE.md`. Then
+   immediately start the next issue, re-deriving remaining state from `gh` + the log,
+   never from accumulated transcript.
 
 **Read-only fan-out is the ONLY allowed in-session subagent use.** Heavy, low-value
 exploration (multi-file code search, cross-issue triage, dependency mapping) MAY be
 delegated to read-only `Explore` subagents so their token churn never lands in the
-loop's context. Quality-critical implementation NEVER goes to a subagent — only to the
-main loop (or, per `## Compaction & resume`, a full-Opus `claude -p` process).
+loop's context. Quality-critical implementation NEVER goes to a subagent and NEVER to a
+fresh `claude -p` process — only to this continuous main loop (see `## Compaction & resume`
+for why fresh/amnesiac workers are banned).
 
 ## Step 4 — Push, CI, merge
 
@@ -202,15 +208,18 @@ manual. The agent does NOT add this marker on its own — the user opts in delib
 
 ## Compaction & resume
 
-**Context hygiene = GitHub-as-state, not a structural subagent boundary.** The loop
-re-derives its state from `gh` each cycle, so it holds almost no long-lived memory:
+**Context hygiene = GitHub-as-state + a re-read decision log, not a subagent boundary.**
+The loop re-derives its state from durable sources each cycle, so it holds almost no
+long-lived transcript memory:
 
 - **Backlog** — `gh issue list --state open` every cycle; the open set IS the to-do
   list. Closed issues vanish from it — that's the durable progress signal.
 - **CI** — poll `gh run view --json status,conclusion,jobs`; dump full logs ONLY on a
   failure (`--log-failed`, for the fix decision). Never tail green-run logs into context.
-- **Per issue** — record ONE terse line (issue #, commit SHA(s), RED→GREEN test names,
-  merge status). Don't re-summarize the whole history each turn.
+- **Per issue** — append ONE terse line to `docs/autopilot-log.md` (issue #, commit
+  SHA(s), RED→GREEN test names, merge status, decision notes). Don't re-summarize the
+  whole history into the transcript each turn — the log IS the summary, and it survives
+  compaction.
 
 Because the working set stays small, the auto-compact threshold is rarely approached.
 And when compaction DOES fire it is harmless here: it lands where the only state is the
@@ -226,30 +235,31 @@ If the session ends, `--resume` restores the `/goal` (turn/timer/token counters 
 re-bind the goal line if needed). The loop is recoverable either way: in-flight work is
 already committed on `dev`, so a killed session just re-dispatches the unclosed issues.
 
-**Escape hatch — headless full-Opus process per issue (true isolation, still gold-standard
-quality).** For a backlog too large to hold even as a lean GitHub-as-state loop, drive
-each issue in a fresh `claude -p` PROCESS instead of inline:
+**One continuous session — NEVER spawn a fresh/amnesiac worker.** Do NOT drive issues
+with `claude -p` child processes, and do NOT route implementation through `Agent`/`Task`
+subagents. A fresh process or subagent starts WITHOUT the understanding built up in this
+session — the decisions, constraints, and conventions worked out together — so it can
+implement an issue in a way THIS session would not allow: wrong pattern, a re-litigated
+decision, a violated convention. **Continuity of understanding beats pristine context.**
+The single `/goal` loop keeps the whole conversation (compacted as needed), so accumulated
+understanding persists across the entire run. There is no "backlog too large" escape that
+justifies an amnesiac worker — if a session truly fills, `--resume` continues THIS thread
+(summary preserved), it does not start a blank one.
 
-```bash
-claude -p "Work issue #$N to a green PR on dev, TDD, Closes #$N." \
-  --output-format json --permission-mode bypassPermissions
-# parse .result for the issue's summary line; .session_id to chain if needed
-# bypassPermissions = unattended headless; scope tool access per the project's risk
-```
+**Durable decision log — so compaction / resume never loses what was settled.** Compaction
+is lossy and `--resume` reloads a summary, not the full thread. To stop the loop from
+"forgetting what we dealt with", persist durable context to files it RE-READS, not to
+transcript memory:
 
-Each `claude -p` boots the SAME main loop — full Opus 4.8, full system prompt, all
-skills — so it is NOT a degraded subagent; quality is identical to inline. It starts
-with fresh conversation context (clean by construction, no compaction inheritance) and
-can itself dispatch `superpowers:subagent-driven-development` (first-level children of
-that process — no nesting violation). The outer driver stays lean: it holds only the
-open-issue list + one parsed summary line per child, monitors each child's PR to green,
-and (auto-merge mode) owns the merge + milestone ping + version bump. Trade-offs: the
-children don't share the in-session `/goal` loop or the live Discord bridge (pings fire
-from the outer driver after each child returns), each child is a cold start (re-reads
-CLAUDE.md/skills — seconds, negligible vs a TDD+CI cycle), and user-slash skills like
-`/review` do NOT run in `-p` — dispatch the review as a subagent instead. Bound
-concurrency to one child at a time on shared `dev`, or give each child its own `git
-worktree` to parallelize later. **This is NOT the default** — prefer the in-session
-main-loop body above; reach for headless only when a single session genuinely can't hold
-the backlog even as a lean GitHub-as-state loop. Either way, implementation is full-Opus,
-never a degraded subagent.
+- **Conventions / decisions that outlive the run** (how endpoints are named, why a pattern
+  was chosen, a gotcha + its fix) → write to the project's **`CLAUDE.md`**. It loads into
+  EVERY future session — the permanent fix to "the new session forgot X".
+- **Run-scoped working notes** (per-issue decisions, scope calls — `issue #40 → reset to
+  0dB per user`, `deferred Z to #88`) → append to a re-read log: **`docs/autopilot-log.md`**.
+  The loop reads this log at the TOP of every cycle, so even right after a compaction it
+  re-loads the full picture of what was decided and done.
+
+At each cycle start the loop reconstructs the world from durable sources that no compaction
+can erase — GitHub (issue / PR / CI state), the decision log (the WHY + conventions), and
+`git log` on `dev` (what code changed). That, not a clean transcript, is what keeps every
+cycle consistent with everything agreed earlier in the session.
