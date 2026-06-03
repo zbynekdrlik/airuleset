@@ -3,6 +3,7 @@
 # Target: <800 lines, <50KB total resolved content.
 # Current (2026-05-30): Opus 4.8 literalism-optimized. Use /rules-audit to review periodically.
 
+modules/core/machine-identities.md
 modules/core/model-awareness.md
 modules/core/claude-code-tooling.md
 modules/core/response-structure.md
