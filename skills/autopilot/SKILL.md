@@ -1,11 +1,18 @@
 ---
 name: autopilot
-description: Work an entire GitHub issue backlog hands-off — pick bundle-safe issues, implement with TDD, open a PR, drive CI green, then (only on projects that opted in via the airuleset:autopilot=auto-merge marker) merge dev→main and pick the next, looping via /goal until the backlog is empty or a genuine decision is needed. On projects without the marker it runs one batch to a green PR and stops for your merge. Run when you want autonomous batch development across a project's open issues without per-batch prompts.
+description: "Usage: /autopilot [auto|manual|status]. auto = hands-off, merges dev→main when all gates green; manual (default) = run one batch to a green PR then stop for your merge; status = show mode + backlog, run nothing. Works the GitHub issue backlog: pick bundle-safe issues → TDD → PR → CI green → merge → repeat until empty or a real question."
+argument-hint: "[auto | manual | status]"
 user-invocable: true
 disable-model-invocation: true
 ---
 
 # Autopilot — Hands-off Backlog Loop
+
+> **Usage:** `/autopilot [auto|manual|status]`
+> • `auto` — hands-off: merges `dev`→`main` whenever all gates are green, loops till backlog empty
+> • `manual` *(default)* — runs one batch to a green PR, then stops for your merge
+> • `status` — print resolved mode + open-issue count, run nothing
+> Mode precedence: arg > repo marker (`airuleset:autopilot=auto-merge`) > default manual.
 
 Removes the three per-batch interruptions: re-invoking `/issue-planner`, approving
 each merge, and manual `/compact`. Picks issues, implements (TDD), PRs, drives CI
