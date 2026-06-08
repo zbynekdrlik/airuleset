@@ -423,6 +423,12 @@ class TestNoDroppedWorkHook(TestCase):
         r, _ = self._run("Spotted a pre-existing off-by-one. Fixing it now in this commit rather than leaving it.")
         self.assertTrue(self._clean(r), r.stdout)
 
+    def test_completed_fix_of_known_issue_allowed(self):
+        # Reporting a COMPLETED fix of a pre-existing/known problem is good work,
+        # not a dismissal — a fix verb must not be mistaken for dropping it.
+        r, _ = self._run("Fixed a known race condition in the scheduler while I was in there.")
+        self.assertTrue(self._clean(r), r.stdout)
+
     # --- the key anti-false-escape: a stray PR #N must NOT excuse a dismissal ---
 
     def test_bare_pr_number_does_not_escape_dismissal(self):

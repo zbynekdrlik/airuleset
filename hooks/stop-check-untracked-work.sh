@@ -29,7 +29,7 @@ MAX_RETRIES=3
 # Require a filing verb adjacent to a #N, an explicit "issue #N", a gh issue create
 # command, or an issues/N URL. Plus a narrow fix-now allowance.
 ESCAPE=0
-if echo "$MSG" | grep -qiE "(filed|filing|file it|tracked|tracking|tracker|logged|opened|created|recorded)[^.]{0,40}#[0-9]+|gh issue create|/issues/[0-9]+|issue\s+#[0-9]+|todo[: ]+#[0-9]+|tracked (in|as|under)\s+#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+|(fixing|fix) (it|this|that)?\s*(now|immediately|in this (pr|commit|session))|let me fix|i'?ll fix (it|this|that)( now)?|fixing it now|fixed it (now|already|in this)"; then
+if echo "$MSG" | grep -qiE "(filed|filing|file it|tracked|tracking|tracker|logged|opened|created|recorded)[^.]{0,40}#[0-9]+|gh issue create|/issues/[0-9]+|issue\s+#[0-9]+|todo[: ]+#[0-9]+|tracked (in|as|under)\s+#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+|(fixing|fix) (it|this|that)?\s*(now|immediately|in this (pr|commit|session))|let me fix|i'?ll fix (it|this|that)( now)?|fixing it now|\b(fixed|resolved|patched|corrected|repaired)\b"; then
     ESCAPE=1
 fi
 
