@@ -118,6 +118,7 @@ class TestHookScriptsExist(TestCase):
             "block-sensitive-staging.sh",
             "pre-deploy-clean-tree.sh",
             "stop-check-untracked-work.sh",
+            "stop-check-status-marker.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -487,6 +488,130 @@ class TestNoDroppedWorkHook(TestCase):
         r, _ = self._run(
             "This failure is pre-existing, skipping.", env_extra={"PATH": str(binbox)}
         )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "", "jq-absent must be a clean no-op")
+
+
+class TestStatusMarkerHook(TestCase):
+    """Behavioral tests for the message-status-marker Stop guard.
+
+    Enforces message-status-marker.md: every message ends with exactly ONE
+    state marker (❓ NEEDS YOU / ⏳ WORKING / ✅ DONE) so the user never has to
+    guess whether Claude is asking, working in the background, or done. Blocks
+    are signalled by {"decision":"block"} JSON on stdout (returncode 0).
+    """
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-status-marker.sh"
+    _counter = 0
+
+    def _sid(self):
+        TestStatusMarkerHook._counter += 1
+        sid = f"test-sm-{os.getpid()}-{TestStatusMarkerHook._counter}"
+        self.addCleanup(
+            lambda: os.path.exists(f"/tmp/airuleset-status-marker-block-{sid}")
+            and os.remove(f"/tmp/airuleset-status-marker-block-{sid}")
+        )
+        return sid
+
+    def _run(self, msg, sid=None, env_extra=None):
+        import subprocess
+
+        sid = sid or self._sid()
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(
+            ["bash", str(self.HOOK)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+    def _blocked(self, r):
+        return r.returncode == 0 and '"block"' in r.stdout
+
+    def _clean(self, r):
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    # --- background state must be marked ⏳ ---
+
+    def test_background_without_marker_blocked(self):
+        r = self._run("Standing by for the mutation result, then the final report. No merge without your go.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_background_marked_working_allowed(self):
+        r = self._run("Pushed the fix.\n\n⏳ WORKING: CI run in progress — I'll report when it lands. Nothing needed from you.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_done_claim_while_background_running_blocked(self):
+        # "✅ DONE" but something is still running = the exact mislead.
+        r = self._run("Kicked off the build, still running in the background.\n\n✅ DONE: build started.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    # --- questions must be marked ❓ ---
+
+    def test_trailing_question_without_marker_blocked(self):
+        r = self._run("The reset can go to 0dB or the last preset. Which behavior do you want?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_should_i_without_marker_blocked(self):
+        r = self._run("PR is green. Should I merge it to main now?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_question_marked_needs_you_allowed(self):
+        r = self._run("PR #5 is green.\n\n❓ NEEDS YOU: approve merge to main?")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- progress/completion claims must carry a marker ---
+
+    def test_completion_claim_without_marker_blocked(self):
+        r = self._run("Fixed the auth bug and pushed commit a1b2c3d. CI is green.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_completion_claim_with_done_marker_allowed(self):
+        r = self._run("Fixed the auth bug, pushed a1b2c3d, CI green.\n\n✅ DONE: auth bug fixed and verified.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_work_complete_heading_counts_as_done(self):
+        # A completion report heading is the ✅ DONE marker.
+        r = self._run("## ✅ Work Complete\n\nPushed and deployed. Everything green.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- benign / non-status messages must not trip ---
+
+    def test_plain_explanation_allowed(self):
+        r = self._run("React re-renders because a new object reference is created each render. Wrap it in useMemo.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_empty_message_allowed(self):
+        r = self._run("")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- retry cap releases after MAX_RETRIES ---
+
+    def test_retry_cap_releases_after_three_blocks(self):
+        sid = self._sid()
+        for _ in range(3):
+            r = self._run("Standing by for the CI result.", sid=sid)
+            self.assertTrue(self._blocked(r), r.stdout)
+        r = self._run("Standing by for the CI result.", sid=sid)
+        self.assertTrue(self._clean(r), f"must release after 3 blocks: {r.stdout}")
+
+    # --- jq absent: graceful no-op ---
+
+    def test_jq_absent_no_op(self):
+        import shutil
+
+        binbox = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, binbox, ignore_errors=True)
+        for b in ["bash", "cat", "grep", "sed", "tr", "tail", "head", "env"]:
+            src = shutil.which(b)
+            if src:
+                os.symlink(src, binbox / b)
+        self.assertIsNone(shutil.which("jq", path=str(binbox)), "test PATH must exclude jq")
+        r = self._run("Standing by for the CI result.", env_extra={"PATH": str(binbox)})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "", "jq-absent must be a clean no-op")
 
