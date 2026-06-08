@@ -1,5 +1,8 @@
 ### Complete Planned Work
 
+**Context gate — related rules you MUST also apply:**
+- `no-dropped-work.md` — any sub-part you don't finish, any "pre-existing / known / out-of-scope" problem you notice, MUST be filed as a `#N` issue before you stop (enforced session-wide, not just in the completion report)
+
 **Before reporting "done", go back and re-read your plan. Check every step. Did you actually do it?**
 
 #### Never stop while work is unfinished

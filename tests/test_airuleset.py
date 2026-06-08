@@ -117,6 +117,7 @@ class TestHookScriptsExist(TestCase):
             "session-start-fetch.sh",
             "block-sensitive-staging.sh",
             "pre-deploy-clean-tree.sh",
+            "stop-check-untracked-work.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -328,6 +329,160 @@ class TestPreDeployCleanTreeHook(TestCase):
             repo, "rsync -a ./ user@host:/srv/", env_extra={"PATH": str(binbox)}
         )
         self.assertEqual(r.returncode, 2, f"jq-absent fallback must still block: {r.stderr}")
+
+
+class TestNoDroppedWorkHook(TestCase):
+    """Behavioral tests for the session-wide untracked-work Stop guard.
+
+    Enforces no-dropped-work.md: any identified-but-unfinished work must be
+    fixed now or filed as a #N issue before stopping. Catches the three loss
+    patterns the user reported — decomposition-shedding, dropped review
+    findings, and 'pre-existing / known / unrelated' test dismissals — on
+    EVERY message, not just completion reports. A block is signalled by a
+    {"decision":"block"} JSON object on stdout (returncode 0), like the
+    sibling prose-violations hook.
+    """
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-untracked-work.sh"
+    _counter = 0
+
+    def _sid(self):
+        # Unique per call so the per-session retry counter never carries over.
+        import shutil
+
+        TestNoDroppedWorkHook._counter += 1
+        sid = f"test-ndw-{os.getpid()}-{TestNoDroppedWorkHook._counter}"
+        self.addCleanup(
+            lambda: shutil.os.path.exists(f"/tmp/airuleset-untracked-work-block-{sid}")
+            and os.remove(f"/tmp/airuleset-untracked-work-block-{sid}")
+        )
+        return sid
+
+    def _run(self, msg, sid=None, env_extra=None):
+        import subprocess
+
+        sid = sid or self._sid()
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        r = subprocess.run(
+            ["bash", str(self.HOOK)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        return r, sid
+
+    def _blocked(self, r):
+        return r.returncode == 0 and '"block"' in r.stdout
+
+    def _clean(self, r):
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    # --- dismissals without a filed #N are blocked ---
+
+    def test_preexisting_dismissal_blocked(self):
+        r, _ = self._run("That test was already failing before my change — pre-existing, so I skipped it.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_known_issue_dismissal_blocked(self):
+        r, _ = self._run("The console warning is a known issue in the upstream lib, nothing to do here.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_unrelated_dismissal_blocked(self):
+        r, _ = self._run("The lint failure is unrelated to my change, so I'm leaving it.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_out_of_scope_dismissal_blocked(self):
+        r, _ = self._run("Refactoring the auth module is out of scope for this task, moving on.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_separate_problem_dismissal_blocked(self):
+        # "separate problem" used to justify skipping, with the noun between
+        # the subject and the phrase (so the 'that is' form doesn't match).
+        r, _ = self._run("That failing test is a separate problem, not addressing it here.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    # --- dismissals WITH proof of filing or in-session fix are allowed ---
+
+    def test_preexisting_with_filed_issue_allowed(self):
+        r, _ = self._run("The test was failing before my change (pre-existing). Filed as #42: flaky login test.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_dismissal_with_gh_issue_create_allowed(self):
+        r, _ = self._run("Found a pre-existing crash in the parser. Ran: gh issue create --title 'parser crash on empty input'.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_dismissal_with_issue_ref_allowed(self):
+        r, _ = self._run("That warning is a known limitation — tracked in issue #87, won't address here.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_dismissal_fixed_now_allowed(self):
+        r, _ = self._run("Spotted a pre-existing off-by-one. Fixing it now in this commit rather than leaving it.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- the key anti-false-escape: a stray PR #N must NOT excuse a dismissal ---
+
+    def test_bare_pr_number_does_not_escape_dismissal(self):
+        r, _ = self._run("PR #5 is ready and mergeable. The flaky e2e failure is pre-existing.")
+        self.assertTrue(self._blocked(r), "a bare PR #N must not satisfy the issue-filed escape: " + r.stdout)
+
+    # --- decomposition-shedding (leftover sub-work) ---
+
+    def test_leftover_parts_blocked(self):
+        r, _ = self._run("I implemented the auth piece. The remaining parts (rate-limiting, audit log) can wait.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_handled_only_part_blocked(self):
+        r, _ = self._run("Done — though I handled only part of what you asked; the export feature is left.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_leftover_parts_with_issues_allowed(self):
+        r, _ = self._run(
+            "Implemented auth. Filed the rest as #12: rate-limiting and #13: audit log."
+        )
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- benign messages must not trip ---
+
+    def test_benign_message_allowed(self):
+        r, _ = self._run("Done. Pushed commit a1b2c3d. CI is green and the dashboard shows v1.2.3-dev.4.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_empty_message_allowed(self):
+        r, _ = self._run("")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    # --- retry cap: stops blocking after MAX_RETRIES to avoid loops ---
+
+    def test_retry_cap_releases_after_three_blocks(self):
+        sid = self._sid()
+        for _ in range(3):
+            r, _ = self._run("This failure is pre-existing, skipping.", sid=sid)
+            self.assertTrue(self._blocked(r), r.stdout)
+        # 4th attempt: retry budget exhausted → let Stop succeed.
+        r, _ = self._run("This failure is pre-existing, skipping.", sid=sid)
+        self.assertTrue(self._clean(r), f"hook must release after 3 blocks: {r.stdout}")
+
+    # --- jq absent: this Stop nicety fails open (graceful no-op), unlike the deploy gate ---
+
+    def test_jq_absent_no_op(self):
+        import shutil
+
+        binbox = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, binbox, ignore_errors=True)
+        for b in ["bash", "cat", "grep", "sed", "head", "env"]:
+            src = shutil.which(b)
+            if src:
+                os.symlink(src, binbox / b)
+        self.assertIsNone(shutil.which("jq", path=str(binbox)), "test PATH must exclude jq")
+        r, _ = self._run(
+            "This failure is pre-existing, skipping.", env_extra={"PATH": str(binbox)}
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "", "jq-absent must be a clean no-op")
 
 
 class TestRulesHaveFrontmatter(TestCase):

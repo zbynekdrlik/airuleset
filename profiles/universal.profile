@@ -46,4 +46,5 @@ modules/quality/version-on-dashboard.md
 modules/quality/comprehensive-logging.md
 modules/quality/autonomous-batch-issue-development.md
 modules/quality/regression-test-first.md
+modules/quality/no-dropped-work.md
 modules/core/completion-report.md

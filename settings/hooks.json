@@ -99,6 +99,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-prose-violations.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-untracked-work.sh",
+            "timeout": 5
           }
         ]
       }
