@@ -35,6 +35,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-custom-monitor.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/pre-deploy-clean-tree.sh",
+            "timeout": 10
           }
         ]
       },

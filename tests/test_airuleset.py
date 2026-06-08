@@ -113,10 +113,120 @@ class TestSkillsExist(TestCase):
 
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
-        for script in ["session-start-fetch.sh", "block-sensitive-staging.sh"]:
+        for script in [
+            "session-start-fetch.sh",
+            "block-sensitive-staging.sh",
+            "pre-deploy-clean-tree.sh",
+        ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
             self.assertTrue(os.access(path, os.X_OK), f"Not executable: {path}")
+
+
+class TestPreDeployCleanTreeHook(TestCase):
+    """Behavioral tests for the dirty-tree deploy guard.
+
+    The incident this guards against: an uncommitted edit rsync'd straight to
+    production. These tests prove the hook BLOCKS a push from a dirty tree and
+    stays out of the way otherwise.
+    """
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "pre-deploy-clean-tree.sh"
+
+    def _run(self, repo: Path, command: str, env_extra=None):
+        import subprocess
+
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        payload = json.dumps({"tool_input": {"command": command}})
+        return subprocess.run(
+            ["bash", str(self.HOOK)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            cwd=str(repo),
+            env=env,
+        )
+
+    def _git(self, repo: Path, *args):
+        import subprocess
+
+        subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _make_repo(self):
+        repo = Path(tempfile.mkdtemp())
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "t@t.t")
+        self._git(repo, "config", "user.name", "t")
+        (repo / "app.py").write_text("print('v1')\n")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", "init")
+        return repo
+
+    def test_clean_tree_push_allowed(self):
+        repo = self._make_repo()
+        r = self._run(repo, "rsync -a ./ user@host:/srv/app/")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dirty_tree_push_blocked(self):
+        repo = self._make_repo()
+        (repo / "app.py").write_text("print('STRAY REVERT')\n")  # uncommitted edit
+        r = self._run(repo, "rsync -a ./ user@host:/srv/app/")
+        self.assertEqual(r.returncode, 2, "dirty rsync push must be blocked")
+        self.assertIn("BLOCKED", r.stderr)
+        self.assertIn("app.py", r.stderr)
+
+    def test_dirty_tree_scp_push_blocked(self):
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(repo, "sshpass -p x scp app.py newlevel@10.77.9.61:/usr/local/bin/")
+        self.assertEqual(r.returncode, 2, "dirty sshpass scp push must be blocked")
+
+    def test_dirty_tree_pull_allowed(self):
+        # remote is the SOURCE (pull), not the destination — not a deploy.
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(repo, "scp user@host:/etc/config ./local-config")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dirty_tree_non_deploy_allowed(self):
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(repo, "echo deploying && ls -la")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dirty_tree_push_bypass_marker(self):
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(repo, "rsync -a ./ user@host:/srv/  # airuleset:deploy-dirty-ok")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dirty_tree_push_bypass_env(self):
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(
+            repo,
+            "rsync -a ./ user@host:/srv/",
+            env_extra={"AIRULESET_ALLOW_DIRTY_DEPLOY": "1"},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dirty_chained_rsync_push_blocked(self):
+        # rsync push followed by a remote restart in one command line.
+        repo = self._make_repo()
+        (repo / "app.py").write_text("changed\n")
+        r = self._run(
+            repo,
+            "rsync -a ./ user@host:/srv/ && ssh user@host 'systemctl restart app'",
+        )
+        self.assertEqual(r.returncode, 2, "dirty push in a chain must still block")
 
 
 class TestRulesHaveFrontmatter(TestCase):

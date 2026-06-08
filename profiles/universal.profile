@@ -30,6 +30,7 @@ modules/ci/e2e-real-user-testing.md
 modules/ci/mutation-testing.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
+modules/deploy/deploy-from-clean-tree.md
 modules/quality/architecture-first.md
 modules/quality/investigate-existing-first.md
 modules/quality/mvp-philosophy.md
