@@ -19,6 +19,12 @@ Before ANY command that copies local files to a remote/production target — `rs
 
 The completion-report `✅ Deploy:` line MUST state the deployed commit SHA and that the remote matches HEAD, e.g. `✅ Deploy: synced 9a048c5 (HEAD=origin/main) to prod, diff-verify clean — all 5 files byte-match HEAD`.
 
+#### Enforcement vs. discipline — the hook covers a subset
+
+A `pre-deploy-clean-tree.sh` PreToolUse hook is the automated backstop. It is **conservative / fail-closed**: any `rsync`/`scp`/`sftp`/`sshpass` (or `rsync://`) command naming a remote endpoint is BLOCKED while the tree is dirty — it does NOT try to prove the transfer is a push, because parsing shell direction is fragile and every miss fails open. A wrongly-blocked pull or remote-to-remote copy is one bypass token of friction; a missed dirty push is the incident. `--dry-run`/`-n` is allowed (transfers nothing).
+
+The hook is a backstop, not the whole rule. **You are still responsible for the clean-tree gate on the vectors the hook does NOT watch:** `docker build` of the working dir, streaming pushes (`tar c … | ssh host "tar x"`, `cat f | ssh host "cat > …"`), and sftp batch/bare-host uploads (`sftp -b batch host`) that carry no `host:path` token. The rule applies to every way bytes leave the working tree for a live target; the hook enforces the argv-detectable subset that caused the incident.
+
 #### Bypass (rare, explicit)
 
 A genuine non-repo deploy (syncing a directory that is not a git checkout, or intentionally shipping local-only files) bypasses the hook with `AIRULESET_ALLOW_DIRTY_DEPLOY=1` or an inline `# airuleset:deploy-dirty-ok` marker in the command. Using the bypass to ship an uncommitted code change is the exact failure this rule prevents — NEVER use it to skip committing real source edits.
