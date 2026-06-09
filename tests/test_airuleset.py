@@ -452,6 +452,38 @@ class TestNoDroppedWorkHook(TestCase):
         )
         self.assertTrue(self._clean(r), r.stdout)
 
+    # --- asking permission to file issues (filing is non-destructive, never ask) ---
+
+    def test_ask_permission_to_create_issues_blocked(self):
+        # The exact log that frustrated the user.
+        r, _ = self._run(
+            "Give the word and I'll create the 7 new issues + apply the 4 rescopes "
+            "(no code, just the tracked backlog). Or tell me to hold."
+        )
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_should_i_file_issues_blocked(self):
+        r, _ = self._run("I drafted these as a backlog. Should I file these issues or hold off?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_want_me_to_open_issues_blocked(self):
+        r, _ = self._run("Here are the 5 tickets I'd open. Want me to create the issues now?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_fixed_verb_does_not_excuse_unfiled_backlog(self):
+        # The filing-only escape must ignore "fixed" — a fix elsewhere does not
+        # mean the proposed backlog was created.
+        r, _ = self._run("Fixed the auth bug. Should I create issues for the other 4 ideas, or hold?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_backlog_already_filed_allowed(self):
+        r, _ = self._run("Filed the backlog: #5, #6, #7, #8. Want me to start on #5 now?")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_issues_created_report_allowed(self):
+        r, _ = self._run("Created issues #12 and #13 for the remaining work via gh issue create.")
+        self.assertTrue(self._clean(r), r.stdout)
+
     # --- benign messages must not trip ---
 
     def test_benign_message_allowed(self):

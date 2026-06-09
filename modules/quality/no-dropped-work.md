@@ -45,6 +45,18 @@ gh issue create --title "<concise problem statement>" \
 
 Then surface it: `Filed as #N: <title>`. File BEFORE you stop — not "I'll file it later" (that's a fourth fate, and it doesn't exist). The bundling/follow-up gate (`autonomous-batch-issue-development.md`, `complete-planned-work.md`) decides whether a small cleanup lands in THIS PR instead of a new issue — but the choice is do-now-in-PR vs file-issue, NEVER drop.
 
+#### Prepared ≠ filed — RUN `gh issue create`, never ask permission to
+
+Filing a GitHub issue is **non-destructive tracking**. It changes no code, touches no production, costs nothing, and is trivially editable or closeable afterward. Therefore it **NEVER requires the user's approval** — and "should I create the issues?" is a pre-answered YES (see `ask-before-assuming.md`).
+
+The failure: you decompose a request, DRAFT the issue list in chat (titles, scopes, "the 7 new issues + 4 rescopes"), and then STOP to ask permission to create them — "give the word and I'll create them", "ready to file the backlog?", "or tell me to hold". **A drafted issue that was never `gh issue create`'d is a dropped issue.** The user then has to say "yes create them", which is exactly the re-prompting this rule exists to eliminate.
+
+- When you identify a backlog at the INITIAL high-level prompt, FILE it as part of doing the work — immediately, in that same turn. Do not present a list and wait to be told.
+- When the user points out missing issues, CREATE them — do not re-draft them and ask again.
+- If a specific issue's DESIGN is genuinely ambiguous (e.g. "reset to 0dB or last preset?"), still FILE the issue now (so it's tracked), then note the open design question ON that issue or in the same turn. Filing is never blocked on a design answer.
+
+Banned (the Stop hook blocks these): "give the word and I'll create the issues", "ready to create the backlog?", "should I file these issues or hold?", "want me to open the issues?", "once you confirm I'll file them" — any wording that asks permission to file issues instead of filing them. The only allowed message about a backlog is one where the issues are ALREADY created (`gh issue create` ran → cite `Filed as #N: <title>` for each).
+
 #### Banned phrases (intent — all rewordings and semantic equivalents apply)
 
 Any of these, when NOT accompanied by a filed `#N` (or an in-session fix), is a dropped-work violation:
