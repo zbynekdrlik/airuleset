@@ -1,38 +1,49 @@
-### PR Merge Policy
+### PR Merge Policy — Auto-Merge by Default
 
-**NEVER merge a PR unless the user explicitly tells you to.** Phrases like "merge it", "approved", "go ahead" are the only valid triggers. A green CI is NOT permission to merge. Completed work is NOT permission to merge. Only an explicit user instruction is.
+**Context gate — related rules you MUST also apply:**
+- `autonomous-quality-discipline.md` — gates are absolute; no bypass, no "merge despite"
+- `approval-scope.md` — deploy follows merge automatically; destructive actions still always ask
+- `post-deploy-verification.md` / `milestone-notifications.md` — verify after merge, ping the user
+- `two-branch-workflow.md` — the flow this policy governs: dev→main PRs in the user's repos
 
-**When work is done, ALWAYS create a PR.** Do not ask "what would you like to do?" with options like merge locally, keep branch, or discard. The answer is always: create a PR from `dev` to `main`, ensure CI is green, provide the URL. This is not a choice — it is the only workflow.
+**DEFAULT: when every gate is green, MERGE — do not ask.** Waiting for a merge confirmation on a fully green PR is wasted time. When work is done:
 
-Your responsibility:
+1. Create the PR from `dev` to `main`.
+2. Drive ALL gates green:
+   - CI: every job green (not partial)
+   - `mergeable: true` AND `mergeable_state: "clean"` (UNSTABLE / BLOCKED / BEHIND / DIRTY = NOT ready):
+     ```bash
+     gh api repos/OWNER/REPO/pulls/NUMBER --jq '{mergeable: .mergeable, mergeable_state: .mergeable_state}'
+     ```
+   - `/review` AND `/requesting-code-review` both clean — 0 🔴 0 🟡 0 🔵
+   - Bug-fix PR → regression-test evidence (RED/GREEN SHAs) per `regression-test-first.md`
+3. **Merge it yourself** (merge commit — no squash, no rebase). Monitor main CI + any deploy workflow to terminal state.
+4. Deploy pipelines triggered by the merge run automatically — verify per `post-deploy-verification.md` (version read from the live DOM).
+5. Send the milestone ping (`merged #N to main → deployed vX.Y.Z, CI green`) and the completion report stating merged + deployed + verified.
 
-1. Create the PR from `dev` to `main`
-2. Ensure all CI checks are green
-3. Verify the PR is mergeable:
-   ```bash
-   gh api repos/OWNER/REPO/pulls/NUMBER --jq '{mergeable: .mergeable, mergeable_state: .mergeable_state}'
-   ```
-4. The PR is ready when: `mergeable: true` AND `mergeable_state: "clean"`
-5. If "behind", sync branches first. If "blocked" or "dirty", fix the issues.
-6. Provide the green PR URL and WAIT for the user's explicit merge instruction.
+An in-the-moment user instruction ("don't merge yet", "hold this one") always overrides the default for that PR.
 
-**Never provide a PR URL that has failing checks or merge conflicts.**
+#### Per-project opt-out — manual merge marker
 
-**NEVER use `gh pr merge --admin` or any branch-protection bypass.** Branch protection exists to keep main green. If a gate is failing, the answer is to fix the failure — never to bypass the gate. Do not propose admin-merge as an option, do not list it in a "realistic options" menu, do not even mention it. If you find yourself thinking "this is unrelated, we could just admin-merge" — STOP. Fix the gate. See `autonomous-quality-discipline.md`.
-
-#### Autonomous auto-merge — opt-in, per-project ONLY
-
-The default above is absolute: no merge without an explicit instruction. The ONE exception is the `/autopilot` backlog loop on a project the user has pre-authorized. A project opts in by placing this marker in its OWN `CLAUDE.md`:
+A project opts OUT of auto-merge by placing this marker in its own `CLAUDE.md`:
 
 ```
-<!-- airuleset:autopilot=auto-merge -->
+<!-- airuleset:merge=manual -->
 ```
 
-That marker IS the user's explicit, standing merge instruction for that repo — the same authority as typing "merge it", granted once instead of per-PR. The user may also authorize a SINGLE run explicitly by invoking `/autopilot auto` (no marker needed — typing it that moment is the same explicit authorization, scoped to that run). When (and ONLY when) the marker is present OR the `auto` arg was given, `/autopilot` MAY merge `dev`→`main` itself — but ONLY after EVERY gate is green:
+Marker present → manual mode: stop at the green PR, provide the URL, end with `❓ NEEDS YOU: approve merge?`, and wait for the explicit instruction ("merge it", "approved"). The marker covers merge AND the deploy that follows it. Only the USER adds or removes this marker — never the agent. The old opt-in marker `airuleset:autopilot=auto-merge` is superseded (auto is now the default); remove it when touching a CLAUDE.md that still carries one.
 
-- CI: all jobs green (not partial, not "lint passed")
-- `mergeable: true` AND `mergeable_state: "clean"` (UNSTABLE / BLOCKED / BEHIND / DIRTY = NOT ready)
-- `/review` AND `/requesting-code-review` both clean — 0 🔴 0 🟡 0 🔵
-- No destructive action, and no production deploy bundled into the merge (deploy stays a separate approval per `approval-scope.md`)
+#### Scope — what auto-merge covers
 
-Any gate not green → fix it or stop and ask. The opt-in relaxes WHO triggers the merge, NEVER the quality bar: still no `--admin`, no branch-protection bypass, no "merge despite". Absent marker → the manual gate above stands; `/autopilot` runs one batch to a green PR and waits for "merge it". The agent NEVER adds this marker itself — only the user opts in. See the `autopilot` skill.
+- Covers: the agent's own dev→main workflow PRs in the user's repos (the two-branch flow).
+- Does NOT cover: foreign/third-party repos, PRs the agent didn't drive, release tags to external registries, anything outside the two-branch flow → ask first.
+- Destructive actions and destructive DB ops are NEVER part of a merge (`no-destructive-remote-actions.md`, `database-migrations.md`).
+
+#### The bar never moves (unchanged absolutes)
+
+Auto-merge changes WHO pulls the trigger when everything is green — NEVER the bar:
+
+- **Never merge with ANY gate red.** A failing gate = fix the root cause. Not "informational", not "advisory", not "flaky".
+- **NEVER `gh pr merge --admin` or any branch-protection bypass.** If you're thinking "unrelated failure, admin-merge it" — STOP. Fix the gate. Do not propose it, do not mention it.
+- **Never report "done" for a PR that has failing checks or conflicts.**
+- UNSTABLE ≠ clean. "Functionally ready" ≠ ready. Applies to all rewordings and semantic equivalents.
