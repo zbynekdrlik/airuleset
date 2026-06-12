@@ -35,15 +35,15 @@ Plus in the repo:
 - `.cargo/mutants.toml`: `profile = "mutants"`; `exclude_globs` for generated code; per-package tests only (never `test_workspace = true`)
 - `Cargo.toml`: `[profile.mutants]` with `inherits = "test"`, `debug = "none"`
 - Slow integration/E2E tests stay OUT of the per-mutant suite (separate package or excluded) — otherwise they re-run for EVERY mutant
-- `-- --all-targets` skips doctests (each doctest compiles a separate binary per mutant)
+- `-- --all-targets` includes all test binary targets; nextest does not run doctests regardless — which is wanted here (each doctest would compile a separate binary per mutant)
 
 #### Budget overrun = setup bug — STOP THE LINE
 
-If the PR gate exceeds ~15 min: fix the CONFIG — apply missing levers, shard (`--shard k/2..4`), narrow scope. NEVER raise `timeout-minutes` as a band-aid, NEVER wait it out, NEVER silently delete the gate. Also: long-lived dev branches grow `--in-diff` scope toward full-tree — merge small PRs frequently (`pr-merge-policy.md` default auto-merge keeps diffs small).
+If the PR gate exceeds ~15 min: fix the CONFIG — apply missing levers, shard across 2-4 matrix jobs (`--shard 1/2`, `--shard 2/2`, …), narrow scope. NEVER raise `timeout-minutes` as a band-aid, NEVER wait it out, NEVER silently delete the gate. Also: long-lived dev branches grow `--in-diff` scope toward full-tree — merge small PRs frequently (`pr-merge-policy.md` default auto-merge keeps diffs small).
 
 #### Weekly full-tree run (async)
 
-Scheduled workflow (weekend), sharded: `cargo mutants --shard k/8 --baseline=skip` across parallel jobs. Surviving mutants → `gh issue create` (batched per module/area, label `test-quality`), worked through the normal backlog loop. The job FAILS only when the tooling fails to run; survivors become issues, not red CI — nothing is silently green because every survivor is a tracked `#N`.
+Scheduled workflow (weekend), sharded: `cargo mutants --shard ${{ matrix.shard }}/8 --baseline=skip` across a matrix of parallel jobs (`matrix.shard` = 1..8; the flag takes `index/total`). Surviving mutants → `gh issue create` (batched per module/area, label `test-quality`), worked through the normal backlog loop. The job FAILS only when the tooling fails to run; survivors become issues, not red CI — nothing is silently green because every survivor is a tracked `#N`. This is NOT `continue-on-error`: the job's declared contract is "mutation ran + report published + survivors filed", and it is binary on that contract.
 
 #### TypeScript: StrykerJS
 

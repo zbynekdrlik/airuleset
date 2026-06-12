@@ -11,10 +11,11 @@ Test coverage must not decrease. Coverage is enforced in CI — not optional, no
 Every Rust project CI MUST include a coverage job using `cargo-llvm-cov`:
 
 ```yaml
+- name: Install coverage tools (prebuilt)
+  uses: taiki-e/install-action@v2
+  with: { tool: cargo-llvm-cov,cargo-nextest }
 - name: Coverage
-  run: |
-    cargo install cargo-llvm-cov
-    cargo llvm-cov nextest --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
+  run: cargo llvm-cov nextest --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '60' }}
 ```
 
 - `--fail-under-lines` — CI fails if line coverage drops below threshold

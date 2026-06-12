@@ -1,7 +1,7 @@
 ### Regression Test First — Bug Reports Are Missing-Test Reports
 
 **Context gate — related rules you MUST also apply:**
-- `tdd-workflow.md` — RED-GREEN-REFACTOR; bug-fix protocol mandates failing test FIRST
+- `tdd-workflow.md` — bug fixes: strict test-first (RED before GREEN); features: tests mandatory, order flexible
 - `test-strictness.md` — no `#[ignore]`, no shallow tests, no mocks of internal code
 - `e2e-real-user-testing.md` — UI bugs need Playwright tests, not curl
 - `complete-planned-work.md` — bug fix without locking test = incomplete
