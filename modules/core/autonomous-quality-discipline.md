@@ -50,7 +50,7 @@ If you've been working overnight or while the user is away, and CI fails:
 The ONLY reasons to interrupt long-running autonomous work:
 - Genuinely ambiguous-scope decision (e.g. "EQ resets to 0dB or last preset?") — see `ask-before-assuming.md`
 - Destructive action that needs explicit approval (reboot, drop table, delete data) — see `no-destructive-remote-actions.md`
-- ALL goals achieved AND PR mergeable + green — send the completion report and wait for "merge it"
+- ALL goals achieved AND merged + deployed + verified (default auto-merge per `pr-merge-policy.md`) — send the completion report. Manual-marker (`airuleset:merge=manual`) projects: stop at the green PR with `❓ approve merge?`
 
 CI failures are NOT interruptions. They are part of the work.
 
