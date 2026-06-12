@@ -2,8 +2,10 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -658,6 +660,73 @@ class TestRulesHaveFrontmatter(TestCase):
                 f"Rule missing frontmatter: {rule_file.name}",
             )
             self.assertIn("paths:", content, f"Rule missing paths: {rule_file.name}")
+
+
+class TestProseViolationsAutoMergeSignals(TestCase):
+    """Auto-merge-era signals in stop-check-prose-violations.sh."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _sid(self):
+        sid = f"test-prose-{uuid.uuid4().hex[:12]}"
+        self.addCleanup(lambda: Path(f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
+        return sid
+
+    def _run(self, msg, sid=None):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid or self._sid()})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_merged_prose_report_without_heading_blocked(self):
+        msg = ("Merged to main (a1b2c3d), v1.2.0 deployed and verified.\n"
+               "https://github.com/zbynekdrlik/foo/pull/12\n"
+               "All done for today.")
+        r = self._run(msg)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('"block"', r.stdout)
+
+    def test_merged_mention_without_pr_url_clean(self):
+        r = self._run("Merged to main and deployed v1.2.0 to dev2.\n✅ DONE: shipped")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"block"', r.stdout)
+
+    def test_merged_midloop_with_working_marker_clean(self):
+        msg = ("Worker finished: merged to main (a1b2c3d), v1.2.0 verified.\n"
+               "https://github.com/zbynekdrlik/foo/pull/12\n"
+               "Starting issue #13 next.\n"
+               "⏳ WORKING: fleet loop continues — nothing needed from you")
+        r = self._run(msg)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"block"', r.stdout)
+
+
+class TestPreAskAutoAnswerMergeQuestions(TestCase):
+    """Merge-permission questions are pre-answered → hook exits 2."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "pre-ask-auto-answer.sh"
+
+    def _run(self, question):
+        payload = json.dumps({"tool_input": {"questions": [{"question": question}]}})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_merge_permission_question_blocked(self):
+        r = self._run("PR #5 is green — should I merge now or wait for your approval?")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("BLOCKED", r.stderr)
+
+    def test_want_me_to_merge_blocked(self):
+        r = self._run("All gates green. Want me to merge the PR?")
+        self.assertEqual(r.returncode, 2)
+
+    def test_design_question_allowed(self):
+        r = self._run("Which wording for the reset button label: 'Reset' or 'Clear'?")
+        self.assertEqual(r.returncode, 0)
+
+    def test_design_merge_question_allowed(self):
+        # "merge" about code design (not a PR) must NOT be blocked
+        r = self._run("Should I merge these two config structs into one type?")
+        self.assertEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":
