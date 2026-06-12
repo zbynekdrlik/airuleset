@@ -10,7 +10,7 @@
 1. Check status: `gh run list --limit 3`
 2. Watch the run: `gh run view <run-id>` (poll until terminal state — success or failure). Do NOT use `gh run watch` — it polls every 3 seconds and causes GitHub API rate limiting on long runs. Instead, run `gh run view` in the background with a reasonable sleep: `sleep 300 && gh run view <run-id>`. Do NOT spam empty "Waiting" messages.
 
-**Do NOT use `/loop`, `CronCreate`, or any scheduled/recurring polling for CI monitoring.** These create 30-minute gaps where failures go unnoticed, and they interfere with Discord idle notifications. Use a single `sleep N && gh run view` background command — this is the ONLY acceptable method.
+**Do NOT use `/loop`, `CronCreate`, or any scheduled/recurring polling for CI monitoring.** These create 30-minute gaps where failures go unnoticed, and they interfere with Discord idle notifications. Use a single `sleep N && gh run view` background command — this is the ONLY acceptable method. (EXCEPTION — orchestration, not CI polling: `/loop` as the autopilot-fleet SUPERVISOR is sanctioned. The orchestrator session never watches CI itself — each worker session monitors its OWN runs with the `sleep N && gh run view` pattern. See the `autopilot` skill.)
 
 **Do NOT write custom bash monitor scripts** (e.g. `/tmp/main-monitor.sh`, `while true; do ... sleep; done`). These detach from Claude's session, don't return results to Claude, and don't trigger notifications. Only use the Bash tool with `run_in_background: true` running `sleep N && gh run view <run-id>` — this returns the result to Claude's conversation when done, allowing Claude to react and correctly trigger the idle notification.
 

@@ -48,7 +48,11 @@ The evaluator reads ONLY the conversation transcript — it does NOT run command
 
 Do NOT use `/goal` for ambiguous-scope work needing user decisions (the loop has no one to ask) or anything gated on a destructive action. It is for verifiable execution, not design. Applies to all rewordings and semantic equivalents.
 
-For the specific case of working a whole GitHub issue backlog hands-off — pick → implement (TDD) → PR → CI green → merge → next, until empty — use the **`/autopilot` skill**. It emits a repo-tuned `/goal` line, governs the per-batch loop body, gates auto-merge on the per-project `airuleset:autopilot=auto-merge` opt-in (`pr-merge-policy.md`), and pings the user at each milestone (`milestone-notifications.md`). Without the opt-in marker it runs one batch to a green PR and stops for the merge.
+For the specific case of working a whole GitHub issue backlog hands-off — pick → implement (TDD) → PR → CI green → merge → deploy verified → next, until empty — use the **`/autopilot` skill**. Default engine is the FLEET: this session runs `/loop` as supervisor and dispatches each issue to a fresh `claude --bg` full-session worker (visible + steerable in agent view); `/autopilot solo` keeps the single-session `/goal` loop. Merging follows `pr-merge-policy.md` default auto-merge (opt-out marker `airuleset:merge=manual`); milestones ping per `milestone-notifications.md`.
+
+#### `/loop` + Agent view (fleet orchestration)
+
+`/loop` (v2.1.72+) re-runs a standing prompt between turns: `/loop 5m <prompt>` fixed-interval, `/loop <prompt>` self-paced (1m–60m adaptive, ends itself when provably done), bare `/loop` runs the project's `.claude/loop.md`. Session-scoped, 7-day expiry, fires only while the session is idle. Agent view (`claude agents`, v2.1.139+) lists background daemon sessions — FULL Claude Code sessions dispatched via `claude --bg --name <n> "<prompt>"`, steerable per row, machine-readable via `claude agents --json` (states working|blocked|done|failed, plus `waitingFor`). The autopilot fleet = `/loop` supervisor in the main session + one `claude --bg` worker per issue (see the `autopilot` skill). Like `/goal`, only the USER can type `/loop` — the skill prints the line to paste. The `ci-monitoring.md` ban on `/loop` applies to CI POLLING, not to this supervisor use.
 
 #### `/fewer-permission-prompts` skill
 
