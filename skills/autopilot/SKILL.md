@@ -1,301 +1,162 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [auto|manual|status]. auto = hands-off, merges dev→main when all gates green; manual (default) = run one batch to a green PR then stop for your merge; status = show mode + backlog, run nothing. Works the GitHub issue backlog: pick bundle-safe issues → TDD → PR → CI green → merge → repeat until empty or a real question."
-argument-hint: "[auto | manual | status]"
+description: "Usage: /autopilot [fleet|solo|status] [manual]. fleet (default) = /loop supervisor in this session dispatches each issue to a fresh claude --bg full-session worker (visible in agent view); solo = single-session /goal loop; status = show mode + backlog, run nothing. manual modifier = stop at green PR this run. Merge/deploy follow pr-merge-policy.md default auto-merge (opt-out marker airuleset:merge=manual)."
+argument-hint: "[fleet | solo | status] [manual]"
 user-invocable: true
 disable-model-invocation: true
 ---
 
-# Autopilot — Hands-off Backlog Loop
+# Autopilot — Hands-off Backlog Loop (Fleet)
 
-> **Usage:** `/autopilot [auto|manual|status]`
-> • `auto` — hands-off: merges `dev`→`main` whenever all gates are green, loops till backlog empty
-> • `manual` *(default)* — runs one batch to a green PR, then stops for your merge
-> • `status` — print resolved mode + open-issue count, run nothing
-> Mode precedence: arg > repo marker (`airuleset:autopilot=auto-merge`) > default manual.
+> **Usage:** `/autopilot [fleet|solo|status] [manual]`
+> • `fleet` *(default)* — orchestrator/worker: this session supervises via `/loop`; each issue runs in a fresh `claude --bg` daemon session (its own full window, visible + steerable in agent view)
+> • `solo` — single-session `/goal` loop (no worker windows)
+> • `status` — print resolved mode + backlog count, run nothing
+> • `manual` modifier — stop every PR at green for the user's "merge it", this run only
 
-Removes the three per-batch interruptions: re-invoking `/issue-planner`, approving
-each merge, and manual `/compact`. Picks issues, implements (TDD), PRs, drives CI
-green, merges (if the project opted in), and continues to the next — until the
-backlog is empty or a **genuine** question is needed.
+Works the GitHub issue backlog hands-off: pick issue → fresh worker implements (TDD) → PR → CI green → auto-merge → deploy verified → issue closed → orchestrator independently verifies → next issue. The main session's context holds only dispatch + verify summaries — no manual `/compact`, no degradation across a long backlog.
 
 **Context gate — this skill IS the orchestration of these rules, apply all:**
-- `autonomous-batch-issue-development.md` — bundling gate, one PR per batch, no between-issue prompts
-- `pr-merge-policy.md` — the per-project auto-merge exception + absolute no-bypass gates
-- `complete-planned-work.md` / `autonomous-quality-discipline.md` — keep going until gates green; never shortcut
-- `tdd-workflow.md` / `regression-test-first.md` — RED-before-GREEN per issue
-- `ci-monitoring.md` / `ci-push-discipline.md` — one push per batch, monitor to terminal
-- `ask-before-assuming.md` — what counts as a real question vs a pre-answered process pause
-- `post-deploy-verification.md` / `version-on-dashboard.md` — verify after any merge that deploys
-- `milestone-notifications.md` — ping the user (Discord/push) at each phase, not just at the end
-- claude-code-tooling.md `#### Autonomous Goals (/goal)` — the loop engine
+- `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker = stop at green PR
+- `autonomous-batch-issue-development.md` — bundling gate; one PR per worker
+- `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
+- `ci-monitoring.md` — workers monitor their OWN CI; the orchestrator NEVER polls CI (the /loop carve-out)
+- `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
+- `milestone-notifications.md` — ping per merged+deployed issue and on every stop-for-question
+- `no-dropped-work.md` — workers file issues for everything identified but unfinished
+- `ask-before-assuming.md` — real design questions stop the loop; process questions never
 
-## Two pieces — and the one manual step
+## Mode resolution
 
-1. **This skill** = the loop body + guardrails (what the agent does each cycle).
-2. **`/goal`** = the native engine that re-runs the agent turn-after-turn with no
-   prompts, until a fast evaluator confirms the condition (reading ONLY the
-   transcript). **The agent cannot set a goal — only you can type `/goal`.** So in
-   hands-off mode this skill PRINTS the exact, repo-tuned `/goal` line; you paste it
-   once and step away. That single paste is the only manual step.
+- `fleet` (default) requires the daemon: `claude agents --json` must work. Unavailable (remote/cloud session, Bedrock-style platform) → fall back to `solo` and say so in the banner.
+- Merge behavior comes from `pr-merge-policy.md`: default auto; `airuleset:merge=manual` marker in the project CLAUDE.md or the `manual` modifier → every PR stops green for "merge it".
+- The old `airuleset:autopilot=auto-merge` marker is superseded (auto is the default now); remove it when touching a CLAUDE.md that still has one.
 
-## Arguments & mode (auto vs manual)
+## FLEET mode
 
-`/autopilot` accepts an optional first argument that sets the mode FOR THIS RUN:
-
-- `/autopilot auto` (aliases `auto-merge`, `hands-off`) → **auto-merge** — the loop
-  merges `dev`→`main` itself when every gate is green. Typing it IS your explicit merge
-  authorization for this run (`pr-merge-policy.md`), the same as the persistent marker.
-- `/autopilot manual` → **manual** — run one batch to a green PR, stop for your merge.
-- `/autopilot` (no arg) → mode comes from the project marker if present, else **manual**.
-- `/autopilot status` → print mode + marker + backlog count and STOP (run nothing).
-
-**Mode resolution precedence:** explicit argument > project marker
-(`airuleset:autopilot=auto-merge` in the repo's `CLAUDE.md`) > default **manual**.
-
-The default is manual on purpose — auto-merge to `main` unattended is safety-sensitive,
-so it must be opted into deliberately (per-run arg, or per-repo marker), never assumed
-just because `/autopilot` was invoked. Prefer the marker for low-risk MVPs you always
-run hands-off; use the `auto` arg for a one-off hands-off run; keep manual for anything
-with real production data.
-
-## Step 1 — Preflight (always)
+### Step F1 — Preflight
 
 ```bash
-git fetch origin
-git rev-parse --abbrev-ref HEAD          # must be dev (or project's dev-equivalent)
-git status --porcelain                   # must be empty (clean tree)
-gh auth status                           # must be authenticated
-gh run list -L 3                         # no run we'd fight; note in-progress
+git fetch origin && git rev-parse --abbrev-ref HEAD && git status --porcelain   # dev, clean
+gh auth status && gh issue list --state open -L 50
+claude daemon status && claude agents --json | head -5                          # daemon available
+grep -n "airuleset:merge=manual" CLAUDE.md || true                              # merge mode
 ```
 
-- **Resolve mode** (precedence: arg > marker > manual):
-  ```bash
-  grep -n "airuleset:autopilot=auto-merge" CLAUDE.md   # marker check
-  ```
-  Explicit `auto`/`manual` arg wins; else marker present → `MODE=auto-merge`; else
-  `MODE=manual`.
-- **PRINT the mode banner FIRST** (before any work) so the resolved mode is always
-  visible and the user knows how to change it — e.g.:
-  ```
-  autopilot · MODE=manual  (source: default — no `auto` arg, no marker)
-  → switch: `/autopilot auto` for this run, or add `<!-- airuleset:autopilot=auto-merge -->`
-    to CLAUDE.md to make it permanent. manual = one batch → green PR → stop for your merge.
-  ```
-  State the source explicitly (arg / marker / default) so "why this mode?" is answered
-  on screen, not hidden in a file.
-- **Load the decision log** — `cat docs/autopilot-log.md` if it exists (create it on the
-  first run). This + the project `CLAUDE.md` re-load the conventions and decisions from
-  earlier work so the loop never re-litigates a settled call (see `## Compaction & resume`).
-- **Version-on-dashboard foundation gate** (web projects) — per `version-on-dashboard.md`
-  / issue-planner Step 1d. If the dashboard has no version label, the foundation issue
-  is the FIRST work item; file it before anything else.
-- **Backlog scope** — `gh issue list --state open`. The work-list is every open issue
-  that is NOT labeled `blocked` / `needs-design` / `needs-decision` / `question` /
-  `wontfix` / `discussion`, and that passes the bundling gate on inspection. If zero
-  qualify → report "backlog empty, nothing to do" and STOP (do not set a goal).
+- **Print the mode banner FIRST**, e.g. `autopilot · FLEET · merge=auto (no manual marker) · /loop expires after 7 days, session must stay open`.
+- **Backlog scope:** open issues NOT labeled `blocked` / `needs-design` / `needs-decision` / `question` / `wontfix` / `discussion`. Zero qualify → "backlog empty", STOP.
+- **One-time machine prerequisites** (tell the user once if missing):
+  - `--permission-mode auto` must have been accepted interactively once on this machine (`claude --permission-mode auto`), else dispatched workers cannot run unattended.
+  - Repo setting `worktree.bgIsolation: "none"` so workers commit directly on `dev` — no stray `.claude/worktrees/` branches (`two-branch-workflow.md`).
+- **Write `.claude/loop.md`** (template in Step F3) and commit it.
+- **Version-on-dashboard foundation gate** (web projects): no version label → that foundation issue is the FIRST work item (`version-on-dashboard.md`).
 
-## Step 2 — Branch on mode
+### Step F2 — Start the engine (the one manual paste)
 
-### MODE=manual (default — no marker)
-
-Merging needs the user, so do NOT set a `/goal` loop (it would spin at the merge
-gate). Instead run ONE bundle-safe batch, then stop:
-
-1. Select the next bundle-safe batch (issue-planner bundling gate: ≤300 LoC each, no
-   schema/API/security/cross-cut, independent).
-2. Run the per-issue cycle (Step 3) for each issue in the batch.
-3. One push, monitor CI to green (Step 4).
-4. Open/confirm the PR (`dev`→`main`), verify `mergeable: true` + `state: clean`,
-   run both audit passes clean.
-5. **Stop** and surface the green PR per `completion-report.md`. Wait for the user's
-   explicit merge instruction. (To opt this repo into hands-off looping, the user adds
-   the marker — see Step 6.)
-
-### MODE=auto-merge (marker present)
-
-Emit the ready-to-paste `/goal` line and let the native loop drive. Print exactly:
+The agent cannot type `/loop` — print this line and let the user paste it once:
 
 ```
-/goal Every open issue in this repo that is not labeled blocked/needs-design/needs-decision is closed via a merged PR — proven in the transcript by `gh issue list --state open` showing none of those issues remain AND `gh run list -b main -L 1` showing the latest main CI run green — or stop after 30 turns, or stop and ask me the moment a genuine design choice, a destructive action, or a CI failure I can't fix in two attempts arises.
+/loop
 ```
 
-Tune the label exclusions and turn bound to the repo before printing. Then run the
-loop body (Step 3 + Step 4 + Step 5) every cycle until the condition holds.
+Bare `/loop` runs `.claude/loop.md` self-paced (1m–60m adaptive). The loop ends itself when the backlog is empty and no worker is active (it simply stops scheduling the next wakeup).
 
-## Step 3 — Per-issue cycle (main-loop implementer)
-
-**The implementer is the main loop — NEVER a degraded in-session subagent.** Each
-issue's implementation runs in the primary Opus 4.8 `/goal` loop itself, so every
-commit is written at full main-loop quality (full system prompt, all rules loaded,
-can ask the user, can itself dispatch `superpowers:subagent-driven-development` one
-supported level deep). An in-session `Agent`/`Task` subagent boots with a REDUCED
-system prompt, isolated fresh context, and no user channel — a different harness, not
-a replica of the main loop — and it cannot spawn `subagent-driven-development` (no
-`Agent` tool inside a subagent). So implementation is NEVER routed through a subagent.
-
-**Context hygiene comes from GitHub-as-state, not a subagent boundary.** The backlog,
-commit SHAs, and PR/CI status are re-derived with `gh` every cycle, so the loop carries
-almost no cross-issue memory and re-reads each issue fresh — mush can't accumulate. See
-`## Compaction & resume` for why this is safe under auto-compact.
-
-For each issue in the batch, no prompts between issues (`autonomous-batch-issue-development.md`):
-
-1. `gh issue view <N>` — read body + comments; confirm it fits the bundling gate
-   (≤300 LoC, no schema/API/security/cross-cut, independent). On inspection it
-   doesn't → stop-and-ask or file solo (Step 5); never silently absorb the surprise.
-2. **Implement on the main loop** (this is the quality-critical work):
-   - **TDD** — bug fix → RED test commit first, then GREEN fix commit
-     (`regression-test-first.md`); feature → tests alongside; UI → Playwright E2E
-     (`e2e-real-user-testing.md`).
-   - For a multi-step issue, the main loop MAY dispatch
-     `superpowers:subagent-driven-development` directly — its implementer/reviewer
-     subagents are first-level children of the main loop (supported, one level deep).
-   - Local cheap checks only (fmt/lint/`cargo check`); CI compiles/tests
-     (`no-local-builds.md`).
-   - Commit on `dev` with `Closes #<N>`.
-3. **Append ONE terse line to `docs/autopilot-log.md`** (issue #, commit SHA(s),
-   RED→GREEN test names, any scope/decision note) — NOT the file-reads/edit churn. If the
-   issue established a lasting project convention, also write it to `CLAUDE.md`. Then
-   immediately start the next issue, re-deriving remaining state from `gh` + the log,
-   never from accumulated transcript.
-
-**Read-only fan-out is the ONLY allowed in-session subagent use.** Heavy, low-value
-exploration (multi-file code search, cross-issue triage, dependency mapping) MAY be
-delegated to read-only `Explore` subagents so their token churn never lands in the
-loop's context. Quality-critical implementation NEVER goes to a subagent and NEVER to a
-fresh `claude -p` process — only to this continuous main loop (see `## Compaction & resume`
-for why fresh/amnesiac workers are banned).
-
-## Step 4 — Push, CI, merge
-
-1. One `git push` for the whole batch.
-2. Monitor CI to terminal — `sleep N && gh run view <id>` in background, ALL jobs
-   (`ci-monitoring.md`). Print the status into the transcript (evidence for the
-   evaluator).
-3. **CI red** → `gh run view --log-failed`, fix root cause, repush once. Same failure
-   twice → STOP and ask (Step 5).
-4. **CI green + `mergeable: true` + `state: clean` + `/review` clean + `/requesting-code-review` clean:**
-   - `MODE=auto-merge` → merge `dev`→`main` (merge commit, **never** `--admin` / no
-     bypass). Monitor main CI + any deploy to terminal. If the merge deploys a UI,
-     run `post-deploy-verification.md` (Playwright, read version label). Sync `dev`,
-     bump version (`version-bumping.md`).
-   - `MODE=manual` → stop, surface the PR, wait for "merge it".
-5. **Milestone ping** (`milestone-notifications.md`) — after an auto-merge lands, notify
-   the user: `merged #N+#M to main → deployed vX.Y.Z-dev.k, CI green`. Discord `reply`
-   if a chat_id is in session, else `PushNotification` proactive. One line, not every
-   commit — once per merged batch.
-6. Re-print `gh issue list --state open` (closed issues now gone) — evidence the
-   backlog shrank. Loop continues to the next batch.
-
-## Step 5 — Stop-and-ask gate (the "real question")
-
-STOP the loop and ask (or surface clearly) ONLY for:
-
-- **Ambiguous scope** on an issue — a genuine design choice (`ask-before-assuming.md`).
-- **Destructive remote action** needed (`no-destructive-remote-actions.md`).
-- **CI failure not fixable** after one real fix attempt (2nd identical failure) —
-  surface the log, do NOT bypass, do NOT loosen the gate.
-- **Design conflict** between two issues in the batch.
-- **A gate won't go clean** in auto-merge mode — surface it; never merge "despite".
-- **Production deploy** that the project's pipeline does not perform automatically —
-  separate approval (`approval-scope.md`).
-- **Backlog exhausted** → report done per `completion-report.md`.
-
-Every stop above ALSO fires a milestone ping (`milestone-notifications.md`) so the user
-is pulled back: `autopilot paused — #51 needs a design call: <the question>` on a
-stop-for-question, or `autopilot done — backlog empty, N issues merged to main` when
-finished.
-
-NOT reasons to stop (pre-answered NO — `ask-before-assuming.md`): "ready for the next
-issue?", "should I bundle?", "commit before next?", "push now or later?", "should I
-monitor CI?", "verify with Playwright?". Decide and proceed.
-
-## Step 6 — Opting a project into hands-off auto-merge
-
-The user enables hands-off merging for one repo by adding to that repo's `CLAUDE.md`
-(matching the local-build tier-marker convention):
+### Step F3 — `.claude/loop.md` template (written by Step F1)
 
 ```markdown
-## Autopilot
+# Autopilot fleet supervisor — one iteration
 
-<!-- airuleset:autopilot=auto-merge -->
+You are the ORCHESTRATOR. Never implement issues yourself; never poll CI yourself.
 
-**Autopilot auto-merge ENABLED.** `/autopilot` may merge dev→main itself when every
-gate is green (CI all-green, mergeable+clean, both audits clean). Reason: <one line>.
+1. `claude agents --json` — list worker sessions (name prefix "ap-").
+2. For each worker finished since the last iteration (state done/failed): INDEPENDENTLY
+   verify from primary sources — never trust the worker's claim:
+   - `gh pr view <PR> --json state,mergedAt,mergeCommit`   (merged?)
+   - `gh run list -b main -L 1 --json conclusion`          (main CI green?)
+   - deployed version read from the live target (curl /api/version or Playwright DOM read)
+   - `gh issue view <N> --json state`                      (closed?)
+   All confirmed → milestone ping (Discord reply if chat_id known, else PushNotification):
+   "#N <title> merged → v<X> deployed, CI green"; append one line to docs/autopilot-log.md.
+   Anything NOT confirmed → treat as stuck (step 4).
+3. No active worker for this repo AND backlog non-empty → dispatch the next issue
+   (highest priority first; bundling gate respected — bundle-safe singles by default,
+   2-3 trivially related issues may share one worker):
+   `cd <repo> && claude --bg --name "ap-<repo>-<N>" --permission-mode auto "<WORKER CONTRACT for issue #N>"`
+4. Stuck/failed workers:
+   - state blocked / waitingFor input → read it (`claude agents --json`, `claude logs <id>`);
+     genuine design question → ❓ ping the user with the question text.
+   - failed, or working > 3 h on a bundle-safe issue → read the log tail; ONE respawn with
+     a refined contract MAX, then stop dispatching and ❓ ping the user. Never silently kill.
+5. Backlog empty AND no active workers → final completion report; do NOT schedule the next
+   wakeup (this ends the loop).
+6. Otherwise schedule the next wakeup ~20–30 min (a worker typically needs 30–90 min — don't poll hot).
 ```
 
-The marker IS the standing merge authorization for that repo (`pr-merge-policy.md`).
-Reserve it for low-risk projects; anything with real users/production data should stay
-manual. The agent does NOT add this marker on its own — the user opts in deliberately.
+### Step F4 — Worker contract (the dispatch prompt template)
 
-## Guardrails (hard — never relax)
+```
+Work GitHub issue #<N> in <repo> end-to-end. You are a full autonomous session — all
+global and project rules apply.
 
-- **Gates are absolute.** Auto-merge requires ALL of: CI every job green; `mergeable: true`
-  AND `mergeable_state: "clean"`; `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
-  Any miss → fix or stop. NEVER `--admin`, NEVER bypass branch protection, NEVER merge
-  "despite" (`autonomous-quality-discipline.md`).
-- **One feature/batch = one PR** — no progressive multi-PR rollouts
-  (`autonomous-batch-issue-development.md`).
-- **Deploy ≠ merge.** Merging is authorized by the marker; a separate production deploy
-  is not, unless the project's own merge→main pipeline does it automatically
-  (`approval-scope.md`).
-- **Bounded loop.** The `/goal` line MUST include `…or stop after N turns`. No built-in cap.
+READ FIRST: this repo's CLAUDE.md, docs/autopilot-log.md (conventions + decisions so far),
+then `gh issue view <N>` (body + all comments).
 
-## Compaction & resume
+CYCLE (no pauses, no process questions):
+1. git fetch origin; confirm dev branch + clean tree; version bump FIRST (version-bumping.md).
+2. Implement issue #<N> ONLY — one issue, nothing else. TDD per tdd-workflow.md: bug →
+   RED test commit then GREEN fix commit; feature → tests in the same PR; UI → Playwright E2E.
+3. Search the codebase before assuming anything is missing — never re-implement what exists.
+   NO placeholder or stub implementations. No scope creep.
+4. Commit on dev with "Closes #<N>", push once, monitor YOUR CI run to terminal state
+   (background `sleep N && gh run view <id>` — ci-monitoring.md).
+5. PR dev→main; drive every gate green: CI all jobs, mergeable:true + mergeable_state:clean,
+   /review AND /requesting-code-review both 0 🔴 0 🟡 0 🔵.
+6. Merge per pr-merge-policy.md (default auto-merge; airuleset:merge=manual marker → stop
+   at the green PR and report it instead). Monitor main CI + deploy workflow to terminal.
+7. Post-deploy verification: open the live app, read the version label from the DOM,
+   exercise the changed feature (post-deploy-verification.md).
+8. Anything identified but not finished → gh issue create NOW (no-dropped-work.md).
+9. Append ONE line to docs/autopilot-log.md (issue, SHAs, RED→GREEN test names, decisions).
 
-**Context hygiene = GitHub-as-state + a re-read decision log, not a subagent boundary.**
-The loop re-derives its state from durable sources each cycle, so it holds almost no
-long-lived transcript memory:
+FINAL MESSAGE = exactly this evidence block (the orchestrator re-verifies every line):
+issue: #<N> <title>
+pr: #<M> <url>
+merge_sha: <sha | "NOT MERGED (manual marker)">
+main_ci: <run-id> <conclusion>
+deployed_version: <string read from DOM | "no deploy">
+issue_state: <open|closed>
+unverified: <list | "none">
+filed: <#K list | "none">
+```
 
-- **Backlog** — `gh issue list --state open` every cycle; the open set IS the to-do
-  list. Closed issues vanish from it — that's the durable progress signal.
-- **CI** — poll `gh run view --json status,conclusion,jobs`; dump full logs ONLY on a
-  failure (`--log-failed`, for the fix decision). Never tail green-run logs into context.
-- **Per issue** — append ONE terse line to `docs/autopilot-log.md` (issue #, commit
-  SHA(s), RED→GREEN test names, merge status, decision notes). Don't re-summarize the
-  whole history into the transcript each turn — the log IS the summary, and it survives
-  compaction.
+### Fleet rules (hard — never relax)
 
-Because the working set stays small, the auto-compact threshold is rarely approached.
-And when compaction DOES fire it is harmless here: it lands where the only state is the
-terse summary, and even a lossy summary loses nothing real — commits, PR, and CI are all
-re-readable from GitHub. (Note: auto-compaction is checked MID-request, NOT at safe task
-boundaries, and is lossy — so a design that depended on in-transcript working memory
-would be fragile. This design does not; GitHub holds the truth, which is what makes
-mid-issue compaction non-catastrophic.)
+- **Serial per repo.** ONE active worker per repo — the two-branch workflow makes parallel same-repo workers collide on `dev` (shared push target; pushes cancel each other's CI). Parallel across DIFFERENT repos is fine: run this pattern from each repo's own session.
+- **The orchestrator never implements and never polls CI.** Implementation churn belongs in worker windows; CI watching belongs to the worker that pushed.
+- **Independent verification is mandatory.** A worker saying "merged and deployed" counts ONLY after the orchestrator re-reads PR/CI/version/issue state from primary sources — premature-done claims are the #1 long-running-agent failure.
+- **Continuity lives in durable files, not transcripts.** Workers read CLAUDE.md + docs/autopilot-log.md FIRST; lasting conventions get written back to CLAUDE.md; per-issue notes to the log. In-session `Agent`/`Task` subagents remain BANNED for issue implementation — they boot with a reduced system prompt and no rules. A daemon worker is a FULL session (full system prompt, all rules, hooks), which is exactly why it may implement.
+- **Gates are absolute** — no `--admin`, no bypass, no merge-despite (`autonomous-quality-discipline.md`).
 
-The agent CANNOT self-`/compact` mid-turn (it is a user/SDK command, not an in-turn
-tool) and MUST NEVER `/clear` mid-loop (`/clear` and `/goal stop` both cancel the goal).
-If the session ends, `--resume` restores the `/goal` (turn/timer/token counters reset;
-re-bind the goal line if needed). The loop is recoverable either way: in-flight work is
-already committed on `dev`, so a killed session just re-dispatches the unclosed issues.
+## SOLO mode (fallback engine)
 
-**One continuous session — NEVER spawn a fresh/amnesiac worker.** Do NOT drive issues
-with `claude -p` child processes, and do NOT route implementation through `Agent`/`Task`
-subagents. A fresh process or subagent starts WITHOUT the understanding built up in this
-session — the decisions, constraints, and conventions worked out together — so it can
-implement an issue in a way THIS session would not allow: wrong pattern, a re-litigated
-decision, a violated convention. **Continuity of understanding beats pristine context.**
-The single `/goal` loop keeps the whole conversation (compacted as needed), so accumulated
-understanding persists across the entire run. There is no "backlog too large" escape that
-justifies an amnesiac worker — if a session truly fills, `--resume` continues THIS thread
-(summary preserved), it does not start a blank one.
+Single-session loop — for remote/cloud sessions without the daemon, or 1–2-issue backlogs.
 
-**Durable decision log — so compaction / resume never loses what was settled.** Compaction
-is lossy and `--resume` reloads a summary, not the full thread. To stop the loop from
-"forgetting what we dealt with", persist durable context to files it RE-READS, not to
-transcript memory:
+1. Preflight as F1 minus the daemon checks.
+2. Print the `/goal` line for the user to paste:
+   ```
+   /goal Every open issue in this repo not labeled blocked/needs-design/needs-decision is closed via a merged PR — proven in the transcript by `gh issue list --state open` showing none of those remain AND `gh run list -b main -L 1` showing main green — or stop after 30 turns, or stop and ask the moment a genuine design choice, a destructive action, or a CI failure unfixable in two attempts arises.
+   ```
+3. Loop body per cycle: pick the bundle-safe batch → implement on the MAIN loop (TDD) → one push → monitor CI → PR → gates green → merge per `pr-merge-policy.md` → verify deploy → milestone ping → re-print `gh issue list --state open` (evidence) → next batch.
+4. Context hygiene: GitHub-as-state + `docs/autopilot-log.md` re-read at the top of every cycle. The transcript carries summaries only; compaction is harmless because GitHub + the log hold the truth. Read-only `Explore` subagents MAY take heavy searches; implementation stays on the main loop.
 
-- **Conventions / decisions that outlive the run** (how endpoints are named, why a pattern
-  was chosen, a gotcha + its fix) → write to the project's **`CLAUDE.md`**. It loads into
-  EVERY future session — the permanent fix to "the new session forgot X".
-- **Run-scoped working notes** (per-issue decisions, scope calls — `issue #40 → reset to
-  0dB per user`, `deferred Z to #88`) → append to a re-read log: **`docs/autopilot-log.md`**.
-  The loop reads this log at the TOP of every cycle, so even right after a compaction it
-  re-loads the full picture of what was decided and done.
+## Stop-and-ask gate (both modes — the only real questions)
 
-At each cycle start the loop reconstructs the world from durable sources that no compaction
-can erase — GitHub (issue / PR / CI state), the decision log (the WHY + conventions), and
-`git log` on `dev` (what code changed). That, not a clean transcript, is what keeps every
-cycle consistent with everything agreed earlier in the session.
+- Genuine design choice on an issue (`ask-before-assuming.md`)
+- Destructive remote action needed (`no-destructive-remote-actions.md`)
+- Same CI failure twice after a real fix attempt — surface it, never bypass
+- A gate that won't go clean — surface it; never merge "despite"
+- Backlog exhausted → final completion report
+
+Every stop ALSO pings the user (`milestone-notifications.md`): `autopilot paused — #51 needs a design call: <question>` / `autopilot done — backlog empty, N issues merged`.
+
+NOT questions (pre-answered, `ask-before-assuming.md`): "ready for the next issue?", "should I bundle?", "push now?", "monitor CI?", "verify with Playwright?", "merge now?" — decide and proceed.
