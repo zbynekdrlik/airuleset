@@ -126,7 +126,7 @@ fi
 #   - Both **Goal:** AND **What changed:** present (clear completion-report markers in prose form)
 IS_COMPLETION_HEADING=$(echo "$MSG" | grep -qE "^## ✅ Work Complete|^✅ Work Complete" && echo 1 || echo 0)
 HAS_PR_URL=$(echo "$MSG" | grep -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+" && echo 1 || echo 0)
-HAS_COMPLETION_PHRASE=$(echo "$MSG" | grep -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy" && echo 1 || echo 0)
+HAS_COMPLETION_PHRASE=$(echo "$MSG" | grep -qiE "awaiting[^.]{0,40}(merge|your merge|merge it)|mergeable[, ]+clean|all [0-9]+/[0-9]+ checks (are )?(green|passing)|all checks (are )?green|mergeStateStatus=CLEAN|mergeable=MERGEABLE|ready to merge|Plan steps \([0-9]+/[0-9]+ done\)|✅ Work Complete|work complete[: ]|per pr-merge-policy|merged (to|into) (main|master)|auto-?merged" && echo 1 || echo 0)
 HAS_GOAL_AND_OUTCOME=0
 if echo "$MSG" | grep -qiE "\*\*Goal:?\*\*|^Goal:" && echo "$MSG" | grep -qiE "\*\*What changed:?\*\*|\*\*Outcome:?\*\*|^What changed:|^Outcome:"; then
     HAS_GOAL_AND_OUTCOME=1
@@ -135,6 +135,11 @@ fi
 IS_COMPLETION_SIGNAL=0
 if [ "$HAS_PR_URL" = "1" ] && { [ "$HAS_COMPLETION_PHRASE" = "1" ] || [ "$HAS_GOAL_AND_OUTCOME" = "1" ]; }; then
     IS_COMPLETION_SIGNAL=1
+fi
+# A message that ends still-working (⏳ marker) is not a completion report — the signal
+# route must not force the template mid-loop (e.g. fleet merged #N, dispatching the next).
+if [ "$IS_COMPLETION_SIGNAL" = "1" ] && echo "$MSG" | grep -q "⏳"; then
+    IS_COMPLETION_SIGNAL=0
 fi
 
 IS_COMPLETION=0

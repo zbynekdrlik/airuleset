@@ -54,4 +54,14 @@ if echo "$TOOL_INPUT" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|byp
     exit 2
 fi
 
+# Merge-permission questions on a green PR — pre-answered (pr-merge-policy.md default auto-merge).
+# Default-auto project: merge yourself. Manual-marker project: end the message with
+# '❓ NEEDS YOU: approve merge?' — never an AskUserQuestion either way.
+# Context-anchored (it/this pr/now/to main...) so DESIGN questions about merging
+# code/files/structs stay allowed.
+if echo "$TOOL_INPUT" | grep -qiE "(should|shall|can|may) (i|we) merge (it\b|this pr|the pr|pr #?[0-9]+|now\b|dev\b|to main|into main)|want me to merge (it\b|this pr|the pr|pr #?[0-9]+|now\b|dev\b|to main|into main)|ok to merge|approve (the )?merge|ready to merge\?|merge (it |the pr )?now or (wait|hold|later)|merge.*or.*wait for your (approval|go|merge)"; then
+    echo "BLOCKED: Merge-permission questions are pre-answered. Default-auto (pr-merge-policy.md): all gates green → merge + deploy + verify yourself, without asking. Manual-marker project (airuleset:merge=manual): do not ask via AskUserQuestion either — stop at the green PR and end the message with '❓ NEEDS YOU: approve merge?'. See ask-before-assuming.md." >&2
+    exit 2
+fi
+
 exit 0
