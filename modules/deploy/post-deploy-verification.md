@@ -4,7 +4,7 @@
 - `autonomous-verification.md` — YOU have Playwright; never ask the user to test or screenshot
 - `e2e-real-user-testing.md` — functional verification must use browser, not curl
 - `no-localhost-urls.md` — use the real IP, never localhost
-- `approval-scope.md` — "merge it" ≠ "deploy to production"; ask separately
+- `approval-scope.md` — deploy follows merge automatically in the default flow; destructive/out-of-flow actions still ask
 - `version-on-dashboard.md` — every web dashboard MUST show the deployed version label; verification reads it from the live DOM
 
 After every deployment, verify the target machine responds correctly before reporting success. **Verification has THREE mandatory layers — liveness, version match, AND functional.**
