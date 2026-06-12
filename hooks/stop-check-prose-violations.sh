@@ -173,7 +173,7 @@ if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
     echo "    🌐 Prod: <url>" >&2
     echo "" >&2
     echo "    **[<project>] PR #N: <full title>**" >&2
-    echo "    <full PR URL> — mergeable, clean" >&2
+    echo "    <full PR URL> — merged <sha> (default-auto) / mergeable, clean (manual-marker)" >&2
     echo "" >&2
     echo "  See completion-report.md → 'MANDATORY structure (use this EXACT template)'." >&2
     add_hard "Prose completion report missing canonical '## ✅ Work Complete' heading — use the full template, not a prose summary"

@@ -271,8 +271,8 @@ After ALL bundled issues committed locally:
 9. Monitor CI per `ci-monitoring.md` until ALL jobs green
 10. Open ONE PR (dev → main) with title `Bundle: fix #N1 + #N2 + #N3 — <summary>` and body listing each `Closes #<N>` on its own line
 11. Verify PR `mergeable: true` AND `mergeable_state: "clean"`
-12. Send ONE completion report per `completion-report.md` listing all bundled issues
-13. Auto-merge per `pr-merge-policy.md` when every gate is green, monitor deploy + verify; manual-marker (`airuleset:merge=manual`) projects: stop and wait for the explicit merge instruction
+12. Auto-merge per `pr-merge-policy.md` when every gate is green, monitor main CI + deploy to terminal, verify; manual-marker (`airuleset:merge=manual`) projects: stop at the green PR and wait for the explicit merge instruction
+13. Send ONE completion report per `completion-report.md` listing all bundled issues — after merge + deploy + verify (manual-marker: at the green PR, ending `❓ approve merge?`)
 
 **Banned between bundled issues:** "ready for #N+1?", "should I continue?", "approve before next?", "commit and move on?". See `ask-before-assuming.md` table.
 
