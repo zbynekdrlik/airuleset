@@ -1,41 +1,54 @@
-### Mutation Testing (Test Quality Gate)
+### Mutation Testing (Test Quality Gate) — Bounded
 
-**Line coverage proves tests execute code. Mutation testing proves tests VERIFY behavior.** A test suite with 100% coverage but 4% mutation score catches almost no real bugs.
+**Context gate — related rules you MUST also apply:**
+- `test-strictness.md` — coverage proves tests execute; mutation proves tests VERIFY
+- `no-timeout-band-aids.md` — a slow mutation gate is a setup bug; never fix it by raising the timeout
+- `no-dropped-work.md` — surviving mutants from the weekly run become tracked `#N` issues, never silent
+- `no-continue-on-error.md` — the weekly job is binary on its own contract (run + report + file issues)
 
-#### What it does
+**Line coverage proves tests execute code. Mutation testing proves tests VERIFY behavior.** Frontier models hard-code tests far less than the 2025 generation that motivated this gate — but reward hacking has not vanished and agent-written suites still over-report quality. Keep the deterministic check; keep it SMALL.
 
-Mutation testing changes code slightly (`>` to `>=`, removes a `return`, swaps `+` to `-`) and re-runs tests. If tests still pass after the mutation → **the test is weak** and doesn't actually verify that behavior.
+#### The two-tier shape (MANDATORY)
 
-#### When to add mutation testing to a project
+1. **PR gate — diff-scoped, blocking, HARD-BOUNDED.** Target < 15 min; job `timeout-minutes: 20` MAX.
+2. **Weekly full-tree run — async, scheduled, sharded.** NOT on the PR path. Survivors → GitHub issues.
 
-Every Rust or TypeScript project with E2E tests SHOULD have mutation testing in CI. Add it when:
-- Setting up a new project's CI pipeline
-- A feature ships broken despite green CI (proves tests were shallow)
+A blocking mutation job that can run for hours is BANNED. The 6-hour-cap gate this policy replaces blocked one project's development for days (cancel/restart cycles ≈ 30 h wall-clock).
 
-#### Rust: cargo-mutants
+#### Rust PR gate (cargo-mutants) — required speed levers, ALL of them
 
 ```yaml
-# CI job — only test code changed in the PR
-- name: Mutation testing
-  run: |
-    cargo install cargo-mutants
-    git diff origin/main...HEAD > pr.diff
-    cargo mutants --in-diff pr.diff --timeout 60
+mutation-testing:
+  needs: [test]          # baseline already proven green by the test job
+  timeout-minutes: 20    # HARD CAP — budget rule below
+  steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 0 }
+    - uses: taiki-e/install-action@v2
+      with: { tool: cargo-mutants,cargo-nextest }   # prebuilt binaries, never `cargo install` in CI
+    - run: |
+        git diff origin/${{ github.base_ref || 'main' }}...HEAD > pr.diff
+        cargo mutants --in-diff pr.diff --baseline=skip --test-tool=nextest --jobs 2 -- --all-targets
 ```
 
-`cargo mutants` exits non-zero if ANY mutant survives (= weak test). `--in-diff` limits to PR changes only (fast).
+Plus in the repo:
+- `.cargo/mutants.toml`: `profile = "mutants"`; `exclude_globs` for generated code; per-package tests only (never `test_workspace = true`)
+- `Cargo.toml`: `[profile.mutants]` with `inherits = "test"`, `debug = "none"`
+- Slow integration/E2E tests stay OUT of the per-mutant suite (separate package or excluded) — otherwise they re-run for EVERY mutant
+- `-- --all-targets` skips doctests (each doctest compiles a separate binary per mutant)
+
+#### Budget overrun = setup bug — STOP THE LINE
+
+If the PR gate exceeds ~15 min: fix the CONFIG — apply missing levers, shard (`--shard k/2..4`), narrow scope. NEVER raise `timeout-minutes` as a band-aid, NEVER wait it out, NEVER silently delete the gate. Also: long-lived dev branches grow `--in-diff` scope toward full-tree — merge small PRs frequently (`pr-merge-policy.md` default auto-merge keeps diffs small).
+
+#### Weekly full-tree run (async)
+
+Scheduled workflow (weekend), sharded: `cargo mutants --shard k/8 --baseline=skip` across parallel jobs. Surviving mutants → `gh issue create` (batched per module/area, label `test-quality`), worked through the normal backlog loop. The job FAILS only when the tooling fails to run; survivors become issues, not red CI — nothing is silently green because every survivor is a tracked `#N`.
 
 #### TypeScript: StrykerJS
 
-```json
-{
-  "mutate": ["src/**/*.ts", "!src/**/*.test.ts"],
-  "thresholds": { "high": 80, "low": 60, "break": 50 }
-}
-```
-
-`break: 50` means CI fails if mutation score drops below 50%.
+PR: `--incremental` with the incremental report restored from the main-branch artifact (only mutants for changed code run). Same budget discipline. Keep `thresholds.break` (≥ 50). Schedule a periodic `--force` full run so incremental state can't drift.
 
 #### The rule
 
-If mutation testing reveals surviving mutants, the feature is NOT done. Write better assertions that catch the mutations, then push again.
+Surviving mutants in YOUR diff = the work is NOT done — write assertions that kill them, push again. A slow gate = fix the gate's setup, never the budget. Applies to all rewordings and semantic equivalents.

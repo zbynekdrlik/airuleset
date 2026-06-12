@@ -1,31 +1,27 @@
-### Test-Driven Development
+### Test-Driven Development — Calibrated
 
 **Context gate — related rules you MUST also apply:**
+- `regression-test-first.md` — bug fixes: failing test committed BEFORE the fix (RED→GREEN order, hook-enforced)
 - `e2e-real-user-testing.md` — UI features need Playwright (browser), not curl
-- `test-strictness.md` — no `#[ignore]`, no `skip`, no `assume()`, no mocked dependencies
+- `test-strictness.md` — no `#[ignore]`, no `skip`, no `assume()`, no mocked internal code
 - `browser-console-zero-errors.md` — Playwright tests must assert zero console errors
 
-Every implementation plan MUST follow RED-GREEN-REFACTOR:
+**Tests are the agent's verification target: every change ships with tests that can FAIL on the behavior they claim to verify, in the same PR.**
 
-1. **Write failing tests** that describe expected behavior
-2. **Confirm tests fail** (proving they test the right thing)
-3. **Implement** the feature or fix
-4. **Confirm tests pass**
-5. **Run ALL existing tests** to catch regressions
-6. **Push and monitor CI**
+#### Bug fixes — STRICT test-first (unchanged)
 
-**Test types required for UI features:**
+RED commit (failing test reproducing the bug) BEFORE GREEN commit (the fix), same PR, per `regression-test-first.md`. Verify the test fails before the fix and passes after. A bug fix without a reproducing test is a guess. This is the best-evidenced agentic practice — never relax it.
 
-- **Playwright E2E** (browser clicks, not curl) — test the user workflow through the actual UI
-- **Unit tests** — test business logic in isolation
-- A feature with only API/curl tests and no Playwright browser test is NOT tested. See `e2e-real-user-testing` module.
+#### Features — tests mandatory, order flexible
 
-**Bug Fix Protocol (MANDATORY):**
+1. Every feature plan MUST include tests for the feature — same PR, no exceptions.
+2. Test-first is RECOMMENDED; implement-then-test within the same PR is acceptable for greenfield features.
+3. Tests must verify BEHAVIOR and be able to fail: no tautologies, no assertion-free tests, no tests that never call the code under test.
+4. **UI features:** Playwright E2E through the real browser (the user workflow) plus unit tests for business logic. API/curl-only coverage of a UI feature is NOT tested (`e2e-real-user-testing.md`).
+5. After implementing: run ALL existing tests to catch regressions, then push and monitor CI.
 
-1. Write a failing test that reproduces the exact reported behavior — if the bug is in the UI, the test must use Playwright to click through the UI, not curl the API
-2. Verify the test FAILS before the fix
-3. Implement the fix
-4. Verify the test PASSES after the fix
-5. Never claim a bug is fixed without a test that specifically asserts the correct behavior
+#### Anti-cheat hardening (ALL test work)
 
-A plan that goes straight to "implement X" without "write tests for X" first is WRONG and must be rewritten. A bug fix without a reproducing test is not a fix — it is a guess.
+- **No hard-coding test cases.** Never special-case test inputs in implementation code, never return memorized expected values. If a task seems impossible or unreasonable, SAY SO instead of gaming the test.
+- **Tests are read-only during GREEN.** While making a failing test pass, existing test files are read-only — never edit, weaken, or delete a test to make it pass. A genuinely wrong test gets fixed in its OWN commit with stated justification.
+- Applies to all rewordings and semantic equivalents (deleting asserts, loosening tolerances, marking flaky, swapping expected values).
