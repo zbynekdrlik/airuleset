@@ -4,7 +4,7 @@
 - `complete-planned-work.md` — finish the job before reporting (no Remaining/Future/TODO sections)
 - `autonomous-verification.md` — ✅ means functional verification (clicked, confirmed), not liveness
 - `e2e-real-user-testing.md` — E2E rows reference real Playwright tests, not API smokes
-- `pr-merge-policy.md` — green PR ≠ permission to merge; wait for explicit user instruction
+- `pr-merge-policy.md` — auto-merge default: the report is sent AFTER merged + deployed + verified; manual-marker (`airuleset:merge=manual`) projects stop at the green PR with ❓
 
 **The completion report's audience is the USER, not you.** Terminal scrolls — only the LAST passage is visible without scrolling back. Audits at TOP, user-facing answers at BOTTOM. Send the report as the LAST thing in your message.
 
@@ -39,7 +39,7 @@
 🌐 Prod: <url>          ← never list backend/API URLs
 
 **[<project>] PR #<N>: <full PR title>**
-<full PR URL> — mergeable, clean
+<full PR URL> — merged <merge-sha>        ← default-auto; manual-marker projects: `— mergeable, clean` + end with ❓ approve merge
 
 ❓ **Question:** <concise 1-2 sentence question>   ← only if you actually need an answer
 ```
