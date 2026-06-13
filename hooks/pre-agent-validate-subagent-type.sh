@@ -26,6 +26,19 @@ case "$SUBAGENT_TYPE" in
         ;;
 esac
 
+# Accept REAL installed subagents — a definition file exists for them. User-level
+# (~/.claude/agents/<name>.md, e.g. airuleset-managed autopilot-worker) or project-level
+# (.claude/agents/<name>.md). The hook's job is to block HALLUCINATED names, not real agents.
+# Sanitize to a bare basename ([A-Za-z0-9_-]) so a crafted name can't traverse paths; this
+# also rejects plugin-prefixed `<plugin>:<role>` (the ':' is stripped, so it won't equal the
+# original and falls through to the block below).
+AGENT_BASENAME=$(printf '%s' "$SUBAGENT_TYPE" | tr -cd 'A-Za-z0-9_-')
+if [ -n "$AGENT_BASENAME" ] && [ "$AGENT_BASENAME" = "$SUBAGENT_TYPE" ]; then
+    if [ -f "$HOME/.claude/agents/${AGENT_BASENAME}.md" ] || [ -f ".claude/agents/${AGENT_BASENAME}.md" ]; then
+        exit 0
+    fi
+fi
+
 # Unknown / hallucinated subagent_type. Block.
 echo "BLOCKED: subagent_type '$SUBAGENT_TYPE' is not in the known-valid agent-type list." >&2
 echo "" >&2
