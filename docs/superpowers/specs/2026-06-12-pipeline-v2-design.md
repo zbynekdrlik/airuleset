@@ -1,5 +1,7 @@
 # Pipeline v2 — Bounded Mutation, Calibrated TDD, Default Auto-Merge+Deploy, Fleet Autopilot
 
+> **Historical record — SHIPPED & SUPERSEDED in parts.** Implemented in commits `204c4b5..11cccb2`. Later refinements override specific lines here: the autopilot **skip-picker** (`58382d8`) and the **full removal of the /loop/CronCreate ban** (`11cccb2`, which went beyond this spec's "carve-out" framing — no /loop CI-polling ban remains; all scheduling/monitoring tools are now sanctioned). Treat this file as the original design snapshot, not current state — the live modules/skills are authoritative.
+
 Date: 2026-06-12. Status: APPROVED (all four decisions confirmed via AskUserQuestion).
 
 Four interlocking changes to the autonomous development pipeline. 3 enables 4; 1+2 cut
