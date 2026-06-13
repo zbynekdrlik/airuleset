@@ -13,6 +13,7 @@ disable-model-invocation: true
 > • `solo` — single-session `/goal` loop (no worker windows)
 > • `status` — print resolved mode + backlog count, run nothing
 > • `manual` modifier — stop every PR at green for the user's "merge it", this run only
+> • **skip picker at start** — you pick existing issues to exclude (persistent `autopilot-skip` label); issues filed by workers mid-run are always worked
 
 Works the GitHub issue backlog hands-off: pick issue → fresh worker implements (TDD) → PR → CI green → auto-merge → deploy verified → issue closed → orchestrator independently verifies → next issue. The main session's context holds only dispatch + verify summaries — no manual `/compact`, no degradation across a long backlog.
 
@@ -44,7 +45,8 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
 ```
 
 - **Print the mode banner FIRST**, e.g. `autopilot · FLEET · merge=auto (no manual marker) · /loop expires after 7 days, session must stay open`.
-- **Backlog scope:** open issues NOT labeled `blocked` / `needs-design` / `needs-decision` / `question` / `wontfix` / `discussion`. Zero qualify → "backlog empty", STOP.
+- **Backlog scope:** open issues NOT labeled `blocked` / `needs-design` / `needs-decision` / `question` / `wontfix` / `discussion` / `autopilot-skip`. Zero qualify → "backlog empty", STOP.
+- **Skip picker (start-of-run exclusion — the one interactive step the user opted into).** Ensure the label exists once: `gh label create autopilot-skip --color ededed --description "Excluded from autopilot runs" 2>/dev/null || true`. List the eligible open issues (after the label filter above) and ask which to EXCLUDE via `AskUserQuestion` with `multiSelect: true`, one option per issue (`#N <title> (Xd old)`). Backlog larger than the ~12-checkbox capacity: show the 12 oldest/highest-priority and tell the user to add extra numbers via "Other" (comma-separated). Apply to each selected/typed issue: `gh issue edit <N> --add-label autopilot-skip`, then print `skipping #A #B … · working N issues`. Selecting none = work all. The label is PERSISTENT — it survives restarts/`--resume` until removed (`gh issue edit <N> --remove-label autopilot-skip`), and the picker reappears each start so the set can be adjusted (`status` mode lists the currently-skipped issues). NEW issues filed by workers during the run never carry this label → always picked up on a later cycle.
 - **One-time machine prerequisites** (tell the user once if missing):
   - `--permission-mode auto` must have been accepted interactively once on this machine (`claude --permission-mode auto`), else dispatched workers cannot run unattended.
   - Repo setting `worktree.bgIsolation: "none"` so workers commit directly on `dev` — no stray `.claude/worktrees/` branches (`two-branch-workflow.md`).
@@ -67,6 +69,8 @@ Bare `/loop` runs `.claude/loop.md` self-paced (1m–60m adaptive). The loop end
 # Autopilot fleet supervisor — one iteration
 
 You are the ORCHESTRATOR. Never implement issues yourself; never poll CI yourself.
+
+Backlog = `gh issue list --state open` MINUS issues labeled blocked/needs-design/needs-decision/question/wontfix/discussion/autopilot-skip. NEW issues filed by workers (no autopilot-skip label) join the backlog automatically on the next cycle — that is intended. NEVER add autopilot-skip yourself; it is the user's start-of-run exclusion only.
 
 1. `claude agents --json` — list worker sessions (name prefix "ap-").
 2. For each worker finished since the last iteration (state done/failed): INDEPENDENTLY
@@ -115,7 +119,7 @@ CYCLE (no pauses, no process questions):
    at the green PR and report it instead). Monitor main CI + deploy workflow to terminal.
 7. Post-deploy verification: open the live app, read the version label from the DOM,
    exercise the changed feature (post-deploy-verification.md).
-8. Anything identified but not finished → gh issue create NOW (no-dropped-work.md).
+8. Anything identified but not finished → gh issue create NOW (no-dropped-work.md). Use `needs-design` if its design is genuinely ambiguous; NEVER apply `autopilot-skip` (the user's start-of-run exclusion only) — an unlabeled new issue is meant to be worked next cycle.
 9. Append ONE line to docs/autopilot-log.md (issue, SHAs, RED→GREEN test names, decisions).
 
 FINAL MESSAGE = exactly this evidence block (the orchestrator re-verifies every line):
@@ -141,12 +145,12 @@ filed: <#K list | "none">
 
 Single-session loop — for remote/cloud sessions without the daemon, or 1–2-issue backlogs.
 
-1. Preflight as F1 minus the daemon checks.
+1. Preflight as F1 minus the daemon checks (includes the start-of-run skip picker).
 2. Print the `/goal` line for the user to paste:
    ```
-   /goal Every open issue in this repo not labeled blocked/needs-design/needs-decision is closed via a merged PR — proven in the transcript by `gh issue list --state open` showing none of those remain AND `gh run list -b main -L 1` showing main green — or stop after 30 turns, or stop and ask the moment a genuine design choice, a destructive action, or a CI failure unfixable in two attempts arises.
+   /goal Every open issue in this repo not labeled blocked/needs-design/needs-decision/autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none of those remain AND `gh run list -b main -L 1` showing main green — or stop after 30 turns, or stop and ask the moment a genuine design choice, a destructive action, or a CI failure unfixable in two attempts arises.
    ```
-3. Loop body per cycle: pick the bundle-safe batch → implement on the MAIN loop (TDD) → one push → monitor CI → PR → gates green → merge per `pr-merge-policy.md` → verify deploy → milestone ping → re-print `gh issue list --state open` (evidence) → next batch.
+3. Loop body per cycle: pick the bundle-safe batch (same label exclusions as F1, incl. `autopilot-skip`; new worker-filed issues are picked up) → implement on the MAIN loop (TDD) → one push → monitor CI → PR → gates green → merge per `pr-merge-policy.md` → verify deploy → milestone ping → re-print `gh issue list --state open --search "-label:autopilot-skip"` (evidence) → next batch.
 4. Context hygiene: GitHub-as-state + `docs/autopilot-log.md` re-read at the top of every cycle. The transcript carries summaries only; compaction is harmless because GitHub + the log hold the truth. Read-only `Explore` subagents MAY take heavy searches; implementation stays on the main loop.
 
 ## Stop-and-ask gate (both modes — the only real questions)
