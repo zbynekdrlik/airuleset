@@ -113,6 +113,20 @@ class TestSkillsExist(TestCase):
         self.assertIn("disable-model-invocation: true", frontmatter)
 
 
+class TestAgentsExist(TestCase):
+    def test_agent_names_defined(self):
+        self.assertIn("autopilot-worker", airuleset.AGENT_NAMES)
+
+    def test_all_agents_have_md_with_name(self):
+        for name in airuleset.AGENT_NAMES:
+            path = airuleset.REPO_DIR / "agents" / f"{name}.md"
+            self.assertTrue(path.exists(), f"Missing agent: {path}")
+            content = path.read_text()
+            self.assertTrue(content.startswith("---"), f"{name}.md missing frontmatter")
+            frontmatter = content.split("---", 2)[1]
+            self.assertIn(f"name: {name}", frontmatter)
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [

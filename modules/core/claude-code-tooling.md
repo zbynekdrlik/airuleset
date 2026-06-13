@@ -48,11 +48,18 @@ The evaluator reads ONLY the conversation transcript — it does NOT run command
 
 Do NOT use `/goal` for ambiguous-scope work needing user decisions (the loop has no one to ask) or anything gated on a destructive action. It is for verifiable execution, not design. Applies to all rewordings and semantic equivalents.
 
-For the specific case of working a whole GitHub issue backlog hands-off — pick → implement (TDD) → PR → CI green → merge → deploy verified → next, until empty — use the **`/autopilot` skill**. Default engine is the FLEET: this session runs `/loop` as supervisor and dispatches each issue to a fresh `claude --bg` full-session worker (visible + steerable in agent view); `/autopilot solo` keeps the single-session `/goal` loop. Merging follows `pr-merge-policy.md` default auto-merge (opt-out marker `airuleset:merge=manual`); milestones ping per `milestone-notifications.md`.
+For the specific case of working a whole GitHub issue backlog hands-off — solve the WHOLE backlog one issue at a time until empty — use the **`/autopilot` skill**. It drives a `/goal` loop that dispatches each issue to a **foreground `autopilot-worker` subagent** (fresh context → main stays thin; visible in the agent strip as `main` + `autopilot-worker`; **able to ask you the important per-issue questions directly** — which is how the loop works `needs-design`/`needs-decision` issues instead of skipping them, so the `/goal`-has-no-one-to-ask caveat above does not bite). After each issue (incl. after merge) it picks the next; it never pre-filters or refuses to start. Merging follows `pr-merge-policy.md` default auto-merge (opt-out marker `airuleset:merge=manual`); milestones ping per `milestone-notifications.md`.
 
-#### `/loop` + Agent view (fleet orchestration)
+#### `/loop` + Agent view + in-session subagents (3 distinct surfaces)
 
-`/loop` (v2.1.72+) re-runs a standing prompt between turns: `/loop 5m <prompt>` fixed-interval, `/loop <prompt>` self-paced (1m–60m adaptive, ends itself when provably done), bare `/loop` runs the project's `.claude/loop.md`. Session-scoped, 7-day expiry, fires only while the session is idle. Agent view (`claude agents`, v2.1.139+) lists background daemon sessions — FULL Claude Code sessions dispatched via `claude --bg --name <n> "<prompt>"`, steerable per row, machine-readable via `claude agents --json` (states working|blocked|done|failed, plus `waitingFor`). The autopilot fleet = `/loop` supervisor in the main session + one `claude --bg` worker per issue (see the `autopilot` skill). Like `/goal`, only the USER can type `/loop` — the skill prints the line to paste.
+`/loop` (v2.1.72+) re-runs a standing prompt between turns: `/loop 5m <prompt>` fixed-interval, `/loop <prompt>` self-paced (1m–60m adaptive, ends itself when provably done), bare `/loop` runs the project's `.claude/loop.md`. Session-scoped, 7-day expiry, fires only while the session is idle.
+
+Three DIFFERENT multi-agent surfaces — do not conflate them:
+- **In-session subagents** (Agent/Task tool) — show in the **bottom agent strip** of the current session (`main` + `<subagent>` rows, `↑/↓` to select, `Enter` to view) and in `/agents` (Running tab) / `/tasks` (attach). **Foreground** subagents pass their prompts/questions through to you (can ask); **background** ones run concurrently but auto-deny prompts (can't ask). This is the surface the **`/autopilot`** skill uses — a foreground `autopilot-worker` per issue.
+- **Agent view** (`claude agents`, v2.1.139+) — a SEPARATE full-screen list of `claude --bg` background daemon sessions across projects (NOT the bottom strip), `--json` states working|blocked|done|failed. Use for handing off independent sessions and checking back.
+- **Agent teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, experimental) — concurrent full sessions you switch between (Shift+Down) and message directly; for parallel independent work, not serial issue-by-issue.
+
+Like `/goal`, only the USER can type `/loop` — a skill prints the line to paste.
 
 #### `/fewer-permission-prompts` skill
 

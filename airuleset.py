@@ -28,6 +28,7 @@ CLAUDE_DIR = Path.home() / ".claude"
 CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 SETTINGS_JSON = CLAUDE_DIR / "settings.json"
 SKILLS_DIR = CLAUDE_DIR / "skills"
+AGENTS_DIR = CLAUDE_DIR / "agents"
 
 MANAGED_HEADER = "# Managed by airuleset"
 MANAGED_MARKER = "<!-- airuleset-managed -->"
@@ -36,6 +37,9 @@ UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot"]
+
+# Subagent definitions (single .md files) symlinked into ~/.claude/agents/
+AGENT_NAMES = ["autopilot-worker"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
@@ -215,6 +219,12 @@ def cmd_validate(args):
         if not skill_md.exists():
             errors.append(f"Missing skill: {skill_md}")
 
+    # Validate agents
+    for name in AGENT_NAMES:
+        agent_md = REPO_DIR / "agents" / f"{name}.md"
+        if not agent_md.exists():
+            errors.append(f"Missing agent: {agent_md}")
+
     # Validate hooks
     if HOOKS_JSON.exists():
         try:
@@ -250,6 +260,7 @@ def cmd_validate(args):
         print(f"  Modules:  {len(list((REPO_DIR / 'modules').rglob('*.md')))}")
         print(f"  Rules:    {len(list((REPO_DIR / 'rules').glob('*.md')))}")
         print(f"  Skills:   {len(SKILL_NAMES)}")
+        print(f"  Agents:   {len(AGENT_NAMES)}")
 
 
 def cmd_diff(args):
@@ -350,6 +361,30 @@ def cmd_install(args):
                 shutil.move(str(link), str(backup))
             else:
                 shutil.move(str(link), str(backup))
+            print(f"  Backed up: {link} -> {backup}")
+
+        link.symlink_to(source)
+        print(f"  Linked:    {link} -> {source}")
+
+    # --- 2b. Symlink agents (subagent definitions, single .md files) ---
+    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    for name in AGENT_NAMES:
+        source = REPO_DIR / "agents" / f"{name}.md"
+        link = AGENTS_DIR / f"{name}.md"
+
+        if not source.exists():
+            print(f"  SKIP agent (source missing): {source}")
+            continue
+
+        if link.is_symlink():
+            current = Path(os.readlink(link))
+            if current == source:
+                print(f"  OK agent:  {name}")
+                continue
+            link.unlink()
+        elif link.exists():
+            backup = link.with_suffix(".md.bak")
+            shutil.move(str(link), str(backup))
             print(f"  Backed up: {link} -> {backup}")
 
         link.symlink_to(source)
