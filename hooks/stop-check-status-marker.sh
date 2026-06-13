@@ -46,7 +46,7 @@ VIOLATION=""
 # Check A — background / in-progress language not marked ⏳ WORKING.
 # A background run means YOU keep going; ⏳ is the honest signal. Claiming ✅ DONE
 # or leaving it unmarked while something runs is the exact mislead.
-if echo "$MSG" | grep -qiE "\bstanding by\b|\bwaiting (on|for) (the|a|an|ci|build|mutation|result|run|it|deploy|test)|\bin the background\b|\brun(ning|s)? in (the )?background\b|\bbackground (run|task|job|process|monitor|build|deploy)\b|\bbackgrounded\b|\bmonitoring (ci|the (run|build|deploy|job))\b|\bwill report (back|when|once|the)\b|\bi'?ll report\b|\bkicked off\b|\blet it run\b|\bpolling\b|\bstill running\b|\bin progress\b|\bcontinu(e|es|ing) to (monitor|run|poll|watch)\b|\bawaiting (the |a |an )?(ci|build|mutation|result|run|completion|deploy|job)"; then
+if echo "$MSG" | grep -qiE "\bstanding by\b|\bwaiting (on|for) (the|a|an|ci|build|mutation|result|run|it|deploy|test)|\bin the background\b|\brun(ning|s)? in (the )?background\b|\bbackground (run|task|job|process|monitor|build|deploy)\b|\bbackgrounded\b|\bmonitoring (ci|the (run|build|deploy|job))\b|\bwill report (back|when|once|the)\b|\bi'?ll report\b|\bkicked off\b|\blet it run\b|\bpolling (ci|the (ci|run|build|deploy|job|pipeline))\b|\bstill running\b|\bin progress\b|\bcontinu(e|es|ing) to (monitor|run|poll|watch)\b|\bawaiting (the |a |an )?(ci|build|mutation|result|run|completion|deploy|job)"; then
     if [ "$HAS_WORKING" = "0" ]; then
         VIOLATION="background"
     fi
