@@ -33,11 +33,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-custom-monitor.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-deploy-clean-tree.sh",
             "timeout": 10
           }
@@ -49,16 +44,6 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-ask-auto-answer.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "CronCreate",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-cron-ci-monitor.sh",
             "timeout": 5
           }
         ]

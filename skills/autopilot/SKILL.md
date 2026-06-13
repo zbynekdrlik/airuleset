@@ -21,7 +21,7 @@ Works the GitHub issue backlog hands-off: pick issue → fresh worker implements
 - `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker = stop at green PR
 - `autonomous-batch-issue-development.md` — bundling gate; one PR per worker
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
-- `ci-monitoring.md` — workers monitor their OWN CI; the orchestrator NEVER polls CI (the /loop carve-out)
+- `ci-monitoring.md` — workers monitor their OWN CI; the orchestrator reacts to worker completion rather than watching CI itself
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
 - `milestone-notifications.md` — ping per merged+deployed issue and on every stop-for-question
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
