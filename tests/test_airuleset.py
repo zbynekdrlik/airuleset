@@ -685,6 +685,21 @@ class TestStatusMarkerHook(TestCase):
         )
         self.assertTrue(self._blocked(r), r.stdout)
 
+    # --- Check A must not fire on a DESCRIPTIVE mention of a background/polling word ---
+    # ("removed the scheduled polling ban") when nothing is running and the message
+    # ends ✅ DONE. The genuine "I'm polling CI right now" state claim stays caught.
+
+    def test_descriptive_polling_word_with_done_allowed(self):
+        r = self._run(
+            "Removed the hard ban on scheduled polling and the /loop restriction.\n\n"
+            "✅ DONE: cron/loop tools unblocked."
+        )
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_real_polling_ci_state_still_blocked(self):
+        r = self._run("I am still polling CI for the run result.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
 
 class TestRulesHaveFrontmatter(TestCase):
     def test_all_rules_have_paths_frontmatter(self):
