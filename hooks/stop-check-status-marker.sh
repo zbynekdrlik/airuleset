@@ -32,6 +32,15 @@ HAS_DONE=$(echo "$MSG" | grep -qiE "✅\s*(DONE|complete[d]?|work complete)" && 
 # --- last non-empty character (for trailing-question detection) ---
 LAST_CHAR=$(echo "$MSG" | tr -d '[:space:]' | tail -c 1)
 
+# --- is the LAST non-blank line already a valid ✅ DONE / ⏳ WORKING marker? ---
+# The marker rule is about the LAST line — that is what the user sees in the scroll.
+# When the message is properly terminated by ✅ DONE or ⏳ WORKING, question/merge
+# phrases elsewhere in the BODY are descriptive content, NOT a pending ask, and must
+# not trip Check B. A REAL unmarked trailing question keeps the question as its last
+# line (ENDS_TERMINAL=0), so it is still caught.
+LAST_LINE=$(echo "$MSG" | grep -vE '^[[:space:]]*$' | tail -1)
+ENDS_TERMINAL=$(echo "$LAST_LINE" | grep -qiE "✅\s*(DONE|complete[d]?|work complete)|⏳" && echo 1 || echo 0)
+
 VIOLATION=""
 
 # Check A — background / in-progress language not marked ⏳ WORKING.
@@ -44,7 +53,8 @@ if echo "$MSG" | grep -qiE "\bstanding by\b|\bwaiting (on|for) (the|a|an|ci|buil
 fi
 
 # Check B — a question / approval-seeking to the user, not marked ❓ NEEDS YOU.
-if [ -z "$VIOLATION" ] && [ "$HAS_NEEDS" = "0" ]; then
+# Suppressed when the LAST line is already a ✅ DONE / ⏳ WORKING marker (ENDS_TERMINAL).
+if [ -z "$VIOLATION" ] && [ "$HAS_NEEDS" = "0" ] && [ "$ENDS_TERMINAL" = "0" ]; then
     if [ "$LAST_CHAR" = "?" ] || echo "$MSG" | grep -qiE "\b(should|shall) (i|we)\b|\bdo you (want|prefer|need)\b|\bwant me to\b|\bwould you like\b|\bok to (proceed|merge|deploy|continue|go|push)\b|\byour (go|call|decision|input|approval)\b|\bawait(ing)? your\b|\bwaiting (for|on) (your|you)\b|\bneeds? your\b|\bmerge it\b|\blet me know\b|\bconfirm (before|if|whether|that)\b|\bgo ahead\?|\bproceed\?|\bno merge without your\b"; then
         VIOLATION="question"
     fi
