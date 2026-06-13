@@ -715,6 +715,54 @@ class TestStatusMarkerHook(TestCase):
         self.assertTrue(self._blocked(r), r.stdout)
 
 
+class TestSubagentTypeHook(TestCase):
+    """pre-agent-validate-subagent-type.sh must allow REAL installed subagents
+    (user-level ~/.claude/agents/<name>.md or project .claude/agents/<name>.md),
+    not just the hardcoded base types — else a real agent like autopilot-worker
+    is wrongly blocked."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "pre-agent-validate-subagent-type.sh"
+
+    def _run(self, subagent_type, home=None):
+        import subprocess
+
+        env = dict(os.environ)
+        if home is not None:
+            env["HOME"] = str(home)
+        payload = json.dumps({"tool_input": {"subagent_type": subagent_type}})
+        return subprocess.run(
+            ["bash", str(self.HOOK)], input=payload, text=True, capture_output=True, env=env
+        )
+
+    def _tmp_home(self):
+        import shutil
+        import tempfile
+
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        (home / ".claude" / "agents").mkdir(parents=True)
+        return home
+
+    def test_base_type_allowed(self):
+        self.assertEqual(self._run("general-purpose").returncode, 0)
+
+    def test_hallucinated_blocked(self):
+        r = self._run("caveman:cavecrew-builder", home=self._tmp_home())
+        self.assertEqual(r.returncode, 2)
+
+    def test_installed_user_agent_allowed(self):
+        home = self._tmp_home()
+        (home / ".claude" / "agents" / "autopilot-worker.md").write_text(
+            "---\nname: autopilot-worker\n---\nbody"
+        )
+        r = self._run("autopilot-worker", home=home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_uninstalled_agent_blocked(self):
+        r = self._run("autopilot-worker", home=self._tmp_home())
+        self.assertEqual(r.returncode, 2)
+
+
 class TestRulesHaveFrontmatter(TestCase):
     def test_all_rules_have_paths_frontmatter(self):
         rules_dir = airuleset.REPO_DIR / "rules"
