@@ -649,6 +649,42 @@ class TestStatusMarkerHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "", "jq-absent must be a clean no-op")
 
+    # --- a valid terminal marker on the LAST line is authoritative ---
+    # Body text that merely MENTIONS a question phrase ("merge it", a body "?") must
+    # NOT trip Check B when the message already ends with ✅ DONE / ⏳ WORKING.
+
+    def test_done_marker_with_merge_phrase_in_body_allowed(self):
+        # The self-trip case: an answer that explains "merge it" but ends ✅ DONE.
+        r = self._run(
+            "Add `manual` to stop each PR at green for your \"merge it\".\n"
+            "Merge is auto by default.\n\n"
+            "✅ DONE: run `/autopilot` (fleet default), then paste the `/loop` line."
+        )
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_done_marker_with_body_question_allowed(self):
+        r = self._run(
+            "You could ask: which approach? Either works.\n\n"
+            "✅ DONE: documented both options."
+        )
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_working_marker_with_question_phrase_in_body_allowed(self):
+        r = self._run(
+            "Worker will handle merge it and deploy.\n\n"
+            "⏳ WORKING: fleet loop running — nothing needed from you."
+        )
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_real_trailing_question_after_done_in_body_still_blocked(self):
+        # ✅ DONE is in the BODY, but the LAST line is a real unmarked question —
+        # the marker must be the last line, so this is still a violation.
+        r = self._run(
+            "✅ DONE: part one shipped.\n\n"
+            "Should I also deploy to prod now?"
+        )
+        self.assertTrue(self._blocked(r), r.stdout)
+
 
 class TestRulesHaveFrontmatter(TestCase):
     def test_all_rules_have_paths_frontmatter(self):
