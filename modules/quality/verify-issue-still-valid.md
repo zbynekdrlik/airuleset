@@ -17,9 +17,32 @@
 3. **If the ticket is already solved / obsolete / overcome / inaccurate** → do NOT implement it as written. CLOSE or RESCOPE the issue WITH EVIDENCE (what you ran, what you observed — the passing repro test, the MCP/curl output, the commit that fixed it), surface it to the user, and move to the next ticket. Be 100% sure before you act on the description.
 4. **Only once you have confirmed the ticket is still valid and its description still matches reality** do you implement it.
 
+#### Before you ASK THE USER anything about a ticket — check the code first
+
+Validation is not only for "should I implement this" — it gates **every question you raise to the
+user about a ticket**. Before asking a design / how-to / scope question, PROVE its premise isn't
+already settled in the current code (grep, read, recent + CLOSED PRs/issues). **Re-asking a
+question the codebase already answers is the same failure as implementing a stale ticket** — e.g.
+asking "how do we reach Money via the prod proxy?" when the repo already implements that access.
+If the premise is already settled → don't ask; state what the code does. Only a genuinely
+unresolved point goes to the user — and quote what you checked so they aren't re-asked something
+already answered.
+
+#### Hard gate for `/autopilot` + `/issue-planner` — the `ticket-validator` subagent
+
+A glance by the implementer is not enough (this keeps recurring). `/autopilot` (supervisor, before
+dispatching the worker for an issue) and `/issue-planner` (per open issue, before selection) MUST
+dispatch the read-only **`ticket-validator`** subagent first. Its verdict gates the work:
+- **STILL_VALID** → proceed. **PARTIAL** → rescope to `still_to_do`. **OVERCOME** → close with the
+  validator's evidence (issue-planner: propose close via AskUserQuestion; never close unasked).
+  **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is re-asked.
+- The validator is read-only (it reports; the caller acts). Its deep checklist (current code, history
+  incl. CLOSED PRs/issues, live reproduction, per-premise check) is the "deeply verified" the user relies on.
+
 #### Anti-patterns (all rewordings apply)
 
 - Reading the issue body and starting to implement without checking current behavior — **WRONG.**
+- Asking the user a design/how-to question whose answer is already in the code — **WRONG** (the Money-access incident).
 - Trusting a months-old repro instead of reproducing it NOW with live tools — **WRONG** (the codex-bridge incident: implementing against stale issue text while read-only MCP access could show the real current behavior).
 - Closing as "obsolete" without citing what you tested — **WRONG.** Evidence, every time.
 - "I have read-only access but I'll trust the issue" — **WRONG.** You have eyes; use them (`autonomous-verification.md`).

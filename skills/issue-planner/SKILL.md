@@ -188,6 +188,12 @@ gh issue list --state open --limit 30 --json number,title,labels,assignees,creat
 
 **This step runs FOR EVERY OPEN ISSUE — not a sample, not a spot-check.** Old issues are the most common to be silently solved by unrelated refactors, dependency bumps, or feature work. Skipping this wastes a planning cycle. This is `verify-issue-still-valid.md` applied at planning time: never trust stale issue text — prove the behavior against the CURRENT code and the LIVE system.
 
+**MANDATORY mechanism — dispatch the `ticket-validator` subagent per issue (hard gate).** For every open issue, dispatch the read-only **`ticket-validator`** (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) — it runs the deep checklist below in its own context and returns a verdict. Act on it:
+- **OVERCOME** → resolve via AskUserQuestion ("Issue #X looks overcome by <evidence> — close it?"); never close unasked. Keep it OUT of Step 4 selection.
+- **PARTIAL** → AskUserQuestion to rescope to `still_to_do`, or work as-is.
+- **STILL_VALID** → present in Step 4. **UNCLEAR** → surface the validator's `premise_check` to the user (don't re-ask anything the code already answers).
+Run validators in parallel across issues for speed. The checklist below is what the validator does (and what you fall back to if dispatching is unavailable):
+
 For each open issue from Step 2:
 
 ```bash

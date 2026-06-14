@@ -116,6 +116,15 @@ Each loop turn:
 
 1. Pick the next open issue not labeled `autopilot-skip` (highest priority / oldest first). 2-3
    trivially-related small issues MAY share one worker (one PR).
+1b. **VALIDATE FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching any worker,
+   dispatch the read-only **`ticket-validator`** subagent (`subagent_type: ticket-validator`,
+   prompt `Validate issue #<N> in <repo>`). Branch on its verdict:
+   - **STILL_VALID** → proceed to step 2. **PARTIAL** → proceed but pass `still_to_do` as the worker's scope.
+   - **OVERCOME** → do NOT implement; close the issue with the validator's evidence, milestone-ping,
+     and pick the next issue (skip step 2).
+   - **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is
+     re-asked; do not dispatch the worker until resolved.
+   This stops the recurring failure (working / re-asking on an already-overcome ticket).
 2. **Dispatch a FOREGROUND `autopilot-worker`** via the Agent tool: `subagent_type:
    autopilot-worker`, **NOT** run in the background (foreground lets it ask you), prompt =
    `Work issue #<N> in <repo>.` plus any repo-specific note. It shows in the agent strip as

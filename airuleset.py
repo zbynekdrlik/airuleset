@@ -39,7 +39,7 @@ UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep"]
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
-AGENT_NAMES = ["autopilot-worker"]
+AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
