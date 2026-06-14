@@ -25,6 +25,17 @@ unambiguous steps proceed without asking.
 2. `docs/autopilot-log.md` if present (decisions + conventions from earlier cycles).
 3. `gh issue view <N>` — full body + ALL comments.
 
+## STEP 0 — VALIDATE THE ISSUE IS STILL REAL (before any code — `verify-issue-still-valid.md`)
+
+Tickets rot. BEFORE implementing, PROVE the issue is still valid against the CURRENT code and
+the LIVE system — never trust the stale issue text. Re-derive current state (grep the tree,
+`git log`/merged PRs since the issue was created) AND reproduce LIVE with the tools you have
+(the running app, MCP tools, curl, SSH, a quick repro test). For a bug, the TDD RED test is the
+proof: if the reproducing test PASSES with no fix, the bug is already gone. If the issue is
+already solved / obsolete / overcome / inaccurate → do NOT implement it; CLOSE or RESCOPE it
+WITH EVIDENCE (what you ran + observed), report it, and stop. Only a confirmed-still-valid issue
+proceeds to the cycle below.
+
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
 1. `git fetch origin`; confirm you are on `dev` with a clean tree; **version bump FIRST**
@@ -73,6 +84,7 @@ without proof:
 
 ```
 issue: #<N> <title>
+validated: <how you proved it's still real: repro/test/MCP/curl observation | "OBSOLETE — closed with evidence: <what>">
 pr: #<M> <url>
 merge_sha: <sha | "NOT MERGED (manual marker)" | "STOPPED: <reason>">
 main_ci: <run-id> <conclusion>

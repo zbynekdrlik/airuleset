@@ -186,7 +186,7 @@ gh issue list --state open --limit 30 --json number,title,labels,assignees,creat
 
 ## Step 3: Per-issue "already overcome by other work" check (MANDATORY)
 
-**This step runs FOR EVERY OPEN ISSUE — not a sample, not a spot-check.** Old issues are the most common to be silently solved by unrelated refactors, dependency bumps, or feature work. Skipping this wastes a planning cycle.
+**This step runs FOR EVERY OPEN ISSUE — not a sample, not a spot-check.** Old issues are the most common to be silently solved by unrelated refactors, dependency bumps, or feature work. Skipping this wastes a planning cycle. This is `verify-issue-still-valid.md` applied at planning time: never trust stale issue text — prove the behavior against the CURRENT code and the LIVE system.
 
 For each open issue from Step 2:
 
@@ -205,10 +205,13 @@ git log --oneline -50 --grep="<keyword>" --all
 gh pr list --state merged --limit 30 --search "<keyword>" --json number,title,mergedAt,body
 gh pr list --state merged --search "fixes #<number> OR closes #<number> OR resolves #<number>" --json number,title,mergedAt
 
-# 5. If the issue references specific code (file:line, function name), VERIFY the current state
+# 5. VERIFY THE CURRENT STATE — reproduce LIVE, don't trust the months-old repro in the issue
 #    — old issue says "function X panics on empty input"; check if X still exists, still panics
 grep -rn "<function or symbol>" src/ 2>/dev/null
-# For Rust: cargo check; for behavioral claims: write a quick repro test
+# For Rust: cargo check; for behavioral claims: REPRODUCE with the tools you actually have —
+#   the running app, MCP tools (e.g. read-only DB/service bridges), curl, SSH, a quick repro test.
+#   A bug that no longer reproduces against current dev is already solved → propose closing it.
+#   (See verify-issue-still-valid.md and autonomous-verification.md — you have eyes, use them.)
 ```
 
 **Decision rules per issue:**

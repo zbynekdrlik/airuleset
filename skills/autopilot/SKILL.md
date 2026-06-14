@@ -31,6 +31,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
 - `milestone-notifications.md` — ping per merged+deployed issue and on every stop-for-approval
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
+- `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, NOT a reason to abandon the issue or stop the loop
 
 ## How it works
@@ -103,10 +104,12 @@ Each loop turn:
    autopilot-worker`, **NOT** run in the background (foreground lets it ask you), prompt =
    `Work issue #<N> in <repo>.` plus any repo-specific note. It shows in the agent strip as
    `autopilot-worker`.
-3. The worker runs the full cycle (version bump → TDD → PR → CI green → merge per
-   `pr-merge-policy.md` → deploy verify) and **asks you directly** on any genuine design / scope /
-   authorization call. Answer it; the worker continues. **A question is a conversation, NOT an
-   abandoned issue.**
+3. The worker FIRST **validates the issue is still real** (`verify-issue-still-valid.md`) —
+   reproduces it against current code + the live system; an obsolete / already-solved ticket is
+   closed with evidence instead of implemented. Then it runs the full cycle (version bump → TDD →
+   PR → CI green → merge per `pr-merge-policy.md` → deploy verify) and **asks you directly** on any
+   genuine design / scope / authorization call. Answer it; the worker continues. **A question is a
+   conversation, NOT an abandoned issue.**
 4. When the worker returns its evidence block, **independently verify** from primary sources
    (never trust the claim):
    - `gh pr view <PR> --json state,mergedAt,mergeCommit`
