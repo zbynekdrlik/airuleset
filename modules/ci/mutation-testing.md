@@ -45,6 +45,15 @@ If the PR gate exceeds ~15 min: fix the CONFIG — apply missing levers, shard a
 
 Scheduled workflow (weekend), sharded: `cargo mutants --shard ${{ matrix.shard }}/8 --baseline=skip` across a matrix of parallel jobs (`matrix.shard` = 1..8; the flag takes `index/total`). Surviving mutants → `gh issue create` (batched per module/area, label `test-quality`), worked through the normal backlog loop. The job FAILS only when the tooling fails to run; survivors become issues, not red CI — nothing is silently green because every survivor is a tracked `#N`. This is NOT `continue-on-error`: the job's declared contract is "mutation ran + report published + survivors filed", and it is binary on that contract.
 
+#### Weekly run must NOT collide with active development
+
+The user develops NONSTOP, so the heavy weekly run must never compete with active dev CI for runners (a multi-hour mutation job queued on a shared self-hosted runner blocks ALL dev CI):
+
+- **Run the weekly on GitHub-HOSTED runners** (`runs-on: ubuntu-latest`), sharded — NEVER on the project's self-hosted / dev runner. Hosted = separate infra → zero interference; dev CI keeps flowing on the self-hosted runners untouched.
+- **Own concurrency group:** `concurrency: { group: mutation-weekly-${{ github.repository }}, cancel-in-progress: true }` — weekly runs never stack; a fresh trigger supersedes a stuck one.
+- **Hardware-bound projects** whose mutation tests REQUIRE self-hosted hardware (GPU / cameras / devices — e.g. RF-DETR, camera-box): give the weekly a **DEDICATED runner label** (not the dev runner). If that's impossible, **gate the weekly to skip while dev is busy** — first step checks `gh run list --status in_progress` (or `queued`); if any dev run is active, exit 0 early and let the next scheduled window retry, so the weekly NEVER preempts active development.
+- Cron at a low-traffic hour is a nicety, NOT the safeguard — the infra separation (hosted, or dedicated runner, or skip-if-dev-active) is what guarantees no collision.
+
 #### TypeScript: StrykerJS
 
 PR: `--incremental` with the incremental report restored from the main-branch artifact (only mutants for changed code run). Same budget discipline. Keep `thresholds.break` (≥ 50). Schedule a periodic `--force` full run so incremental state can't drift.
