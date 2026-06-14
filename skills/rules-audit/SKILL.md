@@ -12,6 +12,7 @@ Systematic review of airuleset + project rules + auto-memory to prevent bloat, c
 - A project reports recurring rule non-compliance
 - After adding 3+ new modules in a short period
 - A new Claude model ships — bump stale version refs + re-scan best practices
+- **IMMEDIATELY after ANY change to a global-policy module** (merge / deploy / approval / autopilot rules, or marker semantics) — MANDATORY, not monthly: reconcile every project's `CLAUDE.md` + stale per-repo artifacts so old local overrides don't silently fight the new global default (see §0). Skipping this is a serious mistake — it makes "projects don't obey the new policy".
 - Monthly as periodic hygiene
 
 ## Scope
@@ -24,6 +25,24 @@ Audit these locations together:
 5. `~/.claude/projects/*/memory/` — auto-memory directories
 
 ## Audit checklist
+
+### 0. Local-override reconciliation (RUN FIRST after any global-policy change)
+
+When a global module's policy changed (merge/deploy went auto-by-default, a marker was renamed/superseded, etc.), STALE local overrides silently fight the new default — the failure that makes "projects don't obey the new merge/deploy policy". Sweep BOTH machines (dev1 + dev2 via ssh):
+
+```bash
+# Stale / conflicting markers + ad-hoc gating in every project CLAUDE.md
+for f in ~/devel/*/CLAUDE.md ~/devel/*/.claude/CLAUDE.md ~/devel/*/repo/CLAUDE.md; do
+  grep -lniE "merge=manual|autopilot=auto-merge|ask.{0,20}(before|for).{0,20}(deploy|merge|prod)|manual (merge|deploy|approval)|deploy.{0,15}(needs|requires).{0,15}approval|prod.{0,15}approval" "$f" 2>/dev/null
+done
+# Stale per-repo artifacts from superseded designs (old autopilot fleet wrote .claude/loop.md)
+ls ~/devel/*/.claude/loop.md 2>/dev/null
+```
+
+- [ ] Every SUPERSEDED marker removed (e.g. `airuleset:autopilot=auto-merge` — auto-merge is the default now, so the marker is cruft).
+- [ ] Every AD-HOC local gate that contradicts the new global default removed. A project keeps a restriction ONLY via the CURRENT documented opt-out marker (e.g. `airuleset:merge=manual`), never via legacy prose.
+- [ ] Stale per-repo artifacts from a superseded design deleted (e.g. `.claude/loop.md` from the old `/autopilot` fleet — the new autopilot doesn't use it).
+- [ ] Do NOT git-commit changes into a repo whose autopilot/worker is mid-run — note it and clean once the run finishes, to avoid colliding with the live worker's tree.
 
 ### 1. Size budget
 - [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`). Target: <400 lines, <30 KB

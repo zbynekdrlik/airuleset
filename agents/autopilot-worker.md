@@ -54,11 +54,14 @@ proceeds to the cycle below.
 6. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal.
-7. Post-deploy verification (`post-deploy-verification.md`): open the live app, read the
-   version label from the DOM, exercise the changed feature. If there is no deploy pipeline
-   (manual scp / Tier-1) or the deploy is a destructive/prod-touch step, STOP and report —
-   do NOT perform an unauthorized destructive deploy (`approval-scope.md`,
-   `no-destructive-remote-actions.md`).
+7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
+   including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
+   the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
+   the live app, read the version label from the DOM, exercise the changed feature. Milestone-ping
+   the deploy; do NOT gate it on approval. **Only STOP and ask for** a genuinely destructive
+   NON-deploy op (rebooting the HOST, stopping/killing a service or process OUTSIDE the deploy,
+   deleting data / DB `DROP`/`DELETE`/`TRUNCATE`) or a project carrying the
+   `<!-- airuleset:merge=manual -->` marker (`no-destructive-remote-actions.md`).
 8. Anything you identify but do not finish → `gh issue create` NOW (`no-dropped-work.md`).
    Use `needs-design` if the new issue's design is genuinely ambiguous. **NEVER** apply
    `autopilot-skip` — that label is the user's start-of-run exclusion only.

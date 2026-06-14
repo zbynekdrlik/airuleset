@@ -9,8 +9,12 @@
 - `taskkill /F` on production processes — **NEVER** without asking first
 - `rm -rf`, `del /S`, `Remove-Item -Recurse` on remote paths — **NEVER** without asking first
 - Database `DROP`, `DELETE`, `TRUNCATE` — **NEVER** without asking first
-- `systemctl stop/restart` on production services — **NEVER** without asking first
-- Any command that causes downtime, data loss, or service interruption
+- `systemctl stop/restart` on production services — **NEVER** without asking first (EXCEPT the deploy's own restart — see carve-out)
+- Any command that causes downtime, data loss, or service interruption — EXCEPT the brief restart inherent to deploying the new version (carve-out below)
+
+#### Carve-out — a DEPLOY's own restart is NOT gated
+
+Restarting the app/service that is BEING DEPLOYED, to load the new version, is the **approved deploy flow** (`approval-scope.md`) — even on prod, even via manual `scp` / `rsync` / MCP. Milestone-ping it; do NOT ask. "No CI/deploy pipeline" does NOT make a deploy approval-gated. This rule gates only the destructive ops that are **NOT part of deploying the new version**: rebooting the HOST machine, stopping / restarting / killing a service or process **outside a deploy**, deleting data (`rm -rf`), DB `DROP`/`DELETE`/`TRUNCATE`. A project whose deploy interrupts a live / event-sensitive production service uses the `<!-- airuleset:merge=manual -->` per-project marker instead of a per-deploy prompt — the user guards prod-event timing themselves.
 
 #### How to ask
 
@@ -26,4 +30,4 @@ Wait for explicit "yes", "go ahead", or "approved". Silence is NOT approval.
 
 #### The rule
 
-**You can READ anything. You can DEPLOY pre-approved artifacts. But you NEVER reboot, stop services, kill processes, or delete data on remote machines without asking first.**
+**You can READ anything. You can DEPLOY the new version end-to-end — push the artifact/config AND restart the deployed app to load it, including prod, including manual `scp`/`rsync`/MCP (the standing-approved flow, `approval-scope.md`). But you NEVER reboot the HOST, stop/kill a service or process OUTSIDE a deploy, or delete data on remote machines without asking first.**
