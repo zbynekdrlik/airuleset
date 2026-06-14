@@ -45,6 +45,11 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
   degrades; it returns only a short evidence block to the main agent.
 - **Main session stays thin** — it holds only "dispatched #N → verified merged" summaries, so
   there is no `/compact` churn across a long backlog.
+- **`/autopilot` itself does ONLY Steps 1–2** — preflight, optional skip-picker, then it PRINTS
+  the `/goal` line and **STOPS**. It must **NOT** start dispatching workers on its own. The
+  per-issue loop (Step 3) runs **only after YOU paste the `/goal` line** — only the user can type
+  `/goal`, and without it nothing re-fires across turns (a directly-dispatched worker would do one
+  issue and stop). So `/autopilot` always ends by handing you the `/goal` line to paste.
 
 ## Step 1 — Preflight
 
@@ -94,7 +99,18 @@ The agent cannot type `/goal` — print this line for the user to paste once:
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
 / `question` issues all count toward "must be closed" — the loop works them WITH your input.
 
-## Step 3 — Per-issue cycle (the loop body)
+**This is the LAST thing `/autopilot` does.** Present the `/goal` line prominently in a code block,
+tell the user to paste it to start the loop, and **STOP** — end your message with
+`❓ NEEDS YOU: paste the /goal line above to start the autopilot loop`. Do **NOT** proceed to
+dispatch any worker yourself — **Step 3 is the LOOP BODY that the `/goal` loop runs each turn AFTER
+the user pastes the line**, not part of this initial invocation. Dispatching a worker now (without
+`/goal` running) would do one issue and stop — the exact failure this avoids. If you skip printing
+the `/goal` line, the loop never starts.
+
+## Step 3 — Per-issue cycle (the loop body — run BY the `/goal` loop each turn, NOT by the initial `/autopilot` call)
+
+> You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
+> The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
 
 Each loop turn:
 
