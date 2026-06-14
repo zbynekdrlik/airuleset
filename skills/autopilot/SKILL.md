@@ -120,10 +120,14 @@ Each loop turn:
    dispatch the read-only **`ticket-validator`** subagent (`subagent_type: ticket-validator`,
    prompt `Validate issue #<N> in <repo>`). Branch on its verdict:
    - **STILL_VALID** → proceed to step 2. **PARTIAL** → proceed but pass `still_to_do` as the worker's scope.
-   - **OVERCOME** → do NOT implement; close the issue with the validator's evidence, milestone-ping,
-     and pick the next issue (skip step 2).
+   - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR resolved it OR a passing repro proves it) →
+     do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment,
+     milestone-ping it (it's reopenable in one click), and pick the next issue (skip step 2).
+   - **OVERCOME + `overcome_confidence: soft`** → do NOT auto-close — ask the user ("looks overcome by
+     <evidence> — close it?") with the validator's evidence; act on their answer.
    - **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is
      re-asked; do not dispatch the worker until resolved.
+   (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
    This stops the recurring failure (working / re-asking on an already-overcome ticket).
 2. **Dispatch a FOREGROUND `autopilot-worker`** via the Agent tool: `subagent_type:
    autopilot-worker`, **NOT** run in the background (foreground lets it ask you), prompt =

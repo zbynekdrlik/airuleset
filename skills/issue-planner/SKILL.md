@@ -189,7 +189,8 @@ gh issue list --state open --limit 30 --json number,title,labels,assignees,creat
 **This step runs FOR EVERY OPEN ISSUE — not a sample, not a spot-check.** Old issues are the most common to be silently solved by unrelated refactors, dependency bumps, or feature work. Skipping this wastes a planning cycle. This is `verify-issue-still-valid.md` applied at planning time: never trust stale issue text — prove the behavior against the CURRENT code and the LIVE system.
 
 **MANDATORY mechanism — dispatch the `ticket-validator` subagent per issue (hard gate).** For every open issue, dispatch the read-only **`ticket-validator`** (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) — it runs the deep checklist below in its own context and returns a verdict. Act on it:
-- **OVERCOME** → resolve via AskUserQuestion ("Issue #X looks overcome by <evidence> — close it?"); never close unasked. Keep it OUT of Step 4 selection.
+- **OVERCOME + `overcome_confidence: hard`** (concrete merged PR resolved it / passing repro proves it) → **auto-close** with the validator's evidence as a closing comment (reopenable in one click); note it in the Step 4 presentation; keep OUT of selection.
+- **OVERCOME + `overcome_confidence: soft`** → resolve via AskUserQuestion ("Issue #X looks overcome by <evidence> — close it?"); don't close unasked. Keep OUT of selection if closed.
 - **PARTIAL** → AskUserQuestion to rescope to `still_to_do`, or work as-is.
 - **STILL_VALID** → present in Step 4. **UNCLEAR** → surface the validator's `premise_check` to the user (don't re-ask anything the code already answers).
 Run validators in parallel across issues for speed. The checklist below is what the validator does (and what you fall back to if dispatching is unavailable):
@@ -227,7 +228,7 @@ grep -rn "<function or symbol>" src/ 2>/dev/null
 - **Stale but unsolved** (>90 days old, no related work) → flag in Step 4 presentation: `#X (180d old, no related work)` so the user can deprioritize
 - **Clean active issue** (no related work, recent or actively referenced) → present in Step 4 for selection
 
-**Block before Step 4:** if any issues are flagged "likely solved" or "partially overlaps", resolve them via AskUserQuestion FIRST. Do not present issues for selection while there are unconfirmed-solved ones in the queue. Never close an issue without explicit user approval.
+**Block before Step 4:** if any issues are flagged "likely solved" or "partially overlaps", resolve them FIRST. Do not present issues for selection while there are unconfirmed-solved ones in the queue. Close policy (hybrid): **auto-close ONLY a clear-cut hard-OVERCOME** (the validator cited a concrete merged PR that resolved it OR a passing repro) with an evidence comment (reopenable); **every other close — soft-overcome, partial-overlap, judgment — needs explicit user approval via AskUserQuestion.**
 
 ## Step 4: Present issues for selection (MULTI-SELECT BY DEFAULT)
 
@@ -295,6 +296,6 @@ For SOLO 🔴 issues: run the same cycle but push + PR + completion report after
 - The "already overcome" check (Step 3) runs for EVERY open issue, not a sample
 - Step 4 ALWAYS uses `multiSelect: true` — single-select is a violation of `autonomous-batch-issue-development.md`
 - Step 5 NEVER pauses between bundled issues — chain them on the same `dev` branch, single push at the end
-- Never close an issue without user confirmation via AskUserQuestion
+- Auto-close ONLY a clear-cut hard-OVERCOME issue (validator cited a concrete merged PR / passing repro) with an evidence comment (reopenable); every other close (soft-overcome, partial, judgment) needs user confirmation via AskUserQuestion
 - Present structured choices, not walls of text
 - If no issues exist, say so and ask if the user wants to create one

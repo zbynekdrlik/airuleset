@@ -36,6 +36,7 @@ The dispatch tells you the issue number + repo (e.g. `Validate issue #567 in mon
 ```
 issue: #<N> <title>
 verdict: STILL_VALID | OVERCOME | PARTIAL | UNCLEAR
+overcome_confidence: <ONLY if verdict=OVERCOME> hard | soft
 premise_check: <each key premise → confirmed-current | already-solved (file:line / PR #) | changed>
 evidence: <what you grepped/ran/read + observations; commit/PR #s that resolved it; repro result>
 already_done: <requirements in the issue that the code ALREADY satisfies (differently or not) — file:line / PR #>
@@ -45,9 +46,13 @@ recommendation: <work as-is | rescope to <X> | close as overcome (cite evidence)
 
 Verdict meanings:
 - **STILL_VALID** — the ask is real and unaddressed; safe to work as written.
-- **OVERCOME** — already solved/superseded; the caller should CLOSE it (with your evidence), not implement it.
+- **OVERCOME** — already solved/superseded; don't implement. State **`overcome_confidence`**:
+  - **hard** — there is a CONCRETE proof artifact: a specific merged PR that resolved/implemented it, OR a reproduction you ran that proves the asked behavior already exists / the bug is already gone. (Caller auto-closes hard-overcome.)
+  - **soft** — you infer it's overcome but have no single proof artifact (heuristic / partial signals). (Caller does NOT auto-close — it asks the user, quoting your evidence.)
 - **PARTIAL** — part done; only `still_to_do` remains — the caller rescopes to that.
 - **UNCLEAR** — you genuinely cannot determine it from code+system; the caller asks the user, quoting your `premise_check` so the user isn't re-asked something already answered.
+
+If you're not CERTAIN an OVERCOME is hard, mark it **soft** — auto-closing the wrong ticket erodes trust; let the user decide on anything less than proven.
 
 Be thorough and skeptical of the issue text. "The issue says X" is NOT evidence X is still true —
 the code and the live system are the truth.
