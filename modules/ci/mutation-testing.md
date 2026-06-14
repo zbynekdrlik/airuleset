@@ -41,18 +41,13 @@ Plus in the repo:
 
 If the PR gate exceeds ~15 min: fix the CONFIG — apply missing levers, shard across 2-4 matrix jobs (`--shard 1/2`, `--shard 2/2`, …), narrow scope. NEVER raise `timeout-minutes` as a band-aid, NEVER wait it out, NEVER silently delete the gate. Also: long-lived dev branches grow `--in-diff` scope toward full-tree — merge small PRs frequently (`pr-merge-policy.md` default auto-merge keeps diffs small).
 
-#### Weekly full-tree run (async)
+#### Full-tree catch-up — ON-DEMAND, never cron (`/mutation-sweep`)
 
-Scheduled workflow (weekend), sharded: `cargo mutants --shard ${{ matrix.shard }}/8 --baseline=skip` across a matrix of parallel jobs (`matrix.shard` = 1..8; the flag takes `index/total`). Surviving mutants → `gh issue create` (batched per module/area, label `test-quality`), worked through the normal backlog loop. The job FAILS only when the tooling fails to run; survivors become issues, not red CI — nothing is silently green because every survivor is a tracked `#N`. This is NOT `continue-on-error`: the job's declared contract is "mutation ran + report published + survivors filed", and it is binary on that contract.
+The full-tree run catches up everything the diff-scoped PR gates skipped across the week's merges. The user develops NONSTOP, so a scheduled cron is WRONG — it would compete with active dev for runners (a multi-hour mutation job queued on a shared self-hosted runner blocks ALL dev CI). Instead the full sweep is **user-triggered, when there's capacity** — no collision, no scheduling guesswork.
 
-#### Weekly run must NOT collide with active development
-
-The user develops NONSTOP, so the heavy weekly run must never compete with active dev CI for runners (a multi-hour mutation job queued on a shared self-hosted runner blocks ALL dev CI):
-
-- **Run the weekly on GitHub-HOSTED runners** (`runs-on: ubuntu-latest`), sharded — NEVER on the project's self-hosted / dev runner. Hosted = separate infra → zero interference; dev CI keeps flowing on the self-hosted runners untouched.
-- **Own concurrency group:** `concurrency: { group: mutation-weekly-${{ github.repository }}, cancel-in-progress: true }` — weekly runs never stack; a fresh trigger supersedes a stuck one.
-- **Hardware-bound projects** whose mutation tests REQUIRE self-hosted hardware (GPU / cameras / devices — e.g. RF-DETR, camera-box): give the weekly a **DEDICATED runner label** (not the dev runner). If that's impossible, **gate the weekly to skip while dev is busy** — first step checks `gh run list --status in_progress` (or `queued`); if any dev run is active, exit 0 early and let the next scheduled window retry, so the weekly NEVER preempts active development.
-- Cron at a low-traffic hour is a nicety, NOT the safeguard — the infra separation (hosted, or dedicated runner, or skip-if-dev-active) is what guarantees no collision.
+- **Trigger = a `workflow_dispatch` workflow** (e.g. `.github/workflows/mutation-full.yml`), NOT `schedule`/`push`/`pull_request`. Full tree, sharded: `cargo mutants --shard ${{ matrix.shard }}/8 --baseline=skip` (`matrix.shard` = 1..8). Surviving mutants → `gh issue create` (batched per area, label `test-quality`). The job FAILS only when the tooling fails to run; survivors become tracked issues, not red CI (NOT `continue-on-error` — its contract is "mutation ran + survivors filed").
+- **The user fires it with the `/mutation-sweep` skill** when active work is done — it dispatches the workflow for the current repo (or all repos), monitors to terminal, confirms survivors were filed. The agent NEVER auto-runs it.
+- **Run on GitHub-HOSTED runners** (`runs-on: ubuntu-latest`) so even on demand it doesn't tie up self-hosted dev runners. Hardware-bound repos (GPU/devices — RF-DETR, camera-box) that must use self-hosted: the user runs `/mutation-sweep` when the hardware is idle (their call), and/or a dedicated runner label — never the active dev runner.
 
 #### TypeScript: StrykerJS
 

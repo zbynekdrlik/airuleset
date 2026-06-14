@@ -36,7 +36,7 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot"]
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep"]
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
 AGENT_NAMES = ["autopilot-worker"]
