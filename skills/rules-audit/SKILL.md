@@ -44,6 +44,21 @@ ls ~/devel/*/.claude/loop.md 2>/dev/null
 - [ ] Stale per-repo artifacts from a superseded design deleted (e.g. `.claude/loop.md` from the old `/autopilot` fleet — the new autopilot doesn't use it).
 - [ ] Do NOT git-commit changes into a repo whose autopilot/worker is mid-run — note it and clean once the run finishes, to avoid colliding with the live worker's tree. **"Mid-run" = an ACTIVE worker/session (`claude agents --json`), NOT a dirty git tree.** A shelved/parked project can sit dirty (`M CLAUDE.md`, uncommitted edits) for months with no active session — that is stale cruft, not live work. Verify activity from the agent list, never infer it from `git status`.
 
+### 0b. CI mutation-budget audit (cross-repo — find "endless CI")
+
+Global rule changes don't reach project CI YAML (it's the project's CODE, not governance). Periodically audit every repo's CI for mutation jobs that violate `mutation-testing.md` (unbounded / full-scope / high-timeout on the PR path = the "endless CI wait"). Scan BOTH machines:
+
+```bash
+for wf in $(find ~/devel -maxdepth 6 -path '*/.github/workflows/*' \( -name '*.yml' -o -name '*.yaml' \) -not -path '*/node_modules/*' 2>/dev/null); do
+  grep -qiE 'cargo[ -]mutants|\bmutmut\b|stryker|\bmutation\b' "$wf" || continue
+  echo "## $wf"; grep -nE 'mutation|mutants|stryker|timeout-minutes|push:|pull_request:|schedule:|in-diff|--shard|--workspace|incremental' "$wf" | grep -viE '^\s*#'
+done
+```
+
+- [ ] Flag any mutation job that is on `push`/`pull_request` AND (full-scope — `--workspace` / no `--in-diff` / "entire codebase") OR `timeout-minutes` > 20.
+- [ ] For each violation, **file an alignment issue on that repo** (diff-scoped ≤20-min PR gate + weekly async, or async-only if covering tests are too slow) — do NOT edit the project's CI yourself ([[feedback-stay-in-repo-lane]]). Precedents: codex-bridge#119, bakerion-ai#341, spinbike#102, songplayer#123, devbridge#62, reaperiem#200.
+- [ ] Diff-scoped + ≤20-min + (weekly async or PR-only-with-skip) = compliant, no action.
+
 ### 1. Size budget
 - [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`). Target: <400 lines, <30 KB
 - [ ] Which 5 modules contribute most tokens? (`wc -l modules/*/*.md | sort -rn | head -10`)
