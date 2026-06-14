@@ -42,7 +42,7 @@ ls ~/devel/*/.claude/loop.md 2>/dev/null
 - [ ] Every SUPERSEDED marker removed (e.g. `airuleset:autopilot=auto-merge` — auto-merge is the default now, so the marker is cruft).
 - [ ] Every AD-HOC local gate that contradicts the new global default removed. A project keeps a restriction ONLY via the CURRENT documented opt-out marker (e.g. `airuleset:merge=manual`), never via legacy prose.
 - [ ] Stale per-repo artifacts from a superseded design deleted (e.g. `.claude/loop.md` from the old `/autopilot` fleet — the new autopilot doesn't use it).
-- [ ] Do NOT git-commit changes into a repo whose autopilot/worker is mid-run — note it and clean once the run finishes, to avoid colliding with the live worker's tree.
+- [ ] Do NOT git-commit changes into a repo whose autopilot/worker is mid-run — note it and clean once the run finishes, to avoid colliding with the live worker's tree. **"Mid-run" = an ACTIVE worker/session (`claude agents --json`), NOT a dirty git tree.** A shelved/parked project can sit dirty (`M CLAUDE.md`, uncommitted edits) for months with no active session — that is stale cruft, not live work. Verify activity from the agent list, never infer it from `git status`.
 
 ### 1. Size budget
 - [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`). Target: <400 lines, <30 KB
