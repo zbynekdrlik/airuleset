@@ -1088,6 +1088,28 @@ class TestQueue(unittest.TestCase):
         b.prune_queue("o/x", open_issues={9})              # 5 no longer open → dropped
         self.assertEqual([r["issue"] for r in b.get_queue()], [9])
 
+    def test_prune_empty_set_leaves_queue_intact(self):
+        """_maybe_prune with an empty open-issues set must NOT wipe the queue.
+
+        The refresher receives an empty set when a repo's gh call returns an
+        empty issues list (transient rate-limit, all-closed repo).  Wiping every
+        queue row in that case destroys the user's planned-work view.  The guard
+        must be truthiness (`if open_issue_numbers:`) not `is not None`.
+        """
+        import board.server as srv
+        b = self._b()
+        b.set_queue("o/x", [(5, "five"), (9, "nine")])
+        # _maybe_prune with empty set → must not prune
+        srv._maybe_prune(b, "o/x", set())
+        issues = [r["issue"] for r in b.get_queue()]
+        self.assertIn(5, issues)
+        self.assertIn(9, issues)
+        # _maybe_prune with non-empty set → prunes closed issues normally
+        srv._maybe_prune(b, "o/x", {9})
+        issues2 = [r["issue"] for r in b.get_queue()]
+        self.assertNotIn(5, issues2)
+        self.assertIn(9, issues2)
+
     def test_queue_excludes_active_run(self):
         b = self._b()
         b.set_queue("o/x", [(5, "five"), (9, "nine")])

@@ -237,7 +237,7 @@ def _queue_section(queue):
     # group by repo while preserving order
     groups = {}
     for item in queue:
-        repo = item["repo"] if hasattr(item, "keys") else item.get("repo") if hasattr(item, "get") else item[0]
+        repo = item["repo"]
         if repo not in groups:
             groups[repo] = []
         groups[repo].append(item)
@@ -246,8 +246,8 @@ def _queue_section(queue):
     for repo, items in groups.items():
         rows_html.append(f"<div class=\"q-repo\">{_e(repo)}</div>")
         for item in items:
-            issue = item["issue"] if hasattr(item, "__getitem__") else None
-            title = item["title"] if hasattr(item, "__getitem__") else None
+            issue = item["issue"]
+            title = item["title"]
             rows_html.append(
                 f"<div class=\"q-item\">"
                 f"#{_e(issue)}&nbsp;{_e(title)}"

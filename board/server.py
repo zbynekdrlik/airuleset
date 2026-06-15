@@ -444,6 +444,24 @@ def _port_already_bound(host, port):
         s.close()
 
 
+def _maybe_prune(board, repo, open_issue_numbers):
+    """Prune closed issues from the queue for `repo` — but ONLY when the
+    open-issues set is non-empty.
+
+    An empty set means the gh fetch returned nothing (transient rate-limit,
+    all-closed repo, or a parse hiccup).  Pruning against an empty set would
+    delete every queue row, wiping the user's planned-work view.  The truthiness
+    guard (`if open_issue_numbers:`) skips the prune when the set is empty so the
+    queue survives transient gh outages intact.  An explicit supervisor
+    `queue_report(repo, [])` is the correct way to clear the queue intentionally."""
+    if not open_issue_numbers:
+        return
+    try:
+        board.prune_queue(repo, open_issue_numbers)
+    except Exception:
+        _log.exception("prune_queue failed for repo %s", repo)
+
+
 def _refresher_loop(board, repos, stop):
     """Background gh refresher (design §8): batched per-repo fetch on a loop with
     a GH_POLL_FLOOR_S floor, per-repo try/except so one repo's failure never
@@ -465,11 +483,7 @@ def _refresher_loop(board, repos, stop):
                 open_issue_numbers = {
                     i.get("number") for i in res.get("issues", [])
                     if i.get("number") is not None}
-                if open_issue_numbers is not None:
-                    try:
-                        board.prune_queue(repo, open_issue_numbers)
-                    except Exception:
-                        _log.exception("prune_queue failed for repo %s", repo)
+                _maybe_prune(board, repo, open_issue_numbers)
                 for pr in res.get("prs", []):
                     num = pr.get("number")
                     if num is None:
