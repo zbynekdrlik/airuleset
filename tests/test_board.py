@@ -262,3 +262,24 @@ class TestGateRows(unittest.TestCase):
         b.set_gate("r1", "ci", "ok", seq=5, claimed=False)
         b.set_gate("r1", "ci", "fail", seq=2, claimed=False)   # stale
         self.assertEqual(b.gate_map("r1")["ci"], "ok")
+
+
+class TestRunId(unittest.TestCase):
+    def setUp(self):
+        import board.reporter as rp
+        self.home = tempfile.mkdtemp()
+        rp.STATE_DIR = self.home
+
+    def test_mint_format_and_reuse(self):
+        import board.reporter as rp
+        rid = rp.start_run("o/x", 1, "title", is_bug_fix=True,
+                           has_deploy=False, merge_mode="auto")
+        self.assertRegex(rid, r"^o_x-1-\d+-[0-9a-f]{4}$")
+        self.assertEqual(rp.current_run("o/x", 1), rid)      # persisted, reusable
+
+    def test_seq_monotonic(self):
+        import board.reporter as rp
+        rid = rp.start_run("o/x", 2, "t")
+        s1 = rp.next_seq(rid)
+        s2 = rp.next_seq(rid)
+        self.assertEqual(s2, s1 + 1)
