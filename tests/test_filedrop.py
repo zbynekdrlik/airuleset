@@ -218,6 +218,20 @@ class TestSafeResolve(unittest.TestCase):
             base, token = self._base(td)
             self.assertIsNone(safe_resolve(f"/{token}/missing.bin", base))
 
+    def test_accepts_all_symbol_sanitized_name(self):
+        # A file named "!!!" sanitizes (safe_name) to "_". The server MUST still
+        # serve it — _NAME_RE deliberately permits a no-alphanumeric name. Guards
+        # against a future regex tightening that would 404 legit shared files.
+        from filedrop.server import safe_resolve
+        from filedrop.share import safe_name
+        self.assertEqual(safe_name("!!!"), "_")
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "drop"
+            token = "B" * 22
+            (base / token).mkdir(parents=True)
+            (base / token / "_").write_bytes(b"data")
+            self.assertIsNotNone(safe_resolve(f"/{token}/_", base))
+
 
 class TestServerEndToEnd(unittest.TestCase):
     def test_get_served_file(self):

@@ -18,6 +18,11 @@ from . import FILEDROP_DIR, PORT, host_ip
 
 # token = secrets.token_urlsafe(>=16) -> url-safe base64 alphabet only.
 _TOKEN_RE = re.compile(r"\A[A-Za-z0-9_-]{16,128}\Z")
+# Name alphabet deliberately matches share.safe_name's OUTPUT exactly — including
+# an all-symbol name that sanitizes to "_" (e.g. "!!!" -> "_"). Do NOT tighten to
+# require an alphanumeric: that would 404 a legitimately shared file. "." and ".."
+# can never reach this regex as a valid name anyway — safe_resolve filters "."/""
+# segments (so a "." name fails the 2-segment count) and rejects any "../.." first.
 _NAME_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 
 
@@ -103,7 +108,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, max-age=3600")
             self.end_headers()
             if not head:
-                shutil.copyfileobj(f, self.wfile)   # stream — never load whole file in RAM
+                try:
+                    shutil.copyfileobj(f, self.wfile)   # stream — never load whole file in RAM
+                except (BrokenPipeError, ConnectionResetError):
+                    # Client aborted the download (closed the tab / stopped playback).
+                    # Not an error — swallow it so journald isn't spammed with a
+                    # stack trace on every interrupted fetch.
+                    pass
         finally:
             f.close()
 
@@ -124,6 +135,10 @@ def make_server(host=None, port=None, base_dir=None):
     default to the LAN IP, PORT, and FILEDROP_DIR respectively."""
     host = host_ip() if host is None else host
     port = PORT if port is None else port
+    # One thread per connection; a slow body-reader holds its thread for the whole
+    # download (Handler.timeout only guards a slow REQUEST). Concurrent readers are
+    # bounded at the cgroup level by the unit's TasksMax=64 — fine for the
+    # LAN-internal trust model. daemon_threads so shutdown never blocks on them.
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     httpd.base_dir = Path(base_dir) if base_dir is not None else FILEDROP_DIR
