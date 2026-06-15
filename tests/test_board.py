@@ -484,3 +484,165 @@ class TestGh(unittest.TestCase):
         self.assertEqual(calls["args"][0], "gh")
         self.assertNotIn("shell", calls["kw"])  # never shell=True
         self.assertFalse(calls["kw"].get("shell", False))
+
+
+class TestRefresh(unittest.TestCase):
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    # -------- the plan's contract: UNSTABLE-merged → alarm end-to-end -------
+    def test_unstable_merged_alarms_end_to_end(self):
+        from board.gate import compute_alarms
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "done", "event_id": "e", "event_ts": 1.0})
+        for g in ("ticket_validated", "ci", "plan_check", "review",
+                  "requesting_code_review"):
+            b.set_gate("r1", g, "ok", seq=1, claimed=True)
+        b.set_gate("r1", "mergeable", "fail", seq=1, claimed=False)  # UNSTABLE
+        snap = b.alarm_input("r1", merged=True)
+        self.assertIn("MERGED_INCOMPLETE_GATE", compute_alarms(snap))
+
+    # -------- alarm_input assembles the right dict --------------------------
+    def test_alarm_input_reads_run_and_gates(self):
+        b = self._b()
+        b.seed_gates("r1", is_bug_fix=True, has_deploy=True)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "merge", "is_bug_fix": 1, "has_deploy": 1,
+                       "merge_mode": "manual", "event_id": "e", "event_ts": 1.0})
+        b.set_gate("r1", "ci", "ok", seq=1, claimed=False)
+        snap = b.alarm_input("r1")
+        self.assertEqual(snap["phase"], "merge")
+        self.assertTrue(snap["is_bug_fix"])
+        self.assertTrue(snap["has_deploy"])
+        self.assertEqual(snap["merge_mode"], "manual")
+        self.assertEqual(snap["gate"]["ci"], "ok")
+        self.assertIn("last_report_age_s", snap)
+        self.assertGreaterEqual(snap["last_report_age_s"], 0)
+
+    def test_alarm_input_merged_from_gh_state(self):
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "done", "event_id": "e", "event_ts": 1.0})
+        # gh says merged — alarm_input picks it up without an override
+        b.set_gh("r1", merged=True)
+        self.assertTrue(b.alarm_input("r1")["merged"])
+        # explicit override wins
+        self.assertFalse(b.alarm_input("r1", merged=False)["merged"])
+
+    def test_alarm_input_missing_run(self):
+        b = self._b()
+        self.assertIsNone(b.alarm_input("nope"))
+
+    def test_alarm_input_uses_board_clock_not_event_ts(self):
+        # last_report_age_s must derive from runs.updated_at (board clock at
+        # commit), NOT the worker-stamped event_ts (which could be far in the
+        # past due to clock skew / queue replay).
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "implementing",
+                       "event_id": "e", "event_ts": 1.0})  # ancient worker ts
+        snap = b.alarm_input("r1")
+        # board just committed → age is tiny, NOT ~now-1970
+        self.assertLess(snap["last_report_age_s"], 60)
+
+    # -------- set_gh writes gh_state AND the verified gate rows -------------
+    def test_set_gh_writes_state_and_gate_rows(self):
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "merge", "event_id": "e", "event_ts": 1.0})
+        b.set_gh("r1", merged=True, mergeable_gate="fail", ci_conclusion="fail",
+                 mergeable_state="UNSTABLE", pr_url="https://github.com/o/x/pull/1")
+        gm = b.gate_map("r1")
+        self.assertEqual(gm["mergeable"], "fail")  # written from gh truth
+        self.assertEqual(gm["ci"], "fail")
+        # and the gate source is board-fixed verified for these
+        row = b.conn().execute(
+            "SELECT source FROM gate WHERE run_id='r1' AND check_name='mergeable'"
+        ).fetchone()
+        self.assertEqual(row["source"], "verified")
+        st = b.conn().execute(
+            "SELECT merged, mergeable_state, pr_url, gh_ok FROM gh_state "
+            "WHERE run_id='r1'").fetchone()
+        self.assertEqual(st["merged"], 1)
+        self.assertEqual(st["mergeable_state"], "UNSTABLE")
+        self.assertEqual(st["gh_ok"], 1)
+
+    def test_set_gh_ok_false_sentinel(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "CI", "event_id": "e", "event_ts": 1.0})
+        b.set_gh("r1", gh_ok=False)
+        st = b.conn().execute(
+            "SELECT gh_ok FROM gh_state WHERE run_id='r1'").fetchone()
+        self.assertEqual(st["gh_ok"], 0)
+
+    def test_set_gh_pending_does_not_write_gate(self):
+        # a 'pending' mergeable_gate (GitHub still computing) must NOT overwrite
+        # a previously-known gate state with pending noise.
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.set_gh("r1", mergeable_gate="ok", mergeable_state="CLEAN")
+        b.set_gh("r1", mergeable_gate="pending")  # later poll, still computing
+        self.assertEqual(b.gate_map("r1")["mergeable"], "ok")  # not clobbered
+
+    # -------- (repo,issue) -> newest non-terminal run mapping ---------------
+    def test_newest_active_run_for_issue(self):
+        b = self._b()
+        b.apply_event({"run_id": "old", "repo": "o/x", "issue": 5, "seq": 1,
+                       "phase": "implementing", "event_id": "a", "event_ts": 1.0})
+        import time
+        time.sleep(0.01)
+        b.apply_event({"run_id": "new", "repo": "o/x", "issue": 5, "seq": 1,
+                       "phase": "implementing", "event_id": "b", "event_ts": 2.0})
+        self.assertEqual(b.newest_active_run("o/x", 5), "new")
+        # a terminal newest run is NOT "active"
+        b.apply_event({"run_id": "new", "seq": 9, "phase": "done",
+                       "event_id": "c", "event_ts": 3.0})
+        self.assertEqual(b.newest_active_run("o/x", 5), "old")
+        self.assertIsNone(b.newest_active_run("o/x", 999))
+
+    # -------- reaper: stale + gh reconcile ---------------------------------
+    def test_mark_stale_sets_status(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "implementing", "event_id": "e", "event_ts": 1.0})
+        # force updated_at far into the past so it's past STALE_ACTIVE_S
+        c = b.conn()
+        c.execute("UPDATE runs SET updated_at=? WHERE run_id='r1'", (100.0,))
+        c.commit()
+        c.close()
+        import time
+        b.mark_stale(time.time())
+        self.assertEqual(b.get_run("r1")["status"], "stale")
+
+    def test_mark_stale_skips_terminal_and_pause(self):
+        b = self._b()
+        for rid, ph in (("done1", "done"), ("ask1", "asking-user")):
+            b.apply_event({"run_id": rid, "repo": "o/x", "issue": 1, "seq": 1,
+                           "phase": ph, "event_id": rid, "event_ts": 1.0})
+            c = b.conn()
+            c.execute("UPDATE runs SET updated_at=100.0 WHERE run_id=?", (rid,))
+            c.commit()
+            c.close()
+        import time
+        b.mark_stale(time.time())
+        self.assertNotEqual(b.get_run("done1")["status"], "stale")
+        self.assertNotEqual(b.get_run("ask1")["status"], "stale")
+
+    def test_reconcile_gh_merged_finalizes_done(self):
+        # gh shows the issue merged+closed for a non-terminal run → finalize done
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "merge", "event_id": "e", "event_ts": 1.0})
+        b.set_gh("r1", merged=True, issue_state="CLOSED")
+        import time
+        b.mark_stale(time.time())
+        row = b.get_run("r1")
+        self.assertEqual(row["phase"], "done")
+        self.assertIn("per gh", (row["result"] or ""))

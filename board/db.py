@@ -328,3 +328,199 @@ class Board:
             return {r["check_name"]: r["state"] for r in rows}
         finally:
             c.close()
+
+    # ----- gh state + alarm assembly (Task 10) -------------------------------
+
+    # Columns gh_state can carry. set_gh accepts these plus the derived
+    # *_gate aliases that ALSO write verified gate rows (mergeable_gate, ci_*).
+    _GH_COLS = ("pr_url", "pr_state", "merged", "ci_conclusion", "mergeable",
+                "mergeable_state", "issue_state", "deploy_version")
+
+    def set_gh(self, rid, **fields):
+        """Upsert objective gh signals into gh_state for `rid`, and — for the
+        gh-verified checks (mergeable, ci) — ALSO write the corresponding gate
+        rows with the board-fixed source ('verified' per gate.source_of) so the
+        alarm sees gh truth a worker can never spoof.
+
+        Recognised kwargs:
+          * gh_state columns: pr_url, pr_state, merged, ci_conclusion,
+            mergeable, mergeable_state, issue_state, deploy_version
+          * mergeable_gate (ok|fail|pending) — writes the `mergeable` gate row
+            (pending is skipped so a 'still computing' poll never clobbers a
+            known state).
+          * ci_conclusion (success|failure|...) — also mapped to a `ci` gate
+            state (success→ok, anything-else-non-null→fail) and written.
+          * gh_ok=False — sets the STALE sentinel; gh_ok defaults True on write.
+
+        A gh refresh is a write — it routes through this method, which the
+        server calls on the single writer thread (same as _apply)."""
+        now = time.time()
+        mergeable_gate = fields.pop("mergeable_gate", None)
+        gh_ok = fields.pop("gh_ok", True)
+        cols = {k: fields[k] for k in self._GH_COLS if k in fields}
+        # bools/ints normalise to 0/1 for the INTEGER columns
+        if "merged" in cols and cols["merged"] is not None:
+            cols["merged"] = int(bool(cols["merged"]))
+
+        c = self.conn()
+        try:
+            # ---- gh_state upsert (COALESCE so a partial poll never nulls) ----
+            set_parts = ["refreshed_at=:refreshed_at", "gh_ok=:gh_ok"]
+            params = {"run_id": rid, "refreshed_at": now,
+                      "gh_ok": int(bool(gh_ok))}
+            for k, v in cols.items():
+                set_parts.append(f"{k}=COALESCE(:{k}, {k})")
+                params[k] = v
+            # INSERT skeleton row if absent, then UPDATE (two statements keep the
+            # COALESCE-against-existing semantics simple and correct).
+            c.execute(
+                "INSERT OR IGNORE INTO gh_state(run_id, refreshed_at, gh_ok) "
+                "VALUES(?,?,?)", (rid, now, int(bool(gh_ok))))
+            c.execute(
+                f"UPDATE gh_state SET {', '.join(set_parts)} WHERE run_id=:run_id",
+                params)
+
+            # ---- mirror gh-verified truth into the gate rows ----
+            # mergeable gate (ok|fail). 'pending' is intentionally NOT written:
+            # GitHub is still computing, so we leave the prior known state alone.
+            if mergeable_gate in ("ok", "fail"):
+                self._set_gate_verified(c, rid, "mergeable", mergeable_gate, now)
+            # ci gate, derived from ci_conclusion.
+            cc = cols.get("ci_conclusion")
+            if cc is not None:
+                ci_state = "ok" if cc == "success" else "fail"
+                self._set_gate_verified(c, rid, "ci", ci_state, now)
+            c.commit()
+        finally:
+            c.close()
+
+    @staticmethod
+    def _set_gate_verified(c, rid, check, state, now):
+        """Write a gh-verified gate row. The source is board-fixed to
+        source_of(check) (which is 'verified' for ci/mergeable). Not seq-guarded
+        the same way as worker reports: gh is the objective authority, so its
+        latest read wins for the verified checks (seq=0 sentinel, recv_ts=now)."""
+        from board.gate import source_of
+        c.execute(
+            """INSERT INTO gate(run_id, check_name, state, source, seq, recv_ts)
+               VALUES(?,?,?,?,0,?)
+               ON CONFLICT(run_id, check_name) DO UPDATE SET
+                 state=excluded.state, source=excluded.source,
+                 recv_ts=excluded.recv_ts""",
+            (rid, check, state, source_of(check), now))
+
+    def alarm_input(self, rid, merged=None):
+        """Assemble the dict gate.compute_alarms expects for `rid`, or None if
+        the run is unknown.
+
+        Pulls merge_mode / is_bug_fix / has_deploy / phase from runs, the gate
+        states from gate_map, `merged` from gh_state unless overridden, and
+        last_report_age_s from the AUTHORITATIVE board clock (now - updated_at,
+        NOT the worker-stamped event_ts — dev1/dev2 clock skew makes event_ts
+        unsafe for cross-machine timing)."""
+        c = self.conn()
+        try:
+            run = c.execute(
+                "SELECT phase, status, is_bug_fix, has_deploy, merge_mode, "
+                "updated_at FROM runs WHERE run_id=?", (rid,)).fetchone()
+            if run is None:
+                return None
+            gh = c.execute(
+                "SELECT merged FROM gh_state WHERE run_id=?", (rid,)).fetchone()
+        finally:
+            c.close()
+        if merged is None:
+            merged = bool(gh["merged"]) if gh and gh["merged"] is not None else False
+        else:
+            merged = bool(merged)
+        updated_at = run["updated_at"] or time.time()
+        age = max(0.0, time.time() - updated_at)
+        return {
+            "merged": merged,
+            "merge_mode": run["merge_mode"] or "auto",
+            "is_bug_fix": bool(run["is_bug_fix"]),
+            "has_deploy": bool(run["has_deploy"]),
+            "phase": run["phase"],
+            "last_report_age_s": age,
+            "gate": self.gate_map(rid),
+        }
+
+    def newest_active_run(self, repo, issue):
+        """The run_id of the NEWEST non-terminal run for (repo, issue), or None.
+
+        'Newest' = greatest started_at (ties broken by updated_at). gh signals
+        for an issue are mapped to THIS run (design §4/§8: poll once per
+        (repo,issue), fan to the active attempt; older attempts auto-demote)."""
+        from board import TERMINAL_PHASES
+        placeholders = ",".join("?" * len(TERMINAL_PHASES))
+        c = self.conn()
+        try:
+            row = c.execute(
+                f"""SELECT run_id FROM runs
+                    WHERE repo=? AND issue=?
+                      AND (phase IS NULL OR phase NOT IN ({placeholders}))
+                      AND (status IS NULL OR status != 'stale')
+                    ORDER BY started_at DESC, updated_at DESC
+                    LIMIT 1""",
+                (repo, issue, *TERMINAL_PHASES)).fetchone()
+            return row["run_id"] if row else None
+        finally:
+            c.close()
+
+    def mark_stale(self, now):
+        """Reaper + reconcile (design §4):
+
+          * RECONCILE FIRST — any non-terminal run whose gh_state shows merged
+            (issue closed or PR merged) is finalized as `done` with the result
+            "completed per gh, no final worker report".
+          * Then any remaining non-terminal run (phase not terminal and not
+            asking-user) whose last board-side update (updated_at) is older than
+            its phase-aware threshold → status='stale'.
+
+        Runs on the single writer thread in the server. Returns (reconciled,
+        stale) counts for logging/tests."""
+        from board import (TERMINAL_PHASES, PAUSE_PHASES, WAIT_PHASES,
+                           STALE_ACTIVE_S, STALE_WAIT_S)
+        term = ",".join("?" * len(TERMINAL_PHASES))
+        reconciled = 0
+        stale = 0
+        c = self.conn()
+        try:
+            # ---- reconcile: gh merged+closed & non-terminal → done ----
+            rows = c.execute(
+                f"""SELECT r.run_id FROM runs r
+                    JOIN gh_state g ON g.run_id = r.run_id
+                    WHERE (r.phase IS NULL OR r.phase NOT IN ({term}))
+                      AND g.merged = 1""",
+                tuple(TERMINAL_PHASES)).fetchall()
+            for row in rows:
+                c.execute(
+                    """UPDATE runs SET phase='done', status='done',
+                         result=COALESCE(result,'') ||
+                                CASE WHEN result IS NULL OR result=''
+                                     THEN 'completed per gh, no final worker report'
+                                     ELSE '' END,
+                         updated_at=?
+                       WHERE run_id=?""",
+                    (now, row["run_id"]))
+                reconciled += 1
+            # ---- stale: remaining non-terminal past phase threshold ----
+            cand = c.execute(
+                f"""SELECT run_id, phase, updated_at FROM runs
+                    WHERE (phase IS NULL OR phase NOT IN ({term}))
+                      AND (status IS NULL OR status != 'stale')""",
+                tuple(TERMINAL_PHASES)).fetchall()
+            for row in cand:
+                phase = row["phase"]
+                if phase in PAUSE_PHASES:
+                    continue  # asking-user is a legitimate pause, never stale
+                upd = row["updated_at"] or now
+                thresh = STALE_WAIT_S if phase in WAIT_PHASES else STALE_ACTIVE_S
+                if (now - upd) > thresh:
+                    c.execute("UPDATE runs SET status='stale' WHERE run_id=?",
+                              (row["run_id"],))
+                    stale += 1
+            c.commit()
+        finally:
+            c.close()
+        return reconciled, stale
