@@ -132,6 +132,7 @@ events(id PK, run_id, event_id UNIQUE, seq, phase, message, event_ts, recv_ts)
 gate(run_id, check, state, source, detail, seq, recv_ts, UNIQUE(run_id, check))
 gh_state(run_id PK, pr_url, pr_state, merged, ci_conclusion,
          mergeable, mergeable_state, issue_state, deploy_version, refreshed_at, gh_ok)
+queue(repo, issue, title, position, reported_at, PRIMARY KEY(repo, issue))   -- planned backlog (§11a)
 schema_version(version)
 ```
 - `runs.result` keeps the human "how solved" summary; the structured evidence columns capture the worker's evidence block so `/ticket` shows the full audit trail (catches weak-evidence obsolete-closes, non-empty `unverified` at merge, etc.).
@@ -188,6 +189,17 @@ schema_version(version)
 - **Recent/Done section:** full history (kept forever), collapsible; previous attempts nest under their issue. Click → `/ticket/<run>` detail (timeline + gate + gh + evidence).
 - **Health strip** + **version footer** + **empty state** as in §6.
 - Timestamps displayed localized to the user's tz; stored/compared as UTC epoch.
+
+## 11a. Planned queue / backlog (ADDED 2026-06-15)
+
+**Why:** the user needs to see, at a glance, how many tickets are still queued and in what order they'll be worked — i.e. how much is left before the autopilot is free again. The Live/Recent sections show what IS and WAS worked; this shows what's NEXT.
+
+- **Source (authoritative):** the `/autopilot` supervisor already computes the ordered backlog each loop iteration (`gh issue list --state open` minus `autopilot-skip`, priority/oldest-first, with bundling). It reports it to the board: `airuleset.py report --queue --repo <r> --items '[[<issue>,"<title>"],...]'` (ordered). The board **atomically replaces** that repo's queue rows with the new ordered list (`set_queue(repo, items)` — delete repo's rows, insert positioned).
+- **Robustness:** the gh-refresher **prunes** queue entries whose issue is now closed OR has become an active run, so a finished/in-progress ticket drops off even before the next supervisor report. Best-effort baseline: if a tracked repo has open non-skip issues the refresher saw but no supervisor-reported queue, the board MAY show them oldest-first as a derived queue (clearly marked "derived").
+- **Render:** a **"Up next — N queued"** section near the TOP of the card grid (it answers "how much is left"), grouped per repo, ordered by `position`; each row = `#issue title`. Issues currently in a Live run are shown in Live, not double-listed in the queue. The count is the remaining total across repos.
+- **Schema:** `queue(repo, issue, title, position, reported_at, PRIMARY KEY(repo, issue))` — migration 2 (idempotent `CREATE TABLE IF NOT EXISTS`).
+- **Endpoint/security:** the queue payload arrives on the same token-gated `POST /report` (a `queue` body shape); same validation (repo regex, issue int, title scrub/escape, body cap). Rendered with `html.escape` like everything else.
+- **Governance:** `skills/autopilot/SKILL.md` Step 1 (and after each issue completes in Step 3) calls `report --queue` with the freshly-computed ordered backlog, so the board's "Up next" stays current as the loop drains it.
 
 ## 12. Governance integration (airuleset)
 

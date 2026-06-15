@@ -945,6 +945,63 @@ class TestServer(unittest.TestCase):
 
 ---
 
+## Phase E2 — Planned queue / backlog (ADDED 2026-06-15)
+
+Implements spec §11a. Slots in AFTER Phase E (needs the db, server, and render to exist). Governance piece (supervisor reports the queue) is wired in Phase G.
+
+### Task 19: Queue table + reporter + server + render + gh-prune
+
+**Files:** Modify `board/db.py`, `board/reporter.py`, `board/server.py`, `board/render.py`, `airuleset.py`; Test `tests/test_board.py::TestQueue`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+class TestQueue(unittest.TestCase):
+    def _b(self):
+        import tempfile, os
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+    def test_set_queue_replaces_atomically_and_orders(self):
+        b=self._b()
+        b.set_queue("o/x", [(5,"five"),(9,"nine")])
+        b.set_queue("o/x", [(9,"nine"),(7,"seven")])   # replace
+        q=b.get_queue()                                 # [{repo,issue,title,position}], excludes active/closed
+        nums=[r["issue"] for r in q if r["repo"]=="o/x"]
+        self.assertEqual(nums, [9,7])                   # new order, old #5 gone
+    def test_prune_closed(self):
+        b=self._b()
+        b.set_queue("o/x", [(5,"five"),(9,"nine")])
+        b.prune_queue("o/x", open_issues={9})           # 5 no longer open → dropped
+        self.assertEqual([r["issue"] for r in b.get_queue()], [9])
+    def test_queue_excludes_active_run(self):
+        b=self._b()
+        b.set_queue("o/x", [(5,"five"),(9,"nine")])
+        b.apply_event({"run_id":"o_x-5-1-aa","repo":"o/x","issue":5,"seq":1,
+                       "phase":"implementing","event_id":"e","event_ts":1.0})
+        nums=[r["issue"] for r in b.get_queue()]        # 5 is now active → not in queue
+        self.assertNotIn(5, nums); self.assertIn(9, nums)
+    def test_render_queue_count_and_escape(self):
+        from board.render import card_grid
+        html=card_grid(live=[], recent=[], version="vX",
+                       health={}, queue=[{"repo":"o/x","issue":1,"title":"<b>t</b>","position":0}])
+        self.assertIn("Up next", html); self.assertIn("1 queued", html)
+        self.assertIn("&lt;b&gt;", html); self.assertNotIn("<b>t</b>", html)
+```
+
+- [ ] **Step 2: Run** `python3 -m unittest tests.test_board.TestQueue -v` → FAIL.
+
+- [ ] **Step 3: Implement**
+  - `board/db.py`: migration 2 — append to `_SCHEMA` a `CREATE TABLE IF NOT EXISTS queue(repo TEXT, issue INTEGER, title TEXT, position INTEGER, reported_at REAL, PRIMARY KEY(repo,issue))`. Methods: `set_queue(repo, items)` (atomic: `DELETE FROM queue WHERE repo=?` then insert each `(repo,issue,title,position,now)`), `prune_queue(repo, open_issues)` (delete rows whose issue not in `open_issues`), `get_queue()` (return ordered rows EXCLUDING any `(repo,issue)` that has a non-terminal run OR whose issue is a closed/terminal run — join against `runs`).
+  - `board/reporter.py`: `queue_report(repo, items)` → POST a `{"kind":"queue","repo":repo,"items":[[n,t],...]}` body (token, scrubbed titles, through the same enqueue/flush path).
+  - `airuleset.py` `cmd_report`: add `--queue --repo R --items '<json>'` → `reporter.queue_report(R, json.loads(items))`.
+  - `board/server.py` POST `/report`: if body `kind=="queue"`, validate repo + each issue int + scrub/cap titles, then `board.set_queue(...)` (via the writer queue). Else the normal event path.
+  - `board/render.py`: `card_grid(..., queue=None)` renders a top "**Up next — N queued**" section (N = len(queue)); per-repo groups, ordered by position, `#issue title` each `html.escape`d. Empty queue → omit or show "queue empty".
+  - `board/gh.py` refresher loop (Phase D code): after fetching a repo's open issues, call `board.prune_queue(repo, open_issue_numbers)`.
+
+- [ ] **Step 4: Run** `python3 -m unittest tests.test_board.TestQueue -v` → PASS; then full `python3 -m unittest discover -s tests`.
+
+- [ ] **Step 5: Commit** `git commit -am "feat(board): planned-queue (backlog) — table, reporter --queue, server, render, gh-prune"`
+
 ## Phase F — airuleset.py integration
 
 ### Task 13: `BOARD_HOST_IP` + `is_board_host()` + `report`/`board` subcommands
