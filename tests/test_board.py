@@ -720,3 +720,109 @@ class TestRefresh(unittest.TestCase):
         row = b.get_run("r1")
         self.assertEqual(row["phase"], "done")
         self.assertIn("per gh", (row["result"] or ""))
+
+
+# ============================ Phase E — render =============================
+
+class TestRender(unittest.TestCase):
+    def _live(self, **kw):
+        base = {"run_id": "o_x-1-1-ab12", "repo": "o/x", "issue": 1,
+                "title": "fix the thing", "phase": "CI", "goal": "g",
+                "approach": "a", "result": None, "machine": "dev1",
+                "gate": {"ci": "ok", "review": "pending"}, "alarms": [],
+                "pr_url": None, "updated_at": 1000.0}
+        base.update(kw)
+        return base
+
+    def test_escapes_xss(self):
+        from board.render import card_grid
+        html = card_grid(
+            live=[self._live(title="<script>alert(1)</script>")],
+            recent=[], version="vX", health={})
+        self.assertIn("&lt;script&gt;", html)
+        self.assertNotIn("<script>alert", html)
+
+    def test_escapes_every_field(self):
+        # goal/approach/result/repo/machine all escaped, not just title.
+        from board.render import card_grid
+        html = card_grid(
+            live=[self._live(goal="<g>", approach="<a>", result="<r>",
+                             repo="<o>/x", machine="<m>", phase="<p>")],
+            recent=[], version="vX", health={})
+        for inj in ("<g>", "<a>", "<r>", "<o>", "<m>", "<p>"):
+            self.assertNotIn(inj, html)
+        self.assertIn("&lt;g&gt;", html)
+        self.assertIn("&lt;m&gt;", html)
+
+    def test_empty_state(self):
+        from board.render import card_grid
+        html = card_grid(live=[], recent=[], version="vX",
+                         health={"last_report": "never"})
+        self.assertIn("No autopilot runs yet", html)
+        self.assertIn("vX", html)
+
+    def test_version_in_footer(self):
+        from board.render import card_grid
+        html = card_grid(live=[self._live()], recent=[],
+                         version="v1.2.3-dev.4 (abc1234)", health={})
+        self.assertIn("v1.2.3-dev.4 (abc1234)", html)
+
+    def test_version_label_is_escaped(self):
+        from board.render import card_grid
+        html = card_grid(live=[], recent=[], version="<v>", health={})
+        self.assertNotIn("<v>", html)
+        self.assertIn("&lt;v&gt;", html)
+
+    def test_alarm_banner_rendered(self):
+        from board.render import card_grid
+        html = card_grid(
+            live=[self._live(alarms=["MERGED_INCOMPLETE_GATE"])],
+            recent=[], version="vX", health={})
+        self.assertIn("MERGED_INCOMPLETE_GATE", html)
+
+    def test_pr_link_only_for_github_https(self):
+        # a valid github https URL becomes a real href; a bad scheme never does.
+        from board.render import card_grid
+        good = card_grid(
+            live=[self._live(pr_url="https://github.com/o/x/pull/5")],
+            recent=[], version="vX", health={})
+        self.assertIn('href="https://github.com/o/x/pull/5"', good)
+        bad = card_grid(
+            live=[self._live(pr_url="javascript:alert(1)")],
+            recent=[], version="vX", health={})
+        self.assertNotIn('href="javascript:', bad)
+        self.assertNotIn("javascript:alert", bad)
+
+    def test_ticket_detail_escapes(self):
+        from board.render import ticket_detail
+        run = {"run_id": "o_x-1-1-ab12", "repo": "o/x", "issue": 1,
+               "title": "<b>t</b>", "goal": "<g>", "approach": "<a>",
+               "result": "<r>", "phase": "done", "machine": "dev1",
+               "merge_mode": "auto", "pr_url": None, "status": None,
+               "unverified": "<u>", "filed_issues": None}
+        events = [{"seq": 1, "phase": "CI", "message": "<m>", "event_ts": 1.0}]
+        gate = {"ci": "ok", "review": "<x>"}
+        gh = {"merged": 1, "ci_conclusion": "<c>", "mergeable_state": "<ms>",
+              "pr_url": None}
+        html = ticket_detail(run, events, gate, gh)
+        # the injected payloads must appear ONLY in escaped form. We assert the
+        # escaped form is present and the raw payload's closing markup (which is
+        # unique to the injection — the template uses <b>..</b> only as labels,
+        # never </b> mid-value) does not leak.
+        for raw, esc in (("<b>t</b>", "&lt;b&gt;t&lt;/b&gt;"), ("<g>", "&lt;g&gt;"),
+                         ("<a>", "&lt;a&gt;"), ("<r>", "&lt;r&gt;"),
+                         ("<m>", "&lt;m&gt;"), ("<u>", "&lt;u&gt;"),
+                         ("<c>", "&lt;c&gt;"), ("<ms>", "&lt;ms&gt;")):
+            self.assertIn(esc, html)
+        # the value-injected closing tag must never render raw
+        self.assertNotIn("<b>t</b>", html)
+        self.assertNotIn("&lt;b&gt;t</b>", html)
+
+    def test_ticket_detail_empty_events(self):
+        from board.render import ticket_detail
+        run = {"run_id": "r", "repo": "o/x", "issue": 1, "title": "t",
+               "goal": None, "approach": None, "result": None,
+               "phase": "implementing", "machine": "dev1", "merge_mode": "auto",
+               "pr_url": None, "status": None}
+        html = ticket_detail(run, [], {}, None)
+        self.assertIn("r", html)  # renders without crashing on empty data
