@@ -14,10 +14,9 @@ import uuid
 import json
 import fcntl
 import urllib.request
-import urllib.error
 
 from board import (REPORT_TIMEOUT, CIRCUIT_BREAKER_S, FLUSH_CAP, QUEUE_TTL_S,
-                   board_url)
+                   QUEUE_MAX_BYTES, board_url)
 
 STATE_DIR = os.path.expanduser("~/.claude")
 BOARD_URL = board_url()
@@ -44,7 +43,12 @@ def _load(f):
         return {}
 
 
+def _ensure_state_dir():
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+
 def _save(f, d):
+    _ensure_state_dir()
     with open(f, "w") as h:
         json.dump(d, h)
 
@@ -136,14 +140,15 @@ def _clear_down():
 
 def _post_one(body):
     """POST a single event to the board. Returns True on HTTP 2xx, False on any
-    error (timeout, connection refused, non-2xx). Never raises."""
-    req = urllib.request.Request(
-        BOARD_URL.rstrip("/") + "/report",
-        data=json.dumps(body).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json",
-                 "X-Board-Token": _token()})
+    error (timeout, connection refused, non-2xx, bad URL, non-serialisable body).
+    Never raises."""
     try:
+        req = urllib.request.Request(
+            BOARD_URL.rstrip("/") + "/report",
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Board-Token": _token()})
         with urllib.request.urlopen(req, timeout=REPORT_TIMEOUT) as r:
             return 200 <= r.status < 300
     except Exception:
@@ -154,25 +159,61 @@ def _post_one(body):
 def report(rid, phase=None, _start=False, reviews=None, **fields):
     """Build one event for `rid`, durably queue it, then best-effort flush.
     Fire-and-forget: never blocks past REPORT_TIMEOUT, never raises."""
-    for k in ("goal", "approach", "result", "note", "title"):
-        if k in fields:
-            fields[k] = scrub(fields[k])
-    ev = {"run_id": rid, "event_id": uuid.uuid4().hex, "seq": next_seq(rid),
-          "phase": phase, "event_ts": time.time(),
-          "machine": os.uname().nodename}
-    ev.update({k: v for k, v in fields.items() if v is not None})
-    if reviews:
-        ev["reviews"] = reviews     # [(check, state), ...]
-    _enqueue_and_flush(ev)
+    try:
+        for k in ("goal", "approach", "result", "note", "title"):
+            if k in fields:
+                fields[k] = scrub(fields[k])
+        ev = {"run_id": rid, "event_id": uuid.uuid4().hex, "seq": next_seq(rid),
+              "phase": phase, "event_ts": time.time(),
+              "machine": os.uname().nodename}
+        ev.update({k: v for k, v in fields.items() if v is not None})
+        if reviews:
+            ev["reviews"] = reviews     # [(check, state), ...]
+        _enqueue_and_flush(ev)
+    except Exception:
+        pass
 
 
 def _enqueue_and_flush(ev):
-    # append first (durability), then try to flush under lock
-    with open(_p("autopilot-board-queue.jsonl"), "a") as h:
+    # append first (durability), then enforce size cap, then try to flush under lock
+    _ensure_state_dir()
+    qf = _p("autopilot-board-queue.jsonl")
+    with open(qf, "a") as h:
         h.write(json.dumps(ev) + "\n")
+    # enforce QUEUE_MAX_BYTES: trim oldest lines under flock so we don't race
+    _trim_queue(qf)
     if _down_recently():
         return  # circuit breaker open — skip the network, leave it queued
     flush_queue()
+
+
+def _trim_queue(qf):
+    """If the queue file exceeds QUEUE_MAX_BYTES, drop oldest lines (keep newest)."""
+    try:
+        if os.path.getsize(qf) <= QUEUE_MAX_BYTES:
+            return
+        h = open(qf, "r+")
+        try:
+            fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError):
+            h.close()
+            return
+        try:
+            data = h.read()
+            if len(data.encode()) <= QUEUE_MAX_BYTES:
+                return
+            lines = data.splitlines(keepends=True)
+            # drop oldest lines until we're under the cap
+            while lines and len("".join(lines).encode()) > QUEUE_MAX_BYTES:
+                lines.pop(0)
+            h.seek(0)
+            h.truncate()
+            h.writelines(lines)
+        finally:
+            fcntl.flock(h, fcntl.LOCK_UN)
+            h.close()
+    except Exception:
+        pass
 
 
 def flush_queue():
@@ -189,9 +230,13 @@ def flush_queue():
         return
     try:
         h = open(qf, "r+")
-        fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError):
-        return  # another reporter owns the queue — skip the flush
+        try:
+            fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError):
+            h.close()
+            return  # another reporter owns the queue — skip the flush
+    except OSError:
+        return  # couldn't open the file at all
     try:
         lines = h.readlines()
         remaining = []

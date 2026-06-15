@@ -290,6 +290,11 @@ class TestReporter(unittest.TestCase):
         import board.reporter as rp
         self.home = tempfile.mkdtemp()
         rp.STATE_DIR = self.home
+        self._orig_post_one = rp._post_one
+
+    def tearDown(self):
+        import board.reporter as rp
+        rp._post_one = self._orig_post_one
 
     def test_secret_scrub(self):
         from board.reporter import scrub
@@ -317,3 +322,69 @@ class TestReporter(unittest.TestCase):
         # so read event_id off the dict directly.
         self.assertEqual({x["event_id"] for x in sent}, {"a", "b"})
         self.assertEqual(os.path.getsize(rp._p("autopilot-board-queue.jsonl")), 0)
+
+    # ------------------------------------------------------------------ C1
+    def test_report_nonexistent_state_dir_does_not_raise(self):
+        """C1: report() must not raise when STATE_DIR doesn't exist."""
+        import board.reporter as rp
+        import tempfile, os
+        # Point STATE_DIR at a path whose parent also doesn't exist
+        deep = os.path.join(tempfile.mkdtemp(), "nonexistent", "subdir")
+        rp.STATE_DIR = deep
+        rp.BOARD_URL = "http://127.0.0.1:1/"  # unreachable — forces queue path
+        try:
+            rid = "test-run-no-dir"
+            result = rp.report(rid, phase="implementing")
+            self.assertIsNone(result)  # fire-and-forget returns None
+        except Exception as e:
+            self.fail(f"report() raised {e!r} — must never raise")
+
+    def test_report_non_serializable_field_does_not_raise(self):
+        """C1: report() with a non-JSON-serializable field must not raise."""
+        import board.reporter as rp
+        rp.BOARD_URL = "http://127.0.0.1:1/"
+        rid = rp.start_run("o/x", 99, "t")
+        try:
+            result = rp.report(rid, phase="implementing", obj=set())
+            self.assertIsNone(result)
+        except Exception as e:
+            self.fail(f"report() raised {e!r} — must never raise")
+
+    def test_post_one_bad_url_returns_false(self):
+        """C1: _post_one with a malformed URL returns False, never raises."""
+        import board.reporter as rp
+        old_url = rp.BOARD_URL
+        rp.BOARD_URL = "not-a-valid-url"
+        try:
+            result = rp._post_one({"x": 1})
+        except Exception as e:
+            rp.BOARD_URL = old_url
+            self.fail(f"_post_one raised {e!r} — must never raise")
+        rp.BOARD_URL = old_url
+        self.assertFalse(result)
+
+    # ------------------------------------------------------------------ I1
+    def test_queue_trimmed_when_board_unreachable(self):
+        """I1: queue file stays at/under QUEUE_MAX_BYTES when board is down."""
+        import board.reporter as rp
+        old_max = rp.QUEUE_MAX_BYTES
+        old_url = rp.BOARD_URL
+        cap = 300  # small cap; one JSONL event line is ~200 bytes
+        try:
+            rp.QUEUE_MAX_BYTES = cap
+            rp.BOARD_URL = "http://127.0.0.1:1/"  # unreachable
+            rid = rp.start_run("o/x", 50, "cap-test")
+            # Emit enough events to overflow the cap
+            for _ in range(20):
+                rp.report(rid, phase="implementing")
+            qf = rp._p("autopilot-board-queue.jsonl")
+            size = os.path.getsize(qf)
+            # The queue may be one line over the cap (append-then-trim);
+            # allow 2× slack to absorb the last appended line before trim kicks in
+            self.assertLessEqual(
+                size, cap * 2,
+                f"Queue grew to {size} bytes, expected ≤{cap * 2}"
+            )
+        finally:
+            rp.QUEUE_MAX_BYTES = old_max
+            rp.BOARD_URL = old_url
