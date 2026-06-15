@@ -73,7 +73,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _serve(self, head):
-        if urlparse(self.path).path in ("/", ""):
+        path = urlparse(self.path).path
+        if path == "/favicon.ico":
+            # Browsers auto-request this on every page open; answer 204 so the
+            # user's console stays clean (browser-console-zero-errors) instead of
+            # logging a 404 every time they open a shared file.
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path in ("/", ""):
             return self._deny(404, "file-drop: provide a file link (/<token>/<name>)")
         target = safe_resolve(self.path, self._base_dir)
         if target is None:

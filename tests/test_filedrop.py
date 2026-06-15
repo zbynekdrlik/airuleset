@@ -248,6 +248,21 @@ class TestServerEndToEnd(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
 
+    def test_favicon_no_content(self):
+        from filedrop.server import make_server
+        with tempfile.TemporaryDirectory() as td:
+            httpd = make_server(host="127.0.0.1", port=0, base_dir=Path(td))
+            port = httpd.server_address[1]
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/favicon.ico", timeout=5) as r:
+                    self.assertEqual(r.status, 204)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
     def test_post_rejected(self):
         from filedrop.server import make_server
         with tempfile.TemporaryDirectory() as td:
