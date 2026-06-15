@@ -103,3 +103,145 @@ class Board:
             c.commit()
         finally:
             c.close()
+
+    # ----- single-writer thread ---------------------------------------------
+    # The server (Task 11/12) routes HTTP-thread + gh-poller writes through this
+    # one queue so only one connection ever writes — eliminating writer
+    # contention. Tests call apply_event() directly (synchronous). BOTH paths
+    # converge on _apply, so the correctness logic is identical.
+
+    def start_writer(self):
+        t = threading.Thread(target=self._writer_loop, daemon=True)
+        t.start()
+        return t
+
+    def _writer_loop(self):
+        c = self.conn()
+        try:
+            while True:
+                job = self._wq.get()
+                if job is None:
+                    break
+                fn, ev, done = job
+                try:
+                    fn(c, ev)
+                    c.commit()
+                except Exception:
+                    c.rollback()
+                finally:
+                    if done is not None:
+                        done.set()
+        finally:
+            c.close()
+
+    def submit(self, ev, wait=True, timeout=5):
+        """Enqueue an event for the writer thread. Returns when committed (if
+        wait) or immediately. Requires start_writer() to have been called."""
+        done = threading.Event() if wait else None
+        self._wq.put((self._apply, ev, done))
+        if done is not None:
+            done.wait(timeout)
+
+    # ----- synchronous apply (direct + via writer) ---------------------------
+
+    def apply_event(self, ev):
+        """Synchronous apply — used directly by tests and any single-threaded
+        caller. The server uses submit()/the writer thread instead. A single
+        upsert statement makes the write atomic; COALESCE preserves populated
+        fields; the seq guard + phase-rank monotonicity (with PAUSE exemption)
+        prevent stale or regressing reports from moving state."""
+        c = self.conn()
+        try:
+            self._apply(c, ev)
+            c.commit()
+        finally:
+            c.close()
+
+    def _apply(self, c, ev):
+        from board import PHASE_RANK, TERMINAL_PHASES, PAUSE_PHASES
+        now = time.time()
+        rid = ev["run_id"]
+        seq = ev.get("seq", 0) or 0
+        cur = c.execute(
+            "SELECT seq, phase FROM runs WHERE run_id=?", (rid,)).fetchone()
+
+        # events row — idempotent by event_id (duplicate event_id inserts once)
+        if ev.get("event_id"):
+            c.execute(
+                """INSERT OR IGNORE INTO events(
+                       run_id, event_id, seq, phase, message, event_ts, recv_ts)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (rid, ev["event_id"], seq, ev.get("phase"),
+                 ev.get("note") or ev.get("message"), ev.get("event_ts"), now))
+
+        # ---- decide the phase to persist ----
+        new_phase = ev.get("phase")
+        cur_phase = cur["phase"] if cur else None
+        cur_seq = (cur["seq"] or 0) if cur else 0
+
+        if not new_phase:
+            # phase-less report (e.g. goal/result only): never touch phase.
+            new_phase = cur_phase
+        elif cur is None:
+            # first event for this run: accept the incoming phase as-is.
+            pass
+        elif seq < cur_seq:
+            # stale replay: a lower-seq report must NOT move state.
+            new_phase = cur_phase
+        elif cur_phase in TERMINAL_PHASES:
+            # never leave a terminal phase, regardless of seq.
+            new_phase = cur_phase
+        elif new_phase in PAUSE_PHASES or cur_phase in PAUSE_PHASES:
+            # PAUSE exemption: when entering OR leaving asking-user, skip the
+            # rank-monotonicity check so implementing -> asking-user ->
+            # implementing works (the pause is non-linear by design).
+            pass
+        elif PHASE_RANK.get(new_phase, -1) < PHASE_RANK.get(cur_phase or "", -1):
+            # never regress rank (a lower-rank incoming phase keeps current).
+            new_phase = cur_phase
+
+        # ---- atomic seq-guarded COALESCE upsert ----
+        # COALESCE(excluded.x, runs.x): a NULL incoming field preserves the
+        # stored value (phase-only reports never null goal/approach/result).
+        # seq=MAX(runs.seq, excluded.seq): the stored seq never decreases.
+        c.execute(
+            """
+          INSERT INTO runs(
+              run_id, repo, issue, title, goal, approach, result, phase, status,
+              machine, worker, seq, is_bug_fix, has_deploy, merge_mode, pr_url,
+              started_at, updated_at)
+          VALUES(:run_id,:repo,:issue,:title,:goal,:approach,:result,:phase,:status,
+                 :machine,:worker,:seq,:is_bug_fix,:has_deploy,:merge_mode,:pr_url,
+                 :now,:now)
+          ON CONFLICT(run_id) DO UPDATE SET
+            repo=COALESCE(excluded.repo, runs.repo),
+            issue=COALESCE(excluded.issue, runs.issue),
+            title=COALESCE(excluded.title, runs.title),
+            goal=COALESCE(excluded.goal, runs.goal),
+            approach=COALESCE(excluded.approach, runs.approach),
+            result=COALESCE(excluded.result, runs.result),
+            pr_url=COALESCE(excluded.pr_url, runs.pr_url),
+            machine=COALESCE(excluded.machine, runs.machine),
+            worker=COALESCE(excluded.worker, runs.worker),
+            phase=:phase,
+            status=COALESCE(excluded.status, runs.status),
+            seq=MAX(runs.seq, excluded.seq),
+            updated_at=:now
+        """,
+            {"run_id": rid, "repo": ev.get("repo"), "issue": ev.get("issue"),
+             "title": ev.get("title"), "goal": ev.get("goal"),
+             "approach": ev.get("approach"), "result": ev.get("result"),
+             "phase": new_phase, "status": ev.get("status"),
+             "machine": ev.get("machine"), "worker": ev.get("worker"),
+             "seq": seq, "is_bug_fix": int(ev.get("is_bug_fix", 0)),
+             "has_deploy": int(ev.get("has_deploy", 0)),
+             "merge_mode": ev.get("merge_mode", "auto"),
+             "pr_url": ev.get("pr_url"), "now": now})
+
+    def get_run(self, rid):
+        c = self.conn()
+        try:
+            return c.execute(
+                "SELECT * FROM runs WHERE run_id=?", (rid,)).fetchone()
+        finally:
+            c.close()

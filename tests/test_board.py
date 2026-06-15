@@ -119,3 +119,75 @@ class TestSchema(unittest.TestCase):
         b.migrate()  # re-run
         self.assertEqual(b.schema_version(), v1)
         self.assertGreaterEqual(v1, 1)
+
+
+class TestUpsert(unittest.TestCase):
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_coalesce_no_null_clobber(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "implementing", "goal": "G", "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "r1", "seq": 2, "phase": "CI", "event_id": "e2", "event_ts": 2.0})
+        row = b.get_run("r1")
+        self.assertEqual(row["goal"], "G")      # preserved
+        self.assertEqual(row["phase"], "CI")    # advanced
+
+    def test_seq_guard_ignores_stale(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 5,
+                       "phase": "merge", "event_id": "e5", "event_ts": 5.0})
+        b.apply_event({"run_id": "r1", "seq": 2, "phase": "CI",
+                       "event_id": "e2", "event_ts": 2.0})  # stale replay
+        self.assertEqual(b.get_run("r1")["phase"], "merge")
+
+    def test_event_id_idempotent(self):
+        b = self._b()
+        ev = {"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+              "phase": "CI", "event_id": "dup", "event_ts": 1.0}
+        b.apply_event(ev)
+        b.apply_event(ev)
+        n = b.conn().execute("SELECT count(*) FROM events WHERE run_id='r1'").fetchone()[0]
+        self.assertEqual(n, 1)
+
+    def test_terminal_not_regressed(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "done", "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "r1", "seq": 9, "phase": "implementing",
+                       "event_id": "e9", "event_ts": 9.0})
+        self.assertEqual(b.get_run("r1")["phase"], "done")
+
+    def test_asking_user_pause_does_not_regress(self):
+        # PAUSE exemption (Fix 2): implementing -> asking-user -> implementing.
+        # asking-user has a HIGHER rank than implementing, so going BACK to
+        # implementing would normally be a rank regression and be rejected. The
+        # PAUSE exemption must skip the rank check so the final phase is
+        # implementing, not stuck at asking-user.
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "implementing", "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "r1", "seq": 2, "phase": "asking-user",
+                       "event_id": "e2", "event_ts": 2.0})
+        self.assertEqual(b.get_run("r1")["phase"], "asking-user")
+        b.apply_event({"run_id": "r1", "seq": 3, "phase": "implementing",
+                       "event_id": "e3", "event_ts": 3.0})
+        self.assertEqual(b.get_run("r1")["phase"], "implementing")
+
+
+class TestConcurrentWrites(unittest.TestCase):
+    def test_parallel_posts_no_loss(self):
+        import threading
+        from board.db import Board
+        b = Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+        def w(i):
+            b.apply_event({"run_id": f"r{i % 5}", "repo": "o/x", "issue": i % 5, "seq": i,
+                           "phase": "implementing", "event_id": f"e{i}", "event_ts": float(i)})
+        ts = [threading.Thread(target=w, args=(i,)) for i in range(100)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        n = b.conn().execute("SELECT count(*) FROM events").fetchone()[0]
+        self.assertEqual(n, 100)
