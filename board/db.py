@@ -291,11 +291,25 @@ class Board:
             c.close()
 
     def set_gate(self, rid, check, state, seq, claimed):
-        """Record a gate check result. seq-guarded: a lower-seq report is
-        dropped. The `source` is board-decided (source_of(check)) — the worker's
-        `claimed` intent is intentionally IGNORED so a worker can never mark a
-        board-verified check as merely 'claimed' or vice-versa."""
+        """Record a gate check result via the WORKER path. seq-guarded: a
+        lower-seq report is dropped. The `source` is board-decided
+        (source_of(check)) — the worker's `claimed` intent is intentionally
+        IGNORED so a worker can never mark a board-verified check as merely
+        'claimed' or vice-versa.
+
+        Alarm-integrity lock (spec §9/§10): a worker can NEVER write a
+        gh-verified check (ci/mergeable/merged/issue_state). Those rows are
+        owned exclusively by the gh refresher (set_gh / _set_gate_verified). A
+        worker set_gate on a verified check is refused outright — otherwise a
+        worker claim could overwrite a gh-verified `mergeable=fail`/`ci=fail`
+        row (flipping state→ok AND source→claimed) and silence
+        MERGED_INCOMPLETE_GATE. The old `seq < cur.seq` guard did NOT stop this
+        because the gh refresher writes verified rows with the seq=0 sentinel."""
         from board.gate import source_of
+        if source_of(check) == "verified":
+            # ci/mergeable/merged/issue_state are gh-verified only; a worker
+            # claim must NEVER write (or overwrite) them. Drop silently.
+            return
         src = source_of(check)  # board decides; worker's `claimed` is ignored
         now = time.time()
         c = self.conn()
@@ -349,11 +363,13 @@ class Board:
             (pending is skipped so a 'still computing' poll never clobbers a
             known state).
           * ci_conclusion (success|failure|...) — also mapped to a `ci` gate
-            state (success→ok, anything-else-non-null→fail) and written.
+            state via gate.ci_gate (success→ok, terminal-failure→fail,
+            non-terminal/in-progress→pending which is NOT written) and stored.
           * gh_ok=False — sets the STALE sentinel; gh_ok defaults True on write.
 
         A gh refresh is a write — it routes through this method, which the
         server calls on the single writer thread (same as _apply)."""
+        from board.gate import ci_gate
         now = time.time()
         mergeable_gate = fields.pop("mergeable_gate", None)
         gh_ok = fields.pop("gh_ok", True)
@@ -385,11 +401,17 @@ class Board:
             # GitHub is still computing, so we leave the prior known state alone.
             if mergeable_gate in ("ok", "fail"):
                 self._set_gate_verified(c, rid, "mergeable", mergeable_gate, now)
-            # ci gate, derived from ci_conclusion.
+            # ci gate, derived from ci_conclusion via gate.ci_gate: only a
+            # terminal failure is 'fail', success is 'ok', and anything
+            # non-terminal (None/in_progress/neutral/skipped) maps to 'pending'
+            # — which we do NOT write (same as mergeable pending) so an
+            # in-progress CI never clobbers a known state or raises a false
+            # MERGED_INCOMPLETE_GATE.
             cc = cols.get("ci_conclusion")
             if cc is not None:
-                ci_state = "ok" if cc == "success" else "fail"
-                self._set_gate_verified(c, rid, "ci", ci_state, now)
+                ci_state = ci_gate(cc)
+                if ci_state in ("ok", "fail"):
+                    self._set_gate_verified(c, rid, "ci", ci_state, now)
             c.commit()
         finally:
             c.close()

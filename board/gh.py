@@ -38,9 +38,11 @@ _log = logging.getLogger("autopilot_board.gh")
 # NOTE: anchor with \A...\Z, NOT ^...$ — in Python `$` matches before a trailing
 # newline, so `^...$` would accept "o/x\n" (a real argv-injection vector). \Z
 # anchors the absolute end of string, rejecting any trailing newline.
-# The owner segment must not start with '-' so the whole slug can never be read
-# as a gh flag.
-_REPO = re.compile(r"\A[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._-]+\Z")
+# NEITHER segment's first char may be '-' so neither the slug nor the bare name
+# (gh accepts `owner/name` and reads `--json`-style leading-hyphen tokens as
+# flags) can ever be read as a gh flag. Both segments use the same char class.
+_REPO = re.compile(
+    r"\A[A-Za-z0-9._][A-Za-z0-9._-]*/[A-Za-z0-9._][A-Za-z0-9._-]*\Z")
 # run_id: a single filesystem-safe opaque token (matches reporter's id charset).
 # First char must NOT be a hyphen, so a value can never be read as a gh flag
 # (--flag). Real run_ids start with the repo prefix (alnum/./_), never '-'.

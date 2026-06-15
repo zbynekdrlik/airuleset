@@ -257,11 +257,47 @@ class TestGateRows(unittest.TestCase):
         self.assertEqual(row["state"], "ok")
 
     def test_gate_seq_guard(self):
+        # seq-guard on the WORKER path — use a claimed check (review); the
+        # verified checks (ci/mergeable) are now worker-locked and cannot be
+        # written via set_gate at all.
         b = self._b()
         b.seed_gates("r1", False, False)
-        b.set_gate("r1", "ci", "ok", seq=5, claimed=False)
-        b.set_gate("r1", "ci", "fail", seq=2, claimed=False)   # stale
-        self.assertEqual(b.gate_map("r1")["ci"], "ok")
+        b.set_gate("r1", "review", "ok", seq=5, claimed=False)
+        b.set_gate("r1", "review", "fail", seq=2, claimed=False)   # stale
+        self.assertEqual(b.gate_map("r1")["review"], "ok")
+
+    def test_worker_claim_cannot_overwrite_verified_gate(self):
+        # spec §9/§10: a worker set_gate must NEVER write a gh-verified check
+        # (ci/mergeable/merged/issue_state). The gh refresher writes verified
+        # rows with seq=0, so the old `seq < cur.seq` guard let a high-seq
+        # worker claim overwrite a gh-verified mergeable=fail row (flipping
+        # state→ok AND source→claimed) and silence MERGED_INCOMPLETE_GATE.
+        b = self._b()
+        b.seed_gates("r1", is_bug_fix=False, has_deploy=False)
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "done", "event_id": "e", "event_ts": 1.0})
+        # gh observes a bad mergeable (UNSTABLE) — verified path writes the row
+        b.set_gh("r1", merged=True, mergeable_gate="fail",
+                 mergeable_state="UNSTABLE", ci_conclusion="success")
+        # a worker tries to claim mergeable green at a far-higher seq
+        b.set_gate("r1", "mergeable", "ok", seq=99, claimed=True)
+        self.assertEqual(b.gate_map("r1")["mergeable"], "fail")  # NOT overwritten
+        # source stays board-verified (a worker claim never touched it)
+        row = b.conn().execute(
+            "SELECT source FROM gate WHERE run_id='r1' AND check_name='mergeable'"
+        ).fetchone()
+        self.assertEqual(row["source"], "verified")
+        from board.gate import compute_alarms
+        self.assertIn("MERGED_INCOMPLETE_GATE",
+                      compute_alarms(b.alarm_input("r1")))
+
+    def test_worker_can_still_write_claimed_checks(self):
+        # the lock is ONLY on verified checks — a worker still writes its own
+        # claimed checks (review/plan_check/...) exactly as before.
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.set_gate("r1", "review", "ok", seq=3, claimed=True)
+        self.assertEqual(b.gate_map("r1")["review"], "ok")
 
 
 class TestRunId(unittest.TestCase):
@@ -408,7 +444,11 @@ class TestGh(unittest.TestCase):
         from board.gh import valid_repo, valid_issue, valid_run_id
         for bad in ("--json", "-f", "o/x;rm -rf", "o/x x", "o x/y", "o/x\n",
                     "", "o/", "/x", "o//x", "../etc/passwd", "o/x/../y",
-                    "$(whoami)/x", "`id`/x", "o/x|y", "o&x/y", None, 5):
+                    "$(whoami)/x", "`id`/x", "o/x|y", "o&x/y", None, 5,
+                    # leading hyphen in the NAME segment — the name alone could
+                    # be read as a gh flag (gh accepts `owner/name`), so both
+                    # segments must reject a leading '-'.
+                    "o/-x", "o/--json", "-o/x"):
             self.assertFalse(valid_repo(bad), f"valid_repo accepted {bad!r}")
         for bad in ("--flag", "5; rm", "5 6", "5\n", "0", "-1", "1.5",
                     "1e3", " 5", None, [], "0x5"):
@@ -498,10 +538,13 @@ class TestRefresh(unittest.TestCase):
         b.seed_gates("r1", False, False)
         b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
                        "phase": "done", "event_id": "e", "event_ts": 1.0})
-        for g in ("ticket_validated", "ci", "plan_check", "review",
+        # worker claims its own (claimed) checks green
+        for g in ("ticket_validated", "plan_check", "review",
                   "requesting_code_review"):
             b.set_gate("r1", g, "ok", seq=1, claimed=True)
-        b.set_gate("r1", "mergeable", "fail", seq=1, claimed=False)  # UNSTABLE
+        # gh-verified path: CI green but mergeable UNSTABLE (the real scenario)
+        b.set_gh("r1", ci_conclusion="success", mergeable_gate="fail",
+                 mergeable_state="UNSTABLE", merged=True)
         snap = b.alarm_input("r1", merged=True)
         self.assertIn("MERGED_INCOMPLETE_GATE", compute_alarms(snap))
 
@@ -512,7 +555,7 @@ class TestRefresh(unittest.TestCase):
         b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
                        "phase": "merge", "is_bug_fix": 1, "has_deploy": 1,
                        "merge_mode": "manual", "event_id": "e", "event_ts": 1.0})
-        b.set_gate("r1", "ci", "ok", seq=1, claimed=False)
+        b.set_gh("r1", ci_conclusion="success")  # verified path sets ci=ok
         snap = b.alarm_input("r1")
         self.assertEqual(snap["phase"], "merge")
         self.assertTrue(snap["is_bug_fix"])
@@ -556,7 +599,8 @@ class TestRefresh(unittest.TestCase):
         b.seed_gates("r1", False, False)
         b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
                        "phase": "merge", "event_id": "e", "event_ts": 1.0})
-        b.set_gh("r1", merged=True, mergeable_gate="fail", ci_conclusion="fail",
+        b.set_gh("r1", merged=True, mergeable_gate="fail",
+                 ci_conclusion="failure",
                  mergeable_state="UNSTABLE", pr_url="https://github.com/o/x/pull/1")
         gm = b.gate_map("r1")
         self.assertEqual(gm["mergeable"], "fail")  # written from gh truth
@@ -590,6 +634,36 @@ class TestRefresh(unittest.TestCase):
         b.set_gh("r1", mergeable_gate="ok", mergeable_state="CLEAN")
         b.set_gh("r1", mergeable_gate="pending")  # later poll, still computing
         self.assertEqual(b.gate_map("r1")["mergeable"], "ok")  # not clobbered
+
+    def test_ci_gate_mapping_terminal_only(self):
+        # pure mapping: terminal failures → fail, success → ok, everything
+        # non-terminal (None/in_progress/neutral/skipped/unknown) → pending.
+        from board.gate import ci_gate
+        self.assertEqual(ci_gate("success"), "ok")
+        for f in ("failure", "cancelled", "timed_out", "action_required"):
+            self.assertEqual(ci_gate(f), "fail", f)
+        for p in (None, "in_progress", "neutral", "skipped", "queued",
+                  "stale", "unknown", "pending"):
+            self.assertEqual(ci_gate(p), "pending", p)
+
+    def test_set_gh_ci_inprogress_does_not_record_fail(self):
+        # an in-progress / non-terminal CI conclusion must NOT be recorded as a
+        # `ci` gate fail (which would raise a false MERGED_INCOMPLETE_GATE) —
+        # it maps to pending and is NOT written, leaving the prior state alone.
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        # success first → ok
+        b.set_gh("r1", ci_conclusion="success")
+        self.assertEqual(b.gate_map("r1")["ci"], "ok")
+        # later in-progress poll must not clobber the known 'ok' with fail
+        b.set_gh("r1", ci_conclusion="in_progress")
+        self.assertEqual(b.gate_map("r1")["ci"], "ok")
+        # None (no conclusion yet) is also a no-op on the gate
+        b.set_gh("r1", ci_conclusion=None)
+        self.assertEqual(b.gate_map("r1")["ci"], "ok")
+        # a terminal failure DOES record fail
+        b.set_gh("r1", ci_conclusion="failure")
+        self.assertEqual(b.gate_map("r1")["ci"], "fail")
 
     # -------- (repo,issue) -> newest non-terminal run mapping ---------------
     def test_newest_active_run_for_issue(self):

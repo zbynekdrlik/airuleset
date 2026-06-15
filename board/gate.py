@@ -31,6 +31,25 @@ def mergeable_ok(mergeable, mergeable_state):
     return "fail"
 
 
+# Terminal CI failure conclusions — only these record a `ci` gate as 'fail'.
+# A non-terminal / in-progress / neutral conclusion is NOT a failure (mirrors
+# the careful 'pending' handling in mergeable_ok): recording it as 'fail' would
+# raise a false MERGED_INCOMPLETE_GATE while CI is still running.
+_CI_FAIL = {"failure", "cancelled", "timed_out", "action_required"}
+
+def ci_gate(ci_conclusion):
+    """Map a GitHub CI conclusion to the board's gate vocabulary:
+      * success                                  -> ok
+      * failure/cancelled/timed_out/action_required -> fail (terminal failures)
+      * anything else (None/in_progress/neutral/skipped/unknown) -> pending
+    Only terminal failures count as 'fail'; everything non-terminal is pending."""
+    if ci_conclusion == "success":
+        return "ok"
+    if ci_conclusion in _CI_FAIL:
+        return "fail"
+    return "pending"
+
+
 GRACE_S = 5 * 60  # while a gate is pending and a report arrived this recently → "verifying"
 
 def compute_alarms(r):
