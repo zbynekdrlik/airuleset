@@ -135,6 +135,7 @@ class TestHookScriptsExist(TestCase):
             "pre-deploy-clean-tree.sh",
             "stop-check-untracked-work.sh",
             "stop-check-status-marker.sh",
+            "autopilot-report.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -1238,6 +1239,52 @@ class TestReportCommand(TestCase):
                       repo="o/x", items="{not valid json")
         # Must not raise — a malformed --items is reported to stderr, not crashed.
         airuleset.cmd_report(args)
+
+
+class TestAutopilotReportHook(TestCase):
+    """hooks/autopilot-report.sh — a Stop hook that emits a skeleton heartbeat for
+    the current autopilot run. It MUST be a pure no-op without AUTOPILOT_RUN, and
+    MUST exit 0 even when AUTOPILOT_RUN is set and the board is unreachable
+    (fire-and-forget: it backgrounds the report and never blocks the Stop event)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "autopilot-report.sh"
+
+    def _run(self, env_overrides):
+        # Start from a clean env (no AUTOPILOT_RUN leaking from the test runner),
+        # keep PATH/HOME so python3 + the repo resolve.
+        env = dict(os.environ)
+        env.pop("AUTOPILOT_RUN", None)
+        env.pop("AUTOPILOT_PHASE", None)
+        env.update(env_overrides)
+        return subprocess.run(
+            ["bash", str(self.HOOK)],
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+
+    def test_noop_without_autopilot_run(self):
+        # No AUTOPILOT_RUN -> exit 0, no output, no report attempted.
+        r = self._run({})
+        self.assertEqual(r.returncode, 0, f"hook must exit 0 as a no-op: {r.stderr}")
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_exit_zero_with_run_even_when_board_unreachable(self):
+        # AUTOPILOT_RUN set + board pointed at an unreachable host -> still exit 0.
+        # The report is backgrounded and the reporter swallows the connection error;
+        # the Stop hook must never block or fail because of a board outage.
+        r = self._run({"AUTOPILOT_RUN": "o_x-1-99-abcd", "BOARD_HOST": "127.0.0.1"})
+        self.assertEqual(r.returncode, 0,
+                         f"hook must exit 0 with a run set even if board is down: {r.stderr}")
+
+    def test_exit_zero_with_run_and_phase(self):
+        # AUTOPILOT_PHASE is optional context; the hook must still exit 0.
+        r = self._run({"AUTOPILOT_RUN": "o_x-1-99-abcd",
+                       "AUTOPILOT_PHASE": "implementing",
+                       "BOARD_HOST": "127.0.0.1"})
+        self.assertEqual(r.returncode, 0,
+                         f"hook must exit 0 with run+phase set: {r.stderr}")
 
 
 if __name__ == "__main__":
