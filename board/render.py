@@ -17,8 +17,9 @@ from worker reports on dev1 AND dev2):
     external script is permitted. The server sets the CSP header (see server.py);
     we keep the markup script-free so the header is honoured.
 
-`card_grid(live, recent, version, health)` is the 4-arg form for Phase E. A
-`queue=` parameter is added in Phase E2 — intentionally NOT here.
+`card_grid(live, recent, version, health)` is the 4-arg form for Phase E.
+Phase E2 adds `queue=None` (Task 19): when non-empty, renders an "Up next"
+section near the top showing upcoming tickets in pick-order.
 
 stdlib only.
 """
@@ -93,6 +94,12 @@ _STYLE = """
   table { border-collapse: collapse; width: 100%; font-size: .82rem; }
   td, th { border: 1px solid #21262d; padding: .25rem .4rem; text-align: left;
            vertical-align: top; }
+  .queue { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+           padding: .6rem .75rem; margin-bottom: .75rem; font-size: .85rem; }
+  .queue h2 { margin: 0 0 .4rem; font-size: .9rem; color: #58a6ff;
+              border-bottom: none; padding-bottom: 0; }
+  .queue .q-repo { color: #8b949e; font-size: .8rem; margin: .3rem 0 .1rem; }
+  .queue .q-item { padding: .1rem 0; }
 """
 
 
@@ -217,27 +224,71 @@ def _health_strip(health):
 # --------------------------------------------------------------------------- #
 # public render functions
 # --------------------------------------------------------------------------- #
-def card_grid(live, recent, version, health):
-    """Render the board home page (Task 11 — 4-arg form; queue= is Phase E2).
+def _queue_section(queue):
+    """Render the 'Up next — N queued' section for the backlog queue.
+
+    `queue` is a list of dicts (or sqlite Rows) with keys: repo, issue, title,
+    position. Items are grouped by repo in the order they appear (already sorted
+    by (repo, position) from the DB). EVERY interpolated value goes through _e()."""
+    if not queue:
+        return ""
+    n = len(queue)
+    label = f"Up next &mdash; {_e(n)} queued"
+    # group by repo while preserving order
+    groups = {}
+    for item in queue:
+        repo = item["repo"] if hasattr(item, "keys") else item.get("repo") if hasattr(item, "get") else item[0]
+        if repo not in groups:
+            groups[repo] = []
+        groups[repo].append(item)
+
+    rows_html = []
+    for repo, items in groups.items():
+        rows_html.append(f"<div class=\"q-repo\">{_e(repo)}</div>")
+        for item in items:
+            issue = item["issue"] if hasattr(item, "__getitem__") else None
+            title = item["title"] if hasattr(item, "__getitem__") else None
+            rows_html.append(
+                f"<div class=\"q-item\">"
+                f"#{_e(issue)}&nbsp;{_e(title)}"
+                f"</div>")
+
+    return (
+        "<div class=\"queue\">"
+        f"<h2>{label}</h2>"
+        + "".join(rows_html)
+        + "</div>"
+    )
+
+
+def card_grid(live, recent, version, health, queue=None):
+    """Render the board home page.
+
+    Phase E: 4-arg form (live, recent, version, health).
+    Phase E2: adds `queue=None` — when non-empty, renders an "Up next — N
+    queued" section near the top showing upcoming tickets in pick-order.
 
     `live` / `recent` are lists of plain run dicts already assembled by the
     server (keys: run_id, repo, issue, title, phase, goal, approach, result,
     machine, status, pr_url, gate{check:state}, alarms[list]). `version` is the
-    footer label; `health` is the health-strip dict. Everything is escaped."""
+    footer label; `health` is the health-strip dict. Everything is escaped.
+    Existing 4-arg callers work unchanged (queue defaults to None)."""
     live = live or []
     recent = recent or []
+    queue_html = _queue_section(queue or [])
 
     if not live and not recent:
         body = (
             "<h1>Autopilot Board</h1>"
             + _health_strip(health)
+            + queue_html
             + "<div class=\"empty\">No autopilot runs yet — "
               "start one with /autopilot</div>"
             + _footer(version)
         )
         return _page("Autopilot Board", body)
 
-    sections = ["<h1>Autopilot Board</h1>", _health_strip(health)]
+    sections = ["<h1>Autopilot Board</h1>", _health_strip(health), queue_html]
     if live:
         sections.append("<h2>Live</h2><div class=\"grid\">")
         sections.extend(_card(r) for r in live)

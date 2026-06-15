@@ -1064,3 +1064,172 @@ class TestServer(unittest.TestCase):
             if 429 in codes:
                 break
         self.assertIn(429, codes)
+
+
+# ============================ Phase E2 — planned queue ====================
+
+class TestQueue(unittest.TestCase):
+    def _b(self):
+        import tempfile
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_set_queue_replaces_atomically_and_orders(self):
+        b = self._b()
+        b.set_queue("o/x", [(5, "five"), (9, "nine")])
+        b.set_queue("o/x", [(9, "nine"), (7, "seven")])   # replace
+        q = b.get_queue()                                  # [{repo,issue,title,position}], excludes active/closed
+        nums = [r["issue"] for r in q if r["repo"] == "o/x"]
+        self.assertEqual(nums, [9, 7])                     # new order, old #5 gone
+
+    def test_prune_closed(self):
+        b = self._b()
+        b.set_queue("o/x", [(5, "five"), (9, "nine")])
+        b.prune_queue("o/x", open_issues={9})              # 5 no longer open → dropped
+        self.assertEqual([r["issue"] for r in b.get_queue()], [9])
+
+    def test_queue_excludes_active_run(self):
+        b = self._b()
+        b.set_queue("o/x", [(5, "five"), (9, "nine")])
+        b.apply_event({"run_id": "o_x-5-1-aa", "repo": "o/x", "issue": 5, "seq": 1,
+                       "phase": "implementing", "event_id": "e", "event_ts": 1.0})
+        nums = [r["issue"] for r in b.get_queue()]        # 5 is now active → not in queue
+        self.assertNotIn(5, nums)
+        self.assertIn(9, nums)
+
+    def test_render_queue_count_and_escape(self):
+        from board.render import card_grid
+        html = card_grid(live=[], recent=[], version="vX",
+                         health={}, queue=[{"repo": "o/x", "issue": 1,
+                                            "title": "<b>t</b>", "position": 0}])
+        self.assertIn("Up next", html)
+        self.assertIn("1 queued", html)
+        self.assertIn("&lt;b&gt;", html)
+        self.assertNotIn("<b>t</b>", html)
+
+    def test_migration_upgrades_existing_db(self):
+        """Open a v1 DB (migration 1 only), confirm queue table is absent,
+        then trigger migration and confirm queue table now exists."""
+        import tempfile
+        import sqlite3
+        from board.db import _SCHEMA
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "v1.sqlite")
+        # Manually build a v1 DB (only migration 1 schema, version=1).
+        c = sqlite3.connect(path)
+        c.executescript(_SCHEMA[0])
+        c.execute("DELETE FROM schema_version")
+        c.execute("INSERT INTO schema_version(version) VALUES (1)")
+        c.commit()
+        c.close()
+        # Confirm queue table is absent in v1.
+        c = sqlite3.connect(path)
+        tabs = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        c.close()
+        self.assertNotIn("queue", tabs)
+        # Now open via Board (triggers migrate()).
+        from board.db import Board
+        b = Board(path)
+        # queue table must now exist.
+        c = b.conn()
+        tabs2 = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        c.close()
+        self.assertIn("queue", tabs2)
+        self.assertGreaterEqual(b.schema_version(), 2)
+
+    def test_queue_report_enqueues(self):
+        """queue_report must queue a body without raising."""
+        import tempfile
+        import board.reporter as rp
+        home = tempfile.mkdtemp()
+        orig_state = rp.STATE_DIR
+        orig_url = rp.BOARD_URL
+        try:
+            rp.STATE_DIR = home
+            rp.BOARD_URL = "http://127.0.0.1:1/"   # nothing listening → queues
+            rp.queue_report("o/x", [(1, "issue one"), (2, "issue two")])
+            qf = os.path.join(home, "autopilot-board-queue.jsonl")
+            self.assertTrue(os.path.exists(qf))
+            import json
+            lines = open(qf).readlines()
+            bodies = [json.loads(l) for l in lines if l.strip()]
+            self.assertTrue(any(b.get("kind") == "queue" for b in bodies))
+        finally:
+            rp.STATE_DIR = orig_state
+            rp.BOARD_URL = orig_url
+
+    def test_server_accepts_queue_post(self):
+        """POST kind=queue to the server must store it via set_queue."""
+        import time
+        import threading
+        import tempfile
+        import board.server as srv
+        from board.db import Board
+        d = tempfile.mkdtemp()
+        token = "qt0k"
+        b = Board(os.path.join(d, "b.sqlite"))
+        b.start_writer()
+        httpd = srv.make_server(b, token=token, host="127.0.0.1", port=0)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            import urllib.request
+            import urllib.error
+            import json
+            body = {"kind": "queue", "repo": "o/x",
+                    "items": [[3, "item three"], [7, "item seven"]]}
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/report",
+                data=json.dumps(body).encode(), method="POST",
+                headers={"Content-Type": "application/json",
+                         "X-Board-Token": token})
+            with urllib.request.urlopen(req) as r:
+                self.assertEqual(r.status, 200)
+            # Give writer a moment.
+            for _ in range(20):
+                q = b.get_queue()
+                if q:
+                    break
+                time.sleep(0.05)
+            issues = [r["issue"] for r in q]
+            self.assertIn(3, issues)
+            self.assertIn(7, issues)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_server_rejects_queue_post_bad_repo(self):
+        """POST kind=queue with invalid repo must be rejected with 400."""
+        import threading
+        import tempfile
+        import board.server as srv
+        from board.db import Board
+        d = tempfile.mkdtemp()
+        token = "qt0k2"
+        b = Board(os.path.join(d, "b.sqlite"))
+        b.start_writer()
+        httpd = srv.make_server(b, token=token, host="127.0.0.1", port=0)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            import urllib.request
+            import urllib.error
+            import json
+            body = {"kind": "queue", "repo": "a;b/bad",
+                    "items": [[1, "title"]]}
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/report",
+                data=json.dumps(body).encode(), method="POST",
+                headers={"Content-Type": "application/json",
+                         "X-Board-Token": token})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    code = r.status
+            except urllib.error.HTTPError as e:
+                code = e.code
+            self.assertEqual(code, 400)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

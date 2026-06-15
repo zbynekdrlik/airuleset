@@ -200,8 +200,19 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
         def _route_get(self):
             path = self.path.split("?", 1)[0]
             if path == "/":
-                self._html(200, render.card_grid(*self._board_view(), version=version,
-                                                  health=self._health()))
+                live, recent = self._board_view()
+                try:
+                    queue = board.get_queue()
+                    # convert sqlite Rows to plain dicts for the renderer
+                    queue = [{"repo": r["repo"], "issue": r["issue"],
+                               "title": r["title"], "position": r["position"]}
+                              for r in queue]
+                except Exception:
+                    _log.exception("get_queue failed")
+                    queue = []
+                self._html(200, render.card_grid(live, recent, version=version,
+                                                  health=self._health(),
+                                                  queue=queue))
             elif path.startswith("/ticket/"):
                 rid = path[len("/ticket/"):]
                 self._serve_ticket(rid)
@@ -302,7 +313,11 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
                 self._text(400, "bad body")
                 return
 
-            # 5) validate gh-bound fields (don't store on failure) -------
+            # 5a) planned-queue body: kind="queue" routes to set_queue ------
+            if ev.get("kind") == "queue":
+                return self._handle_queue(ev)
+
+            # 5b) validate gh-bound fields (don't store on failure) -------
             rid = ev.get("run_id")
             if not ghmod.valid_run_id(rid):
                 self._text(400, "bad run_id")
@@ -343,6 +358,44 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
                     except Exception:
                         _log.exception("set_gate failed: %s %s", rid, item)
 
+            self._text(200, "ok")
+
+        def _handle_queue(self, ev):
+            """Handle POST /report with kind="queue". Validates repo + each
+            item's issue number, scrubs/caps titles, then calls board.set_queue
+            directly (same pattern as set_gate/set_gh — WAL lets multiple
+            readers and one writer coexist; set_queue opens its own connection).
+            Token + body-cap are already enforced by the outer _route_post."""
+            from board.reporter import scrub as _scrub
+            repo = ev.get("repo")
+            if not ghmod.valid_repo(repo):
+                self._text(400, "bad repo")
+                return
+            raw_items = ev.get("items")
+            if not isinstance(raw_items, list):
+                self._text(400, "items must be a list")
+                return
+            items = []
+            for entry in raw_items:
+                try:
+                    issue = entry[0]
+                    title = entry[1] if len(entry) > 1 else ""
+                except (TypeError, IndexError, KeyError):
+                    self._text(400, "bad item format")
+                    return
+                if not ghmod.valid_issue(issue):
+                    self._text(400, f"bad issue: {issue}")
+                    return
+                # scrub titles the same way the reporter does for event fields
+                safe_title = _scrub(str(title) if title is not None else "")
+                items.append((int(issue), safe_title))
+
+            try:
+                board.set_queue(repo, items)
+            except Exception:
+                _log.exception("set_queue failed for repo %s", repo)
+                self._json(500, {"error": "write failed"})
+                return
             self._text(200, "ok")
 
     httpd = ThreadingHTTPServer((host, port), Handler)
@@ -406,6 +459,17 @@ def _refresher_loop(board, repos, stop):
                     _log.warning("gh refresh for %s not ok (rate_limited=%s)",
                                  repo, res.get("rate_limited"))
                     continue
+                # Prune closed issues from the queue for this repo. The open
+                # issue set comes from the issues list returned by fetch_repo_active
+                # (design §8 — the refresher already fetches all open issues).
+                open_issue_numbers = {
+                    i.get("number") for i in res.get("issues", [])
+                    if i.get("number") is not None}
+                if open_issue_numbers is not None:
+                    try:
+                        board.prune_queue(repo, open_issue_numbers)
+                    except Exception:
+                        _log.exception("prune_queue failed for repo %s", repo)
                 for pr in res.get("prs", []):
                     num = pr.get("number")
                     if num is None:

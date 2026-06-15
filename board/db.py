@@ -55,7 +55,12 @@ _SCHEMA = [
       gh_ok INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS schema_version(version INTEGER);
     """,
-    # future migrations append here as idempotent ALTER TABLE ADD COLUMN scripts
+    # migration 2 — planned queue / backlog view (Phase E2, Task 19)
+    """
+    CREATE TABLE IF NOT EXISTS queue(
+      repo TEXT, issue INTEGER, title TEXT, position INTEGER,
+      reported_at REAL, PRIMARY KEY(repo, issue));
+    """,
 ]
 
 
@@ -619,3 +624,73 @@ class Board:
         finally:
             c.close()
         return reconciled, stale
+
+    # ----- planned queue (backlog) — Phase E2, Task 19 ----------------------
+
+    def set_queue(self, repo, items):
+        """Atomically replace the queue rows for `repo`.
+
+        `items` is a list of (issue, title) pairs ordered by desired pick-order.
+        The operation is atomic: DELETE all existing rows for `repo`, then INSERT
+        each item with its 0-based `position` and the current timestamp. A
+        half-written queue is never visible because both statements run inside the
+        same connection with an explicit commit at the end."""
+        now = time.time()
+        c = self.conn()
+        try:
+            c.execute("DELETE FROM queue WHERE repo=?", (repo,))
+            for pos, (issue, title) in enumerate(items):
+                c.execute(
+                    "INSERT INTO queue(repo, issue, title, position, reported_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (repo, int(issue), str(title) if title is not None else "", pos, now))
+            c.commit()
+        finally:
+            c.close()
+
+    def prune_queue(self, repo, open_issues):
+        """Remove queue rows for `repo` whose issue number is NOT in `open_issues`.
+
+        Called by the gh refresher after fetching the set of open issues for a
+        repo so closed tickets drop off the queue automatically. `open_issues` is
+        any collection that supports the `in` operator (set is fastest)."""
+        c = self.conn()
+        try:
+            rows = c.execute(
+                "SELECT issue FROM queue WHERE repo=?", (repo,)).fetchall()
+            to_delete = [r["issue"] for r in rows if r["issue"] not in open_issues]
+            for issue in to_delete:
+                c.execute("DELETE FROM queue WHERE repo=? AND issue=?",
+                          (repo, issue))
+            if to_delete:
+                c.commit()
+        finally:
+            c.close()
+
+    def get_queue(self):
+        """Return queued items ordered by (repo, position), EXCLUDING any
+        (repo, issue) pair that currently has a non-terminal run in the `runs`
+        table. An active ticket shows under Live, not in the queue.
+
+        Returns a list of sqlite Rows with columns: repo, issue, title, position."""
+        from board import TERMINAL_PHASES
+        placeholders = ",".join("?" * len(TERMINAL_PHASES))
+        c = self.conn()
+        try:
+            rows = c.execute(
+                f"""
+                SELECT q.repo, q.issue, q.title, q.position
+                FROM queue q
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM runs r
+                    WHERE r.repo = q.repo
+                      AND r.issue = q.issue
+                      AND (r.phase IS NULL OR r.phase NOT IN ({placeholders}))
+                      AND (r.status IS NULL OR r.status != 'stale')
+                )
+                ORDER BY q.repo, q.position
+                """,
+                tuple(TERMINAL_PHASES)).fetchall()
+            return list(rows)
+        finally:
+            c.close()

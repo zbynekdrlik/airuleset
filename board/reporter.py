@@ -174,6 +174,28 @@ def report(rid, phase=None, _start=False, reviews=None, **fields):
         pass
 
 
+def queue_report(repo, items):
+    """Report the planned queue for `repo` to the board.
+
+    `items` is a list of (issue, title) pairs in desired pick-order. Builds a
+    `kind=queue` body and routes it through the same enqueue/flush path as
+    normal events — fire-and-forget, never raises, never blocks past
+    REPORT_TIMEOUT. The board server routes kind=queue to board.set_queue.
+
+    Note: the `airuleset.py report --queue` CLI flag is a later phase (F).
+    This function is the client-library entry point used directly by callers."""
+    try:
+        body = {
+            "kind": "queue",
+            "repo": repo,
+            "items": [[int(issue), scrub(str(title) if title is not None else "")]
+                      for issue, title in items],
+        }
+        _enqueue_and_flush(body)
+    except Exception:
+        pass
+
+
 def _enqueue_and_flush(ev):
     # append first (durability), then enforce size cap, then try to flush under lock
     _ensure_state_dir()
