@@ -388,3 +388,99 @@ class TestReporter(unittest.TestCase):
         finally:
             rp.QUEUE_MAX_BYTES = old_max
             rp.BOARD_URL = old_url
+
+
+class TestGh(unittest.TestCase):
+    def test_validate_repo_issue_runid(self):
+        from board.gh import valid_repo, valid_issue, valid_run_id
+        self.assertTrue(valid_repo("owner/name"))
+        self.assertFalse(valid_repo("--version"))
+        self.assertFalse(valid_repo("a;b/c"))
+        self.assertTrue(valid_issue(5))
+        self.assertFalse(valid_issue("-1"))
+        self.assertFalse(valid_issue("x"))
+        self.assertTrue(valid_run_id("o_x-1-123-ab12"))
+        self.assertFalse(valid_run_id("a/b"))
+
+    def test_validate_rejects_injection_vectors(self):
+        # gh-argument-injection safety: nothing that could be read as a flag, a
+        # shell metachar, whitespace, or a path traversal may pass validation.
+        from board.gh import valid_repo, valid_issue, valid_run_id
+        for bad in ("--json", "-f", "o/x;rm -rf", "o/x x", "o x/y", "o/x\n",
+                    "", "o/", "/x", "o//x", "../etc/passwd", "o/x/../y",
+                    "$(whoami)/x", "`id`/x", "o/x|y", "o&x/y", None, 5):
+            self.assertFalse(valid_repo(bad), f"valid_repo accepted {bad!r}")
+        for bad in ("--flag", "5; rm", "5 6", "5\n", "0", "-1", "1.5",
+                    "1e3", " 5", None, [], "0x5"):
+            self.assertFalse(valid_issue(bad), f"valid_issue accepted {bad!r}")
+        for bad in ("a/b", "a;b", "a b", "--flag", "a\nb", "", None, "$(x)"):
+            self.assertFalse(valid_run_id(bad), f"valid_run_id accepted {bad!r}")
+        # positives across the supported charset
+        self.assertTrue(valid_repo("Org-1/repo.name_2"))
+        self.assertTrue(valid_issue("42"))
+        self.assertTrue(valid_issue(42))
+        self.assertTrue(valid_run_id("Org-1_repo.name_2-42-1700000000000-ab12"))
+
+    def test_parse_pr_mergeable(self):
+        from board.gh import classify_pr
+        ok = classify_pr({"state": "MERGED", "mergedAt": "2026-06-15T00:00:00Z",
+                          "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"})
+        self.assertTrue(ok["merged"])
+        self.assertEqual(ok["mergeable_gate"], "ok")
+        un = classify_pr({"state": "OPEN", "mergeable": "MERGEABLE",
+                          "mergeStateStatus": "UNSTABLE"})
+        self.assertEqual(un["mergeable_gate"], "fail")
+        pend = classify_pr({"state": "OPEN", "mergeable": "UNKNOWN",
+                            "mergeStateStatus": "UNKNOWN"})
+        self.assertEqual(pend["mergeable_gate"], "pending")
+
+    def test_classify_pr_fields_and_states(self):
+        from board.gh import classify_pr
+        # merged via mergedAt even if state lags
+        m = classify_pr({"state": "OPEN", "mergedAt": "2026-06-15T00:00:00Z",
+                         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"})
+        self.assertTrue(m["merged"])
+        # open, clean, mergeable true → ok; mergeable bool surfaced
+        o = classify_pr({"state": "OPEN", "mergeable": "MERGEABLE",
+                         "mergeStateStatus": "CLEAN"})
+        self.assertFalse(o["merged"])
+        self.assertEqual(o["pr_state"], "OPEN")
+        self.assertIs(o["mergeable"], True)
+        self.assertEqual(o["mergeable_state"], "CLEAN")
+        self.assertEqual(o["mergeable_gate"], "ok")
+        # CONFLICTING (mergeable false) → fail
+        c = classify_pr({"state": "OPEN", "mergeable": "CONFLICTING",
+                         "mergeStateStatus": "DIRTY"})
+        self.assertIs(c["mergeable"], False)
+        self.assertEqual(c["mergeable_gate"], "fail")
+        # missing mergeable key → None → pending
+        miss = classify_pr({"state": "OPEN", "mergeStateStatus": "CLEAN"})
+        self.assertIsNone(miss["mergeable"])
+        self.assertEqual(miss["mergeable_gate"], "pending")
+
+    def test_gh_argv_only_never_shell(self):
+        # _gh must invoke gh via an argv list (subprocess.run([...])) and NEVER
+        # with shell=True / a shell string. We assert by inspecting the call.
+        import board.gh as gh
+        calls = {}
+
+        class _R:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        def fake_run(args, **kw):
+            calls["args"] = args
+            calls["kw"] = kw
+            return _R()
+
+        orig = gh.subprocess.run
+        gh.subprocess.run = fake_run
+        try:
+            gh._gh(["pr", "list", "--repo", "o/x"])
+        finally:
+            gh.subprocess.run = orig
+        self.assertIsInstance(calls["args"], list)
+        self.assertEqual(calls["args"][0], "gh")
+        self.assertNotIn("shell", calls["kw"])  # never shell=True
+        self.assertFalse(calls["kw"].get("shell", False))
