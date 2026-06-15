@@ -36,6 +36,9 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 ## How it works
 
+- **Live board at `http://10.77.9.21:8787/`.** Workers self-report each phase; the supervisor reports
+  the planned queue + its verify verdicts. The board shows the live tickets, the review-gate audit, and
+  the planned "Up next" queue. Reporting is fire-and-forget — it never blocks or gates the loop.
 - **Engine = a `/goal` loop you paste once.** Each turn the main agent dispatches ONE foreground
   `autopilot-worker` for the next open issue; the worker runs the full cycle (and asks you if
   needed); the main agent verifies the result from GitHub; the next turn picks the next issue —
@@ -69,7 +72,10 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
   exclusion. Do **NOT** filter out `needs-design` / `needs-decision` / `question` / `blocked` —
   those get worked too; the worker raises the question with you. A backlog full of "needs input"
   issues is **NOT** a reason to refuse — start anyway. Only a genuinely empty backlog stops you.
-- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog`.
+- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog · board http://10.77.9.21:8787/`.
+- **Report the planned queue** so the board's "Up next" is current — after computing the ordered backlog
+  (open issues minus `autopilot-skip`), at loop START and after each issue completes:
+  `python3 ~/devel/airuleset/airuleset.py report --queue --repo <repo> --items '[[<issue>,"<title>"],…]'`.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
@@ -122,7 +128,10 @@ Each loop turn:
    - **STILL_VALID** → proceed to step 2. **PARTIAL** → proceed but pass `still_to_do` as the worker's scope.
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR resolved it OR a passing repro proves it) →
      do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment,
-     milestone-ping it (it's reopenable in one click), and pick the next issue (skip step 2).
+     report it to the board (`R=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <r> --issue <N>
+     --title "<title>") ; python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase obsolete-closed
+     --result "<validator evidence>"`), milestone-ping it (it's reopenable in one click), and pick the next
+     issue (skip step 2).
    - **OVERCOME + `overcome_confidence: soft`** → do NOT auto-close — ask the user ("looks overcome by
      <evidence> — close it?") with the validator's evidence; act on their answer.
    - **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is
@@ -145,8 +154,11 @@ Each loop turn:
    - `gh run list -b main -L 1 --json conclusion`
    - deployed version read from the live target (if there is a deploy)
    - `gh issue view <N> --json state`
-   Confirmed → milestone ping (`milestone-notifications.md`) + one line to `docs/autopilot-log.md`.
-5. **Immediately pick the next issue** — including right after a merge. Do NOT stop to report
+   Report the supervisor's verdict to the board: `python3 ~/devel/airuleset/airuleset.py report --run
+   "$RUN" --review supervisor-verify=ok|fail`. Confirmed → milestone ping (`milestone-notifications.md`,
+   include the board URL `http://10.77.9.21:8787/`) + one line to `docs/autopilot-log.md`.
+5. **Immediately pick the next issue** — including right after a merge; re-report the planned queue
+   (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to report
    between issues, do NOT re-run `/issue-planner`, do NOT `/compact`.
 
 ## Step 4 — When to actually STOP (only these)

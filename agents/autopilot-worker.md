@@ -19,6 +19,15 @@ continue. Do NOT guess on an important decision, and do NOT bail out of the whol
 because it needs a conversation — have the conversation and keep going. Only routine,
 unambiguous steps proceed without asking.
 
+**REPORTING (board — fire-and-forget, never blocks, never a reason to pause/ask):** As your FIRST
+action, start the run: `RUN=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <repo>
+--issue <N> --title "<issue title>" [--is-bug-fix] [--has-deploy] [--merge-mode auto|manual])` and
+`export AUTOPILOT_RUN=$RUN`. After each phase transition
+(validating→version-bump→implementing→RED→GREEN→CI→review→merge→deploy→done), run one
+`python3 ~/devel/airuleset/airuleset.py report --run "$RUN" --phase <p> [--goal/--approach/--result
+"..."] [--review <check>=ok|fail]`. It always exits 0 — if it fails, IGNORE it and continue.
+Reporting must NEVER delay or interrupt the work or asking the user. Board: http://10.77.9.21:8787/
+
 ## READ FIRST (durable context — never skip)
 
 1. The repo's `CLAUDE.md` (project conventions + the merge mode marker `airuleset:merge=manual`).

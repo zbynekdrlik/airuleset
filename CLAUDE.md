@@ -6,6 +6,10 @@ This is the airuleset repository: a Claude Code configuration management system.
 
 Centralized management of Claude Code rules, skills, and hooks shared across multiple projects. Uses native `@import` syntax in CLAUDE.md for zero-build-step module loading.
 
+## Dashboards
+
+- **Autopilot Board** — `http://10.77.9.21:8787/` — live autopilot tickets, the review-gate audit, and the planned "Up next" queue (workers self-report each phase; the supervisor reports the queue + verify verdicts).
+
 ## Structure
 
 - `modules/` — Atomic rule blocks (standalone .md files), organized by category
