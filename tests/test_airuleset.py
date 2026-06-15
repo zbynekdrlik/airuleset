@@ -929,8 +929,130 @@ class TestBoardHost(TestCase):
                 self.assertTrue(airuleset.is_board_host())
 
 
+class TestInstallBranch(TestCase):
+    """maybe_setup_board() gates setup_board_service() on is_board_host()
+    (plan Task 14)."""
+
+    def test_service_setup_skipped_off_board_host(self):
+        import unittest.mock as m
+        with m.patch.object(airuleset, "is_board_host", return_value=False):
+            calls = []
+            with m.patch.object(airuleset, "setup_board_service",
+                                side_effect=lambda *a, **k: calls.append(1)):
+                with m.patch.object(airuleset.Path, "mkdir"):
+                    airuleset.maybe_setup_board()
+            self.assertEqual(calls, [], "must NOT set up the service off the board host")
+
+    def test_service_setup_runs_on_board_host(self):
+        import unittest.mock as m
+        with m.patch.object(airuleset, "is_board_host", return_value=True):
+            calls = []
+            with m.patch.object(airuleset, "setup_board_service",
+                                side_effect=lambda *a, **k: calls.append(1)):
+                airuleset.maybe_setup_board()
+            self.assertEqual(calls, [1], "must set up the service on the board host")
 
 
+class TestBoardServiceTemplate(TestCase):
+    """The systemd --user unit template ships with the required directives
+    (plan Task 14)."""
+
+    TEMPLATE = airuleset.REPO_DIR / "settings" / "autopilot-board.service.template"
+
+    def test_template_exists(self):
+        self.assertTrue(self.TEMPLATE.exists(), f"Missing: {self.TEMPLATE}")
+
+    def test_template_execstart_and_placeholder(self):
+        text = self.TEMPLATE.read_text()
+        self.assertIn("{{REPO_DIR}}", text, "must carry the repo-path placeholder")
+        self.assertIn("board --serve", text, "ExecStart must run `board --serve`")
+        self.assertIn("ExecStart=", text)
+
+    def test_template_hardening_directives(self):
+        text = self.TEMPLATE.read_text()
+        for directive in [
+            "NoNewPrivileges=yes",
+            "ProtectSystem=strict",
+            "ReadWritePaths=%h/.claude",
+            "ProtectHome=read-only",
+            "PrivateTmp=yes",
+            "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+            "MemoryMax=512M",
+            "TasksMax=64",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "StartLimitBurst=5",
+        ]:
+            self.assertIn(directive, text, f"missing hardening directive: {directive}")
+
+    def test_template_install_section(self):
+        text = self.TEMPLATE.read_text()
+        self.assertIn("WantedBy=default.target", text)
+
+    def test_render_substitutes_repo_dir(self):
+        rendered = airuleset._render_service_unit()
+        self.assertNotIn("{{REPO_DIR}}", rendered, "placeholder must be substituted")
+        self.assertIn(str(airuleset.REPO_DIR), rendered)
+
+
+class TestPushRunsTests(TestCase):
+    """cmd_push runs the test suite FIRST and aborts the push on failure
+    (fail-closed — plan Task 14)."""
+
+    def test_push_aborts_when_tests_fail(self):
+        import unittest.mock as m
+
+        # First subprocess.run is the unittest discover — make it fail (rc=1).
+        # If the push proceeded, a second subprocess.run (git push) would fire;
+        # we assert it does NOT, and that cmd_push raises SystemExit(1).
+        test_run = m.Mock(returncode=1)
+        runner = m.Mock(side_effect=[test_run])
+
+        with m.patch("subprocess.run", runner):
+            with self.assertRaises(SystemExit) as ctx:
+                airuleset.cmd_push(m.Mock())
+
+        self.assertEqual(ctx.exception.code, 1)
+        # Exactly ONE subprocess.run call (the test run) — no git push attempted.
+        self.assertEqual(runner.call_count, 1, "push must not run after failing tests")
+        called_args = runner.call_args_list[0].args[0]
+        self.assertIn("unittest", called_args, "first call must be the test suite")
+        self.assertNotIn("git", called_args)
+
+    def test_push_runs_tests_before_pushing(self):
+        import unittest.mock as m
+
+        # Tests pass (rc=0); the git push then fails (rc=1) so cmd_push exits 1
+        # BEFORE touching dev2 — but crucially the FIRST call must be the test run.
+        test_run = m.Mock(returncode=0, stdout="", stderr="")
+        push_run = m.Mock(returncode=1, stdout="", stderr="push rejected")
+        runner = m.Mock(side_effect=[test_run, push_run])
+
+        with m.patch("subprocess.run", runner):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(m.Mock())
+
+        self.assertGreaterEqual(runner.call_count, 2)
+        first_call = runner.call_args_list[0].args[0]
+        self.assertIn("unittest", first_call, "tests must run before the push")
+        second_call = runner.call_args_list[1].args[0]
+        self.assertIn("git", second_call, "second call is the git push")
+
+
+class TestValidateBoard(TestCase):
+    """cmd_validate asserts the board modules import + the service template exists
+    (plan Task 14)."""
+
+    def test_validate_board_clean(self):
+        # On a healthy tree, _validate_board returns no errors.
+        self.assertEqual(airuleset._validate_board(), [])
+
+    def test_validate_board_reports_missing_template(self):
+        import unittest.mock as m
+        fake = airuleset.REPO_DIR / "settings" / "does-not-exist.service.template"
+        with m.patch.object(airuleset, "BOARD_SERVICE_TEMPLATE", fake):
+            errors = airuleset._validate_board()
+        self.assertTrue(any("service template" in e for e in errors), errors)
 
 
 class TestReportCommand(TestCase):

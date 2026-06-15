@@ -247,6 +247,45 @@ def unified_diff(old: str, new: str, label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _validate_board():
+    """Validate the Autopilot Board: each board/*.py imports cleanly and the
+    systemd service template exists with the repo-path placeholder.
+
+    Loads each module by spec (importlib) so a syntax error or bad import in any
+    board file fails `validate` loudly — the board ships with airuleset, so a
+    broken board file must block install just like a missing module."""
+    import importlib
+
+    errors = []
+    board_dir = REPO_DIR / "board"
+    if not board_dir.is_dir():
+        errors.append(f"Board package missing: {board_dir}")
+        return errors
+
+    # Import each board submodule (in dependency order so e.g. gh's
+    # `from board.gate import ...` resolves). Importing the package first puts
+    # `board` on sys.modules.
+    for mod in ("board", "board.gate", "board.gh", "board.db",
+                "board.render", "board.reporter", "board.server"):
+        try:
+            importlib.import_module(mod)
+        except Exception as e:
+            errors.append(f"Board module failed to import: {mod} ({e})")
+
+    # Service template must exist and carry the {{REPO_DIR}} placeholder + the
+    # board --serve ExecStart.
+    if not BOARD_SERVICE_TEMPLATE.exists():
+        errors.append(f"Missing board service template: {BOARD_SERVICE_TEMPLATE}")
+    else:
+        tmpl = BOARD_SERVICE_TEMPLATE.read_text()
+        if "{{REPO_DIR}}" not in tmpl:
+            errors.append("Board service template missing {{REPO_DIR}} placeholder")
+        if "board --serve" not in tmpl:
+            errors.append("Board service template ExecStart missing `board --serve`")
+
+    return errors
+
+
 def cmd_validate(args):
     """Check all module/rule files exist and all @import paths resolve."""
     errors = []
@@ -307,6 +346,10 @@ def cmd_validate(args):
         content = rule_file.read_text()
         if not content.startswith("---"):
             errors.append(f"Rule missing YAML frontmatter: {rule_file.name}")
+
+    # Validate the Autopilot Board: every board/*.py loads cleanly + service
+    # template exists with the substitution placeholder.
+    errors.extend(_validate_board())
 
     if errors:
         print("VALIDATION FAILED:")
@@ -466,6 +509,14 @@ def cmd_install(args):
             print(f"  Updated:   {SETTINGS_JSON}")
         else:
             print(f"  No change: {SETTINGS_JSON}")
+
+    # --- 4. Autopilot Board: branch on whether this is the board host ---
+    try:
+        maybe_setup_board()
+    except Exception as e:
+        # The board service is best-effort: a failure here must never abort the
+        # core install (CLAUDE.md/skills/hooks already landed). Print and move on.
+        print(f"  board setup error (non-fatal): {e}", file=sys.stderr)
 
     print()
     print("Install complete. Restart Claude Code for changes to take effect.")
@@ -753,6 +804,11 @@ def _board_status():
     print(f"  token:        {'present' if BOARD_TOKEN_PATH.exists() else 'absent'}")
 
 
+# ---------------------------------------------------------------------------
+# Autopilot Board install branching + systemd service (plan Task 14)
+# ---------------------------------------------------------------------------
+
+
 def _xdg_runtime_env():
     """A copy of os.environ with XDG_RUNTIME_DIR set explicitly.
 
@@ -762,6 +818,35 @@ def _xdg_runtime_env():
     env = dict(os.environ)
     env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     return env
+
+
+def _ensure_board_token():
+    """Generate the shared board token if absent (0600). Returns the token."""
+    import secrets
+    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+    if BOARD_TOKEN_PATH.exists():
+        existing = BOARD_TOKEN_PATH.read_text().strip()
+        if existing:
+            return existing
+    token = secrets.token_urlsafe(32)
+    # write then tighten perms to 0600 (owner read/write only)
+    BOARD_TOKEN_PATH.write_text(token)
+    try:
+        os.chmod(BOARD_TOKEN_PATH, 0o600)
+    except OSError:
+        pass
+    print(f"  Generated board token: {BOARD_TOKEN_PATH} (0600)")
+    return token
+
+
+def _render_service_unit():
+    """Read the unit template and substitute the absolute repo path placeholder.
+
+    The template ships with a `{{REPO_DIR}}` placeholder so the ExecStart points
+    at THIS checkout's airuleset.py (dev1 path may differ from dev2)."""
+    text = BOARD_SERVICE_TEMPLATE.read_text()
+    return text.replace("{{REPO_DIR}}", str(REPO_DIR))
+
 
 def _run_systemctl(args):
     """Run `systemctl --user <args>` with the explicit XDG env. Returns
@@ -775,6 +860,7 @@ def _run_systemctl(args):
     except Exception as e:
         return 1, "", str(e)
 
+
 def _restart_board_service():
     """Best-effort `systemctl --user restart autopilot-board.service`."""
     rc, _out, err = _run_systemctl(["restart", "autopilot-board.service"])
@@ -782,6 +868,99 @@ def _restart_board_service():
         print(f"  board service restart failed (rc={rc}): {err.strip()}",
               file=sys.stderr)
     return rc == 0
+
+
+def setup_board_service():
+    """Install + start the board systemd --user service on the board host.
+
+    Called ONLY when is_board_host() is True (the maybe_setup_board gate). On any
+    failure it PRINTS the exact manual command rather than claiming success, so a
+    failed install is visible and recoverable. Steps:
+      1. generate the token (0600) if absent
+      2. write the unit (repo path substituted) to ~/.config/systemd/user/
+      3. loginctl enable-linger (best-effort — service survives logout)
+      4. daemon-reload + enable --now (explicit XDG_RUNTIME_DIR)
+      5. curl 127.0.0.1:8787 for 200, then print the 10.77.9.21 LAN URL
+    """
+    import subprocess
+    print("  Board host detected — installing systemd --user service")
+
+    # 1. token
+    _ensure_board_token()
+
+    # 2. write the unit
+    if not BOARD_SERVICE_TEMPLATE.exists():
+        print(f"  ERROR: service template missing: {BOARD_SERVICE_TEMPLATE} — "
+              f"cannot install the board service.", file=sys.stderr)
+        return False
+    BOARD_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
+    BOARD_SERVICE_DEST.write_text(_render_service_unit())
+    print(f"  Wrote unit: {BOARD_SERVICE_DEST}")
+
+    manual = (
+        "    loginctl enable-linger $(whoami)\n"
+        f"    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
+        f"    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
+        "autopilot-board.service")
+
+    # 3. linger (best-effort, not fatal)
+    try:
+        subprocess.run(["loginctl", "enable-linger", _whoami()],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print(f"  loginctl enable-linger skipped ({e})", file=sys.stderr)
+
+    # 4. daemon-reload + enable --now
+    rc, _o, err = _run_systemctl(["daemon-reload"])
+    if rc != 0:
+        print(f"  systemctl daemon-reload FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+    rc, _o, err = _run_systemctl(["enable", "--now", "autopilot-board.service"])
+    if rc != 0:
+        print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+
+    # 5. liveness check then print the LAN URL
+    if _wait_board_live("http://127.0.0.1:%d/" % BOARD_PORT):
+        print(f"  Board is live. LAN URL: {board_url()}")
+        return True
+    print(f"  Board service started but did NOT answer on 127.0.0.1:{BOARD_PORT}. "
+          f"Check `systemctl --user status autopilot-board.service` and "
+          f"`journalctl --user -u autopilot-board.service`.", file=sys.stderr)
+    return False
+
+
+def _whoami():
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER", "")
+
+
+def _wait_board_live(local_url, attempts=5, delay=1.0):
+    """Poll a local board URL up to `attempts` times for an HTTP 200."""
+    import time
+    for _ in range(attempts):
+        if _board_is_live(local_url):
+            return True
+        time.sleep(delay)
+    return False
+
+
+def maybe_setup_board():
+    """Install branching, called from cmd_install AFTER the core install work.
+
+    Board host  → setup_board_service() (the systemd daemon).
+    Other hosts → ensure ~/.claude exists (reporter writes its state there) and
+                  print that the board is skipped here (reports go to the host)."""
+    if is_board_host():
+        setup_board_service()
+    else:
+        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"  board: skipped (not board host; reports go to {board_url()})")
 
 
 # ---------------------------------------------------------------------------
@@ -800,11 +979,25 @@ REMOTE_HOSTS = [
 
 
 def cmd_push(args):
-    """Push to GitHub and deploy to all remote machines."""
+    """Push to GitHub and deploy to all remote machines.
+
+    Fail-closed: the full test suite runs FIRST; a single failing test aborts the
+    push (and therefore the dev2 deploy) so untested code never ships."""
     import subprocess
 
+    # 0. Run the full test suite — fail-closed before any push/deploy.
+    print("Running test suite (fail-closed before push)...")
+    test_result = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+        cwd=str(REPO_DIR),
+    )
+    if test_result.returncode != 0:
+        print("  TESTS FAILED — refusing to push untested code.", file=sys.stderr)
+        sys.exit(1)
+    print("  Tests passed.")
+
     # 1. Push to GitHub
-    print("Pushing to GitHub...")
+    print("\nPushing to GitHub...")
     result = subprocess.run(
         ["git", "push", "origin", "main"],
         cwd=str(REPO_DIR),
