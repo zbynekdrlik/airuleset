@@ -22,7 +22,9 @@ unambiguous steps proceed without asking.
 **REPORTING (board — fire-and-forget, never blocks, never a reason to pause/ask):** As your FIRST
 action, start the run: `RUN=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <repo>
 --issue <N> --title "<issue title>" [--is-bug-fix] [--has-deploy] [--merge-mode auto|manual])` and
-`export AUTOPILOT_RUN=$RUN`. After each phase transition
+`export AUTOPILOT_RUN=$RUN`. `<repo>` MUST be the canonical **`owner/name`** (a bare name like
+`odoo-erp` is rejected) — get it once with `gh repo view --json nameWithOwner -q .nameWithOwner`.
+After each phase transition
 (validating→version-bump→implementing→RED→GREEN→CI→review→merge→deploy→done), run one
 `python3 ~/devel/airuleset/airuleset.py report --run "$RUN" --phase <p> [--goal/--approach/--result
 "..."] [--review <check>=ok|fail]`. It always exits 0 — if it fails, IGNORE it and continue.

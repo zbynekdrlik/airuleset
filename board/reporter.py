@@ -13,6 +13,7 @@ import time
 import uuid
 import json
 import fcntl
+import urllib.error
 import urllib.request
 
 from board import (REPORT_TIMEOUT, CIRCUIT_BREAKER_S, FLUSH_CAP, QUEUE_TTL_S,
@@ -33,6 +34,34 @@ def _safe_prefix(repo):
     id prefix is sanitised so the run_id stays a single filesystem-safe token.
     """
     return re.sub(r"[^A-Za-z0-9._-]", "_", repo)
+
+
+def _normalize_repo(repo):
+    """Return a canonical `owner/name` for the run's repo.
+
+    The board (and gh) require `owner/name`; a BARE name (e.g. 'odoo-erp' or
+    'camera-box', which a worker easily produces from the directory name) is
+    400-rejected as a bad repo and would poison the offline queue. If `repo`
+    isn't already `owner/name`, resolve the canonical nameWithOwner via
+    `gh repo view` in the current directory (short timeout, best-effort).
+    Falls back to the original string if it can't be resolved — the flush then
+    drops it rather than letting it block the queue. Fast path (already valid)
+    never shells out, so tests and the common case pay no subprocess cost."""
+    from board import gh as _gh
+    if repo and _gh.valid_repo(repo):
+        return repo
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner",
+             "-q", ".nameWithOwner"],
+            capture_output=True, text=True, timeout=8)
+        cand = (r.stdout or "").strip()
+        if r.returncode == 0 and _gh.valid_repo(cand):
+            return cand
+    except Exception:
+        pass
+    return repo
 
 
 def _load(f):
@@ -57,6 +86,7 @@ def start_run(repo, issue, title, is_bug_fix=False, has_deploy=False,
               merge_mode="auto"):
     """Mint a run_id once, persist the repo#issue -> run_id mapping, seed seq=0,
     and emit the opening 'validating' event. Returns the run_id."""
+    repo = _normalize_repo(repo)   # bare name -> owner/name, else the board 400s it
     rid = f"{_safe_prefix(repo)}-{issue}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}"
     runs = _load(_p("autopilot-board-runs.json"))
     runs[f"{repo}#{issue}"] = rid
@@ -138,9 +168,17 @@ def _clear_down():
         pass
 
 
-def _post_one(body):
-    """POST a single event to the board. Returns True on HTTP 2xx, False on any
-    error (timeout, connection refused, non-2xx, bad URL, non-serialisable body).
+def _post_outcome(body):
+    """POST one event and CLASSIFY the result so the flush can react correctly:
+
+      'ok'     — HTTP 2xx: the board stored it; remove it from the queue.
+      'reject' — HTTP 4xx (except 429): the board refused THIS event (bad repo /
+                 run_id / issue / json). Retrying will NEVER succeed, so the flush
+                 drops it — one poison event must not block every good event
+                 queued behind it (the bug that hid real autopilot runs).
+      'down'   — HTTP 5xx, 429, timeout, or connection error: the board is
+                 unhealthy or unreachable. Keep the event and back off (breaker).
+
     Never raises."""
     try:
         req = urllib.request.Request(
@@ -150,9 +188,20 @@ def _post_one(body):
             headers={"Content-Type": "application/json",
                      "X-Board-Token": _token()})
         with urllib.request.urlopen(req, timeout=REPORT_TIMEOUT) as r:
-            return 200 <= r.status < 300
+            return "ok" if 200 <= r.status < 300 else "down"
+    except urllib.error.HTTPError as e:
+        # 429 (rate limited) and 5xx are retryable → back off. Other 4xx mean the
+        # event itself is bad → poison, drop it.
+        if e.code == 429 or e.code >= 500:
+            return "down"
+        return "reject"
     except Exception:
-        return False
+        return "down"
+
+
+def _post_one(body):
+    """Back-compat bool wrapper (True only on HTTP 2xx). Used by the selftest."""
+    return _post_outcome(body) == "ok"
 
 
 # --- emit + queue --------------------------------------------------------
@@ -185,6 +234,7 @@ def queue_report(repo, items):
     Note: the `airuleset.py report --queue` CLI flag is a later phase (F).
     This function is the client-library entry point used directly by callers."""
     try:
+        repo = _normalize_repo(repo)   # bare name -> owner/name, else the board 400s it
         body = {
             "kind": "queue",
             "repo": repo,
@@ -242,8 +292,9 @@ def flush_queue():
     """Drain the offline queue to the board under an exclusive non-blocking lock.
 
     - Lock held by another reporter → return immediately (we already appended).
-    - Remove a line only on HTTP 2xx; on the first failure stop, keep the
-      remainder, open the circuit breaker, and return (caller exits 0).
+    - Per event: HTTP 2xx → remove; board 4xx-reject → DROP and keep draining
+      (a poison event must never block the good events behind it); board
+      down/5xx/429/timeout → keep this + the remainder, open the breaker, stop.
     - At most FLUSH_CAP sends per invocation; events older than QUEUE_TTL_S are
       dropped; a poison (bad-JSON) line is skipped and dropped, never crashes.
     """
@@ -274,10 +325,13 @@ def flush_queue():
                 continue  # poison line: skip + drop
             if now - body.get("event_ts", now) > QUEUE_TTL_S:
                 continue  # TTL drop
-            if _post_one(body):
+            outcome = _post_outcome(body)
+            if outcome == "ok":
                 sent += 1
                 _clear_down()
-            else:
+            elif outcome == "reject":
+                continue  # poison (board 4xx) — drop it, keep draining the rest
+            else:  # "down" — board unhealthy/unreachable: keep this + the rest
                 _mark_down()
                 remaining.append(ln)
                 remaining.extend(lines[i + 1:])

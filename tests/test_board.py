@@ -354,10 +354,14 @@ class TestReporter(unittest.TestCase):
         self.home = tempfile.mkdtemp()
         rp.STATE_DIR = self.home
         self._orig_post_one = rp._post_one
+        self._orig_post_outcome = rp._post_outcome
+        self._orig_normalize = rp._normalize_repo
 
     def tearDown(self):
         import board.reporter as rp
         rp._post_one = self._orig_post_one
+        rp._post_outcome = self._orig_post_outcome
+        rp._normalize_repo = self._orig_normalize
 
     def test_secret_scrub(self):
         from board.reporter import scrub
@@ -376,15 +380,109 @@ class TestReporter(unittest.TestCase):
         import json
         # two queued lines with distinct event_id; a fake sender that records
         sent = []
-        rp._post_one = lambda body: sent.append(body) or True
+        rp._post_outcome = lambda body: (sent.append(body) or "ok")
         with open(rp._p("autopilot-board-queue.jsonl"), "w") as h:
             h.write(json.dumps({"event_id": "a", "run_id": "r"}) + "\n")
             h.write(json.dumps({"event_id": "b", "run_id": "r"}) + "\n")
         rp.flush_queue()
-        # _post_one receives the parsed event dict (it serialises internally),
-        # so read event_id off the dict directly.
         self.assertEqual({x["event_id"] for x in sent}, {"a", "b"})
         self.assertEqual(os.path.getsize(rp._p("autopilot-board-queue.jsonl")), 0)
+
+    def test_flush_drops_poison_and_continues(self):
+        """A board-4xx poison event must be DROPPED, not block the good events
+        behind it (the bug that hid real autopilot runs)."""
+        import board.reporter as rp
+        import json
+        seen = []
+
+        def outcome(body):
+            seen.append(body["event_id"])
+            return "reject" if body["event_id"] == "poison" else "ok"
+        rp._post_outcome = outcome
+        with open(rp._p("autopilot-board-queue.jsonl"), "w") as h:
+            h.write(json.dumps({"event_id": "poison", "run_id": "r"}) + "\n")
+            h.write(json.dumps({"event_id": "good1", "run_id": "r"}) + "\n")
+            h.write(json.dumps({"event_id": "good2", "run_id": "r"}) + "\n")
+        rp.flush_queue()
+        # all three attempted, queue fully drained, breaker NOT tripped
+        self.assertEqual(seen, ["poison", "good1", "good2"])
+        self.assertEqual(os.path.getsize(rp._p("autopilot-board-queue.jsonl")), 0)
+        self.assertFalse(os.path.exists(rp._p("autopilot-board-down")))
+
+    def test_flush_keeps_and_backs_off_when_down(self):
+        """A 'down' outcome keeps the event + remainder and opens the breaker."""
+        import board.reporter as rp
+        import json
+        rp._post_outcome = lambda body: "down"
+        with open(rp._p("autopilot-board-queue.jsonl"), "w") as h:
+            h.write(json.dumps({"event_id": "a", "run_id": "r"}) + "\n")
+            h.write(json.dumps({"event_id": "b", "run_id": "r"}) + "\n")
+        rp.flush_queue()
+        self.assertGreater(os.path.getsize(rp._p("autopilot-board-queue.jsonl")), 0)
+        self.assertTrue(os.path.exists(rp._p("autopilot-board-down")))
+
+    def test_post_outcome_classifies_http_codes(self):
+        import board.reporter as rp
+        import urllib.error
+
+        def mk(exc):
+            def fake(req, timeout=None):
+                raise exc
+            return fake
+        orig = rp.urllib.request.urlopen
+        try:
+            rp.urllib.request.urlopen = mk(
+                urllib.error.HTTPError("u", 400, "bad", {}, None))
+            self.assertEqual(rp._post_outcome({"x": 1}), "reject")
+            rp.urllib.request.urlopen = mk(
+                urllib.error.HTTPError("u", 500, "err", {}, None))
+            self.assertEqual(rp._post_outcome({"x": 1}), "down")
+            rp.urllib.request.urlopen = mk(
+                urllib.error.HTTPError("u", 429, "rl", {}, None))
+            self.assertEqual(rp._post_outcome({"x": 1}), "down")
+            rp.urllib.request.urlopen = mk(urllib.error.URLError("refused"))
+            self.assertEqual(rp._post_outcome({"x": 1}), "down")
+        finally:
+            rp.urllib.request.urlopen = orig
+
+    def test_normalize_repo_passthrough_valid(self):
+        import board.reporter as rp
+        self.assertEqual(rp._normalize_repo("owner/name"), "owner/name")
+
+    def test_normalize_repo_bare_resolves_via_gh(self):
+        import board.reporter as rp
+        import subprocess
+
+        class R:
+            returncode = 0
+            stdout = "owner/name\n"
+        orig = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: R()
+            self.assertEqual(rp._normalize_repo("name"), "owner/name")
+        finally:
+            subprocess.run = orig
+
+    def test_normalize_repo_bare_unresolvable_returns_original(self):
+        import board.reporter as rp
+        import subprocess
+
+        class R:
+            returncode = 1
+            stdout = ""
+        orig = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: R()
+            self.assertEqual(rp._normalize_repo("name"), "name")
+        finally:
+            subprocess.run = orig
+
+    def test_start_run_uses_normalized_repo_in_run_id(self):
+        import board.reporter as rp
+        rp.BOARD_URL = "http://127.0.0.1:1/"          # unreachable → just queues
+        rp._normalize_repo = lambda r: "owner/name"   # force normalization
+        rid = rp.start_run("bare", 5, "t")
+        self.assertTrue(rid.startswith("owner_name-5-"), rid)
 
     # ------------------------------------------------------------------ C1
     def test_report_nonexistent_state_dir_does_not_raise(self):

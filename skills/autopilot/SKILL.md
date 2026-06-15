@@ -76,6 +76,7 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
 - **Report the planned queue** so the board's "Up next" is current — after computing the ordered backlog
   (open issues minus `autopilot-skip`), at loop START and after each issue completes:
   `python3 ~/devel/airuleset/airuleset.py report --queue --repo <repo> --items '[[<issue>,"<title>"],…]'`.
+  `<repo>` MUST be the canonical **`owner/name`** (`gh repo view --json nameWithOwner -q .nameWithOwner`) — a bare name is rejected by the board.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
