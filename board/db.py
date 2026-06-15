@@ -245,3 +245,60 @@ class Board:
                 "SELECT * FROM runs WHERE run_id=?", (rid,)).fetchone()
         finally:
             c.close()
+
+    # ----- gate rows ---------------------------------------------------------
+
+    def seed_gates(self, rid, is_bug_fix, has_deploy):
+        """Seed the applicable required checks at 'pending'. INSERT OR IGNORE so
+        re-seeding never clobbers an already-recorded gate state. The source is
+        board-fixed per board.gate.source_of (verified vs claimed)."""
+        from board.gate import applicable_gates, source_of
+        now = time.time()
+        c = self.conn()
+        try:
+            for g in applicable_gates(is_bug_fix, has_deploy):
+                c.execute(
+                    """INSERT OR IGNORE INTO gate(
+                           run_id, check_name, state, source, seq, recv_ts)
+                       VALUES(?,?, 'pending', ?, 0, ?)""",
+                    (rid, g, source_of(g), now))
+            c.commit()
+        finally:
+            c.close()
+
+    def set_gate(self, rid, check, state, seq, claimed):
+        """Record a gate check result. seq-guarded: a lower-seq report is
+        dropped. The `source` is board-decided (source_of(check)) — the worker's
+        `claimed` intent is intentionally IGNORED so a worker can never mark a
+        board-verified check as merely 'claimed' or vice-versa."""
+        from board.gate import source_of
+        src = source_of(check)  # board decides; worker's `claimed` is ignored
+        now = time.time()
+        c = self.conn()
+        try:
+            cur = c.execute(
+                "SELECT seq FROM gate WHERE run_id=? AND check_name=?",
+                (rid, check)).fetchone()
+            if cur is not None and seq < (cur["seq"] or 0):
+                return  # stale — older than what we already have
+            c.execute(
+                """INSERT INTO gate(
+                       run_id, check_name, state, source, seq, recv_ts)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(run_id, check_name) DO UPDATE SET
+                     state=excluded.state, source=excluded.source,
+                     seq=MAX(gate.seq, excluded.seq), recv_ts=excluded.recv_ts""",
+                (rid, check, state, src, seq, now))
+            c.commit()
+        finally:
+            c.close()
+
+    def gate_map(self, rid):
+        c = self.conn()
+        try:
+            rows = c.execute(
+                "SELECT check_name, state FROM gate WHERE run_id=?",
+                (rid,)).fetchall()
+            return {r["check_name"]: r["state"] for r in rows}
+        finally:
+            c.close()

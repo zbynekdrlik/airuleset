@@ -191,3 +191,33 @@ class TestConcurrentWrites(unittest.TestCase):
         [t.join() for t in ts]
         n = b.conn().execute("SELECT count(*) FROM events").fetchone()[0]
         self.assertEqual(n, 100)
+
+
+class TestGateRows(unittest.TestCase):
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_seed_pending(self):
+        b = self._b()
+        b.seed_gates("r1", is_bug_fix=False, has_deploy=False)
+        g = b.gate_map("r1")
+        self.assertEqual(g["review"], "pending")
+        self.assertNotIn("regression", g)        # not applicable
+
+    def test_set_gate_source_is_board_fixed(self):
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        # worker tries to claim review verified — board forces 'claimed'
+        b.set_gate("r1", "review", "ok", seq=3, claimed=True)
+        row = b.conn().execute(
+            "SELECT source,state FROM gate WHERE run_id='r1' AND check_name='review'").fetchone()
+        self.assertEqual(row["source"], "claimed")
+        self.assertEqual(row["state"], "ok")
+
+    def test_gate_seq_guard(self):
+        b = self._b()
+        b.seed_gates("r1", False, False)
+        b.set_gate("r1", "ci", "ok", seq=5, claimed=False)
+        b.set_gate("r1", "ci", "fail", seq=2, claimed=False)   # stale
+        self.assertEqual(b.gate_map("r1")["ci"], "ok")
