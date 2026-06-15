@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ class TestConstants(unittest.TestCase):
                            EVENT_CAP_PER_RUN, STALE_ACTIVE_S, STALE_WAIT_S,
                            GH_POLL_FLOOR_S, TERMINAL_PHASES)
         self.assertEqual(PORT, 8787)
-        self.assertEqual(BOARD_HOST_IP, "10.77.9.21")
+        self.assertEqual(BOARD_HOST_IP, os.getenv("BOARD_HOST", "10.77.9.21"))
         self.assertEqual(REPORT_TIMEOUT, 2)
         self.assertIn("done", TERMINAL_PHASES)
         self.assertIn("obsolete-closed", TERMINAL_PHASES)
@@ -41,7 +42,8 @@ class TestAlarm(unittest.TestCase):
         base = dict(merged=False, merge_mode="auto", is_bug_fix=False,
                     has_deploy=False, phase="implementing",
                     last_report_age_s=10, gate={})
-        base.update(kw); return base
+        base.update(kw)
+        return base
 
     def test_merged_all_ok_no_alarm(self):
         from board.gate import compute_alarms
@@ -82,4 +84,13 @@ class TestAlarm(unittest.TestCase):
     def test_stale_abandoned_midgate(self):
         from board.gate import compute_alarms
         r = self._run(merged=False, phase="review", last_report_age_s=9999)
+        self.assertIn("STALE_ABANDONED", compute_alarms(r))
+
+    def test_wait_phase_uses_longer_stale_threshold(self):
+        from board.gate import compute_alarms
+        # CI phase: 9 min elapsed — below 30-min WAIT threshold, no alarm
+        r = self._run(merged=False, phase="CI", last_report_age_s=9 * 60)
+        self.assertNotIn("STALE_ABANDONED", compute_alarms(r))
+        # CI phase: 31 min elapsed — above 30-min WAIT threshold, alarm fires
+        r = self._run(merged=False, phase="CI", last_report_age_s=31 * 60)
         self.assertIn("STALE_ABANDONED", compute_alarms(r))

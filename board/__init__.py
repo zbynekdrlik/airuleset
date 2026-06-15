@@ -17,6 +17,12 @@ AUTO_REFRESH_S = 10         # browser meta refresh
 
 TERMINAL_PHASES = frozenset({"done", "stopped", "obsolete-closed"})
 WAIT_PHASES = frozenset({"CI", "deploy"})
+PAUSE_PHASES = frozenset({"asking-user"})  # non-linear pause — EXEMPT from rank-monotonicity (see db._apply)
+
+# ALL_PHASES / PHASE_RANK define display order and linear forward ranking.
+# asking-user (in PAUSE_PHASES) and terminal phases are NOT part of the strict
+# forward sequence — db._apply must skip the rank-monotonicity check when either
+# the current or incoming phase is in PAUSE_PHASES (or TERMINAL_PHASES).
 ALL_PHASES = ("validating", "version-bump", "implementing", "RED", "GREEN",
               "CI", "review", "merge", "deploy", "done", "asking-user",
               "stopped", "obsolete-closed")

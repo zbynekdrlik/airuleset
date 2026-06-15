@@ -1,4 +1,5 @@
 """Pure gate/alarm logic â€” no I/O, fully unit-testable."""
+from board import TERMINAL_PHASES, STALE_ACTIVE_S, STALE_WAIT_S, WAIT_PHASES
 
 # source is a property of the CHECK, never of the report payload.
 _VERIFIED = {"ci", "mergeable", "merged", "issue_state"}
@@ -35,7 +36,6 @@ GRACE_S = 5 * 60  # while a gate is pending and a report arrived this recently â
 def compute_alarms(r):
     """r: dict(merged, merge_mode, is_bug_fix, has_deploy, phase, last_report_age_s, gate{check:state}).
     Returns a list of alarm codes. Claims can NEVER silence MERGED_INCOMPLETE_GATE."""
-    from board import TERMINAL_PHASES, STALE_ACTIVE_S, STALE_WAIT_S, WAIT_PHASES
     alarms = []
     req = applicable_gates(r["is_bug_fix"], r["has_deploy"])
     gate = r.get("gate", {})
