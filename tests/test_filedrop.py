@@ -292,7 +292,15 @@ class TestAirulesetWiring(unittest.TestCase):
         import airuleset
         tmpl = airuleset.FILEDROP_SERVICE_TEMPLATE.read_text()
         self.assertIn("{{REPO_DIR}}", tmpl)
+        self.assertIn("{{HOST_IP}}", tmpl)
         self.assertIn("filedrop --serve", tmpl)
+
+    def test_render_unit_substitutes_placeholders(self):
+        import airuleset
+        unit = airuleset._render_filedrop_unit()
+        self.assertNotIn("{{", unit)            # all placeholders substituted
+        self.assertIn("FILEDROP_HOST=", unit)
+        self.assertIn("airuleset.py filedrop --serve", unit)
 
 
 if __name__ == "__main__":

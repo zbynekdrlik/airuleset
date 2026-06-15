@@ -20,6 +20,11 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# The LAN IP to bind is baked in at install time (computed UNSANDBOXED, where
+# `hostname -I` works). The sandbox below restricts address families to AF_INET/
+# AF_INET6, which blocks the AF_NETLINK socket `hostname -I` needs — so the server
+# must NOT discover its own IP at runtime. {{HOST_IP}} is substituted per machine.
+Environment=FILEDROP_HOST={{HOST_IP}}
 ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py filedrop --serve
 Restart=on-failure
 RestartSec=5

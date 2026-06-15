@@ -331,6 +331,8 @@ def _validate_filedrop():
         tmpl = FILEDROP_SERVICE_TEMPLATE.read_text()
         if "{{REPO_DIR}}" not in tmpl:
             errors.append("File-drop service template missing {{REPO_DIR}} placeholder")
+        if "{{HOST_IP}}" not in tmpl:
+            errors.append("File-drop service template missing {{HOST_IP}} placeholder")
         if "filedrop --serve" not in tmpl:
             errors.append("File-drop service template ExecStart missing `filedrop --serve`")
 
@@ -1071,8 +1073,15 @@ def maybe_setup_board():
 
 
 def _render_filedrop_unit():
-    """Read the file-drop unit template and substitute the repo-path placeholder."""
-    return FILEDROP_SERVICE_TEMPLATE.read_text().replace("{{REPO_DIR}}", str(REPO_DIR))
+    """Read the file-drop unit template and substitute the per-machine placeholders.
+
+    {{REPO_DIR}} -> this checkout's path (ExecStart). {{HOST_IP}} -> the LAN IP
+    this machine should bind, computed HERE (unsandboxed, so `hostname -I` works)
+    and baked into Environment=FILEDROP_HOST so the sandboxed server never needs
+    AF_NETLINK to discover its own address."""
+    return (FILEDROP_SERVICE_TEMPLATE.read_text()
+            .replace("{{REPO_DIR}}", str(REPO_DIR))
+            .replace("{{HOST_IP}}", filedrop_host_ip()))
 
 
 def _filedrop_is_live(url, timeout=2):
@@ -1156,6 +1165,12 @@ def setup_filedrop_service():
         print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
               f"  Run manually:\n{manual}", file=sys.stderr)
         return False
+
+    # 4b. restart to apply the freshly-written unit + latest filedrop code.
+    # `enable --now` is a no-op for an already-running service, so a re-install
+    # with a changed unit (e.g. a new bind IP) or new code needs an explicit
+    # restart. Stateless file server — the brief blip is harmless.
+    _run_systemctl(["restart", "filedrop.service"])
 
     # 5. liveness check on the LAN URL (server binds the LAN IP, not loopback).
     url = filedrop_url()
