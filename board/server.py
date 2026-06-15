@@ -137,6 +137,11 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # Anti slow-loris: BaseHTTPRequestHandler applies this as the request
+        # socket's timeout, so a client that opens a connection and dribbles
+        # bytes (or never sends the body) is dropped after _SOCKET_TIMEOUT_S
+        # rather than tying up a worker thread forever.
+        timeout = _SOCKET_TIMEOUT_S
 
         # ---- helpers -----------------------------------------------------
         def log_message(self, fmt, *args):
@@ -337,9 +342,8 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
             self._text(200, "ok")
 
     httpd = ThreadingHTTPServer((host, port), Handler)
-    httpd.timeout = _SOCKET_TIMEOUT_S
-    # Anti slow-loris: bound how long a single request's socket can block.
-    httpd.socket.settimeout(None)  # accept() blocks; per-conn timeout below
+    # daemon_threads so per-request threads don't block shutdown/server_close.
+    httpd.daemon_threads = True
     return httpd
 
 
