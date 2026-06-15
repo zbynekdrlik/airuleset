@@ -58,6 +58,28 @@ BOARD_TOKEN_PATH = CLAUDE_DIR / "autopilot-board.token"
 BOARD_SERVICE_TEMPLATE = REPO_DIR / "settings" / "autopilot-board.service.template"
 BOARD_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "autopilot-board.service"
 
+# ---------------------------------------------------------------------------
+# File-Drop integration — serve user files as clickable LAN URLs
+# ---------------------------------------------------------------------------
+# Unlike the board (one central daemon on dev1), the file-drop service runs on
+# EVERY machine — each serves the files produced on THAT machine, bound to THAT
+# machine's own LAN IP (discovered at runtime by filedrop.host_ip()).
+try:
+    from filedrop import (PORT as FILEDROP_PORT, host_ip as filedrop_host_ip,
+                          filedrop_url, FILEDROP_DIR)
+except Exception:  # pragma: no cover — filedrop package should always import
+    FILEDROP_PORT = int(os.environ.get("FILEDROP_PORT", "8788"))
+    FILEDROP_DIR = CLAUDE_DIR / "filedrop"
+
+    def filedrop_host_ip():
+        return os.environ.get("FILEDROP_HOST", "127.0.0.1")
+
+    def filedrop_url():
+        return f"http://{filedrop_host_ip()}:{FILEDROP_PORT}/"
+
+FILEDROP_SERVICE_TEMPLATE = REPO_DIR / "settings" / "filedrop.service.template"
+FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop.service"
+
 
 def _local_ips():
     """Collect this machine's IPs from every reliable source.
@@ -286,6 +308,35 @@ def _validate_board():
     return errors
 
 
+def _validate_filedrop():
+    """Validate the File-Drop service: each filedrop/*.py imports cleanly and the
+    systemd service template exists with the repo-path placeholder + ExecStart."""
+    import importlib
+
+    errors = []
+    fd_dir = REPO_DIR / "filedrop"
+    if not fd_dir.is_dir():
+        errors.append(f"File-drop package missing: {fd_dir}")
+        return errors
+
+    for mod in ("filedrop", "filedrop.share", "filedrop.server"):
+        try:
+            importlib.import_module(mod)
+        except Exception as e:
+            errors.append(f"File-drop module failed to import: {mod} ({e})")
+
+    if not FILEDROP_SERVICE_TEMPLATE.exists():
+        errors.append(f"Missing file-drop service template: {FILEDROP_SERVICE_TEMPLATE}")
+    else:
+        tmpl = FILEDROP_SERVICE_TEMPLATE.read_text()
+        if "{{REPO_DIR}}" not in tmpl:
+            errors.append("File-drop service template missing {{REPO_DIR}} placeholder")
+        if "filedrop --serve" not in tmpl:
+            errors.append("File-drop service template ExecStart missing `filedrop --serve`")
+
+    return errors
+
+
 def cmd_validate(args):
     """Check all module/rule files exist and all @import paths resolve."""
     errors = []
@@ -350,6 +401,9 @@ def cmd_validate(args):
     # Validate the Autopilot Board: every board/*.py loads cleanly + service
     # template exists with the substitution placeholder.
     errors.extend(_validate_board())
+
+    # Validate the File-Drop service: filedrop/*.py loads + service template ok.
+    errors.extend(_validate_filedrop())
 
     if errors:
         print("VALIDATION FAILED:")
@@ -517,6 +571,12 @@ def cmd_install(args):
         # The board service is best-effort: a failure here must never abort the
         # core install (CLAUDE.md/skills/hooks already landed). Print and move on.
         print(f"  board setup error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 5. File-Drop service: installed on EVERY machine (serves local files) ---
+    try:
+        maybe_setup_filedrop()
+    except Exception as e:
+        print(f"  filedrop setup error (non-fatal): {e}", file=sys.stderr)
 
     print()
     print("Install complete. Restart Claude Code for changes to take effect.")
@@ -1006,6 +1066,175 @@ def maybe_setup_board():
 
 
 # ---------------------------------------------------------------------------
+# File-Drop systemd service + share/serve subcommands
+# ---------------------------------------------------------------------------
+
+
+def _render_filedrop_unit():
+    """Read the file-drop unit template and substitute the repo-path placeholder."""
+    return FILEDROP_SERVICE_TEMPLATE.read_text().replace("{{REPO_DIR}}", str(REPO_DIR))
+
+
+def _filedrop_is_live(url, timeout=2):
+    """True iff GET <url> returns an HTTP response (root returns 404 by design,
+    which still proves the server is up). Any completed request = live."""
+    import urllib.error
+    import urllib.request
+    try:
+        urllib.request.urlopen(url, timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True          # 404 at root is expected — the server answered
+    except Exception:
+        return False
+
+
+def _wait_filedrop_live(url, attempts=5, delay=1.0):
+    import time
+    for _ in range(attempts):
+        if _filedrop_is_live(url):
+            return True
+        time.sleep(delay)
+    return False
+
+
+def _restart_filedrop_service():
+    rc, _o, err = _run_systemctl(["restart", "filedrop.service"])
+    if rc != 0:
+        print(f"  filedrop service restart failed (rc={rc}): {err.strip()}",
+              file=sys.stderr)
+    return rc == 0
+
+
+def setup_filedrop_service():
+    """Install + start the file-drop systemd --user service on THIS machine.
+
+    Runs on every host (no board-style gating). Creates the served dir first
+    (the read-only server never writes it), writes the unit, enables linger, and
+    enable --now. On any failure it prints the manual command rather than claiming
+    success."""
+    import subprocess
+    print("  Installing file-drop systemd --user service")
+
+    # 1. served dir (0700) — the read-only server depends on it existing.
+    try:
+        FILEDROP_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(FILEDROP_DIR), 0o700)
+    except OSError as e:
+        print(f"  could not create {FILEDROP_DIR} ({e})", file=sys.stderr)
+
+    # 2. write the unit
+    if not FILEDROP_SERVICE_TEMPLATE.exists():
+        print(f"  ERROR: file-drop service template missing: "
+              f"{FILEDROP_SERVICE_TEMPLATE}", file=sys.stderr)
+        return False
+    FILEDROP_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
+    FILEDROP_SERVICE_DEST.write_text(_render_filedrop_unit())
+    print(f"  Wrote unit: {FILEDROP_SERVICE_DEST}")
+
+    manual = (
+        "    loginctl enable-linger $(whoami)\n"
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
+        "filedrop.service")
+
+    # 3. linger (best-effort)
+    try:
+        subprocess.run(["loginctl", "enable-linger", _whoami()],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print(f"  loginctl enable-linger skipped ({e})", file=sys.stderr)
+
+    # 4. daemon-reload + enable --now
+    rc, _o, err = _run_systemctl(["daemon-reload"])
+    if rc != 0:
+        print(f"  systemctl daemon-reload FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+    rc, _o, err = _run_systemctl(["enable", "--now", "filedrop.service"])
+    if rc != 0:
+        print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+
+    # 5. liveness check on the LAN URL (server binds the LAN IP, not loopback).
+    url = filedrop_url()
+    if _wait_filedrop_live(url):
+        print(f"  File-drop is live. LAN base URL: {url}")
+        return True
+    print(f"  File-drop service started but did NOT answer on {url}. Check "
+          f"`systemctl --user status filedrop.service`.", file=sys.stderr)
+    return False
+
+
+def maybe_setup_filedrop():
+    """Install the file-drop service on this machine (every host runs one)."""
+    setup_filedrop_service()
+
+
+def _filedrop_serve():
+    """Run the file-drop HTTP server in the FOREGROUND (systemd ExecStart target)."""
+    from filedrop.server import run_server
+    run_server(host=filedrop_host_ip(), port=FILEDROP_PORT)
+
+
+def cmd_share(args):
+    """Copy a file into the file-drop server and print its clickable LAN URL.
+
+    Prints ONLY the URL on stdout (easy to copy); diagnostics go to stderr. Per
+    no-localhost-urls.md, the URL is live-checked before printing — if the server
+    is down it tries one restart, and refuses to print a dead URL."""
+    from filedrop.share import ShareError, share
+    try:
+        url, dest = share(args.path)
+    except ShareError as e:
+        print(f"share: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"share: unexpected error ({e})", file=sys.stderr)
+        sys.exit(1)
+
+    if _filedrop_is_live(url):
+        print(url)
+        return
+    # Down — try a single restart, then re-check.
+    print("share: file-drop not responding — attempting service restart...",
+          file=sys.stderr)
+    _restart_filedrop_service()
+    if _wait_filedrop_live(url):
+        print(url)
+        return
+    print(f"share: file copied to {dest} but the file-drop server is DOWN at "
+          f"{filedrop_url()} — start it with "
+          f"`systemctl --user start filedrop.service`.", file=sys.stderr)
+    sys.exit(1)
+
+
+def _filedrop_status():
+    url = filedrop_url()
+    live = _filedrop_is_live(url)
+    print(f"file-drop: {url}")
+    print(f"  this machine: serves {FILEDROP_DIR}")
+    print(f"  liveness:     {'UP' if live else 'DOWN / unreachable'}")
+
+
+def cmd_filedrop(args):
+    """File-drop control: --serve (daemon), --url (live-check + print), status."""
+    if getattr(args, "serve", False):
+        _filedrop_serve()
+        return
+    if getattr(args, "url", False):
+        url = filedrop_url()
+        if _filedrop_is_live(url):
+            print(url)
+        else:
+            print(f"file-drop: DOWN — {url} unreachable", file=sys.stderr)
+            sys.exit(1)
+        return
+    _filedrop_status()
+
+
+# ---------------------------------------------------------------------------
 # Remote deployment
 # ---------------------------------------------------------------------------
 
@@ -1137,6 +1366,20 @@ def main():
     p_board.add_argument("--serve", action="store_true",
                          help="Run the board HTTP server in the foreground (systemd ExecStart)")
 
+    # --- File-Drop: share (give the user a clickable LAN URL) + filedrop (control)
+    p_share = sub.add_parser(
+        "share", help="Copy a file into the file-drop server and print its LAN URL")
+    p_share.add_argument("path", help="Path to the file to serve to the user")
+
+    p_filedrop = sub.add_parser("filedrop", help="File-drop service control")
+    p_filedrop.add_argument("filedrop_action", nargs="?", default=None,
+                            choices=["status"],
+                            help="status (default when no flag)")
+    p_filedrop.add_argument("--url", action="store_true",
+                            help="Live-check the file-drop server and print its LAN base URL")
+    p_filedrop.add_argument("--serve", action="store_true",
+                            help="Run the file-drop HTTP server in the foreground (systemd ExecStart)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1155,6 +1398,8 @@ SUBCOMMANDS = {
     "push": cmd_push,
     "report": cmd_report,
     "board": cmd_board,
+    "share": cmd_share,
+    "filedrop": cmd_filedrop,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

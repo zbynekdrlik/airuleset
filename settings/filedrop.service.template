@@ -1,0 +1,41 @@
+# airuleset File-Drop — systemd --user unit (managed by airuleset).
+#
+# Installed on EVERY machine by `airuleset.py install` via setup_filedrop_service()
+# (unlike the autopilot board, which is dev1-only). Each machine serves the files
+# produced on THAT machine, bound to THAT machine's own LAN IP. The {{REPO_DIR}}
+# placeholder is substituted with the absolute path of THIS airuleset checkout at
+# install time, so ExecStart always points at the right airuleset.py.
+#
+# Do not edit the installed copy in ~/.config/systemd/user/ by hand — edit this
+# template and re-run `python3 airuleset.py install`.
+
+[Unit]
+Description=airuleset File-Drop — serve user files as clickable LAN URLs
+Documentation=https://github.com/zbynekdrlik/airuleset
+After=network-online.target
+Wants=network-online.target
+# Restart loop guard: more than StartLimitBurst restarts in the interval = stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py filedrop --serve
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (defense in depth; LAN-internal, read-only file server) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Read-only server: it only READS ~/.claude/filedrop to serve files. The `share`
+# client (runs unsandboxed as the user) is what writes/prunes there, so the
+# service needs NO write paths — home is readable but not writable.
+ProtectHome=read-only
+PrivateTmp=yes
+# TCP sockets only — plain static HTTP, no subprocesses, no unix sockets.
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=default.target
