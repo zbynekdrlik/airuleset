@@ -12,8 +12,15 @@ import re
 import time
 import uuid
 import json
+import fcntl
+import urllib.request
+import urllib.error
+
+from board import (REPORT_TIMEOUT, CIRCUIT_BREAKER_S, FLUSH_CAP, QUEUE_TTL_S,
+                   board_url)
 
 STATE_DIR = os.path.expanduser("~/.claude")
+BOARD_URL = board_url()
 
 
 def _p(name):
@@ -72,5 +79,145 @@ def next_seq(rid):
     return d["seq"]
 
 
-def report(*a, **k):  # temporary stub — replaced by the real body in Task 8
-    pass
+# --- secret scrub --------------------------------------------------------
+# Matched on the value, not the key — anything that smells like a credential is
+# redacted before it can land on the board (where it would render in HTML).
+_SECRET_RE = re.compile(
+    r"(ghp_[A-Za-z0-9]+"
+    r"|github_pat_[A-Za-z0-9_]+"
+    r"|AKIA[0-9A-Z]+"
+    r"|xox[a-z]-[A-Za-z0-9-]+"
+    r"|-----BEGIN[^\n]*"
+    r"|Bearer\s+[A-Za-z0-9._-]+)")
+
+
+def scrub(s):
+    """Redact obvious secrets, collapse to a single line, cap length. Applied to
+    every free-text field (goal/approach/result/note/title) before it leaves the
+    worker."""
+    if not s:
+        return s
+    return _SECRET_RE.sub("[redacted]", str(s))[:2000].replace("\n", " ").strip()
+
+
+# --- network + circuit breaker -------------------------------------------
+def _token():
+    try:
+        with open(_p("autopilot-board.token")) as h:
+            return h.read().strip()
+    except Exception:
+        return ""
+
+
+def _down_recently():
+    """True while the circuit breaker is open — a recent failure stamp means
+    skip the network for CIRCUIT_BREAKER_S and only queue."""
+    try:
+        ts = float(open(_p("autopilot-board-down")).read().strip())
+        return (time.time() - ts) < CIRCUIT_BREAKER_S
+    except Exception:
+        return False
+
+
+def _mark_down():
+    try:
+        with open(_p("autopilot-board-down"), "w") as h:
+            h.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _clear_down():
+    try:
+        os.remove(_p("autopilot-board-down"))
+    except OSError:
+        pass
+
+
+def _post_one(body):
+    """POST a single event to the board. Returns True on HTTP 2xx, False on any
+    error (timeout, connection refused, non-2xx). Never raises."""
+    req = urllib.request.Request(
+        BOARD_URL.rstrip("/") + "/report",
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json",
+                 "X-Board-Token": _token()})
+    try:
+        with urllib.request.urlopen(req, timeout=REPORT_TIMEOUT) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
+# --- emit + queue --------------------------------------------------------
+def report(rid, phase=None, _start=False, reviews=None, **fields):
+    """Build one event for `rid`, durably queue it, then best-effort flush.
+    Fire-and-forget: never blocks past REPORT_TIMEOUT, never raises."""
+    for k in ("goal", "approach", "result", "note", "title"):
+        if k in fields:
+            fields[k] = scrub(fields[k])
+    ev = {"run_id": rid, "event_id": uuid.uuid4().hex, "seq": next_seq(rid),
+          "phase": phase, "event_ts": time.time(),
+          "machine": os.uname().nodename}
+    ev.update({k: v for k, v in fields.items() if v is not None})
+    if reviews:
+        ev["reviews"] = reviews     # [(check, state), ...]
+    _enqueue_and_flush(ev)
+
+
+def _enqueue_and_flush(ev):
+    # append first (durability), then try to flush under lock
+    with open(_p("autopilot-board-queue.jsonl"), "a") as h:
+        h.write(json.dumps(ev) + "\n")
+    if _down_recently():
+        return  # circuit breaker open — skip the network, leave it queued
+    flush_queue()
+
+
+def flush_queue():
+    """Drain the offline queue to the board under an exclusive non-blocking lock.
+
+    - Lock held by another reporter → return immediately (we already appended).
+    - Remove a line only on HTTP 2xx; on the first failure stop, keep the
+      remainder, open the circuit breaker, and return (caller exits 0).
+    - At most FLUSH_CAP sends per invocation; events older than QUEUE_TTL_S are
+      dropped; a poison (bad-JSON) line is skipped and dropped, never crashes.
+    """
+    qf = _p("autopilot-board-queue.jsonl")
+    if not os.path.exists(qf):
+        return
+    try:
+        h = open(qf, "r+")
+        fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        return  # another reporter owns the queue — skip the flush
+    try:
+        lines = h.readlines()
+        remaining = []
+        sent = 0
+        now = time.time()
+        for i, ln in enumerate(lines):
+            if sent >= FLUSH_CAP:
+                remaining.append(ln)
+                continue
+            try:
+                body = json.loads(ln)
+            except Exception:
+                continue  # poison line: skip + drop
+            if now - body.get("event_ts", now) > QUEUE_TTL_S:
+                continue  # TTL drop
+            if _post_one(body):
+                sent += 1
+                _clear_down()
+            else:
+                _mark_down()
+                remaining.append(ln)
+                remaining.extend(lines[i + 1:])
+                break
+        h.seek(0)
+        h.truncate()
+        h.writelines(remaining)
+    finally:
+        fcntl.flock(h, fcntl.LOCK_UN)
+        h.close()

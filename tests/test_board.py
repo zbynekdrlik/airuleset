@@ -283,3 +283,37 @@ class TestRunId(unittest.TestCase):
         s1 = rp.next_seq(rid)
         s2 = rp.next_seq(rid)
         self.assertEqual(s2, s1 + 1)
+
+
+class TestReporter(unittest.TestCase):
+    def setUp(self):
+        import board.reporter as rp
+        self.home = tempfile.mkdtemp()
+        rp.STATE_DIR = self.home
+
+    def test_secret_scrub(self):
+        from board.reporter import scrub
+        self.assertNotIn("ghp_", scrub("token ghp_ABCDEF123456 here"))
+        self.assertIn("[redacted]", scrub("Bearer abc.def.ghi"))
+
+    def test_queue_on_unreachable(self):
+        import board.reporter as rp
+        rp.BOARD_URL = "http://127.0.0.1:1/"   # nothing listening
+        rid = rp.start_run("o/x", 3, "t")      # _start queues
+        rp.report(rid, phase="CI")
+        self.assertTrue(os.path.exists(rp._p("autopilot-board-queue.jsonl")))
+
+    def test_flush_idempotent_event_ids(self):
+        import board.reporter as rp
+        import json
+        # two queued lines with distinct event_id; a fake sender that records
+        sent = []
+        rp._post_one = lambda body: sent.append(body) or True
+        with open(rp._p("autopilot-board-queue.jsonl"), "w") as h:
+            h.write(json.dumps({"event_id": "a", "run_id": "r"}) + "\n")
+            h.write(json.dumps({"event_id": "b", "run_id": "r"}) + "\n")
+        rp.flush_queue()
+        # _post_one receives the parsed event dict (it serialises internally),
+        # so read event_id off the dict directly.
+        self.assertEqual({x["event_id"] for x in sent}, {"a", "b"})
+        self.assertEqual(os.path.getsize(rp._p("autopilot-board-queue.jsonl")), 0)
