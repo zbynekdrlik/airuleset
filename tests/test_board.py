@@ -94,3 +94,28 @@ class TestAlarm(unittest.TestCase):
         # CI phase: 31 min elapsed — above 30-min WAIT threshold, alarm fires
         r = self._run(merged=False, phase="CI", last_report_age_s=31 * 60)
         self.assertIn("STALE_ABANDONED", compute_alarms(r))
+
+
+import tempfile
+
+
+class TestSchema(unittest.TestCase):
+    def _db(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "b.sqlite")
+        from board.db import Board
+        return Board(p)
+
+    def test_cold_init_creates_tables(self):
+        b = self._db()
+        tabs = {r[0] for r in b.conn().execute(
+            "select name from sqlite_master where type='table'")}
+        for t in ("runs", "events", "gate", "gh_state", "schema_version"):
+            self.assertIn(t, tabs)
+
+    def test_migration_idempotent(self):
+        b = self._db()
+        v1 = b.schema_version()
+        b.migrate()  # re-run
+        self.assertEqual(b.schema_version(), v1)
+        self.assertGreaterEqual(v1, 1)
