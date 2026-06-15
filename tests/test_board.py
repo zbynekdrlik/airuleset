@@ -202,7 +202,7 @@ class TestWriterSurvivesBadEvent(unittest.TestCase):
         # Inject a malformed event (missing 'run_id' key) directly onto the queue
         # so _apply raises KeyError — simulating a production write failure.
         bad_done = threading.Event()
-        b._wq.put((b._apply, {}, bad_done))
+        b._wq.put((b._apply, {}, bad_done, None))
         bad_done.wait(timeout=2)
 
         # Writer must still be alive and able to process a subsequent good event.
@@ -216,6 +216,33 @@ class TestWriterSurvivesBadEvent(unittest.TestCase):
 
         b._wq.put(None)  # stop writer
         t.join(timeout=2)
+
+
+class TestSubmitOutcome(unittest.TestCase):
+    """Fix 1: submit() returns True on successful commit, False on failure/timeout."""
+
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_submit_returns_true_on_good_event(self):
+        b = self._b()
+        b.start_writer()
+        ev = {"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+              "phase": "implementing", "event_id": "e1", "event_ts": 1.0}
+        result = b.submit(ev, wait=True, timeout=3)
+        self.assertTrue(result, "submit must return True when the write committed")
+        self.assertIsNotNone(b.get_run("r1"))
+
+    def test_submit_returns_false_on_failing_write(self):
+        """A malformed event (missing run_id) makes _apply raise; submit must
+        return False — not True — so the server can detect the failure."""
+        b = self._b()
+        b.start_writer()
+        # {} has no 'run_id', causing _apply to raise KeyError.
+        bad_ev = {}
+        result = b.submit(bad_ev, wait=True, timeout=3)
+        self.assertFalse(result, "submit must return False when _apply raised")
 
 
 class TestConcurrentWrites(unittest.TestCase):
@@ -1008,6 +1035,23 @@ class TestServer(unittest.TestCase):
 
     def test_unknown_route_404(self):
         self.assertEqual(self._get("/nope")[0], 404)
+
+    # ---- Fix 1: POST /report returns 500 when the write fails ----
+    def test_post_returns_500_on_write_failure(self):
+        """A write failure (submit returns False) must produce a 500 response,
+        not a false 200. We monkeypatch board.submit to return False."""
+        import json
+        orig_submit = self.b.submit
+        self.b.submit = lambda *a, **kw: False
+        try:
+            status, body = self._post({"run_id": "r_fail", "repo": "o/x",
+                                       "issue": 1, "seq": 1, "phase": "CI",
+                                       "event_id": "ef1", "event_ts": 1.0})
+        finally:
+            self.b.submit = orig_submit
+        self.assertEqual(status, 500)
+        data = json.loads(body)
+        self.assertIn("error", data)
 
     # ---- rate limit ----
     def test_rate_limit_on_report(self):

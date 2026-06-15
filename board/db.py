@@ -108,10 +108,11 @@ class Board:
             c.close()
 
     # ----- single-writer thread ---------------------------------------------
-    # The server (Task 11/12) routes HTTP-thread + gh-poller writes through this
-    # one queue so only one connection ever writes — eliminating writer
-    # contention. Tests call apply_event() directly (synchronous). BOTH paths
-    # converge on _apply, so the correctness logic is identical.
+    # Writes serialize via WAL + busy_timeout=5000; the writer thread owns only
+    # the runs/events upsert, while set_gate/set_gh write on their own
+    # connections — all safe under WAL. Tests call apply_event() directly
+    # (synchronous). BOTH paths converge on _apply, so the correctness logic
+    # is identical.
 
     def start_writer(self):
         t = threading.Thread(target=self._writer_loop, daemon=True)
@@ -125,10 +126,12 @@ class Board:
                 job = self._wq.get()
                 if job is None:
                     break
-                fn, ev, done = job
+                fn, ev, done, outcome = job
+                ok = False
                 try:
                     fn(c, ev)
                     c.commit()
+                    ok = True
                 except Exception:
                     _log.exception(
                         "board writer failed to apply event %s",
@@ -136,18 +139,30 @@ class Board:
                     )
                     c.rollback()
                 finally:
+                    if outcome is not None:
+                        outcome.append(ok)
                     if done is not None:
                         done.set()
         finally:
             c.close()
 
     def submit(self, ev, wait=True, timeout=5):
-        """Enqueue an event for the writer thread. Returns when committed (if
-        wait) or immediately. Requires start_writer() to have been called."""
-        done = threading.Event() if wait else None
-        self._wq.put((self._apply, ev, done))
-        if done is not None:
-            done.wait(timeout)
+        """Enqueue an event for the writer thread. When wait=True, blocks until
+        the job is processed and returns True only if the write committed
+        successfully within `timeout` seconds; returns False on write failure or
+        timeout. When wait=False, returns True immediately (fire-and-forget).
+        Requires start_writer() to have been called."""
+        if wait:
+            done = threading.Event()
+            outcome = []
+            self._wq.put((self._apply, ev, done, outcome))
+            timed_out = not done.wait(timeout)
+            if timed_out:
+                return False
+            return bool(outcome and outcome[0])
+        else:
+            self._wq.put((self._apply, ev, None, None))
+            return True
 
     # ----- synchronous apply (direct + via writer) ---------------------------
 

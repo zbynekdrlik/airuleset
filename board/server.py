@@ -318,10 +318,14 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
 
             # 6) route into the single writer (waits for commit) ----------
             try:
-                board.submit(ev, wait=True, timeout=5)
+                ok = board.submit(ev, wait=True, timeout=5)
             except Exception:
                 _log.exception("submit failed for %s", rid)
-                self._text(500, "write failed")
+                self._json(500, {"error": "write failed"})
+                return
+            if not ok:
+                _log.error("board write failed or timed out for %s", rid)
+                self._json(500, {"error": "write failed"})
                 return
 
             # 7) apply worker gate claims (claimed checks only — set_gate
