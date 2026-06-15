@@ -813,6 +813,58 @@ class TestProseViolationsAutoMergeSignals(TestCase):
         self.assertNotIn('"block"', r.stdout)
 
 
+class TestIssueRefTitles(TestCase):
+    """issue-reference-context.md: every issue/PR ref carries its title — ALL messages.
+
+    The bare-ref check in stop-check-prose-violations.sh is a SOFT warning (stderr,
+    no block) — it fires on keyworded bare refs in any message, not just completion
+    reports, and stays quiet when a title/topic is present.
+    """
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+    MODULE = airuleset.REPO_DIR / "modules" / "core" / "issue-reference-context.md"
+
+    def _sid(self):
+        sid = f"test-ref-{uuid.uuid4().hex[:12]}"
+        self.addCleanup(lambda: Path(f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
+        return sid
+
+    def _run(self, msg):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_module_exists_and_in_profile(self):
+        self.assertTrue(self.MODULE.exists())
+        entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
+        self.assertIn("modules/core/issue-reference-context.md", entries)
+
+    def test_bare_pr_ref_warns_outside_completion(self):
+        # Not a completion report — still warns (the always-on behavior).
+        r = self._run("Quick update: PR #7 — pushed and CI is running.\n⏳ WORKING: CI")
+        self.assertIn("Bare issue/PR number", r.stderr)
+
+    def test_bare_closes_ref_warns(self):
+        r = self._run("Committed the fix. Closes #234 in this commit.\n✅ DONE")
+        self.assertIn("Bare issue/PR number", r.stderr)
+
+    def test_bare_issue_mention_warns(self):
+        r = self._run("Issue #42 is still open, will pick it up next.\n✅ DONE")
+        self.assertIn("Bare issue/PR number", r.stderr)
+
+    def test_titled_pr_ref_clean(self):
+        r = self._run("Quick update: PR #7: Refactor driver.rs and add lyrics test — CI running.\n⏳ WORKING: CI")
+        self.assertNotIn("Bare issue/PR number", r.stderr)
+
+    def test_titled_closes_ref_clean(self):
+        r = self._run("Committed the fix. Closes #234 (driver.rs over the 1000-line cap).\n✅ DONE")
+        self.assertNotIn("Bare issue/PR number", r.stderr)
+
+    def test_no_ref_clean(self):
+        r = self._run("Pushed the lint fix, nothing else to report.\n✅ DONE")
+        self.assertNotIn("Bare issue/PR number", r.stderr)
+
+
 class TestPreAskAutoAnswerMergeQuestions(TestCase):
     """Merge-permission questions are pre-answered → hook exits 2."""
 

@@ -18,8 +18,8 @@
 
 #### Message rules
 
-- One line, lead with the actionable fact + IDs: `merged #42+#45 to main → deployed v1.2.3-dev.7, CI green`.
-- Under 200 chars. No markdown in `PushNotification` bodies.
+- One line, lead with the actionable fact + IDs, and give each issue/PR number a short topic (`issue-reference-context.md` — the user can't decode a bare `#N`): `merged #42 (NDI rebind) + #45 (karaoke sanitizer) to main → deployed v1.2.3-dev.7, CI green`.
+- Under 200 chars (topics are short — a few words each, not the full title). No markdown in `PushNotification` bodies.
 - For a stop-for-question ping, say what's blocked: `autopilot paused — issue #51 needs a design call (reset to 0dB or last preset?)`.
 
 #### Don't over-notify

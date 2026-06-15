@@ -1,6 +1,20 @@
 ### Approval Scope — The Full Merge→Deploy Flow Is Standing-Approved; Destructive NON-Deploy Ops Stand Alone
 
-**DEFAULT: every project's full flow — merge → deploy → verify — runs end-to-end WITHOUT asking, including PRODUCTION deploys (`pr-merge-policy.md`). The deploy INCLUDES the brief restart of the app/service being deployed, to load the new version — even on prod, even a manual `scp`/`rsync`/MCP deploy. Milestone-ping it (`milestone-notifications.md`); do NOT gate it on approval.** The user guards production-event timing themselves and will say "hold" in the moment if a live event is on; a project whose deploy interrupts a live/event-sensitive service uses the per-project marker below.
+**DEFAULT: every project's full flow — merge → deploy → verify (including testing/verifying on the live prod target) — runs end-to-end WITHOUT asking, including PRODUCTION deploys (`pr-merge-policy.md`). The deploy INCLUDES the brief restart of the app/service being deployed, to load the new version — even on prod, even a manual `scp`/`rsync`/MCP deploy. Milestone-ping it (`milestone-notifications.md`); do NOT gate it on approval.**
+
+**Claude NEVER asks whether there is a live event, whether prod is in use, or whether "now" is a safe time to deploy / restart / test on prod — and NEVER classifies a project as "event-sensitive" on its own.** Guarding production-event timing is 100% the USER's responsibility: the user stops Claude in the moment when prod is being used live. The ONLY thing that gates a project's deploy is the explicit `<!-- airuleset:merge=manual -->` marker the USER sets (below). Absent that marker, Claude deploys AND tests on prod freely — even for live-streaming / broadcast / OBS / church-stream / "looks event-sensitive" projects (restreamer, camera-box, etc.). "This project streams live, I should confirm there's no event first" is the exact banned inference.
+
+#### NEVER gate on events / prod-usage — the user's hard rule
+
+Banned questions / pauses (intent, all rewordings) — Claude must NOT say or ask any of these before a deploy, restart-to-load-new-version, or prod test:
+
+- "Confirm there's no live event / no broadcast / no service running before I deploy."
+- "Is it safe to deploy now?" / "Is prod in use right now?" / "Should I wait until after the event?"
+- "This deploy will interrupt the live stream — proceed?" (the interruption inherent to loading the new version is the approved deploy, not a gated action)
+- "Want me to hold until the production window is quiet?"
+- Self-classifying: "Since this is a live-streaming project, I'll ask before touching prod."
+
+The user has stated this repeatedly: Claude must not reason about whether prod is busy. Just deploy + verify; the user interrupts when needed.
 
 #### Automatic by default (no approval) — the WHOLE flow
 
@@ -11,7 +25,7 @@
 
 #### Per-project restriction (the user's opt-out)
 
-- `<!-- airuleset:merge=manual -->` in a project's `CLAUDE.md` restores the manual gate for merge AND deploy — use it for a project whose deploy interrupts a live / event-sensitive production service. Only the USER adds or removes it.
+- `<!-- airuleset:merge=manual -->` in a project's `CLAUDE.md` restores the manual gate for merge AND deploy. **Only the USER adds or removes it — Claude NEVER adds it by inferring a project is "sensitive".** When the marker IS present, the gate means simply "wait for the user's explicit merge/deploy instruction" — it is NOT a license to ask "is there an event?" / "is it safe now?". Even in a manual-marker project, Claude never asks about events or prod-usage; it just waits for the go-ahead.
 
 #### Still requires its OWN approval, EVERY time — destructive NON-deploy ops
 

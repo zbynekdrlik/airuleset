@@ -9,6 +9,8 @@
 
 After every deployment, verify the target machine responds correctly before reporting success. **Verification has THREE mandatory layers — liveness, version match, AND functional.**
 
+**Verify on the LIVE / prod target without asking permission and without asking about events.** Testing the deployed change on prod is part of the standing-approved deploy flow — never gate it on "is there a live event / is prod in use / is it safe now". Guarding prod-event timing is the user's job (`approval-scope.md` → "NEVER gate on events / prod-usage"); they stop you in the moment. Just deploy, test on the live target, report what you observed.
+
 #### Layer 1: Liveness (necessary but NOT sufficient)
 
 - Process running: `ssh USER@HOST "tasklist | findstr app"` or `pgrep`

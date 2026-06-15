@@ -8,6 +8,7 @@ modules/core/model-awareness.md
 modules/core/claude-code-tooling.md
 modules/core/response-structure.md
 modules/core/message-status-marker.md
+modules/core/issue-reference-context.md
 modules/core/pr-merge-policy.md
 modules/core/ci-monitoring.md
 modules/core/tdd-workflow.md

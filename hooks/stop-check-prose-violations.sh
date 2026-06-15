@@ -240,24 +240,26 @@ if [ "$IS_COMPLETION" = "1" ]; then
     fi
 fi
 
-# Check completion report uses bare PR/issue numbers without titles.
-# Wrong: 'PR #54 — mergeable, clean'  (em-dash status, no title between # and dash)
-# Right: 'PR #54: Refactor driver.rs and add lyrics test'  (colon + title)
-# Also detects: 'Fixes #234' / 'Closes #99' / 'Resolves #N' not followed by a parenthetical title.
-if [ "$IS_COMPLETION" = "1" ]; then
-    BARE_PR=0
-    BARE_ISSUE=0
-    echo "$MSG" | grep -qE "(PR|pull|Pull Request) #[0-9]+ *(—|--|-)" && BARE_PR=1
-    # Use grep -P for negative lookahead — match "fixes #N" NOT followed by " (" (a parenthetical title)
-    if echo "$MSG" | grep -qPi "(fixes|closes|resolves) #[0-9]+(?! *\()" 2>/dev/null; then
-        BARE_ISSUE=1
-    fi
-    if [ "$BARE_PR" = "1" ] || [ "$BARE_ISSUE" = "1" ]; then
-        echo "VIOLATION: Bare issue/PR number without a title. The user manages many projects in parallel and cannot decode #N references in their head. completion-report.md MANDATES titles on every reference:" >&2
-        echo "  - WRONG: 'PR #54 — mergeable, clean' / 'Fixes #234'" >&2
-        echo "  - RIGHT: 'PR #54: Refactor driver.rs and add lyrics error-path test' / 'Fixes #234 (driver.rs over 1000-line cap)'" >&2
-        echo "Add the title — copy it from 'gh pr view' or 'gh issue view'. See completion-report.md → 'Issue / PR references'." >&2
-    fi
+# Check bare PR/issue numbers without titles — ALL messages (not just completion reports).
+# Per issue-reference-context.md: the user manages many projects, does NOT keep tickets
+# open, and cannot decode a bare '#N' by number. EVERY reference the user reads — status
+# updates, milestone pings, mid-work narration, "filed as", "closes", plan steps,
+# completion reports — must carry the title/topic next to the number.
+# Soft warning (stderr, not a hard block): the rule does the enforcing; this catches slips
+# without trapping the agent on edge cases (e.g. a 'Closes #N' inside a commit-message block,
+# which is exempt git syntax).
+# Right: 'PR #54: <title>' / '#42 (karaoke sanitizer)' / 'Closes #234 (driver.rs cap)'.
+BARE_REF=0
+# "issue|PR|pull request|pull #N" NOT immediately followed by ':' or ' (' (a title/topic).
+if echo "$MSG" | grep -qPi "\b(issue|PR|pull request|pull) #[0-9]+(?! *[:(])(?![0-9])" 2>/dev/null; then BARE_REF=1; fi
+# action-verb "#N" (closes/fixes/resolves/filed/tracked/see/blocked by/depends on/addressed in)
+# NOT followed by ' (' (a parenthetical topic).
+if echo "$MSG" | grep -qPi "\b(closes|fixes|resolves|fixed|filed as|filed:|tracked as|tracking|see|blocked by|depends on|address(ed)? in) #[0-9]+(?! *\()(?![0-9])" 2>/dev/null; then BARE_REF=1; fi
+if [ "$BARE_REF" = "1" ]; then
+    echo "VIOLATION (soft): Bare issue/PR number without its title/topic. The user does NOT keep tickets open and cannot decode '#N' by number — this applies to EVERY message, not just completion reports." >&2
+    echo "  - WRONG: 'PR #54 — mergeable, clean' / 'Fixes #234' / 'Working on #42' / 'See #91'" >&2
+    echo "  - RIGHT: 'PR #54: Refactor driver.rs and add lyrics test' / 'Fixes #234 (driver.rs over 1000-line cap)' / 'Working on #42 (karaoke sanitizer)' / 'See #91 (NDI rebind)'" >&2
+    echo "Add the title/topic next to the number — copy it from 'gh issue view N' / 'gh pr view N'. Commit-message 'Closes #N' is exempt (git syntax). See issue-reference-context.md." >&2
 fi
 
 # Check for follow-up issue filings in completion reports.
