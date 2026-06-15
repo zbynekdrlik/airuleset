@@ -753,13 +753,37 @@ def _board_serve():
 
 
 def _monitored_repos():
-    """Repos the gh refresher polls. Read from BOARD_REPOS (comma-separated
-    `owner/name`) when set; otherwise empty (refresher idle) — the user wires the
-    list in the service env or a follow-up. Kept conservative: no hardcoded list."""
+    """Repos the gh refresher polls.
+
+    Returns BOARD_REPOS env repos UNION repos discovered in the runs table
+    (board.distinct_repos()), deduped and validated by gh.valid_repo. The
+    union means the refresher activates automatically as soon as any worker
+    reports a run — no BOARD_REPOS config required on deploy.
+
+    Falls back gracefully when the DB is absent or unreadable (e.g. first
+    run before any worker has reported)."""
+    from board import gh as ghmod
+    # BOARD_REPOS env (may be empty / unset)
     raw = os.environ.get("BOARD_REPOS", "").strip()
-    if not raw:
-        return []
-    return [r.strip() for r in raw.split(",") if r.strip()]
+    env_repos = [r.strip() for r in raw.split(",") if r.strip()] if raw else []
+
+    # DB-discovered repos
+    db_repos = []
+    try:
+        from board.db import Board
+        board = Board(str(BOARD_DB_PATH))
+        db_repos = board.distinct_repos()
+    except Exception:
+        pass  # DB absent or unreadable on first boot; that's fine
+
+    # Merge, dedupe, validate
+    seen = set()
+    result = []
+    for r in env_repos + db_repos:
+        if r and r not in seen and ghmod.valid_repo(r):
+            seen.add(r)
+            result.append(r)
+    return result
 
 
 def _board_print_url():
@@ -821,20 +845,36 @@ def _xdg_runtime_env():
 
 
 def _ensure_board_token():
-    """Generate the shared board token if absent (0600). Returns the token."""
+    """Generate the shared board token if absent. Returns the token.
+
+    Atomic creation: os.open with O_CREAT|O_WRONLY|O_EXCL and mode 0o600 means
+    the file is born 0600 — no 0664→0600 window from write_text + chmod.
+    FileExistsError means another process won the race or the file already
+    exists; in that case we reuse the existing token (idempotent)."""
     import secrets
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+    # Fast path: reuse if already present and non-empty.
     if BOARD_TOKEN_PATH.exists():
         existing = BOARD_TOKEN_PATH.read_text().strip()
         if existing:
             return existing
     token = secrets.token_urlsafe(32)
-    # write then tighten perms to 0600 (owner read/write only)
-    BOARD_TOKEN_PATH.write_text(token)
     try:
-        os.chmod(BOARD_TOKEN_PATH, 0o600)
-    except OSError:
-        pass
+        # O_EXCL ensures atomicity: only ONE process creates the file,
+        # born with 0o600 — no world/group-readable window.
+        fd = os.open(str(BOARD_TOKEN_PATH), os.O_CREAT | os.O_WRONLY | os.O_EXCL,
+                     0o600)
+        try:
+            os.write(fd, token.encode())
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        # Race: another process created the file first — reuse it.
+        existing = BOARD_TOKEN_PATH.read_text().strip()
+        if existing:
+            return existing
+        # File exists but is empty (concurrent write still in progress? unlikely).
+        # Fall through: return the token we generated (best effort).
     print(f"  Generated board token: {BOARD_TOKEN_PATH} (0600)")
     return token
 

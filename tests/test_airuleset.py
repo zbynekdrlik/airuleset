@@ -1055,6 +1055,147 @@ class TestValidateBoard(TestCase):
         self.assertTrue(any("service template" in e for e in errors), errors)
 
 
+class TestMonitoredReposDiscovery(TestCase):
+    """_monitored_repos() merges BOARD_REPOS env with board.distinct_repos() so
+    the refresher activates as soon as any worker reports — no config needed."""
+
+    def test_env_only_when_db_empty(self):
+        import unittest.mock as m
+        with m.patch.dict(os.environ, {"BOARD_REPOS": "o/a,o/b"}):
+            repos = airuleset._monitored_repos()
+        self.assertIn("o/a", repos)
+        self.assertIn("o/b", repos)
+
+    def test_empty_env_returns_empty_when_no_db(self):
+        import unittest.mock as m
+        with m.patch.dict(os.environ, {"BOARD_REPOS": ""}, clear=False):
+            repos = airuleset._monitored_repos()
+        # Without a board DB path we can't assert DB repos, but the call must
+        # not raise and must return a list.
+        self.assertIsInstance(repos, list)
+
+    def test_discovered_repos_union_env_repos(self):
+        """If a run for o/x is in the DB and BOARD_REPOS has o/y, both appear."""
+        import unittest.mock as m
+        import tempfile
+        from board.db import Board
+        d = tempfile.mkdtemp()
+        db_path = os.path.join(d, "board.sqlite")
+        b = Board(db_path)
+        b.apply_event({"run_id": "o_x-1-1-abcd", "repo": "o/x", "issue": 1,
+                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
+        with m.patch.object(airuleset, "BOARD_DB_PATH",
+                             airuleset.Path(db_path)):
+            with m.patch.dict(os.environ, {"BOARD_REPOS": "o/y"}):
+                repos = airuleset._monitored_repos()
+        self.assertIn("o/x", repos)
+        self.assertIn("o/y", repos)
+
+    def test_invalid_db_repo_filtered_out(self):
+        """Repos from the DB that fail valid_repo() are dropped silently."""
+        import unittest.mock as m
+        import tempfile
+        from board.db import Board
+        from board import gh as ghmod
+        d = tempfile.mkdtemp()
+        db_path = os.path.join(d, "board.sqlite")
+        b = Board(db_path)
+        # Directly insert a bad repo string bypassing apply_event validation.
+        c = b.conn()
+        c.execute("INSERT INTO runs(run_id, repo, seq) VALUES('r1','bad;repo',0)")
+        c.commit()
+        c.close()
+        with m.patch.object(airuleset, "BOARD_DB_PATH",
+                             airuleset.Path(db_path)):
+            with m.patch.dict(os.environ, {"BOARD_REPOS": ""}):
+                repos = airuleset._monitored_repos()
+        self.assertNotIn("bad;repo", repos)
+
+    def test_deduplication(self):
+        """A repo in both BOARD_REPOS and the DB appears only once."""
+        import unittest.mock as m
+        import tempfile
+        from board.db import Board
+        d = tempfile.mkdtemp()
+        db_path = os.path.join(d, "board.sqlite")
+        b = Board(db_path)
+        b.apply_event({"run_id": "o_x-1-1-aa", "repo": "o/x", "issue": 1,
+                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
+        with m.patch.object(airuleset, "BOARD_DB_PATH",
+                             airuleset.Path(db_path)):
+            with m.patch.dict(os.environ, {"BOARD_REPOS": "o/x"}):
+                repos = airuleset._monitored_repos()
+        self.assertEqual(repos.count("o/x"), 1)
+
+
+class TestAtomicBoardToken(TestCase):
+    """_ensure_board_token creates the file 0600 atomically (O_EXCL), no
+    world/group-readable window."""
+
+    def test_creates_token_with_0600_permissions(self):
+        import unittest.mock as m
+        import tempfile
+        d = tempfile.mkdtemp()
+        token_path = airuleset.Path(d) / "board_token"
+        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
+            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
+                tok = airuleset._ensure_board_token()
+        self.assertTrue(token_path.exists())
+        self.assertEqual(oct(os.stat(token_path).st_mode & 0o777), oct(0o600))
+        self.assertTrue(tok)
+
+    def test_reuses_existing_token(self):
+        import unittest.mock as m
+        import tempfile
+        d = tempfile.mkdtemp()
+        token_path = airuleset.Path(d) / "board_token"
+        # Write a pre-existing token atomically.
+        fd = os.open(str(token_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+        os.write(fd, b"existing-token-value")
+        os.close(fd)
+        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
+            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
+                tok = airuleset._ensure_board_token()
+        self.assertEqual(tok, "existing-token-value")
+
+    def test_race_file_exists_reuses_winner_token(self):
+        """FileExistsError from concurrent creation → reuse the existing token.
+
+        Simulates the race by patching os.open to raise FileExistsError on the
+        first call (token file didn't exist at the fast-path check but another
+        process won the race before our O_EXCL open). The winner's token must
+        be returned via the read_text() fallback."""
+        import unittest.mock as m
+        import tempfile
+        d = tempfile.mkdtemp()
+        token_path = airuleset.Path(d) / "board_token"
+        # Pre-create the winner's token (what the 'winner' process wrote).
+        fd = os.open(str(token_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+        os.write(fd, b"winner-token")
+        os.close(fd)
+
+        real_os_open = os.open
+        open_calls = [0]
+
+        def patched_os_open(path, flags, mode=0o777, *a, **kw):
+            open_calls[0] += 1
+            # First open call targeting our token path: simulate the race loss
+            if open_calls[0] == 1 and str(path) == str(token_path):
+                raise FileExistsError("simulated race")
+            return real_os_open(path, flags, mode, *a, **kw)
+
+        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
+            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
+                # fast-path exists() → returns False (file "appears" absent to us)
+                with m.patch.object(token_path.__class__, "exists",
+                                    lambda self: False
+                                    if self == token_path and open_calls[0] == 0
+                                    else airuleset.Path.exists(self)):
+                    with m.patch("os.open", patched_os_open):
+                        tok = airuleset._ensure_board_token()
+        self.assertEqual(tok, "winner-token")
+
+
 class TestReportCommand(TestCase):
     """cmd_report is a thin, crash-proof wrapper over board.reporter (plan Task 13)."""
 

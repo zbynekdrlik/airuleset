@@ -1255,3 +1255,49 @@ class TestQueue(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class TestDistinctRepos(unittest.TestCase):
+    """Board.distinct_repos() returns repos recorded in the runs table."""
+
+    def _b(self):
+        import tempfile
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_empty_db_returns_empty_list(self):
+        b = self._b()
+        self.assertEqual(b.distinct_repos(), [])
+
+    def test_reported_run_appears_in_distinct_repos(self):
+        b = self._b()
+        b.apply_event({"run_id": "o_x-1-1-abcd", "repo": "o/x", "issue": 1,
+                       "seq": 1, "phase": "implementing", "event_id": "e1",
+                       "event_ts": 1.0})
+        self.assertIn("o/x", b.distinct_repos())
+
+    def test_multiple_runs_same_repo_deduped(self):
+        b = self._b()
+        b.apply_event({"run_id": "o_x-1-1-aa", "repo": "o/x", "issue": 1,
+                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "o_x-2-1-bb", "repo": "o/x", "issue": 2,
+                       "seq": 1, "event_id": "e2", "event_ts": 2.0})
+        repos = b.distinct_repos()
+        self.assertEqual(repos.count("o/x"), 1)
+
+    def test_multiple_repos_all_returned(self):
+        b = self._b()
+        b.apply_event({"run_id": "o_x-1-1-aa", "repo": "o/x", "issue": 1,
+                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "o_y-1-1-bb", "repo": "o/y", "issue": 1,
+                       "seq": 1, "event_id": "e2", "event_ts": 2.0})
+        repos = b.distinct_repos()
+        self.assertIn("o/x", repos)
+        self.assertIn("o/y", repos)
+
+    def test_null_repo_excluded(self):
+        """Runs with NULL repo (no repo field reported yet) must not appear."""
+        b = self._b()
+        b.apply_event({"run_id": "no_repo-1-1-cc", "seq": 1,
+                       "event_id": "e1", "event_ts": 1.0})
+        self.assertEqual(b.distinct_repos(), [])

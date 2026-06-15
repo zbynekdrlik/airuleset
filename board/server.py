@@ -462,14 +462,31 @@ def _maybe_prune(board, repo, open_issue_numbers):
         _log.exception("prune_queue failed for repo %s", repo)
 
 
-def _refresher_loop(board, repos, stop):
+def _refresher_loop(board, static_repos, stop):
     """Background gh refresher (design §8): batched per-repo fetch on a loop with
     a GH_POLL_FLOOR_S floor, per-repo try/except so one repo's failure never
     kills the thread. Maps gh signals to the newest non-terminal run per issue
-    and writes them via board.set_gh (the verified-gate path)."""
-    from board.gh import fetch_repo_active
+    and writes them via board.set_gh (the verified-gate path).
+
+    The repo set is recomputed at the top of EACH cycle as:
+      static_repos (BOARD_REPOS env) UNION board.distinct_repos()
+    so a newly-reporting repo is picked up without a restart — no BOARD_REPOS
+    config needed once any worker starts reporting."""
+    from board.gh import fetch_repo_active, valid_repo
     while not stop.is_set():
         start = time.monotonic()
+        # Recompute each cycle so newly-reporting repos are picked up immediately.
+        try:
+            db_repos = board.distinct_repos()
+        except Exception:
+            _log.exception("distinct_repos() failed; using static_repos only")
+            db_repos = []
+        seen = set()
+        repos = []
+        for r in list(static_repos) + db_repos:
+            if r and r not in seen and valid_repo(r):
+                seen.add(r)
+                repos.append(r)
         for repo in repos:
             try:
                 res = fetch_repo_active(repo)
@@ -510,7 +527,11 @@ def _refresher_loop(board, repos, stop):
 
 def run_server(board, token, host=BOARD_HOST_IP, port=PORT, repos=None):
     """Production entrypoint. Fails loud if the port is already bound, starts the
-    single writer + the gh refresher/reaper thread, then serves forever."""
+    single writer + the gh refresher/reaper thread, then serves forever.
+
+    The refresher always starts (even when `repos` is empty) so it can discover
+    repos from board.distinct_repos() as soon as workers begin reporting — no
+    BOARD_REPOS env config required for the alarm/gate-verification to be live."""
     if _port_already_bound(host, port):
         raise SystemExit(
             f"FATAL: {host}:{port} is already bound — a board is already "
@@ -518,9 +539,11 @@ def run_server(board, token, host=BOARD_HOST_IP, port=PORT, repos=None):
     version = _git_version()
     board.start_writer()
     stop = threading.Event()
-    if repos:
-        threading.Thread(target=_refresher_loop, args=(board, repos, stop),
-                         daemon=True).start()
+    # Always start the refresher: it merges static_repos (BOARD_REPOS env) with
+    # board.distinct_repos() each cycle, so it activates the moment any worker
+    # reports — no BOARD_REPOS config needed.
+    threading.Thread(target=_refresher_loop, args=(board, repos or [], stop),
+                     daemon=True).start()
     httpd = make_server(board, token, host=host, port=port, version=version)
     _log.info("autopilot board listening on %s:%s (version %s)",
               host, port, version)

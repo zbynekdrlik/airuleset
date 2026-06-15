@@ -625,6 +625,23 @@ class Board:
             c.close()
         return reconciled, stale
 
+    # ----- repo discovery (for gh refresher auto-discovery) -----------------
+
+    def distinct_repos(self):
+        """Return the list of distinct repo strings recorded in the runs table.
+
+        Used by the gh refresher so it polls whatever is being autopiloted,
+        with no BOARD_REPOS config required. Simple DISTINCT over all runs —
+        robust and cheap (repo is indexed via PRIMARY KEY lookup on run_id)."""
+        c = self.conn()
+        try:
+            rows = c.execute(
+                "SELECT DISTINCT repo FROM runs WHERE repo IS NOT NULL"
+            ).fetchall()
+            return [r["repo"] for r in rows]
+        finally:
+            c.close()
+
     # ----- planned queue (backlog) — Phase E2, Task 19 ----------------------
 
     def set_queue(self, repo, items):
