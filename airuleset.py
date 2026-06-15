@@ -16,6 +16,7 @@ import difflib
 import json
 import os
 import shutil
+import socket
 import sys
 from pathlib import Path
 
@@ -34,6 +35,64 @@ MANAGED_HEADER = "# Managed by airuleset"
 MANAGED_MARKER = "<!-- airuleset-managed -->"
 
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
+
+# ---------------------------------------------------------------------------
+# Autopilot Board integration (plan Phase F — Tasks 13 & 14)
+# ---------------------------------------------------------------------------
+# The board is a single always-on daemon on dev1 (10.77.9.21). Every machine
+# runs the reporter (fire-and-forget client); only the board host runs the
+# systemd service. Single source of truth for the host IP is board.BOARD_HOST_IP
+# (env BOARD_HOST override) — re-exported here so callers can `airuleset.BOARD_HOST_IP`.
+try:
+    from board import BOARD_HOST_IP, PORT as BOARD_PORT, board_url
+except Exception:  # pragma: no cover — board package should always import
+    BOARD_HOST_IP = os.environ.get("BOARD_HOST", "10.77.9.21")
+    BOARD_PORT = 8787
+
+    def board_url():
+        return f"http://{BOARD_HOST_IP}:{BOARD_PORT}/"
+
+# Local board daemon state (all under ~/.claude, gitignored — never in the repo).
+BOARD_DB_PATH = CLAUDE_DIR / "autopilot-board.sqlite"
+BOARD_TOKEN_PATH = CLAUDE_DIR / "autopilot-board.token"
+BOARD_SERVICE_TEMPLATE = REPO_DIR / "settings" / "autopilot-board.service.template"
+BOARD_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "autopilot-board.service"
+
+
+def _local_ips():
+    """Collect this machine's IPs from every reliable source.
+
+    `socket.gethostbyname*` often resolves to loopback (127.0.1.1) on Debian/
+    Ubuntu where /etc/hosts maps the hostname to loopback — so it ALONE would
+    make the real board host detect as a non-board host. We therefore also read
+    `hostname -I` (the documented fallback in spec §12), which lists the actual
+    interface addresses. All sources are best-effort; failures are ignored."""
+    import subprocess
+    ips = set()
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except Exception:
+        pass
+    try:
+        ips.add(socket.gethostbyname(socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True,
+                             text=True, timeout=5)
+        if out.returncode == 0:
+            ips.update(tok for tok in out.stdout.split() if tok)
+    except Exception:
+        pass
+    return ips
+
+
+def is_board_host():
+    """True iff this machine is the board host (BOARD_HOST_IP is one of our IPs).
+
+    Tolerant of resolver failures (returns False) so a misconfigured /etc/hosts
+    never makes a non-board host try to start the service."""
+    return BOARD_HOST_IP in _local_ips()
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep"]
@@ -485,6 +544,247 @@ def cmd_status(args):
 
 
 # ---------------------------------------------------------------------------
+# Autopilot Board subcommands (plan Task 13)
+# ---------------------------------------------------------------------------
+
+
+def cmd_report(args):
+    """Thin CLI wrapper over board.reporter — fire-and-forget, never crashes.
+
+    Modes (mutually exclusive enough for the worker's needs):
+      --start        mint a run_id, emit the opening event, print the run_id
+      --queue        report a planned-issue queue for --repo from --items (JSON)
+      --selftest     POST a synthetic ping and print whether the board accepted it
+      (default)      emit a phase/heartbeat/field event for --run
+
+    The reporter swallows all network errors itself; this wrapper additionally
+    guards against import/usage errors so a board outage can NEVER fail a worker.
+    """
+    try:
+        from board import reporter
+    except Exception as e:  # board package unimportable — degrade gracefully
+        print(f"report: board package unavailable ({e})", file=sys.stderr)
+        return
+
+    try:
+        if getattr(args, "start", False):
+            rid = reporter.start_run(
+                args.repo, args.issue, args.title or "",
+                is_bug_fix=bool(getattr(args, "is_bug_fix", False)),
+                has_deploy=bool(getattr(args, "has_deploy", False)),
+                merge_mode=getattr(args, "merge_mode", "auto") or "auto")
+            print(rid)
+            return
+
+        if getattr(args, "queue", False):
+            repo = args.repo
+            try:
+                items = json.loads(args.items) if args.items else []
+            except (ValueError, TypeError) as e:
+                print(f"report --queue: bad --items JSON ({e})", file=sys.stderr)
+                return
+            # items may be [[issue, title], ...] or [{"issue":..,"title":..}, ...]
+            norm = []
+            for it in items:
+                if isinstance(it, dict):
+                    norm.append((it.get("issue"), it.get("title", "")))
+                else:
+                    norm.append((it[0], it[1] if len(it) > 1 else ""))
+            reporter.queue_report(repo, norm)
+            return
+
+        if getattr(args, "selftest", False):
+            _report_selftest(reporter)
+            return
+
+        # default: a phase / heartbeat / field event for an existing run
+        rid = args.run
+        if not rid:
+            print("report: --run is required (or use --start)", file=sys.stderr)
+            return
+        reviews = _parse_reviews(getattr(args, "review", None))
+        fields = {}
+        for k in ("goal", "approach", "result", "note", "pr", "phase"):
+            v = getattr(args, k, None)
+            if v is not None:
+                fields[k] = v
+        # --pr maps to the pr_url field the board stores
+        if "pr" in fields:
+            fields["pr_url"] = fields.pop("pr")
+        phase = fields.pop("phase", None)
+        if getattr(args, "heartbeat", False) and phase is None and "note" not in fields:
+            # a bare heartbeat carries no phase/field — just a liveness ping
+            fields["note"] = fields.get("note") or "heartbeat"
+        reporter.report(rid, phase=phase, reviews=reviews or None, **fields)
+    except Exception as e:  # absolute backstop — a report must never crash a worker
+        print(f"report: ignored error ({e})", file=sys.stderr)
+
+
+def _parse_reviews(values):
+    """`--review k=v` (repeatable) -> [(check, state), ...]. Ignores malformed."""
+    out = []
+    for raw in (values or []):
+        if "=" not in raw:
+            continue
+        k, v = raw.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k:
+            out.append((k, v))
+    return out
+
+
+def _report_selftest(reporter):
+    """POST a synthetic ping straight to the board and report acceptance.
+
+    Bypasses the offline queue so we test the LIVE path: builds a minimal valid
+    event and calls reporter._post_one directly. Prints OK/FAIL and the board URL."""
+    import time
+    import uuid
+    ev = {
+        "run_id": f"selftest-0-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}",
+        "event_id": uuid.uuid4().hex,
+        "seq": 1,
+        "phase": "validating",
+        "event_ts": time.time(),
+        "machine": os.uname().nodename,
+        "repo": "selftest/ping",
+        "issue": 0,
+        "title": "board selftest ping",
+        "note": "synthetic selftest ping",
+    }
+    ok = False
+    try:
+        ok = reporter._post_one(ev)
+    except Exception as e:
+        print(f"selftest: error posting ({e})", file=sys.stderr)
+    if ok:
+        print(f"selftest: OK — board accepted the ping at {board_url()}")
+    else:
+        print(f"selftest: FAIL — board at {board_url()} did not accept the ping "
+              f"(down, wrong token, or unreachable)", file=sys.stderr)
+
+
+def cmd_board(args):
+    """Board control: --url (live-check + print LAN URL), status, --serve (daemon)."""
+    if getattr(args, "serve", False):
+        _board_serve()
+        return
+    if getattr(args, "url", False):
+        _board_print_url()
+        return
+    # default / `status`
+    _board_status()
+
+
+def _board_serve():
+    """Run the board HTTP server in the FOREGROUND (systemd ExecStart target).
+
+    Instantiates a Board on the local sqlite DB, reads the shared token, and
+    hands off to board.server.run_server (which binds BOARD_HOST_IP:PORT, fails
+    loud if already bound, and starts the writer + gh refresher threads)."""
+    from board.db import Board
+    from board.server import run_server
+
+    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+    token = ""
+    try:
+        token = BOARD_TOKEN_PATH.read_text().strip()
+    except OSError:
+        pass
+    if not token:
+        print(f"FATAL: no board token at {BOARD_TOKEN_PATH}. Run "
+              f"`python3 airuleset.py install` on the board host to generate it.",
+              file=sys.stderr)
+        sys.exit(1)
+    board = Board(str(BOARD_DB_PATH))
+    repos = _monitored_repos()
+    run_server(board, token, host=BOARD_HOST_IP, port=BOARD_PORT, repos=repos)
+
+
+def _monitored_repos():
+    """Repos the gh refresher polls. Read from BOARD_REPOS (comma-separated
+    `owner/name`) when set; otherwise empty (refresher idle) — the user wires the
+    list in the service env or a follow-up. Kept conservative: no hardcoded list."""
+    raw = os.environ.get("BOARD_REPOS", "").strip()
+    if not raw:
+        return []
+    return [r.strip() for r in raw.split(",") if r.strip()]
+
+
+def _board_print_url():
+    """Curl-check the board; print the LAN URL only when it returns 200.
+
+    Per no-localhost-urls.md: never present a dead URL. If the board is down AND
+    we're on the board host, try restarting the service once before giving up."""
+    url = board_url()
+    if _board_is_live(url):
+        print(url)
+        return
+    if is_board_host():
+        print("board: not responding — attempting service restart...",
+              file=sys.stderr)
+        _restart_board_service()
+        if _board_is_live(url):
+            print(url)
+            return
+    print(f"board: DOWN — {url} did not return 200 "
+          f"(not started, wrong host, or crashed)", file=sys.stderr)
+    sys.exit(1)
+
+
+def _board_is_live(url, timeout=2):
+    """True iff GET <url> returns HTTP 200 within `timeout` seconds."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _board_status():
+    """Print board liveness + whether this host is the board host."""
+    url = board_url()
+    here = "board host" if is_board_host() else "reporter-only host"
+    live = _board_is_live(url)
+    print(f"autopilot board: {url}")
+    print(f"  this machine: {here} (BOARD_HOST_IP={BOARD_HOST_IP})")
+    print(f"  liveness:     {'UP (200)' if live else 'DOWN / unreachable'}")
+    print(f"  token:        {'present' if BOARD_TOKEN_PATH.exists() else 'absent'}")
+
+
+def _xdg_runtime_env():
+    """A copy of os.environ with XDG_RUNTIME_DIR set explicitly.
+
+    `systemctl --user` needs XDG_RUNTIME_DIR to find the user bus; when install
+    runs over SSH (no login session) it is often unset. We set it deterministically
+    to /run/user/<uid>."""
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return env
+
+def _run_systemctl(args):
+    """Run `systemctl --user <args>` with the explicit XDG env. Returns
+    (returncode, stdout, stderr). Never raises."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", *args],
+            capture_output=True, text=True, timeout=30, env=_xdg_runtime_env())
+        return r.returncode, r.stdout, r.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+def _restart_board_service():
+    """Best-effort `systemctl --user restart autopilot-board.service`."""
+    rc, _out, err = _run_systemctl(["restart", "autopilot-board.service"])
+    if rc != 0:
+        print(f"  board service restart failed (rc={rc}): {err.strip()}",
+              file=sys.stderr)
+    return rc == 0
+
+
+# ---------------------------------------------------------------------------
 # Remote deployment
 # ---------------------------------------------------------------------------
 
@@ -561,21 +861,68 @@ def main():
     sub.add_parser("status", help="Show current managed config")
     sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
 
+    # --- Autopilot Board: report (worker client) + board (control) ---------
+    p_report = sub.add_parser(
+        "report", help="Report an autopilot run phase/event to the board")
+    p_report.add_argument("--start", action="store_true",
+                          help="Mint a new run_id, emit the opening event, print the run_id")
+    p_report.add_argument("--run", help="Existing run_id to report against")
+    p_report.add_argument("--repo", help="owner/name (for --start / --queue)")
+    p_report.add_argument("--issue", type=int, help="Issue number (for --start)")
+    p_report.add_argument("--title", help="Run title (for --start)")
+    p_report.add_argument("--is-bug-fix", dest="is_bug_fix", action="store_true",
+                          help="Mark the run as a bug fix (regression gate applies)")
+    p_report.add_argument("--has-deploy", dest="has_deploy", action="store_true",
+                          help="Mark the run as deploying (deploy_verified gate applies)")
+    p_report.add_argument("--merge-mode", dest="merge_mode", default="auto",
+                          help="auto | manual (default auto)")
+    p_report.add_argument("--phase", help="Phase to advance to")
+    p_report.add_argument("--goal", help="Goal text")
+    p_report.add_argument("--approach", help="Approach text")
+    p_report.add_argument("--result", help="Result text")
+    p_report.add_argument("--note", help="Free-form note")
+    p_report.add_argument("--pr", help="PR URL")
+    p_report.add_argument("--review", action="append",
+                          help="Gate claim k=v (repeatable), e.g. --review review=ok")
+    p_report.add_argument("--heartbeat", action="store_true",
+                          help="Emit a liveness heartbeat (no phase change required)")
+    p_report.add_argument("--queue", action="store_true",
+                          help="Report a planned-issue queue (--repo + --items JSON)")
+    p_report.add_argument("--items",
+                          help="JSON array of [issue,title] pairs (for --queue)")
+    p_report.add_argument("--selftest", action="store_true",
+                          help="POST a synthetic ping and report whether the board accepted it")
+
+    p_board = sub.add_parser("board", help="Autopilot board control")
+    p_board.add_argument("board_action", nargs="?", default=None,
+                         choices=["status"],
+                         help="status (default when no flag)")
+    p_board.add_argument("--url", action="store_true",
+                         help="Live-check the board and print its LAN URL (200 only)")
+    p_board.add_argument("--serve", action="store_true",
+                         help="Run the board HTTP server in the foreground (systemd ExecStart)")
+
     args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
         sys.exit(1)
 
-    commands = {
-        "install": cmd_install,
-        "diff": cmd_diff,
-        "validate": cmd_validate,
-        "status": cmd_status,
-        "push": cmd_push,
-    }
-
     commands[args.command](args)
+
+
+# Command dispatch table (module-level so tests can assert registration).
+SUBCOMMANDS = {
+    "install": cmd_install,
+    "diff": cmd_diff,
+    "validate": cmd_validate,
+    "status": cmd_status,
+    "push": cmd_push,
+    "report": cmd_report,
+    "board": cmd_board,
+}
+# Backwards-compatible alias used by main() before SUBCOMMANDS existed.
+commands = SUBCOMMANDS
 
 
 if __name__ == "__main__":

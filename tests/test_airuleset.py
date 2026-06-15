@@ -894,5 +894,88 @@ class TestPreAskAutoAnswerMergeQuestions(TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+class TestBoardHost(TestCase):
+    """Autopilot Board host detection + report/board subcommand registration
+    (plan Task 13)."""
+
+    def test_is_board_host_helper_exists_and_returns_bool(self):
+        self.assertTrue(hasattr(airuleset, "is_board_host"))
+        self.assertIsInstance(airuleset.is_board_host(), bool)
+
+    def test_board_host_ip_constant(self):
+        # Default board host IP (env BOARD_HOST may override at runtime).
+        self.assertEqual(airuleset.BOARD_HOST_IP, os.getenv("BOARD_HOST", "10.77.9.21"))
+
+    def test_report_and_board_subcommands_registered(self):
+        self.assertIn("report", airuleset.SUBCOMMANDS)
+        self.assertIn("board", airuleset.SUBCOMMANDS)
+        # They must be callables (the dispatch target).
+        self.assertTrue(callable(airuleset.SUBCOMMANDS["report"]))
+        self.assertTrue(callable(airuleset.SUBCOMMANDS["board"]))
+
+    def test_is_board_host_false_when_ip_not_local(self):
+        import unittest.mock as m
+        # An IP that is definitely not one of our interfaces → not the board host.
+        with m.patch.object(airuleset, "BOARD_HOST_IP", "203.0.113.7"):
+            with m.patch.object(airuleset, "_local_ips",
+                                return_value={"10.0.0.5", "127.0.0.1"}):
+                self.assertFalse(airuleset.is_board_host())
+
+    def test_is_board_host_true_when_ip_local(self):
+        import unittest.mock as m
+        with m.patch.object(airuleset, "BOARD_HOST_IP", "10.77.9.21"):
+            with m.patch.object(airuleset, "_local_ips",
+                                return_value={"10.77.9.21", "127.0.1.1"}):
+                self.assertTrue(airuleset.is_board_host())
+
+
+
+
+
+
+class TestReportCommand(TestCase):
+    """cmd_report is a thin, crash-proof wrapper over board.reporter (plan Task 13)."""
+
+    def test_report_start_prints_run_id(self):
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=True, repo="o/x", issue=1, title="t",
+                      is_bug_fix=False, has_deploy=False, merge_mode="auto")
+        with m.patch.object(reporter, "start_run", return_value="o_x-1-99-abcd") as sr:
+            with m.patch("builtins.print") as pr:
+                airuleset.cmd_report(args)
+        sr.assert_called_once()
+        # The run_id is printed to stdout (the worker captures it).
+        printed = " ".join(str(c.args[0]) for c in pr.call_args_list if c.args)
+        self.assertIn("o_x-1-99-abcd", printed)
+
+    def test_report_phase_routes_to_reporter(self):
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
+                      run="o_x-1-99-abcd", phase="CI", goal=None, approach=None,
+                      result=None, note=None, pr=None, review=None)
+        with m.patch.object(reporter, "report") as rep:
+            airuleset.cmd_report(args)
+        rep.assert_called_once()
+        # phase passed through; run_id is the first positional arg.
+        self.assertEqual(rep.call_args.args[0], "o_x-1-99-abcd")
+        self.assertEqual(rep.call_args.kwargs.get("phase"), "CI")
+
+    def test_report_review_parsing(self):
+        # k=v review flags become (check, state) pairs; malformed are dropped.
+        pairs = airuleset._parse_reviews(["review=ok", "bad", "plan_check=fail"])
+        self.assertIn(("review", "ok"), pairs)
+        self.assertIn(("plan_check", "fail"), pairs)
+        self.assertNotIn("bad", [p[0] for p in pairs])
+
+    def test_report_never_raises_on_bad_items(self):
+        import unittest.mock as m
+        args = m.Mock(start=False, queue=True, selftest=False,
+                      repo="o/x", items="{not valid json")
+        # Must not raise — a malformed --items is reported to stderr, not crashed.
+        airuleset.cmd_report(args)
+
+
 if __name__ == "__main__":
     main()
