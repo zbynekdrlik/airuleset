@@ -63,7 +63,7 @@ class Board:
         self._init()
 
     def conn(self):
-        c = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
+        c = sqlite3.connect(self.path, timeout=5, check_same_thread=True)
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA busy_timeout=5000")
         c.execute("PRAGMA synchronous=NORMAL")
@@ -200,9 +200,22 @@ class Board:
             # never regress rank (a lower-rank incoming phase keeps current).
             new_phase = cur_phase
 
+        # ---- staleness gate for free-text content ----
+        # A report is "fresh" when it's the first event for the run OR its seq
+        # is >= the stored seq. Only a fresh report may advance the free-text
+        # content columns; a stale (lower-seq) replay carrying a DIFFERENT
+        # non-null value must NOT move state backwards (spec §4). We pass None
+        # for those columns when stale so COALESCE(excluded.x, runs.x) preserves
+        # the newer stored value. (phase is already handled above; seq=MAX stays.)
+        fresh = (cur is None) or (seq >= cur_seq)
+
+        def _content(key):
+            return ev.get(key) if fresh else None
+
         # ---- atomic seq-guarded COALESCE upsert ----
         # COALESCE(excluded.x, runs.x): a NULL incoming field preserves the
-        # stored value (phase-only reports never null goal/approach/result).
+        # stored value (phase-only reports never null goal/approach/result, and
+        # stale reports pass None so they cannot overwrite newer content).
         # seq=MAX(runs.seq, excluded.seq): the stored seq never decreases.
         c.execute(
             """
@@ -229,14 +242,14 @@ class Board:
             updated_at=:now
         """,
             {"run_id": rid, "repo": ev.get("repo"), "issue": ev.get("issue"),
-             "title": ev.get("title"), "goal": ev.get("goal"),
-             "approach": ev.get("approach"), "result": ev.get("result"),
-             "phase": new_phase, "status": ev.get("status"),
+             "title": _content("title"), "goal": _content("goal"),
+             "approach": _content("approach"), "result": _content("result"),
+             "phase": new_phase, "status": _content("status"),
              "machine": ev.get("machine"), "worker": ev.get("worker"),
              "seq": seq, "is_bug_fix": int(ev.get("is_bug_fix", 0)),
              "has_deploy": int(ev.get("has_deploy", 0)),
              "merge_mode": ev.get("merge_mode", "auto"),
-             "pr_url": ev.get("pr_url"), "now": now})
+             "pr_url": _content("pr_url"), "now": now})
 
     def get_run(self, rid):
         c = self.conn()

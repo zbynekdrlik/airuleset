@@ -135,6 +135,17 @@ class TestUpsert(unittest.TestCase):
         self.assertEqual(row["goal"], "G")      # preserved
         self.assertEqual(row["phase"], "CI")    # advanced
 
+    def test_stale_report_does_not_clobber_content(self):
+        b = self._b()
+        b.apply_event({"run_id":"r1","repo":"o/x","issue":1,"seq":5,"phase":"merge",
+                       "goal":"refined goal","event_id":"e5","event_ts":5.0})
+        # stale lower-seq replay carrying an OLDER goal must NOT overwrite
+        b.apply_event({"run_id":"r1","seq":2,"phase":"implementing",
+                       "goal":"initial goal","event_id":"e2","event_ts":2.0})
+        row = b.get_run("r1")
+        self.assertEqual(row["goal"], "refined goal")
+        self.assertEqual(row["phase"], "merge")
+
     def test_seq_guard_ignores_stale(self):
         b = self._b()
         b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 5,
