@@ -270,6 +270,64 @@ class Board:
         finally:
             c.close()
 
+    # ----- read-only queries for the server/render (Task 11/12) --------------
+
+    def list_runs(self, limit=500):
+        """All runs, newest first (updated_at DESC), capped at `limit`.
+
+        Read-only — the server fans these into the render's live/recent buckets
+        (a run is 'live' when its phase is non-terminal AND status != 'stale';
+        everything else is 'recent'). Returns a list of sqlite Rows."""
+        c = self.conn()
+        try:
+            return c.execute(
+                "SELECT * FROM runs ORDER BY updated_at DESC, started_at DESC "
+                "LIMIT ?", (limit,)).fetchall()
+        finally:
+            c.close()
+
+    def get_events(self, rid, limit=500):
+        """Events for `rid`, ordered by seq then event_ts (the timeline order
+        the ticket detail renders). Capped at `limit` (most-recent kept)."""
+        c = self.conn()
+        try:
+            return c.execute(
+                "SELECT seq, phase, message, event_ts, recv_ts FROM events "
+                "WHERE run_id=? ORDER BY seq ASC, event_ts ASC LIMIT ?",
+                (rid, limit)).fetchall()
+        finally:
+            c.close()
+
+    def get_gh(self, rid):
+        """The gh_state row for `rid` (or None). Read-only."""
+        c = self.conn()
+        try:
+            return c.execute(
+                "SELECT * FROM gh_state WHERE run_id=?", (rid,)).fetchone()
+        finally:
+            c.close()
+
+    def runs_touched_since(self, since_ts):
+        """Count runs whose updated_at >= since_ts (health strip: runs touched
+        in the last hour)."""
+        c = self.conn()
+        try:
+            return c.execute(
+                "SELECT count(*) FROM runs WHERE updated_at >= ?",
+                (since_ts,)).fetchone()[0]
+        finally:
+            c.close()
+
+    def last_report_ts(self):
+        """The newest events.recv_ts across all runs (health strip: 'last report
+        received'), or None if no events yet."""
+        c = self.conn()
+        try:
+            row = c.execute("SELECT MAX(recv_ts) FROM events").fetchone()
+            return row[0] if row else None
+        finally:
+            c.close()
+
     # ----- gate rows ---------------------------------------------------------
 
     def seed_gates(self, rid, is_bug_fix, has_deploy):

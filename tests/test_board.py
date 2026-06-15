@@ -826,3 +826,197 @@ class TestRender(unittest.TestCase):
                "pr_url": None, "status": None}
         html = ticket_detail(run, [], {}, None)
         self.assertIn("r", html)  # renders without crashing on empty data
+
+
+# ============================ Phase E — server ============================
+
+class TestServer(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import threading
+        import board.server as srv
+        from board.db import Board
+        self.dir = tempfile.mkdtemp()
+        self.token = "t0ken"
+        # NOTE: make_server only builds the ThreadingHTTPServer + handler. It
+        # does NOT start the gh refresher / reaper threads (run_server does), so
+        # this test never touches the network.
+        self.b = Board(os.path.join(self.dir, "b.sqlite"))
+        self.b.start_writer()
+        self.httpd = srv.make_server(self.b, token=self.token,
+                                     host="127.0.0.1", port=0)
+        self.port = self.httpd.server_address[1]
+        self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.t.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def _post(self, body, token="t0ken"):
+        import urllib.request
+        import urllib.error
+        import json
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-Board-Token"] = token
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/report",
+            data=json.dumps(body).encode(), method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def _get(self, path, token=None):
+        import urllib.request
+        import urllib.error
+        headers = {}
+        if token is not None:
+            headers["X-Board-Token"] = token
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", headers=headers)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, dict(r.headers), r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read().decode()
+
+    # ---- POST /report auth + validation ----
+    def test_rejects_bad_token(self):
+        self.assertEqual(
+            self._post({"run_id": "r1", "phase": "CI"}, token="wrong")[0], 403)
+
+    def test_rejects_missing_token(self):
+        self.assertEqual(
+            self._post({"run_id": "r1", "phase": "CI"}, token=None)[0], 403)
+
+    def test_accepts_and_persists(self):
+        import time
+        status, _ = self._post({"run_id": "r1", "repo": "o/x", "issue": 1,
+                                "seq": 1, "phase": "CI", "event_id": "e1",
+                                "event_ts": 1.0})
+        self.assertEqual(status, 200)
+        # writer is async; the handler waits for commit before 200 so it should
+        # already be persisted, but give a tiny margin.
+        for _ in range(20):
+            row = self.b.get_run("r1")
+            if row is not None and row["phase"] == "CI":
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.b.get_run("r1")["phase"], "CI")
+
+    def test_rejects_bad_repo(self):
+        status, _ = self._post({"run_id": "r1", "repo": "a;b/c", "issue": 1,
+                                "phase": "CI", "event_id": "e2"})
+        self.assertEqual(status, 400)
+        self.assertIsNone(self.b.get_run("r1"))  # not stored
+
+    def test_rejects_bad_run_id(self):
+        status, _ = self._post({"run_id": "a/b", "repo": "o/x", "issue": 1,
+                                "phase": "CI", "event_id": "e3"})
+        self.assertEqual(status, 400)
+
+    def test_rejects_bad_issue(self):
+        status, _ = self._post({"run_id": "r1", "repo": "o/x", "issue": -5,
+                                "phase": "CI", "event_id": "e4"})
+        self.assertEqual(status, 400)
+
+    def test_body_too_large(self):
+        status, _ = self._post({"run_id": "r1", "note": "x" * 70000,
+                                "event_id": "e5"})
+        self.assertEqual(status, 413)
+
+    def test_bad_json_400(self):
+        import urllib.request
+        import urllib.error
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/report",
+            data=b"{not json", method="POST",
+            headers={"X-Board-Token": self.token,
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        self.assertEqual(code, 400)
+
+    def test_worker_gate_claim_applied(self):
+        # a report carrying reviews=[["review","ok"]] writes the claimed gate.
+        self.b.seed_gates("r1", is_bug_fix=False, has_deploy=False)
+        status, _ = self._post({"run_id": "r1", "repo": "o/x", "issue": 1,
+                                "seq": 2, "phase": "review", "event_id": "e6",
+                                "event_ts": 2.0,
+                                "reviews": [["review", "ok"]]})
+        self.assertEqual(status, 200)
+        import time
+        for _ in range(20):
+            if self.b.gate_map("r1").get("review") == "ok":
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.b.gate_map("r1")["review"], "ok")
+
+    def test_worker_cannot_claim_verified_gate(self):
+        # a worker review for a gh-verified check (ci) must be ignored by the
+        # data layer (set_gate refuses verified checks).
+        self.b.seed_gates("r1", is_bug_fix=False, has_deploy=False)
+        self._post({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 2,
+                    "phase": "CI", "event_id": "e7", "event_ts": 2.0,
+                    "reviews": [["ci", "ok"]]})
+        import time
+        time.sleep(0.2)
+        # ci stays 'pending' (seeded) — a worker claim cannot flip it to ok.
+        self.assertEqual(self.b.gate_map("r1")["ci"], "pending")
+
+    # ---- GET endpoints ----
+    def test_home_renders_and_headers(self):
+        status, headers, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertEqual(headers.get("Content-Type"),
+                         "text/html; charset=utf-8")
+        # CSP: no script allowed
+        csp = headers.get("Content-Security-Policy", "")
+        self.assertIn("default-src 'none'", csp)
+        # no-CORS: must NOT advertise cross-origin access
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+        self.assertIn("Autopilot Board", body)
+
+    def test_ticket_route(self):
+        # persist a run, then fetch its ticket page
+        self._post({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                    "phase": "CI", "event_id": "e1", "event_ts": 1.0,
+                    "title": "<script>x</script>"})
+        import time
+        time.sleep(0.15)
+        status, headers, body = self._get("/ticket/r1")
+        self.assertEqual(status, 200)
+        self.assertIn("&lt;script&gt;", body)
+        self.assertNotIn("<script>x</script>", body)
+
+    def test_api_state_is_token_gated(self):
+        # without a token → 403; with the token → 200 JSON
+        self.assertEqual(self._get("/api/state")[0], 403)
+        status, headers, body = self._get("/api/state", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get("Content-Type", ""))
+        import json
+        data = json.loads(body)
+        self.assertIn("version", data)
+
+    def test_unknown_route_404(self):
+        self.assertEqual(self._get("/nope")[0], 404)
+
+    # ---- rate limit ----
+    def test_rate_limit_on_report(self):
+        # hammer /report; eventually the per-IP token bucket returns 429.
+        codes = set()
+        for i in range(400):
+            codes.add(self._post({"run_id": "r1", "repo": "o/x", "issue": 1,
+                                  "seq": 100 + i, "phase": "CI",
+                                  "event_id": f"rl{i}", "event_ts": 1.0})[0])
+            if 429 in codes:
+                break
+        self.assertIn(429, codes)
