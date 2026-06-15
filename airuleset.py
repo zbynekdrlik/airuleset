@@ -920,7 +920,7 @@ def setup_board_service():
       2. write the unit (repo path substituted) to ~/.config/systemd/user/
       3. loginctl enable-linger (best-effort — service survives logout)
       4. daemon-reload + enable --now (explicit XDG_RUNTIME_DIR)
-      5. curl 127.0.0.1:8787 for 200, then print the 10.77.9.21 LAN URL
+      5. curl the LAN URL for 200 (server binds the LAN IP, not loopback), then print it
     """
     import subprocess
     print("  Board host detected — installing systemd --user service")
@@ -962,11 +962,13 @@ def setup_board_service():
               f"  Run manually:\n{manual}", file=sys.stderr)
         return False
 
-    # 5. liveness check then print the LAN URL
-    if _wait_board_live("http://127.0.0.1:%d/" % BOARD_PORT):
+    # 5. liveness check then print the LAN URL.
+    # The server binds BOARD_HOST_IP (the scoped LAN interface, not 0.0.0.0/loopback),
+    # so the self-check MUST hit the LAN URL — 127.0.0.1 would falsely report "not live".
+    if _wait_board_live(board_url()):
         print(f"  Board is live. LAN URL: {board_url()}")
         return True
-    print(f"  Board service started but did NOT answer on 127.0.0.1:{BOARD_PORT}. "
+    print(f"  Board service started but did NOT answer on {board_url()}. "
           f"Check `systemctl --user status autopilot-board.service` and "
           f"`journalctl --user -u autopilot-board.service`.", file=sys.stderr)
     return False
