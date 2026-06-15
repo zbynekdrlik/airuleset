@@ -138,13 +138,15 @@ class TestUpsert(unittest.TestCase):
     def test_stale_report_does_not_clobber_content(self):
         b = self._b()
         b.apply_event({"run_id":"r1","repo":"o/x","issue":1,"seq":5,"phase":"merge",
-                       "goal":"refined goal","event_id":"e5","event_ts":5.0})
-        # stale lower-seq replay carrying an OLDER goal must NOT overwrite
+                       "goal":"refined goal","machine":"dev1","event_id":"e5","event_ts":5.0})
+        # stale lower-seq replay carrying an OLDER goal and OLDER machine must NOT overwrite
         b.apply_event({"run_id":"r1","seq":2,"phase":"implementing",
-                       "goal":"initial goal","event_id":"e2","event_ts":2.0})
+                       "goal":"initial goal","machine":"stale-machine",
+                       "event_id":"e2","event_ts":2.0})
         row = b.get_run("r1")
         self.assertEqual(row["goal"], "refined goal")
         self.assertEqual(row["phase"], "merge")
+        self.assertEqual(row["machine"], "dev1")  # Fix 2: machine is seq-guarded via _content()
 
     def test_seq_guard_ignores_stale(self):
         b = self._b()
@@ -186,6 +188,34 @@ class TestUpsert(unittest.TestCase):
         b.apply_event({"run_id": "r1", "seq": 3, "phase": "implementing",
                        "event_id": "e3", "event_ts": 3.0})
         self.assertEqual(b.get_run("r1")["phase"], "implementing")
+
+
+class TestWriterSurvivesBadEvent(unittest.TestCase):
+    """Fix 1: writer thread logs exceptions and survives; subsequent good events land."""
+
+    def test_writer_survives_bad_event(self):
+        import threading
+        from board.db import Board
+        b = Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+        t = b.start_writer()
+
+        # Inject a malformed event (missing 'run_id' key) directly onto the queue
+        # so _apply raises KeyError — simulating a production write failure.
+        bad_done = threading.Event()
+        b._wq.put((b._apply, {}, bad_done))
+        bad_done.wait(timeout=2)
+
+        # Writer must still be alive and able to process a subsequent good event.
+        good_ev = {"run_id": "r_good", "repo": "o/x", "issue": 7, "seq": 1,
+                   "phase": "implementing", "event_id": "eg1", "event_ts": 1.0}
+        b.submit(good_ev, wait=True, timeout=2)
+
+        row = b.get_run("r_good")
+        self.assertIsNotNone(row, "good event must persist after writer survived bad one")
+        self.assertEqual(row["phase"], "implementing")
+
+        b._wq.put(None)  # stop writer
+        t.join(timeout=2)
 
 
 class TestConcurrentWrites(unittest.TestCase):

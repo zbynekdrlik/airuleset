@@ -21,6 +21,9 @@ import sqlite3
 import threading
 import queue
 import time
+import logging
+
+_log = logging.getLogger("autopilot_board")
 
 # Migration list. Index i (0-based) is migration version i+1. Migration 1 is the
 # initial schema; future migrations append idempotent ALTER TABLE ADD COLUMN
@@ -127,6 +130,10 @@ class Board:
                     fn(c, ev)
                     c.commit()
                 except Exception:
+                    _log.exception(
+                        "board writer failed to apply event %s",
+                        (ev or {}).get("event_id"),
+                    )
                     c.rollback()
                 finally:
                     if done is not None:
@@ -207,6 +214,8 @@ class Board:
         # non-null value must NOT move state backwards (spec §4). We pass None
         # for those columns when stale so COALESCE(excluded.x, runs.x) preserves
         # the newer stored value. (phase is already handled above; seq=MAX stays.)
+        # equal seq treated as fresh (last-writer-wins); ties unexpected in
+        # practice because seq is reporter-monotonic per run.
         fresh = (cur is None) or (seq >= cur_seq)
 
         def _content(key):
@@ -217,6 +226,8 @@ class Board:
         # stored value (phase-only reports never null goal/approach/result, and
         # stale reports pass None so they cannot overwrite newer content).
         # seq=MAX(runs.seq, excluded.seq): the stored seq never decreases.
+        # machine/worker use _content() (seq-guarded) for consistency with all
+        # other run-stable content columns.
         c.execute(
             """
           INSERT INTO runs(
@@ -245,7 +256,7 @@ class Board:
              "title": _content("title"), "goal": _content("goal"),
              "approach": _content("approach"), "result": _content("result"),
              "phase": new_phase, "status": _content("status"),
-             "machine": ev.get("machine"), "worker": ev.get("worker"),
+             "machine": _content("machine"), "worker": _content("worker"),
              "seq": seq, "is_bug_fix": int(ev.get("is_bug_fix", 0)),
              "has_deploy": int(ev.get("has_deploy", 0)),
              "merge_mode": ev.get("merge_mode", "auto"),
@@ -292,6 +303,8 @@ class Board:
             cur = c.execute(
                 "SELECT seq FROM gate WHERE run_id=? AND check_name=?",
                 (rid, check)).fetchone()
+            # equal seq treated as fresh (last-writer-wins); ties unexpected in
+            # practice because seq is reporter-monotonic per run.
             if cur is not None and seq < (cur["seq"] or 0):
                 return  # stale — older than what we already have
             c.execute(
