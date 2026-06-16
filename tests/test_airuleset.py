@@ -136,6 +136,7 @@ class TestHookScriptsExist(TestCase):
             "stop-check-untracked-work.sh",
             "stop-check-status-marker.sh",
             "stop-check-prod-gating.sh",
+            "stop-check-sendmessage-narration.sh",
             "autopilot-report.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
@@ -1397,3 +1398,56 @@ class TestAutopilotReportHook(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestSendMessageNarrationHook(TestCase):
+    """hooks/stop-check-sendmessage-narration.sh — blocks the "SendMessage isn't
+    available here, so I'll dispatch a fresh worker" narration (subagent-
+    continuation.md), while letting rule-discussion and normal dispatches pass."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-sendmessage-narration.sh"
+    _n = 0
+
+    def _sid(self):
+        TestSendMessageNarrationHook._n += 1
+        sid = f"test-smn-{os.getpid()}-{TestSendMessageNarrationHook._n}"
+        self.addCleanup(
+            lambda: os.path.exists(f"/tmp/airuleset-sendmessage-narration-block-{sid}")
+            and os.remove(f"/tmp/airuleset-sendmessage-narration-block-{sid}"))
+        return sid
+
+    def _run(self, msg):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True)
+
+    def _blocked(self, r):
+        return r.returncode == 0 and '"block"' in r.stdout
+
+    def _clean(self, r):
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    def test_exact_user_phrasing_blocked(self):
+        r = self._run("(SendMessage to that worker isn't available here, so I'm "
+                      "dispatching a fresh worker to execute the decision, with the "
+                      "finding embedded and the restreamer OBS skill enforced.)")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_short_form_blocked(self):
+        r = self._run("SendMessage isn't available here, dispatching a fresh worker.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_rule_discussion_allowed(self):
+        r = self._run("Per subagent-continuation.md, never narrate that SendMessage "
+                      "is unavailable — just dispatch the fresh worker silently.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_explaining_why_allowed(self):
+        r = self._run("Why isn't SendMessage available? It is gated behind "
+                      "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS — a known CC limitation.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_normal_dispatch_allowed(self):
+        r = self._run("Dispatched the worker for issue #42 with the OBS skill "
+                      "enforced. CI green, merged. Done.")
+        self.assertTrue(self._clean(r), r.stdout)
