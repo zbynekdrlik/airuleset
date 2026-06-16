@@ -45,7 +45,7 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from board import (PORT, BOARD_HOST_IP, BODY_MAX, GH_POLL_FLOOR_S,
-                   TERMINAL_PHASES)
+                   QUEUE_ITEM_TTL_S, TERMINAL_PHASES)
 from board import gh as ghmod
 from board import render
 
@@ -114,6 +114,7 @@ def _run_card_dict(board, run):
         "approach": run["approach"], "result": run["result"],
         "machine": run["machine"], "status": run["status"],
         "pr_url": pr_url, "gate": gate, "alarms": alarms,
+        "updated_str": _fmt_ts(run["updated_at"]),
     }
 
 
@@ -254,10 +255,18 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
             except Exception:
                 _log.exception("health query failed")
                 last_report, touched = None, 0
-            return {
+            h = {
                 "last_report": _fmt_ts(last_report),
                 "runs_last_hour": touched,
             }
+            # gh refresher degraded (rate limit / outage)? surface it so the
+            # header shows the STALE banner render already supports, instead of
+            # the board silently serving gh signals that stopped updating.
+            since = getattr(board, "_gh_degraded_since", None)
+            if since:
+                h["gh_stale"] = True
+                h["gh_stale_since"] = _fmt_ts(since)
+            return h
 
         def _api_state(self):
             runs = []
@@ -462,6 +471,37 @@ def _maybe_prune(board, repo, open_issue_numbers):
         _log.exception("prune_queue failed for repo %s", repo)
 
 
+def _apply_repo_refresh(board, repo, res):
+    """Map ONE `fetch_repo_active` result onto the board — the testable unit of
+    the refresher's per-repo work. Caller guarantees res['gh_ok'] is True.
+
+      * prune the queue to the open-issue set,
+      * fan each PR's gh signals to the RUN of the issue(s) it CLOSES — keyed on
+        the closed issue number, NEVER the PR number (PR# != issue#, the bug
+        that left gh_state empty so nothing was ever reconciled),
+      * record OPEN/CLOSED issue_state per matched run,
+      * finalise as done every run whose issue is no longer open (the main
+        false-STALE_ABANDONED fix) — SKIPPED when the open list was capped, since
+        'not open' is then unreliable (merged-PR reconcile still covers those).
+    """
+    open_issues = res.get("open_issues", set()) or set()
+    capped = res.get("issues_capped", False)
+    _maybe_prune(board, repo, open_issues)
+    for pr in res.get("prs", []):
+        for issue_num in pr.get("closes", []):
+            rid = board.newest_active_run(repo, issue_num)
+            if not rid:
+                continue
+            board.set_gh(
+                rid, pr_url=pr.get("url"), pr_state=pr.get("pr_state"),
+                merged=pr.get("merged"), mergeable=pr.get("mergeable"),
+                mergeable_state=pr.get("mergeable_state"),
+                mergeable_gate=pr.get("mergeable_gate"),
+                issue_state=("CLOSED" if issue_num not in open_issues else "OPEN"))
+    if not capped:
+        board.reconcile_closed(repo, open_issues, time.time())
+
+
 def _refresher_loop(board, static_repos, stop):
     """Background gh refresher (design §8): batched per-repo fetch on a loop with
     a GH_POLL_FLOOR_S floor, per-repo try/except so one repo's failure never
@@ -487,42 +527,37 @@ def _refresher_loop(board, static_repos, stop):
             if r and r not in seen and valid_repo(r):
                 seen.add(r)
                 repos.append(r)
+        cycle_failed = False
         for repo in repos:
             try:
                 res = fetch_repo_active(repo)
                 if not res.get("gh_ok"):
+                    cycle_failed = True
                     _log.warning("gh refresh for %s not ok (rate_limited=%s)",
                                  repo, res.get("rate_limited"))
                     continue
-                # Prune closed issues from the queue for this repo. The open
-                # issue set comes from the issues list returned by fetch_repo_active
-                # (design §8 — the refresher already fetches all open issues).
-                open_issue_numbers = {
-                    i.get("number") for i in res.get("issues", [])
-                    if i.get("number") is not None}
-                _maybe_prune(board, repo, open_issue_numbers)
-                for pr in res.get("prs", []):
-                    num = pr.get("number")
-                    if num is None:
-                        continue
-                    rid = board.newest_active_run(repo, num)
-                    if not rid:
-                        continue
-                    board.set_gh(
-                        rid, pr_url=pr.get("url"), pr_state=pr.get("pr_state"),
-                        merged=pr.get("merged"),
-                        mergeable=pr.get("mergeable"),
-                        mergeable_state=pr.get("mergeable_state"),
-                        mergeable_gate=pr.get("mergeable_gate"))
+                _apply_repo_refresh(board, repo, res)
             except Exception:
+                cycle_failed = True
                 _log.exception("refresher failed for repo %s", repo)
+        # Track gh refresher health for the header banner: first failure stamps
+        # _gh_degraded_since; a fully-clean cycle clears it.
+        if cycle_failed:
+            if getattr(board, "_gh_degraded_since", None) is None:
+                board._gh_degraded_since = time.time()
+        else:
+            board._gh_degraded_since = None
         try:
-            board.mark_stale(time.time())
+            now = time.time()
+            board.mark_stale(now)
+            board.prune_queue_expired(now, QUEUE_ITEM_TTL_S)
         except Exception:
-            _log.exception("reaper (mark_stale) failed")
-        # honour the poll floor (sleep the remainder; never below the floor)
+            _log.exception("reaper (mark_stale/prune) failed")
+        # honour the poll floor: sleep only the REMAINDER to reach the floor
+        # (max(0, …)); the old max(FLOOR, …) always slept a FULL floor on top of
+        # the cycle, halving the refresh rate.
         elapsed = time.monotonic() - start
-        stop.wait(max(GH_POLL_FLOOR_S, GH_POLL_FLOOR_S - elapsed))
+        stop.wait(max(0.0, GH_POLL_FLOOR_S - elapsed))
 
 
 def run_server(board, token, host=BOARD_HOST_IP, port=PORT, repos=None):
@@ -538,6 +573,7 @@ def run_server(board, token, host=BOARD_HOST_IP, port=PORT, repos=None):
             f"running (or a stale process holds the port). Refusing to start.")
     version = _git_version()
     board.start_writer()
+    board._gh_degraded_since = None   # gh-refresher health for the header banner
     stop = threading.Event()
     # Always start the refresher: it merges static_repos (BOARD_REPOS env) with
     # board.distinct_repos() each cycle, so it activates the moment any worker

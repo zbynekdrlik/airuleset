@@ -104,13 +104,55 @@ def current_run(repo, issue):
     return _load(_p("autopilot-board-runs.json")).get(f"{repo}#{issue}")
 
 
+def run_to_repo_issue(rid):
+    """Reverse the persisted repo#issue -> run_id map to recover (repo, issue)
+    for a run_id, or (None, None). Lets a mid-run `report --run <rid>` re-attach
+    the run's repo/issue without the worker re-supplying them — otherwise the
+    board row is inserted with NULL repo/issue and can never be joined to gh
+    signals (the unjoinable / empty repo|issue rows)."""
+    runs = _load(_p("autopilot-board-runs.json"))
+    for key, val in runs.items():
+        if val == rid:
+            repo, sep, issue = key.rpartition("#")
+            if not sep:
+                return None, None
+            try:
+                return (repo or None), int(issue)
+            except (ValueError, TypeError):
+                return (repo or None), None
+    return None, None
+
+
 def next_seq(rid):
-    """Monotonic per-run sequence number, persisted across invocations."""
+    """Monotonic per-run sequence number, persisted across invocations.
+
+    flock-guarded (blocking LOCK_EX): each separate `report` invocation is its
+    own process, and parallel reports for the SAME run otherwise race on the
+    read-modify-write and hand out a DUPLICATE seq — which lets an older event
+    overwrite a newer one (db treats equal seq as last-writer-wins). A unique
+    seq is required, so we BLOCK on the lock rather than skip."""
+    _ensure_state_dir()
     f = _p(f"autopilot-board-seq-{rid}.json")
-    d = _load(f)
-    d["seq"] = d.get("seq", 0) + 1
-    _save(f, d)
-    return d["seq"]
+    h = open(f, "a+")
+    try:
+        fcntl.flock(h, fcntl.LOCK_EX)
+        h.seek(0)
+        raw = h.read()
+        try:
+            seq = json.loads(raw).get("seq", 0) if raw.strip() else 0
+        except Exception:
+            seq = 0
+        seq += 1
+        h.seek(0)
+        h.truncate()
+        h.write(json.dumps({"seq": seq}))
+        h.flush()
+        return seq
+    finally:
+        try:
+            fcntl.flock(h, fcntl.LOCK_UN)
+        finally:
+            h.close()
 
 
 # --- secret scrub --------------------------------------------------------

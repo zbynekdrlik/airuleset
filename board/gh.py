@@ -127,15 +127,29 @@ def _is_rate_limited(returncode, stderr):
             or "api rate limit exceeded" in s)
 
 
+def closing_issue_numbers(pr):
+    """Issue numbers this PR closes, from `closingIssuesReferences` — the ONLY
+    reliable PR->issue link (a PR's own number is NOT its issue's number). gh
+    returns a list of {"number": N, ...}; we keep the ints. Empty when the PR
+    closes nothing the board can see."""
+    out = []
+    for ref in (pr.get("closingIssuesReferences") or []):
+        n = ref.get("number") if isinstance(ref, dict) else None
+        if isinstance(n, int):
+            out.append(n)
+    return out
+
+
 def classify_pr(pr):
-    """Map a `gh pr view --json state,mergedAt,mergeable,mergeStateStatus` dict
-    to the board's classification.
+    """Map a `gh pr view --json state,mergedAt,mergeable,mergeStateStatus,
+    closingIssuesReferences` dict to the board's classification.
 
     Returns dict(merged, pr_state, mergeable(None|bool), mergeable_state,
-    mergeable_gate). `mergeable_gate` uses board.gate.mergeable_ok:
+    mergeable_gate, closes). `mergeable_gate` uses board.gate.mergeable_ok:
       * ok      — mergeable is True AND mergeStateStatus == 'CLEAN'
       * pending — mergeable is None or 'UNKNOWN' (GitHub still computing)
       * fail    — anything else (UNSTABLE/BLOCKED/BEHIND/DIRTY/CONFLICTING)
+    `closes` is the list of issue numbers the PR closes (PR->run linkage).
     """
     state = pr.get("state")
     merged = state == "MERGED" or bool(pr.get("mergedAt"))
@@ -152,13 +166,22 @@ def classify_pr(pr):
         "mergeable": mb,
         "mergeable_state": mergeable_state,
         "mergeable_gate": gate,
+        "closes": closing_issue_numbers(pr),
     }
 
 
 # ---- batched per-repo fetch (the refresher's unit of work) -----------------
 
-_PR_JSON_FIELDS = "number,url,state,mergedAt,mergeable,mergeStateStatus"
+_PR_JSON_FIELDS = ("number,url,state,mergedAt,mergeable,mergeStateStatus,"
+                   "closingIssuesReferences")
 _ISSUE_JSON_FIELDS = "number,state"
+# List caps. A repo with MORE than this many open PRs/issues would silently
+# truncate — and a truncated open-issue set is dangerous (a closed-issue
+# reconcile would falsely finalise an open issue beyond the cap), so
+# fetch_repo_active also returns `issues_capped` so the caller can SKIP the
+# open-set reconcile when the cap was hit (merged-PR reconcile is unaffected).
+_PR_LIMIT = 200
+_ISSUE_LIMIT = 300
 
 
 def fetch_repo_active(repo, timeout=20):
@@ -178,15 +201,15 @@ def fetch_repo_active(repo, timeout=20):
         return {"gh_ok": False, "rate_limited": False}
     try:
         rc1, out1, err1 = _gh(
-            ["pr", "list", "--repo", repo, "--state", "all", "--limit", "60",
-             "--json", _PR_JSON_FIELDS],
+            ["pr", "list", "--repo", repo, "--state", "all",
+             "--limit", str(_PR_LIMIT), "--json", _PR_JSON_FIELDS],
             timeout=timeout)
         if rc1 != 0:
             return {"gh_ok": False,
                     "rate_limited": _is_rate_limited(rc1, err1)}
         rc2, out2, err2 = _gh(
-            ["issue", "list", "--repo", repo, "--state", "open", "--limit", "100",
-             "--json", _ISSUE_JSON_FIELDS],
+            ["issue", "list", "--repo", repo, "--state", "open",
+             "--limit", str(_ISSUE_LIMIT), "--json", _ISSUE_JSON_FIELDS],
             timeout=timeout)
         if rc2 != 0:
             return {"gh_ok": False,
@@ -208,4 +231,9 @@ def fetch_repo_active(repo, timeout=20):
         prs.append(c)
     open_issues = {i.get("number") for i in issues_raw
                    if i.get("state") == "OPEN" and i.get("number") is not None}
-    return {"gh_ok": True, "prs": prs, "open_issues": open_issues}
+    # If the open-issue list hit the cap, "not in open_issues" is unreliable
+    # (open issues beyond the cap are missing) — the caller must NOT run the
+    # closed-issue reconcile for this repo, or it would falsely finalise them.
+    issues_capped = len(issues_raw) >= _ISSUE_LIMIT
+    return {"gh_ok": True, "prs": prs, "open_issues": open_issues,
+            "issues_capped": issues_capped}

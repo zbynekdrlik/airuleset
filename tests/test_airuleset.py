@@ -1170,7 +1170,6 @@ class TestMonitoredReposDiscovery(TestCase):
         import unittest.mock as m
         import tempfile
         from board.db import Board
-        from board import gh as ghmod
         d = tempfile.mkdtemp()
         db_path = os.path.join(d, "board.sqlite")
         b = Board(db_path)
@@ -1298,6 +1297,38 @@ class TestReportCommand(TestCase):
         # phase passed through; run_id is the first positional arg.
         self.assertEqual(rep.call_args.args[0], "o_x-1-99-abcd")
         self.assertEqual(rep.call_args.kwargs.get("phase"), "CI")
+
+    def test_report_resolves_run_from_repo_issue(self):
+        # No --run: resolve the run_id from --repo/--issue (the worker's $RUN
+        # shell var does not survive across separate `report` invocations).
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
+                      run=None, repo="o/x", issue=5, phase="CI", goal=None,
+                      approach=None, result=None, note=None, pr=None, review=None)
+        with m.patch.object(reporter, "current_run", return_value="o_x-5-1-aa") as cr:
+            with m.patch.object(reporter, "report") as rep:
+                airuleset.cmd_report(args)
+        cr.assert_called_once_with("o/x", 5)
+        self.assertEqual(rep.call_args.args[0], "o_x-5-1-aa")
+        # repo/issue carried on the event so the board row is never NULL
+        self.assertEqual(rep.call_args.kwargs.get("repo"), "o/x")
+        self.assertEqual(rep.call_args.kwargs.get("issue"), 5)
+
+    def test_report_recovers_repo_issue_from_run_id(self):
+        # --run given but no --repo/--issue: recover them from the persisted map
+        # so the mid-run event carries repo/issue (no NULL/unjoinable row).
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
+                      run="o_x-9-1-bb", repo=None, issue=None, phase="merge",
+                      goal=None, approach=None, result=None, note=None, pr=None,
+                      review=None)
+        with m.patch.object(reporter, "run_to_repo_issue", return_value=("o/x", 9)):
+            with m.patch.object(reporter, "report") as rep:
+                airuleset.cmd_report(args)
+        self.assertEqual(rep.call_args.kwargs.get("repo"), "o/x")
+        self.assertEqual(rep.call_args.kwargs.get("issue"), 9)
 
     def test_report_review_parsing(self):
         # k=v review flags become (check, state) pairs; malformed are dropped.

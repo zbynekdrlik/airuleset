@@ -24,7 +24,7 @@ stdlib only.
 """
 import html
 
-from board import AUTO_REFRESH_S, ALL_PHASES
+from board import AUTO_REFRESH_S, ALL_PHASES, TERMINAL_PHASES
 
 
 # --------------------------------------------------------------------------- #
@@ -306,6 +306,18 @@ def _card(run):
     upd = run.get("updated_str") or run.get("status")
     foot_bits = f"<span class=\"host\">{_e(run.get('machine'))}" \
                 f"{(' · ' + _e(upd)) if upd else ''}</span>"
+    # A finished run (terminal phase, no alarm) reads as DONE — a single green
+    # pill — NOT a wall of grey "pending" gate pills. Workers rarely self-report
+    # every gate, and a merged/closed issue passed GitHub's own gates already;
+    # showing the full pending checklist on a solved ticket made the board look
+    # like nothing had passed. Live runs still show the gate checklist (the
+    # governance-audit view), and a terminal run WITH an alarm shows its pills so
+    # the failing gate stays visible.
+    terminal = phase in TERMINAL_PHASES
+    if terminal and not alarms:
+        gates_html = "<div class=\"gate\"><span class=\"g ok\">done✓</span></div>"
+    else:
+        gates_html = _gate_pills(run.get("gate") or {})
     return (
         f"<article class=\"tk{' alarm' if alarms else ''}\">"
         f"<div class=\"row1\"><span class=\"repo\">{_repo_issue(run)}</span>{badge}</div>"
@@ -313,7 +325,7 @@ def _card(run):
         + _meta("Goal", run.get("goal"))
         + _meta("Approach", run.get("approach"))
         + _meta("Result", run.get("result"))
-        + _gate_pills(run.get("gate") or {})
+        + gates_html
         + _alarmtxt(alarms)
         + f"<div class=\"foot\">{foot_bits}{pr}</div>"
         + "</article>"

@@ -610,7 +610,7 @@ def cmd_status(args):
         print("  Does not exist")
 
     # --- Skills ---
-    print(f"\n~/.claude/skills/:")
+    print("\n~/.claude/skills/:")
     for skill in SKILL_NAMES:
         link = SKILLS_DIR / skill
         expected_target = REPO_DIR / "skills" / skill
@@ -634,7 +634,7 @@ def cmd_status(args):
             print(f"\n  Unmanaged skills: {', '.join(sorted(unmanaged))}")
 
     # --- Hooks ---
-    print(f"\n~/.claude/settings.json hooks:")
+    print("\n~/.claude/settings.json hooks:")
     if SETTINGS_JSON.exists():
         try:
             settings = json.loads(SETTINGS_JSON.read_text())
@@ -710,11 +710,29 @@ def cmd_report(args):
             _report_selftest(reporter)
             return
 
-        # default: a phase / heartbeat / field event for an existing run
+        # default: a phase / heartbeat / field event for an existing run.
+        # Resolve the run id ROBUSTLY: prefer --run, else look it up from
+        # --repo/--issue (the persisted map). The worker's $RUN shell var does
+        # NOT survive across separate `report` invocations (each runs in a fresh
+        # shell), which silently dropped every mid-run phase report.
         rid = args.run
+        repo = getattr(args, "repo", None)
+        issue = getattr(args, "issue", None)
         if not rid:
-            print("report: --run is required (or use --start)", file=sys.stderr)
-            return
+            if repo and issue is not None:
+                rid = reporter.current_run(repo, issue)
+            if not rid:
+                print("report: need --run, or --repo+--issue of a started run",
+                      file=sys.stderr)
+                return
+        # Recover repo/issue from the run id when not supplied, so EVERY event
+        # carries them. A mid-run report with NULL repo/issue created a board row
+        # that could never be joined to gh signals (and the empty repo|issue
+        # stale rows).
+        if repo is None or issue is None:
+            r2, i2 = reporter.run_to_repo_issue(rid)
+            repo = repo if repo is not None else r2
+            issue = issue if issue is not None else i2
         reviews = _parse_reviews(getattr(args, "review", None))
         fields = {}
         for k in ("goal", "approach", "result", "note", "pr", "phase"):
@@ -724,6 +742,10 @@ def cmd_report(args):
         # --pr maps to the pr_url field the board stores
         if "pr" in fields:
             fields["pr_url"] = fields.pop("pr")
+        if repo is not None:
+            fields["repo"] = repo
+        if issue is not None:
+            fields["issue"] = issue
         phase = fields.pop("phase", None)
         if getattr(args, "heartbeat", False) and phase is None and "note" not in fields:
             # a bare heartbeat carries no phase/field — just a liveness ping
@@ -761,7 +783,7 @@ def _report_selftest(reporter):
         "event_ts": time.time(),
         "machine": os.uname().nodename,
         "repo": "selftest/ping",
-        "issue": 0,
+        "issue": 1,
         "title": "board selftest ping",
         "note": "synthetic selftest ping",
     }
@@ -1001,8 +1023,8 @@ def setup_board_service():
 
     manual = (
         "    loginctl enable-linger $(whoami)\n"
-        f"    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
-        f"    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
         "autopilot-board.service")
 
     # 3. linger (best-effort, not fatal)
@@ -1319,6 +1341,29 @@ def cmd_push(args):
             print(f"  FAILED: {ssh_result.stderr.strip()}")
         else:
             print(f"  {ssh_result.stdout.strip()}")
+
+        # Distribute the board token so this remote's reporter can POST to the
+        # token-gated board. Without it EVERY report is 403-rejected and the
+        # reporter DROPS it (4xx = poison), so the remote's autopilot runs never
+        # appear on the board (the dev2 "no statuses" bug). The board host holds
+        # the authoritative token; copy it over ssh stdin (0600).
+        if BOARD_TOKEN_PATH.exists():
+            try:
+                token_val = BOARD_TOKEN_PATH.read_text()
+                tok_result = subprocess.run(
+                    ["sshpass", "-p", "newlevel", "ssh",
+                     "-o", "StrictHostKeyChecking=no",
+                     f"{remote['user']}@{remote['host']}",
+                     "umask 077; mkdir -p ~/.claude && "
+                     "cat > ~/.claude/autopilot-board.token"],
+                    input=token_val, capture_output=True, text=True, timeout=30)
+                if tok_result.returncode == 0:
+                    print(f"  board token distributed to {remote['name']}")
+                else:
+                    print(f"  WARN: board token copy failed: "
+                          f"{tok_result.stderr.strip()}")
+            except Exception as e:
+                print(f"  WARN: board token copy error: {e}")
     print("\nAll deployments complete.")
 
 

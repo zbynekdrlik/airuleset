@@ -241,6 +241,16 @@ class Board:
         def _content(key):
             return ev.get(key) if fresh else None
 
+        # A terminal phase must NEVER stay 'stale': a run that reaches
+        # done/stopped/obsolete-closed is finished, so force its status to the
+        # terminal phase name. COALESCE(:status_force, ...) below applies this
+        # only when status_force is non-NULL (i.e. only for terminal phases);
+        # non-terminal reports keep the existing COALESCE-against-stored
+        # behaviour. Without this, a worker 'done' report (which carries no
+        # status) left an earlier reaper-set status='stale' in place — the
+        # phase=done/status=stale mismatch that hid finished runs (#620).
+        status_force = new_phase if new_phase in TERMINAL_PHASES else None
+
         # ---- atomic seq-guarded COALESCE upsert ----
         # COALESCE(excluded.x, runs.x): a NULL incoming field preserves the
         # stored value (phase-only reports never null goal/approach/result, and
@@ -275,7 +285,7 @@ class Board:
             {"run_id": rid, "repo": ev.get("repo"), "issue": ev.get("issue"),
              "title": _content("title"), "goal": _content("goal"),
              "approach": _content("approach"), "result": _content("result"),
-             "phase": new_phase, "status": _content("status"),
+             "phase": new_phase, "status": status_force or _content("status"),
              "machine": _content("machine"), "worker": _content("worker"),
              "seq": seq, "is_bug_fix": int(ev.get("is_bug_fix", 0)),
              "has_deploy": int(ev.get("has_deploy", 0)),
@@ -559,7 +569,8 @@ class Board:
                 f"""SELECT run_id FROM runs
                     WHERE repo=? AND issue=?
                       AND (phase IS NULL OR phase NOT IN ({placeholders}))
-                      AND (status IS NULL OR status != 'stale')
+                      AND (status IS NULL OR status != 'stale'
+                           OR phase='asking-user')
                     ORDER BY started_at DESC, updated_at DESC
                     LIMIT 1""",
                 (repo, issue, *TERMINAL_PHASES)).fetchone()
@@ -625,6 +636,61 @@ class Board:
             c.close()
         return reconciled, stale
 
+    def reconcile_closed(self, repo, open_issues, now):
+        """Finalise as `done` every non-terminal run for `repo` whose issue is
+        no longer OPEN on GitHub (issue not in `open_issues`). GitHub is the
+        ground truth for completion: a closed/merged issue is done regardless of
+        whether the worker sent a final report — this is what kills the false
+        STALE_ABANDONED on issues autopilot actually solved.
+
+        The CALLER must pass a TRUSTWORTHY open set (gh_ok AND the issue list was
+        NOT capped); a truncated set would falsely finalise still-open issues.
+        Returns the count reconciled. Runs on the single writer thread."""
+        from board import TERMINAL_PHASES
+        open_set = set(open_issues or ())
+        term = ",".join("?" * len(TERMINAL_PHASES))
+        n = 0
+        c = self.conn()
+        try:
+            rows = c.execute(
+                f"""SELECT run_id, issue FROM runs
+                    WHERE repo=?
+                      AND (phase IS NULL OR phase NOT IN ({term}))
+                      AND issue IS NOT NULL""",
+                (repo, *TERMINAL_PHASES)).fetchall()
+            for row in rows:
+                if row["issue"] in open_set:
+                    continue  # still open on gh — leave it
+                c.execute(
+                    """UPDATE runs SET phase='done', status='done',
+                         result = CASE WHEN result IS NULL OR result=''
+                                       THEN 'completed per gh — issue closed'
+                                       ELSE result END,
+                         updated_at=?
+                       WHERE run_id=?""",
+                    (now, row["run_id"]))
+                n += 1
+            if n:
+                c.commit()
+        finally:
+            c.close()
+        return n
+
+    def prune_queue_expired(self, now, ttl):
+        """Drop queue rows older than `ttl` seconds (by reported_at) so a stale
+        planned backlog never lingers forever (the reported_at column was
+        written but never read). Returns the number deleted."""
+        c = self.conn()
+        try:
+            cur = c.execute(
+                "DELETE FROM queue WHERE reported_at IS NOT NULL "
+                "AND reported_at < ?", (now - ttl,))
+            if cur.rowcount:
+                c.commit()
+            return cur.rowcount
+        finally:
+            c.close()
+
     # ----- repo discovery (for gh refresher auto-discovery) -----------------
 
     def distinct_repos(self):
@@ -686,28 +752,26 @@ class Board:
 
     def get_queue(self):
         """Return queued items ordered by (repo, position), EXCLUDING any
-        (repo, issue) pair that currently has a non-terminal run in the `runs`
-        table. An active ticket shows under Live, not in the queue.
+        (repo, issue) pair that has ANY run in the `runs` table — live, done,
+        OR stale. "Up next" means NOT-YET-STARTED: the moment an issue has a run
+        of any kind it has been worked, so it belongs under Live or Recent, not
+        the queue. (The old filter only excluded non-terminal non-stale runs, so
+        DONE and STALE issues lingered in "Up next" — the user saw finished
+        tickets listed as still-to-do.)
 
         Returns a list of sqlite Rows with columns: repo, issue, title, position."""
-        from board import TERMINAL_PHASES
-        placeholders = ",".join("?" * len(TERMINAL_PHASES))
         c = self.conn()
         try:
             rows = c.execute(
-                f"""
+                """
                 SELECT q.repo, q.issue, q.title, q.position
                 FROM queue q
                 WHERE NOT EXISTS (
                     SELECT 1 FROM runs r
-                    WHERE r.repo = q.repo
-                      AND r.issue = q.issue
-                      AND (r.phase IS NULL OR r.phase NOT IN ({placeholders}))
-                      AND (r.status IS NULL OR r.status != 'stale')
+                    WHERE r.repo = q.repo AND r.issue = q.issue
                 )
                 ORDER BY q.repo, q.position
-                """,
-                tuple(TERMINAL_PHASES)).fetchall()
+                """).fetchall()
             return list(rows)
         finally:
             c.close()

@@ -8,6 +8,7 @@ CIRCUIT_BREAKER_S = 60      # skip network this long after a failure
 FLUSH_CAP = 200             # max queued events flushed per reporter invocation
 QUEUE_MAX_BYTES = 5 * 1024 * 1024
 QUEUE_TTL_S = 6 * 3600      # drop queued events older than this on flush
+QUEUE_ITEM_TTL_S = 14 * 24 * 3600  # planned "Up next" rows expire after this
 BODY_MAX = 64 * 1024        # max POST body
 EVENT_CAP_PER_RUN = 500     # prune older events beyond this per run
 STALE_ACTIVE_S = 8 * 60     # heartbeat threshold, active phases

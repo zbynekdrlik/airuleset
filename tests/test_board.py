@@ -6,10 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 class TestConstants(unittest.TestCase):
     def test_constants_present(self):
-        from board import (PORT, BOARD_HOST_IP, REPORT_TIMEOUT, CIRCUIT_BREAKER_S,
-                           FLUSH_CAP, QUEUE_MAX_BYTES, QUEUE_TTL_S, BODY_MAX,
-                           EVENT_CAP_PER_RUN, STALE_ACTIVE_S, STALE_WAIT_S,
-                           GH_POLL_FLOOR_S, TERMINAL_PHASES)
+        from board import (PORT, BOARD_HOST_IP, REPORT_TIMEOUT, TERMINAL_PHASES)
         self.assertEqual(PORT, 8787)
         self.assertEqual(BOARD_HOST_IP, os.getenv("BOARD_HOST", "10.77.9.21"))
         self.assertEqual(REPORT_TIMEOUT, 2)
@@ -52,11 +49,27 @@ class TestAlarm(unittest.TestCase):
                             "plan_check":"ok","review":"ok","requesting_code_review":"ok"})
         self.assertNotIn("MERGED_INCOMPLETE_GATE", compute_alarms(r))
 
-    def test_merged_missing_rcr_alarms(self):
+    def test_merged_unreported_gate_no_alarm(self):
+        # BEHAVIOUR CHANGE (justified): a merged PR already passed GitHub branch
+        # protection (CI + required reviews enforced at merge time), so the merge
+        # IS the gate evidence. A merely UNREPORTED (pending) worker gate is NOT
+        # a failure — flagging it turned every solved-but-partially-reported run
+        # into a red MERGED_INCOMPLETE_GATE, which is the core "board shows my
+        # finished work as broken" complaint. Only a VERIFIED 'fail' alarms now.
         from board.gate import compute_alarms
         r = self._run(merged=True, phase="done",
                       gate={"ci":"ok","mergeable":"ok","plan_check":"ok",
                             "review":"ok","ticket_validated":"ok"})  # rcr missing→pending
+        self.assertNotIn("MERGED_INCOMPLETE_GATE", compute_alarms(r))
+
+    def test_merged_failed_gate_still_alarms(self):
+        # A gate VERIFIED as 'fail' (not merely unreported) DOES alarm — a real
+        # failure slipped past the merge.
+        from board.gate import compute_alarms
+        r = self._run(merged=True, phase="done",
+                      gate={"ci":"ok","mergeable":"ok","plan_check":"fail",
+                            "review":"ok","requesting_code_review":"ok",
+                            "ticket_validated":"ok"})
         self.assertIn("MERGED_INCOMPLETE_GATE", compute_alarms(r))
 
     def test_merged_unstable_alarms(self):
@@ -488,7 +501,8 @@ class TestReporter(unittest.TestCase):
     def test_report_nonexistent_state_dir_does_not_raise(self):
         """C1: report() must not raise when STATE_DIR doesn't exist."""
         import board.reporter as rp
-        import tempfile, os
+        import tempfile
+        import os
         # Point STATE_DIR at a path whose parent also doesn't exist
         deep = os.path.join(tempfile.mkdtemp(), "nonexistent", "subdir")
         rp.STATE_DIR = deep
@@ -1399,3 +1413,224 @@ class TestDistinctRepos(unittest.TestCase):
         b.apply_event({"run_id": "no_repo-1-1-cc", "seq": 1,
                        "event_id": "e1", "event_ts": 1.0})
         self.assertEqual(b.distinct_repos(), [])
+
+
+# --------------------------------------------------------------------------- #
+# Board reliability fixes (2026-06-16) — STALE_ABANDONED-but-actually-solved,
+# Up-next-shows-done, PR↔issue linkage, reconcile-by-closed-issue, terminal-
+# clears-stale, robust reporting, gh-health, render truthfulness.
+# Each is a regression guard for a confirmed audit finding.
+# --------------------------------------------------------------------------- #
+class TestReliabilityDB(unittest.TestCase):
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    @staticmethod
+    def _exec(b, sql):
+        # one connection: execute + commit + close (conn() mints a fresh
+        # connection per call, so a leaked open conn would hold a WAL write lock)
+        c = b.conn()
+        c.execute(sql)
+        c.commit()
+        c.close()
+
+    def test_terminal_phase_clears_stale(self):
+        # #620: a run marked stale by the reaper, then a worker 'done' report
+        # (which carries NO status) — the done phase MUST clear stale.
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "review", "event_id": "e1", "event_ts": 1.0})
+        self._exec(b, "UPDATE runs SET status='stale' WHERE run_id='r1'")
+        b.apply_event({"run_id": "r1", "seq": 2, "phase": "done",
+                       "event_id": "e2", "event_ts": 2.0})
+        row = b.get_run("r1")
+        self.assertEqual(row["phase"], "done")
+        self.assertNotEqual(row["status"], "stale")
+
+    def test_newest_active_run_finds_stale_asking_user(self):
+        # A stale-marked asking-user run must still be reachable so gh maps to it.
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 7, "seq": 1,
+                       "phase": "asking-user", "event_id": "e1", "event_ts": 1.0})
+        self._exec(b, "UPDATE runs SET status='stale' WHERE run_id='r1'")
+        self.assertEqual(b.newest_active_run("o/x", 7), "r1")
+
+    def test_reconcile_closed_finalizes_non_open_issue(self):
+        # Issue not in the open set (closed/merged on gh) -> done, even with no
+        # final worker report. THE core false-STALE_ABANDONED fix.
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 588, "seq": 1,
+                       "phase": "merge", "event_id": "e1", "event_ts": 1.0})
+        n = b.reconcile_closed("o/x", {600, 601}, 100.0)   # 588 NOT open
+        self.assertEqual(n, 1)
+        row = b.get_run("r1")
+        self.assertEqual(row["phase"], "done")
+        self.assertNotEqual(row["status"], "stale")
+        self.assertIn("issue closed", (row["result"] or ""))
+
+    def test_reconcile_closed_leaves_open_issue(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 626, "seq": 1,
+                       "phase": "review", "event_id": "e1", "event_ts": 1.0})
+        n = b.reconcile_closed("o/x", {626}, 100.0)        # 626 still open
+        self.assertEqual(n, 0)
+        self.assertEqual(b.get_run("r1")["phase"], "review")
+
+    def test_reconcile_closed_skips_terminal(self):
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 5, "seq": 1,
+                       "phase": "done", "event_id": "e1", "event_ts": 1.0})
+        self.assertEqual(b.reconcile_closed("o/x", set(), 100.0), 0)
+
+    def test_get_queue_excludes_done_and_stale_runs(self):
+        # Up next must NOT list an issue that already has ANY run (done or stale).
+        b = self._b()
+        b.set_queue("o/x", [(1, "done one"), (2, "stale one"), (3, "fresh one")])
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 1, "seq": 1,
+                       "phase": "done", "event_id": "e1", "event_ts": 1.0})
+        b.apply_event({"run_id": "r2", "repo": "o/x", "issue": 2, "seq": 1,
+                       "phase": "CI", "event_id": "e2", "event_ts": 2.0})
+        self._exec(b, "UPDATE runs SET status='stale' WHERE run_id='r2'")
+        issues = {r["issue"] for r in b.get_queue()}
+        self.assertEqual(issues, {3})
+
+    def test_prune_queue_expired(self):
+        b = self._b()
+        b.set_queue("o/x", [(1, "old"), (2, "old2")])
+        # backdate the rows
+        self._exec(b, "UPDATE queue SET reported_at=1000 WHERE repo='o/x'")
+        deleted = b.prune_queue_expired(now=1000 + 20 * 24 * 3600, ttl=14 * 24 * 3600)
+        self.assertEqual(deleted, 2)
+        self.assertEqual(b.get_queue(), [])
+
+
+class TestReliabilityGh(unittest.TestCase):
+    def test_classify_pr_returns_closing_issues(self):
+        from board.gh import classify_pr
+        c = classify_pr({"state": "MERGED", "mergedAt": "2026-06-15T23:32:42Z",
+                         "closingIssuesReferences": [{"number": 588},
+                                                     {"number": 615}]})
+        self.assertTrue(c["merged"])
+        self.assertEqual(sorted(c["closes"]), [588, 615])
+
+    def test_classify_pr_no_closing_issues(self):
+        from board.gh import classify_pr
+        c = classify_pr({"state": "OPEN"})
+        self.assertEqual(c["closes"], [])
+
+    def test_pr_json_fields_include_closing_issues(self):
+        from board import gh
+        self.assertIn("closingIssuesReferences", gh._PR_JSON_FIELDS)
+        self.assertGreaterEqual(gh._PR_LIMIT, 100)
+        self.assertGreaterEqual(gh._ISSUE_LIMIT, 100)
+
+
+class TestReliabilityRefresh(unittest.TestCase):
+    def _b(self):
+        from board.db import Board
+        return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def test_apply_repo_refresh_links_pr_by_closed_issue(self):
+        # The fix: a PR (number 999) closing issue 588 maps gh signals to the
+        # RUN of issue 588 — NOT to a run keyed by the PR number.
+        from board.server import _apply_repo_refresh
+        b = self._b()
+        b.apply_event({"run_id": "r588", "repo": "o/x", "issue": 588, "seq": 1,
+                       "phase": "merge", "event_id": "e1", "event_ts": 1.0})
+        res = {"gh_ok": True, "open_issues": set(), "issues_capped": False,
+               "prs": [{"number": 999, "url": "https://github.com/o/x/pull/999",
+                        "pr_state": "MERGED", "merged": True, "mergeable": None,
+                        "mergeable_state": None, "mergeable_gate": "pending",
+                        "closes": [588]}]}
+        _apply_repo_refresh(b, "o/x", res)
+        gh = b.get_gh("r588")
+        self.assertIsNotNone(gh)
+        self.assertEqual(gh["merged"], 1)
+        # issue 588 not in open set -> reconciled to done
+        self.assertEqual(b.get_run("r588")["phase"], "done")
+
+    def test_apply_repo_refresh_skips_reconcile_when_capped(self):
+        from board.server import _apply_repo_refresh
+        b = self._b()
+        b.apply_event({"run_id": "r1", "repo": "o/x", "issue": 9, "seq": 1,
+                       "phase": "review", "event_id": "e1", "event_ts": 1.0})
+        # capped open list -> 'not open' is unreliable -> do NOT finalize
+        res = {"gh_ok": True, "open_issues": set(), "issues_capped": True,
+               "prs": []}
+        _apply_repo_refresh(b, "o/x", res)
+        self.assertEqual(b.get_run("r1")["phase"], "review")
+
+
+class TestReliabilityReporter(unittest.TestCase):
+    def setUp(self):
+        import board.reporter as rp
+        self.home = tempfile.mkdtemp()
+        rp.STATE_DIR = self.home
+
+    def test_run_to_repo_issue_reverses_map(self):
+        import board.reporter as rp
+        rp._save(rp._p("autopilot-board-runs.json"),
+                 {"zbynekdrlik/odoo-erp#588": "zbynekdrlik_odoo-erp-588-1-aa"})
+        repo, issue = rp.run_to_repo_issue("zbynekdrlik_odoo-erp-588-1-aa")
+        self.assertEqual(repo, "zbynekdrlik/odoo-erp")
+        self.assertEqual(issue, 588)
+
+    def test_run_to_repo_issue_unknown(self):
+        import board.reporter as rp
+        rp._save(rp._p("autopilot-board-runs.json"), {})
+        self.assertEqual(rp.run_to_repo_issue("nope"), (None, None))
+
+    def test_next_seq_unique_under_threads(self):
+        # flock guard: concurrent same-run next_seq calls must never collide.
+        import threading
+        import board.reporter as rp
+        seqs = []
+        lock = threading.Lock()
+
+        def worker():
+            s = rp.next_seq("rid-concurrent")
+            with lock:
+                seqs.append(s)
+
+        ts = [threading.Thread(target=worker) for _ in range(25)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(sorted(seqs), list(range(1, 26)))  # all unique 1..25
+
+
+class TestReliabilityRender(unittest.TestCase):
+    def test_terminal_no_alarm_shows_done_not_pending(self):
+        from board.render import card_grid
+        run = {"run_id": "r1", "repo": "o/x", "issue": 1, "title": "t",
+               "phase": "done", "status": "done", "machine": "dev1",
+               "updated_str": "2026-06-16 10:00:00", "gate": {}, "alarms": []}
+        html = card_grid([], [run], "v1", {})
+        self.assertIn("done✓", html)          # the done✓ pill
+        # a finished run does NOT show a wall of pending gate pills
+        self.assertNotIn("/rcr", html)
+
+    def test_terminal_with_alarm_shows_gate_pills(self):
+        from board.render import card_grid
+        run = {"run_id": "r1", "repo": "o/x", "issue": 1, "title": "t",
+               "phase": "done", "status": "done", "machine": "dev1",
+               "gate": {"plan_check": "fail"},
+               "alarms": ["MERGED_INCOMPLETE_GATE"]}
+        html = card_grid([], [run], "v1", {})
+        self.assertIn("MERGED_INCOMPLETE_GATE", html)
+
+    def test_card_shows_updated_timestamp(self):
+        from board.render import card_grid
+        run = {"run_id": "r1", "repo": "o/x", "issue": 1, "title": "t",
+               "phase": "implementing", "status": None, "machine": "dev1",
+               "updated_str": "2026-06-16 11:22:33", "gate": {}, "alarms": []}
+        html = card_grid([run], [], "v1", {})
+        self.assertIn("2026-06-16 11:22:33", html)
+
+    def test_header_shows_gh_stale_banner(self):
+        from board.render import card_grid
+        html = card_grid([], [], "v1",
+                         {"gh_stale": True, "gh_stale_since": "2026-06-16 09:00:00"})
+        self.assertIn("STALE", html)

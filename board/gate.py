@@ -58,19 +58,23 @@ def compute_alarms(r):
     alarms = []
     req = applicable_gates(r["is_bug_fix"], r["has_deploy"])
     gate = r.get("gate", {})
-    not_ok = [g for g in req if gate.get(g, "pending") != "ok"]
 
     if r["merged"]:
-        if not_ok:
-            # grace: still settling (phase not terminal yet) and a fresh report arrived
-            # → verifying, not alarm. Once phase reaches terminal, any pending gate = alarm.
-            in_terminal = r["phase"] in TERMINAL_PHASES
-            if not in_terminal \
-               and all(gate.get(g, "pending") == "pending" for g in not_ok) \
-               and r["last_report_age_s"] < GRACE_S:
-                alarms.append("VERIFYING")
-            else:
-                alarms.append("MERGED_INCOMPLETE_GATE")
+        # A merged PR ALREADY passed GitHub branch protection (CI + required
+        # reviews enforced AT MERGE TIME), so the merge itself is the gate
+        # evidence. Only a gate VERIFIED as 'fail' is a real problem; a merely
+        # UNREPORTED (pending) worker gate is NOT — the worker simply stopped
+        # self-reporting. Flagging pending gates turned every solved-but-
+        # partially-reported run into a red MERGED_INCOMPLETE_GATE (the board
+        # screamed "incomplete" at work GitHub had already merged).
+        failed = [g for g in req if gate.get(g) == "fail"]
+        pending = [g for g in req if gate.get(g, "pending") == "pending"]
+        in_terminal = r["phase"] in TERMINAL_PHASES
+        if failed:
+            alarms.append("MERGED_INCOMPLETE_GATE")
+        elif pending and not in_terminal and r["last_report_age_s"] < GRACE_S:
+            # still settling: just merged, gates not all reported yet, fresh ping
+            alarms.append("VERIFYING")
     # manual mode: green-but-unmerged is a valid done — no alarm (handled by not entering above)
 
     # stale / abandoned mid-gate (the other wrong-work mode)
