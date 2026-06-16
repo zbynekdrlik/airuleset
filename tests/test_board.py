@@ -1506,22 +1506,25 @@ class TestReliabilityDB(unittest.TestCase):
 
 
 class TestReliabilityGh(unittest.TestCase):
-    def test_classify_pr_returns_closing_issues(self):
+    def test_classify_pr_parses_closing_issues_from_body(self):
         from board.gh import classify_pr
         c = classify_pr({"state": "MERGED", "mergedAt": "2026-06-15T23:32:42Z",
-                         "closingIssuesReferences": [{"number": 588},
-                                                     {"number": 615}]})
+                         "body": "Implements the thing.\n\nCloses #588\n"
+                                 "Fixes #615. resolves #7"})
         self.assertTrue(c["merged"])
-        self.assertEqual(sorted(c["closes"]), [588, 615])
+        self.assertEqual(sorted(c["closes"]), [7, 588, 615])
 
     def test_classify_pr_no_closing_issues(self):
         from board.gh import classify_pr
-        c = classify_pr({"state": "OPEN"})
+        c = classify_pr({"state": "OPEN", "body": "prose only, #notaclose"})
         self.assertEqual(c["closes"], [])
+        self.assertEqual(classify_pr({"state": "OPEN"})["closes"], [])  # body absent
 
-    def test_pr_json_fields_include_closing_issues(self):
+    def test_pr_json_fields_use_body_for_linkage(self):
         from board import gh
-        self.assertIn("closingIssuesReferences", gh._PR_JSON_FIELDS)
+        # closingIssuesReferences is NOT a valid `gh pr list` field; we parse body
+        self.assertIn("body", gh._PR_JSON_FIELDS)
+        self.assertNotIn("closingIssuesReferences", gh._PR_JSON_FIELDS)
         self.assertGreaterEqual(gh._PR_LIMIT, 100)
         self.assertGreaterEqual(gh._ISSUE_LIMIT, 100)
 

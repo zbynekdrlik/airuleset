@@ -127,22 +127,30 @@ def _is_rate_limited(returncode, stderr):
             or "api rate limit exceeded" in s)
 
 
+_CLOSES_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE)
+
+
 def closing_issue_numbers(pr):
-    """Issue numbers this PR closes, from `closingIssuesReferences` — the ONLY
-    reliable PR->issue link (a PR's own number is NOT its issue's number). gh
-    returns a list of {"number": N, ...}; we keep the ints. Empty when the PR
-    closes nothing the board can see."""
-    out = []
-    for ref in (pr.get("closingIssuesReferences") or []):
-        n = ref.get("number") if isinstance(ref, dict) else None
-        if isinstance(n, int):
-            out.append(n)
-    return out
+    """Issue numbers this PR closes, parsed from its BODY's GitHub closing
+    keywords ("Closes #N" / "Fixes #N" / "Resolves #N"). This is the PR->issue
+    link (a PR's own number is NOT its issue's number, which left gh_state
+    empty). `closingIssuesReferences` would be cleaner but is NOT a valid
+    `gh pr list --json` field — only `gh pr view` exposes it — so we parse the
+    body, which `gh pr list` does return and which the autopilot worker always
+    writes (`Closes #<N>`). De-duplicated, order-preserving."""
+    body = pr.get("body") or ""
+    seen = []
+    for m in _CLOSES_RE.finditer(body):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+    return seen
 
 
 def classify_pr(pr):
-    """Map a `gh pr view --json state,mergedAt,mergeable,mergeStateStatus,
-    closingIssuesReferences` dict to the board's classification.
+    """Map a `gh pr list --json state,mergedAt,mergeable,mergeStateStatus,body`
+    dict to the board's classification.
 
     Returns dict(merged, pr_state, mergeable(None|bool), mergeable_state,
     mergeable_gate, closes). `mergeable_gate` uses board.gate.mergeable_ok:
@@ -172,8 +180,7 @@ def classify_pr(pr):
 
 # ---- batched per-repo fetch (the refresher's unit of work) -----------------
 
-_PR_JSON_FIELDS = ("number,url,state,mergedAt,mergeable,mergeStateStatus,"
-                   "closingIssuesReferences")
+_PR_JSON_FIELDS = ("number,url,state,mergedAt,mergeable,mergeStateStatus,body")
 _ISSUE_JSON_FIELDS = "number,state"
 # List caps. A repo with MORE than this many open PRs/issues would silently
 # truncate — and a truncated open-issue set is dangerous (a closed-issue
