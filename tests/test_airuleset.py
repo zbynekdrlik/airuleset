@@ -1355,10 +1355,14 @@ class TestAutopilotReportHook(TestCase):
 
     def _run(self, env_overrides):
         # Start from a clean env (no AUTOPILOT_RUN leaking from the test runner),
-        # keep PATH/HOME so python3 + the repo resolve.
+        # keep PATH so python3 + the repo resolve. ISOLATE HOME to a temp dir so
+        # the hook's reporter writes its seq/offline-queue under <tmp>/.claude —
+        # NEVER the real ~/.claude. Otherwise the queued test event later flushes
+        # to the PRODUCTION board (the o_x-1-99-abcd pollution).
         env = dict(os.environ)
         env.pop("AUTOPILOT_RUN", None)
         env.pop("AUTOPILOT_PHASE", None)
+        env["HOME"] = tempfile.mkdtemp()
         env.update(env_overrides)
         return subprocess.run(
             ["bash", str(self.HOOK)],
