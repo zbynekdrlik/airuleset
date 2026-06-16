@@ -135,11 +135,84 @@ class TestHookScriptsExist(TestCase):
             "pre-deploy-clean-tree.sh",
             "stop-check-untracked-work.sh",
             "stop-check-status-marker.sh",
+            "stop-check-prod-gating.sh",
             "autopilot-report.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
             self.assertTrue(os.access(path, os.X_OK), f"Not executable: {path}")
+
+
+class TestProdGatingHook(TestCase):
+    """hooks/stop-check-prod-gating.sh — blocks prod-usage/event/off-air/hardware
+    gating (approval-scope.md, the user's hardest rule), in English AND Slovak,
+    while letting rule-discussion and plain work reports through."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prod-gating.sh"
+    _counter = 0
+
+    def _sid(self):
+        TestProdGatingHook._counter += 1
+        sid = f"test-pg-{os.getpid()}-{TestProdGatingHook._counter}"
+        self.addCleanup(
+            lambda: os.path.exists(f"/tmp/airuleset-prod-gating-block-{sid}")
+            and os.remove(f"/tmp/airuleset-prod-gating-block-{sid}"))
+        return sid
+
+    def _run(self, msg):
+        import subprocess
+        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True)
+
+    def _blocked(self, r):
+        return r.returncode == 0 and '"block"' in r.stdout
+
+    def _clean(self, r):
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    def test_slovak_gating_blocked(self):
+        r = self._run("väčšina vyžaduje FYZICKÝ rig + off-air okná. Odporúčam "
+                      "autopilot-skip na #79 a #81, spraviť ich vedene so mnou, "
+                      "nie naslepo. Pri hardvérových issue musíš byť pri tom.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_english_recommend_skip_blocked(self):
+        r = self._run("#79 touches a live HDMI output — invasive. I recommend "
+                      "autopilot-skip for #79 and #81.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_off_air_window_blocked(self):
+        r = self._run("This needs an off-air window — should I wait until the "
+                      "stream is off-air?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_be_present_blocked(self):
+        r = self._run("For #84 you must be present at the rig — it needs a "
+                      "physical rig and off-air time.")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_ask_prod_live_blocked(self):
+        r = self._run("Before I deploy to the church stream — is prod live right "
+                      "now? Want me to hold until after the event?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_work_report_allowed(self):
+        r = self._run("Worked #79 (DRM master grab on cam2): implemented, tested "
+                      "on the rig, all green. Restarted the camera app to verify.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_rule_discussion_allowed(self):
+        # meta / prohibition (e.g. this very fix) must NOT be blocked
+        r = self._run("Per approval-scope.md the rule now bans off-air gating and "
+                      "you must never recommend autopilot-skip; the user guards "
+                      "prod-timing.")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_plain_status_allowed(self):
+        r = self._run("Pushed abc1234. CI green. Deployed v1.2.3 to prod and "
+                      "verified the dashboard version.")
+        self.assertTrue(self._clean(r), r.stdout)
 
 
 class TestPreDeployCleanTreeHook(TestCase):

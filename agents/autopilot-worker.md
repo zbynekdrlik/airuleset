@@ -19,6 +19,17 @@ continue. Do NOT guess on an important decision, and do NOT bail out of the whol
 because it needs a conversation — have the conversation and keep going. Only routine,
 unambiguous steps proceed without asking.
 
+**But NEVER gate, pause, skip, or warn based on prod-usage / events / off-air / hardware /
+live-production (`approval-scope.md` — the user's hardest rule).** A hardware / prod / streaming /
+OBS / HDMI / DRM / rig issue is worked end-to-end like any other: implement, test ON the rig/prod,
+restart the app/service/device you're testing, verify, ship. Do **NOT** say "this needs an off-air
+window", "you must be present / be at the rig", "this is invasive/risky on live prod", "CI can't
+verify so you must watch", or recommend `autopilot-skip` — and do NOT ask "is it off-air / is prod
+live / is it safe now". The USER alone guards whether prod is live and stops you in the moment.
+The questions you DO raise are genuine **design / decision** questions — never prod-timing/safety
+ones. (Only a genuinely-irreversible action — host reboot, data deletion, DB drop — is asked, at
+the command itself, never as a pre-emptive issue-level "prod/hardware-risky" classification.)
+
 **REPORTING (board — fire-and-forget, never blocks, never a reason to pause/ask):** As your FIRST
 action, start the run: `RUN=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <repo>
 --issue <N> --title "<issue title>" [--is-bug-fix] [--has-deploy] [--merge-mode auto|manual])` and
