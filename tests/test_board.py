@@ -1637,3 +1637,20 @@ class TestReliabilityRender(unittest.TestCase):
         html = card_grid([], [], "v1",
                          {"gh_stale": True, "gh_stale_since": "2026-06-16 09:00:00"})
         self.assertIn("STALE", html)
+
+
+class TestReliabilityDedup(unittest.TestCase):
+    def test_dedupe_newest_per_issue(self):
+        from board.server import _dedupe_newest_per_issue
+        # list_runs is newest-first; the re-dispatched #81 has 3 rows.
+        runs = [
+            {"repo": "o/cam", "issue": 81, "phase": "GREEN"},   # newest
+            {"repo": "o/cam", "issue": 81, "phase": "RED"},     # older dup
+            {"repo": "o/cam", "issue": 81, "phase": "validating"},
+            {"repo": "o/cam", "issue": 85, "phase": "done"},
+            {"repo": None, "issue": None, "phase": "x"},         # no key -> kept
+        ]
+        out = _dedupe_newest_per_issue(runs)
+        kept = [(r["repo"], r["issue"], r["phase"]) for r in out]
+        self.assertEqual(kept, [("o/cam", 81, "GREEN"), ("o/cam", 85, "done"),
+                                (None, None, "x")])

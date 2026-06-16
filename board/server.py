@@ -81,6 +81,24 @@ class _TokenBucket:
             return True
 
 
+def _dedupe_newest_per_issue(runs):
+    """Keep only the newest run per (repo, issue) from a list ALREADY ordered
+    newest-first (list_runs is updated_at DESC). Runs with a NULL repo or issue
+    have no dedupe key and are all kept. Collapses the duplicate cards a
+    re-dispatched autopilot worker creates (a fresh run per cold-start)."""
+    seen = set()
+    out = []
+    for run in runs:
+        repo, issue = run["repo"], run["issue"]
+        if repo and issue is not None:
+            key = (repo, issue)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(run)
+    return out
+
+
 def _is_live(run):
     """A run is 'Live' when its phase is non-terminal and it's not marked stale.
     sqlite Row indexed by column name."""
@@ -227,9 +245,15 @@ def make_server(board, token, host=BOARD_HOST_IP, port=PORT, version="dev"):
                     "Not found", "<h1>404 — not found</h1>"))
 
         def _board_view(self):
-            """(live, recent) lists of card dicts for the home grid."""
+            """(live, recent) lists of card dicts for the home grid, collapsed to
+            the NEWEST run per (repo, issue). A re-dispatched autopilot worker
+            mints a fresh run (SendMessage continuation is unavailable without
+            the agent-teams flag, so the supervisor cold-starts a new worker),
+            which otherwise showed 2-3 duplicate cards for one issue. Older
+            same-issue runs stay in the DB / ticket history; only the grid
+            collapses them."""
             live, recent = [], []
-            for run in board.list_runs():
+            for run in _dedupe_newest_per_issue(board.list_runs()):
                 d = _run_card_dict(board, run)
                 (live if _is_live(run) else recent).append(d)
             return live, recent

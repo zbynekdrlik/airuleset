@@ -60,8 +60,15 @@ proceeds to the cycle below.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
-1. `git fetch origin`; confirm you are on `dev` with a clean tree; **version bump FIRST**
-   (`version-bumping.md`) before any feature code.
+1. `git fetch origin`; confirm you are on `dev` with a clean tree. **RESUME, don't restart:** you may
+   be a RE-DISPATCH of an earlier worker on this same issue (the supervisor cold-starts a fresh worker
+   because `SendMessage` continuation isn't available by default — that's expected, not an error).
+   Before doing anything, check for work already in flight for issue #<N>: an open PR
+   (`gh pr list --head dev --json number,title`), commits already on `dev` since `main`
+   (`git log origin/main..dev --oneline`), and an existing board run (it resumes automatically — you
+   report against the same repo#issue). If the version is already bumped and the issue's work is
+   partially done, CONTINUE from there — do NOT re-bump or redo version-bump→RED. Only on a truly fresh
+   start do you **version bump FIRST** (`version-bumping.md`) before any feature code.
 2. Implement issue #<N> **ONLY** — one issue, nothing else, no scope creep. Calibrated TDD
    (`tdd-workflow.md`): bug → RED test commit BEFORE the GREEN fix commit
    (`regression-test-first.md`); feature → tests in the same PR; UI → Playwright E2E

@@ -157,6 +157,17 @@ Each loop turn:
    PR → CI green → merge per `pr-merge-policy.md` → deploy verify) and **asks you directly** on any
    genuine design / scope / authorization call. Answer it; the worker continues. **A question is a
    conversation, NOT an abandoned issue.**
+
+   > **Re-dispatch fresh — NEVER reach for `SendMessage` to "continue" a worker.** `SendMessage`
+   > (the documented subagent-continuation tool) is gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+   > and is **NOT exposed by default**, so a call returns "no such tool" and you cold-start anyway.
+   > Do **not** narrate "SendMessage isn't available here, dispatching a fresh worker" — just dispatch
+   > the fresh foreground `autopilot-worker` for the issue and let it RESUME from durable state: the
+   > existing `dev` branch, the open PR, and the issue's current state. It continues from there instead
+   > of redoing version-bump→RED. The board collapses re-dispatches to the **newest run per issue**, so
+   > a fresh worker does NOT clutter the board with duplicate cards. A worker ending mid-issue (turn
+   > boundary, error, your answer to its question) is recovered by ONE fresh dispatch with the resume
+   > context in the prompt — never by a continuation tool, never by restarting from scratch.
 4. When the worker returns its evidence block, **independently verify** from primary sources
    (never trust the claim):
    - `gh pr view <PR> --json state,mergedAt,mergeCommit`
