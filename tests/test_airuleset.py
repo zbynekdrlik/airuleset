@@ -1532,4 +1532,20 @@ class TestUltracodeLauncher(TestCase):
         airuleset.apply_ultracode_launcher(p)
         text = p.read_text()
         self.assertIn("claude() { command claude", text)   # function, command-prefixed
-        self.assertIn("claude-plain()", text)              # escape hatch
+        self.assertIn("claude-new()", text)                # fresh-session escape hatch
+        self.assertIn("claude-plain()", text)              # vanilla escape hatch
+
+    def test_default_launcher_has_skip_perms_and_continue(self):
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        # the `claude()` default carries all three: auto-approve, continue, ultracode
+        default_line = next(ln for ln in p.read_text().splitlines()
+                            if ln.startswith("claude() {"))
+        self.assertIn("--dangerously-skip-permissions", default_line)
+        self.assertIn(" -c ", default_line)
+        self.assertIn("--settings '{\"ultracode\":true}'", default_line)
+        # claude-new is ultracode + skip-perms but NOT -c (fresh session)
+        new_line = next(ln for ln in p.read_text().splitlines()
+                        if ln.startswith("claude-new() {"))
+        self.assertIn("--dangerously-skip-permissions", new_line)
+        self.assertNotIn(" -c ", new_line)

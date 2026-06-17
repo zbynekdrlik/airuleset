@@ -258,18 +258,22 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
 BASHRC = Path.home() / ".bashrc"
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
-# ultracode (xhigh + auto dynamic-workflow orchestration) is SESSION-ONLY — it is
-# never written to disk and is NOT accepted in settings.json (GH #64817), so it
-# cannot be a persistent setting. The only always-on route the docs bless is to
-# pass `"ultracode": true` via `--settings` at launch. `--settings` MERGES per-key
-# (CLI ref), so this overrides ONLY the ultracode flag and leaves hooks / model /
-# effortLevel in ~/.claude/settings.json fully intact. A bash FUNCTION (not alias)
-# forwards all args, covering `claude`, `--resume`, `-p`, `--continue`; `command`
-# avoids recursing into the function. Re-injected every launch (sidesteps the
-# in-session revert, GH #66266). Plain launch escape hatch: `command claude` / `claude-plain`.
+# The managed `claude` launcher (user's explicit default): ultracode + auto-approve
+# permissions + continue the last conversation.
+#   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
+#       accepted in settings.json — GH #64817); --settings is the only doc-blessed
+#       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
+#   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
+#   -c                              : continue the most recent conversation in the cwd.
+# A bash FUNCTION (not alias) forwards all args; `command` avoids recursing.
+# Escape hatches: `claude-new` (ultracode + skip-perms, FRESH session — no -c, for a
+# new dir or a clean start) and `claude-plain` (vanilla `claude`, no flags).
 ULTRACODE_BASHRC_BLOCK = (
     f"{ULTRACODE_MARK_START}\n"
-    "claude() { command claude --settings '{\"ultracode\":true}' \"$@\"; }\n"
+    "claude() { command claude --dangerously-skip-permissions -c "
+    "--settings '{\"ultracode\":true}' \"$@\"; }\n"
+    "claude-new() { command claude --dangerously-skip-permissions "
+    "--settings '{\"ultracode\":true}' \"$@\"; }\n"
     "claude-plain() { command claude \"$@\"; }\n"
     f"{ULTRACODE_MARK_END}"
 )
