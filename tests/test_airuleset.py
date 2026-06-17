@@ -1479,3 +1479,57 @@ class TestManagedSettingsDefaults(TestCase):
         src = {"model": "opus"}
         airuleset.apply_managed_settings_defaults(src)
         self.assertNotIn("effortLevel", src)  # input untouched
+
+
+class TestUltracodeLauncher(TestCase):
+    """apply_ultracode_launcher manages the ~/.bashrc block that launches claude
+    in ultracode every shell — idempotent, append-or-replace, never clobbers."""
+
+    def _tmp(self, content=None):
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".bashrc"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_appends_to_existing_bashrc_preserving_content(self):
+        p = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
+        changed = airuleset.apply_ultracode_launcher(p)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn("export PATH=$PATH:/x", text)           # preserved
+        self.assertIn("alias ll='ls -la'", text)              # preserved
+        self.assertIn("--settings '{\"ultracode\":true}'", text)
+        self.assertIn(airuleset.ULTRACODE_MARK_START, text)
+        self.assertIn(airuleset.ULTRACODE_MARK_END, text)
+
+    def test_idempotent_no_change_second_run(self):
+        p = self._tmp("# my rc\n")
+        self.assertTrue(airuleset.apply_ultracode_launcher(p))
+        self.assertFalse(airuleset.apply_ultracode_launcher(p))   # second run no-op
+
+    def test_replaces_block_in_place_no_duplicate(self):
+        p = self._tmp("# rc\n")
+        airuleset.apply_ultracode_launcher(p)
+        # tamper inside the block, re-run -> block restored, exactly ONE block
+        text = p.read_text().replace('--settings \'{"ultracode":true}\'', "BROKEN")
+        p.write_text(text)
+        airuleset.apply_ultracode_launcher(p)
+        out = p.read_text()
+        self.assertEqual(out.count(airuleset.ULTRACODE_MARK_START), 1)
+        self.assertNotIn("BROKEN", out)
+        self.assertIn("--settings '{\"ultracode\":true}'", out)
+
+    def test_creates_bashrc_when_absent(self):
+        from pathlib import Path
+        p = Path(tempfile.mkdtemp()) / ".bashrc"
+        self.assertTrue(airuleset.apply_ultracode_launcher(p))
+        self.assertIn("claude()", p.read_text())
+
+    def test_function_not_alias_and_has_plain_escape(self):
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        self.assertIn("claude() { command claude", text)   # function, command-prefixed
+        self.assertIn("claude-plain()", text)              # escape hatch

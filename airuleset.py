@@ -255,6 +255,47 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
     return result
 
 
+BASHRC = Path.home() / ".bashrc"
+ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
+ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
+# ultracode (xhigh + auto dynamic-workflow orchestration) is SESSION-ONLY — it is
+# never written to disk and is NOT accepted in settings.json (GH #64817), so it
+# cannot be a persistent setting. The only always-on route the docs bless is to
+# pass `"ultracode": true` via `--settings` at launch. `--settings` MERGES per-key
+# (CLI ref), so this overrides ONLY the ultracode flag and leaves hooks / model /
+# effortLevel in ~/.claude/settings.json fully intact. A bash FUNCTION (not alias)
+# forwards all args, covering `claude`, `--resume`, `-p`, `--continue`; `command`
+# avoids recursing into the function. Re-injected every launch (sidesteps the
+# in-session revert, GH #66266). Plain launch escape hatch: `command claude` / `claude-plain`.
+ULTRACODE_BASHRC_BLOCK = (
+    f"{ULTRACODE_MARK_START}\n"
+    "claude() { command claude --settings '{\"ultracode\":true}' \"$@\"; }\n"
+    "claude-plain() { command claude \"$@\"; }\n"
+    f"{ULTRACODE_MARK_END}"
+)
+
+
+def apply_ultracode_launcher(bashrc_path: Path = None) -> bool:
+    """Install/refresh the managed ~/.bashrc block that launches `claude` in
+    ultracode on every shell. Idempotent: replaces the marked block if present,
+    else appends it. Returns True iff the file changed."""
+    import re
+    path = bashrc_path or BASHRC
+    existing = path.read_text() if path.exists() else ""
+    if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
+        pattern = re.compile(
+            re.escape(ULTRACODE_MARK_START) + r".*?" + re.escape(ULTRACODE_MARK_END),
+            re.S)
+        new = pattern.sub(lambda _m: ULTRACODE_BASHRC_BLOCK, existing)
+    else:
+        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+        new = f"{existing}{sep}\n{ULTRACODE_BASHRC_BLOCK}\n"
+    if new != existing:
+        path.write_text(new)
+        return True
+    return False
+
+
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
@@ -587,6 +628,18 @@ def cmd_install(args):
             print(f"  Updated:   {SETTINGS_JSON}")
         else:
             print(f"  No change: {SETTINGS_JSON}")
+
+    # --- 3b. ultracode launcher: managed ~/.bashrc block (every host) ---
+    # ultracode can't live in settings.json (session-only, GH #64817), so wrap
+    # `claude` to pass it via --settings on every launch. effortLevel=xhigh above
+    # is the persistent fallback for the reasoning depth if the wrapper is bypassed.
+    try:
+        if apply_ultracode_launcher():
+            print(f"  Updated:   {BASHRC} (ultracode launcher — `source ~/.bashrc`)")
+        else:
+            print(f"  No change: {BASHRC} (ultracode launcher)")
+    except Exception as e:
+        print(f"  ultracode launcher error (non-fatal): {e}", file=sys.stderr)
 
     # --- 4. Autopilot Board: branch on whether this is the board host ---
     try:
