@@ -1451,3 +1451,31 @@ class TestSendMessageNarrationHook(TestCase):
         r = self._run("Dispatched the worker for issue #42 with the OBS skill "
                       "enforced. CI green, merged. Done.")
         self.assertTrue(self._clean(r), r.stdout)
+
+
+class TestManagedSettingsDefaults(TestCase):
+    """apply_managed_settings_defaults sets the persistent effortLevel=xhigh default
+    in every managed project, preserving all other settings keys, idempotently."""
+
+    def test_sets_effort_xhigh(self):
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(out["effortLevel"], "xhigh")
+
+    def test_preserves_other_keys(self):
+        out = airuleset.apply_managed_settings_defaults(
+            {"model": "opus", "hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
+        self.assertEqual(out["model"], "opus")
+        self.assertEqual(out["hooks"], {"Stop": []})
+        self.assertEqual(out["enabledPlugins"], {"x": True})
+        self.assertEqual(out["effortLevel"], "xhigh")
+
+    def test_idempotent_and_overrides_lower(self):
+        once = airuleset.apply_managed_settings_defaults({"effortLevel": "high"})
+        twice = airuleset.apply_managed_settings_defaults(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(twice["effortLevel"], "xhigh")  # raises a lower default
+
+    def test_does_not_mutate_input(self):
+        src = {"model": "opus"}
+        airuleset.apply_managed_settings_defaults(src)
+        self.assertNotIn("effortLevel", src)  # input untouched

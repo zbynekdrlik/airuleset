@@ -34,6 +34,14 @@ AGENTS_DIR = CLAUDE_DIR / "agents"
 MANAGED_HEADER = "# Managed by airuleset"
 MANAGED_MARKER = "<!-- airuleset-managed -->"
 
+# Managed default effort: `xhigh` (deep adaptive reasoning) is the persistent
+# default the user wants in EVERY managed project so they never have to remember
+# to raise it. `xhigh` is the highest level settings.json accepts and persists
+# across sessions; `max`/`ultracode` are session-only (not valid here) — ultracode
+# adds auto-workflow orchestration on top of xhigh and stays a per-session
+# `/effort ultracode`. The user can still raise/lower per session with `/effort`.
+MANAGED_EFFORT_LEVEL = "xhigh"
+
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # ---------------------------------------------------------------------------
@@ -247,6 +255,18 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
     return result
 
 
+def apply_managed_settings_defaults(settings: dict) -> dict:
+    """Ensure airuleset's managed settings defaults are present (non-hook keys).
+
+    Currently: `effortLevel = xhigh` so deep adaptive reasoning is the persistent
+    default in every managed project without the user remembering to raise it.
+    Idempotent; preserves all other keys. The user can still override per session
+    with `/effort` — this only sets the starting default."""
+    result = dict(settings)
+    result["effortLevel"] = MANAGED_EFFORT_LEVEL
+    return result
+
+
 def read_file_safe(path: Path) -> str:
     """Read a file, returning empty string if it doesn't exist."""
     if path.exists():
@@ -439,7 +459,8 @@ def cmd_diff(args):
     if hooks_config:
         old_settings_str = read_file_safe(SETTINGS_JSON)
         old_settings = json.loads(old_settings_str) if old_settings_str else {}
-        new_settings = merge_hooks_into_settings(hooks_config, old_settings)
+        new_settings = apply_managed_settings_defaults(
+            merge_hooks_into_settings(hooks_config, old_settings))
         new_settings_str = json.dumps(new_settings, indent=2) + "\n"
         old_for_diff = old_settings_str if old_settings_str else "{}\n"
 
@@ -553,7 +574,8 @@ def cmd_install(args):
     if hooks_config:
         old_settings_str = read_file_safe(SETTINGS_JSON)
         old_settings = json.loads(old_settings_str) if old_settings_str else {}
-        new_settings = merge_hooks_into_settings(hooks_config, old_settings)
+        new_settings = apply_managed_settings_defaults(
+            merge_hooks_into_settings(hooks_config, old_settings))
         new_settings_str = json.dumps(new_settings, indent=2) + "\n"
 
         if old_settings_str.strip() != new_settings_str.strip():
