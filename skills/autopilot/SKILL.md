@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks). You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual]"
 user-invocable: true
 disable-model-invocation: true
@@ -239,7 +239,8 @@ Each loop turn:
 
 ## Step 4 — When to actually STOP (only these)
 
-- **Backlog empty** (no open non-skip issues) → final completion report (`completion-report.md`).
+- **Backlog empty** (no open non-skip issues) → run the **end-of-run reconciliation sweep (Step 4a)
+  FIRST**, then the final completion report (`completion-report.md`).
 - **Destructive / prod action** a worker surfaced that needs your approval
   (`no-destructive-remote-actions.md`, `approval-scope.md`).
 - **A gate that won't go clean / the same CI failure twice** after a real fix attempt → surface
@@ -248,6 +249,39 @@ Each loop turn:
 A per-issue **design question is NOT a stop** — the worker asks you inline and continues. "Nothing
 is hands-off" is **NOT a stop** — work it WITH your input. Finishing a merge is **NOT a stop** —
 pick the next issue.
+
+## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
+
+When the workable backlog empties, the run has just changed a lot of code while the context is still
+fresh. Reconcile the WHOLE tracker NOW — **including the `autopilot-skip` issues** — so no ticket
+lingers contradicting what the run achieved (`verify-issue-still-valid.md`, `no-dropped-work.md`).
+This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then the report.
+
+1. **List EVERY still-open issue, skips INCLUDED:** `gh issue list --state open -L 200` (do NOT filter
+   out `autopilot-skip` here — the whole point is to re-examine them too). Gather what the run did from
+   `docs/autopilot-log.md` (PRs merged this run + their `Closes #N`) so each validation has that context.
+2. **Validate EACH remaining open issue against current reality** — dispatch the read-only
+   **`ticket-validator`** (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>;
+   this run merged: <PR list + topics>`). They are independent → validate in parallel. Branch PER issue
+   on its verdict (same hybrid close policy as Step 1b):
+   - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR this run resolved it, OR a passing
+     repro proves it) → **auto-close** with the validator's evidence as the closing comment
+     (`gh issue close <N> --comment "<evidence — overcome by PR #M this run>"`), milestone-ping it
+     (reopenable in one click). This is the core ask: a skip / open ticket the run made moot gets closed.
+   - **PARTIAL** (the run did some of it; real work remains) → do NOT close. **Rescope it non-
+     destructively:** `gh issue comment <N> --body "Reconciled at /autopilot end: PR #M did <X>;
+     remaining scope is <Y>."` so the ticket reflects reality. Leave it open (and, if it was an
+     `autopilot-skip`, note the remaining scope on it — the user re-weighs skips at the next start).
+   - **OVERCOME + `soft` / UNCLEAR** → do NOT auto-close — **ask the user** with the validator's
+     evidence (`#N looks overcome by PR #M — close, rescope, or keep?`), act on the answer.
+   - **STILL_VALID** → leave it as-is (a deliberately-skipped, still-relevant ticket stays skipped).
+3. **NEVER prod/hardware-classify** any ticket in this sweep, and never close a skip just because it
+   touches prod/hardware (`approval-scope.md`) — closure is driven ONLY by the validator's overcome
+   evidence, never by a ticket's subject. Closing/commenting is non-destructive tracking → no approval
+   needed for hard-overcome; everything uncertain goes to the user.
+4. Report each closure/rescope to the board (`report --repo <r> --issue <N> --phase obsolete-closed
+   --result "<evidence>"` for closures) so the board's open set matches GitHub, then write the final
+   completion report — listing what the sweep closed / rescoped / asked about.
 
 ## Watching & steering
 

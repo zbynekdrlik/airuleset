@@ -204,6 +204,45 @@ class TestAutopilotBatching(TestCase):
         self.assertIn("for N in <surviving members>", s)
 
 
+class TestAutopilotEndOfRunSweep(TestCase):
+    """At completion (backlog empty), /autopilot must reconcile the WHOLE tracker
+    — INCLUDING autopilot-skip issues — while context is fresh, closing/rescoping
+    any ticket the run overcame (hybrid: hard-overcome auto-close, soft/unclear
+    ask). Locks the sweep so stale tickets can't silently survive a run."""
+
+    def _skill(self):
+        return (airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md").read_text()
+
+    def test_sweep_section_exists(self):
+        s = self._skill()
+        self.assertIn("End-of-run reconciliation sweep", s)
+        # routed from the backlog-empty stop, BEFORE the final report
+        self.assertIn("Step 4a", s)
+
+    def test_sweep_includes_skipped_issues(self):
+        s = self._skill()
+        # the whole point: skips are re-examined too, not filtered out
+        self.assertIn("skips INCLUDED", s)
+        self.assertIn("do NOT filter\n   out `autopilot-skip` here", s)
+
+    def test_sweep_validates_each_via_ticket_validator(self):
+        s = self._skill()
+        self.assertIn("Validate EACH remaining open issue", s)
+        self.assertIn("ticket-validator", s)
+
+    def test_sweep_hybrid_close_policy(self):
+        s = self._skill()
+        # hard-overcome auto-closes; partial rescopes; soft/unclear asks the user
+        self.assertIn("auto-close** with the validator's evidence", s)
+        self.assertIn("Rescope it non-", s)
+        self.assertIn("ask the user", s)
+
+    def test_sweep_never_prod_classifies(self):
+        # approval-scope: closure driven by overcome evidence, never the subject
+        self.assertIn("NEVER prod/hardware-classify** any ticket in this sweep",
+                      self._skill())
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [
