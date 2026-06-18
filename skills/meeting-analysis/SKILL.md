@@ -42,9 +42,9 @@ user-invocable: true
   Re-export `SKILL=...` and `WORK=...` at the top of EVERY phase's bash block (shown below), or
   use absolute paths.
 
-Machines: **dev1** (`develbox`, 10.77.9.21) = orchestration, ffmpeg, frame dedup, and where YOU
-read the screens — the recording lands here. **dev2** (`baking-ai-5060`, 10.77.8.134, RTX 5050
-8 GB) = the GPU ASR; SSH `ssh newlevel@10.77.8.134`. The GPU is SHARED with production inference
+Machines: **dev1** (`develbox`, 100.104.8.125) = orchestration, ffmpeg, frame dedup, and where YOU
+read the screens — the recording lands here. **dev2** (`baking-ai-5060`, 100.82.64.27, RTX 5050
+8 GB) = the GPU ASR; SSH `ssh newlevel@100.82.64.27`. The GPU is SHARED with production inference
 — check free memory and never kill another process's GPU memory.
 
 ## Phase 0 — Receive the recording (user is remote, no shared filesystem)
@@ -56,7 +56,7 @@ the bundled push endpoint, verify it's live, give them the URL:
 ```bash
 SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
 WORK=/home/newlevel/uploads/acme-call/work          # <- pick a real topic
-TOK=$(openssl rand -hex 8); PORT=8799; IP=10.77.9.21 # IP = the address the user reaches dev1 on
+TOK=$(openssl rand -hex 8); PORT=8799; IP=100.104.8.125 # IP = the address the user reaches dev1 on
 mkdir -p "$WORK"
 setsid nohup python3 "$SKILL/scripts/upload_server.py" "$TOK" "$PORT" "$IP" \
        "$(dirname "$WORK")" >/tmp/upload.log 2>&1 < /dev/null &
@@ -67,7 +67,7 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 ```
 
 - The advertised `IP` must be the address the remote user's VPN actually routes to dev1 (they
-  may reach it on a Tailscale/other IP, not 10.77.9.21). A local 200 does NOT prove the user can
+  may reach it on a Tailscale/other IP, not 100.104.8.125). A local 200 does NOT prove the user can
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path (the filename is sanitized — spaces /
   accents / parens become `_`, so you cannot guess it): `grep SAVED /tmp/upload.log` →
@@ -101,15 +101,15 @@ ASR takes ~15–20 min for a ~1 h call. Do NOT block the session; launch detache
 SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
 WORK=/home/newlevel/uploads/acme-call/work
 # 1. preflight deps on dev2 (one-time; missing deps otherwise crash the run)
-ssh newlevel@10.77.8.134 'python3 -c "import torch,transformers,accelerate,soundfile" 2>/dev/null \
+ssh newlevel@100.82.64.27 'python3 -c "import torch,transformers,accelerate,soundfile" 2>/dev/null \
   || pip install --user "transformers>=4.40" accelerate soundfile'
 # 2. free-GPU gate — turbo+batch1+fp16 needs ~4 GB free; do NOT launch into a full card
-ssh newlevel@10.77.8.134 'nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv,noheader'
+ssh newlevel@100.82.64.27 'nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv,noheader'
 # (read memory.free; if < ~4000 MiB, STOP — the shared card is busy, report contention, do not launch)
 # 3. ship audio + script, launch detached
-ssh newlevel@10.77.8.134 'mkdir -p ~/asr'
-rsync -a "$WORK/audio.wav" "$SKILL/scripts/transcribe.py" newlevel@10.77.8.134:~/asr/
-ssh newlevel@10.77.8.134 'cd ~/asr && rm -f done error && \
+ssh newlevel@100.82.64.27 'mkdir -p ~/asr'
+rsync -a "$WORK/audio.wav" "$SKILL/scripts/transcribe.py" newlevel@100.82.64.27:~/asr/
+ssh newlevel@100.82.64.27 'cd ~/asr && rm -f done error && \
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   setsid nohup python3 transcribe.py audio.wav . openai/whisper-large-v3-turbo sk \
   >asr.log 2>&1 < /dev/null & echo launched'
@@ -126,7 +126,7 @@ with `run_in_background: true` (per ci-monitoring), polling until a terminal mar
 to ~2× expected runtime (≈ minutes ≈ audio-minutes), not a fixed 40:
 
 ```bash
-ssh newlevel@10.77.8.134 'for i in $(seq 1 90); do
+ssh newlevel@100.82.64.27 'for i in $(seq 1 90); do
    [ -f ~/asr/done ]  && { echo DONE;  cat ~/asr/summary.json 2>/dev/null; tail -1 ~/asr/asr.log; exit 0; }
    [ -f ~/asr/error ] && { echo ERROR; tail -8 ~/asr/asr.log; exit 0; }
    pgrep -f transcribe.py >/dev/null || { echo PROCESS_GONE; tail -8 ~/asr/asr.log; exit 0; }
@@ -134,8 +134,8 @@ ssh newlevel@10.77.8.134 'for i in $(seq 1 90); do
  done; echo "STILL_RUNNING_AFTER_90MIN"; nvidia-smi --query-gpu=memory.used --format=csv,noheader'
 ```
 
-Branch on the result: `DONE` → pull results (`rsync -a newlevel@10.77.8.134:~/asr/transcript.json
-newlevel@10.77.8.134:~/asr/transcript.txt newlevel@10.77.8.134:~/asr/summary.json "$WORK/"`).
+Branch on the result: `DONE` → pull results (`rsync -a newlevel@100.82.64.27:~/asr/transcript.json
+newlevel@100.82.64.27:~/asr/transcript.txt newlevel@100.82.64.27:~/asr/summary.json "$WORK/"`).
 `ERROR` → read asr.log, fix the root cause (do NOT just retry). `PROCESS_GONE` with no marker →
 a dependency/import died — check asr.log. `STILL_RUNNING_AFTER_90MIN` while `pgrep` still finds it
 → it is STILL RUNNING (long recording or GPU contention), NOT dead — re-enter the watch; if the

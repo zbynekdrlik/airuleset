@@ -51,15 +51,33 @@ def _ordered_ips():
     return ips
 
 
-def host_ip():
-    """The LAN IP to bind to / put in URLs.
+def _is_tailscale(ip):
+    """True for a tailscale CGNAT address (100.64.0.0/10 → 100.64.x – 100.127.x).
+    Tailscale IPs are stable across LAN switches, so they are preferred for the
+    URL we hand the user — they reach the dev box even on a fallback network."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return a == 100 and 64 <= b <= 127
 
-    FILEDROP_HOST env wins. Otherwise prefer a 10.77.* address (the dev LAN per
-    machine-identities), else the first non-loopback IPv4, else loopback."""
+
+def host_ip():
+    """The IP to bind to / put in URLs.
+
+    FILEDROP_HOST env wins. Otherwise prefer the TAILSCALE IP (stable across
+    network switches — the user reaches the box on the fallback network too), then
+    a 10.77.* dev-LAN address, then the first non-loopback IPv4, else loopback."""
     override = os.environ.get("FILEDROP_HOST")
     if override:
         return override
     ips = _ordered_ips()
+    for ip in ips:
+        if _is_tailscale(ip):
+            return ip
     for ip in ips:
         if ip.startswith("10.77."):
             return ip

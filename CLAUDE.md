@@ -8,7 +8,7 @@ Centralized management of Claude Code rules, skills, and hooks shared across mul
 
 ## Dashboards
 
-- **Autopilot Board** — `http://10.77.9.21:8787/` — live autopilot tickets, the review-gate audit, and the planned "Up next" queue (workers self-report each phase; the supervisor reports the queue + verify verdicts).
+- **Autopilot Board** — `http://100.104.8.125:8787/` — live autopilot tickets, the review-gate audit, and the planned "Up next" queue (workers self-report each phase; the supervisor reports the queue + verify verdicts).
 
 ## Services
 
@@ -40,7 +40,7 @@ python3 airuleset.py push       # Push to GitHub + install locally + deploy to A
 
 Remote machines:
 
-- **dev2**: 10.77.8.134 (user: newlevel) — `~/devel/airuleset/`
+- **dev2**: 100.82.64.27 (user: newlevel) — `~/devel/airuleset/`
 
 **Never use bare `git push` for airuleset changes.** Always use `python3 airuleset.py push`.
 

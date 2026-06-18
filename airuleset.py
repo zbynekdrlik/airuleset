@@ -47,14 +47,15 @@ UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 # ---------------------------------------------------------------------------
 # Autopilot Board integration (plan Phase F — Tasks 13 & 14)
 # ---------------------------------------------------------------------------
-# The board is a single always-on daemon on dev1 (10.77.9.21). Every machine
-# runs the reporter (fire-and-forget client); only the board host runs the
+# The board is a single always-on daemon on dev1 (tailscale 100.104.8.125). Every
+# machine runs the reporter (fire-and-forget client); only the board host runs the
 # systemd service. Single source of truth for the host IP is board.BOARD_HOST_IP
 # (env BOARD_HOST override) — re-exported here so callers can `airuleset.BOARD_HOST_IP`.
+# Tailscale IP so it survives LAN switches (see #1; was 10.77.9.21 pre-renumber).
 try:
     from board import BOARD_HOST_IP, PORT as BOARD_PORT, board_url
 except Exception:  # pragma: no cover — board package should always import
-    BOARD_HOST_IP = os.environ.get("BOARD_HOST", "10.77.9.21")
+    BOARD_HOST_IP = os.environ.get("BOARD_HOST", "100.104.8.125")
     BOARD_PORT = 8787
 
     def board_url():
@@ -1397,11 +1398,12 @@ def cmd_notify(args):
 # Remote deployment
 # ---------------------------------------------------------------------------
 
-# Remote machines that should receive airuleset updates
+# Remote machines that should receive airuleset updates.
+# host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
 REMOTE_HOSTS = [
     {
         "name": "dev2",
-        "host": "10.77.8.134",
+        "host": "100.82.64.27",
         "user": "newlevel",
         "repo_path": "~/devel/airuleset",
     },

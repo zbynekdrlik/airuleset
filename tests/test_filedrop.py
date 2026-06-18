@@ -39,7 +39,14 @@ class TestHostIp(unittest.TestCase):
         finally:
             os.environ.pop("FILEDROP_HOST", None)
 
-    def test_prefers_dev_lan(self):
+    def test_prefers_tailscale(self):
+        # Tailscale (100.64.0.0/10) is preferred over the dev LAN — stable across
+        # network switches (#1). 100.5.x is NOT tailscale (outside 100.64/10).
+        self._fd._ordered_ips = lambda: [
+            "172.17.0.1", "10.77.10.175", "100.104.8.125", "100.5.0.1"]
+        self.assertEqual(self._fd.host_ip(), "100.104.8.125")
+
+    def test_prefers_dev_lan_when_no_tailscale(self):
         self._fd._ordered_ips = lambda: ["172.17.0.1", "10.77.9.21", "192.168.1.5"]
         self.assertEqual(self._fd.host_ip(), "10.77.9.21")
 

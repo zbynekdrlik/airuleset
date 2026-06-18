@@ -55,7 +55,7 @@ def main():
     use_cuda = torch.cuda.is_available()
     if not use_cuda and not ALLOW_CPU:
         raise SystemExit(
-            "no CUDA GPU visible. Run on dev2 (10.77.8.134). CPU is HOURS slower; "
+            "no CUDA GPU visible. Run on dev2 (100.82.64.27). CPU is HOURS slower; "
             "pass --allow-cpu only if you really mean it."
         )
 

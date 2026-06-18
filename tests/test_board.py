@@ -8,7 +8,7 @@ class TestConstants(unittest.TestCase):
     def test_constants_present(self):
         from board import (PORT, BOARD_HOST_IP, REPORT_TIMEOUT, TERMINAL_PHASES)
         self.assertEqual(PORT, 8787)
-        self.assertEqual(BOARD_HOST_IP, os.getenv("BOARD_HOST", "10.77.9.21"))
+        self.assertEqual(BOARD_HOST_IP, os.getenv("BOARD_HOST", "100.104.8.125"))
         self.assertEqual(REPORT_TIMEOUT, 2)
         self.assertIn("done", TERMINAL_PHASES)
         self.assertIn("obsolete-closed", TERMINAL_PHASES)

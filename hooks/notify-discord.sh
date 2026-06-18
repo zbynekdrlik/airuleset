@@ -69,8 +69,11 @@ CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
 # Prepend the tmux-owner @mention (zbynek / marek) so the device line clearly
 # targets the right person. Single source of truth = `airuleset.py notify` (it
 # reads the owner from the tmux session group and the DISCORD_MENTION_<OWNER> map
-# in the channel .env). Empty when there is no tmux / no mapping — then no ping tag.
-MENTION=$(python3 "$HOME/devel/airuleset/airuleset.py" notify --mention-prefix 2>/dev/null || echo "")
+# in the channel .env). airuleset.py is found relative to THIS hook (hooks/..),
+# not via $HOME, so it works regardless of where the repo lives. Empty when there
+# is no tmux / no mapping — then no ping tag.
+AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+MENTION=$(python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
 if [ -n "$MENTION" ]; then
     CONTENT="${MENTION}${CONTENT}"
 fi

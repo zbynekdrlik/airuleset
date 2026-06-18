@@ -52,7 +52,7 @@ the batch's runs (a solo issue is just a one-element list):
 (one shared PR/CI), so they share the same phase. It always exits 0 — if it fails, IGNORE it and
 continue. Reporting must NEVER delay or interrupt the work or asking the user. The shared PR's body
 (`Closes #41`, `Closes #43`, `Closes #47`) lets the board credit every member on merge. Board:
-http://10.77.9.21:8787/
+http://100.104.8.125:8787/
 
 ## READ FIRST (durable context — never skip)
 

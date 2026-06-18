@@ -266,11 +266,16 @@ class TestDiscordNotifyHooks(TestCase):
         subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
                        capture_output=True)
 
-    def _idle(self, sid, cwd):
+    def _idle(self, sid, cwd, owner=""):
+        # owner="" forces NO @mention so the structure assertions are deterministic
+        # regardless of this machine's tmux session / .env mapping. The mention
+        # behaviour is covered by test_idle_prepends_owner_mention + the
+        # TestDiscordAutopilotNotify unit tests.
         payload = json.dumps({"session_id": sid, "cwd": cwd})
         return subprocess.run(["bash", str(self.IDLE)], input=payload, text=True,
                               capture_output=True,
-                              env={**os.environ, "DISCORD_NOTIFY_DRYRUN": "1"})
+                              env={**os.environ, "DISCORD_NOTIFY_DRYRUN": "1",
+                                   "AIRULESET_NOTIFY_OWNER": owner})
 
     def test_question_records_then_idle_sends_slovak(self):
         sid, p = self._sid()
@@ -336,7 +341,7 @@ class TestDiscordNotifyHooks(TestCase):
 
     def test_done_with_trailing_url_after_marker_pings(self):
         sid, p = self._sid()
-        self._stop(sid, "✅ DONE: hotovo\n\nhttp://10.77.9.21:8787/")
+        self._stop(sid, "✅ DONE: hotovo\n\nhttp://100.104.8.125:8787/")
         self.assertIn("hotovo", open(p).read())
 
     def test_question_markdown_form_strips_asterisks(self):
@@ -386,6 +391,24 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertTrue(out2.startswith("**✅"))
         self.assertIn("hotovo", out2)
         self.assertIn("> nasadené v1.2.3", out2)
+
+    def test_idle_prepends_owner_mention(self):
+        # The idle ping must @mention the tmux owner so it clearly targets the
+        # right person. Hermetic: temp HOME with a DISCORD_MENTION_ZBYNEK map +
+        # forced owner=zbynek.
+        sid, _p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB?")
+        home = tempfile.mkdtemp()
+        d = Path(home) / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        (d / ".env").write_text("DISCORD_MENTION_ZBYNEK=773451844110385193\n")
+        payload = json.dumps({"session_id": sid, "cwd": tempfile.mkdtemp()})
+        out = subprocess.run(
+            ["bash", str(self.IDLE)], input=payload, text=True, capture_output=True,
+            env={**os.environ, "HOME": home, "DISCORD_NOTIFY_DRYRUN": "1",
+                 "AIRULESET_NOTIFY_OWNER": "zbynek"}).stdout
+        self.assertTrue(out.startswith("<@773451844110385193> **❓"),
+                        f"idle ping not @mention-prefixed: {out!r}")
 
     def test_governance_no_hand_fired_per_merge_ping(self):
         # pr-merge-policy.md must NOT instruct an active per-merge device ping
@@ -1682,8 +1705,10 @@ class TestBoardHost(TestCase):
         self.assertIsInstance(airuleset.is_board_host(), bool)
 
     def test_board_host_ip_constant(self):
-        # Default board host IP (env BOARD_HOST may override at runtime).
-        self.assertEqual(airuleset.BOARD_HOST_IP, os.getenv("BOARD_HOST", "10.77.9.21"))
+        # Default board host IP = dev1's TAILSCALE IP (stable across LAN switches;
+        # env BOARD_HOST may override at runtime). See #1 (was 10.77.9.21).
+        self.assertEqual(airuleset.BOARD_HOST_IP,
+                         os.getenv("BOARD_HOST", "100.104.8.125"))
 
     def test_report_and_board_subcommands_registered(self):
         self.assertIn("report", airuleset.SUBCOMMANDS)
@@ -1702,9 +1727,9 @@ class TestBoardHost(TestCase):
 
     def test_is_board_host_true_when_ip_local(self):
         import unittest.mock as m
-        with m.patch.object(airuleset, "BOARD_HOST_IP", "10.77.9.21"):
+        with m.patch.object(airuleset, "BOARD_HOST_IP", "100.104.8.125"):
             with m.patch.object(airuleset, "_local_ips",
-                                return_value={"10.77.9.21", "127.0.1.1"}):
+                                return_value={"100.104.8.125", "127.0.1.1"}):
                 self.assertTrue(airuleset.is_board_host())
 
 

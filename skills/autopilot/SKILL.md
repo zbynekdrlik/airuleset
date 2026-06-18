@@ -37,7 +37,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 ## How it works
 
-- **Live board at `http://10.77.9.21:8787/`.** Workers self-report each phase; the supervisor reports
+- **Live board at `http://100.104.8.125:8787/`.** Workers self-report each phase; the supervisor reports
   the planned queue + its verify verdicts. The board shows the live tickets, the review-gate audit, and
   the planned "Up next" queue. Reporting is fire-and-forget — it never blocks or gates the loop.
 - **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles the next BATCH
@@ -85,7 +85,7 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
   hardware / prod / streaming / OBS / HDMI / DRM issue is worked end-to-end on the rig like any other;
   the USER alone guards whether prod is live and stops you in the moment. (Same in Slovak: no
   `off-air okná`, `musíš byť pri tom`, `odporúčam autopilot-skip`, `vedene so mnou nie naslepo`.)
-- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog · board http://10.77.9.21:8787/`.
+- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog · board http://100.104.8.125:8787/`.
 - **Report the planned queue** so the board's "Up next" is current — after computing the ordered backlog
   (open issues minus `autopilot-skip`), at loop START and after each issue completes:
   `python3 ~/devel/airuleset/airuleset.py report --queue --repo <repo> --items '[[<issue>,"<title>"],…]'`.

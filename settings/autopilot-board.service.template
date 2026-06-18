@@ -1,6 +1,6 @@
 # Autopilot Board — systemd --user unit (managed by airuleset).
 #
-# Installed ONLY on the board host (dev1, 10.77.9.21) by `airuleset.py install`
+# Installed ONLY on the board host (dev1, 100.104.8.125) by `airuleset.py install`
 # via setup_board_service(). The {{REPO_DIR}} placeholder is substituted with the
 # absolute path of THIS airuleset checkout at install time, so ExecStart always
 # points at the right airuleset.py.

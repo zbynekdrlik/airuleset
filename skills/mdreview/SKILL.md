@@ -114,12 +114,12 @@ ls ~/devel/airuleset/skills/*/SKILL.md
 cat ~/devel/airuleset/profiles/universal.profile
 ```
 
-### dev2 (remote, 10.77.8.134)
+### dev2 (remote, 100.82.64.27)
 
 ```bash
-ssh newlevel@10.77.8.134 "ls -la ~/.claude/CLAUDE.md ~/.claude/settings.json && wc -l ~/.claude/CLAUDE.md"
-ssh newlevel@10.77.8.134 "ls ~/devel/*/CLAUDE.md 2>/dev/null"
-ssh newlevel@10.77.8.134 "find ~/.claude/projects -name 'MEMORY.md' -exec wc -l {} + 2>/dev/null"
+ssh newlevel@100.82.64.27 "ls -la ~/.claude/CLAUDE.md ~/.claude/settings.json && wc -l ~/.claude/CLAUDE.md"
+ssh newlevel@100.82.64.27 "ls ~/devel/*/CLAUDE.md 2>/dev/null"
+ssh newlevel@100.82.64.27 "find ~/.claude/projects -name 'MEMORY.md' -exec wc -l {} + 2>/dev/null"
 ```
 
 Compare dev1 vs dev2. Drift = airuleset push failure → flag for fix.

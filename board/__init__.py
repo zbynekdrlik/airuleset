@@ -2,7 +2,12 @@
 import os
 
 PORT = 8787
-BOARD_HOST_IP = os.environ.get("BOARD_HOST", "10.77.9.21")
+# dev1's TAILSCALE IP. Tailscale IPs (100.64.0.0/10) are assigned per-node by the
+# coordination server and stay stable even when the underlying LAN switches (the
+# user moves to a fallback network for external events), so the board stays
+# reachable across network changes — unlike the old DHCP LAN IP. Override per host
+# with the BOARD_HOST env var. (Was 10.77.9.21 until the LAN renumber; see #1.)
+BOARD_HOST_IP = os.environ.get("BOARD_HOST", "100.104.8.125")
 REPORT_TIMEOUT = 2          # seconds, reporter connect+read
 CIRCUIT_BREAKER_S = 60      # skip network this long after a failure
 FLUSH_CAP = 200             # max queued events flushed per reporter invocation
