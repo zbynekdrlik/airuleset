@@ -365,6 +365,28 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("❓", out)
         self.assertIn("posledný preset?", out)
 
+    def test_idle_output_is_structured_markdown(self):
+        # the device line must be Discord-markdown structured (bold header +
+        # blockquote on its own line), not one unreadable run-on
+        sid, p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?")
+        cwd = tempfile.mkdtemp()
+        out = self._idle(sid, cwd).stdout
+        lines = out.strip().split("\n")
+        self.assertEqual(len(lines), 2, f"expected header+blockquote, got: {out!r}")
+        self.assertTrue(lines[0].startswith("**❓"), lines[0])  # bold header
+        self.assertIn(os.path.basename(cwd), lines[0])          # project in header
+        self.assertIn("otázka", lines[0])                        # Slovak status
+        self.assertTrue(lines[1].startswith("> "), lines[1])     # blockquote
+        self.assertIn("posledný preset?", lines[1])
+        # ✅ uses the "hotovo" status
+        sid2, _ = self._sid()
+        self._stop(sid2, "✅ DONE: nasadené v1.2.3")
+        out2 = self._idle(sid2, tempfile.mkdtemp()).stdout
+        self.assertTrue(out2.startswith("**✅"))
+        self.assertIn("hotovo", out2)
+        self.assertIn("> nasadené v1.2.3", out2)
+
     def test_governance_no_hand_fired_per_merge_ping(self):
         # pr-merge-policy.md must NOT instruct an active per-merge device ping
         # (contradicts the mobile model); milestone-notifications.md must state it

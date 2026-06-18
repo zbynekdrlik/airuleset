@@ -54,7 +54,17 @@ if [ -n "$CWD" ]; then
 fi
 [ -z "$PROJECT" ] && PROJECT="unknown"
 
-CONTENT="${EMOJI} ${PROJECT} · ${TEXT}"
+# Structured, Discord-markdown line so it is scannable on the phone (not one long
+# run-on): a bold header "<emoji> <PROJECT> — <status>" then the content as a
+# blockquote on its own line.
+case "$EMOJI" in
+    "❓") STATUS="otázka" ;;
+    "✅") STATUS="hotovo" ;;
+    *)    STATUS="" ;;
+esac
+HEADER="**${EMOJI} ${PROJECT}**"
+[ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
+CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
 
 # Consume the pending file so re-idle does not re-send.
 rm -f "$PENDING" 2>/dev/null || true
