@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog one issue at a time. Each issue runs in a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each issue (incl. after merge) it picks the next. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Issues you don't want touched at all: label autopilot-skip (start-of-run picker)."
+description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog one issue at a time. Each issue runs in a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each issue (incl. after merge) it picks the next. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual]"
 user-invocable: true
 disable-model-invocation: true
@@ -88,20 +88,40 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
-### Step 1b — Skip picker (OPTIONAL start-of-run exclusion)
+### Step 1b — Skip review + picker (start-of-run; the skip set is RE-WEIGHED, not frozen)
 
-Only for issues you genuinely do **not** want touched at all this run — the default is *work
-everything*. Ensure the label exists once: `gh label create autopilot-skip --color ededed
---description "Excluded from autopilot runs" 2>/dev/null || true`. PRINT the full open-issue list
-(`#N <title> (Xd old)`, one per line) so the user can read off any number, then ask which to
-EXCLUDE via `AskUserQuestion` with `multiSelect: true` (one option per issue). AskUserQuestion
-renders ~4 options per question, so split across multiple ~4-option questions, or for a large
-backlog show the oldest subset and let the user add any other numbers via "Other" (comma-separated)
-— the printed list backs that. Apply to each chosen issue: `gh issue edit <N> --add-label
-autopilot-skip`, then print `skipping #A #B … · working N issues`. **Selecting none = work all
-(the normal case).** The label is PERSISTENT until removed (`gh issue edit <N> --remove-label
-autopilot-skip`); the picker reappears each start so the set can be adjusted (`status` lists the
-currently-skipped issues). NEW issues filed by workers never carry this label → always worked.
+Run BOTH halves every start so a skipped task is reconsidered each run. Ensure the label exists once:
+`gh label create autopilot-skip --color ededed --description "Excluded from autopilot runs" 2>/dev/null || true`.
+
+**(i) Un-skip review — reconsider what is ALREADY skipped (do this FIRST).** List the currently-skipped
+issues: `gh issue list --state open --label autopilot-skip -L 100`. If ANY exist, PRINT them
+(`#N <title> (Xd old)`) and ask via `AskUserQuestion` (`multiSelect: true`, one option per issue) which
+to **UN-skip** this run. For each chosen: `gh issue edit <N> --remove-label autopilot-skip` → it
+re-enters the backlog. **Default = keep all skipped (un-skip none).** This is how a deliberately-skipped
+task gets re-weighed without silently losing the skip. (If none are skipped, say so and move on.)
+
+**(ii) Add-skip picker — exclude anything you do NOT want touched at all this run.** The default is
+*work everything*. PRINT the full open-issue list (`#N <title> (Xd old)`, one per line), then ask which
+to EXCLUDE via `AskUserQuestion` with `multiSelect: true` (one option per issue). AskUserQuestion renders
+~4 options per question, so split across multiple ~4-option questions, or for a large backlog show the
+oldest subset and let the user add any other numbers via "Other" (comma-separated) — the printed list
+backs that. Apply to each chosen issue: `gh issue edit <N> --add-label autopilot-skip`, then print
+`skipping #A #B … · working N issues`. **Selecting none = work all (the normal case).** NEW issues filed
+by workers never carry this label → always worked.
+
+### Step 1c — Close obsolete issues (interactive, start-of-run)
+
+You often already know a task no longer makes sense but it lingers with no easy way to close it — this
+is that way. From the working backlog (open issues minus `autopilot-skip`), PRINT the full list
+(`#N <title> (Xd old)`) and ask via `AskUserQuestion` (`multiSelect: true`) which are **OBSOLETE and
+should be CLOSED now**. Present the list NEUTRALLY: do **NOT** recommend which to close, and **NEVER**
+classify / flag / colour any issue (especially not prod/hardware — `approval-scope.md`). For each chosen:
+`gh issue close <N> --comment "Closed at /autopilot start — obsolete per user."`, drop it from the
+backlog + planned queue, and milestone-ping the closures (`milestone-notifications.md`). **Default =
+close none.** Same ~4-options-per-question / "Other" handling as the picker above. (You can ALSO close any
+issue at any time — in `/autopilot` or normal chat — by telling Claude `close #N (reason)`; it runs
+`gh issue close <N> --comment "<reason>"` + ping. Closing an issue is non-destructive tracking and never
+needs extra approval.)
 
 ## Step 2 — Start the engine (the one manual paste)
 
