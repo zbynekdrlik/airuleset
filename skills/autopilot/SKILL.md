@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog one issue at a time. Each issue runs in a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each issue (incl. after merge) it picks the next. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual]"
 user-invocable: true
 disable-model-invocation: true
@@ -25,6 +25,7 @@ disable-model-invocation: true
 no "nothing is hands-off so I'm stopping". You answer the important questions; everything else runs.
 
 **Context gate — apply all:**
+- `autonomous-batch-issue-development.md` — bundle bundle-safe issues into ONE PR/CI cycle (the gate + ceiling below)
 - `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker (or the `manual` arg) = stop at green PR
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
 - `ci-monitoring.md` — the worker monitors its OWN CI to terminal; the main loop just verifies the result
@@ -39,10 +40,14 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - **Live board at `http://10.77.9.21:8787/`.** Workers self-report each phase; the supervisor reports
   the planned queue + its verify verdicts. The board shows the live tickets, the review-gate audit, and
   the planned "Up next" queue. Reporting is fire-and-forget — it never blocks or gates the loop.
-- **Engine = a `/goal` loop you paste once.** Each turn the main agent dispatches ONE foreground
-  `autopilot-worker` for the next open issue; the worker runs the full cycle (and asks you if
-  needed); the main agent verifies the result from GitHub; the next turn picks the next issue —
-  until the backlog is empty.
+- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles the next BATCH
+  (one bundle-safe issue, or several bundled into one PR — see Step 3.1) and dispatches ONE
+  foreground `autopilot-worker` for it; the worker runs the full cycle on one `dev` branch / one PR
+  / one CI run (and asks you if needed); the main agent verifies the result from GitHub; the next
+  turn picks the next batch — until the backlog is empty.
+- **Bundling cuts CI cost.** CI is long here, so the loop spends ONE CI cycle on as many
+  bundle-safe issues as the gate allows (`autonomous-batch-issue-development.md`) instead of
+  one-PR-per-issue. Issues that fail the gate (large / schema / API / security / cross-cut) run solo.
 - **Worker = foreground `autopilot-worker` subagent** (user-level, installed by airuleset).
   Foreground so its questions and prompts reach YOU; fresh context so your main session never
   degrades; it returns only a short evidence block to the main agent.
@@ -149,34 +154,55 @@ the `/goal` line, the loop never starts.
 
 Each loop turn:
 
-1. Pick the next open issue not labeled `autopilot-skip` (highest priority / oldest first). 2-3
-   trivially-related small issues MAY share one worker (one PR).
-1b. **VALIDATE FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching any worker,
-   dispatch the read-only **`ticket-validator`** subagent (`subagent_type: ticket-validator`,
-   prompt `Validate issue #<N> in <repo>`). Branch on its verdict:
-   - **STILL_VALID** → proceed to step 2. **PARTIAL** → proceed but pass `still_to_do` as the worker's scope.
+1. **Assemble the next BATCH — bundle by default to spend ONE CI cycle on many issues**
+   (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
+   is the main lever to cut CI cost.
+   - **Seed:** the next open non-`autopilot-skip` issue (highest priority / oldest first).
+   - **Grow greedily** by adding more open backlog issues that EACH pass the **bundling gate** vs the
+     seed and the batch-so-far:
+       • each member ≤ ~300 LoC estimated, AND cumulative batch ≤ ~600 LoC, AND ≤ 4 issues (keep the
+         PR reviewable);
+       • no DB schema/migration, no public-API break (routes/exported types/CLI flags), no
+         security-boundary change (auth/permissions/secrets), no cross-cutting refactor (rename >5
+         files / dep major bump / framework upgrade);
+       • independent — no member depends on another member's design choice.
+   - An issue that FAILS the gate is NOT added — it becomes the seed of a LATER solo batch (its own PR).
+     A large / schema / API / security / cross-cut seed runs SOLO; never force-bundle it.
+   - **Best-effort:** if nothing else qualifies, the batch is just the seed (one issue — today's behavior).
+     Report the chosen batch members on the planned queue so the board's "Up next" reflects the bundling.
+1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
+   the worker, dispatch the read-only **`ticket-validator`** subagent
+   (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
+   are independent, so validate them in parallel. Branch PER member:
+   - **STILL_VALID** → keep in the batch. **PARTIAL** → keep, pass its `still_to_do` as that issue's scope.
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR resolved it OR a passing repro proves it) →
      do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment,
      report it to the board (`R=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <r> --issue <N>
      --title "<title>") ; python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase obsolete-closed
-     --result "<validator evidence>"`), milestone-ping it (it's reopenable in one click), and pick the next
-     issue (skip step 2).
-   - **OVERCOME + `overcome_confidence: soft`** → do NOT auto-close — ask the user ("looks overcome by
-     <evidence> — close it?") with the validator's evidence; act on their answer.
-   - **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is
-     re-asked; do not dispatch the worker until resolved.
+     --result "<validator evidence>"`), milestone-ping it (reopenable in one click), and DROP it from the batch.
+   - **OVERCOME + `overcome_confidence: soft`** → DROP from the batch and ask the user ("looks overcome by
+     <evidence> — close it?") with the validator's evidence; act on their answer (close, or run it solo).
+   - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
+     already-answered is re-asked. **One unclear/overcome member must NOT block the rest of the batch** —
+     pull it out and proceed with the surviving STILL_VALID / PARTIAL members.
    (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
-   This stops the recurring failure (working / re-asking on an already-overcome ticket).
-2. **Dispatch a FOREGROUND `autopilot-worker`** via the Agent tool: `subagent_type:
-   autopilot-worker`, **NOT** run in the background (foreground lets it ask you), prompt =
-   `Work issue #<N> in <repo>.` plus any repo-specific note. It shows in the agent strip as
-   `autopilot-worker`.
-3. The worker FIRST **validates the issue is still real** (`verify-issue-still-valid.md`) —
-   reproduces it against current code + the live system; an obsolete / already-solved ticket is
-   closed with evidence instead of implemented. Then it runs the full cycle (version bump → TDD →
-   PR → CI green → merge per `pr-merge-policy.md` → deploy verify) and **asks you directly** on any
-   genuine design / scope / authorization call. Answer it; the worker continues. **A question is a
-   conversation, NOT an abandoned issue.**
+   After validation, the batch = the surviving STILL_VALID / PARTIAL members. This stops the recurring
+   failure (working / re-asking on an already-overcome ticket).
+2. **Dispatch ONE FOREGROUND `autopilot-worker`** via the Agent tool for the WHOLE batch:
+   `subagent_type: autopilot-worker`, **NOT** run in the background (foreground lets it ask you),
+   prompt = `Work issues #A #B #C in <repo> as ONE bundled PR (Closes all).` (or
+   `Work issue #<N> in <repo>.` for a solo batch) plus any repo-specific note. ONE worker, ONE `dev`
+   branch, ONE PR, ONE CI cycle — **serial per repo still holds** (a batch is still ONE worker). It
+   shows in the agent strip as `autopilot-worker`.
+3. The worker re-validates each batched issue is still real (`verify-issue-still-valid.md` — defense
+   in depth on top of 1b), then runs ONE cycle for the whole batch on one `dev` branch: version bump
+   → per-issue TDD (each bug RED→GREEN, each member committed with its own `Closes #<n>`) → ONE push
+   → ONE CI → ONE PR whose body `Closes` every member → merge per `pr-merge-policy.md` → deploy
+   verify. It **asks you directly** on any genuine design / scope / authorization call. Answer it;
+   the worker continues. **A question is a conversation, NOT an abandoned issue.** If a member turns
+   out to violate the gate mid-flight (schema/API/security/cross-cut discovered), the worker DROPS it
+   from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
+   solo later.
 
    > **Re-dispatch fresh — NEVER reach for `SendMessage` to "continue" a worker.** `SendMessage`
    > (the documented subagent-continuation tool) is gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
@@ -189,17 +215,27 @@ Each loop turn:
    > boundary, error, your answer to its question) is recovered by ONE fresh dispatch with the resume
    > context in the prompt — never by a continuation tool, never by restarting from scratch.
 4. When the worker returns its evidence block, **independently verify** from primary sources
-   (never trust the claim):
-   - `gh pr view <PR> --json state,mergedAt,mergeCommit`
+   (never trust the claim). First read the worker's `dropped:` and `obsolete_closed:` lines and
+   compute the **SURVIVING set** = batch members MINUS dropped MINUS obsolete-closed. Verify the ONE
+   shared PR closed exactly the surviving set — a dropped / obsolete member is NOT a verify failure:
+   - `gh pr view <PR> --json state,mergedAt,mergeCommit,closingIssuesReferences` — confirm EVERY
+     **surviving** member is in `closingIssuesReferences` (dropped/obsolete members are NOT expected here)
    - `gh run list -b main -L 1 --json conclusion`
    - deployed version read from the live target (if there is a deploy)
-   - `gh issue view <N> --json state`
-   Report the supervisor's verdict to the board: `python3 ~/devel/airuleset/airuleset.py report --run
-   "$RUN" --review supervisor-verify=ok|fail`. Confirmed → milestone ping (`milestone-notifications.md`,
-   include the board URL `http://10.77.9.21:8787/`) + one line to `docs/autopilot-log.md`.
-5. **Immediately pick the next issue** — including right after a merge; re-report the planned queue
-   (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to report
-   between issues, do NOT re-run `/issue-planner`, do NOT `/compact`.
+   - `gh issue view <N> --json state` for EACH member: **surviving** → `closed`; **obsolete-closed**
+     → `closed` (closed-with-evidence outside the PR, fine); **dropped** → `open` is CORRECT (it is
+     re-dispatched solo next, not a failure)
+   Report the supervisor's verdict to the board **per member** — the run ids were minted inside the
+   worker, so resolve each from durable state by repo+issue (the reporter persists the repo#issue→run
+   map): `for N in <surviving members>; do python3 ~/devel/airuleset/airuleset.py report --repo <repo>
+   --issue "$N" --review supervisor-verify=ok|fail; done` (the report CLI resolves `--repo --issue` to
+   the started run). Dropped / obsolete members were already terminalized by the worker — do not
+   re-verdict them. Confirmed → ONE milestone ping naming all bundled issues (`milestone-notifications.md`
+   — `merged #A (topic) + #B (topic) → vX`, include the board URL `http://10.77.9.21:8787/`) + one
+   line per surviving issue to `docs/autopilot-log.md`.
+5. **Immediately assemble the next batch** — including right after a merge; re-report the planned
+   queue (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to
+   report between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
 
 ## Step 4 — When to actually STOP (only these)
 
@@ -230,7 +266,9 @@ worker discovers go into the repo `CLAUDE.md`. If the session ends, `--resume` c
 ## Guardrails (hard — never relax)
 
 - **Serial per repo.** ONE worker at a time — the two-branch workflow makes parallel same-repo
-  workers collide on `dev`. (Different repos can each run their own `/autopilot`.)
+  workers collide on `dev`. The CI-cost win comes from BUNDLING many issues into that ONE worker's
+  single PR/CI cycle (Step 3.1), **not** from running workers in parallel. (Different repos can each
+  run their own `/autopilot`.)
 - **Independent verification is mandatory** — a worker's "merged and deployed" counts only after
   the main loop re-reads PR/CI/version/issue state from primary sources (premature-done is the #1
   long-running-agent failure).

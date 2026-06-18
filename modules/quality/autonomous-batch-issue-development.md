@@ -31,7 +31,9 @@ Bundle into one PR when EVERY selected issue meets ALL of these:
 - No cross-cutting refactor (rename across >5 files, dependency major bump, framework upgrade)
 - Issues are independent (issue B does not depend on issue A's design choice being one specific way)
 
-If ANY selected issue fails the gate → that issue gets its OWN PR, processed first or last (user's choice via AskUserQuestion). The remaining bundle-safe issues still go in one PR together.
+**Cumulative ceiling (keep the PR reviewable):** even when every member passes the per-issue gate, cap the bundle at **≤ ~600 LoC total AND ≤ 4 issues**. A batch that would exceed either ceiling splits into two PRs — bundling cuts CI cycles, it does NOT license a 2000-LoC mega-PR no one can review.
+
+If ANY selected issue fails the gate (or the ceiling is hit) → that issue gets its OWN PR, processed first or last (user's choice via AskUserQuestion). The remaining bundle-safe issues still go in one PR together.
 
 #### Per-issue cycle inside the batch — chain without prompting
 

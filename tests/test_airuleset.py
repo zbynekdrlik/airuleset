@@ -127,6 +127,83 @@ class TestAgentsExist(TestCase):
             self.assertIn(f"name: {name}", frontmatter)
 
 
+class TestAutopilotBatching(TestCase):
+    """The /autopilot skill + autopilot-worker must bundle bundle-safe issues
+    into ONE worker run / ONE PR / ONE CI cycle (cut long-CI cost), governed by
+    the existing bundling gate. Locks the feature so it can't silently regress to
+    one-PR-per-issue, and so the board-credit-all-members contract stays stated."""
+
+    def _skill(self):
+        return (airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md").read_text()
+
+    def _worker(self):
+        return (airuleset.REPO_DIR / "agents" / "autopilot-worker.md").read_text()
+
+    def test_skill_references_bundling_gate(self):
+        s = self._skill()
+        self.assertIn("autonomous-batch-issue-development.md", s)
+        # the gate's hard ceilings must be stated so a batch stays reviewable
+        self.assertIn("bundling gate", s.lower())
+        self.assertIn("≤ 4 issues", s)
+
+    def test_skill_dispatches_one_worker_for_a_batch(self):
+        s = self._skill()
+        self.assertIn("as ONE bundled PR", s)
+        # serial-per-repo invariant must be reaffirmed (batch != parallel workers)
+        self.assertIn("serial per repo", s.lower())
+
+    def test_skill_no_longer_says_one_issue_only_weak_line(self):
+        # the old weak "2-3 trivially-related small issues MAY share one worker"
+        # line must be gone — replaced by the real batch-assembly step
+        self.assertNotIn("2-3\n   trivially-related", self._skill())
+
+    def test_worker_accepts_a_batch(self):
+        w = self._worker()
+        self.assertIn("bundled BATCH", w)
+        self.assertIn("Work issues #", w)
+        # one PR body closes EVERY member, one push, one CI
+        self.assertIn("Closes #<n>", w)
+        self.assertIn("push **once**", w)
+
+    def test_worker_starts_a_run_per_member(self):
+        # board credits each member only if each has its own run; the worker must
+        # start one run per named issue and report phases to all of them
+        w = self._worker()
+        self.assertIn("start a run for **EACH** named issue", w)
+        self.assertIn("for R in $RUNS", w)
+
+    def test_worker_drops_gate_violating_member(self):
+        # a member that blows the gate mid-flight is dropped, not allowed to
+        # bloat the whole batch
+        self.assertIn("DROP it from this PR", self._worker())
+
+    def test_worker_terminalizes_dropped_run(self):
+        # a dropped / obsolete member's already-started board run MUST be moved to
+        # a terminal phase + removed from $RUNS, else it orphans into a false
+        # STALE card (the exact lie batching must not reintroduce)
+        w = self._worker()
+        self.assertIn("--phase stopped", w)
+        self.assertIn("--phase obsolete-closed", w)
+        self.assertIn("REMOVE `$RUN_K` from `$RUNS`", w)
+        self.assertIn("obsolete_closed:", w)
+
+    def test_skill_verify_scopes_to_surviving_set(self):
+        # Step 4 must subtract dropped/obsolete members before asserting closed —
+        # a legitimately-dropped member (issue left OPEN) is NOT a verify failure
+        s = self._skill()
+        self.assertIn("SURVIVING set", s)
+        self.assertIn("NOT a verify failure", s)
+
+    def test_skill_resolves_member_verdict_by_repo_issue(self):
+        # the supervisor never sees the worker's minted run ids — it must resolve
+        # each member's run from durable state (repo+issue), per member. (Match on
+        # tokens robust to line-wrapping in the prose.)
+        s = self._skill()
+        self.assertIn("report --repo <repo>", s)
+        self.assertIn('--issue "$N" --review supervisor-verify', s)
+        self.assertIn("for N in <surviving members>", s)
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [

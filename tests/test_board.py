@@ -108,6 +108,18 @@ class TestAlarm(unittest.TestCase):
         r = self._run(merged=False, phase="CI", last_report_age_s=31 * 60)
         self.assertIn("STALE_ABANDONED", compute_alarms(r))
 
+    def test_dropped_member_terminal_phase_never_stale(self):
+        # BATCH drop path: a member split out of a batch (gate violation) or
+        # closed-as-obsolete in STEP 0 has its run terminalized to `stopped` /
+        # `obsolete-closed`. A terminal phase must NEVER raise STALE_ABANDONED,
+        # even at huge report age — else the dropped member's orphaned run would
+        # reintroduce the false-STALE lie batching must not cause.
+        from board.gate import compute_alarms
+        for term in ("stopped", "obsolete-closed", "done"):
+            r = self._run(merged=False, phase=term, last_report_age_s=99999)
+            self.assertNotIn("STALE_ABANDONED", compute_alarms(r),
+                             f"{term} (terminal) wrongly flagged STALE")
+
 
 import tempfile
 
@@ -1563,6 +1575,32 @@ class TestReliabilityRefresh(unittest.TestCase):
                "prs": []}
         _apply_repo_refresh(b, "o/x", res)
         self.assertEqual(b.get_run("r1")["phase"], "review")
+
+    def test_apply_repo_refresh_batched_pr_finalizes_all_runs(self):
+        # BATCH (autonomous-batch-issue-development): ONE PR closing #41 #43 #47
+        # must credit ALL three member runs — the board fans the PR's `closes`
+        # list to every referenced run and reconcile_closed finalizes each. This
+        # is the lie-prevention guarantee for bundling: no member is left as a
+        # false STALE/in-progress card after the shared PR merges.
+        from board.server import _apply_repo_refresh
+        b = self._b()
+        for n in (41, 43, 47):
+            b.apply_event({"run_id": f"r{n}", "repo": "o/x", "issue": n, "seq": 1,
+                           "phase": "merge", "event_id": f"e{n}", "event_ts": 1.0})
+        res = {"gh_ok": True, "open_issues": set(), "issues_capped": False,
+               "prs": [{"number": 500, "url": "https://github.com/o/x/pull/500",
+                        "pr_state": "MERGED", "merged": True, "mergeable": None,
+                        "mergeable_state": None, "mergeable_gate": "pending",
+                        "closes": [41, 43, 47]}]}
+        _apply_repo_refresh(b, "o/x", res)
+        for n in (41, 43, 47):
+            gh = b.get_gh(f"r{n}")
+            self.assertIsNotNone(gh, f"#{n} run got no gh signal")
+            self.assertEqual(gh["merged"], 1, f"#{n} not marked merged")
+            self.assertEqual(gh["pr_url"], "https://github.com/o/x/pull/500")
+            # every member finalized to done -> no false STALE on a batched PR
+            self.assertEqual(b.get_run(f"r{n}")["phase"], "done",
+                             f"#{n} run not finalized done")
 
 
 class TestReliabilityReporter(unittest.TestCase):
