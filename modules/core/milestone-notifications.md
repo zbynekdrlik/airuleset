@@ -1,34 +1,34 @@
-### Milestone Notifications — Ping on Phase Achieved, Not Only When Idle
+### Device Notifications — Mobile-App Model: Only When ASKING or FULLY DONE
 
-**During long or autonomous runs (`/goal` loops, `/autopilot`, batch issue work, overnight CI drives), proactively notify the user at each meaningful phase completion — not just when you go idle waiting for input.** The user wants per-phase visibility ("merged to main and X achieved"), not silence until the very end.
+**Context gate — related rules you MUST also apply:**
+- `message-status-marker.md` — every message ends with ❓ / ⏳ / ✅; the device ping forwards the ❓ / ✅ content
+- `autopilot` skill + `project-autopilot-board` — per-phase progress lives on the BOARD, not the device
 
-#### When to notify (a phase was achieved)
+**The device (Discord / phone) is notified like the mobile Claude app: a ping arrives ONLY when Claude genuinely ASKS the user something (`❓ NEEDS YOU`) or has FULLY completed the work (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress.** This replaces the old "ping every phase" stance — the user found per-merge / per-CI pings to be noise; per-phase visibility lives on the live board instead.
 
-- A PR **merged to main** — name the issues closed + the deployed version
-- A **deploy verified live** (version read from the DOM)
-- **CI driven green** after it was red
-- A **batch / issue finished and committed** (for multi-batch loops)
-- The **whole goal / backlog reached its end state** (backlog empty, condition met)
-- **Stopped for a genuine question** (decision needed, destructive action, unfixable CI) — so the user comes back
+#### The mechanism is AUTOMATIC — do NOT hand-fire per-phase pings
 
-#### Mechanism — Discord-first, push fallback
+Two airuleset hooks implement this from the status marker, with no action from you:
+1. `notify-discord-pending.sh` (Stop) reads the last message's marker → records a pending device line ONLY for `❓` / `✅`; clears it on `⏳` / no-marker.
+2. `notify-discord.sh` (Notification : idle_prompt) sends that pending line ONLY when the user is genuinely idle/away — so there is NO ping during active back-and-forth, and NOTHING on `⏳`.
 
-1. **Discord chat_id available** (session bridged via `--channels`, or any inbound `<channel source="discord" chat_id="…">` seen this session) → post via the discord `reply` tool: `reply(chat_id, "<milestone>")`. Lands in the Discord thread AND pings the device. Send a NEW reply (not `edit_message`) — edits don't ping.
-2. **No Discord chat_id** → `PushNotification` with `status: proactive` — desktop notification + phone (if Remote Control connected).
+So you do NOT call the discord `reply` tool or `PushNotification` to announce a merge, a deploy, a green CI, or a finished issue. Just write the honest status marker; the hook decides whether the device pings. The ONE thing you control is the marker content (below).
 
-#### Message rules
+#### Device content = Slovak, short, phone-readable
 
-- One line, lead with the actionable fact + IDs, and give each issue/PR number a short topic (`issue-reference-context.md` — the user can't decode a bare `#N`): `merged #42 (NDI rebind) + #45 (karaoke sanitizer) to main → deployed v1.2.3-dev.7, CI green`.
-- Under 200 chars (topics are short — a few words each, not the full title). No markdown in `PushNotification` bodies.
-- For a stop-for-question ping, say what's blocked: `autopilot paused — issue #51 needs a design call (reset to 0dB or last preset?)`.
+The hook forwards the text after `❓ NEEDS YOU:` / `✅ DONE:` verbatim. So write that content in **Slovak, short (1 line), self-contained, no jargon** — it must be understandable on a phone with no terminal context. Keep the English keyword (`NEEDS YOU` / `DONE` — the hooks key on it); the content after the colon is Slovak. A question: the actual decision in one Slovak sentence (`❓ NEEDS YOU: reset EQ na 0 dB alebo posledný preset?`). A done: the outcome in one Slovak line (`✅ DONE: nasadené v1.2.3, board zelený`).
 
-#### Don't over-notify
+#### ✅ pings only at FULL completion — the `⏳`-while-looping discipline makes this real
 
-Milestones only — never every commit, every CI poll, or routine progress. A ping the user didn't need erodes the signal. Test: "if they walked away, would they want to know THIS now?" Yes → notify. Routine step → no.
+The device must ping on a `✅ DONE` only when the WHOLE job is finished — NOT per merged issue. This is enforced by the status marker itself, not by the hook guessing: during an `/autopilot` / `/goal` loop, each per-issue / per-batch turn is **still running the loop**, so it ends `⏳ WORKING` (the loop continues to the next issue) — and `⏳` CLEARS the pending payload, so no intermediate device ping. ONLY the terminal turn — backlog empty, loop stops, nothing running — ends `✅ DONE`, and THAT is the single ping. So: inside a loop, never end an intermediate turn with `✅ DONE` (something IS running — the loop); reserve `✅ DONE` for the true end. The hook keys on the last line, so a turn that did `✅ DONE: #5 merged` mid-loop but ends `⏳ WORKING: pokračujem na #6` correctly notifies nothing.
+
+#### Per-phase progress → the BOARD, not the device
+
+During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), report each phase (merged, deployed, CI green, issue finished) to the **autopilot board** (`airuleset.py report …`) — that is the live per-phase view. The device stays quiet until a worker raises a real `❓` question or the whole run ends `✅`. The board is for watching; the device is for "Claude needs me" / "Claude finished".
 
 #### Anti-patterns (all rewordings apply)
 
-- Pinging every commit / every CI poll → **WRONG.** Milestones only.
-- Silent through a 2-hour loop, one ping at the end → **WRONG.** Ping each phase.
-- `edit_message` for a completion instead of a new `reply` → **WRONG.** Edits don't ping the device.
-- Notifying routine progress to "keep the user informed" → **WRONG.** That's noise, not a milestone.
+- Calling `reply` / `PushNotification` to announce a per-merge / per-CI / per-deploy milestone → **WRONG.** That is the per-phase noise the user removed; let the board show it.
+- A device ping for a `⏳ WORKING` turn → **WRONG.** Working ≠ asking ≠ done; the hook sends nothing on `⏳`.
+- Writing the `❓` / `✅` content in English or as a long jargon-filled line → **WRONG.** Slovak, one short phone-readable sentence.
+- `edit_message` instead of a new message when you DO reply in an active Discord conversation → edits don't ping (only relevant to live chat, not milestones).

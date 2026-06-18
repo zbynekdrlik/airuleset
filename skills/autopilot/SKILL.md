@@ -30,7 +30,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
 - `ci-monitoring.md` — the worker monitors its OWN CI to terminal; the main loop just verifies the result
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
-- `milestone-notifications.md` — ping per merged+deployed issue and on every stop-for-approval
+- `milestone-notifications.md` — device pings ONLY on a worker's ❓ question or the FINAL ✅ (mobile-app model); per-phase progress (each merge/deploy) → the BOARD, never a per-issue device ping
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, NOT a reason to abandon the issue or stop the loop
@@ -122,7 +122,7 @@ is that way. From the working backlog (open issues minus `autopilot-skip`), PRIN
 should be CLOSED now**. Present the list NEUTRALLY: do **NOT** recommend which to close, and **NEVER**
 classify / flag / colour any issue (especially not prod/hardware — `approval-scope.md`). For each chosen:
 `gh issue close <N> --comment "Closed at /autopilot start — obsolete per user."`, drop it from the
-backlog + planned queue, and milestone-ping the closures (`milestone-notifications.md`). **Default =
+backlog + planned queue, and report the closures to the board (`milestone-notifications.md` — no per-issue device ping). **Default =
 close none.** Same ~4-options-per-question / "Other" handling as the picker above. (You can ALSO close any
 issue at any time — in `/autopilot` or normal chat — by telling Claude `close #N (reason)`; it runs
 `gh issue close <N> --comment "<reason>"` + ping. Closing an issue is non-destructive tracking and never
@@ -179,7 +179,7 @@ Each loop turn:
      do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment,
      report it to the board (`R=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <r> --issue <N>
      --title "<title>") ; python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase obsolete-closed
-     --result "<validator evidence>"`), milestone-ping it (reopenable in one click), and DROP it from the batch.
+     --result "<validator evidence>"`) — board only, no device ping (reopenable in one click) — and DROP it from the batch.
    - **OVERCOME + `overcome_confidence: soft`** → DROP from the batch and ask the user ("looks overcome by
      <evidence> — close it?") with the validator's evidence; act on their answer (close, or run it solo).
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
@@ -230,9 +230,10 @@ Each loop turn:
    map): `for N in <surviving members>; do python3 ~/devel/airuleset/airuleset.py report --repo <repo>
    --issue "$N" --review supervisor-verify=ok|fail; done` (the report CLI resolves `--repo --issue` to
    the started run). Dropped / obsolete members were already terminalized by the worker — do not
-   re-verdict them. Confirmed → ONE milestone ping naming all bundled issues (`milestone-notifications.md`
-   — `merged #A (topic) + #B (topic) → vX`, include the board URL `http://10.77.9.21:8787/`) + one
-   line per surviving issue to `docs/autopilot-log.md`.
+   re-verdict them. Confirmed → ONE board milestone update naming all bundled issues
+   (`merged #A (topic) + #B (topic) → vX`) + one line per surviving issue to `docs/autopilot-log.md`.
+   **No per-issue device ping** (`milestone-notifications.md`) — the device pings automatically only
+   on a worker's ❓ question or the FINAL ✅ when the whole backlog is done.
 5. **Immediately assemble the next batch** — including right after a merge; re-report the planned
    queue (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to
    report between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
@@ -266,7 +267,7 @@ This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then
    on its verdict (same hybrid close policy as Step 1b):
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR this run resolved it, OR a passing
      repro proves it) → **auto-close** with the validator's evidence as the closing comment
-     (`gh issue close <N> --comment "<evidence — overcome by PR #M this run>"`), milestone-ping it
+     (`gh issue close <N> --comment "<evidence — overcome by PR #M this run>"`), report it to the board
      (reopenable in one click). This is the core ask: a skip / open ticket the run made moot gets closed.
    - **PARTIAL** (the run did some of it; real work remains) → do NOT close. **Rescope it non-
      destructively:** `gh issue comment <N> --body "Reconciled at /autopilot end: PR #M did <X>;

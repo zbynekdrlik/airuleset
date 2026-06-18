@@ -243,6 +243,157 @@ class TestAutopilotEndOfRunSweep(TestCase):
                       self._skill())
 
 
+class TestDiscordNotifyHooks(TestCase):
+    """Mobile-app device-notification model: the device is pinged ONLY when the
+    last turn ended with ❓ NEEDS YOU (a real question) or ✅ DONE (fully done),
+    and only when the user is idle/away. notify-discord-pending.sh (Stop) records
+    the pending ❓/✅ payload; notify-discord.sh (idle) sends it. ⏳ WORKING / no
+    marker → nothing (kills the old 'PROJECT waiting' spam)."""
+
+    PENDING = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
+    IDLE = airuleset.REPO_DIR / "hooks" / "notify-discord.sh"
+    _n = 0
+
+    def _sid(self):
+        TestDiscordNotifyHooks._n += 1
+        sid = f"test-dn-{os.getpid()}-{TestDiscordNotifyHooks._n}"
+        p = f"/tmp/claude-discord-pending-{sid}"
+        self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
+        return sid, p
+
+    def _stop(self, sid, msg):
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+        subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
+                       capture_output=True)
+
+    def _idle(self, sid, cwd):
+        payload = json.dumps({"session_id": sid, "cwd": cwd})
+        return subprocess.run(["bash", str(self.IDLE)], input=payload, text=True,
+                              capture_output=True,
+                              env={**os.environ, "DISCORD_NOTIFY_DRYRUN": "1"})
+
+    def test_question_records_then_idle_sends_slovak(self):
+        sid, p = self._sid()
+        self._stop(sid, "predošlý text\n\n❓ NEEDS YOU: reset EQ na 0 dB alebo "
+                        "posledný preset?")
+        self.assertTrue(os.path.exists(p), "❓ did not record a pending payload")
+        self.assertIn("reset EQ na 0 dB", open(p).read())
+        # idle (cwd with no bg shells) sends it, prefixed with project + emoji
+        cwd = tempfile.mkdtemp()
+        out = self._idle(sid, cwd).stdout
+        self.assertIn("❓", out)
+        self.assertIn("reset EQ na 0 dB alebo posledný preset?", out)
+        self.assertIn(os.path.basename(cwd), out)  # project name
+        self.assertFalse(os.path.exists(p), "pending not consumed after send")
+
+    def test_done_multiline_report_records(self):
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n**Goal:** ...\n\n"
+                        "✅ DONE: nasadené v1.2.3, board zelený")
+        self.assertTrue(os.path.exists(p))
+        self.assertIn("✅", open(p).read())
+        self.assertIn("nasadené v1.2.3", open(p).read())
+
+    def test_working_clears_a_prior_question(self):
+        sid, p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: nieco?")
+        self.assertTrue(os.path.exists(p))
+        # next turn is ⏳ WORKING → pending must be cleared (no stale ping)
+        self._stop(sid, "⏳ WORKING: CI beží, hlásim sa keď dobehne")
+        self.assertFalse(os.path.exists(p), "⏳ did not clear the stale pending")
+
+    def test_no_marker_clears(self):
+        sid, p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: q?")
+        self._stop(sid, "len bežná odpoveď bez markera")
+        self.assertFalse(os.path.exists(p))
+
+    def test_idle_with_nothing_pending_sends_nothing(self):
+        # the core anti-spam guarantee: no pending (⏳/unmarked) → no device line
+        sid, _ = self._sid()
+        out = self._idle(sid, tempfile.mkdtemp()).stdout
+        self.assertEqual(out.strip(), "", "sent something with nothing pending")
+
+    def test_default_auto_report_heading_top_pr_url_last_pings_done(self):
+        # the canonical merged+deployed report: ✅ Work Complete heading at TOP,
+        # PR/URL last — last-line-only detection would MISS the most important
+        # "done" event. Whole-message scan + the explicit ✅ DONE line must catch it.
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n**What changed:** x\n\n"
+                        "https://github.com/o/x/pull/5 — merged abc1234\n\n"
+                        "✅ DONE: nasadené v1.2.3, board zelený")
+        self.assertTrue(os.path.exists(p), "default-auto report recorded nothing")
+        self.assertIn("nasadené v1.2.3", open(p).read())
+
+    def test_report_no_done_line_uses_what_changed_without_label(self):
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n**What changed:** zjednoduchý fix\n\n"
+                        "https://github.com/o/x/pull/9 — merged def")
+        body = open(p).read()
+        self.assertIn("zjednoduchý fix", body)
+        self.assertNotIn("What changed", body)   # label stripped
+        self.assertNotIn("*", body)               # no leaked markdown
+
+    def test_done_with_trailing_url_after_marker_pings(self):
+        sid, p = self._sid()
+        self._stop(sid, "✅ DONE: hotovo\n\nhttp://10.77.9.21:8787/")
+        self.assertIn("hotovo", open(p).read())
+
+    def test_question_markdown_form_strips_asterisks(self):
+        # completion-report template uses "❓ **Question:** <q>"
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n❓ **Question:** schváliš merge PR #5?")
+        body = open(p).read()
+        self.assertTrue(body.startswith("❓"))
+        self.assertIn("schváliš merge PR #5?", body)
+        self.assertNotIn("*", body)
+        self.assertNotIn("Question:", body)
+
+    def test_intermediate_done_with_working_last_line_pings_nothing(self):
+        # autopilot loop: "merged #5 ✅ DONE … now ⏳ WORKING on #6" — the ⏳ last
+        # line means the loop is still running → NO per-issue device ping
+        sid, p = self._sid()
+        self._stop(sid, "Mergnuté #5 → v1.2.3.\n\n✅ DONE: #5 hotové\n\n"
+                        "⏳ WORKING: pokračujem na #6")
+        self.assertFalse(os.path.exists(p), "intermediate ✅+⏳ wrongly recorded a ping")
+
+    def test_question_emoji_present_in_idle_send(self):
+        # ❓ must reach the device (it bypasses the bg-shell skip in the hook)
+        sid, p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?")
+        out = self._idle(sid, tempfile.mkdtemp()).stdout
+        self.assertIn("❓", out)
+        self.assertIn("posledný preset?", out)
+
+    def test_governance_no_hand_fired_per_merge_ping(self):
+        # pr-merge-policy.md must NOT instruct an active per-merge device ping
+        # (contradicts the mobile model); milestone-notifications.md must state it
+        mn = (airuleset.REPO_DIR / "modules" / "core" / "milestone-notifications.md").read_text()
+        pm = (airuleset.REPO_DIR / "modules" / "core" / "pr-merge-policy.md").read_text()
+        self.assertIn("Mobile-App Model", mn)
+        self.assertIn("do NOT call the discord `reply` tool or `PushNotification`", mn)
+        self.assertNotIn("Send the milestone ping", pm)
+
+    def test_governance_final_done_only_discipline(self):
+        # the ✅-only-at-full-completion rule must be documented as the
+        # ⏳-while-looping discipline (so per-issue ✅ never pings)
+        mn = (airuleset.REPO_DIR / "modules" / "core" / "milestone-notifications.md").read_text()
+        self.assertIn("⏳", mn)
+        self.assertIn("FULL completion", mn)
+
+    def test_pending_hook_is_silent_and_nonblocking(self):
+        # a Stop notifier must NOT emit a block decision / any stdout (it shares
+        # the Stop pipeline with the gate hooks)
+        sid, _ = self._sid()
+        r = subprocess.run(
+            ["bash", str(self.PENDING)], text=True, capture_output=True,
+            input=json.dumps({"session_id": sid,
+                              "last_assistant_message": "❓ NEEDS YOU: x?"}))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+        self.assertNotIn("block", r.stdout)
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [
@@ -254,6 +405,8 @@ class TestHookScriptsExist(TestCase):
             "stop-check-prod-gating.sh",
             "stop-check-sendmessage-narration.sh",
             "autopilot-report.sh",
+            "notify-discord-pending.sh",
+            "notify-discord.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")

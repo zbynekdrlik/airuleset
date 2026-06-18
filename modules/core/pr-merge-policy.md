@@ -3,7 +3,7 @@
 **Context gate — related rules you MUST also apply:**
 - `autonomous-quality-discipline.md` — gates are absolute; no bypass, no "merge despite"
 - `approval-scope.md` — deploy follows merge automatically; destructive actions still always ask
-- `post-deploy-verification.md` / `milestone-notifications.md` — verify after merge, ping the user
+- `post-deploy-verification.md` — verify after merge. `milestone-notifications.md` — the device pings AUTOMATICALLY only on ❓/final-✅ (mobile model); do NOT hand-fire a per-merge `reply`/`PushNotification`
 - `two-branch-workflow.md` — the flow this policy governs: dev→main PRs in the user's repos
 
 **DEFAULT: when every gate is green, MERGE — do not ask.** Waiting for a merge confirmation on a fully green PR is wasted time. When work is done:
@@ -19,7 +19,7 @@
    - Bug-fix PR → regression-test evidence (RED/GREEN SHAs) per `regression-test-first.md`
 3. **Merge it yourself** (merge commit — no squash, no rebase). Monitor main CI + any deploy workflow to terminal state.
 4. Deploy pipelines triggered by the merge run automatically — verify per `post-deploy-verification.md` (version read from the live DOM).
-5. Send the milestone ping (`merged #N to main → deployed vX.Y.Z, CI green`) and the completion report stating merged + deployed + verified.
+5. Write the completion report stating merged + deployed + verified, ending with the `✅ DONE` marker (Slovak, short) — the device ping fires AUTOMATICALLY from that marker when the user is idle (`milestone-notifications.md`, mobile model). Do NOT hand-fire a per-merge `reply`/`PushNotification` ping.
 
 An in-the-moment user instruction ("don't merge yet", "hold this one") always overrides the default for that PR.
 

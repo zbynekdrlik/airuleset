@@ -113,8 +113,9 @@ closing. Only confirmed-still-valid issues proceed to the cycle below.
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
-   the live app, read the version label from the DOM, exercise the changed feature. Milestone-ping
-   the deploy; do NOT gate it on approval. **Only STOP and ask for** a genuinely destructive
+   the live app, read the version label from the DOM, exercise the changed feature. Report the deploy
+   to the board (no per-issue device ping — `milestone-notifications.md`); do NOT gate it on approval.
+   **Only STOP and ask for** a genuinely destructive
    NON-deploy op (rebooting the HOST, stopping/killing a service or process OUTSIDE the deploy,
    deleting data / DB `DROP`/`DELETE`/`TRUNCATE`) or a project carrying the
    `<!-- airuleset:merge=manual -->` marker (`no-destructive-remote-actions.md`).

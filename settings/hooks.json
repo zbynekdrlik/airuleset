@@ -109,6 +109,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/autopilot-report.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/notify-discord-pending.sh",
+            "timeout": 5
           }
         ]
       }

@@ -2,7 +2,7 @@
 
 **Context gate — related rules you MUST also apply:**
 - `completion-report.md` — the ✅ Work Complete report IS a done-state; its ❓ Question line is the question marker
-- `milestone-notifications.md` — ping on phase achieved; the marker is the per-message version of the same "tell the user the state" discipline
+- `milestone-notifications.md` — the device (Discord/phone) is pinged ONLY on `❓` / `✅` (mobile-app model); the marker IS what fires it, so the `❓`/`✅` content must be a Slovak, short, phone-readable line
 - `autonomous-verification.md` — ⏳ WORKING means YOU keep working, never "user, go check it"
 
 **The user must NEVER have to guess whether you are asking them something, working in the background, or done. End EVERY message with exactly ONE status marker, on its own line, as the VERY LAST line:**
@@ -18,6 +18,7 @@
 - The only thing left is the user's decision (merge, approve, pick an option) → ❓ NEEDS YOU, not a vague "standing by".
 - "Standing by", "waiting on", "let me know", "your go", "should I", "no merge without your go" are AMBIGUOUS alone — they MUST carry a ❓ (if it's a question for the user) or ⏳ (if you're waiting on a background result, not on the user).
 - A completion report's `## ✅ Work Complete` heading counts as the ✅ DONE marker — and in a manual-marker (`airuleset:merge=manual`) project, where the report waits on the user's merge, end it with `❓ NEEDS YOU: approve merge?` instead. Default-auto projects merge first and report ✅ DONE (`pr-merge-policy.md`).
+- **The `❓` / `✅` content is forwarded to the device** (Discord/phone) when the user is idle — it is the ONLY thing that pings them (`milestone-notifications.md`, mobile-app model). So write that content in **Slovak, short (one line), self-contained** — readable on a phone with no terminal context. Keep the English keyword (`NEEDS YOU` / `DONE`); the text after the colon is Slovak. `⏳ WORKING` is NEVER forwarded (working ≠ asking ≠ done).
 
 #### Anti-pattern (this exact message misled the user)
 
