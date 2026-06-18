@@ -279,9 +279,11 @@ This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then
    touches prod/hardware (`approval-scope.md`) — closure is driven ONLY by the validator's overcome
    evidence, never by a ticket's subject. Closing/commenting is non-destructive tracking → no approval
    needed for hard-overcome; everything uncertain goes to the user.
-4. Report each closure/rescope to the board (`report --repo <r> --issue <N> --phase obsolete-closed
-   --result "<evidence>"` for closures) so the board's open set matches GitHub, then write the final
-   completion report — listing what the sweep closed / rescoped / asked about.
+4. Report each closure to the board (`report --repo <r> --issue <N> --phase obsolete-closed --result
+   "<evidence>"`) so a card with a live run is finalized. A never-worked skip has no run, so that
+   report is a harmless no-op — once it's closed on GitHub the refresher prunes it from the board's
+   open/queue set anyway. Then write the final completion report — listing what the sweep closed /
+   rescoped / asked about.
 
 ## Watching & steering
 
