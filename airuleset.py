@@ -1350,6 +1350,49 @@ def cmd_filedrop(args):
     _filedrop_status()
 
 
+def cmd_notify(args):
+    """Send a Discord notification (with the tmux-owner @mention prepended).
+
+    Modes:
+      --mention-prefix     print just the '<@id> ' prefix for the current tmux
+                           owner (used by hooks/notify-discord.sh) and exit.
+      --autopilot-done     compose + send the canonical per-ticket completion card
+                           from fields (--repo --pr --merge-sha --version --review
+                           --done --remaining --tickets-json). Deduped on repo#pr.
+      --body "<markdown>"  send arbitrary markdown (the general primitive).
+    """
+    from notify import (compose_autopilot_card, mention_prefix, send)
+
+    if getattr(args, "mention_prefix", False):
+        sys.stdout.write(mention_prefix())
+        return
+
+    if getattr(args, "autopilot_done", False):
+        try:
+            tickets = json.loads(args.tickets_json) if args.tickets_json else []
+        except (ValueError, TypeError):
+            print("notify: --tickets-json is not valid JSON", file=sys.stderr)
+            sys.exit(1)
+        body = compose_autopilot_card(
+            repo=args.repo, tickets=tickets, pr=args.pr,
+            version=args.version, merge_sha=args.merge_sha,
+            review_ok=(args.review != "fail"),
+            done=args.done, remaining=args.remaining)
+        dedup = args.dedup_key
+        if dedup is None and args.repo and args.pr:
+            dedup = "%s#%s" % (args.repo, args.pr)
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        return
+
+    if args.body is not None:
+        print(send(args.body, dedup_key=args.dedup_key, dry_run=args.dry_run))
+        return
+
+    print("notify: nothing to send (use --autopilot-done, --body, or "
+          "--mention-prefix)", file=sys.stderr)
+    sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Remote deployment
 # ---------------------------------------------------------------------------
@@ -1519,6 +1562,31 @@ def main():
     p_filedrop.add_argument("--serve", action="store_true",
                             help="Run the file-drop HTTP server in the foreground (systemd ExecStart)")
 
+    # --- Discord notify: @mention the tmux owner + the autopilot completion card
+    p_notify = sub.add_parser(
+        "notify", help="Send a Discord notification (@mentions the tmux owner)")
+    p_notify.add_argument("--mention-prefix", dest="mention_prefix",
+                          action="store_true",
+                          help="Print just the '<@id> ' mention prefix for the current tmux owner")
+    p_notify.add_argument("--autopilot-done", dest="autopilot_done",
+                          action="store_true",
+                          help="Compose + send the per-ticket completion card from fields")
+    p_notify.add_argument("--body", help="Arbitrary markdown body to send")
+    p_notify.add_argument("--repo", help="owner/name (autopilot card)")
+    p_notify.add_argument("--pr", help="Shared PR number (autopilot card)")
+    p_notify.add_argument("--merge-sha", dest="merge_sha", help="Merge commit SHA")
+    p_notify.add_argument("--version", help="Deployed version read from the DOM")
+    p_notify.add_argument("--review", choices=["ok", "fail"], default="ok",
+                          help="Double-review verdict (default ok)")
+    p_notify.add_argument("--done", help="Tickets completed so far this run")
+    p_notify.add_argument("--remaining", help="Open non-skip issues still to do")
+    p_notify.add_argument("--tickets-json", dest="tickets_json",
+                          help='JSON: [{"n":41,"title":..,"goal":..,"achieved":..}]')
+    p_notify.add_argument("--dedup-key", dest="dedup_key",
+                          help="Dedup key (default repo#pr) — same key sends once")
+    p_notify.add_argument("--dry-run", dest="dry_run", action="store_true",
+                          help="Print the composed message instead of sending")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1539,6 +1607,7 @@ SUBCOMMANDS = {
     "board": cmd_board,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
+    "notify": cmd_notify,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
