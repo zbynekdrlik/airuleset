@@ -416,6 +416,415 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertNotIn("block", r.stdout)
 
 
+class TestBashHookStdinContract(TestCase):
+    """REGRESSION: Claude Code passes the tool payload as JSON on STDIN. Four
+    Bash hooks read only the old `$TOOL_INPUT` env var, which CC no longer sets,
+    so they were SILENTLY DEAD (secret gate, lint gate, TDD gate, CI-cleanup all
+    no-op — 0 CI cancellations, the recurring push churn). These tests lock every
+    Bash hook to read stdin so the contract can never silently break again."""
+
+    @staticmethod
+    def _bash_hooks_from_settings():
+        """Every hooks/*.sh wired under a matcher=='Bash' PreToolUse/PostToolUse
+        entry in settings/hooks.json — derived dynamically so a newly-added Bash
+        hook is covered automatically (and can't silently ship reading the dead
+        $TOOL_INPUT env var)."""
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        names = []
+        for event in ("PreToolUse", "PostToolUse"):
+            for entry in cfg.get("hooks", {}).get(event, []):
+                if entry.get("matcher") != "Bash":
+                    continue
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    if "airuleset/hooks/" in cmd:
+                        names.append(cmd.split("airuleset/hooks/")[-1].strip())
+        return names
+
+    def test_settings_has_bash_hooks(self):
+        # guard: the dynamic discovery actually finds the Bash hooks
+        names = self._bash_hooks_from_settings()
+        self.assertGreaterEqual(len(names), 5)
+        self.assertIn("post-push-ci-cleanup.sh", names)
+
+    def test_every_bash_hook_reads_stdin(self):
+        for name in self._bash_hooks_from_settings():
+            src = (airuleset.REPO_DIR / "hooks" / name).read_text()
+            self.assertIn("cat", src, f"{name}: must read the payload from stdin")
+            self.assertRegex(
+                src, r"\$\(cat\b",
+                f"{name}: must capture stdin via $(cat …) — reading only "
+                f"$TOOL_INPUT is the dead contract that disabled the hook")
+
+    def test_no_hook_relies_solely_on_tool_input_env(self):
+        for name in self._bash_hooks_from_settings():
+            src = (airuleset.REPO_DIR / "hooks" / name).read_text()
+            if "TOOL_INPUT" in src:
+                # if it references the env var at all, it must be a FALLBACK after
+                # a stdin read — never the sole source
+                self.assertRegex(
+                    src, r"\$\(cat[\s\S]*TOOL_INPUT",
+                    f"{name}: $TOOL_INPUT must be a fallback AFTER a stdin read")
+
+
+class TestSecretStagingHook(TestCase):
+    """block-sensitive-staging.sh — the secret-staging gate, via the live stdin
+    contract (the exact path that was dead)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "block-sensitive-staging.sh"
+
+    def _run(self, command, use_env=False):
+        import subprocess
+        if use_env:
+            return subprocess.run(["bash", str(self.HOOK)], input="", text=True,
+                                  capture_output=True,
+                                  env={**os.environ, "TOOL_INPUT": command})
+        payload = json.dumps({"tool_name": "Bash",
+                              "tool_input": {"command": command}})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True)
+
+    def test_blocks_credentials_via_stdin(self):
+        r = self._run("git add credentials.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout)
+
+    def test_blocks_env_file(self):
+        self.assertEqual(self._run("git add .env").returncode, 2)
+
+    def test_allows_benign_file(self):
+        self.assertEqual(self._run("git add README.md").returncode, 0)
+
+    def test_blocks_pem_key_p12_extensions(self):
+        # under-match regression: '*.pem' as a grep pattern is a literal asterisk
+        for f in ("server.pem", "config/private.key", "cert.p12"):
+            self.assertEqual(self._run(f"git add {f}").returncode, 2, f)
+
+    def test_does_not_overmatch_env_substring(self):
+        # over-match regression: '.env' regex dot matched 'environment.ts'
+        for f in ("src/environment.ts", "lib/keyboard.ts", ".env.example"):
+            self.assertEqual(self._run(f"git add {f}").returncode, 0, f)
+
+    def test_blocks_env_local_but_allows_example(self):
+        self.assertEqual(self._run("git add .env.local").returncode, 2)
+        self.assertEqual(self._run("git add .env.production").returncode, 2)
+        self.assertEqual(self._run("git add config/.env.template").returncode, 0)
+
+    def test_empty_command_key_does_not_scan_json(self):
+        # a payload with an empty command must NOT fall back to grepping the JSON
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": "",
+                                             "description": "git add .env note"}})
+        r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                           capture_output=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_tool_input_env_fallback_still_blocks(self):
+        # old env contract must still work as a fallback (defensive)
+        self.assertEqual(self._run("git add .env", use_env=True).returncode, 2)
+
+    def test_empty_payload_does_not_hang_or_block(self):
+        import subprocess
+        r = subprocess.run(["bash", str(self.HOOK)], input="", text=True,
+                           capture_output=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+
+
+class TestPostPushCiCleanupHook(TestCase):
+    """post-push-ci-cleanup.sh — fires on git push (via stdin), cancels only
+    SUPERSEDED (ancestor-of-HEAD) runs, never the current push's runs."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "post-push-ci-cleanup.sh"
+
+    def _run(self, command, cwd=None):
+        import subprocess
+        payload = json.dumps({"tool_name": "Bash",
+                              "tool_input": {"command": command}})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, cwd=cwd, timeout=30)
+
+    def test_non_push_command_is_noop(self):
+        r = self._run("ls -la")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_mention_of_git_push_in_string_is_noop(self):
+        # anchored gate: a command merely MENTIONING 'git push' (grep/echo/commit
+        # message) must not trigger the cancel/monitor path
+        for cmd in ("history | grep 'git push'",
+                    "echo 'remember to git push later'",
+                    "git commit -m 'document the git push flow'"):
+            r = self._run(cmd)
+            self.assertEqual(r.returncode, 0, cmd)
+            self.assertEqual(r.stdout.strip(), "", cmd)
+
+    def test_push_outside_git_repo_is_safe(self):
+        # a git push command outside any repo must not crash (set -euo pipefail)
+        r = self._run("git push origin dev", cwd=tempfile.mkdtemp())
+        self.assertEqual(r.returncode, 0)
+
+    def test_reads_command_from_stdin_json(self):
+        # the matcher must see the command inside the JSON payload, not need env
+        src = self.HOOK.read_text()
+        self.assertRegex(src, r"\$\(cat\b")
+        self.assertIn("merge-base --is-ancestor", src)  # supersede-by-ancestor logic
+
+    def _cancel_fixture(self):
+        """Temp git repo (OLD ancestor → HEAD) with a landed-push remote-tip and a
+        stub `gh` on PATH returning: an ANCESTOR in_progress run (must cancel), the
+        push+pull pair at HEAD (must keep), and a DIVERGED run (must keep). Returns
+        (repo, env, head, old)."""
+        import subprocess, shutil, stat
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        repo = os.path.join(root, "repo")
+        bind = os.path.join(root, "bin")
+        os.makedirs(repo); os.makedirs(bind)
+        g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        g("init", "-q", "-b", "dev")
+        g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        open(os.path.join(repo, "f"), "w").write("a\n")
+        g("add", "f"); g("commit", "-qm", "a")
+        old = g("rev-parse", "HEAD").stdout.strip()
+        open(os.path.join(repo, "f"), "a").write("b\n")
+        g("commit", "-qam", "b")
+        head = g("rev-parse", "HEAD").stdout.strip()
+        # simulate a LANDED push: remote-tracking ref == HEAD
+        g("update-ref", "refs/remotes/origin/dev", head)
+        div = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo,
+                             input="z\n", text=True, capture_output=True).stdout.strip()
+        cancels = os.path.join(root, "cancels")
+        gh = os.path.join(bind, "gh")
+        with open(gh, "w") as fh:
+            fh.write(f'''#!/usr/bin/env bash
+[ "$1 $2" = "repo view" ] && {{ echo '{{"name":"x"}}'; exit 0; }}
+if [ "$1 $2" = "run list" ]; then
+  echo '[{{"databaseId":111,"status":"in_progress","headSha":"{old}","event":"push"}},{{"databaseId":444,"status":"in_progress","headSha":"{head}","event":"push"}},{{"databaseId":555,"status":"in_progress","headSha":"{head}","event":"pull_request"}},{{"databaseId":777,"status":"in_progress","headSha":"{div}","event":"push"}}]'
+  exit 0
+fi
+[ "$1 $2" = "run cancel" ] && {{ echo "$3" >> "{cancels}"; exit 0; }}
+exit 0
+''')
+        os.chmod(gh, os.stat(gh).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        env = dict(os.environ); env["PATH"] = bind + os.pathsep + env["PATH"]
+        return repo, env, cancels, head, old
+
+    def _run_env(self, repo, env, command):
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": command}})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, cwd=repo, env=env, timeout=30)
+
+    def test_cancels_only_ancestor_run(self):
+        repo, env, cancels, head, old = self._cancel_fixture()
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        recorded = open(cancels).read().split() if os.path.exists(cancels) else []
+        # ONLY the ancestor run (111) cancelled; HEAD pair (444,555) + diverged (777) kept
+        self.assertEqual(recorded, ["111"], f"cancelled set wrong: {recorded}")
+        self.assertIn("cancelled 1 superseded", r.stdout)
+        # monitor instruction lists BOTH current-HEAD runs
+        self.assertIn("444", r.stdout); self.assertIn("555", r.stdout)
+
+    def test_no_cancel_when_push_did_not_land(self):
+        repo, env, cancels, head, old = self._cancel_fixture()
+        # rewind the remote-tracking ref so HEAD != remote tip (push failed/rejected)
+        import subprocess
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/dev", old], cwd=repo)
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(cancels) and open(cancels).read().strip(),
+                         "cancelled a run although the push did not land")
+
+
+class TestPrePushGatesFire(TestCase):
+    """pre-push-lint.sh + pre-push-test-check.sh were DEAD ($TOOL_INPUT-only). Lock
+    that they FIRE via stdin — a non-push command is a clean no-op, a push payload
+    reaches the gate body (not silently skipped by an empty input)."""
+
+    def _run(self, hook, command, cwd):
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": command}})
+        # isolate HOME so pre-push-test-check's audit log ($HOME/devel/airuleset/
+        # audits/no-test-skips.log) is written under a temp dir, never the real one
+        env = dict(os.environ); env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / hook)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=cwd, timeout=60, env=env)
+
+    def test_test_check_blocks_feature_without_test(self):
+        # a feature-code change with no test file must block (exit 2) via stdin
+        import subprocess, shutil
+        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        open(os.path.join(root, "feature.py"), "w").write("def g():\n    return 2\n")
+        g("add", "feature.py"); g("commit", "-qm", "feat: add g")
+        r = self._run("pre-push-test-check.sh", "git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("BLOCKED", r.stdout)
+
+    def test_test_check_no_test_bypass(self):
+        import subprocess, shutil
+        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("x=1\n")
+        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        open(os.path.join(root, "feature.py"), "w").write("y=2\n")
+        g("add", "feature.py"); g("commit", "-qm", "config tweak\n\n[no-test: config-only change]")
+        r = self._run("pre-push-test-check.sh", "git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_non_push_is_noop_for_both_gates(self):
+        d = tempfile.mkdtemp()
+        for hook in ("pre-push-lint.sh", "pre-push-test-check.sh"):
+            self.assertEqual(self._run(hook, "ls -la", d).returncode, 0, hook)
+
+
+class TestPrePushBaseSyncHook(TestCase):
+    """pre-push-base-sync.sh — GLOBAL conflict-churn guard. Blocks a push ONLY when
+    a trial merge of the base into HEAD has a REAL CONFLICT (git merge-tree). It
+    must NOT block on a mere "behind" (the merge-commit-only divergence after a
+    --no-ff PR merge + version bump — the steady-state two-branch push) nor on
+    non-push commands that merely mention 'git push'."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "pre-push-base-sync.sh"
+
+    def _g(self, cwd, *args):
+        import subprocess
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+    def _base_repo(self):
+        """Remote + clone, main+dev, with a 3-line 'shared' file (so divergent
+        edits to the same line conflict). dev checked out, origin/HEAD set."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        bare = os.path.join(root, "rem.git")
+        self._g(root, "init", "-q", "--bare", bare)
+        repo = os.path.join(root, "repo")
+        self._g(root, "clone", "-q", bare, repo)
+        self._g(repo, "config", "user.email", "t@t")
+        self._g(repo, "config", "user.name", "t")
+        self._g(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+        open(os.path.join(repo, "shared"), "w").write("line1\nline2\nline3\n")
+        self._g(repo, "add", "shared"); self._g(repo, "commit", "-qm", "base")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._g(repo, "checkout", "-q", "-b", "dev")
+        self._g(repo, "push", "-q", "origin", "dev")
+        self._g(repo, "remote", "set-head", "origin", "-a")
+        return repo
+
+    def _edit_line2(self, repo, branch, text):
+        import subprocess
+        self._g(repo, "checkout", "-q", branch)
+        p = os.path.join(repo, "shared")
+        open(p, "w").write(f"line1\n{text}\nline3\n")
+        self._g(repo, "commit", "-qam", f"{branch} edit")
+
+    def _run(self, repo, command, env_extra=None):
+        import subprocess
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        payload = json.dumps({"tool_input": {"command": command}})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, cwd=repo, env=env, timeout=30)
+
+    def test_blocks_on_genuine_conflict(self):
+        repo = self._base_repo()
+        self._edit_line2(repo, "main", "MAIN-EDIT")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._edit_line2(repo, "dev", "DEV-EDIT")
+        r = self._run(repo, "git push origin dev")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("CONFLICT", r.stdout)
+
+    def test_allows_merge_commit_only_behind(self):
+        # THE #1 critical false-block: after a --no-ff PR merge + version bump, dev
+        # is "behind" main by the merge-commit object but has NO content to merge.
+        repo = self._base_repo()
+        open(os.path.join(repo, "d"), "w").write("devwork\n")
+        self._g(repo, "add", "d"); self._g(repo, "commit", "-qm", "devwork")
+        self._g(repo, "push", "-q", "origin", "dev")
+        self._g(repo, "checkout", "-q", "main")
+        self._g(repo, "merge", "-q", "--no-ff", "dev", "-m", "Merge PR")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._g(repo, "checkout", "-q", "dev")
+        open(os.path.join(repo, "version"), "w").write("v2\n")
+        self._g(repo, "add", "version"); self._g(repo, "commit", "-qm", "bump")
+        self._g(repo, "remote", "set-head", "origin", "-a")
+        r = self._run(repo, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_clean_behind(self):
+        # main adds a NEW file dev lacks — behind but a clean merge, no conflict
+        repo = self._base_repo()
+        self._g(repo, "checkout", "-q", "main")
+        open(os.path.join(repo, "newfile"), "w").write("x\n")
+        self._g(repo, "add", "newfile"); self._g(repo, "commit", "-qm", "newfile")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._g(repo, "checkout", "-q", "dev")
+        open(os.path.join(repo, "dd"), "w").write("y\n")
+        self._g(repo, "add", "dd"); self._g(repo, "commit", "-qm", "dwork")
+        self._g(repo, "remote", "set-head", "origin", "-a")
+        r = self._run(repo, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def _conflicting(self):
+        repo = self._base_repo()
+        self._edit_line2(repo, "main", "MAIN-EDIT")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._edit_line2(repo, "dev", "DEV-EDIT")
+        return repo
+
+    def test_non_push_command_not_blocked(self):
+        # over-broad-substring regression: these merely MENTION 'git push'
+        repo = self._conflicting()
+        for cmd in ("grep -rn 'git push' .",
+                    "git commit -m 'document the git push flow'",
+                    "echo 'remember to git push later'"):
+            self.assertEqual(self._run(repo, cmd).returncode, 0, cmd)
+
+    def test_deletion_and_tag_push_allowed(self):
+        repo = self._conflicting()
+        self.assertEqual(self._run(repo, "git push origin --delete old").returncode, 0)
+        self.assertEqual(self._run(repo, "git push origin --tags").returncode, 0)
+
+    def test_pushing_base_branch_allowed(self):
+        repo = self._conflicting()
+        self.assertEqual(self._run(repo, "git push origin main").returncode, 0)
+        self.assertEqual(self._run(repo, "git push origin dev:main").returncode, 0)
+
+    def test_base_word_elsewhere_does_not_bypass(self):
+        # the base-target bypass must match only the refspec DESTINATION, not the
+        # base word anywhere on the line — else the canonical dev->main workflow
+        # command and a base-named feature branch silently skip the conflict guard
+        repo = self._conflicting()
+        for cmd in ("git push origin dev && gh pr create --base main",
+                    "git push -u origin feature-main-fix",
+                    "git push origin dev --push-option=ci.skip-main"):
+            self.assertEqual(self._run(repo, cmd).returncode, 2, cmd)
+
+    def test_bypasses_allow(self):
+        repo = self._conflicting()
+        self.assertEqual(self._run(repo, "git push origin dev",
+                         env_extra={"AIRULESET_ALLOW_BEHIND_PUSH": "1"}).returncode, 0)
+        self.assertEqual(self._run(
+            repo, "git push origin dev # airuleset:push-behind-ok").returncode, 0)
+
+    def test_reads_stdin_and_uses_merge_tree(self):
+        src = self.HOOK.read_text()
+        self.assertRegex(src, r"\$\(cat\b")
+        self.assertIn("merge-tree", src)
+        self.assertIn("fail-safe", src.lower())
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [
@@ -429,6 +838,10 @@ class TestHookScriptsExist(TestCase):
             "autopilot-report.sh",
             "notify-discord-pending.sh",
             "notify-discord.sh",
+            "pre-push-base-sync.sh",
+            "post-push-ci-cleanup.sh",
+            "pre-push-lint.sh",
+            "pre-push-test-check.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")

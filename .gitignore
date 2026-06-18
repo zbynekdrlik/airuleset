@@ -36,3 +36,6 @@ Thumbs.db
 board-*.png
 filedrop-*.png
 design-*.png
+
+# machine-local TDD-skip audit trail (regression-test-first.md)
+audits/no-test-skips.log

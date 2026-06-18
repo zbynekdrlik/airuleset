@@ -10,7 +10,14 @@ set -euo pipefail
 # Every bypass logged to ~/devel/airuleset/audits/no-test-skips.log.
 # Exit code 2 = block the tool call.
 
-INPUT="${TOOL_INPUT:-}"
+# Read the tool payload from STDIN (current CC contract; $TOOL_INPUT is the dead
+# old env var, kept as fallback). See block-sensitive-staging.sh for the rationale.
+PAYLOAD=$(cat 2>/dev/null || echo "")
+[ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
+INPUT=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("tool_input",{}).get("command","") or "")
+except Exception: pass' 2>/dev/null || echo "")
+[ -z "$INPUT" ] && INPUT="$PAYLOAD"
 
 # Only act on git push commands
 if ! echo "$INPUT" | grep -qE 'git\s+push'; then
