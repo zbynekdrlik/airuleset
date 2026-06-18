@@ -125,7 +125,7 @@ def is_board_host():
     return BOARD_HOST_IP in _local_ips()
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep"]
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis"]
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
