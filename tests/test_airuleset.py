@@ -2392,6 +2392,32 @@ class TestDiscordAutopilotNotify(TestCase):
                 self.notify._dedup_release("o/x#5")
                 self.assertTrue(self.notify._dedup_claim("o/x#5"))   # reclaimable
 
+    def test_send_sets_discordbot_user_agent(self):
+        # Cloudflare 403s the default "Python-urllib" UA (error code 1010), so
+        # send() MUST set a DiscordBot User-Agent or EVERY card silently fails
+        # (caught only by a live POST — this locks the regression).
+        import unittest.mock as m
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x", "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    r = self.notify.send("hi", env=env, owner="", dedup_key=None)
+        self.assertEqual(r, "sent")
+        ua = captured["headers"].get("user-agent", "")
+        self.assertIn("DiscordBot", ua)
+        self.assertNotIn("Python-urllib", ua)
+
     def test_send_no_config_releases_dedup(self):
         # A real (non-dry) send with no token must NOT permanently claim the key,
         # so a later configured send can still deliver the card.

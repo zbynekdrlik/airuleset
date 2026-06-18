@@ -260,7 +260,12 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
             data=json.dumps({"content": content}).encode(),
             method="POST",
             headers={"Authorization": "Bot " + token,
-                     "Content-Type": "application/json"})
+                     "Content-Type": "application/json",
+                     # Discord's API REQUIRES a User-Agent, and Cloudflare blocks
+                     # the default "Python-urllib/*" with 403 "error code: 1010".
+                     # A DiscordBot UA (per Discord's spec) gets through — the same
+                     # reason the curl-based hook works.
+                     "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
         urllib.request.urlopen(req, timeout=6).read()
         return "sent"
     except Exception:
