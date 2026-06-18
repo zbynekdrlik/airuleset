@@ -30,7 +30,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
 - `ci-monitoring.md` — the worker monitors its OWN CI to terminal; the main loop just verifies the result
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
-- `milestone-notifications.md` — device pings ONLY on a worker's ❓ question or the FINAL ✅ (mobile-app model); per-phase progress (each merge/deploy) → the BOARD, never a per-issue device ping
+- `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (Step 4b — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, NOT a reason to abandon the issue or stop the loop
@@ -232,8 +232,25 @@ Each loop turn:
    the started run). Dropped / obsolete members were already terminalized by the worker — do not
    re-verdict them. Confirmed → ONE board milestone update naming all bundled issues
    (`merged #A (topic) + #B (topic) → vX`) + one line per surviving issue to `docs/autopilot-log.md`.
-   **No per-issue device ping** (`milestone-notifications.md`) — the device pings automatically only
-   on a worker's ❓ question or the FINAL ✅ when the whole backlog is done.
+4b. **Send the per-ticket Discord completion card** (`milestone-notifications.md` — the ONE sanctioned
+   per-ticket device message; the short `❓`/`✅` idle ping is still suppressed because this loop turn
+   ends `⏳ WORKING`). AFTER the verification above confirms merge + CI + deploy, send ONE structured
+   Slovak card for the surviving set. `--done` = tickets this run has closed so far (count the
+   `Closes #N` lines in `docs/autopilot-log.md`); `--remaining` = `gh issue list --state open --search
+   "-label:autopilot-skip" | wc -l` AFTER the merge. Pull each ticket's `goal` from its issue
+   (`gh issue view <N> --json title,body` — the objective, concise) and `achieved` from the worker's
+   evidence (the `achieved:` line / result summary):
+   ```
+   python3 ~/devel/airuleset/airuleset.py notify --autopilot-done \
+     --repo <owner/name> --pr <M> --merge-sha <merge-sha> --version "<DOM version | —>" \
+     --review ok \
+     --done <closed-so-far> --remaining <open-non-skip-left> \
+     --tickets-json '[{"n":<A>,"title":"<title>","goal":"<objective>","achieved":"<what landed>"},…]'
+   ```
+   It @mentions the tmux owner (zbynek / marek) and is deduped on `repo#pr`, so a re-dispatch never
+   double-posts. Fire-and-forget — it never blocks or gates the loop. `--review fail` only if a gate
+   was not actually clean (a merged PR is normally `ok`). This card is the per-phase device visibility
+   the user asked for; per-issue board reporting (above) still happens too.
 5. **Immediately assemble the next batch** — including right after a merge; re-report the planned
    queue (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to
    report between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.

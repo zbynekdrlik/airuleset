@@ -66,6 +66,15 @@ HEADER="**${EMOJI} ${PROJECT}**"
 [ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
 CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
 
+# Prepend the tmux-owner @mention (zbynek / marek) so the device line clearly
+# targets the right person. Single source of truth = `airuleset.py notify` (it
+# reads the owner from the tmux session group and the DISCORD_MENTION_<OWNER> map
+# in the channel .env). Empty when there is no tmux / no mapping — then no ping tag.
+MENTION=$(python3 "$HOME/devel/airuleset/airuleset.py" notify --mention-prefix 2>/dev/null || echo "")
+if [ -n "$MENTION" ]; then
+    CONTENT="${MENTION}${CONTENT}"
+fi
+
 # Consume the pending file so re-idle does not re-send.
 rm -f "$PENDING" 2>/dev/null || true
 

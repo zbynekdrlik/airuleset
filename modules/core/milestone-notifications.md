@@ -26,9 +26,23 @@ The device must ping on a `✅ DONE` only when the WHOLE job is finished — NOT
 
 During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), report each phase (merged, deployed, CI green, issue finished) to the **autopilot board** (`airuleset.py report …`) — that is the live per-phase view. The device stays quiet until a worker raises a real `❓` question or the whole run ends `✅`. The board is for watching; the device is for "Claude needs me" / "Claude finished".
 
+#### Every device message @mentions the tmux owner (zbynek / marek)
+
+Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is prefixed with that owner's `<@id>` so it is unambiguous WHOM the message concerns. This is automatic — the `notify-discord.sh` hook and `airuleset.py notify` resolve the owner from the tmux session group and look up `DISCORD_MENTION_<OWNER>` in the channel `.env`. You do nothing; just never strip the mention. No tmux / no mapping → no tag (never pings the wrong person).
+
+#### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
+
+The "no per-merge device ping" rule above has ONE explicit, user-requested exception: during an `/autopilot` run, **each ticket that finishes AND deploys gets ONE structured Discord card** — the user wants per-ticket visibility on the phone during hands-off runs. This is NOT the banned per-merge noise: it is a single, deduped, structured message sent through the dedicated path, NOT a hand-fired `reply`/`PushNotification`.
+
+- **Sent by the `/autopilot` SUPERVISOR in Step 4**, AFTER it independently verifies merge + CI + deploy (never the worker's premature claim), via:
+  `python3 ~/devel/airuleset/airuleset.py notify --autopilot-done --repo <owner/name> --pr <M> --merge-sha <sha> --version "<DOM version | —>" --review ok|fail --done <closed-so-far> --remaining <open-non-skip-left> --tickets-json '[{"n":<N>,"title":"…","goal":"<ticket objective>","achieved":"<what landed>"}]'`
+- The card is **Slovak, structured markdown**: per ticket a **🎯 Cieľ** (objective) + **✅ Dosiahnuté** (what landed), then a **🔍 Double-review** line (`/review` + `/requesting-code-review` met?), the PR/merge/deployed-version, and **📊 Autopilot** progress (`hotové X · ostáva Y` until the backlog is empty). Structure is composed by `airuleset.py notify`, so it is consistent every time.
+- **Deduped on `repo#pr`** — a worker re-dispatch / retry never double-posts; a failed send releases the claim so it retries.
+- This is distinct from the `✅ DONE` end-of-run ping: the per-ticket cards fire DURING the loop (the loop turns still end `⏳ WORKING`), and the single `✅ DONE` fires only when the WHOLE backlog is empty.
+
 #### Anti-patterns (all rewordings apply)
 
-- Calling `reply` / `PushNotification` to announce a per-merge / per-CI / per-deploy milestone → **WRONG.** That is the per-phase noise the user removed; let the board show it.
+- Calling `reply` / `PushNotification` to announce a per-merge / per-CI / per-deploy milestone → **WRONG.** That is the per-phase noise the user removed; let the board show it. (The `/autopilot` per-ticket card is NOT this — it goes through `airuleset.py notify --autopilot-done`, deduped + structured, per the sanctioned EXCEPTION above; a raw `reply`/`PushNotification` per-merge is still banned.)
 - A device ping for a `⏳ WORKING` turn → **WRONG.** Working ≠ asking ≠ done; the hook sends nothing on `⏳`.
 - Writing the `❓` / `✅` content in English or as a long jargon-filled line → **WRONG.** Slovak, one short phone-readable sentence.
 - `edit_message` instead of a new message when you DO reply in an active Discord conversation → edits don't ping (only relevant to live chat, not milestones).

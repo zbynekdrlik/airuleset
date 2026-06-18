@@ -146,6 +146,7 @@ them all):
 ```
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
 validated: <per issue: how you proved each is still real: repro/test/MCP/curl | "OBSOLETE — closed: <what>">
+achieved: <per issue, ONE Slovak line of what actually LANDED — used verbatim as the Discord card's "Dosiahnuté" (#A: …; #B: …)>
 pr: #<M> <url>  (body Closes #A #B …)
 merge_sha: <sha | "NOT MERGED (manual marker)" | "STOPPED: <reason>">
 main_ci: <run-id> <conclusion>

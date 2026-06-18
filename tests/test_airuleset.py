@@ -2253,3 +2253,169 @@ class TestUltracodeLauncher(TestCase):
                         if ln.startswith("claude-new() {"))
         self.assertIn("--dangerously-skip-permissions", new_line)
         self.assertNotIn(" -c ", new_line)
+
+
+class TestDiscordAutopilotNotify(TestCase):
+    """`airuleset.py notify` — the single Discord send path: tmux-owner @mention,
+    the autopilot per-ticket completion card, and dedup."""
+
+    AIRULESET = airuleset.REPO_DIR / "airuleset.py"
+    IDLE_HOOK = airuleset.REPO_DIR / "hooks" / "notify-discord.sh"
+
+    def setUp(self):
+        import notify
+        self.notify = notify
+
+    # --- registration -----------------------------------------------------
+    def test_notify_registered(self):
+        self.assertIn("notify", airuleset.SUBCOMMANDS)
+        self.assertTrue(callable(airuleset.SUBCOMMANDS["notify"]))
+
+    # --- @mention resolution ---------------------------------------------
+    def test_mention_prefix_maps_owner_to_id(self):
+        env = {"DISCORD_MENTION_ZBYNEK": "111222333",
+               "DISCORD_MENTION_MAREK": "444555666"}
+        self.assertEqual(self.notify.mention_prefix(env=env, owner="zbynek"),
+                         "<@111222333> ")
+        self.assertEqual(self.notify.mention_prefix(env=env, owner="marek"),
+                         "<@444555666> ")
+
+    def test_mention_prefix_unknown_owner_is_empty(self):
+        env = {"DISCORD_MENTION_ZBYNEK": "111"}
+        self.assertEqual(self.notify.mention_prefix(env=env, owner="nobody"), "")
+        self.assertEqual(self.notify.mention_prefix(env=env, owner=""), "")
+
+    def test_mention_prefix_passes_through_literal_mention(self):
+        # A value already shaped like a mention (role / @here) is used verbatim.
+        env = {"DISCORD_MENTION_ZBYNEK": "<@&9988>"}
+        self.assertEqual(self.notify.mention_prefix(env=env, owner="zbynek"),
+                         "<@&9988> ")
+
+    def test_resolve_owner_env_override(self):
+        import unittest.mock as m
+        with m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "Marek-X"}):
+            self.assertEqual(self.notify.resolve_owner(), "marekx")
+
+    # --- card composition -------------------------------------------------
+    def test_card_has_goal_achieved_review_progress(self):
+        card = self.notify.compose_autopilot_card(
+            repo="o/cam", pr=88, merge_sha="abc1234", version="v1.4.2",
+            review_ok=True, done=3, remaining=5,
+            tickets=[{"n": 41, "title": "NDI rebind",
+                      "goal": "Kamera padla", "achieved": "Watchdog pridany"}])
+        # the two sections the user asked for, per ticket
+        self.assertIn("🎯 **Cieľ:** Kamera padla", card)
+        self.assertIn("✅ **Dosiahnuté:** Watchdog pridany", card)
+        self.assertIn("#41 — NDI rebind", card)
+        # double-review verdict
+        self.assertIn("Double-review:", card)
+        self.assertIn("splnené", card)
+        # backlog progress
+        self.assertIn("hotové 3 · ostáva 5", card)
+        # deploy facts
+        self.assertIn("v1.4.2", card)
+        self.assertIn("PR #88", card)
+        # NO stray separator right after the box emoji
+        self.assertNotIn("📦 ·", card)
+
+    def test_card_review_fail_marks_nesplnene(self):
+        card = self.notify.compose_autopilot_card(
+            repo="o/x", pr=1, tickets=[{"n": 1, "goal": "g", "achieved": "a"}],
+            review_ok=False, done=1, remaining=0)
+        self.assertIn("NESPLNENÉ", card)
+        self.assertIn("❌", card)
+        # remaining 0 → backlog-empty flourish
+        self.assertIn("backlog prázdny", card)
+
+    def test_card_plural_vs_singular(self):
+        one = self.notify.compose_autopilot_card(
+            repo="o/x", tickets=[{"n": 1}])
+        two = self.notify.compose_autopilot_card(
+            repo="o/x", tickets=[{"n": 1}, {"n": 2}])
+        self.assertIn("ticket hotový a nasadený", one)
+        self.assertIn("2 tickety hotové a nasadené", two)
+
+    def test_card_redacts_secrets(self):
+        card = self.notify.compose_autopilot_card(
+            repo="o/x", tickets=[{"n": 1, "goal": "token ghp_abcdEFGH1234567890",
+                                  "achieved": "ok"}])
+        self.assertNotIn("ghp_abcdEFGH1234567890", card)
+        self.assertIn("[redacted]", card)
+
+    # --- send: dry-run + dedup -------------------------------------------
+    def test_send_dry_run_prepends_mention_and_does_not_claim(self):
+        import io, contextlib
+        env = {"DISCORD_MENTION_ZBYNEK": "111222333"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r1 = self.notify.send("BODY", env=env, owner="zbynek",
+                                  dedup_key="k#1", dry_run=True)
+            r2 = self.notify.send("BODY", env=env, owner="zbynek",
+                                  dedup_key="k#1", dry_run=True)
+        out = buf.getvalue()
+        self.assertEqual(r1, "dry-run")
+        # dry-run does NOT claim dedup → the second dry-run still prints (re-runnable)
+        self.assertEqual(r2, "dry-run")
+        self.assertIn("<@111222333> BODY", out)
+
+    def test_dedup_claim_then_release(self):
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                self.assertTrue(self.notify._dedup_claim("o/x#5"))   # first wins
+                self.assertFalse(self.notify._dedup_claim("o/x#5"))  # second blocked
+                self.notify._dedup_release("o/x#5")
+                self.assertTrue(self.notify._dedup_claim("o/x#5"))   # reclaimable
+
+    def test_send_no_config_releases_dedup(self):
+        # A real (non-dry) send with no token must NOT permanently claim the key,
+        # so a later configured send can still deliver the card.
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                r = self.notify.send("BODY", env={}, owner="zbynek",
+                                     dedup_key="o/x#9")
+                self.assertEqual(r, "no-config")
+                # key released → reclaimable
+                self.assertTrue(self.notify._dedup_claim("o/x#9"))
+
+    # --- end-to-end CLI ---------------------------------------------------
+    def _env_home(self):
+        home = tempfile.mkdtemp()
+        d = Path(home) / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        (d / ".env").write_text(
+            "DISCORD_MENTION_ZBYNEK=111222333\n"
+            "DISCORD_MENTION_MAREK=444555666\n")
+        return home
+
+    def test_cli_mention_prefix(self):
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "marek"}
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--mention-prefix"], capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "<@444555666> ")
+
+    def test_cli_autopilot_done_dry_run(self):
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        r = subprocess.run(
+            [sys.executable, str(self.AIRULESET), "notify", "--autopilot-done",
+             "--dry-run", "--repo", "o/cam", "--pr", "88", "--review", "ok",
+             "--done", "2", "--remaining", "4", "--tickets-json",
+             json.dumps([{"n": 41, "title": "T", "goal": "G", "achieved": "A"}])],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("<@111222333> ", r.stdout)
+        self.assertIn("🎯 **Cieľ:** G", r.stdout)
+        self.assertIn("✅ **Dosiahnuté:** A", r.stdout)
+        self.assertIn("hotové 2 · ostáva 4", r.stdout)
+
+    # --- the idle hook now @mentions via the single source of truth -------
+    def test_idle_hook_prepends_mention_via_cli(self):
+        src = self.IDLE_HOOK.read_text()
+        self.assertIn("notify --mention-prefix", src)
+        # it prepends the resolved mention onto the content it sends
+        self.assertIn("MENTION", src)
