@@ -273,5 +273,9 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         urllib.request.urlopen(req, timeout=6).read()
         return "sent"
     except Exception:
-        _dedup_release(dedup_key)
+        # Do NOT release the dedup claim here: a timeout can fire AFTER Discord
+        # already accepted the message, so releasing would re-send a duplicate on
+        # the next merge report. No-dups beats a possibly-lost card on a genuine
+        # (rare) transient failure. ("no-config" above DID release — it provably
+        # never sent.)
         return "error"

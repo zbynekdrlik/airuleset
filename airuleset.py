@@ -1498,8 +1498,13 @@ def _notify_run_card(args, compose_autopilot_card, send):
             done=None, remaining=remaining)
         # Dedup on the run id (one card per ticket-run) so retries / repeated merge
         # reports never double-post.
-        dedup = getattr(args, "dedup_key", None) or getattr(args, "run", None) \
-            or ("%s#%s" % (repo, issue))
+        # Dedup on the REPO-NAME#ISSUE — the stable unit. NOT the run id: /autopilot
+        # re-dispatches a fresh worker each turn (SendMessage is gated), each minting
+        # a NEW run id, so a run-id key re-cards the same issue every dispatch. And
+        # use only the repo's last path segment so a bare name ("odoo-erp") and the
+        # full "owner/odoo-erp" — which BOTH appear in reports — collapse to one key.
+        name = str(repo).rstrip("/").split("/")[-1]
+        dedup = getattr(args, "dedup_key", None) or ("%s#%s" % (name, issue))
         # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
         # the detached spawn (its stdout is /dev/null).
         print(send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False)))

@@ -2433,7 +2433,47 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("✅ **Dosiahnuté:** did the thing", b)
         self.assertIn("PR #9", b)          # extracted from the URL
         self.assertIn("ostáva 7", b)
-        self.assertEqual(captured["dedup"], "rid")  # dedup on the run id
+        # dedup on repo-NAME#issue (stable), NOT the run id
+        self.assertEqual(captured["dedup"], "x#5")
+
+    def test_run_card_dedup_survives_redispatch(self):
+        # The recurring duplicate bug: /autopilot re-dispatches a fresh worker each
+        # turn → NEW run id each time. Dedup must key on repo-name#issue so the SAME
+        # issue is carded once regardless of run-id churn AND bare-vs-full repo.
+        import unittest.mock as m
+        keys = []
+
+        def fake_send(body, **k):
+            keys.append(k.get("dedup_key"))
+            return "sent"
+
+        def mk(run, repo):
+            return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                          body=None, run=run, repo=repo, issue=606, pr=None,
+                          achieved="a", result=None, version=None, merge_sha=None,
+                          review="ok", dedup_key=None, dry_run=False)
+
+        with m.patch.object(airuleset, "_gh_out",
+                            side_effect=lambda *a, **k: "T" if "view" in a else "3"):
+            with m.patch("notify.send", side_effect=fake_send):
+                airuleset.cmd_notify(mk("odoo_erp-606-111-aa", "zbynekdrlik/odoo-erp"))
+                airuleset.cmd_notify(mk("odoo_erp-606-222-bb", "odoo-erp"))  # re-dispatch, bare repo
+        self.assertEqual(keys, ["odoo-erp#606", "odoo-erp#606"])  # identical key both times
+
+    def test_send_error_keeps_dedup_claim(self):
+        # A POST error must NOT release the claim (a timeout can fire after Discord
+        # accepted the message → releasing would duplicate). Retry stays deduped.
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                env = {"DISCORD_BOT_TOKEN": "x",
+                       "DISCORD_NOTIFICATION_CHANNEL_ID": "1"}
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=OSError("boom")):
+                    r = self.notify.send("hi", env=env, owner="", dedup_key="k#err")
+                self.assertEqual(r, "error")
+                # claim kept → a later retry is a dedup hit, not a duplicate send
+                self.assertFalse(self.notify._dedup_claim("k#err"))
 
     def test_card_redacts_secrets(self):
         card = self.notify.compose_autopilot_card(
