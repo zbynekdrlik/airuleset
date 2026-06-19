@@ -139,7 +139,11 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     here so every card is consistent regardless of who calls it. No @mention here —
     send() prepends it."""
     tickets = tickets or []
-    lines = ["🚀 **%s** — %s" % (_clean(repo) or "?", _plural_done(len(tickets) or 1))]
+    # Show only the repo NAME (last path segment), not "owner/name": the @mention
+    # send() prepends already names the person, so an "owner/" prefix repeats it
+    # (e.g. "@Zbynek Drlik … zbynekdrlik/bakerion-ai" said "zbynek" twice).
+    repo_name = (_clean(repo) or "?").rstrip("/").split("/")[-1] or "?"
+    lines = ["🚀 **%s** — %s" % (repo_name, _plural_done(len(tickets) or 1))]
     for t in tickets:
         n = t.get("n")
         title = _clean(t.get("title"))[:_FIELD_CAP]

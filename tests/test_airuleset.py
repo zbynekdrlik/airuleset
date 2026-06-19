@@ -2360,6 +2360,15 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("ticket dokončený", one)
         self.assertIn("2 tickety dokončené", two)
 
+    def test_card_header_shows_repo_name_not_owner(self):
+        # The @mention already names the person; an "owner/" prefix in the header
+        # repeats it ("@Zbynek Drlik … zbynekdrlik/bakerion-ai"). Header = name only.
+        card = self.notify.compose_autopilot_card(
+            repo="zbynekdrlik/bakerion-ai", tickets=[{"n": 7, "goal": "g",
+                                                      "achieved": "a"}])
+        self.assertIn("🚀 **bakerion-ai**", card)
+        self.assertNotIn("zbynekdrlik/bakerion-ai", card)
+
     def test_card_progress_remaining_only(self):
         # The merge-triggered run-card knows only `remaining` (not done) → show
         # "ostáva Y", never a bogus "hotové".
