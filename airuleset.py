@@ -831,8 +831,49 @@ def cmd_report(args):
             # a bare heartbeat carries no phase/field — just a liveness ping
             fields["note"] = fields.get("note") or "heartbeat"
         reporter.report(rid, phase=phase, reviews=reviews or None, **fields)
+        # On a MERGE, fire the per-ticket Discord completion card. Triggered HERE
+        # — inside the `report` subprocess the worker already runs every phase — so
+        # it works even for an /autopilot loop that STARTED BEFORE this feature
+        # existed (the running worker keeps invoking the on-disk airuleset.py, no
+        # session restart needed). Fully detached + best-effort: never blocks or
+        # affects the report itself.
+        if phase == "merge":
+            _spawn_merge_card(rid, repo, issue, args)
     except Exception as e:  # absolute backstop — a report must never crash a worker
         print(f"report: ignored error ({e})", file=sys.stderr)
+
+
+def _spawn_merge_card(rid, repo, issue, args):
+    """Detached, best-effort spawn of `notify --run-card` to post the per-ticket
+    Discord card after a merge. Resolves the @mention owner in THIS (the worker's)
+    context and passes it down, then returns immediately. Never raises/blocks."""
+    try:
+        import subprocess
+        try:
+            from notify import resolve_owner
+            owner = resolve_owner()
+        except Exception:
+            owner = ""
+        cmd = [sys.executable, str(REPO_DIR / "airuleset.py"), "notify",
+               "--run-card", "--run", str(rid)]
+        if repo:
+            cmd += ["--repo", str(repo)]
+        if issue is not None:
+            cmd += ["--issue", str(issue)]
+        pr = getattr(args, "pr", None)
+        if pr:
+            cmd += ["--pr", str(pr)]
+        result = getattr(args, "result", None)
+        if result:
+            cmd += ["--achieved", str(result)]
+        env = dict(os.environ)
+        if owner:
+            env["AIRULESET_NOTIFY_OWNER"] = owner
+        subprocess.Popen(cmd, env=env, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def _parse_reviews(values):
@@ -1368,6 +1409,10 @@ def cmd_notify(args):
         sys.stdout.write(mention_prefix())
         return
 
+    if getattr(args, "run_card", False):
+        _notify_run_card(args, compose_autopilot_card, send)
+        return
+
     if getattr(args, "autopilot_done", False):
         try:
             tickets = json.loads(args.tickets_json) if args.tickets_json else []
@@ -1389,9 +1434,75 @@ def cmd_notify(args):
         print(send(args.body, dedup_key=args.dedup_key, dry_run=args.dry_run))
         return
 
-    print("notify: nothing to send (use --autopilot-done, --body, or "
-          "--mention-prefix)", file=sys.stderr)
+    print("notify: nothing to send (use --autopilot-done, --run-card, --body, "
+          "or --mention-prefix)", file=sys.stderr)
     sys.exit(1)
+
+
+def _gh_out(*gh_args, timeout=8):
+    """Best-effort `gh ...` stdout (stripped), or "" on any failure/timeout."""
+    import subprocess
+    try:
+        r = subprocess.run(["gh", *gh_args], capture_output=True, text=True,
+                           timeout=timeout)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _notify_run_card(args, compose_autopilot_card, send):
+    """Send the per-ticket completion card for a board run, gathering the issue
+    title (the Cieľ) and the remaining backlog count from gh. Called detached by
+    `report --phase merge`, so it runs in the autopilot worker's context (gh auth,
+    tmux owner, the channel .env). Best-effort, never raises."""
+    import re as _re
+    try:
+        repo = getattr(args, "repo", None)
+        issue = getattr(args, "issue", None)
+        if (not repo or issue is None) and getattr(args, "run", None):
+            try:
+                from board import reporter as _rep
+                r2, i2 = _rep.run_to_repo_issue(args.run)
+                repo = repo or r2
+                issue = issue if issue is not None else i2
+            except Exception:
+                pass
+        if not repo or issue is None:
+            return  # not enough to build a card
+
+        title = _gh_out("issue", "view", str(issue), "-R", repo,
+                        "--json", "title", "-q", ".title") or ("#%s" % issue)
+        rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
+                          "--search", "-label:autopilot-skip", "-L", "200",
+                          "--json", "number", "-q", "length")
+        try:
+            remaining = int(rem_raw)
+        except (TypeError, ValueError):
+            remaining = None
+
+        # --pr may arrive as a full PR URL (the report field is a URL) — show the
+        # number only.
+        pr = getattr(args, "pr", None)
+        if pr:
+            m = _re.search(r"(\d+)\s*$", str(pr))
+            pr = m.group(1) if m else None
+
+        achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
+        body = compose_autopilot_card(
+            repo=repo,
+            tickets=[{"n": issue, "title": title, "goal": title,
+                      "achieved": achieved or "PR zmergnutý, deploy beží"}],
+            pr=pr, version=getattr(args, "version", None),
+            merge_sha=getattr(args, "merge_sha", None),
+            review_ok=(getattr(args, "review", "ok") != "fail"),
+            done=None, remaining=remaining)
+        # Dedup on the run id (one card per ticket-run) so retries / repeated merge
+        # reports never double-post.
+        dedup = getattr(args, "dedup_key", None) or getattr(args, "run", None) \
+            or ("%s#%s" % (repo, issue))
+        send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False))
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1573,6 +1684,12 @@ def main():
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")
+    p_notify.add_argument("--run-card", dest="run_card", action="store_true",
+                          help="Send a per-ticket card for a board run, gathering "
+                               "goal/progress from gh (used by report --phase merge)")
+    p_notify.add_argument("--run", help="Board run_id (for --run-card)")
+    p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
+    p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté')")
     p_notify.add_argument("--body", help="Arbitrary markdown body to send")
     p_notify.add_argument("--repo", help="owner/name (autopilot card)")
     p_notify.add_argument("--pr", help="Shared PR number (autopilot card)")

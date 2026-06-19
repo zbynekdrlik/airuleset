@@ -50,7 +50,10 @@ the batch's runs (a solo issue is just a one-element list):
 `for R in $RUNS; do python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase <p>
 [--goal/--approach/--result "..."] [--review <check>=ok|fail]; done`. The members move in lockstep
 (one shared PR/CI), so they share the same phase. It always exits 0 — if it fails, IGNORE it and
-continue. Reporting must NEVER delay or interrupt the work or asking the user. The shared PR's body
+continue. **At the `merge` phase, ALWAYS pass `--pr <url>` AND a one-line Slovak `--result "<what
+landed>"`** — the `merge` report automatically fires the per-ticket Discord completion card for the
+user (your `--result` becomes its ✅ Dosiahnuté; the issue title becomes 🎯 Cieľ). No manual notify
+call — reporting `--phase merge` IS what sends the card. Reporting must NEVER delay or interrupt the work or asking the user. The shared PR's body
 (`Closes #41`, `Closes #43`, `Closes #47`) lets the board credit every member on merge. Board:
 http://100.104.8.125:8787/
 

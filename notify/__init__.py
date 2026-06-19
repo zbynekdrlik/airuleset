@@ -127,8 +127,8 @@ def mention_prefix(env=None, owner=None):
 
 def _plural_done(n):
     if n == 1:
-        return "ticket hotový a nasadený"
-    return "%d tickety hotové a nasadené" % n
+        return "ticket dokončený"
+    return "%d tickety dokončené" % n
 
 
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
@@ -162,17 +162,21 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     v = _clean(version)
     if v and v not in ("—", "-"):
         deploy.append("nasadené **%s**" % v)
-    else:
-        deploy.append("bez nasadenia")
-    lines.append("📦 " + " · ".join(deploy))
+    # Show the facts we have; if none (a bare merge with no PR/version), say so
+    # plainly rather than the misleading "bez nasadenia".
+    lines.append("📦 " + (" · ".join(deploy) if deploy else "PR zmergnutý"))
 
-    if done is not None and remaining is not None:
+    if remaining is not None:
         try:
             rem = int(remaining)
         except (TypeError, ValueError):
             rem = remaining
+        if done is not None:
+            prog = "hotové %s · ostáva %s" % (done, rem)
+        else:
+            prog = "ostáva %s" % rem
         tail = " (backlog prázdny 🎉)" if rem == 0 else ""
-        lines.append("📊 **Autopilot:** hotové %s · ostáva %s%s" % (done, rem, tail))
+        lines.append("📊 **Autopilot:** %s%s" % (prog, tail))
 
     return "\n".join(lines)
 

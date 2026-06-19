@@ -32,12 +32,11 @@ Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord m
 
 #### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
 
-The "no per-merge device ping" rule above has ONE explicit, user-requested exception: during an `/autopilot` run, **each ticket that finishes AND deploys gets ONE structured Discord card** — the user wants per-ticket visibility on the phone during hands-off runs. This is NOT the banned per-merge noise: it is a single, deduped, structured message sent through the dedicated path, NOT a hand-fired `reply`/`PushNotification`.
+The "no per-merge device ping" rule above has ONE explicit, user-requested exception: during an `/autopilot` run, **each ticket whose PR merges gets ONE structured Discord card** — the user wants per-ticket visibility on the phone during hands-off runs. This is NOT the banned per-merge noise: it is a single, deduped, structured message through the dedicated path, NOT a hand-fired `reply`/`PushNotification`.
 
-- **Sent by the `/autopilot` SUPERVISOR in Step 4**, AFTER it independently verifies merge + CI + deploy (never the worker's premature claim), via:
-  `python3 ~/devel/airuleset/airuleset.py notify --autopilot-done --repo <owner/name> --pr <M> --merge-sha <sha> --version "<DOM version | —>" --review ok|fail --done <closed-so-far> --remaining <open-non-skip-left> --tickets-json '[{"n":<N>,"title":"…","goal":"<ticket objective>","achieved":"<what landed>"}]'`
-- The card is **Slovak, structured markdown**: per ticket a **🎯 Cieľ** (objective) + **✅ Dosiahnuté** (what landed), then a **🔍 Double-review** line (`/review` + `/requesting-code-review` met?), the PR/merge/deployed-version, and **📊 Autopilot** progress (`hotové X · ostáva Y` until the backlog is empty). Structure is composed by `airuleset.py notify`, so it is consistent every time.
-- **Deduped on `repo#pr`** — a worker re-dispatch / retry never double-posts; a failed send releases the claim so it retries.
+- **AUTOMATIC — fired by `airuleset.py report`, NOT by the agent.** When the autopilot worker reports the `merge` phase (`report --run <rid> --phase merge --pr <url> --result "<what landed>"`), `report` detaches `notify --run-card`, which gathers the issue title from gh, composes the card, @mentions the tmux owner, and posts it. Neither the supervisor nor the worker calls `notify` by hand. Because the trigger lives in the `report` subprocess the worker runs EVERY phase, it works even for an `/autopilot` loop that started **before** this feature shipped (the running worker keeps invoking the on-disk `airuleset.py` — no restart).
+- The card is **Slovak, structured markdown**: **🎯 Cieľ** (the issue title) + **✅ Dosiahnuté** (the worker's `--result`), a **🔍 Double-review** line (a clean merge ⇒ met), the PR, and **📊 Autopilot** progress (`ostáva Y` open non-skip issues). Structure is composed in code, so it is consistent every time.
+- **Deduped on the run id** — one card per ticket-run; retries / repeated merge reports never double-post; a failed send releases the claim so it retries.
 - This is distinct from the `✅ DONE` end-of-run ping: the per-ticket cards fire DURING the loop (the loop turns still end `⏳ WORKING`), and the single `✅ DONE` fires only when the WHOLE backlog is empty.
 
 #### Anti-patterns (all rewordings apply)

@@ -2357,8 +2357,83 @@ class TestDiscordAutopilotNotify(TestCase):
             repo="o/x", tickets=[{"n": 1}])
         two = self.notify.compose_autopilot_card(
             repo="o/x", tickets=[{"n": 1}, {"n": 2}])
-        self.assertIn("ticket hotový a nasadený", one)
-        self.assertIn("2 tickety hotové a nasadené", two)
+        self.assertIn("ticket dokončený", one)
+        self.assertIn("2 tickety dokončené", two)
+
+    def test_card_progress_remaining_only(self):
+        # The merge-triggered run-card knows only `remaining` (not done) → show
+        # "ostáva Y", never a bogus "hotové".
+        card = self.notify.compose_autopilot_card(
+            repo="o/x", tickets=[{"n": 1, "goal": "g", "achieved": "a"}],
+            remaining=5)
+        self.assertIn("ostáva 5", card)
+        self.assertNotIn("hotové", card)
+
+    def test_report_merge_phase_triggers_card(self):
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
+                      run="o_x-5-1-aa", repo="o/x", issue=5, phase="merge",
+                      goal=None, approach=None, result="hotovo", note=None,
+                      pr="https://h/pull/9", review=None)
+        with m.patch.object(reporter, "report"):
+            with m.patch.object(airuleset, "_spawn_merge_card") as sp:
+                airuleset.cmd_report(args)
+        sp.assert_called_once()
+        self.assertEqual(sp.call_args.args[0], "o_x-5-1-aa")  # rid passed through
+
+    def test_report_nonmerge_phase_no_card(self):
+        import unittest.mock as m
+        from board import reporter
+        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
+                      run="o_x-5-1-aa", repo="o/x", issue=5, phase="CI",
+                      goal=None, approach=None, result=None, note=None, pr=None,
+                      review=None)
+        with m.patch.object(reporter, "report"):
+            with m.patch.object(airuleset, "_spawn_merge_card") as sp:
+                airuleset.cmd_report(args)
+        sp.assert_not_called()
+
+    def test_spawn_merge_card_builds_run_card_popen(self):
+        import subprocess
+        import unittest.mock as m
+        args = m.Mock(pr="https://github.com/o/x/pull/783", result="landed it")
+        # stub resolve_owner so it doesn't shell out (subprocess.run uses Popen too)
+        with m.patch("notify.resolve_owner", return_value="zbynek"):
+            with m.patch.object(subprocess, "Popen") as pop:
+                airuleset._spawn_merge_card("rid-1", "o/x", 5, args)
+        pop.assert_called_once()
+        cmd = pop.call_args.args[0]
+        for tok in ("notify", "--run-card", "--run", "rid-1", "--repo", "o/x",
+                    "--issue", "5", "--achieved"):
+            self.assertIn(tok, cmd)
+
+    def test_run_card_gathers_title_and_backlog_then_sends(self):
+        import unittest.mock as m
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                      body=None, run="rid", repo="o/x", issue=5,
+                      pr="https://h/pull/9", achieved="did the thing", result=None,
+                      version=None, merge_sha=None, review="ok", dedup_key=None,
+                      dry_run=False)
+        captured = {}
+
+        def fake_gh(*a, **k):
+            return "Real Issue Title" if "view" in a else "7"
+
+        def fake_send(body, **k):
+            captured["body"] = body
+            captured["dedup"] = k.get("dedup_key")
+            return "sent"
+
+        with m.patch.object(airuleset, "_gh_out", side_effect=fake_gh):
+            with m.patch("notify.send", side_effect=fake_send):
+                airuleset.cmd_notify(args)
+        b = captured["body"]
+        self.assertIn("🎯 **Cieľ:** Real Issue Title", b)
+        self.assertIn("✅ **Dosiahnuté:** did the thing", b)
+        self.assertIn("PR #9", b)          # extracted from the URL
+        self.assertIn("ostáva 7", b)
+        self.assertEqual(captured["dedup"], "rid")  # dedup on the run id
 
     def test_card_redacts_secrets(self):
         card = self.notify.compose_autopilot_card(

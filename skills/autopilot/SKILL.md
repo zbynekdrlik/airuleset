@@ -232,25 +232,16 @@ Each loop turn:
    the started run). Dropped / obsolete members were already terminalized by the worker — do not
    re-verdict them. Confirmed → ONE board milestone update naming all bundled issues
    (`merged #A (topic) + #B (topic) → vX`) + one line per surviving issue to `docs/autopilot-log.md`.
-4b. **Send the per-ticket Discord completion card** (`milestone-notifications.md` — the ONE sanctioned
-   per-ticket device message; the short `❓`/`✅` idle ping is still suppressed because this loop turn
-   ends `⏳ WORKING`). AFTER the verification above confirms merge + CI + deploy, send ONE structured
-   Slovak card for the surviving set. `--done` = tickets this run has closed so far (count the
-   `Closes #N` lines in `docs/autopilot-log.md`); `--remaining` = `gh issue list --state open --search
-   "-label:autopilot-skip" | wc -l` AFTER the merge. Pull each ticket's `goal` from its issue
-   (`gh issue view <N> --json title,body` — the objective, concise) and `achieved` from the worker's
-   evidence (the `achieved:` line / result summary):
-   ```
-   python3 ~/devel/airuleset/airuleset.py notify --autopilot-done \
-     --repo <owner/name> --pr <M> --merge-sha <merge-sha> --version "<DOM version | —>" \
-     --review ok \
-     --done <closed-so-far> --remaining <open-non-skip-left> \
-     --tickets-json '[{"n":<A>,"title":"<title>","goal":"<objective>","achieved":"<what landed>"},…]'
-   ```
-   It @mentions the tmux owner (zbynek / marek) and is deduped on `repo#pr`, so a re-dispatch never
-   double-posts. Fire-and-forget — it never blocks or gates the loop. `--review fail` only if a gate
-   was not actually clean (a merged PR is normally `ok`). This card is the per-phase device visibility
-   the user asked for; per-issue board reporting (above) still happens too.
+   > **The per-ticket Discord completion card is AUTOMATIC — you do NOT send it by hand.**
+   > It fires from `airuleset.py report` itself: when the WORKER reports the `merge` phase
+   > (`report --run <rid> --phase merge --pr <url> [--result "<what landed>"]`), `report` detaches a
+   > `notify --run-card` that gathers the issue title (🎯 Cieľ) + remaining backlog from gh, takes the
+   > worker's `--result` as ✅ Dosiahnuté, @mentions the tmux owner (zbynek/marek), and posts ONE Slovak
+   > card — deduped on the run id (one card per ticket, retries never double-post). Because the trigger
+   > lives in the `report` subprocess the worker already runs every phase, it works even for an
+   > /autopilot loop that STARTED BEFORE this feature (no restart). So the supervisor does NOT call
+   > `notify`; just ensure the worker reports `--phase merge` (it does) with a good `--result`. The
+   > short `❓`/`✅` idle ping stays suppressed (this loop turn ends `⏳ WORKING`).
 5. **Immediately assemble the next batch** — including right after a merge; re-report the planned
    queue (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to
    report between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
