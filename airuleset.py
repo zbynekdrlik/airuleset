@@ -1500,7 +1500,9 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # reports never double-post.
         dedup = getattr(args, "dedup_key", None) or getattr(args, "run", None) \
             or ("%s#%s" % (repo, issue))
-        send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False))
+        # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
+        # the detached spawn (its stdout is /dev/null).
+        print(send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False)))
     except Exception:
         pass
 
