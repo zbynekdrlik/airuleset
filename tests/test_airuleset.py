@@ -2239,3 +2239,211 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("notify-discord-send.sh", self.IDLE_HOOK.read_text())
         pending = (airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh").read_text()
         self.assertIn("notify-discord-send.sh", pending)
+
+
+class _FakeTmux:
+    """Stand-in for the watchdog's `run` (tmux exec). Answers list-panes /
+    capture-pane from canned data and records every send-keys argv."""
+
+    def __init__(self, panes="", captures=None):
+        self.panes = panes
+        self.captures = captures or {}
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        if argv[:2] == ["tmux", "list-panes"]:
+            return self.panes
+        if argv[:2] == ["tmux", "capture-pane"]:
+            pid = argv[argv.index("-t") + 1]
+            return self.captures.get(pid, "")
+        if argv[:2] == ["tmux", "send-keys"]:
+            self.sent.append(argv)
+            return ""
+        return ""
+
+    def continues_sent(self):
+        # how many `send-keys -l continue` (the literal text, not the Enter) fired
+        return sum(1 for a in self.sent if "-l" in a and "continue" in a)
+
+
+class TestApiWatchdog(TestCase):
+    """api-watchdog: detect a Claude Code session stalled on an API error and
+    auto-resume it (tmux `continue`), pinging on stall + give-up. Pure logic +
+    state machine are unit-tested with no tmux and no network."""
+
+    def setUp(self):
+        import watchdog
+        self.w = watchdog
+        self.tmp = tempfile.mkdtemp()
+        self.projects = Path(self.tmp) / "projects"
+        self.projects.mkdir()
+        self.state = str(Path(self.tmp) / "state.json")
+        self.pings = []
+
+    def _send(self, body, dedup_key=None, dry_run=False):
+        self.pings.append((body, dedup_key))
+        return "sent"
+
+    _ERR = {"type": "assistant", "isApiErrorMessage": True,
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "API Error: 529 Overloaded"}]}}
+    _OK = {"type": "assistant", "isApiErrorMessage": False,
+           "message": {"role": "assistant", "content": [{"type": "text", "text": "Hotovo."}]}}
+    _SENT = {"type": "assistant",
+             "message": {"role": "assistant", "content": [{"type": "text",
+                         "text": "No response requested."}]}}
+
+    def _transcript(self, cwd, entries, age_s, now):
+        d = self.projects / self.w.encode_project_dir(cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sess-abc.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        os.utime(p, (now - age_s, now - age_s))
+        return p
+
+    # --- pure helpers --------------------------------------------------------
+    def test_encode_project_dir_slashes_dots_underscores(self):
+        self.assertEqual(
+            self.w.encode_project_dir("/home/newlevel/devel/website-newlevel.media"),
+            "-home-newlevel-devel-website-newlevel-media")
+        # Claude Code also maps '_' -> '-' (real dir on disk)
+        self.assertEqual(
+            self.w.encode_project_dir("/home/newlevel/devel/tomas_pardubsky/cold_mailing"),
+            "-home-newlevel-devel-tomas-pardubsky-cold-mailing")
+
+    def test_transcript_last_error_detects_flagged(self):
+        p = self._transcript("/x/p", [{"type": "user", "message": {}}, self._ERR], 600, 1_000_000)
+        self.assertIn("529 Overloaded", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_normal_is_empty(self):
+        p = self._transcript("/x/p", [self._ERR, self._OK], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_skips_sentinel(self):
+        # CC appends a synthetic "No response requested." after the error → still detected
+        p = self._transcript("/x/p", [self._ERR, self._SENT], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_pane_shows_api_error_with_box_prefix(self):
+        self.assertTrue(self.w.pane_shows_api_error("│ API Error: 529 Overloaded. Try again."))
+        self.assertFalse(self.w.pane_shows_api_error("Reading file foo.py\n> done"))
+
+    def test_list_claude_panes_dedups_and_filters(self):
+        fake = _FakeTmux(panes="%5\tclaude\t/devel/a\n%5\tclaude\t/devel/a\n"
+                               "%6\tbash\t/devel/b\n%7\tclaude\t/devel/c\n")
+        self.assertEqual(self.w.list_claude_panes(fake), [("%5", "/devel/a"), ("%7", "/devel/c")])
+
+    # --- decide state machine ------------------------------------------------
+    def test_decide_full_lifecycle(self):
+        st, now = {}, 1_000_000
+        a, e = self.w.decide(st, "k", "h", now, interval=300, max_nudges=3)
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["k"] = e
+        # too soon → wait
+        a, e = self.w.decide(st, "k", "h", now + 100, interval=300, max_nudges=3)
+        self.assertEqual(a, "wait"); st["k"] = e
+        # after interval → nudge #2
+        a, e = self.w.decide(st, "k", "h", now + 300, interval=300, max_nudges=3)
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 2); st["k"] = e
+        # #3
+        a, e = self.w.decide(st, "k", "h", now + 600, interval=300, max_nudges=3)
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 3); st["k"] = e
+        # max reached → escalate once
+        a, e = self.w.decide(st, "k", "h", now + 900, interval=300, max_nudges=3)
+        self.assertEqual(a, "escalate"); self.assertTrue(e["escalated"]); st["k"] = e
+        # then noop
+        a, e = self.w.decide(st, "k", "h", now + 1200, interval=300, max_nudges=3)
+        self.assertEqual(a, "noop")
+
+    def test_decide_new_error_hash_resets(self):
+        st = {"k": {"hash": "old", "first_seen": 1, "nudges": [1, 2, 3], "escalated": True}}
+        a, e = self.w.decide(st, "k", "NEWHASH", 1_000_000, interval=300, max_nudges=3)
+        self.assertEqual(a, "nudge")
+        self.assertEqual(e["hash"], "NEWHASH")
+        self.assertFalse(e["escalated"])
+
+    # --- run_once integration (fake tmux + fake send) ------------------------
+    def test_run_once_nudges_and_notifies_on_stall(self):
+        now = 1_000_000
+        cwd = "/devel/projx"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 600, now)  # 10 min stale
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 1, "should send exactly one `continue`")
+        self.assertEqual(len(self.pings), 1, "should ping once on the first nudge")
+        self.assertIn("projx", self.pings[0][0])         # project name in the alert
+        self.assertTrue(any("nudge#1" in l for l in logs))
+
+    def test_run_once_ignores_fresh_transcript(self):
+        now = 1_000_000
+        cwd = "/devel/fresh"
+        self._transcript(cwd, [self._ERR], 30, now)      # only 30s stale → not idle
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state, grace=300)
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_ignores_non_error_idle(self):
+        now = 1_000_000
+        cwd = "/devel/idlechat"
+        self._transcript(cwd, [self._OK], 600, now)      # stale but last msg is normal
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state, grace=300)
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_escalates_then_stops(self):
+        now = 1_000_000
+        cwd = "/devel/stuck"
+        self._transcript(cwd, [self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, interval=300, max_nudges=3)
+        self.w.run_once(now=now, **kw)            # nudge #1 + ping
+        self.w.run_once(now=now + 300, **kw)      # #2
+        self.w.run_once(now=now + 600, **kw)      # #3
+        self.w.run_once(now=now + 900, **kw)      # escalate
+        self.w.run_once(now=now + 1200, **kw)     # noop
+        self.assertEqual(fake.continues_sent(), 3, "exactly 3 continue nudges then stop")
+        # 2 pings: first-nudge stall alert + the give-up alert
+        self.assertEqual(len(self.pings), 2)
+        self.assertIn("pretrváva", self.pings[1][0])
+
+    def test_run_once_drops_recovered_session(self):
+        now = 1_000_000
+        cwd = "/devel/recov"
+        self._transcript(cwd, [self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, interval=300, max_nudges=3)
+        self.w.run_once(now=now, **kw)
+        self.assertTrue(self.w.load_state(self.state), "stalled session recorded")
+        # session recovered: transcript now fresh + last msg normal
+        self._transcript(cwd, [self._ERR, self._OK], 5, now + 60)
+        self.w.run_once(now=now + 60, **kw)
+        self.assertEqual(self.w.load_state(self.state), {}, "recovered key dropped")
+
+    def test_run_once_dry_run_sends_nothing(self):
+        now = 1_000_000
+        cwd = "/devel/dry"
+        self._transcript(cwd, [self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self.w.run_once(now=now, dry_run=True, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 0, "dry-run must not send `continue`")
+
+    # --- wiring --------------------------------------------------------------
+    def test_watchdog_subcommand_registered(self):
+        self.assertIn("watchdog", airuleset.SUBCOMMANDS)
+
+    def test_validate_watchdog_clean(self):
+        self.assertEqual(airuleset._validate_watchdog(), [])
+
+    def test_service_template_runs_watchdog_once(self):
+        svc = (airuleset.REPO_DIR / "settings" / "api-watchdog.service.template").read_text()
+        self.assertIn("watchdog --once", svc)
+        self.assertIn("{{REPO_DIR}}", svc)

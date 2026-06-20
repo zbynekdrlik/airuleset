@@ -1,0 +1,19 @@
+# airuleset api-watchdog — systemd --user timer (managed by airuleset).
+#
+# Fires api-watchdog.service every 60s. Installed on EVERY machine by
+# `airuleset.py install` via setup_watchdog_service(). Edit this template, not the
+# installed copy in ~/.config/systemd/user/, then re-run `airuleset.py install`.
+
+[Unit]
+Description=Run airuleset api-watchdog every minute (auto-resume API-error stalls)
+
+[Timer]
+# Start a couple minutes after boot, then poll every 60s while the machine is up.
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=false
+Unit=api-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,24 @@
+# airuleset api-watchdog — systemd --user service (managed by airuleset).
+#
+# Oneshot poll fired by api-watchdog.timer (every 60s). Detects Claude Code
+# sessions stalled on an API error (529 overloaded / ConnectionRefused / rate &
+# usage limits) and auto-resumes them with `tmux send-keys "continue"`, pinging
+# Discord on the stall and again if it never recovers.
+#
+# Installed on EVERY machine by `airuleset.py install` via setup_watchdog_service()
+# (autopilot runs on dev1 AND dev2). {{REPO_DIR}} is substituted with this
+# checkout's absolute path at install time, so ExecStart points at the right
+# airuleset.py. Do not edit the installed copy in ~/.config/systemd/user/ — edit
+# this template and re-run `python3 airuleset.py install`.
+
+[Unit]
+Description=airuleset api-watchdog — auto-resume Claude Code sessions stalled on an API error
+Documentation=https://github.com/zbynekdrlik/airuleset
+
+[Service]
+Type=oneshot
+# Reads ~/.claude transcripts, talks to the user's tmux server (default socket
+# /tmp/tmux-<uid>/), and POSTs to Discord — so NO network/socket sandbox here.
+ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py watchdog --once
+# A poll must never pile up behind a slow tmux/network call.
+TimeoutStartSec=45

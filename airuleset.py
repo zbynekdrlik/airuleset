@@ -307,6 +307,39 @@ def _validate_filedrop():
     return errors
 
 
+def _validate_watchdog():
+    """Validate the api-watchdog: the package imports cleanly and the systemd
+    service + timer templates exist with the repo-path placeholder + ExecStart."""
+    import importlib
+
+    errors = []
+    wd_dir = REPO_DIR / "watchdog"
+    if not wd_dir.is_dir():
+        errors.append(f"api-watchdog package missing: {wd_dir}")
+        return errors
+    try:
+        importlib.import_module("watchdog")
+    except Exception as e:
+        errors.append(f"api-watchdog module failed to import: ({e})")
+
+    svc = REPO_DIR / "settings" / "api-watchdog.service.template"
+    tmr = REPO_DIR / "settings" / "api-watchdog.timer.template"
+    if not svc.exists():
+        errors.append(f"Missing api-watchdog service template: {svc}")
+    else:
+        t = svc.read_text()
+        if "{{REPO_DIR}}" not in t:
+            errors.append("api-watchdog service template missing {{REPO_DIR}} placeholder")
+        if "watchdog --once" not in t:
+            errors.append("api-watchdog service template ExecStart missing `watchdog --once`")
+    if not tmr.exists():
+        errors.append(f"Missing api-watchdog timer template: {tmr}")
+    elif "OnUnitActiveSec" not in tmr.read_text():
+        errors.append("api-watchdog timer template missing OnUnitActiveSec")
+
+    return errors
+
+
 def cmd_validate(args):
     """Check all module/rule files exist and all @import paths resolve."""
     errors = []
@@ -370,6 +403,8 @@ def cmd_validate(args):
 
     # Validate the File-Drop service: filedrop/*.py loads + service template ok.
     errors.extend(_validate_filedrop())
+    # Validate the api-watchdog: watchdog/ imports + service/timer templates ok.
+    errors.extend(_validate_watchdog())
 
     if errors:
         print("VALIDATION FAILED:")
@@ -549,6 +584,12 @@ def cmd_install(args):
         maybe_setup_filedrop()
     except Exception as e:
         print(f"  filedrop setup error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 5. api-watchdog timer: every machine (auto-resume API-error stalls) ---
+    try:
+        maybe_setup_watchdog()
+    except Exception as e:
+        print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
 
     print()
     print("Install complete. Restart Claude Code for changes to take effect.")
@@ -1048,6 +1089,71 @@ def cmd_push(args):
 
 
 # ---------------------------------------------------------------------------
+# api-watchdog — auto-resume Claude Code sessions stalled on an API error
+# ---------------------------------------------------------------------------
+
+WATCHDOG_SERVICE_TEMPLATE = REPO_DIR / "settings" / "api-watchdog.service.template"
+WATCHDOG_TIMER_TEMPLATE = REPO_DIR / "settings" / "api-watchdog.timer.template"
+WATCHDOG_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchdog.service"
+WATCHDOG_TIMER_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchdog.timer"
+
+
+def cmd_watchdog(args):
+    """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
+    on an API error, ping on stall + give-up. Driven by the systemd timer."""
+    from watchdog import run_once
+    logs = run_once(dry_run=getattr(args, "dry_run", False))
+    if getattr(args, "verbose", False):
+        for line in logs:
+            print(line)
+
+
+def setup_watchdog_service():
+    """Install + start the api-watchdog systemd --user timer on THIS machine
+    (every host — autopilot runs on dev1 and dev2). Mirrors the file-drop setup:
+    write the .service + .timer units, daemon-reload, enable --now the timer."""
+    import subprocess
+    print("  Installing api-watchdog systemd --user timer")
+    for tmpl in (WATCHDOG_SERVICE_TEMPLATE, WATCHDOG_TIMER_TEMPLATE):
+        if not tmpl.exists():
+            print(f"  ERROR: watchdog unit template missing: {tmpl}", file=sys.stderr)
+            return False
+    WATCHDOG_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
+    WATCHDOG_SERVICE_DEST.write_text(
+        WATCHDOG_SERVICE_TEMPLATE.read_text().replace("{{REPO_DIR}}", str(REPO_DIR)))
+    WATCHDOG_TIMER_DEST.write_text(WATCHDOG_TIMER_TEMPLATE.read_text())
+    print(f"  Wrote unit: {WATCHDOG_TIMER_DEST}")
+
+    manual = (
+        "    loginctl enable-linger $(whoami)\n"
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
+        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
+        "api-watchdog.timer")
+    try:
+        subprocess.run(["loginctl", "enable-linger", _whoami()],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print(f"  loginctl enable-linger skipped ({e})", file=sys.stderr)
+
+    rc, _o, err = _run_systemctl(["daemon-reload"])
+    if rc != 0:
+        print(f"  systemctl daemon-reload FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+    rc, _o, err = _run_systemctl(["enable", "--now", "api-watchdog.timer"])
+    if rc != 0:
+        print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
+              f"  Run manually:\n{manual}", file=sys.stderr)
+        return False
+    print("  api-watchdog timer active (polls every 60s).")
+    return True
+
+
+def maybe_setup_watchdog():
+    setup_watchdog_service()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1116,6 +1222,16 @@ def main():
     p_notify.add_argument("--dry-run", dest="dry_run", action="store_true",
                           help="Print the composed message instead of sending")
 
+    p_watchdog = sub.add_parser(
+        "watchdog", help="Detect Claude Code sessions stalled on an API error and "
+                         "auto-resume them (tmux `continue`) — run by a systemd timer")
+    p_watchdog.add_argument("--once", action="store_true",
+                            help="Run one poll cycle and exit (the systemd-timer mode)")
+    p_watchdog.add_argument("--dry-run", dest="dry_run", action="store_true",
+                            help="Detect + log, but do NOT send `continue` or ping")
+    p_watchdog.add_argument("--verbose", action="store_true",
+                            help="Print the actions taken this cycle")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1135,6 +1251,7 @@ SUBCOMMANDS = {
     "share": cmd_share,
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
+    "watchdog": cmd_watchdog,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

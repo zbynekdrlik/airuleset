@@ -10,6 +10,8 @@ Centralized management of Claude Code rules, skills, and hooks shared across mul
 
 - **File-Drop** (`filedrop/` package, `:8788`) — serves user-facing files as clickable LAN URLs so the user (no direct FS access) can open them. `python3 airuleset.py share <file>` → `http://<lan-ip>:8788/<token>/<name>`. systemd `--user` service on BOTH machines (each binds its own LAN IP, baked into the unit at install). Read-only static server; per-file token = the link's auth. Governs via `modules/core/deliver-files-as-urls.md`.
 
+- **api-watchdog** (`watchdog/` package) — systemd `--user` timer (every 60s, BOTH machines) that detects a Claude Code session **stalled on an API error** (529 overloaded / ConnectionRefused / rate & usage limits) and auto-resumes it with `tmux send-keys "continue"`. Why a poller, not a hook: when a turn dies on an API error CC ABORTS the turn and does NOT reliably fire the `Stop` hook with the error text, so `notify-api-error.sh` is blind. Detection = the pane's transcript last assistant entry is `isApiErrorMessage` (or the pane shows an api-error banner) AND the transcript is ≥5 min idle. Action: `continue` immediately, retry every 5 min up to 3×, then ping "gave up". Pings Discord on the stall + on give-up (the reliable replacement for the Stop-hook ping). A session waiting on a real `❓` is never auto-continued (its last entry isn't an api error). `python3 airuleset.py watchdog --once [--dry-run --verbose]`.
+
 ## Structure
 
 - `modules/` — Atomic rule blocks (standalone .md files), organized by category
