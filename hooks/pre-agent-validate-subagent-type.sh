@@ -19,9 +19,12 @@ SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/de
 [ -z "$SUBAGENT_TYPE" ] && exit 0
 
 # Allowlist: known-valid base agent types from stock Agent tool.
+# `fork` is a built-in (forks the parent agent — inherits context, runs on the
+# parent model); it is NOT a file-backed agent under ~/.claude/agents, so it must
+# be allowlisted explicitly or a valid fork dispatch is wrongly blocked.
 # Edit this list if a plugin ever ships real subagents (rare — most plugins ship skills, not agents).
 case "$SUBAGENT_TYPE" in
-    claude|claude-code-guide|Explore|general-purpose|Plan|statusline-setup)
+    claude|claude-code-guide|Explore|general-purpose|Plan|statusline-setup|fork)
         exit 0
         ;;
 esac
@@ -49,6 +52,7 @@ echo "    - Explore              (read-only search)" >&2
 echo "    - general-purpose      (default — has all tools, safe pick)" >&2
 echo "    - Plan                 (architect, plans implementations)" >&2
 echo "    - statusline-setup     (statusline config)" >&2
+echo "    - fork                 (forks the parent agent — inherits context)" >&2
 echo "" >&2
 echo "  Plugin-prefixed names like 'caveman:cavecrew-builder', 'caveman:builder', 'superpowers:implementer', 'superpowers:reviewer', '<plugin>:<role>' are NOT valid agent types — they are hallucinations." >&2
 echo "" >&2

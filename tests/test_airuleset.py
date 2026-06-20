@@ -1547,6 +1547,11 @@ class TestSubagentTypeHook(TestCase):
     def test_base_type_allowed(self):
         self.assertEqual(self._run("general-purpose").returncode, 0)
 
+    def test_fork_allowed(self):
+        # `fork` is a built-in (forks the parent) — NOT a file-backed agent, so it
+        # must be in the allowlist or a valid fork dispatch is wrongly blocked.
+        self.assertEqual(self._run("fork", home=self._tmp_home()).returncode, 0)
+
     def test_hallucinated_blocked(self):
         r = self._run("caveman:cavecrew-builder", home=self._tmp_home())
         self.assertEqual(r.returncode, 2)
