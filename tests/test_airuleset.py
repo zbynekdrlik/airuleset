@@ -2360,6 +2360,24 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("ticket dokončený", one)
         self.assertIn("2 tickety dokončené", two)
 
+    def test_watchdog_alert_stalled(self):
+        a = self.notify.compose_watchdog_alert(
+            "stalled", "zbynekdrlik/camera-box", issue=41,
+            phase="implementing", idle_min=30)
+        self.assertIn("camera-box", a)
+        self.assertNotIn("zbynekdrlik/camera-box", a)   # name only
+        self.assertIn("zamrzla", a)
+        self.assertIn("#41", a)
+        self.assertIn("implementing", a)
+        self.assertIn("30 min ticho", a)
+
+    def test_watchdog_alert_silent(self):
+        a = self.notify.compose_watchdog_alert(
+            "silent", "o/odoo-erp", idle_min=27, remaining=8)
+        self.assertIn("stíchol", a)
+        self.assertIn("ostáva **8**", a)
+        self.assertIn("27 min ticho", a)
+
     def test_card_header_shows_repo_name_not_owner(self):
         # The @mention already names the person; an "owner/" prefix in the header
         # repeats it ("@Zbynek Drlik … zbynekdrlik/bakerion-ai"). Header = name only.

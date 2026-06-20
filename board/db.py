@@ -61,6 +61,18 @@ _SCHEMA = [
       repo TEXT, issue INTEGER, title TEXT, position INTEGER,
       reported_at REAL, PRIMARY KEY(repo, issue));
     """,
+    # migration 3 — stall watchdog: owner stamp + per-run/per-repo ping dedup.
+    # owner = the tmux owner resolved by the worker at --start, so a BOARD-fired
+    # stall ping (the daemon isn't in a tmux session) can still @mention the right
+    # person. watchdog_pinged_at = when the watchdog last pinged for THIS run's
+    # stall; reset to NULL by _apply on any fresh event (re-arm on recovery). The
+    # watchdog table holds per-repo (mode-B "loop went silent") dedup tokens.
+    """
+    ALTER TABLE runs ADD COLUMN owner TEXT;
+    ALTER TABLE runs ADD COLUMN watchdog_pinged_at REAL;
+    CREATE TABLE IF NOT EXISTS watchdog(
+      token TEXT PRIMARY KEY, pinged_at REAL);
+    """,
 ]
 
 
@@ -262,11 +274,11 @@ class Board:
             """
           INSERT INTO runs(
               run_id, repo, issue, title, goal, approach, result, phase, status,
-              machine, worker, seq, is_bug_fix, has_deploy, merge_mode, pr_url,
-              started_at, updated_at)
+              machine, worker, owner, seq, is_bug_fix, has_deploy, merge_mode,
+              pr_url, started_at, updated_at, watchdog_pinged_at)
           VALUES(:run_id,:repo,:issue,:title,:goal,:approach,:result,:phase,:status,
-                 :machine,:worker,:seq,:is_bug_fix,:has_deploy,:merge_mode,:pr_url,
-                 :now,:now)
+                 :machine,:worker,:owner,:seq,:is_bug_fix,:has_deploy,:merge_mode,
+                 :pr_url,:now,:now,NULL)
           ON CONFLICT(run_id) DO UPDATE SET
             repo=COALESCE(excluded.repo, runs.repo),
             issue=COALESCE(excluded.issue, runs.issue),
@@ -277,20 +289,30 @@ class Board:
             pr_url=COALESCE(excluded.pr_url, runs.pr_url),
             machine=COALESCE(excluded.machine, runs.machine),
             worker=COALESCE(excluded.worker, runs.worker),
+            owner=COALESCE(excluded.owner, runs.owner),
             phase=:phase,
             status=COALESCE(excluded.status, runs.status),
             seq=MAX(runs.seq, excluded.seq),
-            updated_at=:now
+            updated_at=:now,
+            -- Any fresh event re-arms the watchdog for this run (recovery).
+            watchdog_pinged_at=NULL
         """,
             {"run_id": rid, "repo": ev.get("repo"), "issue": ev.get("issue"),
              "title": _content("title"), "goal": _content("goal"),
              "approach": _content("approach"), "result": _content("result"),
              "phase": new_phase, "status": status_force or _content("status"),
              "machine": _content("machine"), "worker": _content("worker"),
+             "owner": _content("owner"),
              "seq": seq, "is_bug_fix": int(ev.get("is_bug_fix", 0)),
              "has_deploy": int(ev.get("has_deploy", 0)),
              "merge_mode": ev.get("merge_mode", "auto"),
              "pr_url": _content("pr_url"), "now": now})
+        # Mode-B re-arm: any fresh activity for this repo clears its "loop went
+        # silent" token so a later genuine stall pings again.
+        repo_now = ev.get("repo")
+        if repo_now:
+            c.execute("DELETE FROM watchdog WHERE token=?",
+                      ("silent:" + str(repo_now),))
 
     def get_run(self, rid):
         c = self.conn()
@@ -635,6 +657,93 @@ class Board:
         finally:
             c.close()
         return reconciled, stale
+
+    def watchdog_scan(self, now, silence_s, wait_s):
+        """Detect REAL development that stopped abnormally and is owed a device
+        ping, mark each as pinged (atomic, so the refresher fires exactly once),
+        and return the alert dicts.
+
+        Two modes, both tied to genuinely-running development (never a quiet idle
+        repo):
+          * 'stalled' — a NON-TERMINAL run (a worker was mid-issue) whose last
+            event is older than its phase threshold (wait_s for CI/deploy waits,
+            else silence_s) and that has not been pinged for this stall
+            (watchdog_pinged_at IS NULL). _apply re-arms it (NULLs the column) on
+            any fresh event, so recovery → a later stall pings again.
+          * 'silent' — a repo with a non-empty planned queue (more work WAS lined
+            up) whose newest run is TERMINAL and which has had no activity for
+            > silence_s: the loop stopped between issues. Deduped via the watchdog
+            table token 'silent:<repo>', re-armed by _apply on fresh repo activity.
+
+        Returns a list of dicts: {kind, repo, issue, phase, owner, title,
+        idle_min, remaining}. Never raises out of the writer path."""
+        from board import TERMINAL_PHASES, PAUSE_PHASES, WAIT_PHASES
+        term = ",".join("?" * len(TERMINAL_PHASES))
+        alerts = []
+        c = self.conn()
+        try:
+            # ---- mode A: a non-terminal run went silent past threshold ----
+            rows = c.execute(
+                f"""SELECT run_id, repo, issue, phase, title, owner, updated_at
+                    FROM runs
+                    WHERE (phase IS NULL OR phase NOT IN ({term}))
+                      AND watchdog_pinged_at IS NULL""",
+                tuple(TERMINAL_PHASES)).fetchall()
+            for r in rows:
+                phase = r["phase"]
+                if phase in PAUSE_PHASES:
+                    continue  # asking-user is a legitimate pause
+                upd = r["updated_at"] or now
+                thresh = wait_s if phase in WAIT_PHASES else silence_s
+                if (now - upd) <= thresh:
+                    continue
+                c.execute("UPDATE runs SET watchdog_pinged_at=? WHERE run_id=?",
+                          (now, r["run_id"]))
+                alerts.append({
+                    "kind": "stalled", "repo": r["repo"], "issue": r["issue"],
+                    "phase": phase or "?", "owner": r["owner"],
+                    "title": r["title"], "idle_min": int((now - upd) // 60),
+                    "remaining": None})
+            # ---- mode B: a repo whose loop went silent between issues ----
+            # Repos that have a planned queue (work was lined up). For each, the
+            # newest run must be TERMINAL (nothing active — mode A covers active)
+            # and the last activity older than silence_s, deduped on the token.
+            qrepos = c.execute(
+                "SELECT DISTINCT repo FROM queue WHERE repo IS NOT NULL").fetchall()
+            for qr in qrepos:
+                repo = qr["repo"]
+                newest = c.execute(
+                    """SELECT phase, owner, updated_at FROM runs WHERE repo=?
+                       ORDER BY started_at DESC, updated_at DESC LIMIT 1""",
+                    (repo,)).fetchone()
+                if newest is None:
+                    continue  # queued but never started — not a stall, just pending
+                if newest["phase"] not in TERMINAL_PHASES:
+                    continue  # something is active → mode A's job, not this
+                last = newest["updated_at"] or now
+                if (now - last) <= silence_s:
+                    continue
+                qn = c.execute("SELECT count(*) FROM queue WHERE repo=?",
+                               (repo,)).fetchone()[0]
+                token = "silent:" + str(repo)
+                seen = c.execute("SELECT pinged_at FROM watchdog WHERE token=?",
+                                 (token,)).fetchone()
+                if seen is not None:
+                    continue  # already pinged this silence window (re-armed by _apply)
+                c.execute(
+                    "INSERT OR REPLACE INTO watchdog(token, pinged_at) VALUES(?,?)",
+                    (token, now))
+                alerts.append({
+                    "kind": "silent", "repo": repo, "issue": None,
+                    "phase": newest["phase"], "owner": newest["owner"],
+                    "title": None, "idle_min": int((now - last) // 60),
+                    "remaining": qn})
+            c.commit()
+        except Exception:
+            _log.exception("watchdog_scan failed")
+        finally:
+            c.close()
+        return alerts
 
     def reconcile_closed(self, repo, open_issues, now):
         """Finalise as `done` every non-terminal run for `repo` whose issue is

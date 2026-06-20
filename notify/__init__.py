@@ -185,6 +185,27 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     return "\n".join(lines)
 
 
+def compose_watchdog_alert(kind, repo, issue=None, phase=None, idle_min=None,
+                           remaining=None):
+    """Build the stall-watchdog ping (Slovak, Discord markdown). Fired by the
+    board daemon when real development stops abnormally — `kind` is 'stalled' (a
+    run froze mid-phase) or 'silent' (the loop went quiet between issues). No
+    @mention here — send() prepends it."""
+    name = (_clean(repo) or "?").rstrip("/").split("/")[-1] or "?"
+    idle = "" if idle_min is None else " · %s min ticho" % idle_min
+    if kind == "stalled":
+        head = "⚠️ **%s** — práca zamrzla" % name
+        what = "🧊 ticket **#%s** uviazol vo fáze **%s**%s" % (
+            issue, _clean(phase) or "?", idle)
+        tail = "Autopilot sa zasekol a sám nepokračuje — pozri sa naň."
+    else:  # silent
+        head = "⚠️ **%s** — autopilot stíchol" % name
+        rem = "" if remaining is None else " · ostáva **%s** ticketov" % remaining
+        what = "💤 žiadna aktivita%s%s — loop sa zastavil medzi ticketmi" % (idle, rem)
+        tail = "Posledná práca skončila, ďalšia sa nerozbehla — pozri sa naň."
+    return "%s\n> %s\n> %s" % (head, what, tail)
+
+
 # --- dedup ---------------------------------------------------------------
 def _dedup_dir():
     return os.path.join(_claude_dir(), _DEDUP_DIRNAME)

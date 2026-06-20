@@ -22,6 +22,15 @@ The hook forwards the text after `❓ NEEDS YOU:` / `✅ DONE:` verbatim. So wri
 
 The device must ping on a `✅ DONE` only when the WHOLE job is finished — NOT per merged issue. This is enforced by the status marker itself, not by the hook guessing: during an `/autopilot` / `/goal` loop, each per-issue / per-batch turn is **still running the loop**, so it ends `⏳ WORKING` (the loop continues to the next issue) — and `⏳` CLEARS the pending payload, so no intermediate device ping. ONLY the terminal turn — backlog empty, loop stops, nothing running — ends `✅ DONE`, and THAT is the single ping. So: inside a loop, never end an intermediate turn with `✅ DONE` (something IS running — the loop); reserve `✅ DONE` for the true end. The hook keys on the last line, so a turn that did `✅ DONE: #5 merged` mid-loop but ends `⏳ WORKING: pokračujem na #6` correctly notifies nothing.
 
+#### Stall watchdog — the board pings when work stops abnormally (you do nothing)
+
+A third sanctioned device ping, fully AUTOMATIC: the **autopilot board daemon** (always-on, on dev1, INDEPENDENT of any agent) watches for development that stopped abnormally and fires ONE Discord ping `@owner` — so a silent stall is no longer silent, even when the agent is rate-limited, crashed, or stuck (the case a Stop/idle hook can't cover because the agent never reaches Stop). Two triggers, both tied to genuinely-running work, deduped + re-armed when activity resumes:
+
+- **`stalled`** — a non-terminal run (a worker mid-issue) goes silent past its phase threshold (25 min active / 30 min CI-deploy).
+- **`silent`** — a repo with a non-empty planned queue whose newest run is terminal has had no activity for 25 min (the loop stopped between issues).
+
+This is board-side (`board.watchdog_scan` → `notify.compose_watchdog_alert`), not something the agent triggers — the agent that stalled cannot notify; that's the whole point. The worker stamps its tmux `owner` on the run at `--start` so the daemon can @mention correctly. Override the threshold with `BOARD_WATCHDOG_S`.
+
 #### Per-phase progress → the BOARD, not the device
 
 During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), report each phase (merged, deployed, CI green, issue finished) to the **autopilot board** (`airuleset.py report …`) — that is the live per-phase view. The device stays quiet until a worker raises a real `❓` question or the whole run ends `✅`. The board is for watching; the device is for "Claude needs me" / "Claude finished".

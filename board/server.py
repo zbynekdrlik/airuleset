@@ -526,6 +526,44 @@ def _apply_repo_refresh(board, repo, res):
         board.reconcile_closed(repo, open_issues, time.time())
 
 
+def _fire_watchdog(board, now):
+    """Scan for development that stopped abnormally and fire ONE Discord ping per
+    stall. The board daemon runs ALWAYS (independent of the agent), so this pings
+    even when the agent is rate-limited / crashed / silently stopped — the gap the
+    user hit. watchdog_scan atomically marks each alert pinged, so the send is
+    fire-and-forget in a daemon thread (never blocks the refresher); a send error
+    just means no ping (the run is already board-side stale). Best-effort."""
+    from board import WATCHDOG_SILENCE_S, STALE_WAIT_S
+    try:
+        alerts = board.watchdog_scan(now, WATCHDOG_SILENCE_S, STALE_WAIT_S)
+    except Exception:
+        _log.exception("watchdog_scan failed")
+        return
+    if not alerts:
+        return
+    try:
+        from notify import compose_watchdog_alert, send
+    except Exception:
+        _log.exception("watchdog: notify package unavailable")
+        return
+
+    def _send_all():
+        for a in alerts:
+            try:
+                body = compose_watchdog_alert(
+                    a["kind"], a["repo"], issue=a.get("issue"),
+                    phase=a.get("phase"), idle_min=a.get("idle_min"),
+                    remaining=a.get("remaining"))
+                # owner came from the run (the worker stamped it at --start); the
+                # board daemon isn't in a tmux session so it can't resolve it live.
+                # DB already deduped (watchdog_scan marked it), so no dedup_key.
+                send(body, owner=a.get("owner") or "")
+            except Exception:
+                _log.exception("watchdog send failed for %s", a.get("repo"))
+
+    threading.Thread(target=_send_all, daemon=True).start()
+
+
 def _refresher_loop(board, static_repos, stop):
     """Background gh refresher (design §8): batched per-repo fetch on a loop with
     a GH_POLL_FLOOR_S floor, per-repo try/except so one repo's failure never
@@ -575,6 +613,7 @@ def _refresher_loop(board, static_repos, stop):
             now = time.time()
             board.mark_stale(now)
             board.prune_queue_expired(now, QUEUE_ITEM_TTL_S)
+            _fire_watchdog(board, now)
         except Exception:
             _log.exception("reaper (mark_stale/prune) failed")
         # honour the poll floor: sleep only the REMAINDER to reach the floor

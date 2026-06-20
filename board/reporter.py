@@ -83,10 +83,20 @@ def _save(f, d):
 
 
 def start_run(repo, issue, title, is_bug_fix=False, has_deploy=False,
-              merge_mode="auto"):
+              merge_mode="auto", owner=None):
     """Mint a run_id once, persist the repo#issue -> run_id mapping, seed seq=0,
-    and emit the opening 'validating' event. Returns the run_id."""
+    and emit the opening 'validating' event. Returns the run_id.
+
+    `owner` (the worker's tmux owner) is stamped on the run so the BOARD daemon —
+    which isn't in a tmux session — can @mention the right person on a stall
+    watchdog ping. Resolved here from the worker's session if not supplied."""
     repo = _normalize_repo(repo)   # bare name -> owner/name, else the board 400s it
+    if owner is None:
+        try:
+            from notify import resolve_owner
+            owner = resolve_owner()
+        except Exception:
+            owner = ""
     rid = f"{_safe_prefix(repo)}-{issue}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}"
     runs = _load(_p("autopilot-board-runs.json"))
     runs[f"{repo}#{issue}"] = rid
@@ -94,7 +104,7 @@ def start_run(repo, issue, title, is_bug_fix=False, has_deploy=False,
     _save(_p(f"autopilot-board-seq-{rid}.json"), {"seq": 0})
     report(rid, phase="validating", repo=repo, issue=issue, title=title,
            is_bug_fix=is_bug_fix, has_deploy=has_deploy, merge_mode=merge_mode,
-           _start=True)
+           owner=owner or None, _start=True)
     return rid
 
 
