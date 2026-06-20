@@ -22,7 +22,7 @@ allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUser
 
 ## Spine
 
-1. Read live model from Environment → 2. `Skill(rules-audit)` for structural baseline → 3. Web best-practice research (Step A) → 4. Ecosystem audits (Steps B/C/D) → 5. Score → 6. AskUserQuestion apply-loop → 7. audit log + validate + push.
+1. Read live model from Environment → 2. `Skill(rules-audit)` for structural baseline → 3. Web best-practice research (Step A) → 4. Ecosystem audits — plugins/skills health, MCP, and the MANDATORY per-project tooling pass (Steps B/C/D) → 5. Score → 6. AskUserQuestion review-loop (incl. all tooling findings) → 7. audit log + validate + push.
 
 ## Step 0 — Read the live model (NEVER hardcode a generation)
 
@@ -111,20 +111,31 @@ Cross-reference `~/.claude.json` (global `mcpServers` vs project-scoped). Checks
 Verdicts (always for the OWNING project to action, never a blind global edit): move-to-project-scope / consolidate-duplicate / fix-or-remove-broken / keep.
 Source: code.claude.com/docs/en/mcp
 
-## Step D — New-tooling deep-research (INSTALL vs SKIP)
+## Step D — New-tooling research: ecosystem + MANDATORY per-project pass
 
-Principle (verified): LSP plugins and on-demand Skills REDUCE context; always-on MCP servers INCREASE it. "Install more to reduce chaos" is usually wrong. WebSearch `"best Claude Code plugins <year>"`, `"Claude Code LSP token reduction"`, `"MCP context overhead"`; browse `anthropics/claude-plugins-official` marketplace (it ships per-language LSP plugins — clangd/csharp/go/java/kotlin/php/ruby/rust/swift/ts/pyright).
+Principle (verified): LSP plugins and on-demand Skills REDUCE context; always-on MCP servers INCREASE it. "Install more to reduce chaos" is usually wrong. Rubric: `score = (dev_velocity × context_reduction) / setup_cost`, each 1-5. INSTALL only if ≥3 AND no context regression. `context_reduction`: 5 = LSP/Skill that removes reads; 3 = on-demand; 1 = always-on MCP injecting schema every turn (auto-disqualifies any "reduce chaos" justification).
 
-Rubric: `score = (dev_velocity × context_reduction) / setup_cost`, each 1-5. INSTALL only if ≥3 AND no context regression. `context_reduction`: 5 = LSP/Skill that removes reads; 3 = on-demand; 1 = always-on MCP injecting schema every turn (auto-disqualifies any "reduce chaos" justification).
+**D1 — Ecosystem layer (global).** WebSearch `"best Claude Code plugins <year>"`, `"Claude Code LSP token reduction"`, `"MCP context overhead"`. Extract the FULL local marketplace catalog — do NOT guess plugin names:
+```bash
+python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json')));[print(p.get('name'),'|',(p.get('description') or '')[:80]) for p in d.get('plugins',[])]"
+```
+Cross-check `claude plugin list` so you never re-recommend an installed plugin.
+
+**D2 — PER-PROJECT pass (MANDATORY — this IS the tooling research, not optional).** A generic "install pyright" answer is a FAILURE of this step. Go project-by-project across the user's actual repos and find what helps EACH one:
+1. Enumerate every active project: `~/devel/*/` that has a `CLAUDE.md` (the managed/active set). Detect each one's REAL stack (Cargo.toml / package.json / pyproject / __manifest__.py / go.mod / C/C++ sources) and what it integrates (read its CLAUDE.md/README — external services, hardware, APIs, DBs).
+2. Match each project against the full D1 catalog. Per project decide: a per-language LSP for an in-use language with NO LSP yet (e.g. `clangd-lsp` for real C/C++); a PROJECT-SCOPED domain MCP ONLY if that project automates that exact service as a recurring workflow; an on-demand skill for a recurring task; or — a valid, common answer — NOTHING NEW (covered by installed LSPs + context7).
+3. **Fan out** — dozens of projects → use a Workflow / parallel agents clustered by stack; each agent reads a cluster's CLAUDE.md files and returns structured per-project verdicts. Cover EVERY active project, not a sample (log any skipped + why).
+4. **Cross-cut:** report LSP coverage across ALL projects — which in-use languages still lack an LSP (recurring gap = C/C++ → `clangd-lsp` for the OBS/JUCE projects). pyright/typescript/rust-analyzer already installed.
+5. Be HONEST about fit: the user's stack is mostly self-hosted media/AV/network — the SaaS-heavy catalog matches few projects. Say so; never manufacture a match.
 
 Decision rules:
-- INSTALL an LSP only for an in-use language with no LSP: `pyright-lsp@claude-plugins-official` (Python — airuleset/voiceagent/presenter), `typescript-lsp@claude-plugins-official` (n8n/web) — rust-analyzer-lsp already installed. Grep find-usages ≈10k+ tokens vs LSP ≈500/call.
-- NEVER add an always-on MCP to "reduce rules chaos" — add one only for a concrete recurring workflow.
-- Memory is SOLVED (built-in MEMORY.md + airuleset file-memory) — keep claude-mem DISABLED; never add a silent second memory system.
-- Context savings come from LSPs + scoping MCP to projects — NOT from thinning effective rules. Moving a procedure-heavy module to an on-demand skill is an OPTION only when it doesn't weaken enforcement (Step A.A), never a line-cutting goal.
-- Before adding an MCP: prefer a project-scoped entry over a global one; verify a duplicate is truly unused before recommending its removal (the owning project decides).
+- NEVER add an always-on MCP to "reduce chaos" — only for a concrete recurring workflow, and PROJECT-SCOPED (`.mcp.json` in that project), never a global connector visible to all projects.
+- Memory is SOLVED (built-in MEMORY.md + airuleset file-memory) — keep claude-mem DISABLED.
 - SKIP (overlaps local skills): pr-review-toolkit, code-review, commit-commands, frontend-design.
-Output a table (candidate | what | why-this-stack | install cmd | context effect | score | verdict), SHORTLIST first, then a DO-NOT-BOTHER list.
+
+**D3 — Hand off, don't reach in.** A project-scoped MCP / skill / config belongs to the OWNING project (stay-in-lane). For each such recommendation, FORMULATE a ready-to-paste handoff prompt for that project's Claude (what to install, how to scope it, what to verify). The user pastes it into that project's session — you NEVER edit another project's code/config.
+
+Output: a per-project table (project | real stack | tool | type | scope | why | score | verdict), the cross-cutting LSP-coverage line, the project-scoped-MCP handoff prompts, and an honest "these need nothing new" list — ALL surfaced to the user in Step F, never auto-applied.
 
 ## Step E — caveman-compatibility
 
@@ -133,7 +144,7 @@ caveman lite is active (strips articles/filler). Rules must lean on STRUCTURAL m
 ## Step F — Score, apply, log
 
 1. **Score** each proposed change `Impact × Confidence ÷ Effort`; sort high→low.
-2. **AskUserQuestion** per change (or grouped): Apply now / Defer-to-issue (`gh issue create`) / Reject. Never apply silently.
+2. **AskUserQuestion — EVERYTHING goes to the user's review.** Per change (or grouped): Apply now / Defer-to-issue (`gh issue create`) / Reject. Never apply silently. This INCLUDES every tooling finding (plugin installs, per-project recommendations, MCP changes): present each with a "what next?" choice — install now / hand off a project-scoped prompt to the owning project's Claude / skip. A plugin install changes the user's environment → it is ALWAYS user-reviewed, never auto-run on the agent's own judgement. A found-but-unpresented recommendation is a dropped finding.
 3. **Apply** accepted edits to `modules/` / skills / `settings/`. Heavy situational modules → MOVE TO SKILL per Step A.
 4. **Validate + deploy:** `python3 airuleset.py validate` MUST pass, then `python3 airuleset.py push` (deploys dev1 + dev2 — never bare `git push`).
 5. **Log** to `audits/mdreview-<date>.md`: every finding, its score, source URL, verdict (applied / deferred-#N / rejected / KEPT-still-effective). Record the resolved size as a tracked metric over time — NOT as a pass/fail vs a budget. A run whose verdict is "reviewed, all rules still earn their place, nothing cut" is a SUCCESSFUL run.
