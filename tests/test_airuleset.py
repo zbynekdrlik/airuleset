@@ -2360,23 +2360,62 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("ticket dokončený", one)
         self.assertIn("2 tickety dokončené", two)
 
-    def test_watchdog_alert_stalled(self):
-        a = self.notify.compose_watchdog_alert(
-            "stalled", "zbynekdrlik/camera-box", issue=41,
-            phase="implementing", idle_min=30)
-        self.assertIn("camera-box", a)
-        self.assertNotIn("zbynekdrlik/camera-box", a)   # name only
-        self.assertIn("zamrzla", a)
-        self.assertIn("#41", a)
-        self.assertIn("implementing", a)
-        self.assertIn("30 min ticho", a)
+    # --- API-error notifier (the CONCRETE stall signal) ------------------
+    def test_is_api_error_catches_real_cc_errors(self):
+        for t in [
+            "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
+            "API Error: The socket connection was closed unexpectedly.",
+            "There's an issue with the selected model (claude-fable-5). It may not exist...",
+            "API Error: Overloaded",
+            "Claude usage limit reached. Try again later.",
+        ]:
+            self.assertTrue(self.notify.is_api_error(t), t)
 
-    def test_watchdog_alert_silent(self):
-        a = self.notify.compose_watchdog_alert(
-            "silent", "o/odoo-erp", idle_min=27, remaining=8)
-        self.assertIn("stíchol", a)
-        self.assertIn("ostáva **8**", a)
-        self.assertIn("27 min ticho", a)
+    def test_is_api_error_rejects_normal_prose(self):
+        # the false positives that caused spam — normal work that MENTIONS the words
+        for t in [
+            "✅ DONE: nasadené v1.2.3",
+            "I'll fix the rate limiter config in src/limiter.py and add a test.",
+            "The server was overloaded so I added caching to reduce load.",
+            "Pridal som rate limit do API endpointu podľa zadania.",
+            "⏳ WORKING: monitorujem CI",
+            "",
+        ]:
+            self.assertFalse(self.notify.is_api_error(t), t)
+
+    def test_api_error_alert_uses_real_text(self):
+        a = self.notify.compose_api_error_alert(
+            "zbynekdrlik/odoo-erp",
+            "API Error: Server is temporarily limiting requests · Rate limited")
+        self.assertIn("odoo-erp", a)
+        self.assertNotIn("zbynekdrlik/odoo-erp", a)   # name only
+        self.assertIn("API chyba", a)
+        self.assertIn("Rate limited", a)              # the ACTUAL error text
+
+    def test_cli_api_error_sends_only_on_real_error(self):
+        # CLI --api-error: a real error → sends; normal prose → nothing.
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        real = subprocess.run(
+            [sys.executable, str(self.AIRULESET), "notify", "--api-error",
+             "--dry-run", "--project", "odoo-erp", "--session", "s1", "--text",
+             "API Error: Server is temporarily limiting requests · Rate limited"],
+            capture_output=True, text=True, env=env)
+        self.assertIn("<@111222333>", real.stdout)   # _env_home() zbynek id
+        self.assertIn("API chyba", real.stdout)
+        normal = subprocess.run(
+            [sys.executable, str(self.AIRULESET), "notify", "--api-error",
+             "--dry-run", "--project", "odoo-erp", "--session", "s1", "--text",
+             "I'll fix the rate limiter config and add a test."],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(normal.stdout.strip(), "")   # not an error → nothing
+
+    def test_api_error_hook_wired_in_stop(self):
+        src = (airuleset.REPO_DIR / "settings" / "hooks.json").read_text()
+        self.assertIn("notify-api-error.sh", src)
+        hook = (airuleset.REPO_DIR / "hooks" / "notify-api-error.sh").read_text()
+        self.assertIn("--api-error", hook)
+        self.assertIn("last_assistant_message", hook)
 
     def test_card_header_shows_repo_name_not_owner(self):
         # The @mention already names the person; an "owner/" prefix in the header

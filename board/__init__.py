@@ -18,16 +18,12 @@ BODY_MAX = 64 * 1024        # max POST body
 EVENT_CAP_PER_RUN = 500     # prune older events beyond this per run
 STALE_ACTIVE_S = 8 * 60     # heartbeat threshold, active phases (board VISUAL stale)
 STALE_WAIT_S = 30 * 60      # heartbeat threshold, CI/deploy waits
-# Stall WATCHDOG silence threshold (device ping): a genuinely-running run/loop that
-# goes silent this long has stopped abnormally → fire ONE Discord ping (the board
-# daemon does this, so it works even when the agent is rate-limited / dead). Longer
-# than a normal CI wait so a legit long CI doesn't trip it; WAIT phases use
-# STALE_WAIT_S. Override with BOARD_WATCHDOG_S.
-WATCHDOG_SILENCE_S = int(os.environ.get("BOARD_WATCHDOG_S", str(25 * 60)))
-# Hard ceiling: never ping a stall older than this — a run silent for HOURS is
-# long-abandoned, not freshly stalled, so a ping is stale noise (the backfill-spam
-# guard, with the armed_at gate below). Override with BOARD_WATCHDOG_MAX_S.
-WATCHDOG_MAX_IDLE_S = int(os.environ.get("BOARD_WATCHDOG_MAX_S", str(2 * 3600)))
+# NOTE: a board-silence "stall watchdog" was tried and REMOVED — inferring a stall
+# from absence of board reports false-positived on a worker legitimately working a
+# long phase without reporting (it pinged, the work then finished fine). The real
+# stall signal is the concrete `isApiErrorMessage` event in the session transcript,
+# handled by the notify-api-error.sh Stop hook — NOT a board heuristic. mark_stale
+# below stays VISUAL-only (board status), it never fires a device ping.
 GH_POLL_FLOOR_S = 30        # min seconds between gh polls
 AUTO_REFRESH_S = 10         # browser meta refresh
 

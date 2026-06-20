@@ -185,25 +185,51 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     return "\n".join(lines)
 
 
-def compose_watchdog_alert(kind, repo, issue=None, phase=None, idle_min=None,
-                           remaining=None):
-    """Build the stall-watchdog ping (Slovak, Discord markdown). Fired by the
-    board daemon when real development stops abnormally — `kind` is 'stalled' (a
-    run froze mid-phase) or 'silent' (the loop went quiet between issues). No
-    @mention here — send() prepends it."""
-    name = (_clean(repo) or "?").rstrip("/").split("/")[-1] or "?"
-    idle = "" if idle_min is None else " · %s min ticho" % idle_min
-    if kind == "stalled":
-        head = "⚠️ **%s** — práca zamrzla" % name
-        what = "🧊 ticket **#%s** uviazol vo fáze **%s**%s" % (
-            issue, _clean(phase) or "?", idle)
-        tail = "Autopilot sa zasekol a sám nepokračuje — pozri sa naň."
-    else:  # silent
-        head = "⚠️ **%s** — autopilot stíchol" % name
-        rem = "" if remaining is None else " · ostáva **%s** ticketov" % remaining
-        what = "💤 žiadna aktivita%s%s — loop sa zastavil medzi ticketmi" % (idle, rem)
-        tail = "Posledná práca skončila, ďalšia sa nerozbehla — pozri sa naň."
-    return "%s\n> %s\n> %s" % (head, what, tail)
+# --- API-error detection (the CONCRETE stall signal) ---------------------
+# Claude Code marks a real, user-facing API error with `isApiErrorMessage` in the
+# session transcript and ends the turn on it, so the Stop hook's last assistant
+# message IS the error text (e.g. "API Error: Server is temporarily limiting
+# requests · Rate limited"). These are the genuine "work stopped" events — NOT a
+# board-silence guess — so notifying on them never false-positives.
+# A turn that ENDS on a CC API error leads with "API Error:" — the strongest,
+# safest signal (won't match an agent's normal prose).
+_API_ERROR_LEAD = re.compile(r"^\s*(api\s+error|claude\s+api\s+error)\b", re.IGNORECASE)
+# Specific CC error phrases for the rarer cases that don't lead with "API Error".
+# Deliberately precise — NOT a bare "rate limit"/"overloaded" substring, which
+# appears in normal dev talk ("fix the rate limiter config") and false-positived.
+_API_ERROR_PHRASE = re.compile(
+    r"(temporarily limiting requests"
+    r"|socket connection was closed unexpectedly"
+    r"|issue with the selected model"
+    r"|usage limit (reached|exceeded)"
+    r"|rate[ -]?limited\b"
+    r"|internal server error"
+    r"|service unavailable"
+    r"|\b(502|503|529)\b)",
+    re.IGNORECASE)
+
+
+def is_api_error(text):
+    """True if `text` (a turn's final assistant message) is a real Claude Code API
+    error that stopped the work — the concrete signal the notifier keys on. Precise
+    on purpose: a normal message that merely mentions 'rate limiter' is NOT an
+    error (the false positive that produced spam)."""
+    if not text:
+        return False
+    t = str(text).strip()
+    if len(t) > 600:   # CC API-error lines are short; a long message is normal prose
+        return False
+    return bool(_API_ERROR_LEAD.match(t) or _API_ERROR_PHRASE.search(t))
+
+
+def compose_api_error_alert(project, text):
+    """Build the API-error ping (Slovak, Discord markdown) from the ACTUAL error
+    text Claude Code surfaced. No @mention here — send() prepends it."""
+    proj = (_clean(project) or "?").rstrip("/").split("/")[-1] or "?"
+    err = _clean(text)[:300] or "neznáma API chyba"
+    return ("🛑 **%s** — API chyba, práca sa zastavila\n> %s\n"
+            "> Agent sa zasekol na API chybe — pozri sa naň / skús znova."
+            % (proj, err))
 
 
 # --- dedup ---------------------------------------------------------------

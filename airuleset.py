@@ -1413,6 +1413,22 @@ def cmd_notify(args):
         _notify_run_card(args, compose_autopilot_card, send)
         return
 
+    if getattr(args, "api_error", False):
+        from notify import compose_api_error_alert, is_api_error
+        text = args.text or ""
+        if not is_api_error(text):
+            return  # not a real API error → say nothing (no false ping)
+        import hashlib
+        project = args.project or ""
+        sess = args.session or ""
+        h = hashlib.sha1(text.strip().encode()).hexdigest()[:12]
+        # One ping per distinct error text per session (a wedge that keeps showing
+        # the same error across Stop events pings once, not every turn).
+        dedup = args.dedup_key or ("apierr:%s:%s" % (sess, h))
+        body = compose_api_error_alert(project, text)
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        return
+
     if getattr(args, "autopilot_done", False):
         try:
             tickets = json.loads(args.tickets_json) if args.tickets_json else []
@@ -1694,6 +1710,12 @@ def main():
     p_notify.add_argument("--run-card", dest="run_card", action="store_true",
                           help="Send a per-ticket card for a board run, gathering "
                                "goal/progress from gh (used by report --phase merge)")
+    p_notify.add_argument("--api-error", dest="api_error", action="store_true",
+                          help="Ping IF --text is a real Claude Code API error "
+                               "(used by the notify-api-error.sh Stop hook)")
+    p_notify.add_argument("--text", help="The turn's last assistant message (API-error check)")
+    p_notify.add_argument("--session", help="Session id (API-error dedup scope)")
+    p_notify.add_argument("--project", help="Project name for the API-error ping")
     p_notify.add_argument("--run", help="Board run_id (for --run-card)")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
     p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté')")
