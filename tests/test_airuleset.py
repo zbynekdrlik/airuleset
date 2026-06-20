@@ -2245,14 +2245,18 @@ class _FakeTmux:
     """Stand-in for the watchdog's `run` (tmux exec). Answers list-panes /
     capture-pane from canned data and records every send-keys argv."""
 
-    def __init__(self, panes="", captures=None):
+    def __init__(self, panes="", captures=None, modes=None):
         self.panes = panes
         self.captures = captures or {}
+        self.modes = modes or {}          # pane_id -> "1" (in copy-mode) / "0"
         self.sent = []
 
     def __call__(self, argv, timeout=8):
         if argv[:2] == ["tmux", "list-panes"]:
             return self.panes
+        if argv[:2] == ["tmux", "display-message"]:
+            pid = argv[argv.index("-t") + 1]
+            return self.modes.get(pid, "0")
         if argv[:2] == ["tmux", "capture-pane"]:
             pid = argv[argv.index("-t") + 1]
             return self.captures.get(pid, "")
@@ -2324,10 +2328,6 @@ class TestApiWatchdog(TestCase):
         p = self._transcript("/x/p", [self._ERR, self._SENT], 600, 1_000_000)
         self.assertIn("529", self.w.transcript_last_error(p))
 
-    def test_pane_shows_api_error_with_box_prefix(self):
-        self.assertTrue(self.w.pane_shows_api_error("│ API Error: 529 Overloaded. Try again."))
-        self.assertFalse(self.w.pane_shows_api_error("Reading file foo.py\n> done"))
-
     def test_list_claude_panes_dedups_and_filters(self):
         fake = _FakeTmux(panes="%5\tclaude\t/devel/a\n%5\tclaude\t/devel/a\n"
                                "%6\tbash\t/devel/b\n%7\tclaude\t/devel/c\n")
@@ -2395,6 +2395,21 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 0)
         self.assertEqual(self.pings, [])
 
+    def test_run_once_ignores_pane_text_only_no_flag(self):
+        # REGRESSION (the live incident, 2026-06-20): a session merely DISPLAYING
+        # api-error text — quoting "API Error: 529" in a meta-conversation — but
+        # whose transcript last assistant msg is NOT isApiErrorMessage must NOT be
+        # nudged. Pane content is now irrelevant; ONLY Claude Code's flag triggers.
+        now = 1_000_000
+        cwd = "/devel/meta"
+        self._transcript(cwd, [self._OK], 600, now)      # last msg normal, 10 min stale
+        cap = "API Error: 529 Overloaded. This is a server-side issue\n> quoting 529"
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": cap})
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state, grace=300)
+        self.assertEqual(fake.continues_sent(), 0, "must NOT nudge on pane-text alone")
+        self.assertEqual(self.pings, [])
+
     def test_run_once_escalates_then_stops(self):
         now = 1_000_000
         cwd = "/devel/stuck"
@@ -2435,6 +2450,78 @@ class TestApiWatchdog(TestCase):
                         projects_dir=self.projects, state_path=self.state,
                         grace=300, interval=300, max_nudges=3)
         self.assertEqual(fake.continues_sent(), 0, "dry-run must not send `continue`")
+
+    # --- hardening fixes from the adversarial review -------------------------
+    def test_is_usage_cap_classifier(self):
+        self.assertTrue(self.w.is_usage_cap("Claude usage limit reached; resets at 5pm"))
+        self.assertTrue(self.w.is_usage_cap("You have reached your quota"))
+        # transient errors a retry CAN clear must NOT be classified as a usage cap
+        self.assertFalse(self.w.is_usage_cap("API Error: 529 Overloaded"))
+        self.assertFalse(self.w.is_usage_cap("API Error: rate limited"))
+
+    def test_run_once_skips_ambiguous_cwd(self):
+        # two `claude` panes in the SAME cwd → one transcript, can't tell which pane
+        # stalled → SKIP (never poke the possibly-healthy pane)
+        now = 1_000_000
+        cwd = "/devel/shared"
+        self._transcript(cwd, [self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n%6\tclaude\t" + cwd + "\n")
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state, grace=300)
+        self.assertEqual(fake.continues_sent(), 0, "ambiguous cwd must NOT be nudged")
+        self.assertEqual(self.pings, [])
+        self.assertTrue(any("ambiguous" in l for l in logs))
+
+    def test_run_once_skips_pane_in_copy_mode(self):
+        # user is scrolling (pane_in_mode=1) → keys would corrupt their selection
+        now = 1_000_000
+        cwd = "/devel/scrolling"
+        self._transcript(cwd, [self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", modes={"%5": "1"})
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state, grace=300)
+        self.assertEqual(fake.continues_sent(), 0, "copy-mode pane must NOT be nudged")
+        self.assertEqual(self.w.load_state(self.state), {}, "no retry burned while in-mode")
+
+    def test_run_once_usage_cap_pings_no_continue(self):
+        now = 1_000_000
+        cwd = "/devel/capped"
+        cap = {"type": "assistant", "isApiErrorMessage": True,
+               "message": {"role": "assistant", "content": [{"type": "text",
+                           "text": "Claude usage limit reached — resets at 18:00"}]}}
+        self._transcript(cwd, [cap], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, interval=300, max_nudges=3)
+        self.w.run_once(now=now, **kw)
+        self.assertEqual(fake.continues_sent(), 0, "usage cap must NOT get `continue`")
+        self.assertEqual(len(self.pings), 1, "usage cap pings once")
+        # and it does NOT keep retrying / never false-'gives up'
+        self.w.run_once(now=now + 300, **kw)
+        self.w.run_once(now=now + 600, **kw)
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(len(self.pings), 1, "no further pings after the one usage-cap ping")
+
+    def test_ping_dedup_key_includes_first_seen(self):
+        # a recovered session that re-stalls later must produce a DISTINCT dedup key
+        # (notify's own dedup TTL is 14 days — without first_seen the re-stall ping
+        # would be silently swallowed)
+        now = 1_000_000
+        cwd = "/devel/restall"
+        self._transcript(cwd, [self._ERR], 600, now)
+        kw = dict(run=_FakeTmux(panes="%5\tclaude\t" + cwd + "\n"), send_fn=self._send,
+                  projects_dir=self.projects, state_path=self.state,
+                  grace=300, interval=300, max_nudges=3)
+        self.w.run_once(now=now, **kw)
+        key1 = self.pings[-1][1]
+        self.assertIn(str(now), key1, "first_seen must be in the dedup key")
+        # recover, then re-stall with the SAME error text much later
+        self._transcript(cwd, [self._ERR, self._OK], 5, now + 100)
+        self.w.run_once(now=now + 100, **kw)            # drops the recovered key
+        self._transcript(cwd, [self._ERR], 600, now + 100000)
+        self.w.run_once(now=now + 100000, **kw)
+        key2 = self.pings[-1][1]
+        self.assertNotEqual(key1, key2, "re-stall must produce a distinct dedup key")
 
     # --- wiring --------------------------------------------------------------
     def test_watchdog_subcommand_registered(self):

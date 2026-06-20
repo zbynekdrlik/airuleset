@@ -16,21 +16,32 @@ DETECTION (per `claude` tmux pane)
 ----------------------------------
 - Map the pane's cwd → its newest transcript under ~/.claude/projects/<enc>/.
 - ERROR signal: the session's last assistant entry is flagged `isApiErrorMessage`
-  (Claude Code's own definitive marker), or the visible pane shows an API-error
-  banner (`is_api_error`). The flag is precise; a user merely quoting "API Error"
-  in prose never sets it.
+  (Claude Code's own definitive marker). This is the ONLY trigger — it is set only
+  on an error CC actually hit, never on a user/agent merely quoting "API Error" in
+  prose. (An earlier pane-text fallback was removed: it matched any session
+  DISPLAYING api-error text and false-nudged an active meta-conversation.)
 - IDLE signal: the transcript has not advanced for >= GRACE seconds (Claude Code's
   own quick retries keep the transcript moving, so a 5-min-stale transcript means
   the retries were exhausted and it is genuinely parked).
 - STALLED = ERROR and IDLE.
 
+SAFETY GATES (never steer keys into the wrong / busy pane)
+---------------------------------------------------------
+- AMBIGUOUS BINDING: panes are grouped by their resolved transcript; if two panes
+  own one transcript (two `claude` terminals in one cwd, or two cwds colliding
+  under CC's '/'/'.'/'_'→'-' dir encoding) we SKIP — never guess which pane to
+  poke. A missed auto-resume beats a `continue` typed into a healthy pane.
+- COPY-MODE: a pane in copy-mode / a modal (user scrolling) is skipped this cycle
+  WITHOUT burning a retry — keys would be swallowed or corrupt the user's selection.
+
 ACTION (state machine, see `decide`)
 ------------------------------------
-first sighting -> 'wait' (record first_seen)
-+GRACE still stalled -> 'nudge' #1  (send `continue` + ONE Discord ping)
+first sighting (already >=GRACE stale) -> 'nudge' #1  (send `continue` + ONE ping)
 +INTERVAL each      -> 'nudge' #2, #3
 after MAX_NUDGES     -> 'escalate' (ping "gave up", stop — no continue-spam during
                         a long Anthropic outage)
+USAGE/QUOTA cap      -> ping ONCE, NO `continue` (time-based; only the reset clock
+                        fixes it — CC auto-resumes when the cap resets)
 recovered            -> key dropped from state (a future error starts fresh)
 
 A session waiting on a real `❓` is NEVER auto-continued: its last assistant entry
@@ -44,6 +55,7 @@ no network.
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -137,21 +149,20 @@ def transcript_last_error(path):
     return ""
 
 
-def pane_shows_api_error(captured):
-    """True if the captured tmux pane text shows an API-error banner. Secondary to
-    the transcript flag; strips TUI box-drawing prefixes before the match."""
-    from notify import is_api_error
-    if not captured:
-        return False
-    for raw in captured.splitlines():
-        ln = raw.strip().lstrip("│┃|>*● \t").strip()
-        if is_api_error(ln):
-            return True
-    return False
-
-
 def _hash(text):
     return hashlib.sha1((text or "").strip().encode("utf-8", "replace")).hexdigest()[:12]
+
+
+# A subscription / quota USAGE cap is time-based — `continue` cannot fix it (only
+# the reset clock can), so it is classified separately and only PINGED, never
+# nudged. Kept narrow so a transient 529 / "rate limited" / overloaded (which a
+# retry CAN clear) is NOT caught here and still gets the 3×continue lifecycle.
+_USAGE_CAP_RX = re.compile(
+    r"usage limit|quota|limit (?:reached|will reset|resets)|reset at|reached your", re.I)
+
+
+def is_usage_cap(text):
+    return bool(text) and bool(_USAGE_CAP_RX.search(text))
 
 
 def decide(state, key, err_hash, now,
@@ -236,9 +247,14 @@ def list_claude_panes(run=None):
     return res
 
 
-def capture_pane(pane_id, run=None, lines=40):
+def pane_in_mode(pane_id, run=None):
+    """True if the pane is in tmux copy-mode / a modal (the user is scrolling, or a
+    menu is open). Sending keys then would be swallowed or would corrupt the user's
+    selection — so the watchdog skips such a pane this cycle (without burning a
+    retry)."""
     run = run or _default_run
-    return run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", "-%d" % lines])
+    out = run(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_in_mode}"])
+    return (out or "").strip() == "1"
 
 
 def send_continue(pane_id, text=NUDGE_TEXT, run=None):
@@ -268,18 +284,40 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     logs = []
     stalled = set()
 
+    # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
+    # is bound to a transcript that exactly ONE pane owns — if two panes resolve to
+    # the same transcript (two `claude` terminals in one cwd, or two distinct cwds
+    # that collide under CC's '/'/'.'/'_'→'-' dir encoding) we cannot tell which
+    # pane is the stalled one, so we SKIP rather than fire `continue` into the
+    # wrong (possibly healthy) pane. Mis-targeted keystroke injection is worse than
+    # a missed auto-resume (the user still gets pinged on the stall via the flag).
+    by_transcript = {}
     for pid, cwd in list_claude_panes(run):
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
             continue
         tpath, tmtime = tinfo
+        by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
+
+    for tkey, owners in by_transcript.items():
+        if len(owners) > 1:
+            logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
+            continue
+        pid, cwd, tmtime, tpath = owners[0]
         if (now - tmtime) < grace:        # transcript still advancing → not stalled
             continue
+        # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
+        # assistant entry. This is the ONLY trigger. (An earlier pane-text fallback
+        # was removed after it false-nudged a meta-conversation merely DISPLAYING
+        # api-error text — the flag is set only on an error CC actually hit.)
         err_text = transcript_last_error(tpath)
-        if not err_text and pane_shows_api_error(capture_pane(pid, run)):
-            err_text = "API Error"
         if not err_text:
-            continue                       # idle but no api-error signal → leave it
+            continue                       # not flagged stalled-on-error → leave it
+        # The user is scrolling / a menu is open → keys would be swallowed or would
+        # corrupt their selection. Skip WITHOUT advancing state (no retry burned).
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode %s" % (os.path.basename(cwd.rstrip("/")) or pid))
+            continue
 
         key = tpath.stem                   # session id (stable across grouped panes)
         stalled.add(key)
@@ -287,20 +325,35 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         err_hash = _hash(err_text)
         action, entry = decide(state, key, err_hash, now, interval, max_nudges)
         state[key] = entry
+        # Per-stall-cycle ping dedup: include first_seen so a session that recovers
+        # and RE-stalls with the same error text later still pings (notify's dedup
+        # TTL is 14 days — without first_seen the second cycle would be silent).
+        fs = int(entry.get("first_seen", now))
 
-        if action == "nudge":
+        if action == "nudge" and is_usage_cap(err_text):
+            # Subscription / quota USAGE cap — time-based, `continue` cannot fix it.
+            # Ping ONCE and mark escalated (no `continue`, no retries, no false
+            # "gave up"); CC itself auto-resumes when the cap resets.
+            entry["nudges"], entry["escalated"] = [], True
+            state[key] = entry
+            logs.append("usage-cap %s — ping only, no continue" % project)
+            send_fn(compose_api_error_alert(project, err_text)
+                    + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                    dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+        elif action == "nudge":
             n = len(entry["nudges"])
             logs.append("nudge#%d %s [%s]" % (n, project, key))
             if not dry_run:
                 send_continue(pid, NUDGE_TEXT, run)
             if n == 1:                     # first nudge → tell the user it stalled
                 send_fn(compose_api_error_alert(project, err_text),
-                        dedup_key="apierr:%s:%s" % (key, err_hash), dry_run=dry_run)
+                        dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
         elif action == "escalate":
             logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
             body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
                     "stále nepohlo — treba zásah." % (project, max_nudges))
-            send_fn(body, dedup_key="apierr-giveup:%s:%s" % (key, err_hash), dry_run=dry_run)
+            send_fn(body, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+                    dry_run=dry_run)
         else:
             logs.append("%s %s [%s]" % (action, project, key))
 
