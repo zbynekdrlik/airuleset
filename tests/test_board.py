@@ -1696,15 +1696,26 @@ class TestReliabilityDedup(unittest.TestCase):
 
 class TestStallWatchdog(unittest.TestCase):
     """board.watchdog_scan — detects development that stopped abnormally and is
-    owed a device ping, deduped + re-armed on recovery (the silent-stall gap)."""
+    owed a device ping, deduped + re-armed on recovery, with the anti-spam guards
+    (armed-at, validity, ceiling) that stop the backfill flood."""
 
     SIL = 25 * 60
     WAIT = 30 * 60
+    MAX = 2 * 3600
 
     def _b(self):
         import tempfile
         from board.db import Board
         return Board(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
+
+    def _arm(self, b, armed_at):
+        """Pre-seed the watchdog arm time (when it 'started watching') so a test
+        run whose activity is AFTER it is eligible."""
+        c = b.conn()
+        c.execute("INSERT OR REPLACE INTO watchdog(token, pinged_at) "
+                  "VALUES('armed_at', ?)", (armed_at,))
+        c.commit()
+        c.close()
 
     def _age(self, b, rid, secs_ago, now):
         c = b.conn()
@@ -1712,6 +1723,9 @@ class TestStallWatchdog(unittest.TestCase):
                   (now - secs_ago, rid))
         c.commit()
         c.close()
+
+    def _scan(self, b, now):
+        return b.watchdog_scan(now, self.SIL, self.WAIT, self.MAX)
 
     def test_migration_adds_owner_and_watchdog(self):
         b = self._b()
@@ -1723,32 +1737,78 @@ class TestStallWatchdog(unittest.TestCase):
             "select name from sqlite_master where type='table'")}
         self.assertIn("watchdog", tabs)
 
+    def test_first_scan_arms_and_pings_nothing(self):
+        # THE backfill-flood guard: on the very first scan, every pre-existing
+        # stale run is ignored (none is active since the watchdog armed).
+        import time
+        b = self._b()
+        now = time.time()
+        for i in range(3):  # ancient abandoned runs (days old)
+            b.apply_event({"run_id": f"old{i}", "event_id": f"e{i}", "seq": 1,
+                           "phase": "implementing", "repo": "o/x", "issue": 10 + i})
+            self._age(b, f"old{i}", 5000 * 60, now)
+        self.assertEqual(self._scan(b, now), [])   # armed now → nothing fires
+        self.assertEqual(self._scan(b, now), [])
+
     def test_stalled_run_alert_then_deduped(self):
         import time
         b = self._b()
         now = time.time()
+        self._arm(b, now - 60 * 60)   # watching for an hour
         b.apply_event({"run_id": "r1", "event_id": "e1", "seq": 1,
                        "phase": "implementing", "repo": "o/cam", "issue": 41,
                        "title": "T", "owner": "zbynek"})
-        self._age(b, "r1", 30 * 60, now)
-        a = b.watchdog_scan(now, self.SIL, self.WAIT)
+        self._age(b, "r1", 30 * 60, now)   # active 30 min ago (after arm)
+        a = self._scan(b, now)
         self.assertEqual(len(a), 1)
         self.assertEqual(a[0]["kind"], "stalled")
         self.assertEqual((a[0]["repo"], a[0]["issue"], a[0]["owner"]),
                          ("o/cam", 41, "zbynek"))
         self.assertEqual(a[0]["idle_min"], 30)
-        # second scan → already pinged, no repeat
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
+        self.assertEqual(self._scan(b, now), [])   # deduped
+
+    def test_backfill_run_before_arm_is_suppressed(self):
+        # A run last active BEFORE the watchdog armed = pre-existing → never pings.
+        import time
+        b = self._b()
+        now = time.time()
+        self._arm(b, now - 10 * 60)        # armed 10 min ago
+        b.apply_event({"run_id": "old", "event_id": "e1", "seq": 1,
+                       "phase": "implementing", "repo": "o/x", "issue": 9})
+        self._age(b, "old", 40 * 60, now)  # active 40 min ago — predates the arm
+        self.assertEqual(self._scan(b, now), [])
+
+    def test_garbage_row_never_alerts(self):
+        # No repo / no issue / no phase = '#None' / '?' = never a valid ping.
+        import time
+        b = self._b()
+        now = time.time()
+        self._arm(b, now - 60 * 60)
+        b.apply_event({"run_id": "g1", "event_id": "e1", "seq": 1,
+                       "phase": "implementing"})   # repo + issue NULL
+        self._age(b, "g1", 30 * 60, now)
+        self.assertEqual(self._scan(b, now), [])
+
+    def test_ceiling_suppresses_ancient_stall(self):
+        # Past the ceiling (hours-old) → stale news, never pinged, even if armed.
+        import time
+        b = self._b()
+        now = time.time()
+        self._arm(b, now - 9000 * 60)
+        b.apply_event({"run_id": "r1", "event_id": "e1", "seq": 1,
+                       "phase": "implementing", "repo": "o/x", "issue": 5})
+        self._age(b, "r1", 5000 * 60, now)   # ~83 h idle, way past 2 h ceiling
+        self.assertEqual(self._scan(b, now), [])
 
     def test_fresh_event_rearms_stalled(self):
         import time
         b = self._b()
         now = time.time()
+        self._arm(b, now - 60 * 60)
         b.apply_event({"run_id": "r1", "event_id": "e1", "seq": 1,
                        "phase": "implementing", "repo": "o/cam", "issue": 41})
         self._age(b, "r1", 30 * 60, now)
-        b.watchdog_scan(now, self.SIL, self.WAIT)               # pings once
-        # recovery: a fresh event clears watchdog_pinged_at
+        self._scan(b, now)               # pings once
         b.apply_event({"run_id": "r1", "event_id": "e2", "seq": 2,
                        "phase": "implementing", "repo": "o/cam", "issue": 41})
         pinged = b.conn().execute(
@@ -1759,53 +1819,51 @@ class TestStallWatchdog(unittest.TestCase):
         import time
         b = self._b()
         now = time.time()
-        # a CI run silent 26 min — under the 30-min WAIT threshold → no alert
+        self._arm(b, now - 60 * 60)
         b.apply_event({"run_id": "rci", "event_id": "e1", "seq": 1, "phase": "CI",
                        "repo": "o/x", "issue": 5})
-        self._age(b, "rci", 26 * 60, now)
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
-        # …but silent 31 min → alert
-        self._age(b, "rci", 31 * 60, now)
-        self.assertEqual(len(b.watchdog_scan(now, self.SIL, self.WAIT)), 1)
+        self._age(b, "rci", 26 * 60, now)   # under 30-min WAIT threshold
+        self.assertEqual(self._scan(b, now), [])
+        self._age(b, "rci", 31 * 60, now)   # over → alert
+        self.assertEqual(len(self._scan(b, now)), 1)
 
     def test_asking_user_never_alerts(self):
         import time
         b = self._b()
         now = time.time()
+        self._arm(b, now - 200 * 60)
         b.apply_event({"run_id": "rq", "event_id": "e1", "seq": 1,
                        "phase": "asking-user", "repo": "o/x", "issue": 5})
         self._age(b, "rq", 99 * 60, now)
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
+        self.assertEqual(self._scan(b, now), [])
 
     def test_terminal_run_never_alerts(self):
         import time
         b = self._b()
         now = time.time()
+        self._arm(b, now - 200 * 60)
         b.apply_event({"run_id": "rd", "event_id": "e1", "seq": 1,
                        "phase": "done", "status": "done", "repo": "o/x",
                        "issue": 5})
         self._age(b, "rd", 99 * 60, now)
-        # no queue → not a silent-loop case either
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
+        self.assertEqual(self._scan(b, now), [])
 
     def test_silent_loop_alert_with_remaining_then_rearm(self):
         import time
         b = self._b()
         now = time.time()
-        # last run terminal + a non-empty planned queue + silent 30 min
+        self._arm(b, now - 60 * 60)
         b.apply_event({"run_id": "rd", "event_id": "e1", "seq": 1,
                        "phase": "done", "status": "done", "repo": "o/odoo",
                        "issue": 700, "owner": "marek"})
         self._age(b, "rd", 30 * 60, now)
         b.set_queue("o/odoo", [(701, "A"), (702, "B")])
-        a = b.watchdog_scan(now, self.SIL, self.WAIT)
+        a = self._scan(b, now)
         self.assertEqual(len(a), 1)
         self.assertEqual(a[0]["kind"], "silent")
         self.assertEqual(a[0]["remaining"], 2)
         self.assertEqual(a[0]["owner"], "marek")
-        # deduped
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
-        # fresh activity for the repo re-arms (clears the silent token)
+        self.assertEqual(self._scan(b, now), [])   # deduped
         b.apply_event({"run_id": "rn", "event_id": "e2", "seq": 1,
                        "phase": "implementing", "repo": "o/odoo", "issue": 701})
         tok = b.conn().execute(
@@ -1816,6 +1874,6 @@ class TestStallWatchdog(unittest.TestCase):
         import time
         b = self._b()
         now = time.time()
-        # queue exists but no run ever started for the repo → pending, not stalled
+        self._arm(b, now - 60 * 60)
         b.set_queue("o/new", [(1, "A")])
-        self.assertEqual(b.watchdog_scan(now, self.SIL, self.WAIT), [])
+        self.assertEqual(self._scan(b, now), [])

@@ -658,22 +658,32 @@ class Board:
             c.close()
         return reconciled, stale
 
-    def watchdog_scan(self, now, silence_s, wait_s):
+    def watchdog_scan(self, now, silence_s, wait_s, max_idle_s):
         """Detect REAL development that stopped abnormally and is owed a device
         ping, mark each as pinged (atomic, so the refresher fires exactly once),
         and return the alert dicts.
 
-        Two modes, both tied to genuinely-running development (never a quiet idle
-        repo):
-          * 'stalled' — a NON-TERMINAL run (a worker was mid-issue) whose last
-            event is older than its phase threshold (wait_s for CI/deploy waits,
-            else silence_s) and that has not been pinged for this stall
-            (watchdog_pinged_at IS NULL). _apply re-arms it (NULLs the column) on
-            any fresh event, so recovery → a later stall pings again.
-          * 'silent' — a repo with a non-empty planned queue (more work WAS lined
-            up) whose newest run is TERMINAL and which has had no activity for
-            > silence_s: the loop stopped between issues. Deduped via the watchdog
-            table token 'silent:<repo>', re-armed by _apply on fresh repo activity.
+        THREE hard anti-spam guards (added after the first activation flooded the
+        device with ~20 backfill pings for runs stale for DAYS and rows with no
+        repo/issue):
+          1. ARMED-AT gate — the watchdog records its first-scan time as the
+             'armed_at' token and ONLY considers runs whose last activity is AT OR
+             AFTER that time. So on activation (and forever after) every PRE-
+             EXISTING stale run is ignored: the watchdog only fires for a stall it
+             actually WITNESSED (a run that was live while it was watching, then
+             went quiet). This is what kills the backfill flood.
+          2. VALIDITY gate — never ping a run with no repo, no issue, or no/'?'
+             phase ('#None'/'?' = garbage, never actionable info).
+          3. CEILING — never ping a stall idle longer than max_idle_s (hours-old =
+             stale news, not a fresh stall).
+
+        Modes (both tied to genuinely-running dev, never a quiet idle repo):
+          * 'stalled' — a NON-TERMINAL run (worker mid-issue) silent past its phase
+            threshold (wait_s for CI/deploy waits, else silence_s), not yet pinged.
+            _apply re-arms it (NULLs watchdog_pinged_at) on any fresh event.
+          * 'silent' — a repo with a non-empty planned queue whose newest run is
+            TERMINAL and silent > silence_s (loop stopped between issues). Deduped
+            via the 'silent:<repo>' token, re-armed by _apply on fresh repo activity.
 
         Returns a list of dicts: {kind, repo, issue, phase, owner, title,
         idle_min, remaining}. Never raises out of the writer path."""
@@ -681,7 +691,30 @@ class Board:
         term = ",".join("?" * len(TERMINAL_PHASES))
         alerts = []
         c = self.conn()
+
+        def _actionable(upd, thresh):
+            """A stall worth a ping: silent PAST the threshold but not so long that
+            it's stale news, AND active since the watchdog armed (no backfill)."""
+            idle = now - upd
+            return (thresh < idle <= max_idle_s) and (upd >= armed_at)
+
+        def _valid(repo, issue, phase):
+            return bool(repo) and issue is not None and bool(phase) and phase != "?"
+
         try:
+            # ---- ARM: first scan records the watch start; nothing pre-existing
+            # can satisfy (upd >= armed_at) for runs whose last activity is in the
+            # past, so the activation scan pings NOTHING. The token persists, so
+            # later scans keep the same arm time (a restart does not re-flood).
+            row = c.execute(
+                "SELECT pinged_at FROM watchdog WHERE token='armed_at'").fetchone()
+            if row is None:
+                c.execute("INSERT INTO watchdog(token, pinged_at) VALUES('armed_at', ?)",
+                          (now,))
+                armed_at = now
+            else:
+                armed_at = row["pinged_at"]
+
             # ---- mode A: a non-terminal run went silent past threshold ----
             rows = c.execute(
                 f"""SELECT run_id, repo, issue, phase, title, owner, updated_at
@@ -693,46 +726,46 @@ class Board:
                 phase = r["phase"]
                 if phase in PAUSE_PHASES:
                     continue  # asking-user is a legitimate pause
+                if not _valid(r["repo"], r["issue"], phase):
+                    continue  # garbage row (#None / '?') — never a valid ping
                 upd = r["updated_at"] or now
                 thresh = wait_s if phase in WAIT_PHASES else silence_s
-                if (now - upd) <= thresh:
-                    continue
+                if not _actionable(upd, thresh):
+                    continue  # too fresh, too old, or pre-dates the arm (backfill)
                 c.execute("UPDATE runs SET watchdog_pinged_at=? WHERE run_id=?",
                           (now, r["run_id"]))
                 alerts.append({
                     "kind": "stalled", "repo": r["repo"], "issue": r["issue"],
-                    "phase": phase or "?", "owner": r["owner"],
-                    "title": r["title"], "idle_min": int((now - upd) // 60),
-                    "remaining": None})
+                    "phase": phase, "owner": r["owner"], "title": r["title"],
+                    "idle_min": int((now - upd) // 60), "remaining": None})
             # ---- mode B: a repo whose loop went silent between issues ----
-            # Repos that have a planned queue (work was lined up). For each, the
-            # newest run must be TERMINAL (nothing active — mode A covers active)
-            # and the last activity older than silence_s, deduped on the token.
             qrepos = c.execute(
                 "SELECT DISTINCT repo FROM queue WHERE repo IS NOT NULL").fetchall()
             for qr in qrepos:
                 repo = qr["repo"]
+                if not repo:
+                    continue
                 newest = c.execute(
                     """SELECT phase, owner, updated_at FROM runs WHERE repo=?
                        ORDER BY started_at DESC, updated_at DESC LIMIT 1""",
                     (repo,)).fetchone()
                 if newest is None:
-                    continue  # queued but never started — not a stall, just pending
+                    continue  # queued but never started — pending, not a stall
                 if newest["phase"] not in TERMINAL_PHASES:
-                    continue  # something is active → mode A's job, not this
+                    continue  # something is active → mode A's job
                 last = newest["updated_at"] or now
-                if (now - last) <= silence_s:
+                # same actionable window (past silence, not stale-old, since armed)
+                if not (silence_s < (now - last) <= max_idle_s) or last < armed_at:
                     continue
-                qn = c.execute("SELECT count(*) FROM queue WHERE repo=?",
-                               (repo,)).fetchone()[0]
                 token = "silent:" + str(repo)
-                seen = c.execute("SELECT pinged_at FROM watchdog WHERE token=?",
-                                 (token,)).fetchone()
-                if seen is not None:
-                    continue  # already pinged this silence window (re-armed by _apply)
+                if c.execute("SELECT 1 FROM watchdog WHERE token=?",
+                             (token,)).fetchone() is not None:
+                    continue  # already pinged this silence (re-armed by _apply)
                 c.execute(
                     "INSERT OR REPLACE INTO watchdog(token, pinged_at) VALUES(?,?)",
                     (token, now))
+                qn = c.execute("SELECT count(*) FROM queue WHERE repo=?",
+                               (repo,)).fetchone()[0]
                 alerts.append({
                     "kind": "silent", "repo": repo, "issue": None,
                     "phase": newest["phase"], "owner": newest["owner"],

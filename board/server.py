@@ -533,9 +533,10 @@ def _fire_watchdog(board, now):
     user hit. watchdog_scan atomically marks each alert pinged, so the send is
     fire-and-forget in a daemon thread (never blocks the refresher); a send error
     just means no ping (the run is already board-side stale). Best-effort."""
-    from board import WATCHDOG_SILENCE_S, STALE_WAIT_S
+    from board import WATCHDOG_SILENCE_S, STALE_WAIT_S, WATCHDOG_MAX_IDLE_S
     try:
-        alerts = board.watchdog_scan(now, WATCHDOG_SILENCE_S, STALE_WAIT_S)
+        alerts = board.watchdog_scan(now, WATCHDOG_SILENCE_S, STALE_WAIT_S,
+                                     WATCHDOG_MAX_IDLE_S)
     except Exception:
         _log.exception("watchdog_scan failed")
         return

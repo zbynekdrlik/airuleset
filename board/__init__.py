@@ -24,6 +24,10 @@ STALE_WAIT_S = 30 * 60      # heartbeat threshold, CI/deploy waits
 # than a normal CI wait so a legit long CI doesn't trip it; WAIT phases use
 # STALE_WAIT_S. Override with BOARD_WATCHDOG_S.
 WATCHDOG_SILENCE_S = int(os.environ.get("BOARD_WATCHDOG_S", str(25 * 60)))
+# Hard ceiling: never ping a stall older than this — a run silent for HOURS is
+# long-abandoned, not freshly stalled, so a ping is stale noise (the backfill-spam
+# guard, with the armed_at gate below). Override with BOARD_WATCHDOG_MAX_S.
+WATCHDOG_MAX_IDLE_S = int(os.environ.get("BOARD_WATCHDOG_MAX_S", str(2 * 3600)))
 GH_POLL_FLOOR_S = 30        # min seconds between gh polls
 AUTO_REFRESH_S = 10         # browser meta refresh
 
