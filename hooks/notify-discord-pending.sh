@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: Stop — records a PENDING Discord notification for the idle sender.
+# Hook: Stop — device notification on ❓ NEEDS YOU (immediate) / ✅ DONE (idle).
 #
-# Mobile-app notification model (paired with notify-discord.sh on the idle event):
-# the device is pinged ONLY when Claude genuinely ASKS the user (❓ NEEDS YOU) or
-# FULLY completed work (✅ DONE) — never on ⏳ WORKING, never on routine progress.
+# Mobile-app notification model — the device is pinged ONLY when Claude genuinely
+# ASKS the user (❓ NEEDS YOU) or FULLY completed work (✅ DONE); never on
+# ⏳ WORKING, never on routine progress. Split delivery by urgency:
+#   - ❓ NEEDS YOU → SENT IMMEDIATELY from here (the user is blocked on us; the
+#     question must reach the phone even over tmux/SSH, where Claude Code's
+#     `idle_prompt` event is unreliable — depending on it is why pings "stopped").
+#   - ✅ DONE → recorded to a per-session pending file; notify-discord.sh delivers
+#     it ONLY when the user is genuinely idle/away (a finished turn is less urgent,
+#     and pinging every completed turn while the user watches the terminal = spam).
 #
-# This hook runs on EVERY turn (it has last_assistant_message). It does NOT send
-# anything itself — it only writes the would-send payload to a per-session pending
-# file when the turn ends with ❓ / ✅, and CLEARS that file on ⏳ / no-marker.
-# notify-discord.sh sends the pending payload ONLY when the user is idle/away.
+# This hook runs on EVERY turn (it has last_assistant_message). ⏳ / no-marker
+# CLEARS any stale pending so nothing fires.
 #
 # Marker detection scans the WHOLE message (not just the last line): a completion
 # report puts `## ✅ Work Complete` at the TOP and ends with a PR/URL or a
@@ -31,6 +35,7 @@ SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 PENDING="/tmp/claude-discord-pending-${SID}"
+CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
 
@@ -50,10 +55,24 @@ emit() {
     printf '%s %s' "$1" "$c" > "$PENDING"
 }
 
+send_now() {
+    # $1 = emoji, $2 = raw content — deliver IMMEDIATELY via the shared send path
+    # (no pending file, no waiting for an idle_prompt that may never arrive over
+    # tmux/SSH). Silent + non-blocking: the send backgrounds its own curl.
+    local c send
+    c=$(strip_md "$2" | cut -c1-250)
+    send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
+    ND_EMOJI="$1" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
+}
+
 if printf '%s' "$LAST_LINE" | grep -q "❓"; then
-    # ❓ on the last line — Claude is asking the user. Forward the question.
+    # ❓ on the last line — Claude is BLOCKED on the user. Fire the device ping
+    # IMMEDIATELY (the question must reach the phone even over SSH, where the
+    # idle_prompt event is unreliable). No pending is left, so the idle hook will
+    # not re-send it.
     C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
-    emit "❓" "$C"
+    rm -f "$PENDING" 2>/dev/null || true
+    send_now "❓" "$C"
 elif printf '%s' "$LAST_LINE" | grep -q "⏳"; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear

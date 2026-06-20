@@ -8,9 +8,12 @@
 
 #### The mechanism is AUTOMATIC — do NOT hand-fire per-phase pings
 
-Two airuleset hooks implement this from the status marker, with no action from you:
-1. `notify-discord-pending.sh` (Stop) reads the last message's marker → records a pending device line ONLY for `❓` / `✅`; clears it on `⏳` / no-marker.
-2. `notify-discord.sh` (Notification : idle_prompt) sends that pending line ONLY when the user is genuinely idle/away — so there is NO ping during active back-and-forth, and NOTHING on `⏳`.
+Three airuleset hooks implement this from the status marker, with no action from you:
+1. `notify-discord-pending.sh` (Stop) reads the last message's marker. On `❓ NEEDS YOU` it **SENDS the device ping IMMEDIATELY** (via the shared `notify-discord-send.sh`) — the user is BLOCKED on you, and Claude Code's `idle_prompt` event is unreliable over tmux/SSH, so a question must NOT wait for idle (depending on it is exactly why pings "stopped" arriving). On `✅ DONE` it records a pending line; on `⏳` / no-marker it clears any pending.
+2. `notify-discord.sh` (Notification : idle_prompt) sends the pending `✅` line ONLY when the user is genuinely idle/away — a finished turn is less urgent than a question, and pinging every completed turn while the user watches the terminal is spam. NOTHING on `⏳`.
+3. `notify-discord-send.sh` is the single send path both call (compose structured line + @mention owner + POST) — one place for the curl, no duplication.
+
+So: a **question (`❓`) reaches the phone right away**; a **done (`✅`) reaches it when you're away**. Neither needs action from you beyond writing the honest marker.
 
 So you do NOT call the discord `reply` tool or `PushNotification` to announce a merge, a deploy, a green CI, or a finished issue. Just write the honest status marker; the hook decides whether the device pings. The ONE thing you control is the marker content (below).
 

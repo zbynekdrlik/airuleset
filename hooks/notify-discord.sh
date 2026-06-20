@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: Notification (idle_prompt) — sends the PENDING Discord notification.
+# Hook: Notification (idle_prompt) — sends a PENDING ✅ when the user is idle/away.
 #
 # Mobile-app model (paired with notify-discord-pending.sh on the Stop event):
-# fires ONLY when the user is genuinely idle/away AND the last turn ended with a
-# ❓ NEEDS YOU (a real question) or ✅ DONE (fully finished). On ⏳ WORKING / no
-# marker the pending file was cleared, so NOTHING is sent — no "PROJECT waiting"
-# spam on every idle.
+#   - ❓ NEEDS YOU is sent IMMEDIATELY by the Stop hook (the user is blocked on us;
+#     Claude Code emits `idle_prompt` unreliably over tmux/SSH, so a question must
+#     NOT depend on it). By the time this idle hook runs there is no ❓ pending.
+#   - ✅ DONE is still idle-gated HERE: a finished turn is less urgent, and pinging
+#     every completed turn while the user watches the terminal is spam. The Stop
+#     hook records the ✅ payload; this hook delivers it only on a real idle event.
+# On ⏳ WORKING / no marker the pending file was cleared → NOTHING is sent.
 #
 # Fire-and-forget — never blocks Claude (exit 0 always).
-# DISCORD_NOTIFY_DRYRUN=1 → print the would-send line to stdout (used by tests).
-# DISCORD_NOTIFY_DEBUG=1  → append a debug line to a 0600 per-user log (default off).
+# DISCORD_NOTIFY_DRYRUN=1 → the shared send prints the would-send line to stdout
+# (used by tests). DISCORD_NOTIFY_DEBUG=1 → append a debug line to a 0600 log.
 
 INPUT=$(cat)
 
@@ -26,18 +29,17 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-'); [ -z "$SID" ] && SID="unknown
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 PENDING="/tmp/claude-discord-pending-${SID}"
 
-# Nothing pending → the last turn was ⏳ WORKING or unmarked → send NOTHING.
+# Nothing pending → the last turn was ⏳ WORKING / unmarked, or the ❓ already
+# fired immediately on Stop → send NOTHING.
 [ -s "$PENDING" ] || { dbg "SKIPPED (nothing pending for $SID)"; exit 0; }
 
 BODY=$(cat "$PENDING")
 EMOJI=$(printf '%s' "$BODY" | grep -oE "❓|✅" | head -1 || true)
 TEXT=$(printf '%s' "$BODY" | sed -E 's/^(❓|✅)[[:space:]]*//')
 
-# A ❓ NEEDS YOU is the highest-priority "your turn" event — Claude is genuinely
-# blocked on the user — so it ALWAYS pings, even if a background monitor shell is
-# alive in this cwd. The bg-shell skip applies ONLY to ✅ (a "done" claim while a
-# shell is still running in the project dir is likely intermediate → defer, and
-# leave the pending file so a later idle retries once the shell exits).
+# A ✅ "done" claim while a background monitor shell is still alive in this cwd is
+# likely intermediate → defer (leave the pending so a later idle retries once the
+# shell exits). ❓ never reaches here, so this guard only protects ✅.
 if [ "$EMOJI" != "❓" ] && [ -n "$CWD" ]; then
     for pid in $(pgrep -f "shell-snapshots" 2>/dev/null || true); do
         SHELL_CWD=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
@@ -48,63 +50,12 @@ if [ "$EMOJI" != "❓" ] && [ -n "$CWD" ]; then
     done
 fi
 
-PROJECT=""
-if [ -n "$CWD" ]; then
-    PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || basename "$CWD")
-fi
-[ -z "$PROJECT" ] && PROJECT="unknown"
-
-# Structured, Discord-markdown line so it is scannable on the phone (not one long
-# run-on): a bold header "<emoji> <PROJECT> — <status>" then the content as a
-# blockquote on its own line.
-case "$EMOJI" in
-    "❓") STATUS="otázka" ;;
-    "✅") STATUS="hotovo" ;;
-    *)    STATUS="" ;;
-esac
-HEADER="**${EMOJI} ${PROJECT}**"
-[ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
-CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
-
-# Prepend the tmux-owner @mention (zbynek / marek) so the device line clearly
-# targets the right person. Single source of truth = `airuleset.py notify` (it
-# reads the owner from the tmux session group and the DISCORD_MENTION_<OWNER> map
-# in the channel .env). airuleset.py is found relative to THIS hook (hooks/..),
-# not via $HOME, so it works regardless of where the repo lives. Empty when there
-# is no tmux / no mapping — then no ping tag.
-AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
-MENTION=$(python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
-if [ -n "$MENTION" ]; then
-    CONTENT="${MENTION}${CONTENT}"
-fi
-
 # Consume the pending file so re-idle does not re-send.
 rm -f "$PENDING" 2>/dev/null || true
 
-if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
-    printf '%s\n' "$CONTENT"
-    exit 0
-fi
+dbg "SEND idle: $EMOJI ($SID) cwd=$CWD :: $TEXT"
 
-# Read bot token + notification channel from the Discord channel config.
-ENVF=~/.claude/channels/discord/.env
-BOT_TOKEN=""
-CHANNEL_ID=""
-if [ -f "$ENVF" ]; then
-    BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n')
-    CHANNEL_ID=$(grep -E '^DISCORD_NOTIFICATION_CHANNEL_ID=' "$ENVF" | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n')
-fi
-[ -z "$BOT_TOKEN" ] && exit 0
-[ -z "$CHANNEL_ID" ] && exit 0
-command -v jq &>/dev/null || exit 0
-
-dbg "SENT: $PROJECT ($SID) → $CHANNEL_ID :: $CONTENT"
-
-(curl -s --max-time 5 -X POST \
-    "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
-    -H "Authorization: Bot ${BOT_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
-    >/dev/null 2>&1) &
+SEND="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
+ND_EMOJI="$EMOJI" ND_TEXT="$TEXT" ND_CWD="$CWD" bash "$SEND" || true
 
 exit 0

@@ -244,11 +244,12 @@ class TestAutopilotEndOfRunSweep(TestCase):
 
 
 class TestDiscordNotifyHooks(TestCase):
-    """Mobile-app device-notification model: the device is pinged ONLY when the
-    last turn ended with ❓ NEEDS YOU (a real question) or ✅ DONE (fully done),
-    and only when the user is idle/away. notify-discord-pending.sh (Stop) records
-    the pending ❓/✅ payload; notify-discord.sh (idle) sends it. ⏳ WORKING / no
-    marker → nothing (kills the old 'PROJECT waiting' spam)."""
+    """Mobile-app device-notification model. ❓ NEEDS YOU is delivered IMMEDIATELY
+    by notify-discord-pending.sh (Stop) — the user is blocked on us and the ping
+    must reach the phone even over tmux/SSH, where Claude Code's idle_prompt event
+    is unreliable. ✅ DONE is recorded and delivered by notify-discord.sh only when
+    the user is idle/away (less urgent; no spam per finished turn). Both share the
+    single send path notify-discord-send.sh. ⏳ / no marker → nothing."""
 
     PENDING = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
     IDLE = airuleset.REPO_DIR / "hooks" / "notify-discord.sh"
@@ -261,10 +262,30 @@ class TestDiscordNotifyHooks(TestCase):
         self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
         return sid, p
 
-    def _stop(self, sid, msg):
-        payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
-        subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
-                       capture_output=True)
+    def _stop(self, sid, msg, cwd="", owner="", home=None):
+        # Hermetic: DRYRUN + ND_DRYRUN_FILE → the ❓ immediate-send composes to a
+        # file (never a real Discord POST, never stdout). _sent() reads that file.
+        sf = f"/tmp/claude-dn-send-{sid}"
+        self.addCleanup(lambda: os.path.exists(sf) and os.remove(sf))
+        if os.path.exists(sf):
+            os.remove(sf)
+        self._send_file = sf
+        env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": sf,
+               "AIRULESET_NOTIFY_OWNER": owner}
+        if home:
+            env["HOME"] = home
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
+                              "cwd": cwd})
+        return subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
+                              capture_output=True, env=env)
+
+    def _sent(self):
+        # the device line the Stop hook delivered IMMEDIATELY (❓), or "" if none
+        f = getattr(self, "_send_file", "")
+        if not (f and os.path.exists(f)):
+            return ""
+        with open(f) as fh:
+            return fh.read()
 
     def _idle(self, sid, cwd, owner=""):
         # owner="" forces NO @mention so the structure assertions are deterministic
@@ -277,19 +298,20 @@ class TestDiscordNotifyHooks(TestCase):
                               env={**os.environ, "DISCORD_NOTIFY_DRYRUN": "1",
                                    "AIRULESET_NOTIFY_OWNER": owner})
 
-    def test_question_records_then_idle_sends_slovak(self):
+    def test_question_fires_immediately_no_pending(self):
         sid, p = self._sid()
-        self._stop(sid, "predošlý text\n\n❓ NEEDS YOU: reset EQ na 0 dB alebo "
-                        "posledný preset?")
-        self.assertTrue(os.path.exists(p), "❓ did not record a pending payload")
-        self.assertIn("reset EQ na 0 dB", open(p).read())
-        # idle (cwd with no bg shells) sends it, prefixed with project + emoji
         cwd = tempfile.mkdtemp()
+        self._stop(sid, "predošlý text\n\n❓ NEEDS YOU: reset EQ na 0 dB alebo "
+                        "posledný preset?", cwd=cwd)
+        sent = self._sent()
+        self.assertIn("❓", sent)
+        self.assertIn("reset EQ na 0 dB alebo posledný preset?", sent)
+        self.assertIn(os.path.basename(cwd), sent)  # project name in header
+        self.assertFalse(os.path.exists(p),
+                         "❓ must NOT leave a pending (it was sent immediately)")
+        # idle afterwards has nothing to send (already delivered on Stop)
         out = self._idle(sid, cwd).stdout
-        self.assertIn("❓", out)
-        self.assertIn("reset EQ na 0 dB alebo posledný preset?", out)
-        self.assertIn(os.path.basename(cwd), out)  # project name
-        self.assertFalse(os.path.exists(p), "pending not consumed after send")
+        self.assertEqual(out.strip(), "")
 
     def test_done_multiline_report_records(self):
         sid, p = self._sid()
@@ -299,9 +321,9 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("✅", open(p).read())
         self.assertIn("nasadené v1.2.3", open(p).read())
 
-    def test_working_clears_a_prior_question(self):
+    def test_working_clears_a_prior_done(self):
         sid, p = self._sid()
-        self._stop(sid, "❓ NEEDS YOU: nieco?")
+        self._stop(sid, "✅ DONE: hotovo")          # ✅ records a pending
         self.assertTrue(os.path.exists(p))
         # next turn is ⏳ WORKING → pending must be cleared (no stale ping)
         self._stop(sid, "⏳ WORKING: CI beží, hlásim sa keď dobehne")
@@ -309,7 +331,7 @@ class TestDiscordNotifyHooks(TestCase):
 
     def test_no_marker_clears(self):
         sid, p = self._sid()
-        self._stop(sid, "❓ NEEDS YOU: q?")
+        self._stop(sid, "✅ DONE: hotovo")          # ✅ records a pending
         self._stop(sid, "len bežná odpoveď bez markera")
         self.assertFalse(os.path.exists(p))
 
@@ -345,14 +367,19 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("hotovo", open(p).read())
 
     def test_question_markdown_form_strips_asterisks(self):
-        # completion-report template uses "❓ **Question:** <q>"
+        # completion-report template uses "❓ **Question:** <q>" — the question TEXT
+        # must reach the device with the **Question:** label + asterisks stripped.
         sid, p = self._sid()
         self._stop(sid, "## ✅ Work Complete\n\n❓ **Question:** schváliš merge PR #5?")
-        body = open(p).read()
-        self.assertTrue(body.startswith("❓"))
-        self.assertIn("schváliš merge PR #5?", body)
-        self.assertNotIn("*", body)
-        self.assertNotIn("Question:", body)
+        sent = self._sent()
+        self.assertIn("❓", sent)
+        # the blockquote line carries the cleaned question (header legitimately
+        # uses ** bold, so only the > line is asserted asterisk-free)
+        qline = [l for l in sent.splitlines() if l.startswith("> ")][0]
+        self.assertIn("schváliš merge PR #5?", qline)
+        self.assertNotIn("*", qline)
+        self.assertNotIn("Question:", qline)
+        self.assertFalse(os.path.exists(p), "❓ must not leave a pending")
 
     def test_intermediate_done_with_working_last_line_pings_nothing(self):
         # autopilot loop: "merged #5 ✅ DONE … now ⏳ WORKING on #6" — the ⏳ last
@@ -362,52 +389,66 @@ class TestDiscordNotifyHooks(TestCase):
                         "⏳ WORKING: pokračujem na #6")
         self.assertFalse(os.path.exists(p), "intermediate ✅+⏳ wrongly recorded a ping")
 
-    def test_question_emoji_present_in_idle_send(self):
-        # ❓ must reach the device (it bypasses the bg-shell skip in the hook)
+    def test_question_emoji_present_in_immediate_send(self):
+        # ❓ must reach the device immediately on Stop (no idle dependency)
         sid, p = self._sid()
         self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?")
-        out = self._idle(sid, tempfile.mkdtemp()).stdout
-        self.assertIn("❓", out)
-        self.assertIn("posledný preset?", out)
+        sent = self._sent()
+        self.assertIn("❓", sent)
+        self.assertIn("posledný preset?", sent)
+        self.assertFalse(os.path.exists(p))
 
-    def test_idle_output_is_structured_markdown(self):
-        # the device line must be Discord-markdown structured (bold header +
+    def test_immediate_question_is_structured_markdown(self):
+        # the ❓ device line must be Discord-markdown structured (bold header +
         # blockquote on its own line), not one unreadable run-on
         sid, p = self._sid()
-        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?")
         cwd = tempfile.mkdtemp()
-        out = self._idle(sid, cwd).stdout
-        lines = out.strip().split("\n")
-        self.assertEqual(len(lines), 2, f"expected header+blockquote, got: {out!r}")
+        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?", cwd=cwd)
+        sent = self._sent().strip()
+        lines = sent.split("\n")
+        self.assertEqual(len(lines), 2, f"expected header+blockquote, got: {sent!r}")
         self.assertTrue(lines[0].startswith("**❓"), lines[0])  # bold header
         self.assertIn(os.path.basename(cwd), lines[0])          # project in header
         self.assertIn("otázka", lines[0])                        # Slovak status
         self.assertTrue(lines[1].startswith("> "), lines[1])     # blockquote
         self.assertIn("posledný preset?", lines[1])
-        # ✅ uses the "hotovo" status
-        sid2, _ = self._sid()
-        self._stop(sid2, "✅ DONE: nasadené v1.2.3")
-        out2 = self._idle(sid2, tempfile.mkdtemp()).stdout
+
+    def test_idle_done_is_structured_markdown(self):
+        # ✅ still goes through the idle path; same structured markdown
+        sid, _ = self._sid()
+        self._stop(sid, "✅ DONE: nasadené v1.2.3")
+        out2 = self._idle(sid, tempfile.mkdtemp()).stdout
         self.assertTrue(out2.startswith("**✅"))
         self.assertIn("hotovo", out2)
         self.assertIn("> nasadené v1.2.3", out2)
 
-    def test_idle_prepends_owner_mention(self):
-        # The idle ping must @mention the tmux owner so it clearly targets the
-        # right person. Hermetic: temp HOME with a DISCORD_MENTION_ZBYNEK map +
-        # forced owner=zbynek.
-        sid, _p = self._sid()
-        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB?")
+    def _mention_home(self):
         home = tempfile.mkdtemp()
         d = Path(home) / ".claude" / "channels" / "discord"
         d.mkdir(parents=True)
         (d / ".env").write_text("DISCORD_MENTION_ZBYNEK=773451844110385193\n")
+        return home
+
+    def test_immediate_question_prepends_owner_mention(self):
+        # The ❓ immediate ping must @mention the tmux owner. Hermetic: temp HOME
+        # with a DISCORD_MENTION_ZBYNEK map + forced owner=zbynek.
+        sid, _p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: reset na 0 dB?",
+                   owner="zbynek", home=self._mention_home())
+        self.assertTrue(self._sent().startswith("<@773451844110385193> **❓"),
+                        f"❓ ping not @mention-prefixed: {self._sent()!r}")
+
+    def test_idle_prepends_owner_mention(self):
+        # The idle ✅ ping must @mention the tmux owner too (same shared sender).
+        sid, _p = self._sid()
+        home = self._mention_home()
+        self._stop(sid, "✅ DONE: nasadené v1.2.3")   # records a pending ✅
         payload = json.dumps({"session_id": sid, "cwd": tempfile.mkdtemp()})
         out = subprocess.run(
             ["bash", str(self.IDLE)], input=payload, text=True, capture_output=True,
             env={**os.environ, "HOME": home, "DISCORD_NOTIFY_DRYRUN": "1",
                  "AIRULESET_NOTIFY_OWNER": "zbynek"}).stdout
-        self.assertTrue(out.startswith("<@773451844110385193> **❓"),
+        self.assertTrue(out.startswith("<@773451844110385193> **✅"),
                         f"idle ping not @mention-prefixed: {out!r}")
 
     def test_governance_no_hand_fired_per_merge_ping(self):
@@ -426,14 +467,19 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("⏳", mn)
         self.assertIn("FULL completion", mn)
 
+    def test_governance_question_pings_immediately(self):
+        # ❓ NEEDS YOU is documented as an IMMEDIATE device ping (not idle-gated),
+        # because Claude Code's idle_prompt event is unreliable over tmux/SSH
+        mn = (airuleset.REPO_DIR / "modules" / "core" / "milestone-notifications.md").read_text()
+        self.assertIn("IMMEDIATELY", mn)
+
     def test_pending_hook_is_silent_and_nonblocking(self):
         # a Stop notifier must NOT emit a block decision / any stdout (it shares
-        # the Stop pipeline with the gate hooks)
+        # the Stop pipeline with the gate hooks) — even when it fires the ❓ send
+        # immediately (that send backgrounds its own curl / writes to the dryrun
+        # file, never to stdout).
         sid, _ = self._sid()
-        r = subprocess.run(
-            ["bash", str(self.PENDING)], text=True, capture_output=True,
-            input=json.dumps({"session_id": sid,
-                              "last_assistant_message": "❓ NEEDS YOU: x?"}))
+        r = self._stop(sid, "❓ NEEDS YOU: x?")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
         self.assertNotIn("block", r.stdout)
@@ -1857,6 +1903,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
     AIRULESET = airuleset.REPO_DIR / "airuleset.py"
     IDLE_HOOK = airuleset.REPO_DIR / "hooks" / "notify-discord.sh"
+    SEND_HOOK = airuleset.REPO_DIR / "hooks" / "notify-discord-send.sh"
 
     def setUp(self):
         import notify
@@ -2180,9 +2227,15 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("✅ **Dosiahnuté:** A", r.stdout)
         self.assertIn("hotové 2 · ostáva 4", r.stdout)
 
-    # --- the idle hook now @mentions via the single source of truth -------
-    def test_idle_hook_prepends_mention_via_cli(self):
-        src = self.IDLE_HOOK.read_text()
+    # --- the shared send path @mentions via the single source of truth -------
+    def test_send_hook_prepends_mention_via_cli(self):
+        # the @mention now lives in the single shared sender (notify-discord-send.sh),
+        # which BOTH the immediate ❓ (Stop) and the idle ✅ (Notification) hooks call
+        src = self.SEND_HOOK.read_text()
         self.assertIn("notify --mention-prefix", src)
         # it prepends the resolved mention onto the content it sends
         self.assertIn("MENTION", src)
+        # both hooks delegate to it (no duplicated curl)
+        self.assertIn("notify-discord-send.sh", self.IDLE_HOOK.read_text())
+        pending = (airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh").read_text()
+        self.assertIn("notify-discord-send.sh", pending)
