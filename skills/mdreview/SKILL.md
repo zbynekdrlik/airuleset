@@ -1,270 +1,136 @@
 ---
 name: mdreview
-description: Web-research-driven audit of CLAUDE.md, memory, hooks, settings, skills across dev1+dev2. Fetches latest best practices from Anthropic, Karpathy, Claude Code community in last 7-14 days, then cross-references against current rules to find model-evolution drift, caveman-incompatible rules, broken Discord notifier, dead bash backgrounds, and bloat. Run weekly or after major model release.
+description: Live web-research + ecosystem audit of the ruleset across dev1+dev2. Invokes rules-audit for the offline structural baseline, then adds what needs the network — current Anthropic best practices (with a cited length budget), a "rule now redundant" delete pass, and a plugins/MCP/tooling surface audit. Run manually when you want the ruleset re-checked against the latest published guidance.
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUserQuestion, Skill
 ---
 
-# /mdreview — Live Web-Research Rule & Config Audit
+# /mdreview — Live Web + Ecosystem Rule Audit
 
-Periodic audit of EVERY rule artifact across dev1 + dev2 against the latest published best practices for Claude Code agentic development. Differs from `rules-audit` by pulling current week's state-of-the-art from the web BEFORE judging current rules.
+`rules-audit` is the fast OFFLINE structural auditor (size, dupes, orphans, contradictions, model-version strings, override-reconcile, mutation-budget). This skill is the LIVE layer: it runs `rules-audit` for the structural baseline, then adds only what needs the network — current published best practices, a redundancy-delete pass, and a plugins/MCP/tooling surface audit. Every change it proposes carries a source URL.
 
-## Why this skill exists
+## Spine
 
-Rules optimized for older models (Opus 4.6, Sonnet 4.5) can degrade newer-model behavior (Opus 4.7, future). Rules that compensated for known-old-model bugs become unnecessary once those bugs are fixed natively. Hooks/skills/notifications break silently as the platform evolves. The user runs this weekly to keep the rule set evergreen.
+1. Read live model from Environment → 2. `Skill(rules-audit)` for structural baseline → 3. Web best-practice research (Step A) + cited budget → 4. Ecosystem audits (Steps B/C/D) → 5. Score → 6. AskUserQuestion apply-loop → 7. audit log + validate + push.
 
-## Goals
+## Step 0 — Read the live model (NEVER hardcode a generation)
 
-- Pick up new SOTA techniques for CLAUDE.md / agent autonomy in last 7-14 days
-- Detect rules that worked for older models but degrade newer-model behavior
-- Detect rules that became unnecessary because the model now does the right thing natively
-- Detect rule/hook output suppressed or distorted by caveman compression mode
-- Detect background-process / Discord-notifier issues (long-running bash → no notification)
-- Detect duplicate / contradictory / orphan rules across dev1 + dev2
-- Detect drift between dev1 and dev2 (airuleset push should keep them in sync)
+Read THIS session's `## Environment` block. Note the live primary model (e.g. `Opus 4.8`, ID `claude-opus-4-8`), newest family, and subagent models. ALL search queries below are built from this value at runtime. A hardcoded model version anywhere in this skill body is itself a finding — fix it.
 
-## Step 1: Web research + official Anthropic skill audit (MANDATORY)
-
-### Step 1a: Web research — fetch current week
-
-Use WebSearch then WebFetch to gather published material from the last 7-14 days. Record sources + URLs + summaries.
-
-### Step 1b: Official Anthropic claude-md-management skills (MANDATORY)
-
-The `claude-md-management` plugin (enabled in `~/.claude/settings.json`) ships two official Anthropic skills with built-in CLAUDE.md quality criteria. Invoke them as additional knowledge sources BEFORE judging current rules — they encode Anthropic's own published quality framework.
+## Step 1 — Structural baseline via rules-audit (do NOT re-grep)
 
 ```
-Skill(skill: "claude-md-management:claude-md-improver")  # audit/improve repo CLAUDE.md
-Skill(skill: "claude-md-management:revise-claude-md")    # update with session learnings
+Skill(skill: "rules-audit")
 ```
 
-Capture from each:
-- Quality criteria they apply (length budgets, scope rules, anti-patterns)
-- Section templates they expect
-- How they merge new learnings without bloat
+Consume its punch-list verbatim (size budget, per-module line ranking, duplicates, orphans for modules/hooks/memory-refs, contradictions, context-gate coverage, §0 override-reconcile, §0b CI mutation-budget, memory hygiene, model-version-string bumping). This skill does NOT re-implement any of those greps — that is the deduplication. Everything below is the LIVE/ECOSYSTEM delta only.
 
-Tag findings from these as `[anthropic-official]` in research notes — they outrank community blog posts when they conflict.
+## Step 1b — Official Anthropic CLAUDE.md framework (cited backbone)
 
-### Search queries (use ALL)
+```
+Skill(skill: "claude-md-management:claude-md-improver")   # Anthropic's own quality criteria + length budget
+Skill(skill: "claude-md-management:revise-claude-md")     # merge learnings without bloat
+```
 
-- `"CLAUDE.md" best practices 2026`
-- `Claude Code agent autonomy rules`
-- `Anthropic Opus 4.7 prompt engineering`
-- `Anthropic Opus 4.7 release notes` and `4.6 vs 4.7 differences`
-- `agentic development best practices 2026`
-- `Claude Code skills hooks SOTA`
-- `Karpathy Claude prompt engineering` (X/Twitter primary source)
-- `site:anthropic.com claude.md` (authoritative Anthropic guidance)
-- `site:x.com (Anthropic OR @AnthropicAI OR @karpathy) claude code` (last 7d)
-- `Claude subagent driven development`
-- `Claude Code hooks Stop PreToolUse 2026`
+Capture the length budget, scope rules, and Include/Exclude table they apply. Tag findings `[anthropic-official]` — they outrank community blogs on conflict.
 
-### What to capture per source
+## Step A — Modern best-practice checklist (live web)
 
-For each top result, WebFetch and capture:
-- New techniques (structured output via tools, plan-edit cycles, verification gates, memory patterns)
-- Anti-patterns the community now considers harmful
-- Model-specific tuning advice (4.7 differences from 4.6)
-- Hook / skill / slash command innovations
-- Caveman / token-budget interactions if mentioned
+Run AFTER Step 1. Every change carries a source URL; no URL = no change. Official Anthropic docs (`code.claude.com`, `platform.claude.com`, `anthropic.com/engineering`) outrank community blogs.
 
-Write findings to `~/devel/airuleset/audits/mdreview-<YYYY-MM-DD>-research.md` with:
-- Source URL
-- Publication date
-- Author
-- 3-5 bullet summary
-- Tag: `[autonomy] [model:4.7] [hooks] [memory] [caveman] [discord]`
+WebSearch then WebFetch, queries built from the live model:
+`"Claude <live-model> prompt engineering best practices"`, `"Claude Code <current-year> hooks skills features"`, `"CLAUDE.md best practices length budget"`, `"Anthropic agent skills spec"`. Record each source URL + date + author + a one-line summary to a research note.
 
-If a search returns nothing fresh in 14d, note the gap — don't fabricate research.
+**A. Skills-over-rules triage (primary de-bloat lever).** Anthropic: CLAUDE.md loads every session, so only broadly-applicable rules belong inline; sometimes-relevant workflows belong in skills (loaded on demand). Per always-loaded module: applies to >50% of turns regardless of task? → keep inline. Only during a specific task (deploy/migration/windows/mutation/hardware)? → flag MOVE TO SKILL. Cost: inline = full text every turn; skill = ~100-token description + body only when triggered. Report projected line savings.
+Sources: code.claude.com/docs/en/best-practices · platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
 
-## Step 2: Inventory current state
+**B. Prose → hook conversion (advisory → deterministic).** Anthropic: hooks guarantee the action, CLAUDE.md is only advisory. `grep -rnE "MUST|NEVER|always run|banned|forbidden" modules/`; list hook keys in `settings/`. A mechanically-checkable rule with NO hook → flag HOOKABLE (PreToolUse exit-2 blocks, Stop exit-2 forces continue) + trim prose to a one-line pointer. Cross-check existing hooks — never double-enforce.
+Sources: code.claude.com/docs/en/best-practices · code.claude.com/docs/en/hooks-guide
 
-### dev1 (local)
+**C. Cited budget target + per-line cut test.** Fetch Anthropic's CURRENT published length budget in Step 1/1b and cite the URL. rules-audit reported the resolved size (N lines). State: `resolved = N lines = M× over the published budget. Target for THIS run = <number>; the punch list MUST move toward it.` Per line/module, apply the test: *would removing this cause Claude to make a mistake?* If not, cut it. Grade against the official Include/Exclude table (keep: non-guessable commands, non-default style, repo etiquette, env quirks, architecture; cut: anything inferable from code, standard conventions, linkable API docs, tutorials).
+Sources: code.claude.com/docs/en/best-practices · alexop.dev/posts/stop-bloating-your-claude-md-progressive-disclosure-ai-coding-tools/
+
+**D. "Rule now redundant?" delete pass (de-bloat, not just bump).** For each module, ask two questions the offline auditor can't: (1) does the *current* model do this natively now (read the live model's prompting doc)? (2) does a HOOK now enforce it? If either → propose DELETE, not a version bump. This is the cut that rules-audit's version-string grep misses.
+
+**E. Model currency (read the live doc).** WebFetch the current generation's prompting doc; propagate to `model-awareness.md`. For the live Opus generation flag: pure-negative rules with no positive exemplar (positive examples beat bans); rules using "only-high-severity / only-important" language (the harness now honors it → suppresses findings → prefer report-everything-then-filter); rules that rely on the model silently generalizing one example to others (state scope + "applies to all rewordings").
+Source: platform.claude.com/docs/en/build-with-claude/prompt-engineering (substitute the live model's prompting page)
+
+## Step B — Installed skills & plugins: health + upgrade
+
+Two SEPARATE worlds; commands do NOT overlap.
+
+| World | What | "Upgrade" mechanism |
+|---|---|---|
+| A. Marketplace plugins | `claude plugin` installs (superpowers, discord, caveman, claude-mem, context7, playwright, frontend-design, rust-analyzer-lsp, claude-md-management) | `claude plugin marketplace update <mkt>` → `claude plugin update <name>` → restart to apply |
+| B. airuleset skills | the managed set in `SKILL_NAMES` (ci-monitor, autopilot, mdreview, …), symlinked, NO version | `git pull` in `~/devel/airuleset` → `python3 airuleset.py push` |
+
+Inventory + outdated detection (no native "what's outdated" command):
+```bash
+claude plugin list                                   # name, version, enabled/disabled, scope
+claude plugin details superpowers                    # component inventory + projected token cost (spot bloat)
+python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.claude/plugins/installed_plugins.json')));[print(k,v[0].get('version'),v[0].get('gitCommitSha','-')[:12]) for k,v in d['plugins'].items()]"
+python3 ~/devel/airuleset/airuleset.py validate      # airuleset skills — validate checks ALL managed skills (NOT `status`, it truncates)
+# git-backed marketplace (caveman): commits-behind
+git -C ~/.claude/plugins/marketplaces/caveman fetch -q && echo "behind: $(git -C ~/.claude/plugins/marketplaces/caveman rev-list --count HEAD..origin/HEAD 2>/dev/null)"
+# orphan / broken skills
+find ~/.claude/skills/ -maxdepth 1 -xtype l          # dangling symlinks
+ls ~/.claude/skills/*.md 2>/dev/null                 # flat .md = legacy; a .md duplicating a dir = shadowing
+```
+
+Decision rules:
+- **Upgrade gotcha:** `claude plugin update` can compare a STALE local clone and report "already latest" → ALWAYS `claude plugin marketplace update <mkt>` FIRST, then `claude plugin update <name>`, then restart Claude Code to apply.
+- Official plugins auto-update at startup; 3rd-party (caveman) + disabled (claude-mem) do NOT — upgrade by hand.
+- `version: "unknown"` (context7/playwright/frontend-design) is NORMAL — they declare no semver; track by Last-updated date / gitCommitSha.
+- **claude-mem is DISABLED and several majors behind, and overlaps airuleset's file-memory** → keep DISABLED or `claude plugin uninstall claude-mem@thedotmack`; never silently re-enable a badly-behind plugin or run two memory systems.
+- airuleset skill stale → `git pull` + `python3 airuleset.py push`. Symlink dangling → `python3 airuleset.py install`.
+- Foreign-owned orphan skills (`win-mcp.md`, `test-contact-form.md`) → file an issue, do NOT auto-delete (see project skill-ownership rule).
+Sources: code.claude.com/docs/en/discover-plugins · `claude plugin --help`
+
+## Step C — MCP / connector audit (read-only)
 
 ```bash
-# Global config
-ls -la ~/.claude/CLAUDE.md ~/.claude/settings.json
-wc -l ~/.claude/CLAUDE.md
-# Resolved size including @imports
-python3 -c "
-import re, pathlib
-p = pathlib.Path.home() / '.claude' / 'CLAUDE.md'
-text = p.read_text()
-total = 0
-for line in text.splitlines():
-    m = re.match(r'@(\S+)', line.strip())
-    if m:
-        target = pathlib.Path(m.group(1).replace('~', str(pathlib.Path.home())))
-        if target.exists():
-            total += len(target.read_text().splitlines())
-print(f'Resolved CLAUDE.md ≈ {total} lines')
-"
-
-# Auto-memory across all projects
-find ~/.claude/projects -name 'MEMORY.md' -exec wc -l {} +
-
-# Project-local CLAUDE.md
-ls ~/devel/*/CLAUDE.md ~/devel/*/.claude/CLAUDE.md 2>/dev/null
-
-# airuleset state
-ls ~/devel/airuleset/modules/**/*.md
-ls ~/devel/airuleset/hooks/*.sh
-ls ~/devel/airuleset/skills/*/SKILL.md
-cat ~/devel/airuleset/profiles/universal.profile
+claude mcp list                                      # health + needs-auth + DUPLICATES
 ```
+Cross-reference `~/.claude.json` (`mcpServers` vs project-scoped). Checks:
+- **Redundancy:** different-endpoint servers BOTH load full tool schemas (only identical endpoints dedupe). e.g. n8n wired TWICE (a claude.ai n8n connector + self-hosted `n8n-mcp` HTTP, same tools) → keep one, drop the other.
+- **Version drift:** `npx ... @latest` servers (playwright, context7) are non-reproducible and can fail concurrent sessions → pin each to an exact npm version.
+- **Context cost:** each connected MCP injects its full tool schema every turn. Flag every needs-auth-but-unused connector (odoo, montalu, github, Google, Canva) for removal — an unused connector is pure context cost.
+- **Secret hygiene:** never print bearer tokens; mask.
+Verdicts: keep-auth / pin-version / remove-redundant / disable-unused.
+Source: code.claude.com/docs/en/mcp
 
-### dev2 (remote, 100.82.64.27)
+## Step D — New-tooling deep-research (INSTALL vs SKIP)
 
-```bash
-ssh newlevel@100.82.64.27 "ls -la ~/.claude/CLAUDE.md ~/.claude/settings.json && wc -l ~/.claude/CLAUDE.md"
-ssh newlevel@100.82.64.27 "ls ~/devel/*/CLAUDE.md 2>/dev/null"
-ssh newlevel@100.82.64.27 "find ~/.claude/projects -name 'MEMORY.md' -exec wc -l {} + 2>/dev/null"
-```
+Principle (verified): LSP plugins and on-demand Skills REDUCE context; always-on MCP servers INCREASE it. "Install more to reduce chaos" is usually wrong. WebSearch `"best Claude Code plugins <year>"`, `"Claude Code LSP token reduction"`, `"MCP context overhead"`; browse `anthropics/claude-plugins-official` marketplace (it ships per-language LSP plugins — clangd/csharp/go/java/kotlin/php/ruby/rust/swift/ts/pyright).
 
-Compare dev1 vs dev2. Drift = airuleset push failure → flag for fix.
+Rubric: `score = (dev_velocity × context_reduction) / setup_cost`, each 1-5. INSTALL only if ≥3 AND no context regression. `context_reduction`: 5 = LSP/Skill that removes reads; 3 = on-demand; 1 = always-on MCP injecting schema every turn (auto-disqualifies any "reduce chaos" justification).
 
-## Step 3: Cross-reference research vs current rules
+Decision rules:
+- INSTALL an LSP only for an in-use language with no LSP: `pyright-lsp@claude-plugins-official` (Python — airuleset/voiceagent/presenter), `typescript-lsp@claude-plugins-official` (n8n/web) — rust-analyzer-lsp already installed. Grep find-usages ≈10k+ tokens vs LSP ≈500/call.
+- NEVER add an always-on MCP to "reduce rules chaos" — add one only for a concrete recurring workflow.
+- Memory is SOLVED (built-in MEMORY.md + airuleset file-memory) — keep claude-mem DISABLED; never add a silent second memory system.
+- Biggest de-bloat is NOT an install: `claude-md-improver` + moving procedure-heavy modules to on-demand Skills + binding domain rules with `paths:` frontmatter.
+- PRUNE before you add: drop the duplicate n8n entry; drop unused needs-auth connectors.
+- SKIP (overlaps local skills): pr-review-toolkit, code-review, commit-commands, frontend-design.
+Output a table (candidate | what | why-this-stack | install cmd | context effect | score | verdict), SHORTLIST first, then a DO-NOT-BOTHER list.
 
-For each finding from Step 1, audit current rules:
+## Step E — caveman-compatibility
 
-### a. Model-evolution check
+caveman lite is active (strips articles/filler). Rules must lean on STRUCTURAL markers (✅ ❌ 🌐, headers, code blocks), NOT exact prose strings. Flag any rule/hook whose enforcement depends on a literal phrase a compressor could mangle.
 
-Grep airuleset modules + project CLAUDE.md for model-version-specific phrases:
+## Step F — Score, apply, log
 
-```bash
-grep -rEn "Opus 4\.[0-6]|Sonnet 4\.[0-5]|Haiku 3|before 4\.7|in older models|known bug in" ~/devel/airuleset/modules/ ~/devel/*/CLAUDE.md
-```
-
-For each hit: check if Opus 4.7 release notes / community evidence shows the behavior is now native. If yes → propose removal (rule is now noise). If unclear → note for manual review.
-
-### b. Caveman compatibility check
-
-Caveman mode strips articles, filler, hedging — could break rules that expect specific output strings. Grep for rules that mandate specific text:
-
-```bash
-grep -rEn 'always (say|write|output|print)|MUST contain.*"[^"]+"|exact string|verbatim' ~/devel/airuleset/modules/ ~/devel/airuleset/hooks/
-```
-
-For each: verify caveman wouldn't strip the mandated text. If at risk:
-- Rewrite rule to depend on STRUCTURE (emoji like ✅ ❌ 🌐, code blocks, headers) which caveman preserves
-- Or mark rule as "exempt from caveman" in the rule body
-- Or flag hook for caveman-aware update
-
-### c. Hook / background-process / Discord check
-
-```bash
-# Find hooks that depend on background bash completion
-grep -lE "run_in_background|nohup|disown|&\s*$" ~/devel/airuleset/hooks/
-
-# Discord notifier wiring
-cat ~/.claude/settings.json | python3 -c "import sys, json; cfg=json.load(sys.stdin); print(json.dumps(cfg.get('hooks', {}).get('Notification', []), indent=2))"
-
-# Recent transcripts — were Discord notifications fired when bash bg completed?
-grep -rE "Bash.*run_in_background.*true|notify-discord" ~/.claude/projects/ 2>/dev/null | head -20
-```
-
-Discord notifier currently misses notifications when bash bg jobs complete after agent stops. Audit:
-- Are background bash completions wired to fire notification?
-- Does notify-discord.sh check for pending bg jobs and fire after they finish?
-- Should there be a PostToolUse hook on Bash bg-job completion?
-
-If broken → propose `notify-discord.sh` patch + `settings.json` hook entry.
-
-### d. Bloat / duplicate / orphan check
-
-Delegate to existing `rules-audit` skill output, then merge findings.
-
-```bash
-# Orphan modules — listed in profile but not imported, or imported but not in profile
-diff <(grep -oE 'modules/[^[:space:]]+\.md' ~/devel/airuleset/profiles/universal.profile | sort -u) \
-     <(grep -oE 'modules/[^[:space:]]+\.md' ~/.claude/CLAUDE.md | sort -u)
-
-# Hooks not wired in settings.json
-ls ~/devel/airuleset/hooks/*.sh | xargs -n1 basename | while read h; do
-  grep -q "$h" ~/.claude/settings.json || echo "ORPHAN HOOK: $h"
-done
-
-# Memory entries pointing to nonexistent files
-for mem in $(find ~/.claude/projects -name 'MEMORY.md'); do
-  awk -F'[][)(]' '/\[.*\]\(.*\.md\)/{print $4}' "$mem" | while read ref; do
-    [ -f "$(dirname "$mem")/$ref" ] || echo "ORPHAN MEMORY REF: $mem -> $ref"
-  done
-done
-```
-
-### e. dev1/dev2 drift
-
-If git status on `~/devel/airuleset` differs between dev1 and dev2, or if global CLAUDE.md size differs by >5 lines, propose an `airuleset push` to resync.
-
-## Step 4: Score and prioritize findings
-
-Each finding gets:
-- **Impact** H/M/L — how much does this affect autonomy/correctness?
-- **Confidence** H/M/L — how strong is the research evidence?
-- **Effort** H/M/L — how big is the proposed edit?
-
-Sort by `Impact × Confidence ÷ Effort`. Present top 10 as a table with: ID, file, current behavior, proposed change, source-URL, score.
-
-## Step 5: AskUserQuestion — apply changes
-
-For each top-priority finding, AskUserQuestion with options:
-
-- **Apply** — make the edit now
-- **Defer** — file as GitHub issue in `zbynekdrlik/airuleset` with research source linked
-- **Reject** — record rejection reason in audit log
-
-Apply approved changes:
-1. Edit module / hook / settings.json
-2. `python3 airuleset.py validate`
-3. `python3 airuleset.py push`
-4. Confirm both dev1 + dev2 updated
-
-## Step 6: Save audit log
-
-Write summary to `~/devel/airuleset/audits/mdreview-<YYYY-MM-DD>.md`:
-
-```
-# /mdreview audit — <date>
-
-## Research sources fetched
-- <url> — <date> — <author> — <tags>
-- ...
-
-## Findings (N total, M applied, K deferred, L rejected)
-
-### Applied
-- [ID] file — change — source
-
-### Deferred (issues filed)
-- [ID] file — issue #N — rationale
-
-### Rejected
-- [ID] file — proposed change — reject reason
-
-## Files changed
-<git diff --stat>
-
-## dev1/dev2 drift
-<resolved or none>
-```
-
-Commit to airuleset with: `audit: mdreview <date> — N applied, M deferred`.
-
-## Step 7: Schedule next run
-
-After completion, offer:
-
-> Schedule next /mdreview in 7 days?
-
-Use the `schedule` skill if user agrees.
+1. **Score** each proposed change `Impact × Confidence ÷ Effort`; sort high→low.
+2. **AskUserQuestion** per change (or grouped): Apply now / Defer-to-issue (`gh issue create`) / Reject. Never apply silently.
+3. **Apply** accepted edits to `modules/` / skills / `settings/`. Heavy situational modules → MOVE TO SKILL per Step A.
+4. **Validate + deploy:** `python3 airuleset.py validate` MUST pass, then `python3 airuleset.py push` (deploys dev1 + dev2 — never bare `git push`).
+5. **Log** to `audits/mdreview-<date>.md`: every finding, its score, source URL, verdict (applied/deferred-#N/rejected), and the resolved-size before/after vs the cited budget.
 
 ## Rules
 
-- **Always do Step 1 first.** No skipping research because "I remember last week's findings" — model behavior + community wisdom moves fast.
-- **Cite every proposed change** — link to the research source URL. No source = no change.
-- **Never apply changes silently** — every change goes through AskUserQuestion.
-- **Always validate before push** — `python3 airuleset.py validate` must pass.
-- **Always sync dev1 + dev2** — `airuleset push` after every applied change.
-- **Caveman mode caveat** — when proposing rule wording changes, verify the new text survives caveman compression. Test by mentally stripping articles + filler from the rule output.
-- **Discord notifier caveat** — if proposing a notification-triggering hook, manually test it fires (run a bg bash, wait for completion, check Discord).
+- Every proposed change cites a source URL captured THIS run. No URL → no change.
+- Model generation is read from Environment ONCE (Step 0) — never hardcoded in a query.
+- Structural checks are owned by `rules-audit` (Step 1) — do NOT re-grep them here.
+- Never apply silently; always validate before push; always sync dev1 + dev2.
+- This skill is manually invoked — no auto-schedule, no cron (competes with active dev runners).
