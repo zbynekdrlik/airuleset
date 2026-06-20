@@ -16,7 +16,6 @@ import difflib
 import json
 import os
 import shutil
-import socket
 import sys
 from pathlib import Path
 
@@ -45,34 +44,11 @@ MANAGED_EFFORT_LEVEL = "xhigh"
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # ---------------------------------------------------------------------------
-# Autopilot Board integration (plan Phase F — Tasks 13 & 14)
-# ---------------------------------------------------------------------------
-# The board is a single always-on daemon on dev1 (tailscale 100.104.8.125). Every
-# machine runs the reporter (fire-and-forget client); only the board host runs the
-# systemd service. Single source of truth for the host IP is board.BOARD_HOST_IP
-# (env BOARD_HOST override) — re-exported here so callers can `airuleset.BOARD_HOST_IP`.
-# Tailscale IP so it survives LAN switches (see #1; was 10.77.9.21 pre-renumber).
-try:
-    from board import BOARD_HOST_IP, PORT as BOARD_PORT, board_url
-except Exception:  # pragma: no cover — board package should always import
-    BOARD_HOST_IP = os.environ.get("BOARD_HOST", "100.104.8.125")
-    BOARD_PORT = 8787
-
-    def board_url():
-        return f"http://{BOARD_HOST_IP}:{BOARD_PORT}/"
-
-# Local board daemon state (all under ~/.claude, gitignored — never in the repo).
-BOARD_DB_PATH = CLAUDE_DIR / "autopilot-board.sqlite"
-BOARD_TOKEN_PATH = CLAUDE_DIR / "autopilot-board.token"
-BOARD_SERVICE_TEMPLATE = REPO_DIR / "settings" / "autopilot-board.service.template"
-BOARD_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "autopilot-board.service"
-
-# ---------------------------------------------------------------------------
 # File-Drop integration — serve user files as clickable LAN URLs
 # ---------------------------------------------------------------------------
-# Unlike the board (one central daemon on dev1), the file-drop service runs on
-# EVERY machine — each serves the files produced on THAT machine, bound to THAT
-# machine's own LAN IP (discovered at runtime by filedrop.host_ip()).
+# The file-drop service runs on EVERY machine — each serves the files produced on
+# THAT machine, bound to THAT machine's own LAN IP (discovered at runtime by
+# filedrop.host_ip()).
 try:
     from filedrop import (PORT as FILEDROP_PORT, host_ip as filedrop_host_ip,
                           filedrop_url, FILEDROP_DIR)
@@ -89,41 +65,6 @@ except Exception:  # pragma: no cover — filedrop package should always import
 FILEDROP_SERVICE_TEMPLATE = REPO_DIR / "settings" / "filedrop.service.template"
 FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop.service"
 
-
-def _local_ips():
-    """Collect this machine's IPs from every reliable source.
-
-    `socket.gethostbyname*` often resolves to loopback (127.0.1.1) on Debian/
-    Ubuntu where /etc/hosts maps the hostname to loopback — so it ALONE would
-    make the real board host detect as a non-board host. We therefore also read
-    `hostname -I` (the documented fallback in spec §12), which lists the actual
-    interface addresses. All sources are best-effort; failures are ignored."""
-    import subprocess
-    ips = set()
-    try:
-        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
-    except Exception:
-        pass
-    try:
-        ips.add(socket.gethostbyname(socket.gethostname()))
-    except Exception:
-        pass
-    try:
-        out = subprocess.run(["hostname", "-I"], capture_output=True,
-                             text=True, timeout=5)
-        if out.returncode == 0:
-            ips.update(tok for tok in out.stdout.split() if tok)
-    except Exception:
-        pass
-    return ips
-
-
-def is_board_host():
-    """True iff this machine is the board host (BOARD_HOST_IP is one of our IPs).
-
-    Tolerant of resolver failures (returns False) so a misconfigured /etc/hosts
-    never makes a non-board host try to start the service."""
-    return BOARD_HOST_IP in _local_ips()
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis"]
@@ -335,45 +276,6 @@ def unified_diff(old: str, new: str, label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _validate_board():
-    """Validate the Autopilot Board: each board/*.py imports cleanly and the
-    systemd service template exists with the repo-path placeholder.
-
-    Loads each module by spec (importlib) so a syntax error or bad import in any
-    board file fails `validate` loudly — the board ships with airuleset, so a
-    broken board file must block install just like a missing module."""
-    import importlib
-
-    errors = []
-    board_dir = REPO_DIR / "board"
-    if not board_dir.is_dir():
-        errors.append(f"Board package missing: {board_dir}")
-        return errors
-
-    # Import each board submodule (in dependency order so e.g. gh's
-    # `from board.gate import ...` resolves). Importing the package first puts
-    # `board` on sys.modules.
-    for mod in ("board", "board.gate", "board.gh", "board.db",
-                "board.render", "board.reporter", "board.server"):
-        try:
-            importlib.import_module(mod)
-        except Exception as e:
-            errors.append(f"Board module failed to import: {mod} ({e})")
-
-    # Service template must exist and carry the {{REPO_DIR}} placeholder + the
-    # board --serve ExecStart.
-    if not BOARD_SERVICE_TEMPLATE.exists():
-        errors.append(f"Missing board service template: {BOARD_SERVICE_TEMPLATE}")
-    else:
-        tmpl = BOARD_SERVICE_TEMPLATE.read_text()
-        if "{{REPO_DIR}}" not in tmpl:
-            errors.append("Board service template missing {{REPO_DIR}} placeholder")
-        if "board --serve" not in tmpl:
-            errors.append("Board service template ExecStart missing `board --serve`")
-
-    return errors
-
-
 def _validate_filedrop():
     """Validate the File-Drop service: each filedrop/*.py imports cleanly and the
     systemd service template exists with the repo-path placeholder + ExecStart."""
@@ -465,10 +367,6 @@ def cmd_validate(args):
         content = rule_file.read_text()
         if not content.startswith("---"):
             errors.append(f"Rule missing YAML frontmatter: {rule_file.name}")
-
-    # Validate the Autopilot Board: every board/*.py loads cleanly + service
-    # template exists with the substitution placeholder.
-    errors.extend(_validate_board())
 
     # Validate the File-Drop service: filedrop/*.py loads + service template ok.
     errors.extend(_validate_filedrop())
@@ -646,15 +544,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ultracode launcher error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 4. Autopilot Board: branch on whether this is the board host ---
-    try:
-        maybe_setup_board()
-    except Exception as e:
-        # The board service is best-effort: a failure here must never abort the
-        # core install (CLAUDE.md/skills/hooks already landed). Print and move on.
-        print(f"  board setup error (non-fatal): {e}", file=sys.stderr)
-
-    # --- 5. File-Drop service: installed on EVERY machine (serves local files) ---
+    # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
         maybe_setup_filedrop()
     except Exception as e:
@@ -737,304 +627,7 @@ def cmd_status(args):
 
 
 # ---------------------------------------------------------------------------
-# Autopilot Board subcommands (plan Task 13)
-# ---------------------------------------------------------------------------
-
-
-def cmd_report(args):
-    """Thin CLI wrapper over board.reporter — fire-and-forget, never crashes.
-
-    Modes (mutually exclusive enough for the worker's needs):
-      --start        mint a run_id, emit the opening event, print the run_id
-      --queue        report a planned-issue queue for --repo from --items (JSON)
-      --selftest     POST a synthetic ping and print whether the board accepted it
-      (default)      emit a phase/heartbeat/field event for --run
-
-    The reporter swallows all network errors itself; this wrapper additionally
-    guards against import/usage errors so a board outage can NEVER fail a worker.
-    """
-    try:
-        from board import reporter
-    except Exception as e:  # board package unimportable — degrade gracefully
-        print(f"report: board package unavailable ({e})", file=sys.stderr)
-        return
-
-    try:
-        if getattr(args, "start", False):
-            rid = reporter.start_run(
-                args.repo, args.issue, args.title or "",
-                is_bug_fix=bool(getattr(args, "is_bug_fix", False)),
-                has_deploy=bool(getattr(args, "has_deploy", False)),
-                merge_mode=getattr(args, "merge_mode", "auto") or "auto")
-            print(rid)
-            return
-
-        if getattr(args, "queue", False):
-            repo = args.repo
-            try:
-                items = json.loads(args.items) if args.items else []
-            except (ValueError, TypeError) as e:
-                print(f"report --queue: bad --items JSON ({e})", file=sys.stderr)
-                return
-            # items may be [[issue, title], ...] or [{"issue":..,"title":..}, ...]
-            norm = []
-            for it in items:
-                if isinstance(it, dict):
-                    norm.append((it.get("issue"), it.get("title", "")))
-                else:
-                    norm.append((it[0], it[1] if len(it) > 1 else ""))
-            reporter.queue_report(repo, norm)
-            return
-
-        if getattr(args, "selftest", False):
-            _report_selftest(reporter)
-            return
-
-        # default: a phase / heartbeat / field event for an existing run.
-        # Resolve the run id ROBUSTLY: prefer --run, else look it up from
-        # --repo/--issue (the persisted map). The worker's $RUN shell var does
-        # NOT survive across separate `report` invocations (each runs in a fresh
-        # shell), which silently dropped every mid-run phase report.
-        rid = args.run
-        repo = getattr(args, "repo", None)
-        issue = getattr(args, "issue", None)
-        if not rid:
-            if repo and issue is not None:
-                rid = reporter.current_run(repo, issue)
-            if not rid:
-                print("report: need --run, or --repo+--issue of a started run",
-                      file=sys.stderr)
-                return
-        # Recover repo/issue from the run id when not supplied, so EVERY event
-        # carries them. A mid-run report with NULL repo/issue created a board row
-        # that could never be joined to gh signals (and the empty repo|issue
-        # stale rows).
-        if repo is None or issue is None:
-            r2, i2 = reporter.run_to_repo_issue(rid)
-            repo = repo if repo is not None else r2
-            issue = issue if issue is not None else i2
-        reviews = _parse_reviews(getattr(args, "review", None))
-        fields = {}
-        for k in ("goal", "approach", "result", "note", "pr", "phase"):
-            v = getattr(args, k, None)
-            if v is not None:
-                fields[k] = v
-        # --pr maps to the pr_url field the board stores
-        if "pr" in fields:
-            fields["pr_url"] = fields.pop("pr")
-        if repo is not None:
-            fields["repo"] = repo
-        if issue is not None:
-            fields["issue"] = issue
-        phase = fields.pop("phase", None)
-        if getattr(args, "heartbeat", False) and phase is None and "note" not in fields:
-            # a bare heartbeat carries no phase/field — just a liveness ping
-            fields["note"] = fields.get("note") or "heartbeat"
-        reporter.report(rid, phase=phase, reviews=reviews or None, **fields)
-        # On a MERGE, fire the per-ticket Discord completion card. Triggered HERE
-        # — inside the `report` subprocess the worker already runs every phase — so
-        # it works even for an /autopilot loop that STARTED BEFORE this feature
-        # existed (the running worker keeps invoking the on-disk airuleset.py, no
-        # session restart needed). Fully detached + best-effort: never blocks or
-        # affects the report itself.
-        if phase == "merge":
-            _spawn_merge_card(rid, repo, issue, args)
-    except Exception as e:  # absolute backstop — a report must never crash a worker
-        print(f"report: ignored error ({e})", file=sys.stderr)
-
-
-def _spawn_merge_card(rid, repo, issue, args):
-    """Detached, best-effort spawn of `notify --run-card` to post the per-ticket
-    Discord card after a merge. Resolves the @mention owner in THIS (the worker's)
-    context and passes it down, then returns immediately. Never raises/blocks."""
-    try:
-        import subprocess
-        try:
-            from notify import resolve_owner
-            owner = resolve_owner()
-        except Exception:
-            owner = ""
-        cmd = [sys.executable, str(REPO_DIR / "airuleset.py"), "notify",
-               "--run-card", "--run", str(rid)]
-        if repo:
-            cmd += ["--repo", str(repo)]
-        if issue is not None:
-            cmd += ["--issue", str(issue)]
-        pr = getattr(args, "pr", None)
-        if pr:
-            cmd += ["--pr", str(pr)]
-        result = getattr(args, "result", None)
-        if result:
-            cmd += ["--achieved", str(result)]
-        env = dict(os.environ)
-        if owner:
-            env["AIRULESET_NOTIFY_OWNER"] = owner
-        subprocess.Popen(cmd, env=env, start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-
-def _parse_reviews(values):
-    """`--review k=v` (repeatable) -> [(check, state), ...]. Ignores malformed."""
-    out = []
-    for raw in (values or []):
-        if "=" not in raw:
-            continue
-        k, v = raw.split("=", 1)
-        k, v = k.strip(), v.strip()
-        if k:
-            out.append((k, v))
-    return out
-
-
-def _report_selftest(reporter):
-    """POST a synthetic ping straight to the board and report acceptance.
-
-    Bypasses the offline queue so we test the LIVE path: builds a minimal valid
-    event and calls reporter._post_one directly. Prints OK/FAIL and the board URL."""
-    import time
-    import uuid
-    ev = {
-        "run_id": f"selftest-0-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}",
-        "event_id": uuid.uuid4().hex,
-        "seq": 1,
-        "phase": "validating",
-        "event_ts": time.time(),
-        "machine": os.uname().nodename,
-        "repo": "selftest/ping",
-        "issue": 1,
-        "title": "board selftest ping",
-        "note": "synthetic selftest ping",
-    }
-    ok = False
-    try:
-        ok = reporter._post_one(ev)
-    except Exception as e:
-        print(f"selftest: error posting ({e})", file=sys.stderr)
-    if ok:
-        print(f"selftest: OK — board accepted the ping at {board_url()}")
-    else:
-        print(f"selftest: FAIL — board at {board_url()} did not accept the ping "
-              f"(down, wrong token, or unreachable)", file=sys.stderr)
-
-
-def cmd_board(args):
-    """Board control: --url (live-check + print LAN URL), status, --serve (daemon)."""
-    if getattr(args, "serve", False):
-        _board_serve()
-        return
-    if getattr(args, "url", False):
-        _board_print_url()
-        return
-    # default / `status`
-    _board_status()
-
-
-def _board_serve():
-    """Run the board HTTP server in the FOREGROUND (systemd ExecStart target).
-
-    Instantiates a Board on the local sqlite DB, reads the shared token, and
-    hands off to board.server.run_server (which binds BOARD_HOST_IP:PORT, fails
-    loud if already bound, and starts the writer + gh refresher threads)."""
-    from board.db import Board
-    from board.server import run_server
-
-    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-    token = ""
-    try:
-        token = BOARD_TOKEN_PATH.read_text().strip()
-    except OSError:
-        pass
-    if not token:
-        print(f"FATAL: no board token at {BOARD_TOKEN_PATH}. Run "
-              f"`python3 airuleset.py install` on the board host to generate it.",
-              file=sys.stderr)
-        sys.exit(1)
-    board = Board(str(BOARD_DB_PATH))
-    repos = _monitored_repos()
-    run_server(board, token, host=BOARD_HOST_IP, port=BOARD_PORT, repos=repos)
-
-
-def _monitored_repos():
-    """Repos the gh refresher polls.
-
-    Returns BOARD_REPOS env repos UNION repos discovered in the runs table
-    (board.distinct_repos()), deduped and validated by gh.valid_repo. The
-    union means the refresher activates automatically as soon as any worker
-    reports a run — no BOARD_REPOS config required on deploy.
-
-    Falls back gracefully when the DB is absent or unreadable (e.g. first
-    run before any worker has reported)."""
-    from board import gh as ghmod
-    # BOARD_REPOS env (may be empty / unset)
-    raw = os.environ.get("BOARD_REPOS", "").strip()
-    env_repos = [r.strip() for r in raw.split(",") if r.strip()] if raw else []
-
-    # DB-discovered repos
-    db_repos = []
-    try:
-        from board.db import Board
-        board = Board(str(BOARD_DB_PATH))
-        db_repos = board.distinct_repos()
-    except Exception:
-        pass  # DB absent or unreadable on first boot; that's fine
-
-    # Merge, dedupe, validate
-    seen = set()
-    result = []
-    for r in env_repos + db_repos:
-        if r and r not in seen and ghmod.valid_repo(r):
-            seen.add(r)
-            result.append(r)
-    return result
-
-
-def _board_print_url():
-    """Curl-check the board; print the LAN URL only when it returns 200.
-
-    Per no-localhost-urls.md: never present a dead URL. If the board is down AND
-    we're on the board host, try restarting the service once before giving up."""
-    url = board_url()
-    if _board_is_live(url):
-        print(url)
-        return
-    if is_board_host():
-        print("board: not responding — attempting service restart...",
-              file=sys.stderr)
-        _restart_board_service()
-        if _board_is_live(url):
-            print(url)
-            return
-    print(f"board: DOWN — {url} did not return 200 "
-          f"(not started, wrong host, or crashed)", file=sys.stderr)
-    sys.exit(1)
-
-
-def _board_is_live(url, timeout=2):
-    """True iff GET <url> returns HTTP 200 within `timeout` seconds."""
-    import urllib.request
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
-def _board_status():
-    """Print board liveness + whether this host is the board host."""
-    url = board_url()
-    here = "board host" if is_board_host() else "reporter-only host"
-    live = _board_is_live(url)
-    print(f"autopilot board: {url}")
-    print(f"  this machine: {here} (BOARD_HOST_IP={BOARD_HOST_IP})")
-    print(f"  liveness:     {'UP (200)' if live else 'DOWN / unreachable'}")
-    print(f"  token:        {'present' if BOARD_TOKEN_PATH.exists() else 'absent'}")
-
-
-# ---------------------------------------------------------------------------
-# Autopilot Board install branching + systemd service (plan Task 14)
+# systemd --user helpers (shared by the File-Drop service install)
 # ---------------------------------------------------------------------------
 
 
@@ -1047,50 +640,6 @@ def _xdg_runtime_env():
     env = dict(os.environ)
     env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     return env
-
-
-def _ensure_board_token():
-    """Generate the shared board token if absent. Returns the token.
-
-    Atomic creation: os.open with O_CREAT|O_WRONLY|O_EXCL and mode 0o600 means
-    the file is born 0600 — no 0664→0600 window from write_text + chmod.
-    FileExistsError means another process won the race or the file already
-    exists; in that case we reuse the existing token (idempotent)."""
-    import secrets
-    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-    # Fast path: reuse if already present and non-empty.
-    if BOARD_TOKEN_PATH.exists():
-        existing = BOARD_TOKEN_PATH.read_text().strip()
-        if existing:
-            return existing
-    token = secrets.token_urlsafe(32)
-    try:
-        # O_EXCL ensures atomicity: only ONE process creates the file,
-        # born with 0o600 — no world/group-readable window.
-        fd = os.open(str(BOARD_TOKEN_PATH), os.O_CREAT | os.O_WRONLY | os.O_EXCL,
-                     0o600)
-        try:
-            os.write(fd, token.encode())
-        finally:
-            os.close(fd)
-    except FileExistsError:
-        # Race: another process created the file first — reuse it.
-        existing = BOARD_TOKEN_PATH.read_text().strip()
-        if existing:
-            return existing
-        # File exists but is empty (concurrent write still in progress? unlikely).
-        # Fall through: return the token we generated (best effort).
-    print(f"  Generated board token: {BOARD_TOKEN_PATH} (0600)")
-    return token
-
-
-def _render_service_unit():
-    """Read the unit template and substitute the absolute repo path placeholder.
-
-    The template ships with a `{{REPO_DIR}}` placeholder so the ExecStart points
-    at THIS checkout's airuleset.py (dev1 path may differ from dev2)."""
-    text = BOARD_SERVICE_TEMPLATE.read_text()
-    return text.replace("{{REPO_DIR}}", str(REPO_DIR))
 
 
 def _run_systemctl(args):
@@ -1106,108 +655,12 @@ def _run_systemctl(args):
         return 1, "", str(e)
 
 
-def _restart_board_service():
-    """Best-effort `systemctl --user restart autopilot-board.service`."""
-    rc, _out, err = _run_systemctl(["restart", "autopilot-board.service"])
-    if rc != 0:
-        print(f"  board service restart failed (rc={rc}): {err.strip()}",
-              file=sys.stderr)
-    return rc == 0
-
-
-def setup_board_service():
-    """Install + start the board systemd --user service on the board host.
-
-    Called ONLY when is_board_host() is True (the maybe_setup_board gate). On any
-    failure it PRINTS the exact manual command rather than claiming success, so a
-    failed install is visible and recoverable. Steps:
-      1. generate the token (0600) if absent
-      2. write the unit (repo path substituted) to ~/.config/systemd/user/
-      3. loginctl enable-linger (best-effort — service survives logout)
-      4. daemon-reload + enable --now (explicit XDG_RUNTIME_DIR)
-      5. curl the LAN URL for 200 (server binds the LAN IP, not loopback), then print it
-    """
-    import subprocess
-    print("  Board host detected — installing systemd --user service")
-
-    # 1. token
-    _ensure_board_token()
-
-    # 2. write the unit
-    if not BOARD_SERVICE_TEMPLATE.exists():
-        print(f"  ERROR: service template missing: {BOARD_SERVICE_TEMPLATE} — "
-              f"cannot install the board service.", file=sys.stderr)
-        return False
-    BOARD_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-    BOARD_SERVICE_DEST.write_text(_render_service_unit())
-    print(f"  Wrote unit: {BOARD_SERVICE_DEST}")
-
-    manual = (
-        "    loginctl enable-linger $(whoami)\n"
-        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user daemon-reload\n"
-        "    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user enable --now "
-        "autopilot-board.service")
-
-    # 3. linger (best-effort, not fatal)
-    try:
-        subprocess.run(["loginctl", "enable-linger", _whoami()],
-                       capture_output=True, text=True, timeout=15)
-    except Exception as e:
-        print(f"  loginctl enable-linger skipped ({e})", file=sys.stderr)
-
-    # 4. daemon-reload + enable --now
-    rc, _o, err = _run_systemctl(["daemon-reload"])
-    if rc != 0:
-        print(f"  systemctl daemon-reload FAILED (rc={rc}): {err.strip()}\n"
-              f"  Run manually:\n{manual}", file=sys.stderr)
-        return False
-    rc, _o, err = _run_systemctl(["enable", "--now", "autopilot-board.service"])
-    if rc != 0:
-        print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
-              f"  Run manually:\n{manual}", file=sys.stderr)
-        return False
-
-    # 5. liveness check then print the LAN URL.
-    # The server binds BOARD_HOST_IP (the scoped LAN interface, not 0.0.0.0/loopback),
-    # so the self-check MUST hit the LAN URL — 127.0.0.1 would falsely report "not live".
-    if _wait_board_live(board_url()):
-        print(f"  Board is live. LAN URL: {board_url()}")
-        return True
-    print(f"  Board service started but did NOT answer on {board_url()}. "
-          f"Check `systemctl --user status autopilot-board.service` and "
-          f"`journalctl --user -u autopilot-board.service`.", file=sys.stderr)
-    return False
-
-
 def _whoami():
     try:
         import getpass
         return getpass.getuser()
     except Exception:
         return os.environ.get("USER", "")
-
-
-def _wait_board_live(local_url, attempts=5, delay=1.0):
-    """Poll a local board URL up to `attempts` times for an HTTP 200."""
-    import time
-    for _ in range(attempts):
-        if _board_is_live(local_url):
-            return True
-        time.sleep(delay)
-    return False
-
-
-def maybe_setup_board():
-    """Install branching, called from cmd_install AFTER the core install work.
-
-    Board host  → setup_board_service() (the systemd daemon).
-    Other hosts → ensure ~/.claude exists (reporter writes its state there) and
-                  print that the board is skipped here (reports go to the host)."""
-    if is_board_host():
-        setup_board_service()
-    else:
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"  board: skipped (not board host; reports go to {board_url()})")
 
 
 # ---------------------------------------------------------------------------
@@ -1467,24 +920,18 @@ def _gh_out(*gh_args, timeout=8):
 
 
 def _notify_run_card(args, compose_autopilot_card, send):
-    """Send the per-ticket completion card for a board run, gathering the issue
-    title (the Cieľ) and the remaining backlog count from gh. Called detached by
-    `report --phase merge`, so it runs in the autopilot worker's context (gh auth,
-    tmux owner, the channel .env). Best-effort, never raises."""
+    """Send the per-ticket completion card, gathering the issue title (the Cieľ)
+    and the remaining backlog count from gh. The autopilot worker fires this
+    DIRECTLY at merge (`notify --run-card --repo <owner/name> --issue <N> --pr
+    <url> --achieved "<slovak>"`), so it runs in the worker's context (gh auth,
+    tmux owner, the channel .env). REQUIRES --repo + --issue. Best-effort, never
+    raises."""
     import re as _re
     try:
         repo = getattr(args, "repo", None)
         issue = getattr(args, "issue", None)
-        if (not repo or issue is None) and getattr(args, "run", None):
-            try:
-                from board import reporter as _rep
-                r2, i2 = _rep.run_to_repo_issue(args.run)
-                repo = repo or r2
-                issue = issue if issue is not None else i2
-            except Exception:
-                pass
         if not repo or issue is None:
-            return  # not enough to build a card
+            return  # need --repo + --issue to build a card
 
         title = _gh_out("issue", "view", str(issue), "-R", repo,
                         "--json", "title", "-q", ".title") or ("#%s" % issue)
@@ -1512,13 +959,11 @@ def _notify_run_card(args, compose_autopilot_card, send):
             merge_sha=getattr(args, "merge_sha", None),
             review_ok=(getattr(args, "review", "ok") != "fail"),
             done=None, remaining=remaining)
-        # Dedup on the run id (one card per ticket-run) so retries / repeated merge
-        # reports never double-post.
-        # Dedup on the REPO-NAME#ISSUE — the stable unit. NOT the run id: /autopilot
-        # re-dispatches a fresh worker each turn (SendMessage is gated), each minting
-        # a NEW run id, so a run-id key re-cards the same issue every dispatch. And
-        # use only the repo's last path segment so a bare name ("odoo-erp") and the
-        # full "owner/odoo-erp" — which BOTH appear in reports — collapse to one key.
+        # Dedup on the REPO-NAME#ISSUE — the stable unit. /autopilot re-dispatches a
+        # fresh worker each turn (SendMessage is gated), so the same issue can be
+        # carded more than once; keying on repo-name#issue collapses those to one.
+        # Use only the repo's last path segment so a bare name ("odoo-erp") and the
+        # full "owner/odoo-erp" collapse to one key.
         name = str(repo).rstrip("/").split("/")[-1]
         dedup = getattr(args, "dedup_key", None) or ("%s#%s" % (name, issue))
         # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
@@ -1599,29 +1044,6 @@ def cmd_push(args):
             print(f"  FAILED: {ssh_result.stderr.strip()}")
         else:
             print(f"  {ssh_result.stdout.strip()}")
-
-        # Distribute the board token so this remote's reporter can POST to the
-        # token-gated board. Without it EVERY report is 403-rejected and the
-        # reporter DROPS it (4xx = poison), so the remote's autopilot runs never
-        # appear on the board (the dev2 "no statuses" bug). The board host holds
-        # the authoritative token; copy it over ssh stdin (0600).
-        if BOARD_TOKEN_PATH.exists():
-            try:
-                token_val = BOARD_TOKEN_PATH.read_text()
-                tok_result = subprocess.run(
-                    ["sshpass", "-p", "newlevel", "ssh",
-                     "-o", "StrictHostKeyChecking=no",
-                     f"{remote['user']}@{remote['host']}",
-                     "umask 077; mkdir -p ~/.claude && "
-                     "cat > ~/.claude/autopilot-board.token"],
-                    input=token_val, capture_output=True, text=True, timeout=30)
-                if tok_result.returncode == 0:
-                    print(f"  board token distributed to {remote['name']}")
-                else:
-                    print(f"  WARN: board token copy failed: "
-                          f"{tok_result.stderr.strip()}")
-            except Exception as e:
-                print(f"  WARN: board token copy error: {e}")
     print("\nAll deployments complete.")
 
 
@@ -1642,47 +1064,6 @@ def main():
     sub.add_parser("validate", help="Check all files exist and resolve")
     sub.add_parser("status", help="Show current managed config")
     sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
-
-    # --- Autopilot Board: report (worker client) + board (control) ---------
-    p_report = sub.add_parser(
-        "report", help="Report an autopilot run phase/event to the board")
-    p_report.add_argument("--start", action="store_true",
-                          help="Mint a new run_id, emit the opening event, print the run_id")
-    p_report.add_argument("--run", help="Existing run_id to report against")
-    p_report.add_argument("--repo", help="owner/name (for --start / --queue)")
-    p_report.add_argument("--issue", type=int, help="Issue number (for --start)")
-    p_report.add_argument("--title", help="Run title (for --start)")
-    p_report.add_argument("--is-bug-fix", dest="is_bug_fix", action="store_true",
-                          help="Mark the run as a bug fix (regression gate applies)")
-    p_report.add_argument("--has-deploy", dest="has_deploy", action="store_true",
-                          help="Mark the run as deploying (deploy_verified gate applies)")
-    p_report.add_argument("--merge-mode", dest="merge_mode", default="auto",
-                          help="auto | manual (default auto)")
-    p_report.add_argument("--phase", help="Phase to advance to")
-    p_report.add_argument("--goal", help="Goal text")
-    p_report.add_argument("--approach", help="Approach text")
-    p_report.add_argument("--result", help="Result text")
-    p_report.add_argument("--note", help="Free-form note")
-    p_report.add_argument("--pr", help="PR URL")
-    p_report.add_argument("--review", action="append",
-                          help="Gate claim k=v (repeatable), e.g. --review review=ok")
-    p_report.add_argument("--heartbeat", action="store_true",
-                          help="Emit a liveness heartbeat (no phase change required)")
-    p_report.add_argument("--queue", action="store_true",
-                          help="Report a planned-issue queue (--repo + --items JSON)")
-    p_report.add_argument("--items",
-                          help="JSON array of [issue,title] pairs (for --queue)")
-    p_report.add_argument("--selftest", action="store_true",
-                          help="POST a synthetic ping and report whether the board accepted it")
-
-    p_board = sub.add_parser("board", help="Autopilot board control")
-    p_board.add_argument("board_action", nargs="?", default=None,
-                         choices=["status"],
-                         help="status (default when no flag)")
-    p_board.add_argument("--url", action="store_true",
-                         help="Live-check the board and print its LAN URL (200 only)")
-    p_board.add_argument("--serve", action="store_true",
-                         help="Run the board HTTP server in the foreground (systemd ExecStart)")
 
     # --- File-Drop: share (give the user a clickable LAN URL) + filedrop (control)
     p_share = sub.add_parser(
@@ -1708,15 +1089,15 @@ def main():
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")
     p_notify.add_argument("--run-card", dest="run_card", action="store_true",
-                          help="Send a per-ticket card for a board run, gathering "
-                               "goal/progress from gh (used by report --phase merge)")
+                          help="Send a per-ticket card (requires --repo + --issue), "
+                               "gathering goal/progress from gh — fired by the "
+                               "autopilot worker directly at merge")
     p_notify.add_argument("--api-error", dest="api_error", action="store_true",
                           help="Ping IF --text is a real Claude Code API error "
                                "(used by the notify-api-error.sh Stop hook)")
     p_notify.add_argument("--text", help="The turn's last assistant message (API-error check)")
     p_notify.add_argument("--session", help="Session id (API-error dedup scope)")
     p_notify.add_argument("--project", help="Project name for the API-error ping")
-    p_notify.add_argument("--run", help="Board run_id (for --run-card)")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
     p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté')")
     p_notify.add_argument("--body", help="Arbitrary markdown body to send")
@@ -1751,8 +1132,6 @@ SUBCOMMANDS = {
     "validate": cmd_validate,
     "status": cmd_status,
     "push": cmd_push,
-    "report": cmd_report,
-    "board": cmd_board,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,

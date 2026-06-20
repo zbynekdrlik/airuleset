@@ -30,16 +30,13 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
 - `ci-monitoring.md` — the worker monitors its OWN CI to terminal; the main loop just verifies the result
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
-- `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (Step 4b — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
+- `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, NOT a reason to abandon the issue or stop the loop
 
 ## How it works
 
-- **Live board at `http://100.104.8.125:8787/`.** Workers self-report each phase; the supervisor reports
-  the planned queue + its verify verdicts. The board shows the live tickets, the review-gate audit, and
-  the planned "Up next" queue. Reporting is fire-and-forget — it never blocks or gates the loop.
 - **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles the next BATCH
   (one bundle-safe issue, or several bundled into one PR — see Step 3.1) and dispatches ONE
   foreground `autopilot-worker` for it; the worker runs the full cycle on one `dev` branch / one PR
@@ -85,11 +82,7 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
   hardware / prod / streaming / OBS / HDMI / DRM issue is worked end-to-end on the rig like any other;
   the USER alone guards whether prod is live and stops you in the moment. (Same in Slovak: no
   `off-air okná`, `musíš byť pri tom`, `odporúčam autopilot-skip`, `vedene so mnou nie naslepo`.)
-- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog · board http://100.104.8.125:8787/`.
-- **Report the planned queue** so the board's "Up next" is current — after computing the ordered backlog
-  (open issues minus `autopilot-skip`), at loop START and after each issue completes:
-  `python3 ~/devel/airuleset/airuleset.py report --queue --repo <repo> --items '[[<issue>,"<title>"],…]'`.
-  `<repo>` MUST be the canonical **`owner/name`** (`gh repo view --json nameWithOwner -q .nameWithOwner`) — a bare name is rejected by the board.
+- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog`.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
@@ -122,7 +115,7 @@ is that way. From the working backlog (open issues minus `autopilot-skip`), PRIN
 should be CLOSED now**. Present the list NEUTRALLY: do **NOT** recommend which to close, and **NEVER**
 classify / flag / colour any issue (especially not prod/hardware — `approval-scope.md`). For each chosen:
 `gh issue close <N> --comment "Closed at /autopilot start — obsolete per user."`, drop it from the
-backlog + planned queue, and report the closures to the board (`milestone-notifications.md` — no per-issue device ping). **Default =
+backlog, and note the closures (no per-issue device ping — `milestone-notifications.md`). **Default =
 close none.** Same ~4-options-per-question / "Other" handling as the picker above. (You can ALSO close any
 issue at any time — in `/autopilot` or normal chat — by telling Claude `close #N (reason)`; it runs
 `gh issue close <N> --comment "<reason>"` + ping. Closing an issue is non-destructive tracking and never
@@ -169,17 +162,15 @@ Each loop turn:
    - An issue that FAILS the gate is NOT added — it becomes the seed of a LATER solo batch (its own PR).
      A large / schema / API / security / cross-cut seed runs SOLO; never force-bundle it.
    - **Best-effort:** if nothing else qualifies, the batch is just the seed (one issue — today's behavior).
-     Report the chosen batch members on the planned queue so the board's "Up next" reflects the bundling.
 1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
    are independent, so validate them in parallel. Branch PER member:
    - **STILL_VALID** → keep in the batch. **PARTIAL** → keep, pass its `still_to_do` as that issue's scope.
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR resolved it OR a passing repro proves it) →
-     do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment,
-     report it to the board (`R=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <r> --issue <N>
-     --title "<title>") ; python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase obsolete-closed
-     --result "<validator evidence>"`) — board only, no device ping (reopenable in one click) — and DROP it from the batch.
+     do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment
+     (`gh issue close <N> --comment "<validator evidence>"`) — no device ping (reopenable in one
+     click) — and DROP it from the batch.
    - **OVERCOME + `overcome_confidence: soft`** → DROP from the batch and ask the user ("looks overcome by
      <evidence> — close it?") with the validator's evidence; act on their answer (close, or run it solo).
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
@@ -210,10 +201,10 @@ Each loop turn:
    > Do **not** narrate "SendMessage isn't available here, dispatching a fresh worker" — just dispatch
    > the fresh foreground `autopilot-worker` for the issue and let it RESUME from durable state: the
    > existing `dev` branch, the open PR, and the issue's current state. It continues from there instead
-   > of redoing version-bump→RED. The board collapses re-dispatches to the **newest run per issue**, so
-   > a fresh worker does NOT clutter the board with duplicate cards. A worker ending mid-issue (turn
-   > boundary, error, your answer to its question) is recovered by ONE fresh dispatch with the resume
-   > context in the prompt — never by a continuation tool, never by restarting from scratch.
+   > of redoing version-bump→RED. The per-ticket Discord card is deduped on repo-name#issue, so a
+   > fresh worker re-dispatched for the same issue does NOT double-post its card. A worker ending
+   > mid-issue (turn boundary, error, your answer to its question) is recovered by ONE fresh dispatch
+   > with the resume context in the prompt — never by a continuation tool, never by restarting from scratch.
 4. When the worker returns its evidence block, **independently verify** from primary sources
    (never trust the claim). First read the worker's `dropped:` and `obsolete_closed:` lines and
    compute the **SURVIVING set** = batch members MINUS dropped MINUS obsolete-closed. Verify the ONE
@@ -225,26 +216,17 @@ Each loop turn:
    - `gh issue view <N> --json state` for EACH member: **surviving** → `closed`; **obsolete-closed**
      → `closed` (closed-with-evidence outside the PR, fine); **dropped** → `open` is CORRECT (it is
      re-dispatched solo next, not a failure)
-   Report the supervisor's verdict to the board **per member** — the run ids were minted inside the
-   worker, so resolve each from durable state by repo+issue (the reporter persists the repo#issue→run
-   map): `for N in <surviving members>; do python3 ~/devel/airuleset/airuleset.py report --repo <repo>
-   --issue "$N" --review supervisor-verify=ok|fail; done` (the report CLI resolves `--repo --issue` to
-   the started run). Dropped / obsolete members were already terminalized by the worker — do not
-   re-verdict them. Confirmed → ONE board milestone update naming all bundled issues
-   (`merged #A (topic) + #B (topic) → vX`) + one line per surviving issue to `docs/autopilot-log.md`.
-   > **The per-ticket Discord completion card is AUTOMATIC — you do NOT send it by hand.**
-   > It fires from `airuleset.py report` itself: when the WORKER reports the `merge` phase
-   > (`report --run <rid> --phase merge --pr <url> [--result "<what landed>"]`), `report` detaches a
-   > `notify --run-card` that gathers the issue title (🎯 Cieľ) + remaining backlog from gh, takes the
-   > worker's `--result` as ✅ Dosiahnuté, @mentions the tmux owner (zbynek/marek), and posts ONE Slovak
-   > card — deduped on the run id (one card per ticket, retries never double-post). Because the trigger
-   > lives in the `report` subprocess the worker already runs every phase, it works even for an
-   > /autopilot loop that STARTED BEFORE this feature (no restart). So the supervisor does NOT call
-   > `notify`; just ensure the worker reports `--phase merge` (it does) with a good `--result`. The
-   > short `❓`/`✅` idle ping stays suppressed (this loop turn ends `⏳ WORKING`).
-5. **Immediately assemble the next batch** — including right after a merge; re-report the planned
-   queue (`report --queue …`, see Step 1) so the board's "Up next" stays current. Do NOT stop to
-   report between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
+   Confirmed → one line per surviving issue to `docs/autopilot-log.md`.
+   > **The per-ticket Discord completion card is fired by the WORKER, directly at merge — you do NOT
+   > send it by hand.** The worker runs `airuleset.py notify --run-card --repo <owner/name> --issue
+   > <N> --pr <url> --achieved "<what landed>"` once its PR merges (one per member). `notify --run-card`
+   > gathers the issue title (🎯 Cieľ) + remaining backlog from gh, takes `--achieved` as ✅ Dosiahnuté,
+   > @mentions the tmux owner (zbynek/marek), and posts ONE Slovak card — deduped on repo-name#issue
+   > (one card per ticket, re-dispatches never double-post). So the supervisor does NOT call `notify`;
+   > just confirm the worker carded each merged member. The short `❓`/`✅` idle ping stays suppressed
+   > (this loop turn ends `⏳ WORKING`).
+5. **Immediately assemble the next batch** — including right after a merge. Do NOT stop to report
+   between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
 
 ## Step 4 — When to actually STOP (only these)
 
@@ -275,8 +257,8 @@ This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then
    on its verdict (same hybrid close policy as Step 1b):
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR this run resolved it, OR a passing
      repro proves it) → **auto-close** with the validator's evidence as the closing comment
-     (`gh issue close <N> --comment "<evidence — overcome by PR #M this run>"`), report it to the board
-     (reopenable in one click). This is the core ask: a skip / open ticket the run made moot gets closed.
+     (`gh issue close <N> --comment "<evidence — overcome by PR #M this run>"`) — reopenable in one
+     click. This is the core ask: a skip / open ticket the run made moot gets closed.
    - **PARTIAL** (the run did some of it; real work remains) → do NOT close. **Rescope it non-
      destructively:** `gh issue comment <N> --body "Reconciled at /autopilot end: PR #M did <X>;
      remaining scope is <Y>."` so the ticket reflects reality. Leave it open (and, if it was an
@@ -288,11 +270,7 @@ This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then
    touches prod/hardware (`approval-scope.md`) — closure is driven ONLY by the validator's overcome
    evidence, never by a ticket's subject. Closing/commenting is non-destructive tracking → no approval
    needed for hard-overcome; everything uncertain goes to the user.
-4. Report each closure to the board (`report --repo <r> --issue <N> --phase obsolete-closed --result
-   "<evidence>"`) so a card with a live run is finalized. A never-worked skip has no run, so that
-   report is a harmless no-op — once it's closed on GitHub the refresher prunes it from the board's
-   open/queue set anyway. Then write the final completion report — listing what the sweep closed /
-   rescoped / asked about.
+4. Then write the final completion report — listing what the sweep closed / rescoped / asked about.
 
 ## Watching & steering
 

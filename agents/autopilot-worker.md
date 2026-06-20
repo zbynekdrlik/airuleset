@@ -38,24 +38,18 @@ The questions you DO raise are genuine **design / decision** questions — never
 ones. (Only a genuinely-irreversible action — host reboot, data deletion, DB drop — is asked, at
 the command itself, never as a pre-emptive issue-level "prod/hardware-risky" classification.)
 
-**REPORTING (board — fire-and-forget, never blocks, never a reason to pause/ask):** As your FIRST
-action, start a run for **EACH** named issue (one per issue, even in a batch, so every member shows
-its own card): `RUN_N=$(python3 ~/devel/airuleset/airuleset.py report --start --repo <repo> --issue
-<N> --title "<issue title>" [--is-bug-fix] [--has-deploy] [--merge-mode auto|manual])`. `<repo>` MUST
-be the canonical **`owner/name`** (a bare name like `odoo-erp` is rejected) — get it once with
-`gh repo view --json nameWithOwner -q .nameWithOwner`. Keep the run ids in a list (e.g.
-`RUNS="$RUN_41 $RUN_43 $RUN_47"`). After each phase transition
-(validating→version-bump→implementing→RED→GREEN→CI→review→merge→deploy→done), report it to **ALL**
-the batch's runs (a solo issue is just a one-element list):
-`for R in $RUNS; do python3 ~/devel/airuleset/airuleset.py report --run "$R" --phase <p>
-[--goal/--approach/--result "..."] [--review <check>=ok|fail]; done`. The members move in lockstep
-(one shared PR/CI), so they share the same phase. It always exits 0 — if it fails, IGNORE it and
-continue. **At the `merge` phase, ALWAYS pass `--pr <url>` AND a one-line Slovak `--result "<what
-landed>"`** — the `merge` report automatically fires the per-ticket Discord completion card for the
-user (your `--result` becomes its ✅ Dosiahnuté; the issue title becomes 🎯 Cieľ). No manual notify
-call — reporting `--phase merge` IS what sends the card. Reporting must NEVER delay or interrupt the work or asking the user. The shared PR's body
-(`Closes #41`, `Closes #43`, `Closes #47`) lets the board credit every member on merge. Board:
-http://100.104.8.125:8787/
+**PER-TICKET DISCORD CARD (fired DIRECTLY at merge — fire-and-forget, never blocks, never a reason
+to pause/ask):** There is no board. After EACH ticket's PR merges, fire its Discord completion card
+DIRECTLY — one per issue, even in a batch, so every member gets its own card:
+`python3 ~/devel/airuleset/airuleset.py notify --run-card --repo <repo> --issue <N> --pr <url>
+--achieved "<one-line Slovak what landed>"`. `<repo>` MUST be the canonical **`owner/name`** (a bare
+name like `odoo-erp` is rejected) — get it once with `gh repo view --json nameWithOwner -q
+.nameWithOwner`. Your `--achieved` becomes the card's ✅ Dosiahnuté; the issue title (fetched from gh)
+becomes 🎯 Cieľ. For a BATCH, fire one card per member after the shared PR merges (loop over the
+members with each member's own `--issue` + `--achieved`). It always exits 0 and is deduped on
+repo-name#issue — if it fails, IGNORE it and continue. Firing the card must NEVER delay or interrupt
+the work or asking the user. The shared PR's body (`Closes #41`, `Closes #43`, `Closes #47`) closes
+every member on merge.
 
 ## READ FIRST (durable context — never skip)
 
@@ -71,11 +65,10 @@ tree, `git log`/merged PRs since the issue was created) AND reproduce LIVE with 
 (the running app, MCP tools, curl, SSH, a quick repro test). For a bug, the TDD RED test is the
 proof: if the reproducing test PASSES with no fix, the bug is already gone. If a named issue is
 already solved / obsolete / overcome / inaccurate → do NOT implement it; CLOSE or RESCOPE it WITH
-EVIDENCE (what you ran + observed). Report its board run to the terminal `obsolete-closed` phase
-(`report --run "$RUN_K" --phase obsolete-closed --result "<evidence>"`) and REMOVE `$RUN_K` from
-`$RUNS`. In a batch, drop that one member (do NOT add its `Closes #N` to the PR), note it on the
-evidence block's `obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after
-closing. Only confirmed-still-valid issues proceed to the cycle below.
+EVIDENCE (what you ran + observed) — `gh issue close <N> --comment "<evidence>"`. In a batch, drop
+that one member (do NOT add its `Closes #N` to the PR), note it on the evidence block's
+`obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after closing. Only
+confirmed-still-valid issues proceed to the cycle below.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
@@ -83,9 +76,8 @@ closing. Only confirmed-still-valid issues proceed to the cycle below.
    be a RE-DISPATCH of an earlier worker on this same issue (the supervisor cold-starts a fresh worker
    because `SendMessage` continuation isn't available by default — that's expected, not an error).
    Before doing anything, check for work already in flight for the named issue(s): an open PR
-   (`gh pr list --head dev --json number,title,body` — its body may already `Closes` some members),
-   commits already on `dev` since `main` (`git log origin/main..dev --oneline`), and existing board
-   runs (they resume automatically — you report against the same repo#issue). If the version is
+   (`gh pr list --head dev --json number,title,body` — its body may already `Closes` some members)
+   and commits already on `dev` since `main` (`git log origin/main..dev --oneline`). If the version is
    already bumped and some members are partially done, CONTINUE from there — do NOT re-bump or redo
    version-bump→RED, and do NOT re-do an already-committed member. Only on a truly fresh start do you
    **version bump FIRST** (`version-bumping.md`) before any feature code.
@@ -97,10 +89,7 @@ closing. Only confirmed-still-valid issues proceed to the cycle below.
    cross-cut work** (it actually fails the bundling gate): DROP it from this PR, leave its issue OPEN
    with a comment on what you found, finish the remaining members, and note the drop in your evidence
    block (`dropped:` line) — the supervisor re-dispatches it solo. Do NOT let one member's scope blow
-   up the batch. **Immediately terminalize its board run so it never shows as a false STALE card:**
-   `python3 ~/devel/airuleset/airuleset.py report --run "$RUN_K" --phase stopped --result "split out
-   of batch — gate violation, re-dispatched solo"` and REMOVE `$RUN_K` from `$RUNS` (so later lockstep
-   phase reports skip it). `stopped` is a terminal phase, so the orphaned run is finalized at once.
+   up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
 3. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
 4. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
@@ -112,12 +101,14 @@ closing. Only confirmed-still-valid issues proceed to the cycle below.
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
 6. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
-   Then monitor main CI + any deploy workflow to terminal.
+   Then monitor main CI + any deploy workflow to terminal. **Once the PR merges, fire the per-ticket
+   Discord card for EACH member** (`notify --run-card --repo <owner/name> --issue <N> --pr <url>
+   --achieved "<one-line Slovak what landed>"` — see the PER-TICKET DISCORD CARD note above).
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
-   the live app, read the version label from the DOM, exercise the changed feature. Report the deploy
-   to the board (no per-issue device ping — `milestone-notifications.md`); do NOT gate it on approval.
+   the live app, read the version label from the DOM, exercise the changed feature. No per-issue
+   device ping for the deploy itself (`milestone-notifications.md`); do NOT gate it on approval.
    **Only STOP and ask for** a genuinely destructive
    NON-deploy op (rebooting the HOST, stopping/killing a service or process OUTSIDE the deploy,
    deleting data / DB `DROP`/`DELETE`/`TRUNCATE`) or a project carrying the

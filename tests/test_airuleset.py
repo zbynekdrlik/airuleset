@@ -165,27 +165,27 @@ class TestAutopilotBatching(TestCase):
         self.assertIn("Closes #<n>", w)
         self.assertIn("push **once**", w)
 
-    def test_worker_starts_a_run_per_member(self):
-        # board credits each member only if each has its own run; the worker must
-        # start one run per named issue and report phases to all of them
+    def test_worker_cards_each_merged_member(self):
+        # The board is gone — the worker fires the per-ticket Discord card DIRECTLY
+        # at merge, one per member (each member's own --issue / --achieved).
         w = self._worker()
-        self.assertIn("start a run for **EACH** named issue", w)
-        self.assertIn("for R in $RUNS", w)
+        self.assertIn("notify --run-card", w)
+        self.assertIn("--repo", w)
+        self.assertIn("--issue", w)
+        self.assertIn("--achieved", w)
+        self.assertIn("PER-TICKET DISCORD CARD", w)
 
     def test_worker_drops_gate_violating_member(self):
         # a member that blows the gate mid-flight is dropped, not allowed to
         # bloat the whole batch
         self.assertIn("DROP it from this PR", self._worker())
 
-    def test_worker_terminalizes_dropped_run(self):
-        # a dropped / obsolete member's already-started board run MUST be moved to
-        # a terminal phase + removed from $RUNS, else it orphans into a false
-        # STALE card (the exact lie batching must not reintroduce)
+    def test_worker_dropped_member_gets_no_card(self):
+        # a dropped / obsolete member is simply not carded (no board run to
+        # terminalize); the evidence block still tracks it
         w = self._worker()
-        self.assertIn("--phase stopped", w)
-        self.assertIn("--phase obsolete-closed", w)
-        self.assertIn("REMOVE `$RUN_K` from `$RUNS`", w)
         self.assertIn("obsolete_closed:", w)
+        self.assertIn("dropped member simply gets no merge card", w)
 
     def test_skill_verify_scopes_to_surviving_set(self):
         # Step 4 must subtract dropped/obsolete members before asserting closed —
@@ -194,14 +194,14 @@ class TestAutopilotBatching(TestCase):
         self.assertIn("SURVIVING set", s)
         self.assertIn("NOT a verify failure", s)
 
-    def test_skill_resolves_member_verdict_by_repo_issue(self):
-        # the supervisor never sees the worker's minted run ids — it must resolve
-        # each member's run from durable state (repo+issue), per member. (Match on
-        # tokens robust to line-wrapping in the prose.)
+    def test_skill_card_fired_by_worker_at_merge(self):
+        # The board is gone — the per-ticket card is fired by the WORKER directly
+        # at merge (notify --run-card), NOT by a board report; the supervisor only
+        # confirms each merged member was carded.
         s = self._skill()
-        self.assertIn("report --repo <repo>", s)
-        self.assertIn('--issue "$N" --review supervisor-verify', s)
-        self.assertIn("for N in <surviving members>", s)
+        self.assertIn("notify --run-card", s)
+        self.assertIn("fired by the WORKER, directly at merge", s)
+        self.assertNotIn("supervisor-verify", s)
 
 
 class TestAutopilotEndOfRunSweep(TestCase):
@@ -294,7 +294,7 @@ class TestDiscordNotifyHooks(TestCase):
     def test_done_multiline_report_records(self):
         sid, p = self._sid()
         self._stop(sid, "## ✅ Work Complete\n\n**Goal:** ...\n\n"
-                        "✅ DONE: nasadené v1.2.3, board zelený")
+                        "✅ DONE: nasadené v1.2.3, CI zelené")
         self.assertTrue(os.path.exists(p))
         self.assertIn("✅", open(p).read())
         self.assertIn("nasadené v1.2.3", open(p).read())
@@ -326,7 +326,7 @@ class TestDiscordNotifyHooks(TestCase):
         sid, p = self._sid()
         self._stop(sid, "## ✅ Work Complete\n\n**What changed:** x\n\n"
                         "https://github.com/o/x/pull/5 — merged abc1234\n\n"
-                        "✅ DONE: nasadené v1.2.3, board zelený")
+                        "✅ DONE: nasadené v1.2.3, CI zelené")
         self.assertTrue(os.path.exists(p), "default-auto report recorded nothing")
         self.assertIn("nasadené v1.2.3", open(p).read())
 
@@ -858,7 +858,6 @@ class TestHookScriptsExist(TestCase):
             "stop-check-status-marker.sh",
             "stop-check-prod-gating.sh",
             "stop-check-sendmessage-narration.sh",
-            "autopilot-report.sh",
             "notify-discord-pending.sh",
             "notify-discord.sh",
             "pre-push-base-sync.sh",
@@ -1696,439 +1695,6 @@ class TestPreAskAutoAnswerMergeQuestions(TestCase):
         self.assertEqual(r.returncode, 0)
 
 
-class TestBoardHost(TestCase):
-    """Autopilot Board host detection + report/board subcommand registration
-    (plan Task 13)."""
-
-    def test_is_board_host_helper_exists_and_returns_bool(self):
-        self.assertTrue(hasattr(airuleset, "is_board_host"))
-        self.assertIsInstance(airuleset.is_board_host(), bool)
-
-    def test_board_host_ip_constant(self):
-        # Default board host IP = dev1's TAILSCALE IP (stable across LAN switches;
-        # env BOARD_HOST may override at runtime). See #1 (was 10.77.9.21).
-        self.assertEqual(airuleset.BOARD_HOST_IP,
-                         os.getenv("BOARD_HOST", "100.104.8.125"))
-
-    def test_report_and_board_subcommands_registered(self):
-        self.assertIn("report", airuleset.SUBCOMMANDS)
-        self.assertIn("board", airuleset.SUBCOMMANDS)
-        # They must be callables (the dispatch target).
-        self.assertTrue(callable(airuleset.SUBCOMMANDS["report"]))
-        self.assertTrue(callable(airuleset.SUBCOMMANDS["board"]))
-
-    def test_is_board_host_false_when_ip_not_local(self):
-        import unittest.mock as m
-        # An IP that is definitely not one of our interfaces → not the board host.
-        with m.patch.object(airuleset, "BOARD_HOST_IP", "203.0.113.7"):
-            with m.patch.object(airuleset, "_local_ips",
-                                return_value={"10.0.0.5", "127.0.0.1"}):
-                self.assertFalse(airuleset.is_board_host())
-
-    def test_is_board_host_true_when_ip_local(self):
-        import unittest.mock as m
-        with m.patch.object(airuleset, "BOARD_HOST_IP", "100.104.8.125"):
-            with m.patch.object(airuleset, "_local_ips",
-                                return_value={"100.104.8.125", "127.0.1.1"}):
-                self.assertTrue(airuleset.is_board_host())
-
-
-class TestInstallBranch(TestCase):
-    """maybe_setup_board() gates setup_board_service() on is_board_host()
-    (plan Task 14)."""
-
-    def test_service_setup_skipped_off_board_host(self):
-        import unittest.mock as m
-        with m.patch.object(airuleset, "is_board_host", return_value=False):
-            calls = []
-            with m.patch.object(airuleset, "setup_board_service",
-                                side_effect=lambda *a, **k: calls.append(1)):
-                with m.patch.object(airuleset.Path, "mkdir"):
-                    airuleset.maybe_setup_board()
-            self.assertEqual(calls, [], "must NOT set up the service off the board host")
-
-    def test_service_setup_runs_on_board_host(self):
-        import unittest.mock as m
-        with m.patch.object(airuleset, "is_board_host", return_value=True):
-            calls = []
-            with m.patch.object(airuleset, "setup_board_service",
-                                side_effect=lambda *a, **k: calls.append(1)):
-                airuleset.maybe_setup_board()
-            self.assertEqual(calls, [1], "must set up the service on the board host")
-
-
-class TestBoardServiceTemplate(TestCase):
-    """The systemd --user unit template ships with the required directives
-    (plan Task 14)."""
-
-    TEMPLATE = airuleset.REPO_DIR / "settings" / "autopilot-board.service.template"
-
-    def test_template_exists(self):
-        self.assertTrue(self.TEMPLATE.exists(), f"Missing: {self.TEMPLATE}")
-
-    def test_template_execstart_and_placeholder(self):
-        text = self.TEMPLATE.read_text()
-        self.assertIn("{{REPO_DIR}}", text, "must carry the repo-path placeholder")
-        self.assertIn("board --serve", text, "ExecStart must run `board --serve`")
-        self.assertIn("ExecStart=", text)
-
-    def test_template_hardening_directives(self):
-        text = self.TEMPLATE.read_text()
-        for directive in [
-            "NoNewPrivileges=yes",
-            "ProtectSystem=strict",
-            "ReadWritePaths=%h/.claude",
-            "ProtectHome=read-only",
-            "PrivateTmp=yes",
-            "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
-            "MemoryMax=512M",
-            "TasksMax=64",
-            "Restart=on-failure",
-            "RestartSec=5",
-            "StartLimitBurst=5",
-        ]:
-            self.assertIn(directive, text, f"missing hardening directive: {directive}")
-
-    def test_template_install_section(self):
-        text = self.TEMPLATE.read_text()
-        self.assertIn("WantedBy=default.target", text)
-
-    def test_render_substitutes_repo_dir(self):
-        rendered = airuleset._render_service_unit()
-        self.assertNotIn("{{REPO_DIR}}", rendered, "placeholder must be substituted")
-        self.assertIn(str(airuleset.REPO_DIR), rendered)
-
-
-class TestPushRunsTests(TestCase):
-    """cmd_push runs the test suite FIRST and aborts the push on failure
-    (fail-closed — plan Task 14)."""
-
-    def test_push_aborts_when_tests_fail(self):
-        import unittest.mock as m
-
-        # First subprocess.run is the unittest discover — make it fail (rc=1).
-        # If the push proceeded, a second subprocess.run (git push) would fire;
-        # we assert it does NOT, and that cmd_push raises SystemExit(1).
-        test_run = m.Mock(returncode=1)
-        runner = m.Mock(side_effect=[test_run])
-
-        with m.patch("subprocess.run", runner):
-            with self.assertRaises(SystemExit) as ctx:
-                airuleset.cmd_push(m.Mock())
-
-        self.assertEqual(ctx.exception.code, 1)
-        # Exactly ONE subprocess.run call (the test run) — no git push attempted.
-        self.assertEqual(runner.call_count, 1, "push must not run after failing tests")
-        called_args = runner.call_args_list[0].args[0]
-        self.assertIn("unittest", called_args, "first call must be the test suite")
-        self.assertNotIn("git", called_args)
-
-    def test_push_runs_tests_before_pushing(self):
-        import unittest.mock as m
-
-        # Tests pass (rc=0); the git push then fails (rc=1) so cmd_push exits 1
-        # BEFORE touching dev2 — but crucially the FIRST call must be the test run.
-        test_run = m.Mock(returncode=0, stdout="", stderr="")
-        push_run = m.Mock(returncode=1, stdout="", stderr="push rejected")
-        runner = m.Mock(side_effect=[test_run, push_run])
-
-        with m.patch("subprocess.run", runner):
-            with self.assertRaises(SystemExit):
-                airuleset.cmd_push(m.Mock())
-
-        self.assertGreaterEqual(runner.call_count, 2)
-        first_call = runner.call_args_list[0].args[0]
-        self.assertIn("unittest", first_call, "tests must run before the push")
-        second_call = runner.call_args_list[1].args[0]
-        self.assertIn("git", second_call, "second call is the git push")
-
-
-class TestValidateBoard(TestCase):
-    """cmd_validate asserts the board modules import + the service template exists
-    (plan Task 14)."""
-
-    def test_validate_board_clean(self):
-        # On a healthy tree, _validate_board returns no errors.
-        self.assertEqual(airuleset._validate_board(), [])
-
-    def test_validate_board_reports_missing_template(self):
-        import unittest.mock as m
-        fake = airuleset.REPO_DIR / "settings" / "does-not-exist.service.template"
-        with m.patch.object(airuleset, "BOARD_SERVICE_TEMPLATE", fake):
-            errors = airuleset._validate_board()
-        self.assertTrue(any("service template" in e for e in errors), errors)
-
-
-class TestMonitoredReposDiscovery(TestCase):
-    """_monitored_repos() merges BOARD_REPOS env with board.distinct_repos() so
-    the refresher activates as soon as any worker reports — no config needed."""
-
-    def test_env_only_when_db_empty(self):
-        import unittest.mock as m
-        with m.patch.dict(os.environ, {"BOARD_REPOS": "o/a,o/b"}):
-            repos = airuleset._monitored_repos()
-        self.assertIn("o/a", repos)
-        self.assertIn("o/b", repos)
-
-    def test_empty_env_returns_empty_when_no_db(self):
-        import unittest.mock as m
-        with m.patch.dict(os.environ, {"BOARD_REPOS": ""}, clear=False):
-            repos = airuleset._monitored_repos()
-        # Without a board DB path we can't assert DB repos, but the call must
-        # not raise and must return a list.
-        self.assertIsInstance(repos, list)
-
-    def test_discovered_repos_union_env_repos(self):
-        """If a run for o/x is in the DB and BOARD_REPOS has o/y, both appear."""
-        import unittest.mock as m
-        import tempfile
-        from board.db import Board
-        d = tempfile.mkdtemp()
-        db_path = os.path.join(d, "board.sqlite")
-        b = Board(db_path)
-        b.apply_event({"run_id": "o_x-1-1-abcd", "repo": "o/x", "issue": 1,
-                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
-        with m.patch.object(airuleset, "BOARD_DB_PATH",
-                             airuleset.Path(db_path)):
-            with m.patch.dict(os.environ, {"BOARD_REPOS": "o/y"}):
-                repos = airuleset._monitored_repos()
-        self.assertIn("o/x", repos)
-        self.assertIn("o/y", repos)
-
-    def test_invalid_db_repo_filtered_out(self):
-        """Repos from the DB that fail valid_repo() are dropped silently."""
-        import unittest.mock as m
-        import tempfile
-        from board.db import Board
-        d = tempfile.mkdtemp()
-        db_path = os.path.join(d, "board.sqlite")
-        b = Board(db_path)
-        # Directly insert a bad repo string bypassing apply_event validation.
-        c = b.conn()
-        c.execute("INSERT INTO runs(run_id, repo, seq) VALUES('r1','bad;repo',0)")
-        c.commit()
-        c.close()
-        with m.patch.object(airuleset, "BOARD_DB_PATH",
-                             airuleset.Path(db_path)):
-            with m.patch.dict(os.environ, {"BOARD_REPOS": ""}):
-                repos = airuleset._monitored_repos()
-        self.assertNotIn("bad;repo", repos)
-
-    def test_deduplication(self):
-        """A repo in both BOARD_REPOS and the DB appears only once."""
-        import unittest.mock as m
-        import tempfile
-        from board.db import Board
-        d = tempfile.mkdtemp()
-        db_path = os.path.join(d, "board.sqlite")
-        b = Board(db_path)
-        b.apply_event({"run_id": "o_x-1-1-aa", "repo": "o/x", "issue": 1,
-                       "seq": 1, "event_id": "e1", "event_ts": 1.0})
-        with m.patch.object(airuleset, "BOARD_DB_PATH",
-                             airuleset.Path(db_path)):
-            with m.patch.dict(os.environ, {"BOARD_REPOS": "o/x"}):
-                repos = airuleset._monitored_repos()
-        self.assertEqual(repos.count("o/x"), 1)
-
-
-class TestAtomicBoardToken(TestCase):
-    """_ensure_board_token creates the file 0600 atomically (O_EXCL), no
-    world/group-readable window."""
-
-    def test_creates_token_with_0600_permissions(self):
-        import unittest.mock as m
-        import tempfile
-        d = tempfile.mkdtemp()
-        token_path = airuleset.Path(d) / "board_token"
-        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
-            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
-                tok = airuleset._ensure_board_token()
-        self.assertTrue(token_path.exists())
-        self.assertEqual(oct(os.stat(token_path).st_mode & 0o777), oct(0o600))
-        self.assertTrue(tok)
-
-    def test_reuses_existing_token(self):
-        import unittest.mock as m
-        import tempfile
-        d = tempfile.mkdtemp()
-        token_path = airuleset.Path(d) / "board_token"
-        # Write a pre-existing token atomically.
-        fd = os.open(str(token_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
-        os.write(fd, b"existing-token-value")
-        os.close(fd)
-        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
-            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
-                tok = airuleset._ensure_board_token()
-        self.assertEqual(tok, "existing-token-value")
-
-    def test_race_file_exists_reuses_winner_token(self):
-        """FileExistsError from concurrent creation → reuse the existing token.
-
-        Simulates the race by patching os.open to raise FileExistsError on the
-        first call (token file didn't exist at the fast-path check but another
-        process won the race before our O_EXCL open). The winner's token must
-        be returned via the read_text() fallback."""
-        import unittest.mock as m
-        import tempfile
-        d = tempfile.mkdtemp()
-        token_path = airuleset.Path(d) / "board_token"
-        # Pre-create the winner's token (what the 'winner' process wrote).
-        fd = os.open(str(token_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
-        os.write(fd, b"winner-token")
-        os.close(fd)
-
-        real_os_open = os.open
-        open_calls = [0]
-
-        def patched_os_open(path, flags, mode=0o777, *a, **kw):
-            open_calls[0] += 1
-            # First open call targeting our token path: simulate the race loss
-            if open_calls[0] == 1 and str(path) == str(token_path):
-                raise FileExistsError("simulated race")
-            return real_os_open(path, flags, mode, *a, **kw)
-
-        with m.patch.object(airuleset, "BOARD_TOKEN_PATH", token_path):
-            with m.patch.object(airuleset, "CLAUDE_DIR", airuleset.Path(d)):
-                # fast-path exists() → returns False (file "appears" absent to us)
-                with m.patch.object(token_path.__class__, "exists",
-                                    lambda self: False
-                                    if self == token_path and open_calls[0] == 0
-                                    else airuleset.Path.exists(self)):
-                    with m.patch("os.open", patched_os_open):
-                        tok = airuleset._ensure_board_token()
-        self.assertEqual(tok, "winner-token")
-
-
-class TestReportCommand(TestCase):
-    """cmd_report is a thin, crash-proof wrapper over board.reporter (plan Task 13)."""
-
-    def test_report_start_prints_run_id(self):
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=True, repo="o/x", issue=1, title="t",
-                      is_bug_fix=False, has_deploy=False, merge_mode="auto")
-        with m.patch.object(reporter, "start_run", return_value="o_x-1-99-abcd") as sr:
-            with m.patch("builtins.print") as pr:
-                airuleset.cmd_report(args)
-        sr.assert_called_once()
-        # The run_id is printed to stdout (the worker captures it).
-        printed = " ".join(str(c.args[0]) for c in pr.call_args_list if c.args)
-        self.assertIn("o_x-1-99-abcd", printed)
-
-    def test_report_phase_routes_to_reporter(self):
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
-                      run="o_x-1-99-abcd", phase="CI", goal=None, approach=None,
-                      result=None, note=None, pr=None, review=None)
-        with m.patch.object(reporter, "report") as rep:
-            airuleset.cmd_report(args)
-        rep.assert_called_once()
-        # phase passed through; run_id is the first positional arg.
-        self.assertEqual(rep.call_args.args[0], "o_x-1-99-abcd")
-        self.assertEqual(rep.call_args.kwargs.get("phase"), "CI")
-
-    def test_report_resolves_run_from_repo_issue(self):
-        # No --run: resolve the run_id from --repo/--issue (the worker's $RUN
-        # shell var does not survive across separate `report` invocations).
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
-                      run=None, repo="o/x", issue=5, phase="CI", goal=None,
-                      approach=None, result=None, note=None, pr=None, review=None)
-        with m.patch.object(reporter, "current_run", return_value="o_x-5-1-aa") as cr:
-            with m.patch.object(reporter, "report") as rep:
-                airuleset.cmd_report(args)
-        cr.assert_called_once_with("o/x", 5)
-        self.assertEqual(rep.call_args.args[0], "o_x-5-1-aa")
-        # repo/issue carried on the event so the board row is never NULL
-        self.assertEqual(rep.call_args.kwargs.get("repo"), "o/x")
-        self.assertEqual(rep.call_args.kwargs.get("issue"), 5)
-
-    def test_report_recovers_repo_issue_from_run_id(self):
-        # --run given but no --repo/--issue: recover them from the persisted map
-        # so the mid-run event carries repo/issue (no NULL/unjoinable row).
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
-                      run="o_x-9-1-bb", repo=None, issue=None, phase="merge",
-                      goal=None, approach=None, result=None, note=None, pr=None,
-                      review=None)
-        with m.patch.object(reporter, "run_to_repo_issue", return_value=("o/x", 9)):
-            with m.patch.object(reporter, "report") as rep:
-                airuleset.cmd_report(args)
-        self.assertEqual(rep.call_args.kwargs.get("repo"), "o/x")
-        self.assertEqual(rep.call_args.kwargs.get("issue"), 9)
-
-    def test_report_review_parsing(self):
-        # k=v review flags become (check, state) pairs; malformed are dropped.
-        pairs = airuleset._parse_reviews(["review=ok", "bad", "plan_check=fail"])
-        self.assertIn(("review", "ok"), pairs)
-        self.assertIn(("plan_check", "fail"), pairs)
-        self.assertNotIn("bad", [p[0] for p in pairs])
-
-    def test_report_never_raises_on_bad_items(self):
-        import unittest.mock as m
-        args = m.Mock(start=False, queue=True, selftest=False,
-                      repo="o/x", items="{not valid json")
-        # Must not raise — a malformed --items is reported to stderr, not crashed.
-        airuleset.cmd_report(args)
-
-
-class TestAutopilotReportHook(TestCase):
-    """hooks/autopilot-report.sh — a Stop hook that emits a skeleton heartbeat for
-    the current autopilot run. It MUST be a pure no-op without AUTOPILOT_RUN, and
-    MUST exit 0 even when AUTOPILOT_RUN is set and the board is unreachable
-    (fire-and-forget: it backgrounds the report and never blocks the Stop event)."""
-
-    HOOK = airuleset.REPO_DIR / "hooks" / "autopilot-report.sh"
-
-    def _run(self, env_overrides):
-        # Start from a clean env (no AUTOPILOT_RUN leaking from the test runner),
-        # keep PATH so python3 + the repo resolve. ISOLATE HOME to a temp dir so
-        # the hook's reporter writes its seq/offline-queue under <tmp>/.claude —
-        # NEVER the real ~/.claude. Otherwise the queued test event later flushes
-        # to the PRODUCTION board (the o_x-1-99-abcd pollution).
-        env = dict(os.environ)
-        env.pop("AUTOPILOT_RUN", None)
-        env.pop("AUTOPILOT_PHASE", None)
-        env["HOME"] = tempfile.mkdtemp()
-        env.update(env_overrides)
-        return subprocess.run(
-            ["bash", str(self.HOOK)],
-            text=True,
-            capture_output=True,
-            env=env,
-            timeout=20,
-        )
-
-    def test_noop_without_autopilot_run(self):
-        # No AUTOPILOT_RUN -> exit 0, no output, no report attempted.
-        r = self._run({})
-        self.assertEqual(r.returncode, 0, f"hook must exit 0 as a no-op: {r.stderr}")
-        self.assertEqual(r.stdout.strip(), "")
-
-    def test_exit_zero_with_run_even_when_board_unreachable(self):
-        # AUTOPILOT_RUN set + board pointed at an unreachable host -> still exit 0.
-        # The report is backgrounded and the reporter swallows the connection error;
-        # the Stop hook must never block or fail because of a board outage.
-        r = self._run({"AUTOPILOT_RUN": "o_x-1-99-abcd", "BOARD_HOST": "127.0.0.1"})
-        self.assertEqual(r.returncode, 0,
-                         f"hook must exit 0 with a run set even if board is down: {r.stderr}")
-
-    def test_exit_zero_with_run_and_phase(self):
-        # AUTOPILOT_PHASE is optional context; the hook must still exit 0.
-        r = self._run({"AUTOPILOT_RUN": "o_x-1-99-abcd",
-                       "AUTOPILOT_PHASE": "implementing",
-                       "BOARD_HOST": "127.0.0.1"})
-        self.assertEqual(r.returncode, 0,
-                         f"hook must exit 0 with run+phase set: {r.stderr}")
-
-
-if __name__ == "__main__":
-    main()
-
-
 class TestSendMessageNarrationHook(TestCase):
     """hooks/stop-check-sendmessage-narration.sh — blocks the "SendMessage isn't
     available here, so I'll dispatch a fresh worker" narration (subagent-
@@ -2435,49 +2001,12 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("ostáva 5", card)
         self.assertNotIn("hotové", card)
 
-    def test_report_merge_phase_triggers_card(self):
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
-                      run="o_x-5-1-aa", repo="o/x", issue=5, phase="merge",
-                      goal=None, approach=None, result="hotovo", note=None,
-                      pr="https://h/pull/9", review=None)
-        with m.patch.object(reporter, "report"):
-            with m.patch.object(airuleset, "_spawn_merge_card") as sp:
-                airuleset.cmd_report(args)
-        sp.assert_called_once()
-        self.assertEqual(sp.call_args.args[0], "o_x-5-1-aa")  # rid passed through
-
-    def test_report_nonmerge_phase_no_card(self):
-        import unittest.mock as m
-        from board import reporter
-        args = m.Mock(start=False, queue=False, selftest=False, heartbeat=False,
-                      run="o_x-5-1-aa", repo="o/x", issue=5, phase="CI",
-                      goal=None, approach=None, result=None, note=None, pr=None,
-                      review=None)
-        with m.patch.object(reporter, "report"):
-            with m.patch.object(airuleset, "_spawn_merge_card") as sp:
-                airuleset.cmd_report(args)
-        sp.assert_not_called()
-
-    def test_spawn_merge_card_builds_run_card_popen(self):
-        import subprocess
-        import unittest.mock as m
-        args = m.Mock(pr="https://github.com/o/x/pull/783", result="landed it")
-        # stub resolve_owner so it doesn't shell out (subprocess.run uses Popen too)
-        with m.patch("notify.resolve_owner", return_value="zbynek"):
-            with m.patch.object(subprocess, "Popen") as pop:
-                airuleset._spawn_merge_card("rid-1", "o/x", 5, args)
-        pop.assert_called_once()
-        cmd = pop.call_args.args[0]
-        for tok in ("notify", "--run-card", "--run", "rid-1", "--repo", "o/x",
-                    "--issue", "5", "--achieved"):
-            self.assertIn(tok, cmd)
-
     def test_run_card_gathers_title_and_backlog_then_sends(self):
+        # The worker fires `notify --run-card --repo --issue` directly at merge —
+        # repo + issue are passed explicitly (no board run_id fallback).
         import unittest.mock as m
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                      body=None, run="rid", repo="o/x", issue=5,
+                      body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       version=None, merge_sha=None, review="ok", dedup_key=None,
                       dry_run=False)
@@ -2504,8 +2033,9 @@ class TestDiscordAutopilotNotify(TestCase):
 
     def test_run_card_dedup_survives_redispatch(self):
         # The recurring duplicate bug: /autopilot re-dispatches a fresh worker each
-        # turn → NEW run id each time. Dedup must key on repo-name#issue so the SAME
-        # issue is carded once regardless of run-id churn AND bare-vs-full repo.
+        # turn, so the same issue can be carded twice. Dedup must key on
+        # repo-name#issue so the SAME issue is carded once, regardless of bare-vs-full
+        # repo form.
         import unittest.mock as m
         keys = []
 
@@ -2513,17 +2043,17 @@ class TestDiscordAutopilotNotify(TestCase):
             keys.append(k.get("dedup_key"))
             return "sent"
 
-        def mk(run, repo):
+        def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                          body=None, run=run, repo=repo, issue=606, pr=None,
+                          body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, version=None, merge_sha=None,
                           review="ok", dedup_key=None, dry_run=False)
 
         with m.patch.object(airuleset, "_gh_out",
                             side_effect=lambda *a, **k: "T" if "view" in a else "3"):
             with m.patch("notify.send", side_effect=fake_send):
-                airuleset.cmd_notify(mk("odoo_erp-606-111-aa", "zbynekdrlik/odoo-erp"))
-                airuleset.cmd_notify(mk("odoo_erp-606-222-bb", "odoo-erp"))  # re-dispatch, bare repo
+                airuleset.cmd_notify(mk("zbynekdrlik/odoo-erp"))
+                airuleset.cmd_notify(mk("odoo-erp"))  # re-dispatch, bare repo
         self.assertEqual(keys, ["odoo-erp#606", "odoo-erp#606"])  # identical key both times
 
     def test_send_error_keeps_dedup_claim(self):

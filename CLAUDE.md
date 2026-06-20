@@ -6,10 +6,6 @@ This is the airuleset repository: a Claude Code configuration management system.
 
 Centralized management of Claude Code rules, skills, and hooks shared across multiple projects. Uses native `@import` syntax in CLAUDE.md for zero-build-step module loading.
 
-## Dashboards
-
-- **Autopilot Board** — `http://100.104.8.125:8787/` — live autopilot tickets, the review-gate audit, and the planned "Up next" queue (workers self-report each phase; the supervisor reports the queue + verify verdicts).
-
 ## Services
 
 - **File-Drop** (`filedrop/` package, `:8788`) — serves user-facing files as clickable LAN URLs so the user (no direct FS access) can open them. `python3 airuleset.py share <file>` → `http://<lan-ip>:8788/<token>/<name>`. systemd `--user` service on BOTH machines (each binds its own LAN IP, baked into the unit at install). Read-only static server; per-file token = the link's auth. Governs via `modules/core/deliver-files-as-urls.md`.
