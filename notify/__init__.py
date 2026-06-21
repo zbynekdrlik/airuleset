@@ -132,11 +132,13 @@ def _plural_done(n):
 
 
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
-                           review_ok=True, done=None, remaining=None):
+                           review_ok=True, done=None, remaining=None, urls=None):
     """Build the canonical per-ticket completion card (Slovak, Discord markdown).
 
-    `tickets` is a list of dicts {n, title, goal, achieved}. Structure is fixed
-    here so every card is consistent regardless of who calls it. No @mention here —
+    `tickets` is a list of dicts {n, title, goal, achieved}. `pr` is the PR URL
+    (a clickable "kód (PR)" link). `urls` is a list of "where to see it" links —
+    each a bare URL or "Label=URL" (e.g. "Prod=https://…"). Structure is fixed here
+    so every card is consistent regardless of who calls it. No @mention here —
     send() prepends it."""
     tickets = tickets or []
     # Show only the repo NAME (last path segment), not "owner/name": the @mention
@@ -169,6 +171,24 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     if merge_sha:
         deploy.append("`%s`" % _clean(str(merge_sha))[:12])
     lines.append("📦 " + (" · ".join(deploy) if deploy else "zmergnuté"))
+
+    # 🔗 links — click through to the CODE (PR) and to SEE the change LIVE. The PR
+    # is a clickable "kód (PR)" link (the number was dropped, the link kept). Each
+    # `urls` entry is a bare URL ("pozri naživo") or "Label=URL" (e.g. "Prod=…").
+    links = []
+    pr_url = _clean(pr)
+    if pr_url.startswith("http"):
+        links.append("[kód (PR)](%s)" % pr_url)
+    for raw in (urls or []):
+        entry = _clean(raw)
+        label, sep, url = entry.partition("=")
+        if not sep:
+            label, url = "pozri naživo", entry
+        url = url.strip()
+        if url.startswith("http"):
+            links.append("[%s](%s)" % (label.strip() or "pozri naživo", url))
+    if links:
+        lines.append("🔗 " + " · ".join(links))
 
     if remaining is not None:
         try:

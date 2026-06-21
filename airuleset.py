@@ -967,7 +967,6 @@ def _notify_run_card(args, compose_autopilot_card, send):
     <url> --achieved "<slovak>"`), so it runs in the worker's context (gh auth,
     tmux owner, the channel .env). REQUIRES --repo + --issue. Best-effort, never
     raises."""
-    import re as _re
     try:
         repo = getattr(args, "repo", None)
         issue = getattr(args, "issue", None)
@@ -984,25 +983,20 @@ def _notify_run_card(args, compose_autopilot_card, send):
         except (TypeError, ValueError):
             remaining = None
 
-        # --pr may arrive as a full PR URL (the report field is a URL) — show the
-        # number only.
-        pr = getattr(args, "pr", None)
-        if pr:
-            m = _re.search(r"(\d+)\s*$", str(pr))
-            pr = m.group(1) if m else None
-
         achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
         # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable); the
         # technical gh issue title is only the fallback when --goal is omitted.
         goal = getattr(args, "goal", None) or title
+        # --pr is the full PR URL → a clickable "kód (PR)" link (the number was
+        # dropped, the link kept). --url = "where to see it live" link(s).
         body = compose_autopilot_card(
             repo=repo,
             tickets=[{"n": issue, "title": title, "goal": goal,
                       "achieved": achieved or "PR zmergnutý, deploy beží"}],
-            pr=pr, version=getattr(args, "version", None),
+            pr=getattr(args, "pr", None), version=getattr(args, "version", None),
             merge_sha=getattr(args, "merge_sha", None),
             review_ok=(getattr(args, "review", "ok") != "fail"),
-            done=None, remaining=remaining)
+            done=None, remaining=remaining, urls=getattr(args, "url", None))
         # Dedup on the REPO-NAME#ISSUE — the stable unit. /autopilot re-dispatches a
         # fresh worker each turn (SendMessage is gated), so the same issue can be
         # carded more than once; keying on repo-name#issue collapses those to one.
@@ -1213,7 +1207,10 @@ def main():
                                          "simple/understandable, NOT the technical issue title")
     p_notify.add_argument("--body", help="Arbitrary markdown body to send")
     p_notify.add_argument("--repo", help="owner/name (autopilot card)")
-    p_notify.add_argument("--pr", help="Shared PR number (autopilot card)")
+    p_notify.add_argument("--pr", help="PR URL → clickable 'kód (PR)' link on the card")
+    p_notify.add_argument("--url", action="append",
+                          help="'Where to see it live' link for the card — a bare URL "
+                               "or 'Label=URL' (e.g. 'Prod=https://…'); repeatable")
     p_notify.add_argument("--merge-sha", dest="merge_sha", help="Merge commit SHA")
     p_notify.add_argument("--version", help="Deployed version read from the DOM")
     p_notify.add_argument("--review", choices=["ok", "fail"], default="ok",

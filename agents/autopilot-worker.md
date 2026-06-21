@@ -43,9 +43,16 @@ to pause/ask):** There is no board. After EACH ticket's PR merges AND its deploy
 have the deployed version), fire its Discord completion card DIRECTLY — one per issue, even in a
 batch, so every member gets its own card:
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --repo <repo> --issue <N>
---goal "<plain goal>" --achieved "<plain what landed>" --version "<deployed version>"`. `<repo>` MUST
+--goal "<plain goal>" --achieved "<plain what landed>" --version "<deployed version>"
+--pr <PR url> --url "<live app url where the change is visible>"`. `<repo>` MUST
 be the canonical **`owner/name`** (a bare name like `odoo-erp` is rejected) — get it once with `gh repo
 view --json nameWithOwner -q .nameWithOwner`.
+**`--pr` + `--url` are the click-through links** so the user can SEE what landed: `--pr` is the full PR
+URL (the card shows a clickable "kód (PR)" — the diff/code), and `--url` is the **user-clickable web URL
+where the change is visible live** (the dashboard you opened during post-deploy verification — the same
+🌐 URL the completion report uses, NOT a backend/API URL). Pass `--url` once per surface, optionally
+labeled `"Prod=https://…"` / `"Dev=https://…"`; repeat the flag for more than one. Omit `--url` only for
+a project with no user-facing web surface (a pure CLI/lib) — then the PR link alone is fine.
 **`--goal` and `--achieved` must be PLAIN, SIMPLE, NON-TECHNICAL Slovak** — the card is read on a phone.
 The card header is just `🎫 #N` (no title), so `--goal` IS the only goal text shown. Do NOT paste the
 technical issue title; translate it into one short understandable sentence of WHAT the ticket wanted,
@@ -114,8 +121,9 @@ confirmed-still-valid issues proceed to the cycle below.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
    member AFTER post-deploy verification (step 7), so its 📦 line carries the deployed version you
    read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --goal "<plain goal>"
-   --achieved "<plain what landed>" --version "<version read in step 7>"` — `--goal`/`--achieved` PLAIN
-   non-technical Slovak, see the PER-TICKET DISCORD CARD note above).
+   --achieved "<plain what landed>" --version "<version read in step 7>" --pr <PR url> --url "<live app
+   url>"` — `--goal`/`--achieved` PLAIN non-technical Slovak; `--pr`/`--url` are the click-through links
+   to the code + the live change; see the PER-TICKET DISCORD CARD note above).
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open

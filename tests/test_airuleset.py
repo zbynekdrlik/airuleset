@@ -1976,6 +1976,19 @@ class TestDiscordAutopilotNotify(TestCase):
         # remaining 0 → backlog-empty flourish still present
         self.assertIn("backlog prázdny", card)
 
+    def test_card_links_pr_and_live_url(self):
+        # 🔗 line: clickable PR (the code) + "where to see it live" url(s)
+        card = self.notify.compose_autopilot_card(
+            repo="o/x", pr="https://github.com/o/x/pull/12",
+            urls=["https://app.x.sk", "Prod=https://prod.x.sk"],
+            tickets=[{"n": 1, "goal": "g", "achieved": "a"}])
+        self.assertIn("🔗", card)
+        self.assertIn("[kód (PR)](https://github.com/o/x/pull/12)", card)
+        self.assertIn("[pozri naživo](https://app.x.sk)", card)   # bare url → default label
+        self.assertIn("[Prod](https://prod.x.sk)", card)          # Label=URL
+        # no pr / no urls → no 🔗 line at all
+        self.assertNotIn("🔗", self.notify.compose_autopilot_card(repo="o/x", tickets=[{"n": 1}]))
+
     def test_card_plural_vs_singular(self):
         one = self.notify.compose_autopilot_card(
             repo="o/x", tickets=[{"n": 1}])
@@ -2067,7 +2080,8 @@ class TestDiscordAutopilotNotify(TestCase):
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
-                      review="ok", dedup_key=None, dry_run=False)
+                      url=["Prod=https://montalu.sk/dash"], review="ok",
+                      dedup_key=None, dry_run=False)
         captured = {}
 
         def fake_gh(*a, **k):
@@ -2088,7 +2102,10 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertNotIn("Real Issue Title", b)
         self.assertIn("✅ **Dosiahnuté:** did the thing", b)
         self.assertIn("nasadené **v9.9.9**", b)   # deployed version on the 📦 line
-        self.assertNotIn("PR #", b)               # PR number removed
+        self.assertNotIn("PR #", b)               # bare PR number removed
+        # 🔗 click-through links: PR as a clickable link + the live "where to see it" url
+        self.assertIn("[kód (PR)](https://h/pull/9)", b)
+        self.assertIn("[Prod](https://montalu.sk/dash)", b)
         self.assertIn("ostáva 7", b)
         # dedup on repo-NAME#issue (stable), NOT the run id
         self.assertEqual(captured["dedup"], "x#5")
@@ -2108,8 +2125,9 @@ class TestDiscordAutopilotNotify(TestCase):
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
-                          achieved="a", result=None, version=None, merge_sha=None,
-                          review="ok", dedup_key=None, dry_run=False)
+                          achieved="a", result=None, goal="g", version=None,
+                          merge_sha=None, url=None, review="ok", dedup_key=None,
+                          dry_run=False)
 
         with m.patch.object(airuleset, "_gh_out",
                             side_effect=lambda *a, **k: "T" if "view" in a else "3"):
