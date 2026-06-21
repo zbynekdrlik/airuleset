@@ -1950,9 +1950,8 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("🎯 **Cieľ:** Kamera padla", card)
         self.assertIn("✅ **Dosiahnuté:** Watchdog pridany", card)
         self.assertIn("#41 — NDI rebind", card)
-        # double-review verdict
-        self.assertIn("Double-review:", card)
-        self.assertIn("splnené", card)
+        # the Double-review line was removed (always ✅ on a clean merge = redundant)
+        self.assertNotIn("Double-review", card)
         # backlog progress
         self.assertIn("hotové 3 · ostáva 5", card)
         # deploy facts
@@ -1961,13 +1960,16 @@ class TestDiscordAutopilotNotify(TestCase):
         # NO stray separator right after the box emoji
         self.assertNotIn("📦 ·", card)
 
-    def test_card_review_fail_marks_nesplnene(self):
-        card = self.notify.compose_autopilot_card(
-            repo="o/x", pr=1, tickets=[{"n": 1, "goal": "g", "achieved": "a"}],
-            review_ok=False, done=1, remaining=0)
-        self.assertIn("NESPLNENÉ", card)
-        self.assertIn("❌", card)
-        # remaining 0 → backlog-empty flourish
+    def test_card_omits_double_review_line(self):
+        # the Double-review line was removed at the user's request — it was always
+        # ✅ on a clean merge (the only time a card fires), so pure repetition.
+        for ok in (True, False):
+            card = self.notify.compose_autopilot_card(
+                repo="o/x", pr=1, tickets=[{"n": 1, "goal": "g", "achieved": "a"}],
+                review_ok=ok, done=1, remaining=0)
+            self.assertNotIn("Double-review", card)
+            self.assertNotIn("NESPLNENÉ", card)
+        # remaining 0 → backlog-empty flourish still present
         self.assertIn("backlog prázdny", card)
 
     def test_card_plural_vs_singular(self):

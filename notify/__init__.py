@@ -153,10 +153,10 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
         lines += ["", head, "> 🎯 **Cieľ:** %s" % goal,
                   "> ✅ **Dosiahnuté:** %s" % achieved]
 
-    mark = "✅" if review_ok else "❌"
-    verdict = "splnené" if review_ok else "**NESPLNENÉ**"
-    lines += ["", "🔍 **Double-review:** /review %s · /requesting-code-review %s — %s"
-              % (mark, mark, verdict)]
+    # (The "🔍 Double-review" line was removed at the user's request: a card only
+    # ever fires on a CLEAN merge, so the line was always ✅ — pure repetition the
+    # user does not need to re-read. `review_ok` is kept in the signature so the
+    # worker's `--review` arg stays valid, but it no longer prints.)
 
     deploy = []
     if pr:
