@@ -2587,13 +2587,32 @@ class TestApiWatchdog(TestCase):
         self._transcript(cwd, [self._OK], 200, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
         kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
-                  state_path=self.state, grace=300, wait_grace=120)
+                  state_path=self.state, grace=300, wait_grace=120, wait_clear=90)
         self.w.run_once(now=now, **kw)
         self.assertIn("wait:sess-abc", self.w.load_state(self.state))
-        # answered: prompt footer gone, session moved on
+        # answered: prompt footer gone. The key persists briefly (tolerance) then is
+        # dropped once the footer has been absent > wait_clear.
         fake.captures["%5"] = "● Committed abc1234\n  done"
-        self.w.run_once(now=now + 60, **kw)
+        self.w.run_once(now=now + 60, **kw)        # within tolerance → still present
+        self.assertIn("wait:sess-abc", self.w.load_state(self.state))
+        self.w.run_once(now=now + 200, **kw)       # absent > wait_clear → dropped
         self.assertNotIn("wait:sess-abc", self.w.load_state(self.state))
+
+    def test_run_once_waiting_no_reping_on_transcript_jitter(self):
+        # THE REPORTED BUG: a multi-question dialog / re-ask loop touches the
+        # transcript (idle dips below wait_grace) while the SAME prompt stays open.
+        # The episode (footer) dedup must NOT re-ping.
+        now = 1_000_000
+        cwd = "/devel/jitter"
+        self._transcript(cwd, [self._OK], 200, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, wait_grace=120, wait_clear=90)
+        self.w.run_once(now=now, **kw)                       # ping #1
+        self._transcript(cwd, [self._OK], 5, now + 60)       # transcript jitters (idle→5)
+        self.w.run_once(now=now + 60, **kw)                  # footer still open → no re-ping
+        self.w.run_once(now=now + 120, **kw)
+        self.assertEqual(len(self.pings), 1, "jitter must not re-ping the same open prompt")
 
     def test_run_once_ping_mentions_pane_owner(self):
         # the ping must @mention the OWNER of the waiting pane (resolved from that

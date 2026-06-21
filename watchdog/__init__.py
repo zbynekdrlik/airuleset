@@ -74,6 +74,11 @@ NUDGE_TEXT = "continue"
 # A session sitting on an interactive prompt (AskUserQuestion / permission /
 # plan-approval) this long with no progress = the user is away → ping (NEVER act).
 WAIT_GRACE_SECONDS = 2 * 60
+# A waiting episode is kept alive while the prompt footer keeps appearing; it ends
+# (and a future prompt may ping again) only after the footer has been ABSENT this
+# long. Tolerates a transient capture miss / transcript jitter (a multi-question
+# dialog or a re-ask loop) so the SAME open prompt is pinged exactly once.
+WAIT_CLEAR_SECONDS = 90
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "api-watchdog-state.json"
@@ -331,7 +336,8 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
-             max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS):
+             max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
+             wait_clear=WAIT_CLEAR_SECONDS):
     """Scan every `claude` pane once. Two independent jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -346,7 +352,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     state = load_state(state_path)
     logs = []
     stalled = set()
-    waiting = set()
 
     # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
     # is bound to a transcript that exactly ONE pane owns — if two panes resolve to
@@ -420,25 +425,44 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 continue                   # handled as an api-error stall
 
         # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
-        # The session is blocked on an interactive prompt the human must answer.
-        # We NEVER send keys here (a design decision needs the user), so the loose
-        # pane-text match is safe. One ping per waiting episode; the `idle` gate
-        # means a still-open footer from an ALREADY-answered prompt (transcript
-        # advanced → fresh mtime) does not false-ping.
-        if idle >= wait_grace and pane_waiting_on_user(capture_pane(pid, run)):
+        # Blocked on an interactive prompt the human must answer. NEVER send keys
+        # (a design decision needs the user), so the loose pane-text match is safe.
+        # Dedup is by the FOOTER EPISODE, NOT per-poll idle: the episode lives while
+        # the prompt footer keeps appearing, and ends only after WAIT_CLEAR seconds
+        # without it. So a multi-question dialog / re-ask loop that jitters the
+        # transcript (idle dipping, a momentary capture miss) does NOT re-ping the
+        # SAME open prompt — `pinged` stays set for the whole episode.
+        if pane_waiting_on_user(capture_pane(pid, run)):
             wkey = "wait:" + key
-            waiting.add(wkey)
-            if wkey not in state:
-                state[wkey] = {"first_seen": int(now)}
+            w = state.get(wkey)
+            if w is None:
+                # approximate when the prompt opened = the last transcript write,
+                # so a prompt that has ALREADY been open >= wait_grace pings on the
+                # first poll (not wait_grace later).
+                w = {"first_seen": int(now - idle), "pinged": False}
+                state[wkey] = w
+            else:
+                # a pre-existing entry (incl. an old-format one with no `pinged`)
+                # was already pinged by a prior poll — never re-ping on upgrade.
+                w.setdefault("pinged", True)
+            w["last_seen"] = int(now)
+            if not w.get("pinged") and (now - w["first_seen"]) >= wait_grace:
+                w["pinged"] = True
                 logs.append("waiting %s [%s]" % (project, key))
                 send_fn("❓ **%s** — čaká na teba\n> Session sa zastavila "
                         "na otázke (AskUserQuestion) — pozri sa naň." % project,
-                        owner=owner, dedup_key="waiting:%s:%s" % (key, int(now)), dry_run=dry_run)
+                        owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
+                        dry_run=dry_run)
 
-    # Drop recovered / vanished sessions (both namespaces) so a future stall or a
-    # future question starts a fresh cycle.
-    keep = stalled | waiting
-    for k in [k for k in state if k not in keep]:
-        del state[k]
+    # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
+    # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
+    # (the episode is genuinely over / the prompt was answered) — tolerating a
+    # single missed poll so the same open prompt is never pinged twice.
+    for k in list(state.keys()):
+        if k.startswith("wait:"):
+            if int(now) - state[k].get("last_seen", 0) > wait_clear:
+                del state[k]
+        elif k not in stalled:
+            del state[k]
     save_state(state_path, state)
     return logs
