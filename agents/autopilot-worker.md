@@ -43,12 +43,20 @@ to pause/ask):** There is no board. After EACH ticket's PR merges AND its deploy
 have the deployed version), fire its Discord completion card DIRECTLY — one per issue, even in a
 batch, so every member gets its own card:
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --repo <repo> --issue <N>
---achieved "<one-line Slovak what landed>" --version "<deployed version>"`. `<repo>` MUST be the
-canonical **`owner/name`** (a bare name like `odoo-erp` is rejected) — get it once with `gh repo view
---json nameWithOwner -q .nameWithOwner`. Your `--achieved` becomes the card's ✅ Dosiahnuté; the issue
-title (fetched from gh) becomes 🎯 Cieľ. **`--version` is the deployed version you READ from the live
+--goal "<plain goal>" --achieved "<plain what landed>" --version "<deployed version>"`. `<repo>` MUST
+be the canonical **`owner/name`** (a bare name like `odoo-erp` is rejected) — get it once with `gh repo
+view --json nameWithOwner -q .nameWithOwner`.
+**`--goal` and `--achieved` must be PLAIN, SIMPLE, NON-TECHNICAL Slovak** — the card is read on a phone.
+The card header is just `🎫 #N` (no title), so `--goal` IS the only goal text shown. Do NOT paste the
+technical issue title; translate it into one short understandable sentence of WHAT the ticket wanted,
+and `--achieved` into one short sentence of WHAT changed for the user — no driver names, no
+class/exception jargon, no issue-number chains. E.g. title *"wg-money tunnel flapping intermittently
+fails the #567 Money Gate even with hardened importer retries (#698 follow-up)"* →
+`--goal "Money Gate občas spadne keď krátko vypadne tunel do Money — zabrániť tomu"`
+`--achieved "Money Gate už pri krátkom výpadku tunela nepadá — spojenie sa samo obnoví"`.
+**`--version` is the deployed version you READ from the live
 dashboard DOM during post-deploy verification** (per `post-deploy-verification.md` / `version-on-dashboard.md`) — it is the card's 📦 line, the one fact the user wants ("which version went live?"). Always pass it; omit only if the project genuinely has no version label. (The PR number was removed from the card — do NOT bother passing `--pr`.) For a BATCH, fire one card per member after the shared PR merges (loop over the
-members with each member's own `--issue` + `--achieved`). It always exits 0 and is deduped on
+members with each member's own `--issue` + `--goal` + `--achieved`). It always exits 0 and is deduped on
 repo-name#issue — if it fails, IGNORE it and continue. Firing the card must NEVER delay or interrupt
 the work or asking the user. The shared PR's body (`Closes #41`, `Closes #43`, `Closes #47`) closes
 every member on merge.
@@ -105,8 +113,9 @@ confirmed-still-valid issues proceed to the cycle below.
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
    member AFTER post-deploy verification (step 7), so its 📦 line carries the deployed version you
-   read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --achieved "<what landed>"
-   --version "<version read in step 7>"` — see the PER-TICKET DISCORD CARD note above).
+   read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --goal "<plain goal>"
+   --achieved "<plain what landed>" --version "<version read in step 7>"` — `--goal`/`--achieved` PLAIN
+   non-technical Slovak, see the PER-TICKET DISCORD CARD note above).
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open

@@ -146,11 +146,12 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     lines = ["🚀 **%s** — %s" % (repo_name, _plural_done(len(tickets) or 1))]
     for t in tickets:
         n = t.get("n")
-        title = _clean(t.get("title"))[:_FIELD_CAP]
+        # Header is JUST the number — the issue title is technical/long and was
+        # repeated verbatim in 🎯 Cieľ. 🎯 Cieľ / ✅ Dosiahnuté carry the worker's
+        # PLAIN-language one-liners instead (simple, understandable).
         goal = _clean(t.get("goal"))[:_FIELD_CAP] or "—"
         achieved = _clean(t.get("achieved"))[:_FIELD_CAP] or "—"
-        head = "🎫 **#%s — %s**" % (n, title) if title else "🎫 **#%s**" % n
-        lines += ["", head, "> 🎯 **Cieľ:** %s" % goal,
+        lines += ["", "🎫 **#%s**" % n, "> 🎯 **Cieľ:** %s" % goal,
                   "> ✅ **Dosiahnuté:** %s" % achieved]
 
     # (The "🔍 Double-review" line was removed at the user's request: a card only

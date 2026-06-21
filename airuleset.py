@@ -992,9 +992,12 @@ def _notify_run_card(args, compose_autopilot_card, send):
             pr = m.group(1) if m else None
 
         achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
+        # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable); the
+        # technical gh issue title is only the fallback when --goal is omitted.
+        goal = getattr(args, "goal", None) or title
         body = compose_autopilot_card(
             repo=repo,
-            tickets=[{"n": issue, "title": title, "goal": title,
+            tickets=[{"n": issue, "title": title, "goal": goal,
                       "achieved": achieved or "PR zmergnutý, deploy beží"}],
             pr=pr, version=getattr(args, "version", None),
             merge_sha=getattr(args, "merge_sha", None),
@@ -1205,7 +1208,9 @@ def main():
     p_notify.add_argument("--session", help="Session id (API-error dedup scope)")
     p_notify.add_argument("--project", help="Project name for the API-error ping")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
-    p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté')")
+    p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté') — plain language")
+    p_notify.add_argument("--goal", help="Plain-language ticket goal (card 'Cieľ') — "
+                                         "simple/understandable, NOT the technical issue title")
     p_notify.add_argument("--body", help="Arbitrary markdown body to send")
     p_notify.add_argument("--repo", help="owner/name (autopilot card)")
     p_notify.add_argument("--pr", help="Shared PR number (autopilot card)")

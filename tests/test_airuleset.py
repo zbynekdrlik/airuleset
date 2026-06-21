@@ -1951,7 +1951,9 @@ class TestDiscordAutopilotNotify(TestCase):
         # the two sections the user asked for, per ticket
         self.assertIn("🎯 **Cieľ:** Kamera padla", card)
         self.assertIn("✅ **Dosiahnuté:** Watchdog pridany", card)
-        self.assertIn("#41 — NDI rebind", card)
+        # header is JUST the number — the technical title is dropped, not repeated
+        self.assertIn("🎫 **#41**", card)
+        self.assertNotIn("NDI rebind", card)
         # the Double-review line was removed (always ✅ on a clean merge = redundant)
         self.assertNotIn("Double-review", card)
         # backlog progress
@@ -2064,8 +2066,8 @@ class TestDiscordAutopilotNotify(TestCase):
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
-                      version="v9.9.9", merge_sha=None, review="ok", dedup_key=None,
-                      dry_run=False)
+                      goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
+                      review="ok", dedup_key=None, dry_run=False)
         captured = {}
 
         def fake_gh(*a, **k):
@@ -2080,7 +2082,10 @@ class TestDiscordAutopilotNotify(TestCase):
             with m.patch("notify.send", side_effect=fake_send):
                 airuleset.cmd_notify(args)
         b = captured["body"]
-        self.assertIn("🎯 **Cieľ:** Real Issue Title", b)
+        # 🎯 Cieľ = the worker's PLAIN --goal, NOT the technical gh title; header = #N only
+        self.assertIn("🎯 **Cieľ:** Tunel občas vypadne", b)
+        self.assertIn("🎫 **#5**", b)
+        self.assertNotIn("Real Issue Title", b)
         self.assertIn("✅ **Dosiahnuté:** did the thing", b)
         self.assertIn("nasadené **v9.9.9**", b)   # deployed version on the 📦 line
         self.assertNotIn("PR #", b)               # PR number removed
