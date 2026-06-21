@@ -1,6 +1,12 @@
-"""api-watchdog — detect a Claude Code session STALLED on an API error and
-auto-resume it (`tmux send-keys "continue"`), pinging Discord on the stall and
-again if it never recovers.
+"""api-watchdog — keep unattended Claude Code sessions moving. Two jobs per poll:
+
+  (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
+      rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
+  (2) NOTIFY-ONLY: a session WAITING ON THE USER (an AskUserQuestion / permission
+      dialog is open) is PINGED — never acted on, a design decision needs the
+      human. This closes the gap that left a blocked `bakerion` session silent:
+      an AskUserQuestion wait is neither a `❓` Stop-marker turn nor `idle_prompt`,
+      so no hook covered it.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -65,6 +71,9 @@ GRACE_SECONDS = 5 * 60
 RETRY_INTERVAL_SECONDS = 5 * 60
 MAX_NUDGES = 3
 NUDGE_TEXT = "continue"
+# A session sitting on an interactive prompt (AskUserQuestion / permission /
+# plan-approval) this long with no progress = the user is away → ping (NEVER act).
+WAIT_GRACE_SECONDS = 2 * 60
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "api-watchdog-state.json"
@@ -165,6 +174,19 @@ def is_usage_cap(text):
     return bool(text) and bool(_USAGE_CAP_RX.search(text))
 
 
+# A Claude Code INTERACTIVE PROMPT footer — present only while a selection dialog
+# (AskUserQuestion), a permission request, or a plan approval is OPEN and waiting
+# for the human. Used for a NOTIFICATION ONLY (never to send keys), so a loose
+# match is safe: a false ping is harmless. (The api-error ACTION path stays strict
+# / flag-only precisely because it injects keystrokes.)
+_WAITING_RX = re.compile(
+    r"Tab/Arrow keys to navigate|Enter to select|Do you want to proceed", re.I)
+
+
+def pane_waiting_on_user(captured):
+    return bool(captured) and bool(_WAITING_RX.search(captured))
+
+
 def decide(state, key, err_hash, now,
            interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES):
     """Pure decision for ONE stalled session. Returns (action, entry) where action
@@ -257,6 +279,14 @@ def pane_in_mode(pane_id, run=None):
     return (out or "").strip() == "1"
 
 
+def capture_pane(pane_id, run=None, lines=40):
+    """Last `lines` of the pane's visible content. Used ONLY for the ping-only
+    waiting-on-user detector — never for the api-error action trigger (that is
+    flag-only, after the pane-text-fallback incident)."""
+    run = run or _default_run
+    return run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", "-%d" % lines])
+
+
 def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     """Type `text` literally into the pane, then press Enter to submit it."""
     run = run or _default_run
@@ -271,9 +301,12 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
-             max_nudges=MAX_NUDGES):
-    """Scan every `claude` pane once; nudge / escalate the stalled ones. Returns a
-    list of human-readable action log lines (for --verbose / tests)."""
+             max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS):
+    """Scan every `claude` pane once. Two independent jobs:
+      (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
+      (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
+          PING ONLY, never act (a design decision needs the human).
+    Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
     from notify import compose_api_error_alert
@@ -283,6 +316,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     state = load_state(state_path)
     logs = []
     stalled = set()
+    waiting = set()
 
     # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
     # is bound to a transcript that exactly ONE pane owns — if two panes resolve to
@@ -304,61 +338,76 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
             continue
         pid, cwd, tmtime, tpath = owners[0]
-        if (now - tmtime) < grace:        # transcript still advancing → not stalled
-            continue
-        # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
-        # assistant entry. This is the ONLY trigger. (An earlier pane-text fallback
-        # was removed after it false-nudged a meta-conversation merely DISPLAYING
-        # api-error text — the flag is set only on an error CC actually hit.)
-        err_text = transcript_last_error(tpath)
-        if not err_text:
-            continue                       # not flagged stalled-on-error → leave it
-        # The user is scrolling / a menu is open → keys would be swallowed or would
-        # corrupt their selection. Skip WITHOUT advancing state (no retry burned).
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode %s" % (os.path.basename(cwd.rstrip("/")) or pid))
-            continue
-
-        key = tpath.stem                   # session id (stable across grouped panes)
-        stalled.add(key)
+        idle = now - tmtime
         project = os.path.basename(cwd.rstrip("/")) or "unknown"
-        err_hash = _hash(err_text)
-        action, entry = decide(state, key, err_hash, now, interval, max_nudges)
-        state[key] = entry
-        # Per-stall-cycle ping dedup: include first_seen so a session that recovers
-        # and RE-stalls with the same error text later still pings (notify's dedup
-        # TTL is 14 days — without first_seen the second cycle would be silent).
-        fs = int(entry.get("first_seen", now))
+        key = tpath.stem                   # session id (stable across grouped panes)
 
-        if action == "nudge" and is_usage_cap(err_text):
-            # Subscription / quota USAGE cap — time-based, `continue` cannot fix it.
-            # Ping ONCE and mark escalated (no `continue`, no retries, no false
-            # "gave up"); CC itself auto-resumes when the cap resets.
-            entry["nudges"], entry["escalated"] = [], True
-            state[key] = entry
-            logs.append("usage-cap %s — ping only, no continue" % project)
-            send_fn(compose_api_error_alert(project, err_text)
-                    + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
-                    dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-        elif action == "nudge":
-            n = len(entry["nudges"])
-            logs.append("nudge#%d %s [%s]" % (n, project, key))
-            if not dry_run:
-                send_continue(pid, NUDGE_TEXT, run)
-            if n == 1:                     # first nudge → tell the user it stalled
-                send_fn(compose_api_error_alert(project, err_text),
-                        dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-        elif action == "escalate":
-            logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
-            body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                    "stále nepohlo — treba zásah." % (project, max_nudges))
-            send_fn(body, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                    dry_run=dry_run)
-        else:
-            logs.append("%s %s [%s]" % (action, project, key))
+        # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
+        # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
+        # assistant entry — the ONLY trigger (an earlier pane-text fallback false-
+        # nudged a meta-conversation merely DISPLAYING api-error text).
+        if idle >= grace:
+            err_text = transcript_last_error(tpath)
+            if err_text:
+                # user scrolling / a menu open → keys would be swallowed or corrupt
+                # the selection. Skip WITHOUT advancing state (no retry burned).
+                if pane_in_mode(pid, run):
+                    logs.append("skip in-mode %s" % (project or pid))
+                    continue
+                stalled.add(key)
+                err_hash = _hash(err_text)
+                action, entry = decide(state, key, err_hash, now, interval, max_nudges)
+                state[key] = entry
+                # first_seen in the dedup key so a recover→re-stall still pings
+                # (notify's own dedup TTL is 14 days).
+                fs = int(entry.get("first_seen", now))
+                if action == "nudge" and is_usage_cap(err_text):
+                    # quota USAGE cap — time-based, `continue` can't fix it. Ping
+                    # ONCE, mark escalated (no nudge, no retries, no false giveup).
+                    entry["nudges"], entry["escalated"] = [], True
+                    state[key] = entry
+                    logs.append("usage-cap %s — ping only, no continue" % project)
+                    send_fn(compose_api_error_alert(project, err_text)
+                            + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                            dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                elif action == "nudge":
+                    n = len(entry["nudges"])
+                    logs.append("nudge#%d %s [%s]" % (n, project, key))
+                    if not dry_run:
+                        send_continue(pid, NUDGE_TEXT, run)
+                    if n == 1:             # first nudge → tell the user it stalled
+                        send_fn(compose_api_error_alert(project, err_text),
+                                dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                elif action == "escalate":
+                    logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
+                    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+                            "stále nepohlo — treba zásah." % (project, max_nudges))
+                    send_fn(body, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+                            dry_run=dry_run)
+                else:
+                    logs.append("%s %s [%s]" % (action, project, key))
+                continue                   # handled as an api-error stall
 
-    # Drop recovered / vanished sessions so their next error starts a fresh cycle.
-    for k in [k for k in state if k not in stalled]:
+        # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
+        # The session is blocked on an interactive prompt the human must answer.
+        # We NEVER send keys here (a design decision needs the user), so the loose
+        # pane-text match is safe. One ping per waiting episode; the `idle` gate
+        # means a still-open footer from an ALREADY-answered prompt (transcript
+        # advanced → fresh mtime) does not false-ping.
+        if idle >= wait_grace and pane_waiting_on_user(capture_pane(pid, run)):
+            wkey = "wait:" + key
+            waiting.add(wkey)
+            if wkey not in state:
+                state[wkey] = {"first_seen": int(now)}
+                logs.append("waiting %s [%s]" % (project, key))
+                send_fn("❓ **%s** — čaká na teba\n> Session sa zastavila "
+                        "na otázke (AskUserQuestion) — pozri sa naň." % project,
+                        dedup_key="waiting:%s:%s" % (key, int(now)), dry_run=dry_run)
+
+    # Drop recovered / vanished sessions (both namespaces) so a future stall or a
+    # future question starts a fresh cycle.
+    keep = stalled | waiting
+    for k in [k for k in state if k not in keep]:
         del state[k]
     save_state(state_path, state)
     return logs

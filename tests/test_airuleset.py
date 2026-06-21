@@ -2523,6 +2523,65 @@ class TestApiWatchdog(TestCase):
         key2 = self.pings[-1][1]
         self.assertNotEqual(key1, key2, "re-stall must produce a distinct dedup key")
 
+    # --- waiting-on-user (AskUserQuestion) PING-ONLY detector ----------------
+    _WAIT_CAP = ("│ ❯ 1. Direction gates\n│ 2. Time + pairing\n"
+                 "│ Enter to select · Tab/Arrow keys to navigate · Esc to cancel")
+
+    def test_pane_waiting_on_user_matches_prompt_footer(self):
+        self.assertTrue(self.w.pane_waiting_on_user(self._WAIT_CAP))
+        self.assertTrue(self.w.pane_waiting_on_user("Do you want to proceed? ❯ 1. Yes"))
+        self.assertFalse(self.w.pane_waiting_on_user("● Running tests...\n  42 passed"))
+        self.assertFalse(self.w.pane_waiting_on_user(""))
+
+    def test_run_once_pings_waiting_session_never_acts(self):
+        now = 1_000_000
+        cwd = "/devel/asking"
+        self._transcript(cwd, [self._OK], 200, now)   # not flagged; 200s stale
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, wait_grace=120)
+        self.assertEqual(fake.continues_sent(), 0, "waiting must NEVER inject keys")
+        self.assertEqual(len(self.pings), 1, "waiting pings once")
+        self.assertIn("asking", self.pings[0][0])
+        self.assertTrue(self.pings[0][1].startswith("waiting:"))
+        self.assertTrue(any("waiting" in l for l in logs))
+
+    def test_run_once_waiting_pings_once_not_every_poll(self):
+        now = 1_000_000
+        cwd = "/devel/asking2"
+        self._transcript(cwd, [self._OK], 200, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, wait_grace=120)
+        self.w.run_once(now=now, **kw)
+        self.w.run_once(now=now + 60, **kw)
+        self.w.run_once(now=now + 120, **kw)
+        self.assertEqual(len(self.pings), 1, "one ping per waiting episode, not per poll")
+
+    def test_run_once_waiting_too_fresh_no_ping(self):
+        now = 1_000_000
+        cwd = "/devel/fresh-ask"
+        self._transcript(cwd, [self._OK], 30, now)    # 30s < wait_grace
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
+        self.w.run_once(now=now, run=fake, send_fn=self._send, projects_dir=self.projects,
+                        state_path=self.state, grace=300, wait_grace=120)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_waiting_key_dropped_when_answered(self):
+        now = 1_000_000
+        cwd = "/devel/answered"
+        self._transcript(cwd, [self._OK], 200, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, wait_grace=120)
+        self.w.run_once(now=now, **kw)
+        self.assertIn("wait:sess-abc", self.w.load_state(self.state))
+        # answered: prompt footer gone, session moved on
+        fake.captures["%5"] = "● Committed abc1234\n  done"
+        self.w.run_once(now=now + 60, **kw)
+        self.assertNotIn("wait:sess-abc", self.w.load_state(self.state))
+
     # --- wiring --------------------------------------------------------------
     def test_watchdog_subcommand_registered(self):
         self.assertIn("watchdog", airuleset.SUBCOMMANDS)
