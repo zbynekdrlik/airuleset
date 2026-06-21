@@ -158,17 +158,16 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     # user does not need to re-read. `review_ok` is kept in the signature so the
     # worker's `--review` arg stays valid, but it no longer prints.)
 
+    # Deploy line leads with the DEPLOYED VERSION (the fact the user actually wants
+    # — "which version went live?"). The PR number was removed at the user's request
+    # (noise). `pr` is still accepted in the signature so callers don't break.
     deploy = []
-    if pr:
-        deploy.append("PR #%s" % _clean(str(pr)))
-    if merge_sha:
-        deploy.append("`%s`" % _clean(str(merge_sha))[:12])
     v = _clean(version)
     if v and v not in ("—", "-"):
         deploy.append("nasadené **%s**" % v)
-    # Show the facts we have; if none (a bare merge with no PR/version), say so
-    # plainly rather than the misleading "bez nasadenia".
-    lines.append("📦 " + (" · ".join(deploy) if deploy else "PR zmergnutý"))
+    if merge_sha:
+        deploy.append("`%s`" % _clean(str(merge_sha))[:12])
+    lines.append("📦 " + (" · ".join(deploy) if deploy else "zmergnuté"))
 
     if remaining is not None:
         try:

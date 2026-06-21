@@ -39,13 +39,15 @@ ones. (Only a genuinely-irreversible action — host reboot, data deletion, DB d
 the command itself, never as a pre-emptive issue-level "prod/hardware-risky" classification.)
 
 **PER-TICKET DISCORD CARD (fired DIRECTLY at merge — fire-and-forget, never blocks, never a reason
-to pause/ask):** There is no board. After EACH ticket's PR merges, fire its Discord completion card
-DIRECTLY — one per issue, even in a batch, so every member gets its own card:
-`python3 ~/devel/airuleset/airuleset.py notify --run-card --repo <repo> --issue <N> --pr <url>
---achieved "<one-line Slovak what landed>"`. `<repo>` MUST be the canonical **`owner/name`** (a bare
-name like `odoo-erp` is rejected) — get it once with `gh repo view --json nameWithOwner -q
-.nameWithOwner`. Your `--achieved` becomes the card's ✅ Dosiahnuté; the issue title (fetched from gh)
-becomes 🎯 Cieľ. For a BATCH, fire one card per member after the shared PR merges (loop over the
+to pause/ask):** There is no board. After EACH ticket's PR merges AND its deploy is verified (so you
+have the deployed version), fire its Discord completion card DIRECTLY — one per issue, even in a
+batch, so every member gets its own card:
+`python3 ~/devel/airuleset/airuleset.py notify --run-card --repo <repo> --issue <N>
+--achieved "<one-line Slovak what landed>" --version "<deployed version>"`. `<repo>` MUST be the
+canonical **`owner/name`** (a bare name like `odoo-erp` is rejected) — get it once with `gh repo view
+--json nameWithOwner -q .nameWithOwner`. Your `--achieved` becomes the card's ✅ Dosiahnuté; the issue
+title (fetched from gh) becomes 🎯 Cieľ. **`--version` is the deployed version you READ from the live
+dashboard DOM during post-deploy verification** (per `post-deploy-verification.md` / `version-on-dashboard.md`) — it is the card's 📦 line, the one fact the user wants ("which version went live?"). Always pass it; omit only if the project genuinely has no version label. (The PR number was removed from the card — do NOT bother passing `--pr`.) For a BATCH, fire one card per member after the shared PR merges (loop over the
 members with each member's own `--issue` + `--achieved`). It always exits 0 and is deduped on
 repo-name#issue — if it fails, IGNORE it and continue. Firing the card must NEVER delay or interrupt
 the work or asking the user. The shared PR's body (`Closes #41`, `Closes #43`, `Closes #47`) closes
@@ -101,9 +103,10 @@ confirmed-still-valid issues proceed to the cycle below.
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
 6. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
-   Then monitor main CI + any deploy workflow to terminal. **Once the PR merges, fire the per-ticket
-   Discord card for EACH member** (`notify --run-card --repo <owner/name> --issue <N> --pr <url>
-   --achieved "<one-line Slovak what landed>"` — see the PER-TICKET DISCORD CARD note above).
+   Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
+   member AFTER post-deploy verification (step 7), so its 📦 line carries the deployed version you
+   read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --achieved "<what landed>"
+   --version "<version read in step 7>"` — see the PER-TICKET DISCORD CARD note above).
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open

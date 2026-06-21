@@ -217,10 +217,11 @@ Each loop turn:
      → `closed` (closed-with-evidence outside the PR, fine); **dropped** → `open` is CORRECT (it is
      re-dispatched solo next, not a failure)
    Confirmed → one line per surviving issue to `docs/autopilot-log.md`.
-   > **The per-ticket Discord completion card is fired by the WORKER, directly at merge — you do NOT
-   > send it by hand.** The worker runs `airuleset.py notify --run-card --repo <owner/name> --issue
-   > <N> --pr <url> --achieved "<what landed>"` once its PR merges (one per member). `notify --run-card`
-   > gathers the issue title (🎯 Cieľ) + remaining backlog from gh, takes `--achieved` as ✅ Dosiahnuté,
+   > **The per-ticket Discord completion card is fired by the WORKER, after merge + post-deploy
+   > verification — you do NOT send it by hand.** The worker runs `airuleset.py notify --run-card
+   > --repo <owner/name> --issue <N> --achieved "<what landed>" --version "<deployed version read from
+   > the DOM>"` (one per member). `--version` is the card's 📦 line (the fact the user wants); the PR
+   > number was removed. `notify --run-card` gathers the issue title (🎯 Cieľ) + remaining backlog from gh, takes `--achieved` as ✅ Dosiahnuté,
    > @mentions the tmux owner (zbynek/marek), and posts ONE Slovak card — deduped on repo-name#issue
    > (one card per ticket, re-dispatches never double-post). So the supervisor does NOT call `notify`;
    > just confirm the worker carded each merged member. The short `❓`/`✅` idle ping stays suppressed

@@ -200,7 +200,9 @@ class TestAutopilotBatching(TestCase):
         # confirms each merged member was carded.
         s = self._skill()
         self.assertIn("notify --run-card", s)
-        self.assertIn("fired by the WORKER, directly at merge", s)
+        self.assertIn("fired by the WORKER", s)
+        # card carries the deployed version, not the PR number
+        self.assertIn("--version", s)
         self.assertNotIn("supervisor-verify", s)
 
 
@@ -1954,9 +1956,9 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertNotIn("Double-review", card)
         # backlog progress
         self.assertIn("hotové 3 · ostáva 5", card)
-        # deploy facts
-        self.assertIn("v1.4.2", card)
-        self.assertIn("PR #88", card)
+        # deploy line = the DEPLOYED VERSION (the fact the user wants); PR # removed
+        self.assertIn("nasadené **v1.4.2**", card)
+        self.assertNotIn("PR #", card)
         # NO stray separator right after the box emoji
         self.assertNotIn("📦 ·", card)
 
@@ -2062,7 +2064,7 @@ class TestDiscordAutopilotNotify(TestCase):
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
-                      version=None, merge_sha=None, review="ok", dedup_key=None,
+                      version="v9.9.9", merge_sha=None, review="ok", dedup_key=None,
                       dry_run=False)
         captured = {}
 
@@ -2080,7 +2082,8 @@ class TestDiscordAutopilotNotify(TestCase):
         b = captured["body"]
         self.assertIn("🎯 **Cieľ:** Real Issue Title", b)
         self.assertIn("✅ **Dosiahnuté:** did the thing", b)
-        self.assertIn("PR #9", b)          # extracted from the URL
+        self.assertIn("nasadené **v9.9.9**", b)   # deployed version on the 📦 line
+        self.assertNotIn("PR #", b)               # PR number removed
         self.assertIn("ostáva 7", b)
         # dedup on repo-NAME#issue (stable), NOT the run id
         self.assertEqual(captured["dedup"], "x#5")
