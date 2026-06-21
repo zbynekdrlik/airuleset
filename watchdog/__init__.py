@@ -287,6 +287,21 @@ def capture_pane(pane_id, run=None, lines=40):
     return run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", "-%d" % lines])
 
 
+def pane_owner(pane_id, run=None):
+    """Lowercase tmux owner (zbynek / marek) of a SPECIFIC pane, so a ping about
+    that pane @mentions the right person — the watchdog runs headless (systemd
+    --user) with NO tmux context of its own, so it must resolve the owner from the
+    waiting/stalled pane, not from itself. Matches notify.resolve_owner's
+    normalization ('marek-12' → 'marek')."""
+    run = run or _default_run
+    for fmt in ("#{session_group}", "#S"):
+        out = (run(["tmux", "display-message", "-p", "-t", pane_id, fmt]) or "").strip()
+        if out:
+            out = re.sub(r"-\d+$", "", out)
+            return re.sub(r"[^a-z0-9]", "", out.lower())
+    return ""
+
+
 def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     """Type `text` literally into the pane, then press Enter to submit it."""
     run = run or _default_run
@@ -341,6 +356,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         idle = now - tmtime
         project = os.path.basename(cwd.rstrip("/")) or "unknown"
         key = tpath.stem                   # session id (stable across grouped panes)
+        owner = pane_owner(pid, run)       # @mention the right person for THIS pane
 
         # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
         # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
@@ -369,7 +385,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     logs.append("usage-cap %s — ping only, no continue" % project)
                     send_fn(compose_api_error_alert(project, err_text)
                             + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
-                            dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                            owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge":
                     n = len(entry["nudges"])
                     logs.append("nudge#%d %s [%s]" % (n, project, key))
@@ -377,12 +393,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         send_continue(pid, NUDGE_TEXT, run)
                     if n == 1:             # first nudge → tell the user it stalled
                         send_fn(compose_api_error_alert(project, err_text),
-                                dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                                owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "escalate":
                     logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
                     body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
                             "stále nepohlo — treba zásah." % (project, max_nudges))
-                    send_fn(body, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+                    send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
                             dry_run=dry_run)
                 else:
                     logs.append("%s %s [%s]" % (action, project, key))
@@ -402,7 +418,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 logs.append("waiting %s [%s]" % (project, key))
                 send_fn("❓ **%s** — čaká na teba\n> Session sa zastavila "
                         "na otázke (AskUserQuestion) — pozri sa naň." % project,
-                        dedup_key="waiting:%s:%s" % (key, int(now)), dry_run=dry_run)
+                        owner=owner, dedup_key="waiting:%s:%s" % (key, int(now)), dry_run=dry_run)
 
     # Drop recovered / vanished sessions (both namespaces) so a future stall or a
     # future question starts a fresh cycle.

@@ -2245,10 +2245,11 @@ class _FakeTmux:
     """Stand-in for the watchdog's `run` (tmux exec). Answers list-panes /
     capture-pane from canned data and records every send-keys argv."""
 
-    def __init__(self, panes="", captures=None, modes=None):
+    def __init__(self, panes="", captures=None, modes=None, owners=None):
         self.panes = panes
         self.captures = captures or {}
         self.modes = modes or {}          # pane_id -> "1" (in copy-mode) / "0"
+        self.owners = owners or {}        # pane_id -> tmux session/group (e.g. marek-12)
         self.sent = []
 
     def __call__(self, argv, timeout=8):
@@ -2256,7 +2257,12 @@ class _FakeTmux:
             return self.panes
         if argv[:2] == ["tmux", "display-message"]:
             pid = argv[argv.index("-t") + 1]
-            return self.modes.get(pid, "0")
+            fmt = argv[-1]
+            if fmt == "#{pane_in_mode}":
+                return self.modes.get(pid, "0")
+            if fmt in ("#{session_group}", "#S"):
+                return self.owners.get(pid, "")
+            return ""
         if argv[:2] == ["tmux", "capture-pane"]:
             pid = argv[argv.index("-t") + 1]
             return self.captures.get(pid, "")
@@ -2284,8 +2290,8 @@ class TestApiWatchdog(TestCase):
         self.state = str(Path(self.tmp) / "state.json")
         self.pings = []
 
-    def _send(self, body, dedup_key=None, dry_run=False):
-        self.pings.append((body, dedup_key))
+    def _send(self, body, owner=None, dedup_key=None, dry_run=False):
+        self.pings.append((body, dedup_key, owner))
         return "sent"
 
     _ERR = {"type": "assistant", "isApiErrorMessage": True,
@@ -2581,6 +2587,19 @@ class TestApiWatchdog(TestCase):
         fake.captures["%5"] = "● Committed abc1234\n  done"
         self.w.run_once(now=now + 60, **kw)
         self.assertNotIn("wait:sess-abc", self.w.load_state(self.state))
+
+    def test_run_once_ping_mentions_pane_owner(self):
+        # the ping must @mention the OWNER of the waiting pane (resolved from that
+        # pane's tmux session group) — the watchdog runs headless with no tmux of
+        # its own, so it can't use the current-context owner
+        now = 1_000_000
+        cwd = "/devel/ownertest"
+        self._transcript(cwd, [self._OK], 200, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         captures={"%5": self._WAIT_CAP}, owners={"%5": "marek-12"})
+        self.w.run_once(now=now, run=fake, send_fn=self._send, projects_dir=self.projects,
+                        state_path=self.state, grace=300, wait_grace=120)
+        self.assertEqual(self.pings[0][2], "marek", "ping must carry the pane's owner")
 
     # --- wiring --------------------------------------------------------------
     def test_watchdog_subcommand_registered(self):
