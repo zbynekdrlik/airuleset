@@ -2312,6 +2312,13 @@ class TestApiWatchdog(TestCase):
         return p
 
     # --- pure helpers --------------------------------------------------------
+    def test_project_label_expands_generic_checkout_dir(self):
+        self.assertEqual(self.w.project_label("/home/newlevel/devel/bakerion-ai/repo"),
+                         "bakerion-ai/repo")
+        self.assertEqual(self.w.project_label("/home/newlevel/devel/montalu/monday-orders"),
+                         "monday-orders")
+        self.assertEqual(self.w.project_label("/home/newlevel/devel/restreamer"), "restreamer")
+
     def test_encode_project_dir_slashes_dots_underscores(self):
         self.assertEqual(
             self.w.encode_project_dir("/home/newlevel/devel/website-newlevel.media"),

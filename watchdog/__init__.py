@@ -162,6 +162,21 @@ def _hash(text):
     return hashlib.sha1((text or "").strip().encode("utf-8", "replace")).hexdigest()[:12]
 
 
+# Generic checkout-dir basenames that carry no project identity on their own — when
+# the cwd ends in one, the label uses parent/base (e.g. .../bakerion-ai/repo →
+# "bakerion-ai/repo") so the ping names a recognisable project, not "repo".
+_GENERIC_DIRS = {"repo", "src", "app", "code", "main", "checkout", "work", "dist"}
+
+
+def project_label(cwd):
+    parts = [p for p in str(cwd).rstrip("/").split("/") if p]
+    if not parts:
+        return "unknown"
+    if parts[-1].lower() in _GENERIC_DIRS and len(parts) >= 2:
+        return parts[-2] + "/" + parts[-1]
+    return parts[-1]
+
+
 # A subscription / quota USAGE cap is time-based — `continue` cannot fix it (only
 # the reset clock can), so it is classified separately and only PINGED, never
 # nudged. Kept narrow so a transient 529 / "rate limited" / overloaded (which a
@@ -354,7 +369,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             continue
         pid, cwd, tmtime, tpath = owners[0]
         idle = now - tmtime
-        project = os.path.basename(cwd.rstrip("/")) or "unknown"
+        project = project_label(cwd)
         key = tpath.stem                   # session id (stable across grouped panes)
         owner = pane_owner(pid, run)       # @mention the right person for THIS pane
 
@@ -369,7 +384,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 # the selection. Skip WITHOUT advancing state (no retry burned).
                 if pane_in_mode(pid, run):
                     logs.append("skip in-mode %s" % (project or pid))
-                    continue
+                    continue  # do not advance state (no retry burned)
                 stalled.add(key)
                 err_hash = _hash(err_text)
                 action, entry = decide(state, key, err_hash, now, interval, max_nudges)
