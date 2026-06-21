@@ -135,11 +135,12 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
                            review_ok=True, done=None, remaining=None, urls=None):
     """Build the canonical per-ticket completion card (Slovak, Discord markdown).
 
-    `tickets` is a list of dicts {n, title, goal, achieved}. `pr` is the PR URL
-    (a clickable "kód (PR)" link). `urls` is a list of "where to see it" links —
-    each a bare URL or "Label=URL" (e.g. "Prod=https://…"). Structure is fixed here
-    so every card is consistent regardless of who calls it. No @mention here —
-    send() prepends it."""
+    `tickets` is a list of dicts {n, title, goal, achieved}. `urls` is a list of
+    "where to SEE the change live" links — each a bare URL or "Label=URL" (e.g.
+    "Money Gate stav=https://…/money-gate"). `pr` is accepted for call-compatibility
+    but NOT rendered (the user wants the live view, not the code/diff). Structure is
+    fixed here so every card is consistent regardless of who calls it. No @mention
+    here — send() prepends it."""
     tickets = tickets or []
     # Show only the repo NAME (last path segment), not "owner/name": the @mention
     # send() prepends already names the person, so an "owner/" prefix repeats it
@@ -172,13 +173,11 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
         deploy.append("`%s`" % _clean(str(merge_sha))[:12])
     lines.append("📦 " + (" · ".join(deploy) if deploy else "zmergnuté"))
 
-    # 🔗 links — click through to the CODE (PR) and to SEE the change LIVE. The PR
-    # is a clickable "kód (PR)" link (the number was dropped, the link kept). Each
-    # `urls` entry is a bare URL ("pozri naživo") or "Label=URL" (e.g. "Prod=…").
+    # 🔗 links — WHERE to SEE the change LIVE: the app's web page, or the specific
+    # dashboard sub-page / route the change is visible on. NOT the PR/diff (the user
+    # is not interested in the code link). Each `urls` entry is a bare URL (label
+    # "pozri naživo") or "Label=URL" (e.g. "Money Gate stav=https://…/money-gate").
     links = []
-    pr_url = _clean(pr)
-    if pr_url.startswith("http"):
-        links.append("[kód (PR)](%s)" % pr_url)
     for raw in (urls or []):
         entry = _clean(raw)
         label, sep, url = entry.partition("=")

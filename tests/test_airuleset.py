@@ -1976,18 +1976,20 @@ class TestDiscordAutopilotNotify(TestCase):
         # remaining 0 → backlog-empty flourish still present
         self.assertIn("backlog prázdny", card)
 
-    def test_card_links_pr_and_live_url(self):
-        # 🔗 line: clickable PR (the code) + "where to see it live" url(s)
+    def test_card_links_live_urls_not_pr(self):
+        # 🔗 line: "where to see it live" url(s) only — the PR/diff link is NOT shown
         card = self.notify.compose_autopilot_card(
             repo="o/x", pr="https://github.com/o/x/pull/12",
-            urls=["https://app.x.sk", "Prod=https://prod.x.sk"],
+            urls=["https://app.x.sk", "Money Gate=https://prod.x.sk/money-gate"],
             tickets=[{"n": 1, "goal": "g", "achieved": "a"}])
         self.assertIn("🔗", card)
-        self.assertIn("[kód (PR)](https://github.com/o/x/pull/12)", card)
+        self.assertNotIn("kód (PR)", card)                        # PR link removed
+        self.assertNotIn("/pull/12", card)                        # PR url not rendered
         self.assertIn("[pozri naživo](https://app.x.sk)", card)   # bare url → default label
-        self.assertIn("[Prod](https://prod.x.sk)", card)          # Label=URL
-        # no pr / no urls → no 🔗 line at all
-        self.assertNotIn("🔗", self.notify.compose_autopilot_card(repo="o/x", tickets=[{"n": 1}]))
+        self.assertIn("[Money Gate](https://prod.x.sk/money-gate)", card)   # Label=URL deep link
+        # a PR url but no live urls → no 🔗 line at all (PR alone is not shown)
+        self.assertNotIn("🔗", self.notify.compose_autopilot_card(
+            repo="o/x", pr="https://github.com/o/x/pull/9", tickets=[{"n": 1}]))
 
     def test_card_plural_vs_singular(self):
         one = self.notify.compose_autopilot_card(
@@ -2103,8 +2105,8 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("✅ **Dosiahnuté:** did the thing", b)
         self.assertIn("nasadené **v9.9.9**", b)   # deployed version on the 📦 line
         self.assertNotIn("PR #", b)               # bare PR number removed
-        # 🔗 click-through links: PR as a clickable link + the live "where to see it" url
-        self.assertIn("[kód (PR)](https://h/pull/9)", b)
+        self.assertNotIn("/pull/9", b)            # PR link NOT rendered (user doesn't want it)
+        # 🔗 line = the live "where to see it" url only
         self.assertIn("[Prod](https://montalu.sk/dash)", b)
         self.assertIn("ostáva 7", b)
         # dedup on repo-NAME#issue (stable), NOT the run id
