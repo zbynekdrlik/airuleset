@@ -6,6 +6,8 @@
 
 Test coverage must not decrease. Coverage is enforced in CI — not optional, not advisory.
 
+**The coverage GATE is the in-CI `cargo llvm-cov --fail-under-lines` job** (it fails the build below threshold) — NOT codecov. Codecov / any external coverage service is purely an informational dashboard and gates nothing. Do NOT rely on it as the gate, and do NOT let it spam: if a repo uploads to codecov at all, its `codecov.yml` MUST set `comment: false` (its per-PR comment emails the owner on every PR — pure noise, the user has had it removed). Prefer NO codecov upload at all — the in-CI fail-under job is sufficient.
+
 #### Rust projects: cargo-llvm-cov (MANDATORY)
 
 Every Rust project CI MUST include a coverage job using `cargo-llvm-cov`:
