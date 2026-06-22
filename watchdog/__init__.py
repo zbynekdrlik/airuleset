@@ -188,10 +188,21 @@ def project_label(cwd):
 # retry CAN clear) is NOT caught here and still gets the 3×continue lifecycle.
 _USAGE_CAP_RX = re.compile(
     r"usage limit|quota|limit (?:reached|will reset|resets)|reset at|reached your", re.I)
+# Transient SERVER-side throttles — a retry / `continue` CAN clear these, so they
+# must NOT be read as a quota cap. Checked FIRST. Critically this catches
+# "(not your usage limit)" — Claude Code's transient rate-limit banner literally
+# CONTAINS the words "usage limit", which would otherwise false-match above.
+_TRANSIENT_RX = re.compile(
+    r"not your usage limit|temporarily limiting|rate.?limit|overloaded|\b529\b|try again", re.I)
 
 
 def is_usage_cap(text):
-    return bool(text) and bool(_USAGE_CAP_RX.search(text))
+    """True ONLY for a real subscription/quota cap (time-based → `continue` can't
+    fix it → ping only). A transient server throttle returns False so it still gets
+    the 3×`continue` lifecycle."""
+    if not text or _TRANSIENT_RX.search(text):
+        return False
+    return bool(_USAGE_CAP_RX.search(text))
 
 
 # A Claude Code INTERACTIVE PROMPT footer — present only while a selection dialog

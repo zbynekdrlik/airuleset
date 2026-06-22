@@ -2515,6 +2515,12 @@ class TestApiWatchdog(TestCase):
         # transient errors a retry CAN clear must NOT be classified as a usage cap
         self.assertFalse(self.w.is_usage_cap("API Error: 529 Overloaded"))
         self.assertFalse(self.w.is_usage_cap("API Error: rate limited"))
+        # REGRESSION (presenter): the transient banner literally contains "usage
+        # limit" inside "(not your usage limit)" — must NOT be read as a quota cap,
+        # so it still gets `continue`.
+        self.assertFalse(self.w.is_usage_cap(
+            "API Error: Server is temporarily limiting requests "
+            "(not your usage limit) · Rate limited"))
 
     def test_run_once_skips_ambiguous_cwd(self):
         # two `claude` panes in the SAME cwd → one transcript, can't tell which pane
