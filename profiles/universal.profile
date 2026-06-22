@@ -18,6 +18,7 @@ modules/core/git-fetch-first.md
 modules/core/version-bumping.md
 modules/core/ci-push-discipline.md
 modules/core/ask-before-assuming.md
+modules/core/user-questions-slovak.md
 modules/core/autonomous-quality-discipline.md
 modules/core/milestone-notifications.md
 modules/core/subagent-type-discipline.md

@@ -15,6 +15,8 @@
 
 Use AskUserQuestion with 2-4 concrete options. Include a description for each option explaining the tradeoff. The user can always choose "Other" for a custom answer.
 
+**Write the question + every option label + description in SLOVAK, plain human language, no jargon** — see `user-questions-slovak.md`. Translate issue numbers / gate names / infra terms into what they mean for the project; a non-engineer must understand it on a phone. English, jargon-dense questions are banned.
+
 **Good question:** "The EQ reset can either reset to the REAPER default (0dB) or to the last saved preset. Which behavior?"
 **Bad question:** "How should I handle the reset?" (too vague, makes the user do the thinking)
 

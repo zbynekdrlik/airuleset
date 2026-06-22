@@ -31,6 +31,17 @@ class TestParseProfile(TestCase):
             full_path = airuleset.REPO_DIR / entry
             self.assertTrue(full_path.exists(), f"Missing: {entry}")
 
+    def test_user_questions_slovak_rule_present(self):
+        # AskUserQuestion dialogs shown IN Claude must be Slovak + plain human language
+        mod = airuleset.REPO_DIR / "modules" / "core" / "user-questions-slovak.md"
+        self.assertTrue(mod.exists(), "user-questions-slovak.md missing")
+        text = mod.read_text()
+        self.assertIn("SLOVAK", text)
+        self.assertIn("AskUserQuestion", text)
+        # wired into the global config so it applies to every project
+        prof = airuleset.UNIVERSAL_PROFILE.read_text()
+        self.assertIn("modules/core/user-questions-slovak.md", prof)
+
     def test_rust_windows_profile_includes_universal(self):
         rw_entries = airuleset.parse_profile(
             airuleset.REPO_DIR / "profiles" / "rust-windows.profile"
