@@ -164,6 +164,7 @@ Tier 1 + Tier 2 projects are EXEMPT — their `target/` is a working asset, not 
 
 #### Enforcement
 
+- **`block-tier0-local-build.sh` PreToolUse(Bash) hook HARD-BLOCKS a heavy local build** (`cargo build` / `cargo test` (runs) / `cargo tauri build` / `trunk build` / `wasm-pack build`) in a Tier-0 project — the rule alone let presenter's `target/` balloon to 97 GB on dev2. Tier-1/2 (allow / fast-iterate marker), the cheap checks (`cargo check` / `clippy` / `cargo test --no-run`), and an inline `# airuleset:build-ok` / `AIRULESET_ALLOW_LOCAL_BUILD=1` bypass are exempt; an unmanaged dir (no CLAUDE.md) is not enforced.
 - `/issue-planner` step 1e audits `~/devel/*/target` etc. before issue selection. Tier 1 (`=allowed`) AND Tier 2 (`=fast-iterate`) projects are EXEMPT from the waste calculation.
 - `/fast-iterate` skill toggles the Tier 2 marker on/off in the current project's CLAUDE.md.
 - Pre-push hook runs Tier-0 fmt check; agent runs `cargo check` + `cargo clippy` + `cargo test --no-run` manually before invoking `git push`.

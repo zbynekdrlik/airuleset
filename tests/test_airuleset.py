@@ -2781,3 +2781,59 @@ class TestApiWatchdog(TestCase):
         svc = (airuleset.REPO_DIR / "settings" / "api-watchdog.service.template").read_text()
         self.assertIn("watchdog --once", svc)
         self.assertIn("{{REPO_DIR}}", svc)
+
+
+class TestTier0BuildBlock(TestCase):
+    """PreToolUse(Bash) hook block-tier0-local-build.sh — heavy local builds
+    (cargo build / cargo test / cargo tauri build / trunk build) are BLOCKED in a
+    Tier-0 project (a CLAUDE.md with no local-builds marker); Tier-1/2 markers,
+    cheap checks, the inline bypass, and unmanaged dirs are allowed."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "block-tier0-local-build.sh"
+
+    def _run(self, cmd, cwd):
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": cwd})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True)
+
+    def _proj(self, marker=None):
+        d = tempfile.mkdtemp()
+        content = "# proj\n" + (("<!-- airuleset:local-builds=%s -->\n" % marker) if marker else "")
+        Path(d, "CLAUDE.md").write_text(content)
+        return d
+
+    def test_blocks_heavy_build_in_tier0(self):
+        d = self._proj()                       # no marker = Tier 0
+        for cmd in ["cargo build --release", "cargo test", "cargo tauri build", "trunk build"]:
+            r = self._run(cmd, d)
+            self.assertEqual(r.returncode, 2, cmd)
+            self.assertIn("BLOCKED", r.stderr)
+
+    def test_allows_cheap_checks_in_tier0(self):
+        d = self._proj()
+        for cmd in ["cargo check --workspace", "cargo clippy -- -D warnings",
+                    "cargo test --no-run", "cargo fmt --all"]:
+            self.assertEqual(self._run(cmd, d).returncode, 0, cmd)
+
+    def test_allows_heavy_build_in_tier1_and_tier2(self):
+        for marker in ("allowed", "fast-iterate"):
+            d = self._proj(marker)
+            self.assertEqual(self._run("cargo build --release", d).returncode, 0, marker)
+
+    def test_inline_bypass(self):
+        d = self._proj()
+        self.assertEqual(self._run("cargo build  # airuleset:build-ok", d).returncode, 0)
+
+    def test_unmanaged_dir_not_enforced(self):
+        d = tempfile.mkdtemp()                 # no CLAUDE.md anywhere → not enforced
+        self.assertEqual(self._run("cargo build", d).returncode, 0)
+
+    def test_non_build_command_ignored(self):
+        d = self._proj()
+        self.assertEqual(self._run("git commit -m 'mention cargo build here'", d).returncode, 0)
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("block-tier0-local-build.sh" in c for c in cmds))

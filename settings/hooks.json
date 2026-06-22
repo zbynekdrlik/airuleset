@@ -40,6 +40,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-push-base-sync.sh",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-tier0-local-build.sh",
+            "timeout": 10
           }
         ]
       },
