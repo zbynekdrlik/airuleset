@@ -28,4 +28,21 @@ English, and dense with `#227`/`#258`, "E2E gate", "VPS-registration timeout", "
 > • **Skúsiť ešte raz** — keďže zakaždým padol inak, môže to byť len výkyv. (~2 h CI, nemusí pomôcť.)
 > • **Najprv zistiť prečo** — preskúmať, prečo sa Facebook nestihne pripojiť. (môže odhaliť skutočnú chybu.)
 
-The intent: the user understands every question instantly, in their language, without engineering knowledge. Applies to all rewordings and semantic equivalents — every question the user reads, in any project, via any tool.
+#### Tickets in a question — explain EACH in plain words, NEVER a bare number or range
+
+The user does NOT remember what a ticket number means and CANNOT decode a range at all. In any question, EVERY ticket you mention carries a SHORT, HUMAN Slovak explanation of what it is ABOUT — not just its number, not just its (often jargon) title.
+
+- A bare `#258` / `#227` → **WRONG.** `#258 (kontrola obrazu+zvuku pred spustením)`.
+- A RANGE like `#684–#740`, or "the 52-ticket rollout", or "tie skip'd tickety" → **WRONG, doubly so** — it names dozens of tickets the user cannot see. Either list the FEW that matter, each with a one-line plain meaning, OR describe the GROUP in plain words ("~50 starších úloh okolo prerábky prehrávača") — never a bare range expecting the user to know what is inside it.
+- Copy the title from `gh issue view`, then TRANSLATE it to plain Slovak — the raw title is usually technical.
+
+#### Ask in SMALL parts — one decision at a time, iterate (NEVER one universal answer to a pile)
+
+The user wants to decide **part by part**, NOT give a single sweeping answer covering many different tickets at once. When a decision spans many tickets / topics:
+
+- Break it into the SMALLEST useful pieces and ask about ONE at a time; let the user answer, then move to the next. Iterating over several short, clear questions is GOOD — the user PREFERS that to one dense mega-question.
+- NEVER present a big heterogeneous batch ("tu je 52 ticketov / celý rollout — čo chceš?") expecting one universal answer — the tickets differ, so one answer can't fit them all.
+- Smaller + clearer + sequential beats big + sweeping. Each piece explained in plain Slovak (above).
+- **This governs QUESTIONS the user must answer — it does NOT change `autonomous-batch-issue-development.md`** (still bundle the WORK silently, no asking between issues). When you genuinely MUST ask, ask small and explain each piece.
+
+The intent: the user understands every question instantly, in their language, without engineering knowledge, and decides in small clear steps — never a number they can't decode, never one sweeping answer to a pile. Applies to all rewordings and semantic equivalents — every question the user reads, in any project, via any tool.

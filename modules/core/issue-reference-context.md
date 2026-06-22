@@ -14,6 +14,7 @@
 - "PR #7 — mergeable, clean" → **WRONG.** `PR #7: <title> — mergeable, clean`
 - "Filed as #88." / "See #91." / "Blocked by #103." with no topic → **WRONG.** Add the topic.
 - A milestone ping "merged #42+#45 to main" with no titles → **WRONG.** Add a short topic per number.
+- A RANGE / pile — `#684–#740`, "the 52-ticket rollout", "those skip'd tickets" — naming dozens the user can't see → **WRONG, doubly so.** List the few that matter each with a one-line plain meaning, OR describe the group in plain words ("~50 starších úloh okolo prerábky prehrávača"); never a bare range. When it's a question, see `user-questions-slovak.md` (explain each + ask in small parts).
 
 #### One exception — commit-message syntax
 

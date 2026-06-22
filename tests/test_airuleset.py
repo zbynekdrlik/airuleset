@@ -38,6 +38,9 @@ class TestParseProfile(TestCase):
         text = mod.read_text()
         self.assertIn("SLOVAK", text)
         self.assertIn("AskUserQuestion", text)
+        # explain each ticket (no bare number/range) + ask in small parts, iterate
+        self.assertIn("NEVER a bare number or range", text)
+        self.assertIn("one decision at a time", text)
         # wired into the global config so it applies to every project
         prof = airuleset.UNIVERSAL_PROFILE.read_text()
         self.assertIn("modules/core/user-questions-slovak.md", prof)
