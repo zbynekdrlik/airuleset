@@ -241,9 +241,21 @@ Each loop turn:
 - **A gate that won't go clean / the same CI failure twice** after a real fix attempt → surface
   it, never bypass (`autonomous-quality-discipline.md`).
 
-A per-issue **design question is NOT a stop** — the worker asks you inline and continues. "Nothing
-is hands-off" is **NOT a stop** — work it WITH your input. Finishing a merge is **NOT a stop** —
-pick the next issue.
+A per-issue **design question is NOT a stop** — but handle it in ONE of two HONEST ways, never the
+mixed-signal third way:
+- **(a) Block on it** — if the CURRENT issue cannot proceed without the answer AND nothing else is
+  workable, the foreground worker asks you inline and WAITS (the loop pauses on that worker). End the
+  turn `❓ NEEDS YOU` (it pings your phone — correct, you ARE blocked).
+- **(b) Defer it + keep working** — if other tickets remain (the usual case), DON'T block: set the
+  asked ticket aside (label `needs-decision` / `autopilot-skip`), keep grinding the rest, end the turn
+  `⏳ WORKING`. Collect the deferred questions and raise them as ONE `❓ NEEDS YOU` only when the
+  workable backlog is EXHAUSTED.
+- **NEVER (c): end a turn `❓ NEEDS YOU` and then continue to the next ticket anyway** — that pings the
+  user "I'm waiting" while you've already moved on. `❓` and continuing are mutually exclusive
+  (`message-status-marker.md`). If you're going to keep working, it's `⏳`, and the question is deferred.
+
+"Nothing is hands-off" is **NOT a stop** — defer the blocked ones (b), work the rest. Finishing a
+merge is **NOT a stop** — pick the next issue.
 
 ## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
 

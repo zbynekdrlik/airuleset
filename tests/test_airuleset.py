@@ -414,6 +414,21 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("posledný preset?", sent)
         self.assertFalse(os.path.exists(p))
 
+    def test_question_while_continuing_loop_is_not_pinged(self):
+        # A ❓ on a turn that ALSO says it KEEPS WORKING (a /goal or autopilot loop
+        # moving to the next ticket) is a malformed marker — it must NOT ping the
+        # phone (the agent actually moved on; the status-marker hook forces ⏳).
+        for cont in ["Remaining backlog (14). I can keep grinding these.",
+                     "PP OAuth is out to your phone; continuing now with #426.",
+                     "I'll surface the blocked trio later; moving on to the next ticket."]:
+            sid, _ = self._sid()
+            self._stop(sid, cont + "\n\n❓ NEEDS YOU: čo s 3 blokovanými ticketmi?")
+            self.assertEqual(self._sent(), "", "❓ while continuing must NOT ping: %r" % cont)
+        # a genuine ❓ (no continuing language) DOES ping
+        sid2, _ = self._sid()
+        self._stop(sid2, "❓ NEEDS YOU: schváliš merge PR #5?")
+        self.assertIn("❓", self._sent())
+
     def test_immediate_question_is_structured_markdown(self):
         # the ❓ device line must be Discord-markdown structured (bold header +
         # blockquote on its own line), not one unreadable run-on

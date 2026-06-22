@@ -65,14 +65,27 @@ send_now() {
     ND_EMOJI="$1" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
 }
 
+# A turn that asks ❓ but ALSO says it will KEEP WORKING (a /goal or autopilot loop
+# continuing to the next ticket) is a MALFORMED marker — ❓ means "your turn, I'm
+# waiting", which contradicts continuing. Such a ❓ must NOT ping the phone (it
+# misleads the user that Claude is blocked when it actually moved on). The
+# status-marker Stop hook forces the agent to fix it to ⏳ + defer the question.
+_CONTINUING='keep (working|going|grind|grinding|processing|moving)|continu(e|es|ing) (now|with|on|to (work|grind|process|the))|move on( to)?|next (ticket|issue|batch|one|item)|per the goal i keep|grinding (these|the backlog|on)|keep grinding|i.?ll (process|handle|surface|tackle|do|get to) (it|that|the|its|them|those|#) .* (later|next|when you|after)|surface (it|them|those|the .*) later|process its callback'
+
 if printf '%s' "$LAST_LINE" | grep -q "❓"; then
-    # ❓ on the last line — Claude is BLOCKED on the user. Fire the device ping
-    # IMMEDIATELY (the question must reach the phone even over SSH, where the
-    # idle_prompt event is unreliable). No pending is left, so the idle hook will
-    # not re-send it.
-    C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
-    rm -f "$PENDING" 2>/dev/null || true
-    send_now "❓" "$C"
+    if printf '%s' "$MSG" | grep -qiE "$_CONTINUING"; then
+        # ❓ but the turn is CONTINUING the loop → not a genuine block. Suppress the
+        # phone ping (clear pending). The agent should have used ⏳ + deferred the
+        # question; the status-marker hook will make it.
+        rm -f "$PENDING" 2>/dev/null || true
+    else
+        # ❓ on the last line, genuinely blocked on the user → fire the device ping
+        # IMMEDIATELY (the question must reach the phone even over SSH, where the
+        # idle_prompt event is unreliable). No pending left → idle hook won't re-send.
+        C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
+        rm -f "$PENDING" 2>/dev/null || true
+        send_now "❓" "$C"
+    fi
 elif printf '%s' "$LAST_LINE" | grep -q "⏳"; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear
