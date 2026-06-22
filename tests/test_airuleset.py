@@ -2032,6 +2032,13 @@ class TestDiscordAutopilotNotify(TestCase):
             "The server was overloaded so I added caching to reduce load.",
             "Pridal som rate limit do API endpointu podľa zadania.",
             "⏳ WORKING: monitorujem CI",
+            # REGRESSION (odoo-slovnormal false ping): an agent ⏳ WORKING update
+            # that NARRATES a past 529 must NOT be read as an api error.
+            "Re-dispatched (the 529 did nothing — fresh start). Worker building the "
+            "production workflow. ⏳ WORKING: staviam stav-workflow → demo → PROD. "
+            "Ozvem sa.",
+            # a bare "529" in prose, no status marker → still not an error
+            "Re-dispatched after the 529 cleared, fresh start on the workflow.",
             "",
         ]:
             self.assertFalse(self.notify.is_api_error(t), t)

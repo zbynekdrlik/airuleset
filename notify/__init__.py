@@ -223,20 +223,29 @@ _API_ERROR_PHRASE = re.compile(
     r"|usage limit (reached|exceeded)"
     r"|rate[ -]?limited\b"
     r"|internal server error"
-    r"|service unavailable"
-    r"|\b(502|503|529)\b)",
+    r"|service unavailable)",
     re.IGNORECASE)
+# A bare "529"/"502" in prose ("the 529 did nothing") is NOT an error — a real CC
+# 529 leads with "API Error:" (the LEAD) or says "Overloaded", so the bare-number
+# alternative was removed (it false-pinged an agent's own status update).
+
+# Status markers prove the text is the agent's OWN message (it narrated a past
+# error inside a ⏳/✅/❓ update) — a genuine api error ABORTS the turn, so its
+# last_assistant_message is the bare banner with NO status marker.
+_AGENT_STATUS_RX = re.compile(r"⏳|✅|❓|NEEDS YOU|\bWORKING:|\bDONE:")
 
 
 def is_api_error(text):
     """True if `text` (a turn's final assistant message) is a real Claude Code API
     error that stopped the work — the concrete signal the notifier keys on. Precise
-    on purpose: a normal message that merely mentions 'rate limiter' is NOT an
-    error (the false positive that produced spam)."""
+    on purpose: a normal message that merely MENTIONS '529' / 'rate limiter' / a
+    status marker is NOT an error (the false positives that produced spam)."""
     if not text:
         return False
     t = str(text).strip()
-    if len(t) > 600:   # CC API-error lines are short; a long message is normal prose
+    if len(t) > 600:                 # CC API-error lines are short; long = normal prose
+        return False
+    if _AGENT_STATUS_RX.search(t):   # the agent's own ⏳/✅/❓ status update, not an error
         return False
     return bool(_API_ERROR_LEAD.match(t) or _API_ERROR_PHRASE.search(t))
 
