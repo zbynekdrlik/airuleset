@@ -1097,9 +1097,11 @@ WATCHDOG_TIMER_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchd
 
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
-    on an API error, ping on stall + give-up. Driven by the systemd timer."""
-    from watchdog import run_once
-    logs = run_once(dry_run=getattr(args, "dry_run", False))
+    on an API error, ping on stall + give-up + on a session waiting on the user,
+    and (rate-limited) alert when the weekly token limit nears its cap. Driven by
+    the systemd timer."""
+    from watchdog import run_once, fetch_usage
+    logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage)
     if getattr(args, "verbose", False):
         for line in logs:
             print(line)

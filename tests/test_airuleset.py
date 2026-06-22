@@ -2695,6 +2695,81 @@ class TestApiWatchdog(TestCase):
                         state_path=self.state, grace=300, wait_grace=120)
         self.assertEqual(self.pings[0][2], "marek", "ping must carry the pane's owner")
 
+    # --- weekly token-usage alert -------------------------------------------
+    @staticmethod
+    def _wk(pct, resets="W1", model=None):
+        lim = {"group": "weekly", "kind": "weekly_all", "percent": pct, "resets_at": resets}
+        if model:
+            lim["kind"] = "weekly_scoped"
+            lim["scope"] = {"model": {"display_name": model}}
+        return {"limits": [{"group": "session", "percent": 4}, lim]}
+
+    def test_weekly_percent_picks_highest_active(self):
+        u = {"limits": [
+            {"group": "session", "percent": 4},
+            {"group": "weekly", "kind": "weekly_all", "percent": 41, "resets_at": "R1"},
+            {"group": "weekly", "kind": "weekly_scoped", "percent": 80, "resets_at": "R2",
+             "scope": {"model": {"display_name": "Opus"}}}]}
+        pct, resets, label = self.w.weekly_percent(u)
+        self.assertEqual(pct, 80.0)
+        self.assertEqual(resets, "R2")
+        self.assertIn("Opus", label)
+
+    def test_weekly_percent_none_without_weekly(self):
+        self.assertIsNone(self.w.weekly_percent({"limits": [{"group": "session", "percent": 9}]}))
+        self.assertIsNone(self.w.weekly_percent({}))
+
+    def test_check_usage_alerts_at_threshold_once_per_window(self):
+        st, now = {}, 1_000_000
+        f = lambda: self._wk(98, "RW1")
+        line = self.w.check_usage(now, st, self._send, fetch=f, threshold=98, interval=900)
+        self.assertTrue(line.startswith("usage-alert"))
+        self.assertEqual(len(self.pings), 1)
+        self.assertIn("98%", self.pings[0][0])
+        self.assertTrue(self.pings[0][1].startswith("usage:"))
+        # within interval → no re-poll
+        self.w.check_usage(now + 100, st, self._send, fetch=f, threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        # after interval, SAME reset window → deduped
+        self.w.check_usage(now + 1000, st, self._send, fetch=f, threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+
+    def test_check_usage_below_threshold_no_alert(self):
+        st, now = {}, 1_000_000
+        self.w.check_usage(now, st, self._send, fetch=lambda: self._wk(80), threshold=98, interval=900)
+        self.assertEqual(self.pings, [])
+
+    def test_check_usage_re_alerts_after_window_reset(self):
+        st, now = {}, 1_000_000
+        self.w.check_usage(now, st, self._send, fetch=lambda: self._wk(99, "W1"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        # next week (new resets_at) still >=98 → a fresh alert
+        self.w.check_usage(now + 1000, st, self._send, fetch=lambda: self._wk(99, "W2"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 2)
+
+    def test_check_usage_handles_fetch_failure(self):
+        st, now = {}, 1_000_000
+        self.w.check_usage(now, st, self._send, fetch=lambda: None, threshold=98, interval=900)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_runs_usage_check_when_fetcher_given(self):
+        now = 1_000_000
+        fake = _FakeTmux(panes="")        # no panes — isolate the usage job
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               usage_fetch=lambda: self._wk(98, "RW"))
+        self.assertTrue(any("usage-alert" in l for l in logs))
+        self.assertEqual(len(self.pings), 1)
+
+    def test_run_once_skips_usage_without_fetcher(self):
+        now = 1_000_000
+        fake = _FakeTmux(panes="")
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state)  # no usage_fetch
+        self.assertEqual(self.pings, [])
+
     # --- wiring --------------------------------------------------------------
     def test_watchdog_subcommand_registered(self):
         self.assertIn("watchdog", airuleset.SUBCOMMANDS)

@@ -1,4 +1,4 @@
-"""api-watchdog — keep unattended Claude Code sessions moving. Two jobs per poll:
+"""api-watchdog — keep unattended Claude Code sessions moving. Three jobs per poll:
 
   (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
       rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
@@ -7,6 +7,11 @@
       human. This closes the gap that left a blocked `bakerion` session silent:
       an AskUserQuestion wait is neither a `❓` Stop-marker turn nor `idle_prompt`,
       so no hook covered it.
+  (3) WEEKLY-LIMIT ALERT: the 3rd reason work stalls — the WEEKLY subscription
+      token limit runs out. A rate-limited poll of Anthropic's oauth/usage window
+      state (the same data `/usage` shows) pings ONCE per reset window when a
+      weekly limit reaches the cap percent (default 98), so the user can react before it
+      hard-stops. Polled at most every USAGE_INTERVAL — the endpoint 429s hard.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -356,6 +361,118 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
 
 
 # --------------------------------------------------------------------------- #
+# Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
+# limit runs out). Reads Anthropic's oauth/usage window state — the same data
+# `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
+# The endpoint is AGGRESSIVELY rate-limited (429), so it is polled at most every
+# USAGE_INTERVAL (not on the 60s tmux cadence).
+# --------------------------------------------------------------------------- #
+
+USAGE_THRESHOLD = 98              # alert when a weekly window reaches this %
+USAGE_INTERVAL = 15 * 60         # min seconds between usage polls (429s hard)
+_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_CC_VERSION_FALLBACK = "2.1.185"
+
+
+def _cc_version():
+    import subprocess
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True,
+                             text=True, timeout=5).stdout
+        m = re.search(r"(\d+\.\d+\.\d+)", out or "")
+        return m.group(1) if m else _CC_VERSION_FALLBACK
+    except Exception:
+        return _CC_VERSION_FALLBACK
+
+
+def _read_oauth_token():
+    try:
+        d = json.load(open(os.path.expanduser("~/.claude/.credentials.json")))
+        return (d.get("claudeAiOauth") or {}).get("accessToken") or None
+    except Exception:
+        return None
+
+
+def fetch_usage():
+    """GET Anthropic's oauth/usage window state, or None on any error / 429. The
+    `claude-code` User-Agent is REQUIRED (without it the endpoint 429s even harder)."""
+    import urllib.request
+    tok = _read_oauth_token()
+    if not tok:
+        return None
+    req = urllib.request.Request(_OAUTH_USAGE_URL, headers={
+        "Authorization": "Bearer " + tok,
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "claude-code/" + _cc_version(),
+        "Content-Type": "application/json"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=12).read())
+    except Exception:
+        return None
+
+
+def weekly_percent(usage):
+    """(percent, resets_at, label) of the HIGHEST active WEEKLY window in the
+    oauth/usage payload, or None — ANY weekly window hitting the cap stalls work."""
+    best = None
+    for lim in (usage or {}).get("limits", []):
+        if lim.get("group") != "weekly":
+            continue
+        pct = lim.get("percent")
+        if pct is None:
+            continue
+        label = "týždenný limit"
+        model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        if model:
+            label = "týždenný limit (%s)" % model
+        if best is None or pct > best[0]:
+            best = (float(pct), lim.get("resets_at"), label)
+    return best
+
+
+def _human_reset(iso):
+    if not iso:
+        return "?"
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m. %H:%M")
+    except Exception:
+        return str(iso)[:16]
+
+
+def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
+                threshold=USAGE_THRESHOLD, interval=USAGE_INTERVAL):
+    """Rate-limited weekly-usage poll: at most once per `interval`, and an alert
+    ONCE per reset window when a weekly limit reaches `threshold`%. Mutates
+    state['usage']; returns a log line or ''. Best-effort (never raises)."""
+    fetch = fetch or fetch_usage
+    u = state.get("usage") or {}
+    if (now - u.get("last_check", 0)) < interval:
+        return ""
+    u["last_check"] = int(now)
+    state["usage"] = u
+    data = fetch()
+    if not data:
+        return ""                          # 429 / error → try again next interval
+    wk = weekly_percent(data)
+    if not wk:
+        return ""
+    pct, resets_at, label = wk
+    if pct < threshold:
+        u["alerted_window"] = None         # back below threshold → re-arm the dedup
+        state["usage"] = u
+        return ""
+    if u.get("alerted_window") == resets_at:
+        return ""                          # already alerted for THIS reset window
+    u["alerted_window"] = resets_at
+    state["usage"] = u
+    send_fn("⚠️ **Tokeny — %s na %d%%**\n> Práca sa môže čoskoro zastaviť "
+            "(vyčerpaný týždenný limit). Reset: %s." % (label, int(pct), _human_reset(resets_at)),
+            owner=owner, dedup_key="usage:%s:%d" % (resets_at, int(pct)), dry_run=dry_run)
+    return "usage-alert %s %d%%" % (label, int(pct))
+
+
+# --------------------------------------------------------------------------- #
 # One poll cycle
 # --------------------------------------------------------------------------- #
 
@@ -363,11 +480,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
-             wait_clear=WAIT_CLEAR_SECONDS):
-    """Scan every `claude` pane once. Two independent jobs:
+             wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None):
+    """Scan every `claude` pane once. Three jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
-          PING ONLY, never act (a design decision needs the human).
+          PING ONLY, never act (a design decision needs the human);
+      (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
+          → ping when a weekly limit reaches the cap %.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -378,6 +497,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     state = load_state(state_path)
     logs = []
     stalled = set()
+    account_owner = ""                  # owner to @mention on the account-wide usage alert
 
     # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
     # is bound to a transcript that exactly ONE pane owns — if two panes resolve to
@@ -403,6 +523,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         project = project_label(cwd)
         key = tpath.stem                   # session id (stable across grouped panes)
         owner = pane_owner(pid, run)       # @mention the right person for THIS pane
+        if owner and not account_owner:
+            account_owner = owner          # first owner seen → the account/usage owner
 
         # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
         # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
@@ -491,10 +613,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # (the episode is genuinely over / the prompt was answered) — tolerating a
     # single missed poll so the same open prompt is never pinged twice.
     for k in list(state.keys()):
+        if k == "usage":
+            continue                       # account-wide usage state, not a session
         if k.startswith("wait:"):
             if int(now) - state[k].get("last_seen", 0) > wait_clear:
                 del state[k]
         elif k not in stalled:
             del state[k]
+
+    # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
+    # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
+    # the aggressively-429'd endpoint. Best-effort: never breaks the tmux jobs.
+    if usage_fetch is not None:
+        try:
+            line = check_usage(now, state, send_fn, fetch=usage_fetch,
+                               owner=account_owner or None, dry_run=dry_run)
+            if line:
+                logs.append(line)
+        except Exception:
+            pass
+
     save_state(state_path, state)
     return logs
