@@ -26,10 +26,14 @@ DETECTION (per `claude` tmux pane)
   on an error CC actually hit, never on a user/agent merely quoting "API Error" in
   prose. (An earlier pane-text fallback was removed: it matched any session
   DISPLAYING api-error text and false-nudged an active meta-conversation.)
-- IDLE signal: the transcript has not advanced for >= GRACE seconds (Claude Code's
-  own quick retries keep the transcript moving, so a 5-min-stale transcript means
-  the retries were exhausted and it is genuinely parked).
-- STALLED = ERROR and IDLE.
+- STALL TIMER (state, NOT transcript mtime): from the first poll where the last
+  reply is an api-error, `decide` counts how long it has stayed that way and nudges
+  after GRACE. It does NOT gate on transcript-idle — Claude Code's own retries +
+  queue/snapshot writes keep touching the transcript, so an mtime-idle gate never
+  reaches GRACE for a rate-limited session (the bug that left `presenter`
+  unnudged). first_seen is seeded with `now - idle` so an already-stale stall
+  counts from when it really began; a session that recovers (last reply turns
+  normal) is dropped from state, giving Claude Code its own GRACE to recover first.
 
 SAFETY GATES (never steer keys into the wrong / busy pane)
 ---------------------------------------------------------
@@ -42,7 +46,8 @@ SAFETY GATES (never steer keys into the wrong / busy pane)
 
 ACTION (state machine, see `decide`)
 ------------------------------------
-first sighting (already >=GRACE stale) -> 'nudge' #1  (send `continue` + ONE ping)
+first sighting -> 'wait' (record first_seen); 'nudge' #1 right away IF already
+                 >=GRACE stuck (seeded from now-idle), else after GRACE (+ ONE ping)
 +INTERVAL each      -> 'nudge' #2, #3
 after MAX_NUDGES     -> 'escalate' (ping "gave up", stop — no continue-spam during
                         a long Anthropic outage)
@@ -218,33 +223,43 @@ def pane_waiting_on_user(captured):
     return bool(captured) and bool(_WAITING_RX.search(captured))
 
 
-def decide(state, key, err_hash, now,
-           interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES):
+def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
+           interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES, first_seen_seed=None):
     """Pure decision for ONE stalled session. Returns (action, entry) where action
     is 'nudge' | 'wait' | 'escalate' | 'noop'. `entry` is the updated state record
     (caller persists state[key] = entry).
 
-    The INITIAL grace is enforced by the caller: `run_once` only calls `decide`
-    once the transcript has been idle >= GRACE (i.e. the stall is already >= 5 min
-    old), so the FIRST qualifying sighting nudges IMMEDIATELY — "5 min after the
-    error" — rather than waiting a second grace period. Thereafter a nudge fires
-    only every `interval`; after `max_nudges` it escalates once, then noops. A
-    different err_hash (a new error) restarts the cycle."""
+    The grace is tracked HERE, from `first_seen` (the moment the session's last
+    reply became an api-error), NOT from transcript mtime — Claude Code's own
+    retries + queue/snapshot writes keep touching the transcript, so an mtime-idle
+    gate never trips for a rate-limited session (that bug left `presenter`
+    unnudged). On first sighting `first_seen = first_seen_seed` (the caller seeds it
+    with `now - idle` so an already-stale stall counts from when it really began);
+    if that is already >= grace old the first `continue` goes out NOW, else we
+    `wait` and let Claude Code recover on its own for `grace` first. Thereafter a
+    nudge fires every `interval`; after `max_nudges` it escalates once, then noops.
+    A different err_hash (a new error) restarts the cycle."""
     e = state.get(key)
     if e is None or e.get("hash") != err_hash:
-        # already >= grace stale (caller-gated) → first `continue` goes out NOW
-        return "nudge", {"hash": err_hash, "first_seen": now, "nudges": [now], "escalated": False}
+        fs = int(first_seen_seed) if first_seen_seed is not None else int(now)
+        entry = {"hash": err_hash, "first_seen": fs, "nudges": [], "escalated": False}
+        if (now - fs) >= grace:           # already stuck >= grace → first continue now
+            entry["nudges"] = [int(now)]
+            return "nudge", entry
+        return "wait", entry              # fresh → give Claude Code `grace` to recover
     if e.get("escalated"):
         return "noop", e
     nudges = list(e.get("nudges", []))
-    if (now - (nudges[-1] if nudges else e.get("first_seen", now))) < interval:
+    last = nudges[-1] if nudges else e.get("first_seen", now)
+    needed = grace if not nudges else interval
+    if (now - last) < needed:
         return "wait", e
     if len(nudges) >= max_nudges:
         e2 = dict(e)
         e2["escalated"] = True
         return "escalate", e2
     e2 = dict(e)
-    e2["nudges"] = nudges + [now]
+    e2["nudges"] = nudges + [int(now)]
     return "nudge", e2
 
 
@@ -392,48 +407,54 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
         # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
         # assistant entry — the ONLY trigger (an earlier pane-text fallback false-
-        # nudged a meta-conversation merely DISPLAYING api-error text).
-        if idle >= grace:
-            err_text = transcript_last_error(tpath)
-            if err_text:
-                # user scrolling / a menu open → keys would be swallowed or corrupt
-                # the selection. Skip WITHOUT advancing state (no retry burned).
-                if pane_in_mode(pid, run):
-                    logs.append("skip in-mode %s" % (project or pid))
-                    continue  # do not advance state (no retry burned)
-                stalled.add(key)
-                err_hash = _hash(err_text)
-                action, entry = decide(state, key, err_hash, now, interval, max_nudges)
+        # nudged a meta-conversation merely DISPLAYING api-error text). The grace is
+        # tracked from when the last reply BECAME an error (in state, via decide),
+        # NOT from transcript mtime: CC's own retries + queue/snapshot writes keep
+        # touching the transcript, so an mtime-idle gate never trips for a rate-
+        # limited session (that bug left `presenter` unnudged).
+        err_text = transcript_last_error(tpath)
+        if err_text:
+            # user scrolling / a menu open → keys would be swallowed or corrupt the
+            # selection. Skip WITHOUT advancing state (no retry burned).
+            if pane_in_mode(pid, run):
+                logs.append("skip in-mode %s" % (project or pid))
+                continue
+            stalled.add(key)
+            err_hash = _hash(err_text)
+            # seed first_seen with now-idle so an already-stale stall counts from
+            # when it really began (idle = age of the last transcript write).
+            action, entry = decide(state, key, err_hash, now, grace, interval,
+                                   max_nudges, first_seen_seed=now - idle)
+            state[key] = entry
+            # first_seen in the dedup key so a recover→re-stall still pings
+            # (notify's own dedup TTL is 14 days).
+            fs = int(entry.get("first_seen", now))
+            if action == "nudge" and is_usage_cap(err_text):
+                # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
+                # mark escalated (no nudge, no retries, no false giveup).
+                entry["nudges"], entry["escalated"] = [], True
                 state[key] = entry
-                # first_seen in the dedup key so a recover→re-stall still pings
-                # (notify's own dedup TTL is 14 days).
-                fs = int(entry.get("first_seen", now))
-                if action == "nudge" and is_usage_cap(err_text):
-                    # quota USAGE cap — time-based, `continue` can't fix it. Ping
-                    # ONCE, mark escalated (no nudge, no retries, no false giveup).
-                    entry["nudges"], entry["escalated"] = [], True
-                    state[key] = entry
-                    logs.append("usage-cap %s — ping only, no continue" % project)
-                    send_fn(compose_api_error_alert(project, err_text)
-                            + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                logs.append("usage-cap %s — ping only, no continue" % project)
+                send_fn(compose_api_error_alert(project, err_text)
+                        + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                        owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+            elif action == "nudge":
+                n = len(entry["nudges"])
+                logs.append("nudge#%d %s [%s]" % (n, project, key))
+                if not dry_run:
+                    send_continue(pid, NUDGE_TEXT, run)
+                if n == 1:                 # first nudge → tell the user it stalled
+                    send_fn(compose_api_error_alert(project, err_text),
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-                elif action == "nudge":
-                    n = len(entry["nudges"])
-                    logs.append("nudge#%d %s [%s]" % (n, project, key))
-                    if not dry_run:
-                        send_continue(pid, NUDGE_TEXT, run)
-                    if n == 1:             # first nudge → tell the user it stalled
-                        send_fn(compose_api_error_alert(project, err_text),
-                                owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-                elif action == "escalate":
-                    logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
-                    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                            "stále nepohlo — treba zásah." % (project, max_nudges))
-                    send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                            dry_run=dry_run)
-                else:
-                    logs.append("%s %s [%s]" % (action, project, key))
-                continue                   # handled as an api-error stall
+            elif action == "escalate":
+                logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
+                body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+                        "stále nepohlo — treba zásah." % (project, max_nudges))
+                send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+                        dry_run=dry_run)
+            else:
+                logs.append("%s %s [%s]" % (action, project, key))
+            continue                       # handled as an api-error stall
 
         # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
         # Blocked on an interactive prompt the human must answer. NEVER send keys

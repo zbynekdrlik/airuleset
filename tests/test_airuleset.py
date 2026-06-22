@@ -2391,30 +2391,40 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(self.w.list_claude_panes(fake), [("%5", "/devel/a"), ("%7", "/devel/c")])
 
     # --- decide state machine ------------------------------------------------
-    def test_decide_full_lifecycle(self):
+    def _dec(self, st, key, h, now, seed=None):
+        return self.w.decide(st, key, h, now, grace=300, interval=300, max_nudges=3,
+                             first_seen_seed=seed)
+
+    def test_decide_lifecycle_fresh_stall(self):
+        # a FRESH stall (seed=now) waits a full grace before the first nudge
         st, now = {}, 1_000_000
-        a, e = self.w.decide(st, "k", "h", now, interval=300, max_nudges=3)
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["k"] = e
-        # too soon → wait
-        a, e = self.w.decide(st, "k", "h", now + 100, interval=300, max_nudges=3)
+        a, e = self._dec(st, "k", "h", now, seed=now)
         self.assertEqual(a, "wait"); st["k"] = e
-        # after interval → nudge #2
-        a, e = self.w.decide(st, "k", "h", now + 300, interval=300, max_nudges=3)
+        a, e = self._dec(st, "k", "h", now + 100, seed=now)
+        self.assertEqual(a, "wait"); st["k"] = e
+        a, e = self._dec(st, "k", "h", now + 300, seed=now)    # grace elapsed → nudge #1
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["k"] = e
+        a, e = self._dec(st, "k", "h", now + 600, seed=now)    # +interval → #2
         self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 2); st["k"] = e
-        # #3
-        a, e = self.w.decide(st, "k", "h", now + 600, interval=300, max_nudges=3)
+        a, e = self._dec(st, "k", "h", now + 900, seed=now)    # #3
         self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 3); st["k"] = e
-        # max reached → escalate once
-        a, e = self.w.decide(st, "k", "h", now + 900, interval=300, max_nudges=3)
+        a, e = self._dec(st, "k", "h", now + 1200, seed=now)   # max → escalate once
         self.assertEqual(a, "escalate"); self.assertTrue(e["escalated"]); st["k"] = e
-        # then noop
-        a, e = self.w.decide(st, "k", "h", now + 1200, interval=300, max_nudges=3)
+        a, e = self._dec(st, "k", "h", now + 1500, seed=now)   # then noop
         self.assertEqual(a, "noop")
+
+    def test_decide_already_stale_nudges_on_first_sighting(self):
+        # seed older than grace (the rate-limit / presenter case once detected) →
+        # the first `continue` goes out immediately, no extra grace wait
+        st, now = {}, 1_000_000
+        a, e = self._dec(st, "k", "h", now, seed=now - 600)
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 1)
 
     def test_decide_new_error_hash_resets(self):
         st = {"k": {"hash": "old", "first_seen": 1, "nudges": [1, 2, 3], "escalated": True}}
-        a, e = self.w.decide(st, "k", "NEWHASH", 1_000_000, interval=300, max_nudges=3)
-        self.assertEqual(a, "nudge")
+        a, e = self._dec(st, "k", "NEWHASH", 1_000_000, seed=1_000_000)  # fresh seed
+        self.assertEqual(a, "wait")                 # new error, not yet grace-old
         self.assertEqual(e["hash"], "NEWHASH")
         self.assertFalse(e["escalated"])
 
@@ -2577,7 +2587,8 @@ class TestApiWatchdog(TestCase):
                   grace=300, interval=300, max_nudges=3)
         self.w.run_once(now=now, **kw)
         key1 = self.pings[-1][1]
-        self.assertIn(str(now), key1, "first_seen must be in the dedup key")
+        # first_seen (seeded now-idle = now-600) is in the dedup key
+        self.assertIn(str(now - 600), key1, "first_seen must be in the dedup key")
         # recover, then re-stall with the SAME error text much later
         self._transcript(cwd, [self._ERR, self._OK], 5, now + 100)
         self.w.run_once(now=now + 100, **kw)            # drops the recovered key
