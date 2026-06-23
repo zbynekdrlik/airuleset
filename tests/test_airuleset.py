@@ -2629,6 +2629,90 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 1, "api-error → continue")
         self.assertFalse(any("dlho visí" in p[0] for p in self.pings), "not a working-stall")
 
+    # --- job 5: deliver a pending ✅ (idle_prompt backstop) ------------------
+    def _txn_for_sid(self, sid, entries, age_s, now, cwd="/devel/projx"):
+        # write a transcript named <sid>.jsonl (so _transcript_for_sid finds it),
+        # carrying a cwd field so _cwd_from_transcript resolves a project name
+        d = self.projects / "enc-dir"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (sid + ".jsonl")
+        rows = [dict(e, cwd=cwd) if isinstance(e, dict) else e for e in entries]
+        p.write_text("\n".join(json.dumps(e) for e in rows) + "\n")
+        os.utime(p, (now - age_s, now - age_s))
+        return p
+
+    def _deliver(self, now, prefix, **kw):
+        kw.setdefault("bg_check", lambda c: False)
+        return self.w.deliver_pending_done(
+            now, self._send, self.projects, dry_run=kw.pop("dry_run", False),
+            done_grace=120, max_stale=3600, pending_prefix=prefix, **kw)
+
+    def test_deliver_done_sends_when_idle_and_still_done(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidA", [self._DONE], 300, now, cwd="/devel/projx")
+        pf = prefix + "sidA"; Path(pf).write_text("✅ hotová práca, čakám")
+        self._deliver(now, prefix)
+        self.assertEqual(len(self.pings), 1, "delivers the ✅ idle_prompt missed")
+        self.assertIn("hotovo", self.pings[0][0]); self.assertIn("projx", self.pings[0][0])
+        self.assertFalse(os.path.exists(pf), "pending claimed/consumed")
+
+    def test_deliver_done_cleared_when_refired(self):
+        # the user's exact worry: a session that said ✅ then a bg task re-fired it
+        # (now ⏳) must NOT be pinged "done" — clear the stale pending silently.
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidB", [self._DONE, self._WORKING], 300, now)
+        pf = prefix + "sidB"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix)
+        self.assertEqual(self.pings, [], "re-fired session → never ping done")
+        self.assertFalse(os.path.exists(pf), "stale ✅ cleared")
+
+    def test_deliver_done_too_fresh_keeps(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidC", [self._DONE], 30, now)
+        pf = prefix + "sidC"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix)
+        self.assertEqual(self.pings, [])
+        self.assertTrue(os.path.exists(pf), "too fresh → keep for next poll / idle hook")
+
+    def test_deliver_done_stale_cleared_no_ping(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidD", [self._DONE], 99999, now)   # idle > max_stale
+        pf = prefix + "sidD"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix)
+        self.assertEqual(self.pings, [], "legacy orphan → clear, don't ping a day-old done")
+        self.assertFalse(os.path.exists(pf))
+
+    def test_deliver_done_bg_monitor_defers(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidE", [self._DONE], 300, now)
+        pf = prefix + "sidE"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, bg_check=lambda c: True)
+        self.assertEqual(self.pings, [], "bg monitor alive → ✅ likely intermediate")
+        self.assertTrue(os.path.exists(pf), "deferred, not consumed")
+
+    def test_deliver_done_uses_session_owner(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidF", [self._DONE], 300, now)
+        pf = prefix + "sidF"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, owner_by_sid={"sidF": "marek"})
+        self.assertEqual(self.pings[0][2], "marek", "@mentions the session's owner")
+
+    def test_deliver_done_orphan_no_transcript(self):
+        # session pane closed, transcript gone → trust the recorded ✅, deliver on age
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        pf = prefix + "sidGHOST"; Path(pf).write_text("✅ hotovo orphan")
+        os.utime(pf, (now - 300, now - 300))
+        self._deliver(now, prefix)
+        self.assertEqual(len(self.pings), 1, "orphaned pending delivered on its own age")
+        self.assertFalse(os.path.exists(pf))
+
+    def test_deliver_done_dry_run_nondestructive(self):
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidH", [self._DONE], 300, now)
+        pf = prefix + "sidH"; Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, dry_run=True)
+        self.assertTrue(os.path.exists(pf), "dry_run must NOT remove the pending")
+
     def test_run_once_escalates_then_stops(self):
         now = 1_000_000
         cwd = "/devel/stuck"

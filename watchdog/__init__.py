@@ -1,4 +1,4 @@
-"""api-watchdog — keep unattended Claude Code sessions moving. Four jobs per poll:
+"""api-watchdog — keep unattended Claude Code sessions moving. Five jobs per poll:
 
   (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
       rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
@@ -27,6 +27,15 @@
       job 4 is only a safe backstop. Gated by an advancing-subagent check (skips the
       common healthy long wait) + a high threshold (skips CI/mutation) + once-per-
       episode dedup, so the ping is rare and true.
+  (5) DELIVER A PENDING ✅ (the unreliable-idle_prompt backstop): notify-discord-
+      pending.sh records a `✅ DONE` to /tmp/claude-discord-pending-<sid>; notify-
+      discord.sh delivers it on `idle_prompt` — but CC emits idle_prompt UNRELIABLY
+      over tmux/SSH, so on dev2 a finished turn's ✅ ping silently never arrives (the
+      pending just sits in /tmp — the reported symptom). The watchdog delivers it
+      once the session has been idle >= PENDING_DONE_GRACE, but ONLY while its
+      CURRENT last marker is STILL ✅ — a session that re-fired (a background task
+      re-invoked it → now ⏳) has its stale ✅ cleared WITHOUT pinging, so the device
+      is never told "done" for work that kept going. PING ONLY; claim-then-send.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -126,6 +135,24 @@ WAIT_CLEAR_SECONDS = 90
 # ONCE per episode (like job 2's waiting ping). Keyed on the CONCRETE `⏳` marker, not
 # bare silence.
 STALL_WORKING_SECONDS = 45 * 60
+
+# (5) DELIVER A PENDING ✅ — the reliable backstop for the unreliable idle_prompt.
+# notify-discord-pending.sh (Stop) records a ✅ DONE to /tmp/claude-discord-pending-
+# <sid>; notify-discord.sh delivers it on the `idle_prompt` Notification event. But
+# Claude Code emits idle_prompt UNRELIABLY over tmux/SSH (the same reason ❓ was
+# moved to immediate), so over SSH a completed turn's ✅ ping silently never arrives —
+# the pending just sits in /tmp (verified: undelivered files on dev2). The watchdog
+# polls reliably, so it delivers a pending ✅ once the session has been idle >= GRACE
+# (the user is away — the mobile-app "done when idle" model). It delivers ONLY if the
+# session's CURRENT last marker is STILL ✅ — if the session re-fired (a background
+# task re-invoked it → now ⏳, or it moved on), the ✅ is stale and is cleared WITHOUT
+# pinging, so the device never says "done" for work that actually kept going. A
+# pending older than MAX_STALE is a legacy orphan (the user has long moved on) →
+# cleared without pinging. PING ONLY; claim-then-send so it can't double-fire with the
+# idle hook.
+PENDING_DONE_GRACE = 120          # idle this long after ✅ → user is away → deliver
+PENDING_DONE_MAX_STALE = 12 * 3600  # older → legacy orphan, clear without pinging
+PENDING_PREFIX = "/tmp/claude-discord-pending-"
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "api-watchdog-state.json"
@@ -566,6 +593,131 @@ def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# Pending-✅ delivery (job 5) — reliable backstop for the unreliable idle_prompt.
+# --------------------------------------------------------------------------- #
+
+def _transcript_for_sid(projects_dir, sid):
+    """Path of the session transcript <projects>/*/<sid>.jsonl, or None. (The file
+    survives the pane closing, so a closed session's marker/idle is still readable.)"""
+    if not sid:
+        return None
+    for p in Path(projects_dir).glob("*/%s.jsonl" % sid):
+        return p
+    return None
+
+
+def _cwd_from_transcript(path):
+    """The session cwd recorded in the transcript (most recent entry carrying one),
+    or '' — used for the ✅ ping's project header."""
+    try:
+        for entry in reversed(_iter_jsonl_tail(path, max_lines=120)):
+            if isinstance(entry, dict) and entry.get("cwd"):
+                return entry["cwd"]
+    except Exception:
+        pass
+    return ""
+
+
+def _bg_monitor_in_cwd(cwd, run=None):
+    """True if a Claude `shell-snapshots` background shell is still alive in `cwd` —
+    a ✅ over a still-running background monitor is likely intermediate, so defer the
+    ping (mirrors notify-discord.sh's guard). Best-effort; False on any error."""
+    if not cwd:
+        return False
+    run = run or _default_run
+    out = run(["pgrep", "-f", "shell-snapshots"])
+    for pid in (out or "").split():
+        try:
+            if os.readlink("/proc/%s/cwd" % pid.strip()) == cwd:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
+                         account_owner="", dry_run=False,
+                         done_grace=PENDING_DONE_GRACE, max_stale=PENDING_DONE_MAX_STALE,
+                         pending_prefix=PENDING_PREFIX, bg_check=None):
+    """Sweep /tmp/claude-discord-pending-* and deliver a ✅ DONE ping the unreliable
+    idle_prompt event failed to deliver. Delivers ONLY when the session is genuinely,
+    still done: the pending exists AND the session's CURRENT last marker is STILL ✅
+    AND it has been idle >= done_grace (user away). A session that re-fired (a
+    background task re-invoked it → last marker now ⏳, or it moved on) has its stale
+    ✅ CLEARED without pinging — so the device is never told "done" for work that kept
+    going (the exact confusion to avoid). PING ONLY; claim-then-send (rm before send)
+    so it can't double-fire with the idle hook. Best-effort; returns log lines."""
+    import glob as _glob
+    owner_by_sid = owner_by_sid or {}
+    bg_check = bg_check if bg_check is not None else _bg_monitor_in_cwd
+    logs = []
+    plen = len(os.path.basename(pending_prefix))
+    for pf in sorted(_glob.glob(pending_prefix + "*")):
+        try:
+            with open(pf) as f:
+                content = f.read().strip()
+        except OSError:
+            continue
+        if not content.startswith("✅"):       # ❓ sends immediately, never pends; skip anything else
+            continue
+        sid = os.path.basename(pf)[plen:]
+        text = content[1:].strip()             # drop the leading ✅
+        tpath = _transcript_for_sid(projects_dir, sid)
+        if tpath is not None:
+            try:
+                idle = now - tpath.stat().st_mtime
+            except OSError:
+                idle = now - _safe_mtime(pf)
+            marker = transcript_last_marker(tpath)   # '' for a closed/normal-ended session
+            cwd = _cwd_from_transcript(tpath)
+        else:
+            idle = now - _safe_mtime(pf)
+            marker, cwd = "✅", ""              # no transcript → trust the recorded ✅
+
+        # Deliver ONLY while the session's CURRENT last marker is still ✅. If it
+        # re-fired (a background task re-invoked it → ⏳), asked ❓, hit an api-error,
+        # or ended a later turn markerless — anything but ✅ — the done-claim is no
+        # longer current: clear it, NEVER ping "done" for work that continued. (An
+        # orphan with no transcript keeps the recorded marker="✅" and is trusted.)
+        if marker != "✅":
+            if not dry_run:
+                _safe_unlink(pf)
+            logs.append("cleared non-✅ sid=%s (now %r)" % (sid[:8], marker))
+            continue
+        if idle < done_grace:
+            continue                            # too fresh — user may continue / idle hook may fire
+        if idle > max_stale:
+            if not dry_run:
+                _safe_unlink(pf)
+            logs.append("cleared stale ✅ sid=%s idle=%dh" % (sid[:8], int(idle // 3600)))
+            continue
+        if cwd and bg_check(cwd):
+            continue                            # bg monitor alive → ✅ likely intermediate, defer
+        if not dry_run:
+            _safe_unlink(pf)                    # claim first so a concurrent idle hook can't double-send
+        project = project_label(cwd) if cwd else "unknown"
+        owner = owner_by_sid.get(sid) or account_owner or None
+        send_fn("✅ **%s** — hotovo\n> %s" % (project, text[:250]),
+                owner=owner, dedup_key="done:%s" % sid, dry_run=dry_run)
+        logs.append("delivered ✅ sid=%s [%s] idle=%dm" % (sid[:8], project, int(idle // 60)))
+    return logs
+
+
+def _safe_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _safe_unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # One poll cycle
 # --------------------------------------------------------------------------- #
 
@@ -574,15 +726,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
              wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None,
-             stall_working=STALL_WORKING_SECONDS):
-    """Scan every `claude` pane once. Four jobs:
+             stall_working=STALL_WORKING_SECONDS,
+             done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX):
+    """Scan every `claude` pane once. Five jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
           → ping when a weekly limit reaches the cap %;
       (4) a session idle on `⏳ WORKING` ≥ `stall_working` with NO advancing subagent
-          → PING once (its launched work may have died silently). Never injects keys.
+          → PING once (its launched work may have died silently). Never injects keys;
+      (5) a session that ended `✅ DONE` and went idle ≥ `done_grace` → DELIVER the
+          pending ✅ device ping the unreliable idle_prompt event failed to send
+          (only while the session is STILL ✅ — a re-fired one is cleared silently).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -593,6 +749,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     state = load_state(state_path)
     logs = []
     stalled = set()
+    owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     account_owner = ""                  # owner to @mention on the account-wide usage alert
 
     # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
@@ -619,8 +776,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         project = project_label(cwd)
         key = tpath.stem                   # session id (stable across grouped panes)
         owner = pane_owner(pid, run)       # @mention the right person for THIS pane
-        if owner and not account_owner:
-            account_owner = owner          # first owner seen → the account/usage owner
+        if owner:
+            owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
+            if not account_owner:
+                account_owner = owner      # first owner seen → the account/usage owner
 
         # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
         # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
@@ -764,6 +923,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 logs.append(line)
         except Exception:
             pass
+
+    # --- (5) DELIVER PENDING ✅ — backstop for the unreliable idle_prompt event.
+    # Best-effort: a bad pending file must never break the tmux jobs.
+    try:
+        logs += deliver_pending_done(now, send_fn, projects_dir,
+                                     owner_by_sid=owner_by_sid, account_owner=account_owner,
+                                     dry_run=dry_run, done_grace=done_grace,
+                                     pending_prefix=pending_prefix)
+    except Exception:
+        pass
 
     save_state(state_path, state)
     return logs
