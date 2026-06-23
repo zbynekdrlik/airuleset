@@ -189,8 +189,13 @@ Each loop turn:
    in depth on top of 1b), then runs ONE cycle for the whole batch on one `dev` branch: version bump
    → per-issue TDD (each bug RED→GREEN, each member committed with its own `Closes #<n>`) → ONE push
    → ONE CI → ONE PR whose body `Closes` every member → merge per `pr-merge-policy.md` → deploy
-   verify. It **asks you directly** on any genuine design / scope / authorization call. Answer it;
-   the worker continues. **A question is a conversation, NOT an abandoned issue.** If a member turns
+   verify. It **asks you directly** on any genuine design / scope / authorization call — but FIRST it
+   runs the ownership gate (`ask-before-assuming.md`): a question goes to you ONLY if it is CONCEPTUAL
+   (what to build / ambiguous intent / a product decision you have a stake in / irreversible), NEVER a
+   TECHNICAL detail the worker should just decide (placement of a diagnostic element, which corner, a
+   size, a default, layout of a debug overlay). Asking "súhlasíš s týmto rozmiestnením QR kódov?" is a
+   banned over-ask — the worker decides that and proceeds. Answer the conceptual ones; the worker
+   continues. **A question is a conversation, NOT an abandoned issue.** If a member turns
    out to violate the gate mid-flight (schema/API/security/cross-cut discovered), the worker DROPS it
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
    solo later.

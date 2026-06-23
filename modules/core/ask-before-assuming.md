@@ -2,11 +2,32 @@
 
 **When you are unsure about the user's intent, USE the AskUserQuestion tool to ask — do not guess and proceed.** Structured questions with multiple-choice options are faster for the user to answer than fixing your wrong assumption.
 
+#### FIRST — before ANY question, is it the USER's call or YOURS?
+
+**Run this gate before EVERY question (AskUserQuestion or prose). Most things you are tempted to ask are TECHNICAL details YOU must decide — asking them dumps your job on the user and wastes their time. You were hired as the engineer to make these calls.** This is NOT "ask less" in general — genuine conceptual / intent / scope questions stay WELCOME (the rest of this rule); the gate only separates those from the technical details you should just decide.
+
+The test: **"Does a sensible default exist that the user would not bother to override? Am I asking HOW to implement, rather than WHAT to build?"** If a competent senior engineer would just pick a good answer and move on → DECIDE IT, do NOT ask. (Careful: a product-UX choice the end user will SEE — nav placement, flow order, which-of-two visible behaviors — is a WHAT even though it can feel like HOW; the real discriminator is user STAKE, not implementation-vs-design. When in doubt about stake, ask.)
+
+**YOU decide (NEVER ask — pick well and proceed):**
+
+- Implementation / technical details: placement & layout of internal or diagnostic elements, which corner, pixel sizes, default values, names, file/module structure, which of N **truly interchangeable** approaches (same user-visible behavior AND same maintenance cost — if they differ in consequences, that is the user's call, see below).
+- Anything with an obvious sensible default that the user has no stake in.
+- **Real banned example (this incident):** an autopilot worker asked the user to approve a 4-corner QR-code layout for a latency-proof recording ("kamerové hore, strih vľavo dole, stream vpravo dole, ~300px — súhlasíš?"). Pure technical placement, obvious default (don't overlap, keep readable). The user, angry: *"totálne nechápem prečo sa ma pýtaš takú hlúpu technickú otázku, na toto netreba mňa."* → That is YOURS. DECIDE IT.
+
+**The USER decides (ask ONLY when genuinely ambiguous — these questions ARE welcome):**
+
+- WHAT to build / the feature's core behavior / which of several DIFFERENT intents they meant (ambiguous scope).
+- A genuine product decision they have a real STAKE in — the end-user-facing UX / copy / brand, the product's actual behavior — NOT every internal placement.
+- Irreversible / destructive actions.
+- Something only they know (their credentials, business logic, a preference no default can guess).
+
+One-line test: **if you would be annoyed at a junior engineer for asking it instead of just doing it well — don't ask it, decide it.** This is NOT "stop asking" — genuine conceptual / intent / scope questions are welcome (the rest of this rule). It means: separate the conceptual decision the user owns from the technical detail you own, and only send the former. When a question DOES pass this gate and it is a visual/layout one the user has a stake in, ask it with the visual companion (per the pre-answered table) — but most internal/technical placements never pass the gate at all.
+
 #### When to ask (use AskUserQuestion tool)
 
 - **Ambiguous scope** — "fix this" could mean multiple things. Ask which interpretation.
-- **Multiple valid approaches** — two architectures could work. Ask which the user prefers.
-- **UX / copy / wording / design choices** — "Which wording for this label?", "Which color for the alert?", "Which icon style?". The user owns these — ask freely. The pre-answered table covers PROCESS questions ("which execution approach"), NOT content questions.
+- **Multiple valid approaches with DIFFERENT consequences** — two architectures that differ in user-visible behavior, maintainability, or future cost could work. Ask which the user prefers. (Two approaches that are *truly interchangeable* — same visible behavior, same maintenance cost — are YOURS to decide; don't ask. The fork must have consequences the user has a stake in to warrant a question.)
+- **UX / copy / wording / design choices the user has a STAKE in** — "Which wording for this end-user label?", "Which brand color for the alert?", "Which icon style?". The user owns the product's user-facing design — ask freely. BUT this means the genuine PRODUCT design the user cares about, NOT every layout/placement: an internal or diagnostic element's position (a debug QR corner, a log-panel placement, a dev-only overlay) has an obvious sensible default and NO user stake → that is YOURS, decide it (see the gate above). The pre-answered table covers PROCESS questions ("which execution approach"), NOT genuine content questions.
 - **Destructive or irreversible actions** — already covered by no-destructive-remote-actions, but also applies to: deleting files, major refactors, changing APIs.
 - **Dependencies on user context** — you don't know which environment, which instance, which config. Ask.
 - **Before stopping early** — if you think you can't finish, ask what the user wants instead of inventing a stopping point.
@@ -27,7 +48,8 @@ These questions waste user time. The answer never changes. Apply the answer dire
 | Question pattern | Fixed answer | What to do |
 |---|---|---|
 | "Subagent or sequential/inline?" / "Two execution options: Subagent-Driven vs Inline / Which approach?" | **Subagent** | Use `superpowers:subagent-driven-development`. Always. Do NOT present options. Do NOT ask "Which approach?". Just dispatch subagents. |
-| "Want visual companion / mockups?" / "Should I use visual companion for this design question?" / "Use terminal ASCII or visual companion for this layout question?" | **MANDATORY — start visual companion, never use ASCII art** | Visual companion is REQUIRED for ANY layout / position / UI-design / component-placement / wizard-step / dashboard-layout / page-header-footer / "where should X go" question. ASCII / box-drawing / text-mockup is BANNED for those questions — the user has repeatedly stated it's unreadable and causes wrong iterations. The brainstorming skill's "decide per question — terminal for conceptual, browser for visual" escape DOES NOT apply to layout/position questions; those are ALWAYS visual. Start the companion ONCE at brainstorming start, then USE IT for every layout question without re-asking. Stop hook blocks ASCII-art layout mockups. |
+| "Want visual companion / mockups?" / "Should I use visual companion for this design question?" / "Use terminal ASCII or visual companion for this layout question?" | **MANDATORY — start visual companion, never use ASCII art** | Visual companion is REQUIRED for ANY layout / position / UI-design / component-placement / wizard-step / dashboard-layout / page-header-footer / "where should X go" question **that the ownership gate (top of this rule) says is the user's to ask at all** — i.e. a genuine end-user-facing product layout the user has a stake in. An internal / diagnostic / dev-only placement is DECIDED, never asked (no companion, no question). ASCII / box-drawing / text-mockup is BANNED for those questions — the user has repeatedly stated it's unreadable and causes wrong iterations. The brainstorming skill's "decide per question — terminal for conceptual, browser for visual" escape DOES NOT apply to layout/position questions; those are ALWAYS visual. Start the companion ONCE at brainstorming start, then USE IT for every layout question without re-asking. Stop hook blocks ASCII-art layout mockups. |
+| "Where should I place [the diagnostic QR / debug overlay / log panel / dev element]?" / "Which corner / size / layout for [an internal/technical element]?" / "Do you agree with this [technical placement / 4-corner layout / ~300px]?" | **DECIDE — never ask** | Technical placement of an internal or diagnostic element has an obvious sensible default and NO user stake. You are the engineer — pick well (don't overlap, keep it readable) and proceed. Real incident: a worker asked the user to approve a QR-code corner layout; the user, angry — *"totálne nechápem prečo sa ma pýtaš takú hlúpu technickú otázku, na toto netreba mňa."* Only a genuine end-user-facing PRODUCT layout the user has a stake in is asked (then via the visual companion). See the ownership gate at the top of this rule. |
 | "Should I continue with phase N?" | **Yes** | Execute the entire approved plan without stopping. |
 | "Should I monitor CI?" | **Yes** | Just monitor it. Never ask. |
 | "Want me to verify with Playwright?" | **Yes** | Verification is mandatory, not a proposal. |
@@ -60,7 +82,7 @@ These questions waste user time. The answer never changes. Apply the answer dire
 #### When NOT to ask (general)
 
 - Obvious next steps in a plan you already agreed on — just do them.
-- Technical decisions within your expertise that don't affect the user's workflow.
+- **Technical / implementation details within your competence** — placement of internal or diagnostic elements, layout of dev-only overlays, default values, sizes, names, structure, which technically-equivalent approach. A sensible default exists and the user has no stake → DECIDE IT. (This is the gate at the top — the most common over-ask.)
 - Questions you could answer by reading the code or documentation.
 
-**The rule: 5 seconds of asking saves 5 hours of fixing the wrong thing.**
+**The rule: 5 seconds of asking the RIGHT (conceptual) question saves 5 hours of fixing a wrong assumption — but asking the WRONG (technical) question wastes the user's time on a decision that was always yours. Ask the conceptual ones; decide the technical ones.**
