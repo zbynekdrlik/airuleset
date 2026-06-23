@@ -33,6 +33,12 @@ AGENTS_DIR = CLAUDE_DIR / "agents"
 MANAGED_HEADER = "# Managed by airuleset"
 MANAGED_MARKER = "<!-- airuleset-managed -->"
 
+# Externally-managed CLAUDE.md blocks to PRESERVE across regeneration. airuleset
+# fully regenerates ~/.claude/CLAUDE.md from the profile; that would otherwise wipe
+# a delimited block another tool injects. CodeGraph (`codegraph install`) appends
+# its guidance block here — preserve it so a `push` doesn't silently delete it.
+EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")]
+
 # Managed default effort: `xhigh` (deep adaptive reasoning) is the persistent
 # default the user wants in EVERY managed project so they never have to remember
 # to raise it. `xhigh` is the highest level settings.json accepts and persists
@@ -192,6 +198,24 @@ def generate_claude_md(modules: list[str]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def preserve_external_blocks(old_text: str, new_text: str) -> str:
+    """Re-attach externally-managed, delimited blocks (e.g. CodeGraph's guidance)
+    from the OLD CLAUDE.md onto freshly-generated NEW content, so regenerating from
+    the profile never silently deletes another tool's block. Pure + idempotent
+    (a block already present in new_text is not duplicated; absent markers = no-op)."""
+    result = new_text
+    for start, end in EXTERNAL_BLOCK_MARKERS:
+        if start in result:
+            continue  # already present — don't duplicate
+        si = old_text.find(start)
+        ei = old_text.find(end)
+        if si == -1 or ei == -1 or ei < si:
+            continue  # no intact block in the old file
+        block = old_text[si:ei + len(end)]
+        result = result.rstrip("\n") + "\n\n" + block + "\n"
+    return result
 
 
 def load_hooks_json() -> dict:
@@ -524,6 +548,8 @@ def cmd_install(args):
 
     if CLAUDE_MD.exists():
         old_content = CLAUDE_MD.read_text()
+        # Preserve externally-managed blocks (CodeGraph) that live outside the profile.
+        new_claude_md = preserve_external_blocks(old_content, new_claude_md)
         if old_content != new_claude_md:
             # Create backup
             backup = CLAUDE_MD.with_suffix(".md.bak")
