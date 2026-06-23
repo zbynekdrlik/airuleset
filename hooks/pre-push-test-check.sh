@@ -107,9 +107,21 @@ if [ -n "$COMMITS" ]; then
         BODY=$(git log -1 --pretty='%b' "$SHA" 2>/dev/null || echo "")
         FILES=$(git diff-tree --no-commit-id --name-only -r "$SHA" 2>/dev/null || echo "")
 
-        # Does this commit add/modify a test file?
+        # Does this commit add/modify a test file (by PATH)?
         if echo "$FILES" | grep -qiE '(test|spec|e2e|playwright)'; then
             SEEN_TEST_COMMIT=1
+        fi
+        # …or add INLINE tests in a non-test-named source file? Rust's dominant pattern is
+        # `#[cfg(test)] mod tests { #[test] fn … }` living INSIDE the source file (.rs),
+        # so a RED test commit touches e.g. `src/foo.rs`, NOT a `*test*`-named path. Without
+        # this, a perfectly-ordered RED→GREEN Rust PR is wrongly flagged "fix before test".
+        # Recognise a test commit by its diff ADDING a test attribute / assertion.
+        if [ "$SEEN_TEST_COMMIT" = "0" ]; then
+            ADDED=$(git diff-tree --no-commit-id -p -r "$SHA" 2>/dev/null \
+                | grep -E '^\+' || true)
+            if printf '%s' "$ADDED" | grep -qE '#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|it\(|describe\('; then
+                SEEN_TEST_COMMIT=1
+            fi
         fi
 
         # Is this commit a bug fix?
