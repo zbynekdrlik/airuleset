@@ -69,6 +69,48 @@ FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis"]
 
+# ---------------------------------------------------------------------------
+# Caveman plugin — managed wiring (kept correct on every host by `install`)
+# ---------------------------------------------------------------------------
+# Caveman (JuliusBrussee/caveman) is a third-party Claude Code plugin the user
+# relies on for compressed output. airuleset does NOT own its code, but DOES own
+# keeping it wired correctly on every machine — it kept HALF-installing / breaking
+# (plugin not enabled in enabledPlugins; statusLine pointing at a stale cache
+# hash). The recurring breakage is the cache hash: the plugin's real statusline
+# script lives under a content-hashed dir
+# (~/.claude/plugins/cache/caveman/caveman/<hash>/hooks/caveman-statusline.sh)
+# that CHANGES on every `claude plugin update`, so any hard-coded hash in
+# settings.json rots and the statusline silently dies. Fix: ship a STABLE shim at
+# a fixed path that resolves the current hash at RUNTIME, and point settings.json
+# statusLine -> shim. `install` then reconciles enable + marketplace + statusLine
+# on every push, self-healing both machines (the user asked to "put it into
+# maintenance"). See modules/core/machine-identities.md sibling docs + memory.
+CAVEMAN_MARKETPLACE_REPO = "JuliusBrussee/caveman"
+CAVEMAN_PLUGIN_KEY = "caveman@caveman"
+CAVEMAN_SHIM_DEST = CLAUDE_DIR / "airuleset-caveman-statusline.sh"
+CAVEMAN_MODE_FILE = CLAUDE_DIR / ".caveman-active"
+CAVEMAN_DEFAULT_MODE = "lite"
+VALID_CAVEMAN_MODES = {
+    "lite", "full", "ultra",
+    "wenyan-lite", "wenyan-full", "wenyan-ultra",
+}
+CAVEMAN_CACHE_GLOB = "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh"
+# Hash-independent entry to caveman's statusline. Must NEVER error (a broken
+# statusline would break the prompt render) — prints nothing if caveman isn't
+# built yet. `ls -dt ... | head -1` picks the newest cache hash at runtime.
+CAVEMAN_SHIM_CONTENT = (
+    "#!/usr/bin/env bash\n"
+    "# airuleset-managed (do NOT edit) — hash-independent entry to caveman's\n"
+    "# statusline. caveman's real script lives under a content-hashed cache dir\n"
+    "# that changes on every `claude plugin update`; resolving it at runtime means\n"
+    "# a plugin update can never rot the statusLine path again.\n"
+    'real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/'
+    "caveman-statusline.sh 2>/dev/null | head -1)\n"
+    'if [ -n "$real" ] && [ -f "$real" ]; then exec bash "$real" "$@"; fi\n'
+    "exit 0\n"
+)
+CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
+
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
@@ -591,6 +633,12 @@ def cmd_install(args):
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
+    try:
+        maybe_setup_caveman()
+    except Exception as e:
+        print(f"  caveman setup error (non-fatal): {e}", file=sys.stderr)
+
     print()
     print("Install complete. Restart Claude Code for changes to take effect.")
 
@@ -822,6 +870,111 @@ def setup_filedrop_service():
 def maybe_setup_filedrop():
     """Install the file-drop service on this machine (every host runs one)."""
     setup_filedrop_service()
+
+
+# ---------------------------------------------------------------------------
+# Caveman plugin wiring (every host) — see the constants block up top
+# ---------------------------------------------------------------------------
+
+def reconcile_caveman_settings(settings: dict,
+                               statusline_command: str = CAVEMAN_STATUSLINE_COMMAND) -> dict:
+    """Pure: return a new settings dict with caveman correctly wired —
+    statusLine -> the stable shim, the plugin enabled, the marketplace known.
+    Every other key is preserved untouched. Idempotent (same input -> same output)."""
+    result = dict(settings)
+    result["statusLine"] = {"type": "command", "command": statusline_command}
+    enabled = dict(result.get("enabledPlugins", {}))
+    enabled[CAVEMAN_PLUGIN_KEY] = True
+    result["enabledPlugins"] = enabled
+    markets = dict(result.get("extraKnownMarketplaces", {}))
+    markets["caveman"] = {"source": {"source": "github", "repo": CAVEMAN_MARKETPLACE_REPO}}
+    result["extraKnownMarketplaces"] = markets
+    return result
+
+
+def caveman_mode_or_default(existing) -> str:
+    """Pure: keep the user's current caveman mode if it's valid, else fall back
+    to the managed default. Never clobbers a valid `/caveman` pick; only repairs
+    a missing/empty/garbage mode file."""
+    if existing is not None:
+        mode = str(existing).strip()
+        if mode in VALID_CAVEMAN_MODES:
+            return mode
+    return CAVEMAN_DEFAULT_MODE
+
+
+def _caveman_plugin_built() -> bool:
+    """True iff caveman's plugin cache (the real statusline script) exists on disk."""
+    import glob
+    return bool(glob.glob(str(CLAUDE_DIR / CAVEMAN_CACHE_GLOB)))
+
+
+def setup_caveman():
+    """Keep the caveman plugin correctly wired on THIS machine (idempotent).
+
+    1. write the stable statusline shim (hash-independent),
+    2. install the plugin if its cache is missing (best-effort, time-boxed),
+    3. reconcile settings.json (enable + marketplace + statusLine -> shim),
+    4. seed a valid `.caveman-active` mode (preserve a valid user pick).
+    Non-fatal: prints the manual step on any failure rather than aborting install."""
+    import subprocess
+    print("  Wiring caveman plugin (managed)")
+
+    # 1. stable shim — survives `claude plugin update` cache-hash churn.
+    try:
+        CAVEMAN_SHIM_DEST.write_text(CAVEMAN_SHIM_CONTENT)
+        os.chmod(str(CAVEMAN_SHIM_DEST), 0o755)
+    except OSError as e:
+        print(f"    could not write caveman shim ({e})", file=sys.stderr)
+
+    # 2. install if the plugin cache is missing (best-effort).
+    if not _caveman_plugin_built():
+        try:
+            r = subprocess.run(
+                ["claude", "plugin", "install", CAVEMAN_PLUGIN_KEY],
+                capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                print(f"    installed {CAVEMAN_PLUGIN_KEY}")
+            else:
+                print(f"    could not install {CAVEMAN_PLUGIN_KEY} (rc={r.returncode}): "
+                      f"{(r.stderr or r.stdout).strip()[:200]}\n"
+                      f"    Run manually: claude plugin install {CAVEMAN_PLUGIN_KEY}",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"    caveman install skipped ({e}); run: "
+                  f"claude plugin install {CAVEMAN_PLUGIN_KEY}", file=sys.stderr)
+
+    # 3. reconcile settings.json (runs AFTER the main settings write in cmd_install).
+    raw = read_file_safe(SETTINGS_JSON)
+    try:
+        settings = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        print("    settings.json invalid JSON — skipped caveman reconcile", file=sys.stderr)
+        settings = None
+    if settings is not None:
+        new_str = json.dumps(reconcile_caveman_settings(settings), indent=2) + "\n"
+        if new_str.strip() != raw.strip():
+            if SETTINGS_JSON.exists():
+                shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
+            SETTINGS_JSON.write_text(new_str)
+            print("    settings.json: enabled + statusLine -> stable shim")
+        else:
+            print("    settings.json: already correct")
+
+    # 4. seed a valid mode (preserve a valid user choice).
+    existing = CAVEMAN_MODE_FILE.read_text() if CAVEMAN_MODE_FILE.exists() else None
+    mode = caveman_mode_or_default(existing)
+    if existing is None or existing.strip() != mode:
+        try:
+            CAVEMAN_MODE_FILE.write_text(mode)
+            print(f"    mode: {mode}")
+        except OSError as e:
+            print(f"    could not write caveman mode ({e})", file=sys.stderr)
+
+
+def maybe_setup_caveman():
+    """Wire the caveman plugin on this machine (every host)."""
+    setup_caveman()
 
 
 def _filedrop_serve():
