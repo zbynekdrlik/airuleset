@@ -42,8 +42,8 @@ user-invocable: true
   Re-export `SKILL=...` and `WORK=...` at the top of EVERY phase's bash block (shown below), or
   use absolute paths.
 
-Machines: **dev1** (`develbox`, 100.104.8.125) = orchestration, ffmpeg, frame dedup, and where YOU
-read the screens — the recording lands here. **dev2** (`baking-ai-5060`, 100.82.64.27, RTX 5050
+Machines: **dev1** (hostname `dev1`, 100.104.8.125) = orchestration, ffmpeg, frame dedup, and where YOU
+read the screens — the recording lands here. **dev2** (hostname `dev2`, 100.82.64.27, RTX 5050
 8 GB) = the GPU ASR; SSH `ssh newlevel@100.82.64.27`. The GPU is SHARED with production inference
 — check free memory and never kill another process's GPU memory.
 
