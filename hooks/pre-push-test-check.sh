@@ -154,14 +154,18 @@ if [ -n "$TEST_CHANGES" ]; then
     for tf in $TEST_CHANGES; do
         [ -f "$tf" ] || continue
 
-        # Count meaningful assertion patterns
+        # Count meaningful assertion patterns. NB: `grep -c` PRINTS `0` *and* exits 1 on
+        # zero matches, so a naive `$(grep -c … || echo 0)` yields "0\n0" and crashes the
+        # `$(( … ))` arithmetic under `set -e` (it blocked every push touching an
+        # `e2e`-named non-test file). `_count` normalises grep's output to a single int.
+        _count() { local n; n=$(grep -cE "$1" "$2" 2>/dev/null | head -1 | tr -dc '0-9'); echo "${n:-0}"; }
         ASSERTION_COUNT=0
         # Playwright/Jest: expect(...).to*
-        ASSERTION_COUNT=$((ASSERTION_COUNT + $(grep -cE 'expect\(.+\)\.(to|not)' "$tf" 2>/dev/null || echo 0)))
+        ASSERTION_COUNT=$((ASSERTION_COUNT + $(_count 'expect\(.+\)\.(to|not)' "$tf")))
         # Rust: assert!, assert_eq!, assert_ne!
-        ASSERTION_COUNT=$((ASSERTION_COUNT + $(grep -cE 'assert(_eq|_ne)?!' "$tf" 2>/dev/null || echo 0)))
+        ASSERTION_COUNT=$((ASSERTION_COUNT + $(_count 'assert(_eq|_ne)?!' "$tf")))
         # Python: assert, self.assert
-        ASSERTION_COUNT=$((ASSERTION_COUNT + $(grep -cE '^\s*assert\s|self\.assert' "$tf" 2>/dev/null || echo 0)))
+        ASSERTION_COUNT=$((ASSERTION_COUNT + $(_count '^\s*assert\s|self\.assert' "$tf")))
 
         if [ "$ASSERTION_COUNT" -lt "$MIN_ASSERTIONS" ]; then
             SHALLOW_WARNINGS="${SHALLOW_WARNINGS}\n  ⚠️ $tf: only $ASSERTION_COUNT assertions (minimum: $MIN_ASSERTIONS)"
