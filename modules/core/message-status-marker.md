@@ -4,6 +4,7 @@
 - `completion-report.md` — the ✅ Work Complete report IS a done-state; its ❓ Question line is the question marker
 - `milestone-notifications.md` — the device (Discord/phone) is pinged ONLY on `❓` / `✅` (mobile-app model); the marker IS what fires it, so the `❓`/`✅` content must be a Slovak, short, phone-readable line
 - `autonomous-verification.md` — ⏳ WORKING means YOU keep working, never "user, go check it"
+- `verify-launched-work-liveness.md` — a `⏳ WORKING` turn must have a bounded re-check ARMED (a dead background job sends no "done"); `⏳` is a promise to re-verify on a cadence, not a blind indefinite wait
 
 **The user must NEVER have to guess whether you are asking them something, working in the background, or done. End EVERY message with exactly ONE status marker, on its own line, as the VERY LAST line:**
 

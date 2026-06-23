@@ -1,4 +1,4 @@
-"""api-watchdog — keep unattended Claude Code sessions moving. Three jobs per poll:
+"""api-watchdog — keep unattended Claude Code sessions moving. Four jobs per poll:
 
   (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
       rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
@@ -12,6 +12,21 @@
       state (the same data `/usage` shows) pings ONCE per reset window when a
       weekly limit reaches the cap percent (default 98), so the user can react before it
       hard-stops. Polled at most every USAGE_INTERVAL — the endpoint 429s hard.
+  (4) WORKING-STALL ALERT (PING ONLY): the 4th reason work stalls — a session ended
+      `⏳ WORKING` (a background process / Monitor / build is running, it'll report
+      when done) but then NOTHING happened for STALL_WORKING and NO subagent is
+      advancing. A crashed / OOM-killed / hung job emits no completion event, so a
+      success-only wait hangs FOREVER (the bug that lost the user 8 hours on a dead
+      `verdict` process). The watchdog PINGS once ("this session may be stuck on dead
+      launched work — check it"). It NEVER injects keys: an adversarial review proved
+      idle-after-`⏳` is ALSO the signature of HEALTHY waiting (a live CI / mutation /
+      encode wait freezes the parent transcript for 15-25 min routinely), so the
+      poller CANNOT prove a stall from outside and must not type into a possibly-
+      healthy pane (the user's scar). The real fix — poll your own launched work for
+      liveness from INSIDE the session — is the rule verify-launched-work-liveness.md;
+      job 4 is only a safe backstop. Gated by an advancing-subagent check (skips the
+      common healthy long wait) + a high threshold (skips CI/mutation) + once-per-
+      episode dedup, so the ping is rare and true.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -89,6 +104,28 @@ WAIT_GRACE_SECONDS = 2 * 60
 # long. Tolerates a transient capture miss / transcript jitter (a multi-question
 # dialog or a re-ask loop) so the SAME open prompt is pinged exactly once.
 WAIT_CLEAR_SECONDS = 90
+# (4) WORKING-STALL alert (PING ONLY — never injects keys). A turn that ended
+# `⏳ WORKING` (Claude said a background task is running and it'll report when done)
+# but has then been idle a LONG time MIGHT mean the launched work died silently — a
+# crashed / OOM-killed / hung process emits no completion event, so a success-only
+# wait hangs forever (the bug that lost the user 8 hours on a dead `verdict`
+# process). CRITICAL CONSTRAINT (an adversarial review caught this): transcript-idle
+# does NOT prove a stall — idle-after-`⏳` is ALSO the NORMAL signature of HEALTHY
+# waiting. A session waiting on a live CI run (15-25 min), a mutation gate (≤20 min),
+# an encode, or GPU transcription freezes its parent transcript for the whole wait
+# and is perfectly fine. So the watchdog CANNOT prove the job is dead from outside,
+# and MUST NOT type into a possibly-healthy pane (that is the user's exact scar:
+# `continue` injected into a session they were using). Therefore job 4 only PINGS —
+# never `send_continue`. The real fix (poll your own launched work for liveness from
+# INSIDE the session, where the PID/progress are visible) lives in the rule
+# `modules/quality/verify-launched-work-liveness.md`; this is only a safe backstop.
+# To keep the ping rare + true: (a) the ONE reliable positive-liveness signal the
+# poller has is an advancing SUBAGENT transcript (a dispatched worker/workflow) — if
+# one is live the parent `⏳` is healthy, skip; (b) the threshold sits ABOVE the
+# common CI + mutation waits so only a genuinely long silence pings; (c) deduped to
+# ONCE per episode (like job 2's waiting ping). Keyed on the CONCRETE `⏳` marker, not
+# bare silence.
+STALL_WORKING_SECONDS = 45 * 60
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "api-watchdog-state.json"
@@ -171,6 +208,62 @@ def transcript_last_error(path):
             continue            # synthetic — keep scanning back
         return ""               # a real normal reply → not stalled
     return ""
+
+
+# A status marker is the FIRST glyph of its own line (`⏳ WORKING: …`) — anchored so
+# a `⏳`/`✅`/`❓` QUOTED mid-prose (common in this very project, which documents the
+# markers) does NOT false-match. Checked over the last few non-blank lines, not only
+# the last, so a turn that appends a trailing URL / PR / deploy line after the marker
+# is still recognised.
+_MARKER_RX = re.compile(r"^\s*(⏳|✅|❓)")
+
+
+def transcript_last_marker(path):
+    """The status marker (⏳ / ✅ / ❓) of the session's last REAL assistant message,
+    or '' if none. Trailing synthetic / tool-only entries are skipped. An
+    `isApiErrorMessage` entry returns '' — an api-error is NOT a status marker (job 1
+    owns those). Used by job 4 to spot a `⏳ WORKING` turn that has gone idle; a
+    `✅`/`❓`/none last marker is NOT a working-stall (done / waiting-on-user / plain
+    end), so it never triggers the job-4 ping."""
+    for entry in reversed(_iter_jsonl_tail(path)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return ""               # api-error → job 1's domain, not a marker
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue                # synthetic / tool-only — keep scanning back
+        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        for ln in reversed(nonblank[-3:]):     # marker line, tolerating ≤2 trailing lines
+            m = _MARKER_RX.match(ln)
+            if m:
+                return m.group(1)
+        return ""                   # a real reply, but with no status marker
+    return ""
+
+
+def subagent_active(transcript_path, now, window):
+    """True if a SUBAGENT transcript of this session was written within `window`
+    seconds — a dispatched worker / workflow is live, so the parent's `⏳ WORKING`
+    idle is HEALTHY waiting, not a stall. Subagent transcripts live at
+    <session-dir>/<session-id>/subagents/**/*.jsonl (confirmed on disk). This is the
+    one POSITIVE-liveness signal the external poller has; without it, idle-after-`⏳`
+    is indistinguishable from a healthy subagent run, so job 4 would false-fire on
+    every autopilot/workflow dispatch. Fail-safe True is NOT assumed — a missing dir
+    returns False (no subagent), which only ALLOWS a ping (never a keystroke)."""
+    try:
+        d = Path(transcript_path).parent / Path(transcript_path).stem / "subagents"
+        if not d.is_dir():
+            return False
+        for p in d.rglob("*.jsonl"):
+            try:
+                if (now - p.stat().st_mtime) <= window:
+                    return True
+            except OSError:
+                continue
+        return False
+    except Exception:
+        return False
 
 
 def _hash(text):
@@ -480,13 +573,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
-             wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None):
-    """Scan every `claude` pane once. Three jobs:
+             wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None,
+             stall_working=STALL_WORKING_SECONDS):
+    """Scan every `claude` pane once. Four jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
-          → ping when a weekly limit reaches the cap %.
+          → ping when a weekly limit reaches the cap %;
+      (4) a session idle on `⏳ WORKING` ≥ `stall_working` with NO advancing subagent
+          → PING once (its launched work may have died silently). Never injects keys.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -607,6 +703,38 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         "na otázke (AskUserQuestion) — pozri sa naň." % project,
                         owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
                         dry_run=dry_run)
+            continue                       # waiting on the user → not a working-stall
+
+        # --- (4) ⏳ WORKING, long-idle, NO live subagent → PING (never inject keys) --
+        # Claude ended the turn `⏳ WORKING` (a background job is running, it'll report
+        # when done) but nothing has happened for `stall_working` AND no subagent
+        # transcript is advancing → the launched work MIGHT have died silently. We
+        # CANNOT prove it from outside (idle-after-`⏳` is also the signature of a
+        # healthy CI/encode wait), so we ONLY PING — never `send_continue` into a
+        # possibly-healthy pane (the user's scar). The advancing-subagent check skips
+        # the common healthy long wait (an autopilot/workflow dispatch); the high
+        # threshold skips CI (≤25 min) + mutation gates (≤20 min). Deduped ONCE per
+        # episode (like job 2). The real fix is the agent's own in-session liveness
+        # poll (modules/quality/verify-launched-work-liveness.md); this is a backstop.
+        if (transcript_last_marker(tpath) == "⏳" and idle >= stall_working
+                and not subagent_active(tpath, now, stall_working)):
+            wkey = "working:" + key
+            w = state.get(wkey)
+            if w is None:
+                w = {"first_seen": int(now - idle), "pinged": False}
+                state[wkey] = w
+            else:
+                w.setdefault("pinged", True)   # pre-existing entry was already pinged
+            w["last_seen"] = int(now)
+            if not w.get("pinged"):
+                w["pinged"] = True
+                logs.append("working-stall %s [%s] idle=%dm" % (project, key, int(idle // 60)))
+                send_fn("\U0001f552 **%s** — dlho visí na ⏳ WORKING\n> Ohlásila bežiacu "
+                        "úlohu, ale ~%d min sa nič nedeje a nebeží žiadny podagent — "
+                        "možno spustená úloha (build / CI / proces) zomrela potichu. "
+                        "Pozri, či ešte žije." % (project, int(idle // 60)),
+                        owner=owner, dedup_key="workingstall:%s:%s" % (key, w["first_seen"]),
+                        dry_run=dry_run)
 
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
     # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
@@ -615,7 +743,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     for k in list(state.keys()):
         if k == "usage":
             continue                       # account-wide usage state, not a session
-        if k.startswith("wait:"):
+        if k.startswith("wait:") or k.startswith("working:"):
+            # episode keys (job 2 waiting / job 4 working-stall): drop only after the
+            # condition has been ABSENT for wait_clear seconds (the prompt was
+            # answered / the session moved on), so the SAME episode pings exactly once
+            # and a transient miss doesn't re-arm it.
             if int(now) - state[k].get("last_seen", 0) > wait_clear:
                 del state[k]
         elif k not in stalled:

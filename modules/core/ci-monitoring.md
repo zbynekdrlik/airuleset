@@ -4,6 +4,7 @@
 - `ci-push-discipline.md` — local checks before push, batch fixes, one push per cycle
 - `complete-planned-work.md` — CI monitoring is part of the plan; skipping it = incomplete work
 - `completion-report.md` — never send completion report while CI is still running
+- `verify-launched-work-liveness.md` — the general form: ANY launched job (not just `gh` runs) must be polled for liveness with a death/timeout branch — a dead process sends no "done", so a success-only wait hangs forever
 
 **After every push, you MUST monitor CI until ALL jobs reach a terminal state.** Do not move on to other tasks or claim work is done while CI is running. **This includes brainstorming, issue selection, or any "next task" planning — NOTHING starts until CI reaches terminal state.**
 

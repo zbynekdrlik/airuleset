@@ -2341,6 +2341,10 @@ class _FakeTmux:
         # how many `send-keys -l continue` (the literal text, not the Enter) fired
         return sum(1 for a in self.sent if "-l" in a and "continue" in a)
 
+    def selfchecks_sent(self):
+        # how many job-4 SELF-CHECK nudges (literal text containing "stuck-check") fired
+        return sum(1 for a in self.sent if "-l" in a and any("stuck-check" in x for x in a))
+
 
 class TestApiWatchdog(TestCase):
     """api-watchdog: detect a Claude Code session stalled on an API error and
@@ -2498,6 +2502,132 @@ class TestApiWatchdog(TestCase):
                         projects_dir=self.projects, state_path=self.state, grace=300)
         self.assertEqual(fake.continues_sent(), 0, "must NOT nudge on pane-text alone")
         self.assertEqual(self.pings, [])
+
+    # --- job 4: ⏳ WORKING-stall alert (PING ONLY, subagent-gated) ------------
+    _WORKING = {"type": "assistant", "isApiErrorMessage": False,
+                "message": {"role": "assistant", "content": [{"type": "text",
+                            "text": "Spustil som verdict proces.\n\n⏳ WORKING: dekódujem strih"}]}}
+    _WORKING_URL = {"type": "assistant", "isApiErrorMessage": False,
+                    "message": {"role": "assistant", "content": [{"type": "text",
+                                "text": "Beží build.\n\n⏳ WORKING: build beží\nhttp://dev/x"}]}}
+    _DONE = {"type": "assistant", "isApiErrorMessage": False,
+             "message": {"role": "assistant", "content": [{"type": "text",
+                         "text": "Nasadené.\n\n✅ DONE: v1.2.3 nasadené"}]}}
+    _QUESTION = {"type": "assistant", "isApiErrorMessage": False,
+                 "message": {"role": "assistant", "content": [{"type": "text",
+                             "text": "Treba rozhodnúť.\n\n❓ NEEDS YOU: 0 dB alebo preset?"}]}}
+    _QUOTES_MARKER = {"type": "assistant", "isApiErrorMessage": False,
+                      "message": {"role": "assistant", "content": [{"type": "text",
+                                  "text": "Vysvetlenie: marker ⏳ znamená že niečo beží."}]}}
+
+    def _subagent_transcript(self, cwd, age_s, now):
+        # write a subagent transcript at <enc>/sess-abc/subagents/agent-x.jsonl
+        d = self.projects / self.w.encode_project_dir(cwd) / "sess-abc" / "subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "agent-x.jsonl"
+        p.write_text('{"type":"assistant"}\n')
+        os.utime(p, (now - age_s, now - age_s))
+        return p
+
+    def test_transcript_last_marker_anchored(self):
+        # marker at line start → detected (tolerating a trailing URL line)
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/w", [self._WORKING], 1, 1_000_000)), "⏳")
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/u", [self._WORKING_URL], 1, 1_000_000)), "⏳")
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/d", [self._DONE], 1, 1_000_000)), "✅")
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/q", [self._QUESTION], 1, 1_000_000)), "❓")
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/n", [self._OK], 1, 1_000_000)), "")
+        # a ⏳ QUOTED mid-prose is NOT a status marker (anchored match)
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/p", [self._QUOTES_MARKER], 1, 1_000_000)), "")
+        # an api-error entry is NOT a marker (job 1's domain)
+        self.assertEqual(self.w.transcript_last_marker(
+            self._transcript("/x/e", [self._ERR], 1, 1_000_000)), "")
+
+    def _run4(self, now, fake, **kw):
+        return self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3,
+                               stall_working=300, **kw)
+
+    def test_run_once_working_stall_pings_never_keys(self):
+        # ⏳ WORKING + idle >= stall_working + no subagent → ONE ping, ZERO keystrokes
+        now, cwd = 1_000_000, "/devel/wstall"
+        self._transcript(cwd, [self._WORKING], 300, now)   # idle 5 min on ⏳
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        logs = self._run4(now, fake)
+        self.assertEqual(len(self.pings), 1, "exactly one working-stall ping")
+        self.assertIn("dlho visí na ⏳", self.pings[0][0])
+        self.assertEqual(fake.continues_sent(), 0, "must NEVER inject `continue`")
+        self.assertEqual(fake.selfchecks_sent(), 0, "must NEVER inject any keystroke")
+        self.assertTrue(any("working-stall" in l for l in logs))
+
+    def test_run_once_working_stall_skipped_when_subagent_active(self):
+        # a live SUBAGENT transcript → the parent ⏳ is HEALTHY waiting → NO ping
+        now, cwd = 1_000_000, "/devel/wsub"
+        self._transcript(cwd, [self._WORKING], 3600, now)  # parent idle 1h on ⏳
+        self._subagent_transcript(cwd, 10, now)            # subagent advanced 10s ago
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [], "live subagent → not a stall")
+        self.assertEqual(fake.continues_sent() + fake.selfchecks_sent(), 0)
+
+    def test_run_once_working_stall_pings_when_subagent_stale(self):
+        # a subagent dir exists but its transcript is OLD (beyond the window) → the
+        # subagent finished long ago; the parent is genuinely idle → ping
+        now, cwd = 1_000_000, "/devel/wsubold"
+        self._transcript(cwd, [self._WORKING], 600, now)
+        self._subagent_transcript(cwd, 5000, now)          # last subagent write 83 min ago
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(len(self.pings), 1)
+
+    def test_run_once_no_working_ping_below_threshold(self):
+        # ⏳ but idle < stall_working → probably fine, no ping yet
+        now, cwd = 1_000_000, "/devel/wfresh"
+        self._transcript(cwd, [self._WORKING], 120, now)   # only 2 min idle
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_no_working_ping_when_done(self):
+        # ✅ DONE idle long = correctly idle awaiting the user — never pinged as stall
+        now, cwd = 1_000_000, "/devel/wdone"
+        self._transcript(cwd, [self._DONE], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_no_working_ping_when_question(self):
+        # ❓ marker → waiting on the user (job 2's domain), not a working-stall
+        now, cwd = 1_000_000, "/devel/wq"
+        self._transcript(cwd, [self._QUESTION], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_working_stall_pings_once_per_episode(self):
+        # the SAME open ⏳ stall pings exactly once across repeated polls
+        now, cwd = 1_000_000, "/devel/wonce"
+        self._transcript(cwd, [self._WORKING], 300, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self._run4(now + 60, fake)
+        self._run4(now + 120, fake)
+        self.assertEqual(len(self.pings), 1, "deduped per episode")
+
+    def test_run_once_apierror_precedes_working(self):
+        # an api-error stall is job 1's (a `continue`), NOT a job-4 working-stall ping
+        now, cwd = 1_000_000, "/devel/wboth"
+        self._transcript(cwd, [self._WORKING, self._ERR], 600, now)  # last entry = error
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        self.assertEqual(fake.continues_sent(), 1, "api-error → continue")
+        self.assertFalse(any("dlho visí" in p[0] for p in self.pings), "not a working-stall")
 
     def test_run_once_escalates_then_stops(self):
         now = 1_000_000
