@@ -33,3 +33,44 @@ class TestPlaybookReviewSkill(TestCase):
         self.assertIn("description:", text)
         self.assertIn("📔 Playbook:", text)          # emits the gated line
         self.assertIn("routing", text.lower())        # applies the routing rule
+
+
+import json
+
+class TestPlaybookStopHook(TestCase):
+    HOOK = str(REPO / "hooks" / "stop-check-playbook-review.sh")
+    RETRY_FILE = "/tmp/airuleset-playbook-block-test-pb"
+
+    def setUp(self):
+        import os
+        try:
+            os.remove(self.RETRY_FILE)
+        except FileNotFoundError:
+            pass
+
+    def tearDown(self):
+        import os
+        try:
+            os.remove(self.RETRY_FILE)
+        except FileNotFoundError:
+            pass
+
+    def _run(self, msg):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": "test-pb"})
+        return subprocess.run(["bash", self.HOOK], input=payload,
+                              capture_output=True, text=True)
+
+    def test_completion_report_without_marker_blocks(self):
+        msg = "## ✅ Work Complete\n\nGoal: x\nPR #5 merged abc123"
+        out = self._run(msg)
+        self.assertIn("decision", out.stdout)
+        self.assertIn("block", out.stdout)
+
+    def test_completion_report_with_marker_passes(self):
+        msg = "## ✅ Work Complete\n\n📔 Playbook: naučil som build cez CI\nPR #5"
+        out = self._run(msg)
+        self.assertNotIn("block", out.stdout)
+
+    def test_non_completion_message_passes(self):
+        out = self._run("just a normal status update ✅ DONE: hotovo")
+        self.assertNotIn("block", out.stdout)
