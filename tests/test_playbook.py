@@ -74,3 +74,14 @@ class TestPlaybookStopHook(TestCase):
     def test_non_completion_message_passes(self):
         out = self._run("just a normal status update ✅ DONE: hotovo")
         self.assertNotIn("block", out.stdout)
+
+
+class TestPlaybookCleanupSkill(TestCase):
+    def test_present_and_registered(self):
+        self.assertTrue((REPO / "skills" / "playbook-cleanup" / "SKILL.md").exists())
+        self.assertIn("playbook-cleanup", airuleset.SKILL_NAMES)
+    def test_describes_consolidation(self):
+        t = (REPO / "skills" / "playbook-cleanup" / "SKILL.md").read_text()
+        self.assertIn("name: playbook-cleanup", t)
+        for n in ["memory", ".claude/skills/", "router", "before/after"]:
+            self.assertIn(n, t)
