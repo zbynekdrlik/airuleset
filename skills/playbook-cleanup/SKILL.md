@@ -33,6 +33,8 @@ Apply the routing rule to every item found in Step 1:
 
 **Procedures NEVER live in memory.** Any memory entry that is actually a procedure (how-to, command sequence, API gotcha) gets **moved** to `.claude/skills/<area>/SKILL.md` and **deleted** from memory.
 
+**Order matters — never lose knowledge:** write the procedure into `.claude/skills/<area>/SKILL.md` FIRST and confirm it's preserved there; delete the memory entry ONLY after that. Never delete-then-recreate.
+
 ### Writing / updating `.claude/skills/<area>/SKILL.md`
 
 - Existing area skill → append or update the relevant section.
