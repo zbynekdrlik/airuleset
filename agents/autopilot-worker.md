@@ -140,6 +140,9 @@ confirmed-still-valid issues proceed to the cycle below.
    `autopilot-skip` — that label is the user's start-of-run exclusion only.
 9. Append one terse line PER member to `docs/autopilot-log.md` (issue #, commit SHAs, RED→GREEN
    test names, decisions, and the shared PR #). Create the file if missing.
+10. Run the `playbook-review` skill — capture reusable procedures, gotchas, and non-obvious
+    decisions to the project playbook per `project-playbook-maintenance.md`. The completion report
+    MUST carry the `📔 Playbook:` line (enforced by the Stop gate `stop-check-playbook-review.sh`).
 
 ## ASK-THE-USER (you are foreground — surface these to the user, discuss, then continue)
 

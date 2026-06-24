@@ -85,3 +85,11 @@ class TestPlaybookCleanupSkill(TestCase):
         self.assertIn("name: playbook-cleanup", t)
         for n in ["memory", ".claude/skills/", "router", "before/after"]:
             self.assertIn(n, t)
+
+
+class TestAutopilotAndDocs(TestCase):
+    def test_autopilot_worker_runs_playbook_review(self):
+        t = (REPO / "agents" / "autopilot-worker.md").read_text()
+        self.assertIn("playbook-review", t)
+    def test_services_doc_mentions_playbook(self):
+        self.assertIn("playbook", (REPO / "CLAUDE.md").read_text().lower())
