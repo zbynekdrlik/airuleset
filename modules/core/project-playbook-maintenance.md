@@ -8,8 +8,10 @@ Each project keeps a maintained **playbook**: on-demand skills in the project's 
 |---|---|
 | `.claude/skills/<area>` | Procedures, gotchas, non-obvious patterns for that area |
 | Project `CLAUDE.md` | Router (which skill to load for which area) + always-rules |
-| Memory | User preferences and transient session notes only |
+| Memory (local, NOT git) | User preferences, transient notes, AND all secrets/credentials |
 | Global (`~/.claude/CLAUDE.md`) | Cross-project universal rules only — never project-specific procedures |
+
+**Secrets NEVER go into a skill or `CLAUDE.md`** — both are git-committed, memory is local. When a procedure that belongs in a skill has an embedded password / token / key / passphrase, STRIP the literal value (replace with `sshpass -p "$VAR"` / `<secret — GitHub secret X, not committed>`); the value stays in memory or a secure store. Grep every new/edited skill for secret patterns BEFORE committing or merging — a credential in a committed skill is a leak.
 
 #### Routing rule
 

@@ -53,6 +53,8 @@ Apply the routing rule to every item found in Step 1:
 
 **Order matters — never lose knowledge:** write the procedure into `.claude/skills/<area>/SKILL.md` FIRST and confirm it's preserved there; delete the memory entry ONLY after that. Never delete-then-recreate.
 
+**Secrets NEVER go into a skill or CLAUDE.md — STRIP them.** Skills and CLAUDE.md are git-committed; memory is local. A procedure worth moving (a deploy command, an API call) often has an embedded password / token / key / passphrase — REPLACE the literal secret with a reference (`sshpass -p "$DEVICE_PW"`, `<API key — GitHub secret X, not committed>`); the value stays in memory or a secure store. **Secret-scrub gate (MANDATORY before any commit/merge):** grep every new/edited skill + CLAUDE.md for `sshpass -p '<value>'`, `password|passphrase|secret|token|api[_-]?key` + a literal value, and 20+ char hex/base64 blobs — fix any hit FIRST. NEVER commit or merge a skill containing a credential value. (This rollout's incident: an auto-merged skill carried an OBS password into GitHub history — scrub BEFORE the PR, and credential-scan BEFORE auto-merging.)
+
 ### Writing / updating `.claude/skills/<area>/SKILL.md`
 
 - Existing area skill → append or update the relevant section.

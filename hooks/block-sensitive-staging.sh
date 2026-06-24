@@ -36,7 +36,12 @@ echo "$INPUT" | grep -qE 'git\s+add' || exit 0
 # body is inside shell single quotes, so NO single quotes / no f-string escapes).
 BAD=$(printf '%s' "$INPUT" | python3 -c 'import re,sys
 cmd=sys.stdin.read()
-m=re.search(r"git\s+add\b(.*)", cmd, re.S)
+# Capture ONLY the git-add arguments — stop at the first command separator
+# (&& || ; | newline). The old r"(.*)" with re.S over-captured the rest of a
+# compound command (e.g. `git add x && git commit -m "...secret..."`), so the
+# words "secret"/"credential" in a later commit message or piped command
+# false-tripped the sensitive-filename check.
+m=re.search(r"git\s+add\b([^\n;|&]*)", cmd)
 args=m.group(1) if m else ""
 Q=chr(34)+chr(39)
 allow=(".env.example",".env.sample",".env.template",".env.dist")

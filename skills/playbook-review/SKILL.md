@@ -31,6 +31,8 @@ Apply the routing rule to every finding:
 
 **Procedures NEVER go to memory.** A procedure that lands in memory is lost the next time a fresh context loads the project.
 
+**Secrets NEVER go into a skill or CLAUDE.md — STRIP them.** Skills and CLAUDE.md are git-committed; memory is local. A procedure worth keeping (a deploy command, an API call) often has an embedded password / token / key / passphrase — when you move it into a skill, REPLACE the literal secret with a reference: `sshpass -p "$DEVICE_PW"`, `<API key — GitHub secret FB_APP_SECRET, not committed>`. The value stays in memory (local) or a secure store, never in a skill. **Secret-scrub gate (MANDATORY before any commit/merge):** grep every new/edited skill + CLAUDE.md for `sshpass -p '<value>'`, `password|passphrase|secret|token|api[_-]?key` followed by a literal value, and 20+ char hex/base64 blobs — if any literal secret remains, fix it FIRST. NEVER commit or merge a skill that contains a credential value.
+
 ### Writing to `.claude/skills/<area>/SKILL.md`
 
 - If the area skill already exists: append or update the relevant section.
