@@ -74,8 +74,21 @@ FEATURE_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(rs|ts|tsx|js|jsx|py)$' | g
 # Test/E2E files
 TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' || echo "")
 
-# Gate 1: Feature code changed but no test files
-if [ -n "$FEATURE_CHANGES" ] && [ -z "$TEST_CHANGES" ]; then
+# INLINE tests in a non-test-named source file? Rust's dominant pattern is
+# `#[cfg(test)] mod tests { #[test] fn … }` living INSIDE the source file (.rs), so the
+# tests for a change touch e.g. `src/foo.rs`, NOT a `*test*`-named path. Mirror Gate 2's
+# inline-test recognition here so a feature/bugfix that DOES ship inline tests is not
+# wrongly flagged "no test files modified". Look at lines ADDED in the branch diff.
+INLINE_TEST_ADDED=0
+BRANCH_DIFF_ADDED=$(git diff -U0 "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null \
+    | grep -E '^\+' || true)
+if printf '%s' "$BRANCH_DIFF_ADDED" \
+    | grep -qE '#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|it\(|describe\('; then
+    INLINE_TEST_ADDED=1
+fi
+
+# Gate 1: Feature code changed but no test files (path-named OR inline)
+if [ -n "$FEATURE_CHANGES" ] && [ -z "$TEST_CHANGES" ] && [ "$INLINE_TEST_ADDED" = "0" ]; then
     echo ""
     echo "🚫 BLOCKED: Feature code changed but NO test files modified."
     echo ""
