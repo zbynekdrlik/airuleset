@@ -14,6 +14,7 @@ modules/core/ci-monitoring.md
 modules/core/tdd-workflow.md
 modules/core/autonomous-verification.md
 modules/core/complete-planned-work.md
+modules/core/project-playbook-maintenance.md
 modules/core/git-fetch-first.md
 modules/core/version-bumping.md
 modules/core/ci-push-discipline.md
