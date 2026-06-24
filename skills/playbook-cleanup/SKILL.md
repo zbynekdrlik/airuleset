@@ -10,6 +10,24 @@ A one-time consolidation skill for a project whose knowledge is scattered across
 `CLAUDE.md`, and ad-hoc notes. Run it once to bring the project into the boundary-correct shape
 described by `project-playbook-maintenance.md`; thereafter use `playbook-review` after every ticket.
 
+## Step 0 — check `dev` is clean FIRST (don't ride an unrelated PR)
+
+In the two-branch model there is exactly ONE `dev`→`main` PR at a time, so anything you commit to
+`dev` rides whatever PR is already open. Before consolidating:
+
+```bash
+git -C <repo> fetch origin
+git -C <repo> rev-list --count origin/main..origin/dev   # how far dev is ahead
+gh pr list --repo <owner/name> --base main --head dev --state open
+```
+
+- **`dev` clean (0 ahead, no open PR):** ideal — the cleanup becomes its OWN dedicated `dev`→`main` PR.
+- **`dev` has unmerged feature work / an open PR:** the cleanup WILL ride that PR. Do NOT silently
+  mix it in. Either (a) wait for the open PR to merge, then run on a clean `dev`; or (b) proceed only
+  if you keep the cleanup as a SINGLE config-only commit (no source files) AND update the open PR's
+  description to note it now also carries the playbook consolidation. Surface it to the user — never
+  bury a consolidation inside an unrelated PR undescribed.
+
 ## Step 1 — Audit all three stores
 
 Read everything currently held for this project:
