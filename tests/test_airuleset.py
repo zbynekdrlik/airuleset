@@ -2140,6 +2140,9 @@ class TestDiscordAutopilotNotify(TestCase):
         # The worker fires `notify --run-card --repo --issue` directly at merge —
         # repo + issue are passed explicitly (no board run_id fallback).
         import unittest.mock as m
+        # NOTE: m.Mock auto-creates EVERY attr truthy, so every cmd_notify
+        # early-return flag (mention_prefix / channel_id / owner / autopilot_done)
+        # MUST be pinned False here — a new flag left unpinned hijacks this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                       channel_id=False, owner=False,
                       body=None, run=None, repo="o/x", issue=5,
