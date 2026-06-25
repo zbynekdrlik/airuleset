@@ -12,21 +12,37 @@
       state (the same data `/usage` shows) pings ONCE per reset window when a
       weekly limit reaches the cap percent (default 98), so the user can react before it
       hard-stops. Polled at most every USAGE_INTERVAL — the endpoint 429s hard.
-  (4) WORKING-STALL ALERT (PING ONLY): the 4th reason work stalls — a session ended
-      `⏳ WORKING` (a background process / Monitor / build is running, it'll report
-      when done) but then NOTHING happened for STALL_WORKING and NO subagent is
-      advancing. A crashed / OOM-killed / hung job emits no completion event, so a
-      success-only wait hangs FOREVER (the bug that lost the user 8 hours on a dead
-      `verdict` process). The watchdog PINGS once ("this session may be stuck on dead
-      launched work — check it"). It NEVER injects keys: an adversarial review proved
-      idle-after-`⏳` is ALSO the signature of HEALTHY waiting (a live CI / mutation /
-      encode wait freezes the parent transcript for 15-25 min routinely), so the
-      poller CANNOT prove a stall from outside and must not type into a possibly-
-      healthy pane (the user's scar). The real fix — poll your own launched work for
-      liveness from INSIDE the session — is the rule verify-launched-work-liveness.md;
-      job 4 is only a safe backstop. Gated by an advancing-subagent check (skips the
-      common healthy long wait) + a high threshold (skips CI/mutation) + once-per-
-      episode dedup, so the ping is rare and true.
+  (4) WORKING-STALL SELF-CHECK NUDGE: the 4th reason work stalls — a session ended
+      `⏳ WORKING` (a background process / Monitor / build / dispatched subagent is
+      running, it'll report when done) but then NOTHING happened for STALL_WORKING and
+      NO subagent is advancing. A crashed / OOM-killed / hung job emits no completion
+      event, so a success-only wait hangs FOREVER (the bug that lost the user 8 hours
+      on a dead `verdict` process; the user also had to hand-type "stucked?" into
+      nearly every session one morning because none of them internally re-checked why a
+      subagent/subprocess had gone silent for hours). The watchdog NUDGES the parked
+      pane with a `stuck-check` self-check prompt (`send-keys` — the autonomous
+      equivalent of the user's manual "stucked?") telling the session to verify the
+      LIVENESS of its launched work (ps / log mtime / dashboard / gh run) and intervene
+      if it died. WHY THIS IS SAFE where a blind `continue` was NOT (the user's scar):
+      the nudge is a QUESTION, not a forced resume — it delegates the healthy-vs-dead
+      judgment to the ONE entity equipped to make it (the session has eyes: PIDs,
+      logs, the dashboard). A healthy CI/encode wait nudged this way just self-checks,
+      confirms alive, and continues; the keystroke itself writes a transcript entry, so
+      idle resets and the episode self-resolves in ONE nudge with no Discord noise. A
+      dead job → the session intervenes. Only if the nudge produces NO response across
+      MAX_WORKING_NUDGES retries (the Claude process itself is wedged) does it ESCALATE
+      to ONE Discord ping ("auto-recovery failed — needs you"). So the common case is
+      ZERO user-facing pings (it just un-sticks itself); a ping fires only when the
+      automated fix genuinely failed. Safety gates: copy-mode + ambiguous-pane skips
+      (never type into the wrong/scrolled pane), an advancing-subagent check (a live
+      worker writing its transcript is progress, not silence → skip), idle-reset
+      self-dedup. THRESHOLD is 30 min — the user's explicitly chosen cadence: they said
+      an occasional "stucked?" on silence is fine EVEN IF the answer is "not stuck",
+      because a liveness confirmation beats hoping nothing is wedged and losing a whole
+      day (so firing on a still-healthy wait is acceptable by design, not a bug). The
+      real fix is still the agent's OWN in-session liveness poll (modules/quality/
+      verify-launched-work-liveness.md); job 4 is the model-independent backstop for
+      when a session fails to follow it.
   (5) DELIVER A PENDING ✅ (the unreliable-idle_prompt backstop): notify-discord-
       pending.sh records a `✅ DONE` to /tmp/claude-discord-pending-<sid>; notify-
       discord.sh delivers it on `idle_prompt` — but CC emits idle_prompt UNRELIABLY
@@ -113,28 +129,60 @@ WAIT_GRACE_SECONDS = 2 * 60
 # long. Tolerates a transient capture miss / transcript jitter (a multi-question
 # dialog or a re-ask loop) so the SAME open prompt is pinged exactly once.
 WAIT_CLEAR_SECONDS = 90
-# (4) WORKING-STALL alert (PING ONLY — never injects keys). A turn that ended
-# `⏳ WORKING` (Claude said a background task is running and it'll report when done)
-# but has then been idle a LONG time MIGHT mean the launched work died silently — a
-# crashed / OOM-killed / hung process emits no completion event, so a success-only
-# wait hangs forever (the bug that lost the user 8 hours on a dead `verdict`
-# process). CRITICAL CONSTRAINT (an adversarial review caught this): transcript-idle
-# does NOT prove a stall — idle-after-`⏳` is ALSO the NORMAL signature of HEALTHY
-# waiting. A session waiting on a live CI run (15-25 min), a mutation gate (≤20 min),
-# an encode, or GPU transcription freezes its parent transcript for the whole wait
-# and is perfectly fine. So the watchdog CANNOT prove the job is dead from outside,
-# and MUST NOT type into a possibly-healthy pane (that is the user's exact scar:
-# `continue` injected into a session they were using). Therefore job 4 only PINGS —
-# never `send_continue`. The real fix (poll your own launched work for liveness from
-# INSIDE the session, where the PID/progress are visible) lives in the rule
-# `modules/quality/verify-launched-work-liveness.md`; this is only a safe backstop.
-# To keep the ping rare + true: (a) the ONE reliable positive-liveness signal the
-# poller has is an advancing SUBAGENT transcript (a dispatched worker/workflow) — if
-# one is live the parent `⏳` is healthy, skip; (b) the threshold sits ABOVE the
-# common CI + mutation waits so only a genuinely long silence pings; (c) deduped to
-# ONCE per episode (like job 2's waiting ping). Keyed on the CONCRETE `⏳` marker, not
-# bare silence.
-STALL_WORKING_SECONDS = 45 * 60
+# (4) WORKING-STALL self-check NUDGE. A turn that ended `⏳ WORKING` (Claude said a
+# background task / subagent is running and it'll report when done) but has then been
+# idle a LONG time MIGHT mean the launched work died silently — a crashed / OOM-killed
+# / hung process or a dead subagent emits no completion event, so a success-only wait
+# hangs forever (the bug that lost the user 8 hours on a dead `verdict` process; and
+# the morning the user had to hand-type "stucked?" into nearly every session because
+# none re-checked why a subagent/subprocess had been silent for hours). PRIOR DESIGN
+# was PING-ONLY: an adversarial review noted idle-after-`⏳` is ALSO the signature of
+# HEALTHY waiting (a live CI run 15-25 min, a mutation gate ≤20 min, an encode, GPU
+# transcription all freeze the parent transcript), and a blind `continue` into a
+# possibly-healthy pane was the user's scar — so it refused to act. BUT a ping to an
+# OFFLINE user does nothing for the whole night, and the user explicitly asked for the
+# autonomous form of their own "stucked?": NUDGE the session to self-check. This is
+# safe where blind `continue` was not, because the nudge is a QUESTION, not a forced
+# resume — it delegates the healthy-vs-dead judgment to the session itself, the one
+# entity with eyes (PID, log mtime, dashboard, gh run). A healthy wait nudged this way
+# self-checks, confirms alive, and continues; the keystroke writes a transcript entry
+# so idle resets and the episode self-resolves in ONE nudge with no Discord noise. A
+# dead job → the session intervenes. The poller never decides liveness — it only
+# triggers the decision the rule (verify-launched-work-liveness.md) already mandates
+# the session make. THRESHOLD = 30 min, the user's explicitly chosen cadence: the user
+# said an occasional "stucked?" on silence is "úplne v poriadku" EVEN IF the session
+# answers "not stuck" — they'd far rather over-nudge and get a liveness CONFIRMATION
+# than hope nothing is stuck and lose a whole day. So firing on a still-healthy wait is
+# acceptable BY DESIGN, not a bug to avoid (the v1 review's "never type into a healthy
+# pane" was about blind `continue`; a benign self-check QUESTION the user wants).
+# Kept targeted: (a) copy-mode + ambiguous-pane skips (never type into the wrong /
+# scrolled pane); (b) an advancing SUBAGENT transcript = visible progress, not silence
+# → skip (the user's trigger is SILENCE, and a live worker writing its transcript isn't
+# silent); (c) escalate to a Discord ping ONLY after MAX_WORKING_NUDGES no-response
+# nudges (the Claude process itself is wedged) — so the common case is ZERO user pings.
+STALL_WORKING_SECONDS = 30 * 60
+# The self-check nudge text — the autonomous equivalent of the user typing "stucked?".
+# Single line (send-keys -l types it as one prompt, then Enter submits). Contains
+# "stuck-check" so the pane content is unambiguous in the transcript + greppable.
+# WORDING IS DEATH-GATED ON PURPOSE (adversarial review, finding #2): the nudge fires
+# on a STILL-HEALTHY long wait too (a 35-min GPU transcription, a long Monitor), so it
+# must NOT read as "restart the job". Order: verify FIRST → if ALIVE, only confirm and
+# continue, restart NOTHING → ONLY IF death is proven by concrete evidence, intervene.
+WORKING_NUDGE_TEXT = (
+    "stuck-check: tvrdíš ⏳ WORKING ale dlho ticho a nebeží žiadny podagent. "
+    "NAJPRV over liveness spustenej úlohy KONKRÉTNYM dôkazom — ps PID, mtime "
+    "logu/transcriptu podagenta, dashboard, gh run. AK ešte žije, len to potvrď a "
+    "pokračuj v bounded sledovaní — NIČ nereštartuj. LEN AK je smrť potvrdená dôkazom, "
+    "zasiahni (reštart / re-route / re-dispatch). Nikdy nečakaj slepo na success-only "
+    "signál, ale ani neintervenuj bez dôkazu o smrti."
+)
+# After the first nudge, re-nudge only this often — and only if the session produced
+# NO response (a successful nudge resets idle below the threshold, so job 4 stops
+# firing for it). So a retry means the keystroke had no effect = the Claude process
+# itself is wedged, not just its launched job.
+WORKING_RETRY_INTERVAL_SECONDS = 5 * 60
+# After this many no-response nudges, give up auto-recovery and ping the user once.
+MAX_WORKING_NUDGES = 3
 
 # (5) DELIVER A PENDING ✅ — the reliable backstop for the unreliable idle_prompt.
 # notify-discord-pending.sh (Stop) records a ✅ DONE to /tmp/claude-discord-pending-
@@ -388,6 +436,40 @@ def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
     return "nudge", e2
 
 
+def decide_working(state, wkey, now, idle, interval=WORKING_RETRY_INTERVAL_SECONDS,
+                   max_nudges=MAX_WORKING_NUDGES):
+    """Pure decision for ONE `⏳ WORKING`-stalled session (job 4). Returns
+    (action, entry) where action is 'nudge' | 'wait' | 'escalate' | 'noop'; the
+    caller persists state[wkey] = entry. Called ONLY after the caller has already
+    confirmed `⏳` marker + idle >= threshold + no advancing subagent, so the FIRST
+    sighting nudges immediately (the threshold IS the grace).
+
+    Unlike job 1's `decide` (api-error, where CC keeps writing the transcript so the
+    timer is state-based), a job-4 nudge that LANDS resets the transcript idle below
+    the threshold — so the caller simply stops invoking this for that session and the
+    episode is cleaned up by last_seen. We only get here AGAIN if the prior nudge
+    produced no transcript write within `interval` (the Claude process is itself
+    wedged), so a retry is the right escalation. After `max_nudges` no-response nudges
+    it escalates ONCE (the single user-facing ping), then noops."""
+    e = state.get(wkey)
+    if e is None:
+        e = {"first_seen": int(now - idle), "nudges": [], "escalated": False}
+    e["last_seen"] = int(now)
+    if e.get("escalated"):
+        return "noop", e
+    nudges = list(e.get("nudges", []))
+    if not nudges:                         # first sighting past the threshold → nudge now
+        e["nudges"] = [int(now)]
+        return "nudge", e
+    if len(nudges) >= max_nudges:          # MAX no-response nudges → give up, ping once
+        e["escalated"] = True
+        return "escalate", e
+    if (now - nudges[-1]) >= interval:     # still wedged `interval` later → re-nudge
+        e["nudges"] = nudges + [int(now)]
+        return "nudge", e
+    return "wait", e                       # within the retry interval → hold
+
+
 def load_state(state_path):
     try:
         with open(state_path) as f:
@@ -478,6 +560,13 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     run = run or _default_run
     run(["tmux", "send-keys", "-t", pane_id, "-l", text])
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+
+
+def send_selfcheck(pane_id, run=None):
+    """Job 4's self-check nudge — the autonomous form of the user's manual 'stucked?'.
+    Types WORKING_NUDGE_TEXT into the pane and submits it, prompting the session to
+    verify the liveness of its launched work and intervene if it died silently."""
+    send_continue(pane_id, WORKING_NUDGE_TEXT, run)
 
 
 # --------------------------------------------------------------------------- #
@@ -727,6 +816,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
              wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None,
              stall_working=STALL_WORKING_SECONDS,
+             working_interval=WORKING_RETRY_INTERVAL_SECONDS,
+             max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX):
     """Scan every `claude` pane once. Five jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
@@ -735,7 +826,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
           → ping when a weekly limit reaches the cap %;
       (4) a session idle on `⏳ WORKING` ≥ `stall_working` with NO advancing subagent
-          → PING once (its launched work may have died silently). Never injects keys;
+          → NUDGE the pane with a `stuck-check` self-check prompt (its launched work
+          may have died silently); retry up to `max_nudges`, escalate-ping on give-up;
       (5) a session that ended `✅ DONE` and went idle ≥ `done_grace` → DELIVER the
           pending ✅ device ping the unreliable idle_prompt event failed to send
           (only while the session is STILL ✅ — a re-fired one is cleared silently).
@@ -864,36 +956,57 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         dry_run=dry_run)
             continue                       # waiting on the user → not a working-stall
 
-        # --- (4) ⏳ WORKING, long-idle, NO live subagent → PING (never inject keys) --
-        # Claude ended the turn `⏳ WORKING` (a background job is running, it'll report
-        # when done) but nothing has happened for `stall_working` AND no subagent
-        # transcript is advancing → the launched work MIGHT have died silently. We
-        # CANNOT prove it from outside (idle-after-`⏳` is also the signature of a
-        # healthy CI/encode wait), so we ONLY PING — never `send_continue` into a
-        # possibly-healthy pane (the user's scar). The advancing-subagent check skips
-        # the common healthy long wait (an autopilot/workflow dispatch); the high
-        # threshold skips CI (≤25 min) + mutation gates (≤20 min). Deduped ONCE per
-        # episode (like job 2). The real fix is the agent's own in-session liveness
-        # poll (modules/quality/verify-launched-work-liveness.md); this is a backstop.
+        # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
+        # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
+        # it'll report when done) but nothing has happened for `stall_working` AND no
+        # subagent transcript is advancing → the launched work MIGHT have died silently.
+        # We send the autonomous form of the user's manual "stucked?": a `stuck-check`
+        # self-check nudge telling the session to verify the liveness of its launched
+        # work and intervene if dead. Safe where a blind `continue` was the user's scar
+        # (see the STALL_WORKING / WORKING_NUDGE_TEXT block): the nudge is a QUESTION
+        # that delegates the healthy-vs-dead call to the session (which has eyes); a
+        # landed nudge resets idle so the episode self-resolves in ONE nudge with no
+        # Discord noise; only a wedged session (no response across `max_working_nudges`
+        # retries) escalates to ONE ping. Gates: advancing-subagent (skips the common
+        # healthy long wait), high threshold (skips CI ≤25 min / mutation ≤20 min),
+        # copy-mode skip (never type into a scrolled pane).
         if (transcript_last_marker(tpath) == "⏳" and idle >= stall_working
                 and not subagent_active(tpath, now, stall_working)):
+            # user scrolling / a menu open → keys would be swallowed or corrupt the
+            # selection. Skip WITHOUT advancing state (no retry burned) — same gate as
+            # job 1's api-error nudge. (Adversarial-review finding #3: we deliberately do
+            # NOT add a "pane input buffer non-empty" guard. tmux cannot tell typed text
+            # from the CC input PLACEHOLDER, so such a guard would false-positive and
+            # SUPPRESS the overnight nudge — the exact failure the user is angry about.
+            # The residual — a user typing into a 30-min-stale ⏳ pane in the same 60s
+            # window gets one interleaved, recoverable, visible buffer line while PRESENT
+            # — matches job 1's accepted residual and is not the forced-resume scar.)
+            if pane_in_mode(pid, run):
+                logs.append("skip in-mode (working-stall) %s" % (project or pid))
+                continue
             wkey = "working:" + key
-            w = state.get(wkey)
-            if w is None:
-                w = {"first_seen": int(now - idle), "pinged": False}
-                state[wkey] = w
-            else:
-                w.setdefault("pinged", True)   # pre-existing entry was already pinged
-            w["last_seen"] = int(now)
-            if not w.get("pinged"):
-                w["pinged"] = True
-                logs.append("working-stall %s [%s] idle=%dm" % (project, key, int(idle // 60)))
-                send_fn("\U0001f552 **%s** — dlho visí na ⏳ WORKING\n> Ohlásila bežiacu "
-                        "úlohu, ale ~%d min sa nič nedeje a nebeží žiadny podagent — "
-                        "možno spustená úloha (build / CI / proces) zomrela potichu. "
-                        "Pozri, či ešte žije." % (project, int(idle // 60)),
-                        owner=owner, dedup_key="workingstall:%s:%s" % (key, w["first_seen"]),
+            action, entry = decide_working(state, wkey, now, idle,
+                                           interval=working_interval,
+                                           max_nudges=max_working_nudges)
+            state[wkey] = entry
+            fs = int(entry.get("first_seen", now))
+            if action == "nudge":
+                n = len(entry["nudges"])
+                logs.append("working-nudge#%d %s [%s] idle=%dm"
+                            % (n, project, key, int(idle // 60)))
+                if not dry_run:
+                    send_selfcheck(pid, run)
+            elif action == "escalate":
+                logs.append("working-escalate %s [%s] — wedged after %d nudges"
+                            % (project, key, max_working_nudges))
+                send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING a nereaguje\n> Po %d× "
+                        "automatickom stuck-check pingu sa session stále nepohla — "
+                        "pravdepodobne zamrzol samotný Claude proces. Treba zásah."
+                        % (project, max_working_nudges),
+                        owner=owner, dedup_key="workingstall-giveup:%s:%s" % (key, fs),
                         dry_run=dry_run)
+            else:
+                logs.append("working-%s %s [%s]" % (action, project, key))
 
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
     # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
@@ -905,8 +1018,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         if k.startswith("wait:") or k.startswith("working:"):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
-            # answered / the session moved on), so the SAME episode pings exactly once
-            # and a transient miss doesn't re-arm it.
+            # answered / the session moved on), so the SAME episode pings/nudges exactly
+            # once and a transient miss doesn't re-arm it. (Adversarial-review finding
+            # #1: dropping a `working:` key resets its nudge counter, but this is BENIGN
+            # by design — a job-4 nudge that LANDS resets idle below the 30-min
+            # threshold, and re-triggering then needs a GENUINELY NEW 30-min silence,
+            # which correctly deserves a fresh nudge#1, not a resumed escalation. The
+            # only escalation-continuity path — a wedged process — keeps idle growing so
+            # the condition stays continuously true, last_seen advances every poll, and
+            # this branch never fires before all 3 nudges + the give-up ping land.)
             if int(now) - state[k].get("last_seen", 0) > wait_clear:
                 del state[k]
         elif k not in stalled:

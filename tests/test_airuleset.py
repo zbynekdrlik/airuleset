@@ -2503,7 +2503,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 0, "must NOT nudge on pane-text alone")
         self.assertEqual(self.pings, [])
 
-    # --- job 4: ⏳ WORKING-stall alert (PING ONLY, subagent-gated) ------------
+    # --- job 4: ⏳ WORKING-stall self-check NUDGE (subagent-gated, escalate-on-wedge) -
     _WORKING = {"type": "assistant", "isApiErrorMessage": False,
                 "message": {"role": "assistant", "content": [{"type": "text",
                             "text": "Spustil som verdict proces.\n\n⏳ WORKING: dekódujem strih"}]}}
@@ -2554,20 +2554,21 @@ class TestApiWatchdog(TestCase):
                                grace=300, interval=300, max_nudges=3,
                                stall_working=300, **kw)
 
-    def test_run_once_working_stall_pings_never_keys(self):
-        # ⏳ WORKING + idle >= stall_working + no subagent → ONE ping, ZERO keystrokes
+    def test_run_once_working_stall_nudges_self_check(self):
+        # ⏳ WORKING + idle >= stall_working + no subagent → ONE `stuck-check` nudge,
+        # NO `continue`, and ZERO Discord pings (a landed nudge self-resolves quietly —
+        # the whole point: un-stick the session without bothering the offline user).
         now, cwd = 1_000_000, "/devel/wstall"
         self._transcript(cwd, [self._WORKING], 300, now)   # idle 5 min on ⏳
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         logs = self._run4(now, fake)
-        self.assertEqual(len(self.pings), 1, "exactly one working-stall ping")
-        self.assertIn("dlho visí na ⏳", self.pings[0][0])
-        self.assertEqual(fake.continues_sent(), 0, "must NEVER inject `continue`")
-        self.assertEqual(fake.selfchecks_sent(), 0, "must NEVER inject any keystroke")
-        self.assertTrue(any("working-stall" in l for l in logs))
+        self.assertEqual(fake.selfchecks_sent(), 1, "exactly one stuck-check nudge")
+        self.assertEqual(fake.continues_sent(), 0, "job 4 sends stuck-check, NOT `continue`")
+        self.assertEqual(self.pings, [], "a first nudge must NOT ping (no Discord noise)")
+        self.assertTrue(any("working-nudge#1" in l for l in logs))
 
     def test_run_once_working_stall_skipped_when_subagent_active(self):
-        # a live SUBAGENT transcript → the parent ⏳ is HEALTHY waiting → NO ping
+        # a live SUBAGENT transcript → the parent ⏳ is HEALTHY waiting → NO nudge
         now, cwd = 1_000_000, "/devel/wsub"
         self._transcript(cwd, [self._WORKING], 3600, now)  # parent idle 1h on ⏳
         self._subagent_transcript(cwd, 10, now)            # subagent advanced 10s ago
@@ -2576,58 +2577,128 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(self.pings, [], "live subagent → not a stall")
         self.assertEqual(fake.continues_sent() + fake.selfchecks_sent(), 0)
 
-    def test_run_once_working_stall_pings_when_subagent_stale(self):
+    def test_run_once_working_stall_nudges_when_subagent_stale(self):
         # a subagent dir exists but its transcript is OLD (beyond the window) → the
-        # subagent finished long ago; the parent is genuinely idle → ping
+        # subagent finished/died long ago; the parent is genuinely idle → nudge
         now, cwd = 1_000_000, "/devel/wsubold"
         self._transcript(cwd, [self._WORKING], 600, now)
         self._subagent_transcript(cwd, 5000, now)          # last subagent write 83 min ago
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
-        self.assertEqual(len(self.pings), 1)
+        self.assertEqual(fake.selfchecks_sent(), 1)
+        self.assertEqual(self.pings, [])
 
-    def test_run_once_no_working_ping_below_threshold(self):
-        # ⏳ but idle < stall_working → probably fine, no ping yet
+    def test_run_once_no_working_nudge_below_threshold(self):
+        # ⏳ but idle < stall_working → probably fine, no nudge yet
         now, cwd = 1_000_000, "/devel/wfresh"
         self._transcript(cwd, [self._WORKING], 120, now)   # only 2 min idle
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0)
         self.assertEqual(self.pings, [])
 
-    def test_run_once_no_working_ping_when_done(self):
-        # ✅ DONE idle long = correctly idle awaiting the user — never pinged as stall
+    def test_run_once_no_working_nudge_when_done(self):
+        # ✅ DONE idle long = correctly idle awaiting the user — never nudged as stall
         now, cwd = 1_000_000, "/devel/wdone"
         self._transcript(cwd, [self._DONE], 3600, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0)
         self.assertEqual(self.pings, [])
 
-    def test_run_once_no_working_ping_when_question(self):
+    def test_run_once_no_working_nudge_when_question(self):
         # ❓ marker → waiting on the user (job 2's domain), not a working-stall
         now, cwd = 1_000_000, "/devel/wq"
         self._transcript(cwd, [self._QUESTION], 3600, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0)
         self.assertEqual(self.pings, [])
 
-    def test_run_once_working_stall_pings_once_per_episode(self):
-        # the SAME open ⏳ stall pings exactly once across repeated polls
+    def test_run_once_working_stall_nudges_once_per_episode(self):
+        # the SAME still-stuck ⏳ episode nudges exactly once within the retry interval
+        # (repeated polls before `working_interval` elapses → no re-nudge)
         now, cwd = 1_000_000, "/devel/wonce"
         self._transcript(cwd, [self._WORKING], 300, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
-        self._run4(now, fake)
-        self._run4(now + 60, fake)
-        self._run4(now + 120, fake)
-        self.assertEqual(len(self.pings), 1, "deduped per episode")
+        self._run4(now, fake, working_interval=300)
+        self._run4(now + 60, fake, working_interval=300)
+        self._run4(now + 120, fake, working_interval=300)
+        self.assertEqual(fake.selfchecks_sent(), 1, "one nudge per retry interval")
+        self.assertEqual(self.pings, [])
+
+    def test_run_once_working_stall_self_resolves_after_nudge(self):
+        # a LANDED nudge: the session reacts, its transcript goes fresh (idle resets)
+        # while still ⏳ (it re-checked and keeps working) → no second nudge, no ping.
+        now, cwd = 1_000_000, "/devel/wresolve"
+        self._transcript(cwd, [self._WORKING], 300, now)        # idle 5 min → nudge#1
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake, working_interval=300)
+        self.assertEqual(fake.selfchecks_sent(), 1)
+        self._transcript(cwd, [self._WORKING], 5, now + 60)     # responded → fresh, still ⏳
+        self._run4(now + 60, fake, working_interval=300)
+        self.assertEqual(fake.selfchecks_sent(), 1, "responded → no re-nudge")
+        self.assertEqual(self.pings, [], "self-resolved → never ping")
+
+    def test_run_once_working_stall_escalates_when_wedged(self):
+        # the Claude process itself is wedged: the keystroke produces no response, idle
+        # keeps growing → 3 nudges spaced by the interval, then ONE give-up ping.
+        now, cwd = 1_000_000, "/devel/wwedged"
+        self._transcript(cwd, [self._WORKING], 300, now)        # never rewritten → idle grows
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake, working_interval=300)             # nudge#1
+        self._run4(now + 300, fake, working_interval=300)       # nudge#2
+        self._run4(now + 600, fake, working_interval=300)       # nudge#3
+        self._run4(now + 900, fake, working_interval=300)       # escalate (give-up ping)
+        self._run4(now + 1200, fake, working_interval=300)      # noop
+        self.assertEqual(fake.selfchecks_sent(), 3, "exactly 3 nudges then stop")
+        self.assertEqual(len(self.pings), 1, "one give-up ping after MAX nudges")
+        self.assertIn("nereaguje", self.pings[0][0])
+
+    def test_run_once_working_stall_skips_pane_in_copy_mode(self):
+        # the user is scrolling the pane (copy-mode) → never inject keys, no state burn
+        now, cwd = 1_000_000, "/devel/wcopy"
+        self._transcript(cwd, [self._WORKING], 300, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", modes={"%5": "1"})
+        self._run4(now, fake, working_interval=300)
+        self.assertEqual(fake.selfchecks_sent(), 0, "must NOT type into a scrolled pane")
+        self.assertEqual(self.pings, [])
 
     def test_run_once_apierror_precedes_working(self):
-        # an api-error stall is job 1's (a `continue`), NOT a job-4 working-stall ping
+        # an api-error stall is job 1's (a `continue`), NOT a job-4 working stuck-check
         now, cwd = 1_000_000, "/devel/wboth"
         self._transcript(cwd, [self._WORKING, self._ERR], 600, now)  # last entry = error
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
         self.assertEqual(fake.continues_sent(), 1, "api-error → continue")
-        self.assertFalse(any("dlho visí" in p[0] for p in self.pings), "not a working-stall")
+        self.assertEqual(fake.selfchecks_sent(), 0, "not a working-stall nudge")
+
+    # --- decide_working state machine (job 4) --------------------------------
+    def _decw(self, st, key, now, idle):
+        return self.w.decide_working(st, key, now, idle, interval=300, max_nudges=3)
+
+    def test_decide_working_lifecycle(self):
+        # first sighting (already past threshold) nudges immediately; then a re-nudge
+        # every interval up to MAX, then escalate once, then noop.
+        st, now = {}, 1_000_000
+        a, e = self._decw(st, "w", now, 3000)            # idle past threshold
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["w"] = e
+        a, e = self._decw(st, "w", now + 100, 3100)      # within interval → hold
+        self.assertEqual(a, "wait"); st["w"] = e
+        a, e = self._decw(st, "w", now + 300, 3300)      # +interval → nudge#2
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 2); st["w"] = e
+        a, e = self._decw(st, "w", now + 600, 3600)      # nudge#3
+        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 3); st["w"] = e
+        a, e = self._decw(st, "w", now + 900, 3900)      # MAX → escalate once
+        self.assertEqual(a, "escalate"); self.assertTrue(e["escalated"]); st["w"] = e
+        a, e = self._decw(st, "w", now + 1200, 4200)     # then noop
+        self.assertEqual(a, "noop")
+
+    def test_decide_working_first_seen_seeded_from_idle(self):
+        # first_seen counts from when the stall really began (now - idle), not now
+        st, now = {}, 1_000_000
+        _, e = self._decw(st, "w", now, 2700)
+        self.assertEqual(e["first_seen"], now - 2700)
 
     # --- job 5: deliver a pending ✅ (idle_prompt backstop) ------------------
     def _txn_for_sid(self, sid, entries, age_s, now, cwd="/devel/projx"):
