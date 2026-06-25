@@ -1071,15 +1071,31 @@ def cmd_notify(args):
     Modes:
       --mention-prefix     print just the '<@id> ' prefix for the current tmux
                            owner (used by hooks/notify-discord.sh) and exit.
+      --channel-id         print the resolved per-owner Discord channel/thread id
+                           (DISCORD_NOTIFICATION_CHANNEL_<OWNER>, else the shared
+                           DISCORD_NOTIFICATION_CHANNEL_ID) and exit — the single
+                           source of truth the shell send path reads.
+      --owner              print the resolved tmux owner and exit — lets the shell
+                           hook resolve ONCE and force the same owner onto both the
+                           --mention-prefix and --channel-id calls (so they agree).
       --autopilot-done     compose + send the canonical per-ticket completion card
                            from fields (--repo --pr --merge-sha --version --review
                            --done --remaining --tickets-json). Deduped on repo#pr.
       --body "<markdown>"  send arbitrary markdown (the general primitive).
     """
-    from notify import (compose_autopilot_card, mention_prefix, send)
+    from notify import (compose_autopilot_card, mention_prefix,
+                        notification_channel, resolve_owner, send)
+
+    if getattr(args, "owner", False):
+        sys.stdout.write(resolve_owner())
+        return
 
     if getattr(args, "mention_prefix", False):
         sys.stdout.write(mention_prefix())
+        return
+
+    if getattr(args, "channel_id", False):
+        sys.stdout.write(notification_channel())
         return
 
     if getattr(args, "run_card", False):
@@ -1369,6 +1385,12 @@ def main():
     p_notify.add_argument("--mention-prefix", dest="mention_prefix",
                           action="store_true",
                           help="Print just the '<@id> ' mention prefix for the current tmux owner")
+    p_notify.add_argument("--channel-id", dest="channel_id", action="store_true",
+                          help="Print the resolved per-owner Discord channel/thread id "
+                               "(DISCORD_NOTIFICATION_CHANNEL_<OWNER>, else the shared id)")
+    p_notify.add_argument("--owner", dest="owner", action="store_true",
+                          help="Print the resolved tmux owner (so a caller can resolve "
+                               "once and pass AIRULESET_NOTIFY_OWNER to keep mention+channel in sync)")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")

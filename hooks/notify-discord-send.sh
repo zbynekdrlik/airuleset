@@ -47,9 +47,16 @@ HEADER="**${EMOJI} ${PROJECT}**"
 CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
 
 # @mention the tmux owner (zbynek / marek). Single source of truth =
-# `airuleset.py notify --mention-prefix` (reads owner from the tmux session group
-# + DISCORD_MENTION_<OWNER> in the channel .env). Path is relative to THIS file.
+# `airuleset.py notify` (reads owner from the tmux session group + the channel .env).
+# Path is relative to THIS file.
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+# Resolve the owner ONCE and force it onto BOTH downstream calls (--mention-prefix
+# and --channel-id) via AIRULESET_NOTIFY_OWNER, so the @mention and the per-owner
+# thread target ALWAYS agree — mirrors the Python send() "resolve owner once"
+# invariant (a second independent tmux re-query could otherwise disagree, mentioning
+# one person while posting to the other's thread). It also means only ONE tmux query
+# runs: the two calls below short-circuit on the forced owner.
+export AIRULESET_NOTIFY_OWNER="$(python3 "$AIRULESET_PY" notify --owner 2>/dev/null || echo "")"
 MENTION=$(python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
 [ -n "$MENTION" ] && CONTENT="${MENTION}${CONTENT}"
 
@@ -62,14 +69,17 @@ if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
     exit 0
 fi
 
-# Real delivery — bot token + notification channel from the Discord channel config.
+# Real delivery — bot token from the Discord channel config; channel/THREAD id
+# from the owner-aware resolver so each person's notifications land in THEIR own
+# thread (DISCORD_NOTIFICATION_CHANNEL_<OWNER>, else the shared id). The resolver
+# (airuleset.py notify --channel-id) is the SINGLE source of truth shared with the
+# Python send() path — no duplicated per-owner logic in bash.
 ENVF=~/.claude/channels/discord/.env
 BOT_TOKEN=""
-CHANNEL_ID=""
 if [ -f "$ENVF" ]; then
     BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n')
-    CHANNEL_ID=$(grep -E '^DISCORD_NOTIFICATION_CHANNEL_ID=' "$ENVF" | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n')
 fi
+CHANNEL_ID=$(python3 "$AIRULESET_PY" notify --channel-id 2>/dev/null | tr -d '\r\n' || echo "")
 [ -z "$BOT_TOKEN" ] && exit 0
 [ -z "$CHANNEL_ID" ] && exit 0
 command -v jq &>/dev/null || exit 0

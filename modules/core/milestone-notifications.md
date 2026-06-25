@@ -33,9 +33,9 @@ A third sanctioned device ping, fully AUTOMATIC: the **`notify-api-error.sh` Sto
 
 During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), routine per-phase progress (merged, deployed, CI green) does NOT ping the device — the device stays quiet until a worker raises a real `❓` question, fires the per-ticket merge card (the EXCEPTION below), or the whole run ends `✅`. Do NOT hand-fire a per-phase ping.
 
-#### Every device message @mentions the tmux owner (zbynek / marek)
+#### Every device message goes to the owner's OWN thread AND @mentions them (zbynek / marek)
 
-Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is prefixed with that owner's `<@id>` so it is unambiguous WHOM the message concerns. This is automatic — the `notify-discord.sh` hook and `airuleset.py notify` resolve the owner from the tmux session group and look up `DISCORD_MENTION_<OWNER>` in the channel `.env`. You do nothing; just never strip the mention. No tmux / no mapping → no tag (never pings the wrong person).
+Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is (1) POSTED to that owner's **own thread** — `claude-zbynek` / `claude-marek` — so the two people's notifications never mix in one shared thread, AND (2) prefixed with that owner's `<@id>` so it is unambiguous WHOM it concerns (the mention also auto-joins them to their thread and fires the phone push). This is automatic — both send paths (`hooks/notify-discord-send.sh` for `❓`/`✅`, the Python `notify.send()` for the api-error ping + autopilot card) resolve the owner from the tmux session group, then route via `airuleset.py notify --channel-id`: `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` (the per-person thread) when set, else the shared `DISCORD_NOTIFICATION_CHANNEL_ID`. The mention id is `DISCORD_MENTION_<OWNER>` in the channel `.env`. You do nothing; never strip the mention. No tmux / no mapping → no per-owner thread and no tag → it falls back to the shared thread, never pinging the wrong person.
 
 #### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
 

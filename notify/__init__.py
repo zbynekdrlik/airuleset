@@ -105,6 +105,27 @@ def resolve_owner():
     return ""
 
 
+def notification_channel(env=None, owner=None):
+    """Resolve the Discord channel/THREAD id to POST to for the current owner.
+
+    Per-owner routing: each person gets their OWN thread so notifications don't
+    mix (the user runs zbynek + marek side by side and an @mention in a shared
+    thread was not enough — they want a separate `claude-zbynek` / `claude-marek`
+    thread). `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` (e.g.
+    DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=<thread id>) wins when set; it falls back
+    to the shared `DISCORD_NOTIFICATION_CHANNEL_ID` when the owner has no per-owner
+    thread configured OR the owner can't be determined (no tmux). Returns "" when
+    neither is set. A Discord thread IS a channel in the API, so the POST target is
+    identical — only the id differs."""
+    env = _read_env() if env is None else env
+    owner = resolve_owner() if owner is None else owner
+    if owner:
+        per = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
+        if per:
+            return per
+    return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
+
+
 def mention_prefix(env=None, owner=None):
     """Return the Discord @mention prefix ('<@123> ') for the current owner, or ""
     when there is no owner or no mapping. The mapping lives in the .env as
@@ -320,6 +341,10 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     notification channel. Deduped on `dedup_key`. Returns a short status string
     ('sent' / 'dedup' / 'dry-run' / 'no-config' / 'error'). Never raises."""
     env = _read_env() if env is None else env
+    # Resolve the owner ONCE so the @mention and the per-owner thread target agree
+    # (a tmux re-query between them could otherwise disagree).
+    if owner is None:
+        owner = resolve_owner()
     content = (mention_prefix(env, owner) + (body or ""))[:_MAX_CONTENT]
 
     # dry-run never claims dedup (so previews / tests stay re-runnable).
@@ -333,7 +358,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         return "dedup"
 
     token = env.get("DISCORD_BOT_TOKEN", "")
-    channel = env.get("DISCORD_NOTIFICATION_CHANNEL_ID", "")
+    # Per-owner thread (claude-zbynek / claude-marek) when configured, else shared.
+    channel = notification_channel(env, owner)
     if not token or not channel:
         _dedup_release(dedup_key)
         return "no-config"

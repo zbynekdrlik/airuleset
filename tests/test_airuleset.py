@@ -1970,6 +1970,32 @@ class TestDiscordAutopilotNotify(TestCase):
         with m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "Marek-X"}):
             self.assertEqual(self.notify.resolve_owner(), "marekx")
 
+    # --- per-owner thread routing ----------------------------------------
+    def test_notification_channel_per_owner_wins(self):
+        # Each owner posts to THEIR own thread when configured (claude-zbynek /
+        # claude-marek) — the @mention in a shared thread was not enough.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_NOTIFICATION_CHANNEL_MAREK": "mthread"}
+        self.assertEqual(self.notify.notification_channel(env=env, owner="zbynek"),
+                         "zthread")
+        self.assertEqual(self.notify.notification_channel(env=env, owner="marek"),
+                         "mthread")
+
+    def test_notification_channel_falls_back_to_shared(self):
+        # Owner with no per-owner thread, AND unknown / empty owner → shared id.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(self.notify.notification_channel(env=env, owner="marek"),
+                         "shared")           # no per-marek thread yet
+        self.assertEqual(self.notify.notification_channel(env=env, owner="nobody"),
+                         "shared")
+        self.assertEqual(self.notify.notification_channel(env=env, owner=""),
+                         "shared")
+
+    def test_notification_channel_empty_when_nothing_set(self):
+        self.assertEqual(self.notify.notification_channel(env={}, owner="zbynek"), "")
+
     # --- card composition -------------------------------------------------
     def test_card_has_goal_achieved_review_progress(self):
         card = self.notify.compose_autopilot_card(
@@ -2115,6 +2141,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # repo + issue are passed explicitly (no board run_id fallback).
         import unittest.mock as m
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                      channel_id=False, owner=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
@@ -2162,6 +2189,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                      channel_id=False, owner=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,
                           merge_sha=None, url=None, review="ok", dedup_key=None,
@@ -2259,6 +2287,56 @@ class TestDiscordAutopilotNotify(TestCase):
                 # key released → reclaimable
                 self.assertTrue(self.notify._dedup_claim("o/x#9"))
 
+    def test_send_posts_to_per_owner_thread(self):
+        # send() must POST to the OWNER's thread, not the shared channel, when a
+        # per-owner thread is configured. Locks the routing end-to-end.
+        import unittest.mock as m
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_NOTIFICATION_CHANNEL_MAREK": "mthread"}
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    self.assertEqual(
+                        self.notify.send("hi", env=env, owner="marek"), "sent")
+        self.assertIn("/channels/mthread/messages", captured["url"])
+        self.assertNotIn("shared", captured["url"])
+
+    def test_send_unknown_owner_posts_to_shared(self):
+        import unittest.mock as m
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    self.assertEqual(
+                        self.notify.send("hi", env=env, owner=""), "sent")
+        self.assertIn("/channels/shared/messages", captured["url"])
+
     # --- end-to-end CLI ---------------------------------------------------
     def _env_home(self):
         home = tempfile.mkdtemp()
@@ -2266,7 +2344,10 @@ class TestDiscordAutopilotNotify(TestCase):
         d.mkdir(parents=True)
         (d / ".env").write_text(
             "DISCORD_MENTION_ZBYNEK=111222333\n"
-            "DISCORD_MENTION_MAREK=444555666\n")
+            "DISCORD_MENTION_MAREK=444555666\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ID=shared999\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread111\n"
+            "DISCORD_NOTIFICATION_CHANNEL_MAREK=mthread222\n")
         return home
 
     def test_cli_mention_prefix(self):
@@ -2277,6 +2358,32 @@ class TestDiscordAutopilotNotify(TestCase):
                            env=env)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout, "<@444555666> ")
+
+    def test_cli_channel_id(self):
+        # The shell send path reads the resolved per-owner thread id from here.
+        home = self._env_home()
+        for owner, expected in (("marek", "mthread222"), ("zbynek", "zthread111")):
+            env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": owner}
+            r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                                "--channel-id"], capture_output=True, text=True,
+                               env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, expected)
+        # Unknown owner → shared fallback.
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "nobody"}
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--channel-id"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.stdout, "shared999")
+
+    def test_cli_owner(self):
+        # `notify --owner` lets the shell hook resolve ONCE and force the same owner
+        # onto both --mention-prefix and --channel-id (so they can never disagree).
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "Zbynek"}
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--owner"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "zbynek")          # normalized like resolve_owner
 
     def test_cli_autopilot_done_dry_run(self):
         home = self._env_home()
@@ -2301,6 +2408,14 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("notify --mention-prefix", src)
         # it prepends the resolved mention onto the content it sends
         self.assertIn("MENTION", src)
+        # the channel/THREAD target is owner-aware via the single source of truth,
+        # NOT a direct grep of the shared id (that mixed both owners into one thread)
+        self.assertIn("notify --channel-id", src)
+        self.assertNotIn("DISCORD_NOTIFICATION_CHANNEL_ID", src)
+        # owner resolved ONCE and forced onto both calls so the @mention and the
+        # per-owner thread can never disagree (the reviewer's flagged concern)
+        self.assertIn("notify --owner", src)
+        self.assertIn("AIRULESET_NOTIFY_OWNER", src)
         # both hooks delegate to it (no duplicated curl)
         self.assertIn("notify-discord-send.sh", self.IDLE_HOOK.read_text())
         pending = (airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh").read_text()
