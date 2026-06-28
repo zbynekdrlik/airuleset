@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is a FOREGROUND autopilot-worker subagent (fresh context, visible in the agent strip) that can ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks). You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is an in-session BACKGROUND autopilot-worker subagent (run_in_background — your main session stays FREE + thin, the worker stays visible in the agent strip) that can still ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks). You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual]"
 user-invocable: true
 disable-model-invocation: true
@@ -8,10 +8,10 @@ disable-model-invocation: true
 
 # Autopilot — Hands-off Backlog Loop
 
-> Solves the **ENTIRE** open backlog, one issue at a time. Each issue is handed to a
-> **foreground `autopilot-worker` subagent** — fresh context (your main session stays thin),
-> visible in the agent strip, and **able to ask you the genuinely-important questions
-> directly**. After each issue completes (merged + deployed, or a question resolved), the loop
+> Solves the **ENTIRE** open backlog, one issue at a time. Each issue is handed to an
+> **in-session background `autopilot-worker` subagent** (`run_in_background: true`) — fresh
+> context (your main session stays thin AND interactive — you can keep messaging it), visible in
+> the agent strip, and **able to ask you the genuinely-important questions directly**. After each issue completes (merged + deployed, or a question resolved), the loop
 > picks the **next** — including right after a merge. It **NEVER** pre-filters "needs input"
 > issues and **NEVER** refuses to start. The goal is to finish everything; your only job is to
 > answer the important per-issue questions when a worker raises one.
@@ -39,15 +39,20 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 - **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles the next BATCH
   (one bundle-safe issue, or several bundled into one PR — see Step 3.1) and dispatches ONE
-  foreground `autopilot-worker` for it; the worker runs the full cycle on one `dev` branch / one PR
-  / one CI run (and asks you if needed); the main agent verifies the result from GitHub; the next
-  turn picks the next batch — until the backlog is empty.
+  in-session BACKGROUND `autopilot-worker` (`run_in_background: true`) for it; the dispatch returns
+  IMMEDIATELY so your main session stays FREE, and the worker RE-INVOKES the loop when it finishes.
+  The worker runs the full cycle on one `dev` branch / one PR / one CI run (and asks you if needed,
+  its prompts surfacing in your main session); on completion the main agent verifies the result from
+  GitHub; the next turn picks the next batch — until the backlog is empty.
 - **Bundling cuts CI cost.** CI is long here, so the loop spends ONE CI cycle on as many
   bundle-safe issues as the gate allows (`autonomous-batch-issue-development.md`) instead of
   one-PR-per-issue. Issues that fail the gate (large / schema / API / security / cross-cut) run solo.
-- **Worker = foreground `autopilot-worker` subagent** (user-level, installed by airuleset).
-  Foreground so its questions and prompts reach YOU; fresh context so your main session never
-  degrades; it returns only a short evidence block to the main agent.
+- **Worker = in-session BACKGROUND `autopilot-worker` subagent** (`run_in_background: true`, user-
+  level, installed by airuleset). Background so your MAIN session stays FREE (you can keep messaging
+  it) and THIN while the worker runs — and since Claude Code's 2026-W26 change the worker's prompts
+  and questions still SURFACE in your main session, so it can ask you. It stays VISIBLE in the agent
+  strip (it's an in-session subagent — NOT a hidden `claude --bg` daemon). Fresh context so your main
+  session never degrades; it returns only a short evidence block to the main agent.
 - **Main session stays thin** — it holds only "dispatched #N → verified merged" summaries, so
   there is no `/compact` churn across a long backlog.
 - **`/autopilot` itself does ONLY Steps 1–2** — preflight, optional skip-picker, then it PRINTS
@@ -126,7 +131,7 @@ needs extra approval.)
 The agent cannot type `/goal` — print this line for the user to paste once:
 
 ```
-/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. Do NOT stop merely because an issue needs my input: dispatch its foreground autopilot-worker, which asks me directly, and after every merge immediately pick the next issue.
+/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. Do NOT stop merely because an issue needs my input: dispatch its background autopilot-worker, which asks me directly (its prompts surface in my main session), and after every merge immediately pick the next issue.
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -179,12 +184,18 @@ Each loop turn:
    (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
    After validation, the batch = the surviving STILL_VALID / PARTIAL members. This stops the recurring
    failure (working / re-asking on an already-overcome ticket).
-2. **Dispatch ONE FOREGROUND `autopilot-worker`** via the Agent tool for the WHOLE batch:
-   `subagent_type: autopilot-worker`, **NOT** run in the background (foreground lets it ask you),
-   prompt = `Work issues #A #B #C in <repo> as ONE bundled PR (Closes all).` (or
-   `Work issue #<N> in <repo>.` for a solo batch) plus any repo-specific note. ONE worker, ONE `dev`
-   branch, ONE PR, ONE CI cycle — **serial per repo still holds** (a batch is still ONE worker). It
-   shows in the agent strip as `autopilot-worker`.
+2. **Dispatch ONE in-session BACKGROUND `autopilot-worker`** via the Agent tool for the WHOLE batch:
+   `subagent_type: autopilot-worker`, **`run_in_background: true`** — this keeps your main session
+   FREE + thin while the worker runs, the worker stays VISIBLE in the agent strip, and (per CC's
+   2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in <repo>
+   as ONE bundled PR (Closes all).` (or `Work issue #<N> in <repo>.` for a solo batch) plus any
+   repo-specific note. ONE worker, ONE `dev` branch, ONE PR, ONE CI cycle.
+   - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
+     `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
+   - **Serial per repo (hard).** Before dispatching, if a background `autopilot-worker` for THIS repo
+     is STILL running (check the agent strip / running tasks), do **NOTHING** this turn — end
+     `⏳ WORKING` and let it finish (it re-invokes you). NEVER dispatch a second worker on the same
+     repo while one runs — two would collide on `dev`. (A batch is still ONE worker.)
 3. The worker re-validates each batched issue is still real (`verify-issue-still-valid.md` — defense
    in depth on top of 1b), then runs ONE cycle for the whole batch on one `dev` branch: version bump
    → per-issue TDD (each bug RED→GREEN, each member committed with its own `Closes #<n>`) → ONE push
@@ -204,7 +215,7 @@ Each loop turn:
    > (the documented subagent-continuation tool) is gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
    > and is **NOT exposed by default**, so a call returns "no such tool" and you cold-start anyway.
    > Do **not** narrate "SendMessage isn't available here, dispatching a fresh worker" — just dispatch
-   > the fresh foreground `autopilot-worker` for the issue and let it RESUME from durable state: the
+   > the fresh background `autopilot-worker` for the issue and let it RESUME from durable state: the
    > existing `dev` branch, the open PR, and the issue's current state. It continues from there instead
    > of redoing version-bump→RED. The per-ticket Discord card is deduped on repo-name#issue, so a
    > fresh worker re-dispatched for the same issue does NOT double-post its card. A worker ending
@@ -249,8 +260,9 @@ Each loop turn:
 A per-issue **design question is NOT a stop** — but handle it in ONE of two HONEST ways, never the
 mixed-signal third way:
 - **(a) Block on it** — if the CURRENT issue cannot proceed without the answer AND nothing else is
-  workable, the foreground worker asks you inline and WAITS (the loop pauses on that worker). End the
-  turn `❓ NEEDS YOU` (it pings your phone — correct, you ARE blocked).
+  workable, the background worker's question surfaces in your main session and it WAITS for your
+  answer (that worker pauses; the loop holds). End the turn `❓ NEEDS YOU` (it pings your phone —
+  correct, you ARE blocked).
 - **(b) Defer it + keep working** — if other tickets remain (the usual case), DON'T block: set the
   asked ticket aside (label `needs-decision` / `autopilot-skip`), keep grinding the rest, end the turn
   `⏳ WORKING`. Collect the deferred questions and raise them as ONE `❓ NEEDS YOU` only when the
@@ -295,10 +307,14 @@ This is a ONE-TIME sweep at completion, not a per-issue step; it runs once, then
 
 ## Watching & steering
 
-The worker is foreground, so its questions appear **inline** in your session and it shows in the
-**agent strip** (`main` + `autopilot-worker`, `↑/↓` to select, `Enter` to view). You discuss the
-important calls with the worker as it works; everything routine runs without you. (This uses
-in-session subagents — the strip mechanism — NOT `claude --bg` daemon sessions.)
+The worker runs in the **background** (`run_in_background: true`), so your **main session stays FREE
+and interactive while it works** (you can keep messaging it) AND it stays VISIBLE in the **agent
+strip** (`main` + `autopilot-worker`, `↑/↓` to select, `Enter` to view). Its questions **surface in
+your main session**, so you discuss the important calls; everything routine runs without you. (This
+uses in-session subagents — the strip mechanism — NOT hidden `claude --bg` daemon sessions. Why
+background not foreground: Claude Code 2.1.x makes a FOREGROUND dispatch BLOCK the main session —
+you couldn't message it while a worker ran, CC issue #71768 — and its 2026-W26 change made
+background-subagent prompts surface in the parent, removing the only reason foreground was used.)
 
 ## Context hygiene & resume
 
