@@ -133,6 +133,26 @@ class TextToolcallStallDetector(unittest.TestCase):
                "/x</parameter></invoke>\n```")
         self.assertFalse(self._stall([_assistant(txt)]))
 
+    def test_block_in_unterminated_fence_does_not_match(self):
+        # a debug note that pastes the block inside an OPEN code fence (no closing ```)
+        txt = ("Here is the literal text that never ran:\n```\ncourt "
+               "<invoke name=\"Read\"><parameter name=\"file_path\">/x</parameter></invoke>")
+        self.assertFalse(self._stall([_assistant(txt)]))
+
+    def test_blockquoted_example_does_not_match(self):
+        # a markdown blockquote example — a real emitted call is never blockquoted
+        txt = "> <invoke name=\"Read\"><parameter name=\"file_path\">/x</parameter></invoke>"
+        self.assertFalse(self._stall([_assistant(txt)]))
+
+    def test_bare_final_invoke_block_is_treated_as_stall(self):
+        # ACCEPTED RESIDUAL (documented in _ends_with_toolcall): a marker-LESS message
+        # whose final content is a bare, unfenced, unquoted block is indistinguishable
+        # from a real stall → True. The hook-enforced status-marker convention protects
+        # compliant turns; the worst case is one benign stuck-check the session answers.
+        txt = ("I confirmed it. The last assistant text was literally:\n\ncourt "
+               "<invoke name=\"Read\"><parameter name=\"file_path\">/x</parameter></invoke>")
+        self.assertTrue(self._stall([_assistant(txt)]))
+
     def test_inflight_tooluse_over_prior_textcall_does_not_match(self):
         # ORDERING GUARD: a real in-flight tool_use is the last entry (empty text) — it
         # must short-circuit to False, NOT be skipped as an empty sentinel and let the

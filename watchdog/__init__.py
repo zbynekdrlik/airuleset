@@ -411,6 +411,21 @@ def _ends_with_toolcall(text):
         pass                                # last = the FINAL `<invoke name=` (or None)
     if last is None:
         return False
+    # A QUOTED example block (markdown code fence or blockquote) is not a real
+    # emitted call — reject it. A real model-emitted call is raw output, never inside
+    # a fence or a `> ` blockquote. (We do NOT require the tag at column 0: a real
+    # stall can have a same-line prose lead-in, e.g. camera-box's `court <invoke…>`.)
+    line_start = s.rfind("\n", 0, last.start()) + 1
+    if s[line_start:last.start()].lstrip().startswith(">"):
+        return False                        # markdown blockquote → quoted example
+    if s[:last.start()].count("```") % 2 == 1:
+        return False                        # inside an open ``` code fence → quoted example
+    # NOTE — accepted residual (per the user's job-4 over-nudge policy): a marker-LESS
+    # message whose final content is a bare, unfenced, unquoted `<invoke>…</invoke>`
+    # block is textually identical to a real stall, so it returns True. In practice the
+    # hook-enforced status-marker convention means a compliant turn ends with ⏳/✅/❓
+    # (prose after the block → False), and the worst case is one benign `stuck-check`
+    # keystroke the session answers "not stuck" — exactly the residual job 4 accepts.
     tail = s[last.start():]                 # from the last opening to end-of-message
     if _TOOLCALL_BLOCK_RX.match(tail):
         return True                         # closed form: the tail IS exactly one call block
