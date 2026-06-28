@@ -10,9 +10,11 @@ Permission-classifier that auto-approves safe commands and pauses on risky ones.
 
 Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Default is `high`** on Opus 4.8 (all surfaces, incl. Claude Code). Guidance:
 - `max` — deep debugging, complex architecture, multi-file refactors (frontier problems only — overthinks structured tasks)
-- `xhigh` — recommended starting point for coding/agentic work (repeated tool calls, deep search); meaningfully higher token use than `high`
+- `xhigh` — genuinely HARD coding/agentic work (deep search, multi-step reasoning); meaningfully higher token use than `high`, so NOT a blanket default — reserve it for work that needs the depth
 - `high` — default; complex reasoning, difficult coding, agentic tasks
-- `low`/`medium` — trivial edits, formatting fixes, simple commits
+- `low`/`medium` — trivial edits, formatting fixes, simple commits, mechanical/read-only work
+
+**Tier effort on DISPATCHED sub-work, don't blanket-`xhigh` it.** The user's MAIN session runs `xhigh` by his own managed default (his deliberate quality baseline — leave it; see `model-awareness.md` → Model tiering). The tiering here is what the AGENT sets on the subagents and workflow stages IT dispatches: mechanical/read-only stages pair a cheap model with `low`/`medium` effort; code-logic stages keep the inherited tier. Don't dispatch every subagent/stage at `xhigh` by reflex — that spends a lot of thinking tokens with no quality gain on mechanical work.
 
 Set with `/model` in CLI. **ultracode** mode = `xhigh` + standing permission to launch multi-agent workflows (not a separate API tier).
 
@@ -31,7 +33,12 @@ The `Workflow` tool runs a deterministic JS script that orchestrates many subage
 
 This ask is NOT a banned "shall I proceed?" process-pause. It is a request for a **capability only the user can grant** (same shape as "ask for the missing tool" in `autonomous-verification.md`) — so it is exempt from the `ask-before-assuming.md` / `autonomous-quality-discipline.md` bans on process questions. Scale the response to the work: for small/cheap fan-out just dispatch parallel `Agent` calls inline (no interruption needed); reserve the stop-and-ask for work where Workflow's orchestration genuinely beats inline parallel agents.
 
-Anti-patterns: riding the `brainstorming → writing-plans → subagent-driven-development` chain for a review/audit/migration without noting that a Workflow would cover it in parallel; treating "ultracode off" as "Workflows unavailable" (you can still author a one-off when the user asks). Applies to all rewordings and semantic equivalents.
+**Tier the model PER STAGE inside the script (cost discipline).** A workflow fanned out over Opus + xhigh on every stage was a major token sink with no quality gain on mechanical stages. Set `agent()` `opts.model`/`opts.effort` per stage by what the stage actually does (the conservative policy in `model-awareness.md` → Model tiering):
+- Mechanical / read-only stages (file/site discovery, log/grep sweeps, status collection, format-only transforms, ticket-validation reads) → `opts.model: 'sonnet'` (or `'haiku'` for the most trivial) + `opts.effort: 'low'`/`'medium'`.
+- Stages that read, write, judge, or synthesize CODE / LOGIC (implement, review, verify, design-synthesis) → omit the override (inherit the Opus main-loop model). Quality is never downtiered here.
+- When unsure → omit (inherit Opus). The saving is on provably-mechanical stages only; never gamble code quality to save tokens.
+
+Anti-patterns: riding the `brainstorming → writing-plans → subagent-driven-development` chain for a review/audit/migration without noting that a Workflow would cover it in parallel; treating "ultracode off" as "Workflows unavailable" (you can still author a one-off when the user asks); running every workflow stage on Opus+xhigh when half the stages are mechanical. Applies to all rewordings and semantic equivalents.
 
 #### Autonomous Goals (`/goal`)
 
