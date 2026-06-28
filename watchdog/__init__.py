@@ -366,9 +366,22 @@ def subagent_active(transcript_path, now, window):
         return False
 
 
-# A tool call the model emitted as TEXT — `<invoke name="...">` / `<invoke
+# A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
 _TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)
+# A COMPLETE tool-call block — `<invoke name=...>` + zero-or-more `<parameter>` +
+# closing `</invoke>` — anchored to END of string (re.S so a parameter VALUE may
+# span newlines / contain status glyphs). Used to verify a message ENDS with exactly
+# one clean call block (the signature of a tool call emitted as text and never run),
+# which a meta-conversation that merely quotes `<invoke>` and then continues never is.
+_TOOLCALL_BLOCK_RX = re.compile(
+    r"<\s*(?:antml:)?invoke\b[^>]*>"
+    r"(?:\s*<\s*(?:antml:)?parameter\b[^>]*>.*?</\s*(?:antml:)?parameter\s*>)*"
+    r"\s*</\s*(?:antml:)?invoke\s*>\s*\Z",
+    re.I | re.S)
+# Markup (a parameter / nested invoke) that may legitimately follow an UNCLOSED open
+# tag in a turn cut off mid-call — distinct from prose (which means a discussion).
+_TOOLCALL_MARKUP_AFTER_RX = re.compile(r"<\s*(?:antml:)?(?:parameter|invoke)\b", re.I)
 
 
 def _entry_has_tool_use(entry):
@@ -384,20 +397,53 @@ def _entry_has_tool_use(entry):
     return False
 
 
-def transcript_text_toolcall_stall(path, tail_window=400):
+def _ends_with_toolcall(text):
+    """True iff `text` ENDS with tool-call markup — the signature of a tool call the
+    model emitted as TEXT (the harness never ran it; the turn died right after
+    emitting it, so nothing follows). This is the precision guard: a message that
+    merely MENTIONS `<invoke>` and then continues with prose, a status marker, or a
+    closing code fence does NOT end with the markup, so it does NOT match (the
+    airuleset repo — and a review/completion-report session about THIS feature — is
+    full of such mentions and must never be nudged)."""
+    s = (text or "").rstrip()
+    last = None
+    for last in _TEXTCALL_RX.finditer(s):
+        pass                                # last = the FINAL `<invoke name=` (or None)
+    if last is None:
+        return False
+    tail = s[last.start():]                 # from the last opening to end-of-message
+    if _TOOLCALL_BLOCK_RX.match(tail):
+        return True                         # closed form: the tail IS exactly one call block
+    if re.search(r"</\s*(?:antml:)?invoke", tail, re.I):
+        return False                        # a close exists but the tail isn't a clean block → prose around it
+    # unclosed: the turn was cut off mid-call. Accept only if no PROSE follows the
+    # opening tag (a real cut-off ends inside the opening tag, at its '>', or inside a
+    # following <parameter> — never in a natural-language sentence).
+    gt = tail.find(">")
+    if gt == -1:
+        return True                         # truncated inside the opening tag itself
+    rest = tail[gt + 1:].lstrip()
+    return rest == "" or bool(_TOOLCALL_MARKUP_AFTER_RX.match(rest))
+
+
+def transcript_text_toolcall_stall(path):
     """True iff the session's last real turn emitted a tool call as TEXT (failed
     parse → turn ended → idle). High precision so a conversation that merely
     DISCUSSES `<invoke>` markup (this very repo documents it) does NOT match:
 
       - the last NON-system entry must be an assistant message (a trailing
         user / tool_result entry means the conversation progressed → not stalled);
-      - that message is not an api-error (job 1 owns those);
-      - it carries NO parsed tool_use block (a real tool_use ran fine);
-      - its text contains the tool-call opening, and that opening sits in the TAIL
-        of the message (the trailing content) — not buried mid-prose / in a code
-        fence, which is how a meta-discussion mentions it.
+      - it is not an api-error (job 1 owns those);
+      - it carries NO parsed tool_use block — checked BEFORE the empty/sentinel skip,
+        because a pure tool_use entry has empty text (`"" in _SENTINELS`) and would
+        otherwise be skipped and let the scan walk back to an older message;
+      - its text ENDS with the tool-call markup (`_ends_with_toolcall`), not merely
+        mentions it mid-prose / in a code fence.
+
+    Scans more than the default tail window so a stall buried under a burst of
+    trailing hook/system entries is not missed.
     """
-    for entry in reversed(_iter_jsonl_tail(path)):
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
         if not isinstance(entry, dict):
             continue
         t = entry.get("type")
@@ -407,17 +453,12 @@ def transcript_text_toolcall_stall(path, tail_window=400):
             return False                    # user / tool_result tail → progressed, not stalled
         if entry.get("isApiErrorMessage") is True:
             return False                    # api-error → job 1's domain
+        if _entry_has_tool_use(entry):
+            return False                    # a real tool_use (incl. in-flight) → not a text-stall
         text = (_entry_text(entry) or "").strip()
         if text in _SENTINELS:
-            continue                        # synthetic assistant — keep scanning back
-        if _entry_has_tool_use(entry):
-            return False                    # a real tool_use was produced → not stalled
-        last = None
-        for last in _TEXTCALL_RX.finditer(text):
-            pass                            # last = final match (or None if none)
-        if last is None:
-            return False                    # last real assistant msg has no text tool-call
-        return last.start() >= max(0, len(text) - tail_window)
+            continue                        # synthetic / tool-only text — keep scanning back
+        return _ends_with_toolcall(text)
     return False
 
 

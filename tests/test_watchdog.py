@@ -108,6 +108,50 @@ class TextToolcallStallDetector(unittest.TestCase):
     def test_missing_transcript_is_not_a_stall(self):
         self.assertFalse(wd.transcript_text_toolcall_stall("/no/such/file.jsonl"))
 
+    # --- precision guards added after adversarial review (tail-window was too loose) ---
+
+    def test_short_completion_report_mention_does_not_match(self):
+        # a SHORT report that mentions <invoke> within 400 chars of the end then ends
+        # on a status marker — the old tail_window=400 heuristic wrongly fired here
+        txt = ("Fixed it. The model emitted `<invoke name=\"Read\">` as text, so it "
+               "never ran.\n\n✅ DONE: opravené, nasadené.")
+        self.assertFalse(self._stall([_assistant(txt)]))
+
+    def test_inline_quoted_mention_at_end_does_not_match(self):
+        # the markup is the last thing mentioned, but quoted + punctuation after it
+        self.assertFalse(self._stall([
+            _assistant("The opening tag is `<invoke name=\"Read\">`.")]))
+
+    def test_unclosed_tag_with_prose_after_does_not_match(self):
+        # an unclosed <invoke ...> followed by a natural-language sentence = discussion
+        self.assertFalse(self._stall([
+            _assistant("You write <invoke name=\"Read\"> to call a tool in the harness.")]))
+
+    def test_closing_tag_in_a_fence_does_not_match(self):
+        # a fenced example whose block closes, then the code fence closes after it
+        txt = ("Example:\n```\n<invoke name=\"Read\"><parameter name=\"file_path\">"
+               "/x</parameter></invoke>\n```")
+        self.assertFalse(self._stall([_assistant(txt)]))
+
+    def test_inflight_tooluse_over_prior_textcall_does_not_match(self):
+        # ORDERING GUARD: a real in-flight tool_use is the last entry (empty text) — it
+        # must short-circuit to False, NOT be skipped as an empty sentinel and let the
+        # scan walk back to a prior stall-shaped message and wrongly fire.
+        self.assertFalse(self._stall([
+            _assistant(CAMERA_BOX_TEXT),       # an earlier stall-shaped message
+            _assistant_tooluse("Bash"),        # ...but a real tool is running NOW
+        ]))
+
+    def test_closed_block_with_multiline_param_is_a_stall(self):
+        txt = ('<invoke name="Bash"><parameter name="command">echo a\necho b'
+               '</parameter></invoke>')
+        self.assertTrue(self._stall([_assistant(txt)]))
+
+    def test_stall_buried_under_many_system_entries(self):
+        # trailing hook/system bursts must not push the broken turn out of view
+        self.assertTrue(self._stall(
+            [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT)] + [_system()] * 100))
+
 
 class EntryHasToolUse(unittest.TestCase):
     def test_positive(self):
@@ -184,6 +228,17 @@ class RunOnceTextcallWiring(unittest.TestCase):
         self.assertFalse(any("textcall" in ln for ln in logs),
                          "meta-discussion must not trigger a textcall stall: %r" % logs)
         self.assertEqual(sent, [], "no keystroke should be sent for a healthy pane")
+
+    def test_short_report_mentioning_invoke_is_not_nudged(self):
+        # the exact false-positive the review found: a short healthy turn that mentions
+        # <invoke> near its end (well within 400 chars) then ends on a status marker —
+        # the old heuristic injected a keystroke here; the precise check must not.
+        txt = ("Fixed. Model emitted `<invoke name=\"Read\">` as text.\n\n"
+               "✅ DONE: opravené.")
+        logs, sent = self._run_with_transcript([_assistant(txt)])
+        self.assertFalse(any("textcall" in ln for ln in logs),
+                         "a short report mentioning <invoke> must not fire: %r" % logs)
+        self.assertEqual(sent, [], "no keystroke into a healthy pane")
 
     def test_fresh_stall_within_grace_is_not_nudged_yet(self):
         # idle below STALL_TEXTCALL_SECONDS → hold (guard against a mid-write turn)
