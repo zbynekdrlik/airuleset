@@ -184,6 +184,31 @@ WORKING_RETRY_INTERVAL_SECONDS = 5 * 60
 # After this many no-response nudges, give up auto-recovery and ping the user once.
 MAX_WORKING_NUDGES = 3
 
+# (4a) TEXT-EMITTED TOOL-CALL STALL — a faster, higher-precision sibling of job 4.
+# Sometimes the model emits a tool call as LITERAL TEXT (a `<invoke name="...">...`
+# block inside an assistant TEXT block) instead of a structured tool_use. The harness
+# never parses it → nothing runs → the turn just ENDS and the session sits idle at the
+# prompt, often with a now-stale `⏳ WORKING` (or no marker at all) still on screen. It
+# LOOKS like it was about to act; it is dead. Unlike job 4 (which must wait
+# STALL_WORKING_SECONDS because idle-after-`⏳` is ALSO healthy waiting), this stall is
+# detectable INSTANTLY and with high precision from the transcript SHAPE — the last
+# real assistant message ENDS with the tool-call markup and carries NO parsed tool_use
+# block — so it nudges after only a short grace (which guards against reading a
+# mid-write turn), with no 30-min wait, regardless of marker. Incident: camera-box PR
+# #305 sat ~20 min on a `court <invoke name="Read">…</invoke>` text turn (caveman lite
+# suspected) while a green auto-merge PR went unmerged and the user could not tell it
+# had died. See verify-launched-work-liveness.md.
+STALL_TEXTCALL_SECONDS = 2 * 60
+# The nudge for a text-emitted tool-call stall — tells the session its last turn
+# emitted a tool call as TEXT (so it never ran) and to re-issue it and continue.
+# Single line (send-keys -l). Contains "stuck-check" so the pane line stays greppable.
+TEXTCALL_NUDGE_TEXT = (
+    "stuck-check: tvoj posledný turn vypísal volanie nástroja ako TEXT "
+    "(<invoke name=...>) namiesto reálneho tool-callu — nespustilo sa, turn skončil "
+    "a stojíš (nepracuješ, hoci to tak možno vyzerá). Zopakuj to volanie poriadne "
+    "ako reálny nástroj a pokračuj v rozrobenej práci."
+)
+
 # (5) DELIVER A PENDING ✅ — the reliable backstop for the unreliable idle_prompt.
 # notify-discord-pending.sh (Stop) records a ✅ DONE to /tmp/claude-discord-pending-
 # <sid>; notify-discord.sh delivers it on the `idle_prompt` Notification event. But
@@ -339,6 +364,61 @@ def subagent_active(transcript_path, now, window):
         return False
     except Exception:
         return False
+
+
+# A tool call the model emitted as TEXT — `<invoke name="...">` / `<invoke
+# name="...">` — instead of a structured tool_use. Used by job 4a.
+_TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)
+
+
+def _entry_has_tool_use(entry):
+    """True if an assistant transcript entry carries a parsed `tool_use` content
+    block — i.e. the harness DID call a tool, so this entry is NOT a text-toolcall
+    stall (the malformed-as-text case has only `text` blocks)."""
+    msg = entry.get("message") if isinstance(entry, dict) else None
+    if not isinstance(msg, dict):
+        return False
+    c = msg.get("content")
+    if isinstance(c, list):
+        return any(isinstance(x, dict) and x.get("type") == "tool_use" for x in c)
+    return False
+
+
+def transcript_text_toolcall_stall(path, tail_window=400):
+    """True iff the session's last real turn emitted a tool call as TEXT (failed
+    parse → turn ended → idle). High precision so a conversation that merely
+    DISCUSSES `<invoke>` markup (this very repo documents it) does NOT match:
+
+      - the last NON-system entry must be an assistant message (a trailing
+        user / tool_result entry means the conversation progressed → not stalled);
+      - that message is not an api-error (job 1 owns those);
+      - it carries NO parsed tool_use block (a real tool_use ran fine);
+      - its text contains the tool-call opening, and that opening sits in the TAIL
+        of the message (the trailing content) — not buried mid-prose / in a code
+        fence, which is how a meta-discussion mentions it.
+    """
+    for entry in reversed(_iter_jsonl_tail(path)):
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("type")
+        if t == "system":
+            continue                        # hook / system noise after the turn — skip
+        if t != "assistant":
+            return False                    # user / tool_result tail → progressed, not stalled
+        if entry.get("isApiErrorMessage") is True:
+            return False                    # api-error → job 1's domain
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue                        # synthetic assistant — keep scanning back
+        if _entry_has_tool_use(entry):
+            return False                    # a real tool_use was produced → not stalled
+        last = None
+        for last in _TEXTCALL_RX.finditer(text):
+            pass                            # last = final match (or None if none)
+        if last is None:
+            return False                    # last real assistant msg has no text tool-call
+        return last.start() >= max(0, len(text) - tail_window)
+    return False
 
 
 def _hash(text):
@@ -816,10 +896,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
              wait_clear=WAIT_CLEAR_SECONDS, usage_fetch=None,
              stall_working=STALL_WORKING_SECONDS,
+             stall_textcall=STALL_TEXTCALL_SECONDS,
              working_interval=WORKING_RETRY_INTERVAL_SECONDS,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX):
-    """Scan every `claude` pane once. Five jobs:
+    """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
@@ -828,6 +909,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (4) a session idle on `⏳ WORKING` ≥ `stall_working` with NO advancing subagent
           → NUDGE the pane with a `stuck-check` self-check prompt (its launched work
           may have died silently); retry up to `max_nudges`, escalate-ping on give-up;
+      (4a) a session whose last turn emitted a tool call as TEXT (`<invoke name=...>`
+          that never ran → turn ended → idle) → NUDGE immediately after a short grace
+          (`stall_textcall`), no 30-min wait, regardless of marker;
       (5) a session that ended `✅ DONE` and went idle ≥ `done_grace` → DELIVER the
           pending ✅ device ping the unreliable idle_prompt event failed to send
           (only while the session is STILL ✅ — a re-fired one is cleared silently).
@@ -956,6 +1040,47 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         dry_run=dry_run)
             continue                       # waiting on the user → not a working-stall
 
+        # --- (4a) TEXT-EMITTED TOOL-CALL STALL → nudge immediately (no 30-min wait) --
+        # The model emitted a tool call as TEXT (a `<invoke name=...>` block in an
+        # assistant text block) instead of a structured tool_use → it never ran, the
+        # turn ENDED, and the session sits idle (often on a now-stale `⏳`, or no marker
+        # at all). Detectable instantly from the transcript SHAPE (see
+        # transcript_text_toolcall_stall — precise, so a meta-conversation merely
+        # DISCUSSING `<invoke>` does not match), so unlike job 4 this fires after only a
+        # short grace (guarding a mid-write turn), REGARDLESS of marker. Reuses job 4's
+        # nudge lifecycle (decide_working: nudge → retry → escalate) under a distinct
+        # `textcall:` key. Same copy-mode / advancing-subagent skips as job 4.
+        if (idle >= stall_textcall
+                and transcript_text_toolcall_stall(tpath)
+                and not subagent_active(tpath, now, stall_textcall)):
+            if pane_in_mode(pid, run):
+                logs.append("skip in-mode (textcall-stall) %s" % (project or pid))
+                continue
+            wkey = "textcall:" + key
+            action, entry = decide_working(state, wkey, now, idle,
+                                           interval=working_interval,
+                                           max_nudges=max_working_nudges)
+            state[wkey] = entry
+            fs = int(entry.get("first_seen", now))
+            if action == "nudge":
+                n = len(entry["nudges"])
+                logs.append("textcall-nudge#%d %s [%s] idle=%dm"
+                            % (n, project, key, int(idle // 60)))
+                if not dry_run:
+                    send_continue(pid, TEXTCALL_NUDGE_TEXT, run)
+            elif action == "escalate":
+                logs.append("textcall-escalate %s [%s] — wedged after %d nudges"
+                            % (project, key, max_working_nudges))
+                send_fn("\U0001f6d1 **%s** — turn sa zlomil (tool-call vypísaný ako "
+                        "text) a nereaguje\n> Po %d× automatickom stuck-check pingu sa "
+                        "session stále nepohla — pravdepodobne zamrzol samotný Claude "
+                        "proces. Treba zásah." % (project, max_working_nudges),
+                        owner=owner, dedup_key="textcall-giveup:%s:%s" % (key, fs),
+                        dry_run=dry_run)
+            else:
+                logs.append("textcall-%s %s [%s]" % (action, project, key))
+            continue                        # handled as a text-toolcall stall
+
         # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
         # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
         # it'll report when done) but nothing has happened for `stall_working` AND no
@@ -1015,7 +1140,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     for k in list(state.keys()):
         if k == "usage":
             continue                       # account-wide usage state, not a session
-        if k.startswith("wait:") or k.startswith("working:"):
+        if k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:"):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly
