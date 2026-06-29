@@ -107,6 +107,13 @@ class TestCavemanShim(TestCase):
         self.assertIn("context_window", c)
         self.assertIn("used_percentage", c)
 
+    def test_shim_renders_usage_limits(self):
+        c = airuleset.CAVEMAN_SHIM_CONTENT
+        # Also renders the 5h + weekly usage-limit meters from rate_limits.
+        self.assertIn("rate_limits", c)
+        self.assertIn("five_hour", c)
+        self.assertIn("seven_day", c)
+
 
 class TestCavemanShimBehavior(TestCase):
     """Run the shim as a real subprocess against a fake HOME + sample stdin."""
@@ -214,6 +221,40 @@ class TestCavemanShimBehavior(TestCase):
     def test_malformed_payload_never_errors(self):
         r = self._run("not json at all")  # passed through json.dumps -> a string
         self.assertEqual(r.returncode, 0)
+
+    def test_usage_limits_render_with_context(self):
+        r = self._run(
+            {
+                "context_window": {
+                    "used_percentage": 18,
+                    "context_window_size": 1000000,
+                    "total_input_tokens": 177186,
+                },
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 21, "resets_at": 0},
+                    "seven_day": {"used_percentage": 97, "resets_at": 0},
+                },
+            }
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("ctx", r.stdout)
+        self.assertIn("5h 21%", r.stdout)
+        self.assertIn("wk 97%", r.stdout)
+
+    def test_usage_limits_render_without_context(self):
+        # No context_window block, but rate_limits present -> badge + limits.
+        r = self._run(
+            {
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 5},
+                    "seven_day": {"used_percentage": 60},
+                }
+            }
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("[CAVEMAN:LITE]", r.stdout)
+        self.assertIn("5h 5%", r.stdout)
+        self.assertIn("wk 60%", r.stdout)
 
 
 if __name__ == "__main__":

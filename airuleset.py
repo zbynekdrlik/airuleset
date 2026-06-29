@@ -120,24 +120,16 @@ real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/caveman-stat
 badge=""
 if [ -n "$real" ] && [ -f "$real" ]; then badge=$(bash "$real" </dev/null 2>/dev/null); fi
 meter=$(CTX_JSON="$in" python3 2>/dev/null <<'PY'
-import os, json
+import os, json, time
 try:
-    cw = (json.loads(os.environ.get("CTX_JSON") or "{}").get("context_window") or {})
+    d = json.loads(os.environ.get("CTX_JSON") or "{}")
 except Exception:
     raise SystemExit
-cu = cw.get("current_usage") or {}
-size = cw.get("context_window_size") or 0
-pct = cw.get("used_percentage")
-if pct is None:
-    if not cu:
-        raise SystemExit  # no usage measured yet (e.g. right after /compact)
-    used = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
-    pct = round(used / size * 100) if size else None
-if pct is None:
+if not isinstance(d, dict):
     raise SystemExit
-tok = cw.get("total_input_tokens")
-if tok is None:
-    tok = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
+segs = []
+def colr(pct, lo, hi):  # green below lo, yellow below hi, red at/above hi
+    return 40 if pct < lo else (220 if pct < hi else 196)
 def hk(n):
     n = int(n or 0)
     if n >= 1000000:
@@ -145,11 +137,48 @@ def hk(n):
     if n >= 1000:
         return "%dk" % round(n / 1000.0)
     return str(n)
-pct = max(0, min(100, int(pct)))
-filled = round(pct / 10.0)
-bar = "█" * filled + "░" * (10 - filled)
-col = 40 if pct < 50 else (220 if pct < 80 else 196)
-print("\033[38;5;%dmctx %s %s%%\033[0m \033[2m(%s/%s)\033[0m" % (col, bar, pct, hk(tok), hk(size)))
+# --- context-window fill ---
+cw = d.get("context_window") or {}
+cu = cw.get("current_usage") or {}
+size = cw.get("context_window_size") or 0
+pct = cw.get("used_percentage")
+if pct is None and cu:
+    used = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
+    pct = round(used / size * 100) if size else None
+if pct is not None:
+    pct = max(0, min(100, int(pct)))
+    filled = round(pct / 10.0)
+    bar = "█" * filled + "░" * (10 - filled)
+    tok = cw.get("total_input_tokens")
+    if tok is None:
+        tok = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
+    c = colr(pct, 50, 80)
+    segs.append("\033[38;5;%dmctx %s %s%%\033[0m \033[2m(%s/%s)\033[0m" % (c, bar, pct, hk(tok), hk(size)))
+# --- usage limits (5h + weekly), high % = near the cap ---
+rl = d.get("rate_limits") or {}
+now = time.time()
+def reset(ts):
+    if not ts:
+        return ""
+    s = int(ts) - now
+    if s <= 0:
+        return ""
+    if s >= 86400:
+        return " (%dd)" % round(s / 86400.0)
+    if s >= 3600:
+        return " (%dh)" % round(s / 3600.0)
+    return " (%dm)" % max(1, round(s / 60.0))
+for key, label in (("five_hour", "5h"), ("seven_day", "wk")):
+    w = rl.get(key) or {}
+    p = w.get("used_percentage")
+    if p is None:
+        continue
+    p = max(0, min(100, int(p)))
+    c = colr(p, 70, 90)
+    segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, label, p, reset(w.get("resets_at"))))
+if not segs:
+    raise SystemExit
+print("  ".join(segs))
 PY
 )
 out="$badge"
