@@ -119,6 +119,14 @@ in=$(cat)
 real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh 2>/dev/null | head -1)
 badge=""
 if [ -n "$real" ] && [ -f "$real" ]; then badge=$(bash "$real" </dev/null 2>/dev/null); fi
+# de-emphasize caveman (least-important info): strip its bright color, lowercase,
+# drop the brackets, render faint so it stops grabbing attention.
+cm=""
+if [ -n "$badge" ]; then
+  plain=$(printf '%s' "$badge" | sed 's/\x1b\[[0-9;]*m//g' | tr 'A-Z' 'a-z')
+  plain=${plain#[}; plain=${plain%]}
+  [ -n "$plain" ] && cm=$(printf '\033[2m%s\033[0m' "$plain")
+fi
 meter=$(CTX_JSON="$in" python3 2>/dev/null <<'PY'
 import os, json, time
 try:
@@ -130,14 +138,7 @@ if not isinstance(d, dict):
 segs = []
 def colr(pct, lo, hi):  # green below lo, yellow below hi, red at/above hi
     return 40 if pct < lo else (220 if pct < hi else 196)
-def hk(n):
-    n = int(n or 0)
-    if n >= 1000000:
-        return ("%dM" % (n // 1000000)) if n % 1000000 == 0 else ("%.1fM" % (n / 1000000.0))
-    if n >= 1000:
-        return "%dk" % round(n / 1000.0)
-    return str(n)
-# --- context-window fill ---
+# --- context-window fill (bar only — no % / tokens, per user pref) ---
 cw = d.get("context_window") or {}
 cu = cw.get("current_usage") or {}
 size = cw.get("context_window_size") or 0
@@ -149,11 +150,8 @@ if pct is not None:
     pct = max(0, min(100, int(pct)))
     filled = round(pct / 10.0)
     bar = "█" * filled + "░" * (10 - filled)
-    tok = cw.get("total_input_tokens")
-    if tok is None:
-        tok = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
     c = colr(pct, 50, 80)
-    segs.append("\033[38;5;%dmctx %s %s%%\033[0m \033[2m(%s/%s)\033[0m" % (c, bar, pct, hk(tok), hk(size)))
+    segs.append("\033[38;5;%dmctx %s\033[0m" % (c, bar))
 # --- usage limits (5h + weekly), high % = near the cap ---
 rl = d.get("rate_limits") or {}
 now = time.time()
@@ -181,9 +179,11 @@ if not segs:
 print("  ".join(segs))
 PY
 )
-out="$badge"
-if [ -n "$badge" ] && [ -n "$meter" ]; then out="$badge  $meter"; fi
-if [ -z "$badge" ]; then out="$meter"; fi
+# meter (ctx bar + usage limits) leads; faint caveman tag trails.
+out="$meter"
+if [ -n "$cm" ]; then
+  if [ -n "$out" ]; then out="$out  $cm"; else out="$cm"; fi
+fi
 printf '%s' "$out"
 exit 0
 """

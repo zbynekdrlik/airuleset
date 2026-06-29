@@ -152,7 +152,7 @@ class TestCavemanShimBehavior(TestCase):
             )
             return r
 
-    def test_badge_and_meter_render_together(self):
+    def test_badge_quiet_and_ctx_is_bar_only(self):
         r = self._run(
             {
                 "context_window": {
@@ -168,12 +168,17 @@ class TestCavemanShimBehavior(TestCase):
             }
         )
         self.assertEqual(r.returncode, 0)
-        self.assertIn("[CAVEMAN:LITE]", r.stdout)
-        self.assertIn("18%", r.stdout)
-        self.assertIn("177k/1M", r.stdout)
+        # caveman rendered quietly: lowercased, no loud [CAVEMAN] brackets.
+        self.assertIn("caveman:lite", r.stdout)
+        self.assertNotIn("[CAVEMAN:LITE]", r.stdout)
+        # ctx is a bar only — no percentage, no token count.
+        self.assertIn("ctx", r.stdout)
+        self.assertTrue("█" in r.stdout or "░" in r.stdout)
+        self.assertNotIn("177k", r.stdout)
+        self.assertNotIn("18%", r.stdout)
 
-    def test_meter_computed_when_used_percentage_missing(self):
-        # used_percentage null -> compute from current_usage / size.
+    def test_ctx_bar_computed_when_used_percentage_missing(self):
+        # used_percentage null -> compute from current_usage / size -> 50% bar.
         r = self._run(
             {
                 "context_window": {
@@ -188,11 +193,11 @@ class TestCavemanShimBehavior(TestCase):
             }
         )
         self.assertEqual(r.returncode, 0)
-        self.assertIn("50%", r.stdout)
+        self.assertIn("█████░░░░░", r.stdout)  # 50% -> half-filled bar
 
     def test_no_meter_after_compact_still_shows_badge(self):
         # Right after /compact current_usage is null and there's no percentage:
-        # render the badge alone, no crash, no stray "%".
+        # render the (quiet) badge alone, no crash, no stray "%".
         r = self._run(
             {
                 "context_window": {
@@ -203,20 +208,20 @@ class TestCavemanShimBehavior(TestCase):
             }
         )
         self.assertEqual(r.returncode, 0)
-        self.assertIn("[CAVEMAN:LITE]", r.stdout)
+        self.assertIn("caveman", r.stdout)
         self.assertNotIn("%", r.stdout)
 
-    def test_meter_renders_even_without_caveman(self):
-        # No caveman plugin on disk -> badge empty, but the context meter still
-        # shows (so the user never loses context fill), and exit is clean.
+    def test_ctx_bar_renders_even_without_caveman(self):
+        # No caveman plugin on disk -> no tag, but the ctx bar still shows.
         r = self._run(
             {"context_window": {"used_percentage": 42, "context_window_size": 1000000,
                                 "total_input_tokens": 420000}},
             with_caveman=False,
         )
         self.assertEqual(r.returncode, 0)
-        self.assertNotIn("[CAVEMAN", r.stdout)
-        self.assertIn("42%", r.stdout)
+        self.assertNotIn("caveman", r.stdout.lower())
+        self.assertIn("ctx", r.stdout)
+        self.assertTrue("█" in r.stdout or "░" in r.stdout)
 
     def test_malformed_payload_never_errors(self):
         r = self._run("not json at all")  # passed through json.dumps -> a string
@@ -252,7 +257,7 @@ class TestCavemanShimBehavior(TestCase):
             }
         )
         self.assertEqual(r.returncode, 0)
-        self.assertIn("[CAVEMAN:LITE]", r.stdout)
+        self.assertIn("caveman:lite", r.stdout)
         self.assertIn("5h 5%", r.stdout)
         self.assertIn("wk 60%", r.stdout)
 
