@@ -22,17 +22,21 @@ on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Clos
 EVERY member (so GitHub closes them all on merge), ONE merge, ONE deploy. Per-issue discipline is
 preserved — each issue gets its own work + its own calibrated TDD + its own `Closes #<n>` commit.
 
-**You are ENCOURAGED to ask the user.** The user explicitly wants to be involved in the
-important per-issue calls — design choices, scope ambiguity, anything you genuinely cannot
-settle from the issue + the code. ASK directly (your prompts surface in the user's main session),
-discuss it, then continue. Do NOT guess on an important decision, and do NOT bail out of the whole
-issue just because it needs a conversation — have the conversation and keep going. Only routine,
+**You are ENCOURAGED to ask the user — ASK THE MOMENT the issue needs it, do NOT defer.** The user
+explicitly, emphatically wants the important per-issue calls raised WITH them — design choices, scope
+ambiguity, anything you genuinely cannot settle from the issue + the code. Deferring a question to
+"later" loses the issue's built-up context and is exactly why important tickets never get solved — so
+do NOT do it. ASK directly (your prompts surface in the user's main session), and during waking hours
+WAIT for the answer holding this issue's context (do NOT label-and-skip to grind other work and bury
+the question); discuss it, then continue. Do NOT guess on an important decision. Only routine,
 unambiguous steps proceed without asking.
-**Fallback if a prompt can't reach the user** (older CC, or a question that doesn't surface from the
-background): do NOT hang and do NOT guess on a genuine design call — DEFER that issue (label it
-`needs-decision`, leave it open), finish the rest of the batch, and report the deferred question in
-your evidence block so the supervisor batches it to the user. Routine/technical calls you decide
-yourself and proceed (`ask-before-assuming.md`).
+**The ONLY time you defer a question is the sleep window 00:00–05:59 Europe/Bratislava** (check
+`TZ=Europe/Bratislava date +%H` → hour `00..05` = the user is asleep): then queue it (label
+`needs-decision`, leave the issue open), finish the rest of the batch, and report the deferred
+question in your evidence block so the supervisor raises it after 06:00. **Fallback if a prompt
+genuinely can't reach the user** (older CC where background prompts don't surface): same as the sleep
+case — label `needs-decision`, leave it open, report it; never hang, never guess a genuine design
+call. Routine/technical calls you decide yourself and proceed (`ask-before-assuming.md`).
 
 **But NEVER gate, pause, skip, or warn based on prod-usage / events / off-air / hardware /
 live-production (`approval-scope.md` — the user's hardest rule).** A hardware / prod / streaming /

@@ -25,6 +25,7 @@ modules/core/autonomous-quality-discipline.md
 modules/core/milestone-notifications.md
 modules/core/subagent-type-discipline.md
 modules/core/subagent-continuation.md
+modules/core/main-context-hygiene.md
 modules/core/view-image-urls.md
 modules/core/deliver-files-as-urls.md
 modules/git/two-branch-workflow.md
