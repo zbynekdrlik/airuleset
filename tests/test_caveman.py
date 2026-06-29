@@ -91,12 +91,129 @@ class TestCavemanShim(TestCase):
         c = airuleset.CAVEMAN_SHIM_CONTENT
         self.assertIn("plugins/cache/caveman/caveman/", c)
         self.assertIn("ls -dt", c)  # newest cache hash wins
-        self.assertIn("exec bash", c)
+        self.assertIn("caveman-statusline.sh", c)  # still runs caveman's badge
+        # Must NOT exec — the shim has to keep running to append the context meter.
+        self.assertNotIn("exec bash", c)
 
     def test_shim_never_errors_when_caveman_absent(self):
-        # Must exit 0 (print nothing) so a missing plugin can't break the prompt.
+        # Must exit 0 (print nothing it can't render) so a missing plugin or a
+        # malformed payload can never break the prompt render.
         self.assertIn("exit 0", airuleset.CAVEMAN_SHIM_CONTENT)
         self.assertNotIn("set -e", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_shim_renders_context_meter(self):
+        c = airuleset.CAVEMAN_SHIM_CONTENT
+        # Reads the session JSON from stdin and renders from context_window.
+        self.assertIn("context_window", c)
+        self.assertIn("used_percentage", c)
+
+
+class TestCavemanShimBehavior(TestCase):
+    """Run the shim as a real subprocess against a fake HOME + sample stdin."""
+
+    import os
+    import subprocess
+    import tempfile
+    import json
+
+    def _run(self, payload, with_caveman=True):
+        import os
+        import subprocess
+        import tempfile
+        import json
+        with tempfile.TemporaryDirectory() as home:
+            if with_caveman:
+                cav = os.path.join(
+                    home, ".claude/plugins/cache/caveman/caveman/abc123/hooks"
+                )
+                os.makedirs(cav)
+                sl = os.path.join(cav, "caveman-statusline.sh")
+                with open(sl, "w") as fh:
+                    fh.write('#!/usr/bin/env bash\nprintf "[CAVEMAN:LITE]"\n')
+                os.chmod(sl, 0o755)
+            shim = os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
+            env = dict(os.environ)
+            env["HOME"] = home
+            r = subprocess.run(
+                ["bash", shim],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            return r
+
+    def test_badge_and_meter_render_together(self):
+        r = self._run(
+            {
+                "context_window": {
+                    "used_percentage": 18,
+                    "context_window_size": 1000000,
+                    "total_input_tokens": 177186,
+                    "current_usage": {
+                        "input_tokens": 2,
+                        "cache_read_input_tokens": 175516,
+                        "cache_creation_input_tokens": 1668,
+                    },
+                }
+            }
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("[CAVEMAN:LITE]", r.stdout)
+        self.assertIn("18%", r.stdout)
+        self.assertIn("177k/1M", r.stdout)
+
+    def test_meter_computed_when_used_percentage_missing(self):
+        # used_percentage null -> compute from current_usage / size.
+        r = self._run(
+            {
+                "context_window": {
+                    "used_percentage": None,
+                    "context_window_size": 200000,
+                    "current_usage": {
+                        "input_tokens": 0,
+                        "cache_read_input_tokens": 100000,
+                        "cache_creation_input_tokens": 0,
+                    },
+                }
+            }
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("50%", r.stdout)
+
+    def test_no_meter_after_compact_still_shows_badge(self):
+        # Right after /compact current_usage is null and there's no percentage:
+        # render the badge alone, no crash, no stray "%".
+        r = self._run(
+            {
+                "context_window": {
+                    "used_percentage": None,
+                    "current_usage": None,
+                    "context_window_size": 1000000,
+                }
+            }
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("[CAVEMAN:LITE]", r.stdout)
+        self.assertNotIn("%", r.stdout)
+
+    def test_meter_renders_even_without_caveman(self):
+        # No caveman plugin on disk -> badge empty, but the context meter still
+        # shows (so the user never loses context fill), and exit is clean.
+        r = self._run(
+            {"context_window": {"used_percentage": 42, "context_window_size": 1000000,
+                                "total_input_tokens": 420000}},
+            with_caveman=False,
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("[CAVEMAN", r.stdout)
+        self.assertIn("42%", r.stdout)
+
+    def test_malformed_payload_never_errors(self):
+        r = self._run("not json at all")  # passed through json.dumps -> a string
+        self.assertEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":

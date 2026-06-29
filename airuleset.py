@@ -101,20 +101,63 @@ VALID_CAVEMAN_MODES = {
     "wenyan-lite", "wenyan-full", "wenyan-ultra",
 }
 CAVEMAN_CACHE_GLOB = "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh"
-# Hash-independent entry to caveman's statusline. Must NEVER error (a broken
-# statusline would break the prompt render) — prints nothing if caveman isn't
-# built yet. `ls -dt ... | head -1` picks the newest cache hash at runtime.
-CAVEMAN_SHIM_CONTENT = (
-    "#!/usr/bin/env bash\n"
-    "# airuleset-managed (do NOT edit) — hash-independent entry to caveman's\n"
-    "# statusline. caveman's real script lives under a content-hashed cache dir\n"
-    "# that changes on every `claude plugin update`; resolving it at runtime means\n"
-    "# a plugin update can never rot the statusLine path again.\n"
-    'real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/'
-    "caveman-statusline.sh 2>/dev/null | head -1)\n"
-    'if [ -n "$real" ] && [ -f "$real" ]; then exec bash "$real" "$@"; fi\n'
-    "exit 0\n"
+# Hash-independent entry to caveman's statusline + a context-fill meter. Must
+# NEVER error (a broken statusline would break the prompt render). Caveman's real
+# script lives under a content-hashed cache dir that changes on every `claude
+# plugin update`; `ls -dt ... | head -1` resolves the newest hash at runtime so
+# the path can't rot. A custom statusLine occupies the whole footer row, so the
+# native context-fill indicator is unreliable — Claude Code pipes the session JSON
+# on stdin (context_window.used_percentage etc., CC v2.1.132+) and caveman's script
+# reads only its flag file, so the shim consumes stdin and renders the context
+# meter itself, right next to the badge. Must NOT `exec` caveman (it has to keep
+# running to append the meter). Prints nothing it can't safely render.
+CAVEMAN_SHIM_CONTENT = r"""#!/usr/bin/env bash
+# airuleset-managed (do NOT edit) — caveman badge + context-fill meter.
+# caveman's real statusline lives under a content-hashed cache dir resolved at
+# runtime (ls -dt ... | head -1) so a `claude plugin update` can never rot it.
+in=$(cat)
+real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh 2>/dev/null | head -1)
+badge=""
+if [ -n "$real" ] && [ -f "$real" ]; then badge=$(bash "$real" </dev/null 2>/dev/null); fi
+meter=$(CTX_JSON="$in" python3 2>/dev/null <<'PY'
+import os, json
+try:
+    cw = (json.loads(os.environ.get("CTX_JSON") or "{}").get("context_window") or {})
+except Exception:
+    raise SystemExit
+cu = cw.get("current_usage") or {}
+size = cw.get("context_window_size") or 0
+pct = cw.get("used_percentage")
+if pct is None:
+    if not cu:
+        raise SystemExit  # no usage measured yet (e.g. right after /compact)
+    used = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
+    pct = round(used / size * 100) if size else None
+if pct is None:
+    raise SystemExit
+tok = cw.get("total_input_tokens")
+if tok is None:
+    tok = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
+def hk(n):
+    n = int(n or 0)
+    if n >= 1000000:
+        return ("%dM" % (n // 1000000)) if n % 1000000 == 0 else ("%.1fM" % (n / 1000000.0))
+    if n >= 1000:
+        return "%dk" % round(n / 1000.0)
+    return str(n)
+pct = max(0, min(100, int(pct)))
+filled = round(pct / 10.0)
+bar = "█" * filled + "░" * (10 - filled)
+col = 40 if pct < 50 else (220 if pct < 80 else 196)
+print("\033[38;5;%dmctx %s %s%%\033[0m \033[2m(%s/%s)\033[0m" % (col, bar, pct, hk(tok), hk(size)))
+PY
 )
+out="$badge"
+if [ -n "$badge" ] && [ -n "$meter" ]; then out="$badge  $meter"; fi
+if [ -z "$badge" ]; then out="$meter"; fi
+printf '%s' "$out"
+exit 0
+"""
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
