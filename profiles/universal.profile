@@ -6,6 +6,7 @@
 modules/core/machine-identities.md
 modules/core/model-awareness.md
 modules/core/claude-code-tooling.md
+modules/core/gh-cli-recipes.md
 modules/core/response-structure.md
 modules/core/message-status-marker.md
 modules/core/issue-reference-context.md
