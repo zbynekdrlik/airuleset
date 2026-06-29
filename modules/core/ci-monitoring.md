@@ -16,8 +16,11 @@
 A reasonable inline-reporting default — NOT a mandate, pick what fits:
 ```
 Bash(command: "sleep 300 && gh run view <run-id> --json status,conclusion,jobs", run_in_background: true)
+# ^ MAIN SESSION ONLY — a SUBAGENT that runs this and ends its turn TERMINATES (see caveat below)
 ```
 When it returns, read the output, act on it, continue. Notifications fire on their own — the mobile app surfaces "waiting on you", and Discord idle pings fire when you go idle — so you no longer need to shape monitoring around them.
+
+**CRITICAL — `run_in_background` CI-polling is a MAIN-SESSION pattern, NOT a subagent one.** It works for the main session because the background task RE-INVOKES the session that launched it. **A SUBAGENT (e.g. an `autopilot-worker`) that launches a `run_in_background` CI poll and then ends its turn TERMINATES** — a subagent with no pending FOREGROUND tool call is returned as "completed", and the detached background task's completion fires to the PARENT (supervisor) session, NOT to the now-gone subagent. So the subagent silently dies after every push (this was the single dominant autopilot-worker failure — ~40% of workers). **Inside a subagent, wait FOREGROUND** — a blocking `gh run view <id>` poll loop (each Bash call well under the 10-min tool cap — e.g. `sleep 300`, repeated until terminal), which keeps the subagent alive — **or, for a long / multi-stage wait, hand the run-id back to the supervisor and RETURN** (the supervisor is the long-lived component that survives the wait via `run_in_background` + re-invocation). Applies to all rewordings and semantic equivalents.
 3. If any job fails: `gh run view <run-id> --log-failed` — investigate and fix immediately
 4. Push fixes and monitor again until green
 5. After merge to main: monitor the main branch CI run AND any release/deploy workflows until they complete

@@ -123,9 +123,22 @@ confirmed-still-valid issues proceed to the cycle below.
 3. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
 4. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
-   push **once** (one push for the whole batch — `ci-push-discipline.md`), then monitor YOUR OWN CI
-   run to a terminal state (`ci-monitoring.md` — use whatever monitoring you judge best; a background
-   `sleep N && gh run view <id>` is a fine default). The supervisor does NOT watch your CI.
+   push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
+   **CRITICAL — NEVER wait with `Bash(run_in_background=True)`. You are a SUBAGENT: a subagent that
+   backgrounds a wait and ends its turn TERMINATES** — the detached background task re-invokes the
+   supervisor, not you, so you silently die after every push (this was the dominant worker failure,
+   ~40% of workers). Wait **FOREGROUND** instead — a blocking `gh run view <id>` poll loop (each call
+   well under the 10-min Bash cap — e.g. `sleep 300`, repeated until terminal — `ci-monitoring.md`),
+   which keeps you alive.
+   **For a LONG / MULTI-STAGE pipeline** (a 3-branch `develop→staging→main` flow, or any wait that
+   spans multiple sequential CI stages or would exceed ~20 min): do **NOT** hold the whole wait —
+   report the CI run-id + current stage in your evidence block and RETURN; the supervisor owns the
+   wait (it survives long waits via `run_in_background` + re-invocation) and re-dispatches a fresh
+   worker for the next stage (`skills/autopilot/SKILL.md`). **If the supervisor dispatches you FOR a
+   specific promotion stage** (e.g. "promote develop→staging for #N"), do ONLY that stage's PR /
+   promotion and RETURN; only the FINAL `merge→deploy-verify` stage worker runs steps 6–7 and fires
+   the per-ticket card. For a plain 2-branch single-CI repo you own the one short CI yourself
+   (foreground), running the whole cycle (steps 5–7) as below.
 5. Open ONE PR `dev`→`main` whose body lists `Closes #<n>` for **EVERY** member (separate lines, so
    GitHub closes them all on merge). Drive EVERY gate green: CI all jobs, `mergeable: true` +
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.

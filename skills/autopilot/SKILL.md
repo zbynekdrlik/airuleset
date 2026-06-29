@@ -28,7 +28,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `autonomous-batch-issue-development.md` — bundle bundle-safe issues into ONE PR/CI cycle (the gate + ceiling below)
 - `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker (or the `manual` arg) = stop at green PR
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
-- `ci-monitoring.md` — the worker monitors its OWN CI to terminal; the main loop just verifies the result
+- `ci-monitoring.md` — 2-branch single-CI repo: the worker monitors its OWN CI **foreground** (NEVER `run_in_background` — that ends the subagent), the main loop verifies the result; long / multi-stage pipeline (3-branch): the SUPERVISOR owns the CI waits and the worker returns per stage (Step 3 multi-stage note)
 - `post-deploy-verification.md` / `version-on-dashboard.md` — deploys verified via the live DOM version
 - `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
@@ -221,6 +221,22 @@ Each loop turn:
    > fresh worker re-dispatched for the same issue does NOT double-post its card. A worker ending
    > mid-issue (turn boundary, error, your answer to its question) is recovered by ONE fresh dispatch
    > with the resume context in the prompt — never by a continuation tool, never by restarting from scratch.
+
+   > **Multi-stage / long pipelines (e.g. a 3-branch `develop→staging→main` flow) — YOU own the CI
+   > waits, not the worker.** A single worker cannot safely hold an hour-plus of successive CI waits:
+   > a subagent that `run_in_background`-waits and ends its turn TERMINATES (the dominant worker
+   > failure — its background task re-invokes YOU, not the dead worker), a foreground wait caps at
+   > 10 min/call and bloats the worker's context, and the long lifetime is exposed to api-errors the
+   > whole time. So for such repos the worker is BOUNDED PER STAGE — it does its stage's work →
+   > pushes / opens the PR → reports the CI run-id + current stage in its evidence block → RETURNS.
+   > YOU (the supervisor) then own the wait: poll the reported run-id with a `run_in_background`
+   > bounded poll (you ARE the long-lived component — `run_in_background` re-invokes you and
+   > `--resume` continues you, exactly why the wait is safe here and fatal inside a subagent), and
+   > when CI is green dispatch the next short-lived worker for the next promotion (develop→staging,
+   > staging→main, merge→deploy-verify). Serial-per-repo still holds (one active worker at a time);
+   > each worker's lifetime just shrinks. This is the SANCTIONED pattern — not an improvisation. For a
+   > plain 2-branch single-CI repo it isn't needed: the worker waits FOREGROUND through the one short
+   > CI and runs the whole cycle itself.
 4. When the worker returns its evidence block, **independently verify** from primary sources
    (never trust the claim). First read the worker's `dropped:` and `obsolete_closed:` lines and
    compute the **SURVIVING set** = batch members MINUS dropped MINUS obsolete-closed. Verify the ONE
