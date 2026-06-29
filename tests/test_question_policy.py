@@ -39,6 +39,8 @@ class TestQuestionPolicy(TestCase):
         self.assertIn("06:00", t)
         # The old "(b) Defer it + keep working" default must be gone.
         self.assertNotIn("Defer it + keep working", t)
+        # The explicit ban on the rationalization that recurred live must stay.
+        self.assertIn("loop nemá stáť na čakaní", t)
 
     def test_worker_asks_the_moment(self):
         t = read("agents/autopilot-worker.md")

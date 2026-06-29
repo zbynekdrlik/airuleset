@@ -284,6 +284,19 @@ never arrives and the question never gets asked. So handle it BY THE CLOCK:
 "Nothing is hands-off" is **NOT a stop** — work the tickets; when one needs your decision, ask it NOW
 (waking) or queue it (sleep). Finishing a merge is **NOT a stop** — pick the next issue.
 
+**BANNED rationalization — this recurred LIVE, kill it explicitly:** "the loop must not stand
+waiting", "**loop nemá stáť na čakaní**", "there's other workable work so I'll move to the next ticket
+and ask later", "**pokračujem na ďalšom tickete, otázku položím neskôr**", "medzitým robím iné".
+**WRONG.** During waking hours, WAITING for the user's answer to a genuine per-ticket question IS the
+loop correctly doing its job (ask-and-hold) — it is NOT an idle/dead wait and NOT a breach of "keep
+the loop going" or `/goal`'s "don't stop merely because". Moving to a DIFFERENT ticket to AVOID the
+wait is the banned defer: it buries the question, the user gets NO question, and the important ticket
+never gets solved — the exact failure this whole policy exists to kill. The loop legitimately STOPS on
+the `❓` and resumes when answered. The ONLY thing that licenses moving on instead of asking is the
+00:00–06:00 (hours 00..05) Europe/Bratislava sleep window. (Post-MERGE "pick the next issue" is
+correct and DIFFERENT — that is continuing after a ticket is DONE, not skipping a ticket that needs
+your answer; do not confuse the two.)
+
 ## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
 
 When the workable backlog empties, the run has just changed a lot of code while the context is still
