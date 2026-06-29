@@ -33,7 +33,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
-- `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it (never deferred while you grind other work, except the 00:00–06:00 Europe/Bratislava sleep window) — never a reason to abandon the issue
+- `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it (never deferred while you grind other work, except the 00:00–06:00 — hours `00..05` — Europe/Bratislava sleep window) — never a reason to abandon the issue
 
 ## How it works
 
@@ -131,7 +131,7 @@ needs extra approval.)
 The agent cannot type `/goal` — print this line for the user to paste once:
 
 ```
-/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up (the background autopilot-worker's prompts surface in my main session) and wait for my answer holding that issue's context — do NOT defer it or bury it under other tickets, EXCEPT 00:00–06:00 Europe/Bratislava when I'm asleep (then queue it and ask after 06:00). After every merge immediately pick the next issue.
+/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up (the background autopilot-worker's prompts surface in my main session) and wait for my answer holding that issue's context — do NOT defer it or bury it under other tickets, EXCEPT 00:00–06:00 (hours 00..05) Europe/Bratislava when I'm asleep (then queue it and ask after 06:00). After every merge immediately pick the next issue.
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -267,7 +267,9 @@ never arrives and the question never gets asked. So handle it BY THE CLOCK:
   `06..23`): ASK NOW and HOLD.** The background worker surfaces the question in your main session and
   HOLDS that issue's full context (paused, alive); you end the turn `❓ NEEDS YOU` (Slovak, the real
   decision) — it pings the phone immediately. The loop STOPS on this issue and resumes the instant the
-  user answers (the worker continues with its context intact). Do **NOT** set the issue aside / label
+  user answers (the worker continues with its context intact — and if your CC build RETURNS the
+  background dispatch instead of holding it blocked, the worker resumes from DURABLE state, the open
+  branch / PR / gh issue, per `subagent-continuation.md`; the answer is never lost). Do **NOT** set the issue aside / label
   `needs-decision` / grind other tickets to bury the question; do **NOT** wait for "backlog
   exhausted". Asking-and-holding ends `❓` — that is the loop legitimately pausing for the user, NOT a
   violation of "❓ and continuing are mutually exclusive" (you are NOT continuing — you are waiting).

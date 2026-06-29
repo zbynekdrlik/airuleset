@@ -25,6 +25,8 @@ class TestQuestionPolicy(TestCase):
         t = read("modules/core/message-status-marker.md")
         self.assertIn("Europe/Bratislava", t)
         self.assertIn("ASKED THE MOMENT", t)
+        # Lock the sleep-window hours so a silent window change (e.g. 22:00-08:00) trips.
+        self.assertIn("00..05", t)
         # The old defer-by-default clause must be gone.
         self.assertNotIn("a per-ticket question is ALWAYS deferred", t)
 
@@ -32,6 +34,9 @@ class TestQuestionPolicy(TestCase):
         t = read("skills/autopilot/SKILL.md")
         self.assertIn("Europe/Bratislava", t)
         self.assertIn("ASK NOW and HOLD", t)
+        # Lock the hour boundaries: defer 00..05, ask from 06:00.
+        self.assertIn("00..05", t)
+        self.assertIn("06:00", t)
         # The old "(b) Defer it + keep working" default must be gone.
         self.assertNotIn("Defer it + keep working", t)
 
@@ -39,6 +44,7 @@ class TestQuestionPolicy(TestCase):
         t = read("agents/autopilot-worker.md")
         self.assertIn("ASK THE MOMENT", t)
         self.assertIn("Europe/Bratislava", t)
+        self.assertIn("00..05", t)
 
     def test_main_context_hygiene_module_exists_and_wired(self):
         mod = ROOT / "modules" / "core" / "main-context-hygiene.md"
