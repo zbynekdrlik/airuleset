@@ -14,6 +14,8 @@ The primary Claude Code agent runs Opus 4.8, but subagents (`Task` tool) often r
   - Agent tool: pass `model: "sonnet"` / `"haiku"` on read-only dispatches (e.g. `Explore`, `ticket-validator`). Implementation dispatches: omit (inherit Opus).
   - Workflow `agent()`: set `opts.model`/`opts.effort` per stage — cheap for mechanical stages, omit (inherit Opus) for code-logic stages.
 - **When unsure which tier → Opus.** The cost saving is on PROVABLY mechanical work only; if a step might touch logic, keep it on Opus. Never gamble code quality to save tokens.
+- **The READ / GROUND / SCAN / ENUMERATE plumbing of a fan-out is mechanical — cheap-tier is its DEFAULT, not a "maybe."** "When unsure → Opus" governs the JUDGE / WRITE / SYNTHESIZE stage; it does NOT mean "the whole dispatch on Opus." Every multi-agent dispatch has cheap-tier stages (gathering the shared context, listing files, scraping logs, collecting status) — those go `sonnet`/`haiku` by default.
+- **Self-audit before launching a multi-agent dispatch: name which stages are cheap-tier. If the answer is "none," it is almost certainly a tiering MISS — re-examine.** A whole Workflow / fleet that ran ENTIRELY on Opus is the symptom the user names as "I never see Sonnet used" — and it is the dominant avoidable token cost. Pure-Opus fan-out is the exception (genuinely all-logic work), never the default.
 
 Applies to all rewordings and semantic equivalents — the intent: cheap model for cheap work, Opus for everything that touches the code, automatically, with zero manual model-switching by the user.
 
