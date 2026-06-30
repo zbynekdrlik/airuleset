@@ -1291,6 +1291,15 @@ REMOTE_HOSTS = [
         "user": "newlevel",
         "repo_path": "~/devel/airuleset",
     },
+    {
+        # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
+        # NOT the shared "newlevel" password — it is a prod-critical host.
+        "name": "gatekeeper",
+        "host": "168.119.99.160",
+        "user": "gatekeeper",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
 ]
 
 
@@ -1334,13 +1343,24 @@ def cmd_push(args):
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")
         remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
-        ssh_result = subprocess.run(
-            [
+        identity = remote.get("identity")
+        if identity:
+            # key-based SSH (e.g. the gatekeeper — prod-critical, no shared password)
+            ssh_cmd = [
+                "ssh", "-i", os.path.expanduser(identity),
+                "-o", "StrictHostKeyChecking=no",
+                f"{remote['user']}@{remote['host']}",
+                remote_cmd,
+            ]
+        else:
+            ssh_cmd = [
                 "sshpass", "-p", "newlevel",
                 "ssh", "-o", "StrictHostKeyChecking=no",
                 f"{remote['user']}@{remote['host']}",
                 remote_cmd,
-            ],
+            ]
+        ssh_result = subprocess.run(
+            ssh_cmd,
             capture_output=True,
             text=True,
             timeout=60,
