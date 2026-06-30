@@ -383,12 +383,23 @@ def apply_ultracode_launcher(bashrc_path: Path = None) -> bool:
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
-    Currently: `effortLevel = xhigh` so deep adaptive reasoning is the persistent
-    default in every managed project without the user remembering to raise it.
-    Idempotent; preserves all other keys. The user can still override per session
-    with `/effort` — this only sets the starting default."""
+    - `effortLevel = xhigh` so deep adaptive reasoning is the persistent default in
+      every managed project without the user remembering to raise it. The user can
+      still override per session with `/effort`.
+    - `disableAgentView = true` HARD-disables Claude Code's `claude agents` / fleet /
+      `claude --bg` background daemon (the on-demand supervisor that spawns DETACHED
+      background sessions which SURVIVE `/exit` and keep running/pinging untracked).
+      The user runs explicit interactive `claude` in tmux and wants NO unmanaged
+      background Claude — incident: a fleet session ran 2.9 days and kept pinging
+      after the user `/exit`-ed it. Equivalent to env `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`.
+      This does NOT affect in-session `run_in_background` subagents (the agent strip /
+      autopilot-worker) — those are a separate, session-scoped mechanism that dies
+      with the session. Takes effect on the NEXT `claude` launch.
+
+    Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
+    result["disableAgentView"] = True
     return result
 
 

@@ -1838,6 +1838,13 @@ class TestManagedSettingsDefaults(TestCase):
         out = airuleset.apply_managed_settings_defaults({})
         self.assertEqual(out["effortLevel"], "xhigh")
 
+    def test_disables_agent_view(self):
+        # Hard-disables the `claude agents` / fleet / `claude --bg` background daemon
+        # (detached sessions that survive /exit). Must be a managed default on every
+        # install so a fresh machine never spawns unmanaged background Claude.
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertIs(out["disableAgentView"], True)
+
     def test_preserves_other_keys(self):
         out = airuleset.apply_managed_settings_defaults(
             {"model": "opus", "hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
