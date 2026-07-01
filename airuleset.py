@@ -748,6 +748,12 @@ def cmd_install(args):
     except Exception as e:
         print(f"  caveman setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 7. Discord notify config: warn LOUDLY if this host has no .env ---
+    try:
+        check_discord_notify_config()
+    except Exception as e:
+        print(f"  discord notify check error (non-fatal): {e}", file=sys.stderr)
+
     print()
     print("Install complete. Restart Claude Code for changes to take effect.")
 
@@ -974,6 +980,36 @@ def setup_filedrop_service():
     print(f"  File-drop service started but did NOT answer on {url}. Check "
           f"`systemctl --user status filedrop.service`.", file=sys.stderr)
     return False
+
+
+def check_discord_notify_config():
+    """Report whether Discord notifications are wired on THIS host (no secrets printed).
+
+    The Discord `.env` (bot token + per-owner channels/mentions) is LOCAL and NOT
+    git-deployed — `install` cannot carry it. A host that never got it wired sends
+    NOTHING: every notify call fail-safes to a silent no-op. That is exactly how the
+    gatekeeper box went dark (the `.env` was never wired when it was added). This
+    check makes the gap LOUD at install time instead of a silent failure discovered
+    weeks later. It NEVER prints the token value — only presence."""
+    env = CLAUDE_DIR / "channels" / "discord" / ".env"
+    print("  Checking Discord notify config")
+    if not env.is_file():
+        print("    ⚠ Discord notify DISABLED — no ~/.claude/channels/discord/.env on this host.")
+        print("      Pings (❓/✅, api-error, autopilot cards) will silently NOT send.")
+        print("      Wire it from an already-configured host (secrets stay local, not git):")
+        print("        cat ~/.claude/channels/discord/.env | ssh <this-host> \\")
+        print("          'umask 077 && mkdir -p ~/.claude/channels/discord && "
+              "cat > ~/.claude/channels/discord/.env'")
+        return
+    token = ""
+    for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("DISCORD_BOT_TOKEN="):
+            token = line.split("=", 1)[1].strip()
+            break
+    if not token:
+        print("    ⚠ Discord .env present but DISCORD_BOT_TOKEN is empty — pings will not send.")
+    else:
+        print("    Discord notify: configured (bot token present).")
 
 
 def maybe_setup_filedrop():
