@@ -190,14 +190,12 @@ Each loop turn:
    2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in <repo>
    as ONE bundled PR (Closes all).` (or `Work issue #<N> in <repo>.` for a solo batch) plus any
    repo-specific note. ONE worker, ONE `dev` branch, ONE PR, ONE CI cycle.
-   - **Model = Sonnet 5 by default; escalate to Opus only for genuinely HARD tickets** (`model-awareness.md`
-     `opusplan` split — Sonnet 5 executes, Opus plans/reviews). The `autopilot-worker` frontmatter already
-     defaults to `model: sonnet` (= Sonnet 5, full effort) — dispatch it AS-IS for a routine ticket (bug fix,
-     scoped feature). **Override to `model: opus` on the Agent call ONLY** when the ticket-validator or the
-     issue itself signals genuinely hard work: architecture / redesign, subtle multi-file reasoning, an
-     ambiguous design core, or a frontier bug. You (the Opus main session) re-verify every line of the
-     worker's evidence block regardless, so a Sonnet 5 worker always has an Opus review bookend. Do NOT
-     reflexively Opus a routine ticket — that is the "I never see Sonnet used" miss.
+   - **Model = Fable 5 by default — every ticket** (`model-awareness.md` MAX-PERFORMANCE policy,
+     2026-07-01: the strongest model does all judgment work, execution included). The `autopilot-worker`
+     frontmatter already defaults to `model: fable` — dispatch it AS-IS for every ticket; no per-ticket
+     model triage needed. You (the main session) still re-verify every line of the worker's evidence
+     block. Downgrade the dispatch to `model: sonnet` ONLY if the user re-activates the `opusplan`
+     economy split — never on your own inference of spend.
    - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
      `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
    - **Serial per repo (hard).** Before dispatching, if a background `autopilot-worker` for THIS repo

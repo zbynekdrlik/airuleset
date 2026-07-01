@@ -8,8 +8,10 @@ hand-converged. When called out, the agent KILLED the run and harvested NOTHING
 
   A) Workflow fan-out over-grounds (N agents re-read the same big files) and
      over-scopes (a fleet where one pass sufficed) — ground once, right-size.
-  B) Model tiering never bites ("I never see Sonnet used") — cheap-tier is the
-     DEFAULT for read/ground plumbing; an all-Opus fan-out is a tiering MISS.
+  B) Model tiering never bites — a stage's model must be chosen by what the stage
+     IS. (2026-07-01 update: under the MAX-PERFORMANCE policy the miss is INVERTED —
+     a judgment stage on a cheap tier; mechanical lookups still stay light. The
+     redundancy guards A+C are policy-independent and unchanged.)
   C) Killing expensive in-flight work and discarding its partial output — a NEW
      salvage-before-discarding-work module, wired into the universal profile.
 """
@@ -36,13 +38,14 @@ class TestWorkflowCostDiscipline(TestCase):
         # The anti-patterns line must name the kill-and-discard waste + point at the module.
         self.assertIn("salvage-before-discarding-work.md", t)
 
-    def test_tiering_default_for_read_stages(self):
+    def test_tiering_still_names_a_miss_and_keeps_lookups_light(self):
         t = read("modules/core/model-awareness.md")
-        # Cheap-tier is the DEFAULT for read/ground plumbing, not a "maybe".
-        self.assertIn("cheap-tier is its DEFAULT", t)
-        # The all-Opus self-audit / "never see Sonnet" symptom.
+        # The self-audit must still name a tiering MISS (inverted under max-performance).
         self.assertIn("tiering MISS", t)
-        self.assertIn("I never see Sonnet used", t)
+        # Mechanical lookups stay on a light tier under EVERY policy (latency, not cost).
+        self.assertIn("Purely MECHANICAL / READ-ONLY plumbing = Sonnet 5 (or Haiku", t)
+        # Redundancy stays banned even with unlimited budget.
+        self.assertIn("Redundancy is still waste, not rigor", t)
 
     def test_salvage_module_exists_and_wired(self):
         m = read("modules/core/salvage-before-discarding-work.md")

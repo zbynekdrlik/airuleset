@@ -1,0 +1,150 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b11ceb5..1802681 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++## [19.0.2.19.47] - 2026-06-19
++
++### Fixed
++
++- **#696 / #701 — salesperson importer crashed at module-level execution
++  (`NameError: _rep_users_from_display is not defined`).** The #696 SALESPERSON
++  WIRING block (which calls `_rep_users_from_display` / `_web_user_id` /
++  `build_user_canon_map` at module scope) was emitted in STEP 1d BEFORE those
++  helpers were defined; the Odoo-shell runs the importer body top-to-bottom, so the
++  `--full --domains orders` run on montalu PROD raised the NameError and rolled back
++  (watermark NOT advanced — no partial data). Moved the wiring to AFTER the resolver
++  helper definitions in both `orders/` and `quotes/importer_runtime.py` (regions stay
++  byte-identical). Added a module-level call-before-def regression test that the
++  isolated resolver-region exec could not catch. No behaviour change to the resolver.
++
+ ## [19.0.2.19.46] - 2026-06-19
+ 
+ ### Added
+diff --git a/addons/company_base/__manifest__.py b/addons/company_base/__manifest__.py
+index 57c7604..f313477 100644
+--- a/addons/company_base/__manifest__.py
++++ b/addons/company_base/__manifest__.py
+@@ -1,6 +1,6 @@
+ {
+     "name": "Slovnormal Base",
+-    "version": "19.0.2.19.46",
++    "version": "19.0.2.19.47",
+     "category": "Hidden",
+     "summary": "Base customizations for Slovnormal",
+     "description": """
+diff --git a/scripts/import-montalu/orders/importer_runtime.py b/scripts/import-montalu/orders/importer_runtime.py
+index 6232805..9c3c6dd 100644
+--- a/scripts/import-montalu/orders/importer_runtime.py
++++ b/scripts/import-montalu/orders/importer_runtime.py
+@@ -274,13 +274,9 @@ for uid, name, login in env.cr.fetchall():
+     if name:
+         USER_ID_BY_DISPLAY[name.strip().lower()] = uid
+ 
+-# 1d.2 #696/#701 — build the salesperson canonical map (rep display name + Money
+-# spelling variants → res.users id) and resolve the WEB user (id) for Option A.
+-# The 5 montalu reps + WEB ALREADY EXIST — we MAP, never create
+-# (feedback_dont_mix_users_across_instances).
+-REP_USERS = _rep_users_from_display(USER_ID_BY_DISPLAY, _log)
+-WEB_USER_ID = _web_user_id(USER_ID_BY_DISPLAY, USER_BY_LOGIN, _log)
+-USER_CANON = build_user_canon_map(REP_USERS)
++# 1d.2 #696/#701 — the salesperson canonical map + WEB-user resolution is wired
++# AFTER the resolver helpers are defined (search "#696 SALESPERSON WIRING" below),
++# because the module body runs top-to-bottom and those helpers are declared later.
+ 
+ 
+ # 1e. #695/#700/#718 — Stredisko analytic accounts (the seeded 1:1 Money mirror).
+@@ -534,6 +530,19 @@ def _match_obchodnik(vystavil_name, src_uuid, obchodnik_name=""):
+ FIRMA_ESHOP_NAMES = ("MONTALU Firma", "MONT-ALU Eshop")
+ 
+ 
++# ===== #696 SALESPERSON WIRING =====
++# Build the salesperson canonical map (rep display name + Money spelling variants →
++# res.users id) and resolve the WEB user (id) for Option A. Placed HERE — after the
++# resolver helpers above — so module-level execution finds them defined (the
++# NameError this fixes only surfaced on the live odoo-shell run, never in the
++# isolated offline test that exec's just the resolver region). The 5 montalu reps +
++# WEB ALREADY EXIST — we MAP, never create (feedback_dont_mix_users_across_instances).
++REP_USERS = _rep_users_from_display(USER_ID_BY_DISPLAY, _log)
++WEB_USER_ID = _web_user_id(USER_ID_BY_DISPLAY, USER_BY_LOGIN, _log)
++USER_CANON = build_user_canon_map(REP_USERS)
++# ===== #696 SALESPERSON WIRING END =====
++
++
+ # ---------- STEP 2: resolve rate→tax via the shared #697 map ----------
+ # Promoted out of this importer into scripts/import-montalu/tax_map.py so the
+ # greenfield invoice importer (#724/#743/#744) reuses the SAME resolution. The
+diff --git a/scripts/import-montalu/orders/tests/test_salesperson_resolution.py b/scripts/import-montalu/orders/tests/test_salesperson_resolution.py
+index 0fa828b..47b97dd 100644
+--- a/scripts/import-montalu/orders/tests/test_salesperson_resolution.py
++++ b/scripts/import-montalu/orders/tests/test_salesperson_resolution.py
+@@ -193,6 +193,25 @@ def test_blank_everything_is_null():
+     assert audit == "" or audit is None
+ 
+ 
++def test_wiring_is_after_helper_definitions():
++    """Regression for the live NameError: the module body runs top-to-bottom, so
++    the #696 SALESPERSON WIRING block (which CALLS _rep_users_from_display /
++    _web_user_id / build_user_canon_map at module level) MUST appear AFTER all three
++    helpers are defined. The isolated resolver-region exec in the other tests can't
++    catch a module-level ordering bug — this asserts source order directly, for BOTH
++    importers."""
++    for rt in (RUNTIME, HERE.parent.parent / "quotes" / "importer_runtime.py"):
++        src = rt.read_text(encoding="utf-8")
++        call_pos = src.index("REP_USERS = _rep_users_from_display")
++        for helper in ("_rep_users_from_display", "_web_user_id", "build_user_canon_map"):
++            def_pos = src.index(f"def {helper}(")
++            assert def_pos < call_pos, (
++                f"{rt.name}: '{helper}' is DEFINED at {def_pos} but first CALLED at "
++                f"{call_pos} (module-level NameError at runtime). The #696 SALESPERSON "
++                f"WIRING block must come after all resolver-helper definitions."
++            )
++
++
+ def test_quotes_runtime_shares_the_same_resolver():
+     """#711 facet: the quotes importer must apply the SAME resolver (it carries the
+     same banner-delimited region) so quotes attribute identically. Lock that the
+diff --git a/scripts/import-montalu/quotes/importer_runtime.py b/scripts/import-montalu/quotes/importer_runtime.py
+index 962ce83..3d2f25e 100644
+--- a/scripts/import-montalu/quotes/importer_runtime.py
++++ b/scripts/import-montalu/quotes/importer_runtime.py
+@@ -266,14 +266,10 @@ for uid, name, login in env.cr.fetchall():
+     if name:
+         USER_ID_BY_DISPLAY[name.strip().lower()] = uid
+ 
+-# 1d.2 #696/#701 — build the salesperson canonical map (rep display name + Money
+-# spelling variants → res.users id) and resolve the WEB user (id) for Option A.
+-# The 5 montalu reps + WEB ALREADY EXIST — we MAP, never create
+-# (feedback_dont_mix_users_across_instances). Shared resolver with orders/ (the
+-# #696 banner region below is byte-identical), so quotes attribute the same way.
+-REP_USERS = _rep_users_from_display(USER_ID_BY_DISPLAY, _log)
+-WEB_USER_ID = _web_user_id(USER_ID_BY_DISPLAY, USER_BY_LOGIN, _log)
+-USER_CANON = build_user_canon_map(REP_USERS)
++# 1d.2 #696/#701 — the salesperson canonical map + WEB-user resolution is wired
++# AFTER the resolver helpers are defined (search "#696 SALESPERSON WIRING" below),
++# because the module body runs top-to-bottom and those helpers are declared later.
++# Shared resolver with orders/ (the #696 banner region below is byte-identical).
+ 
+ 
+ # ===== #696 SALESPERSON RESOLVER =====
+@@ -488,6 +484,17 @@ def _match_obchodnik(vystavil_name, src_uuid, obchodnik_name=""):
+ FIRMA_ESHOP_NAMES = ("MONTALU Firma", "MONT-ALU Eshop")
+ 
+ 
++# ===== #696 SALESPERSON WIRING =====
++# Build the salesperson canonical map + resolve the WEB user (Option A). Placed
++# HERE — after the resolver helpers above — so module-level execution finds them
++# defined (the NameError this fixes only surfaced on the live odoo-shell run). The
++# 5 montalu reps + WEB ALREADY EXIST — we MAP, never create (feedback_dont_mix_users).
++REP_USERS = _rep_users_from_display(USER_ID_BY_DISPLAY, _log)
++WEB_USER_ID = _web_user_id(USER_ID_BY_DISPLAY, USER_BY_LOGIN, _log)
++USER_CANON = build_user_canon_map(REP_USERS)
++# ===== #696 SALESPERSON WIRING END =====
++
++
+ # ---------- STEP 2: resolve rate→tax via the shared #697 map ----------
+ _log("resolving sale rate→tax maps via shared #697 tax_map (native SK + legacy fallback)")
+ company = env.company
