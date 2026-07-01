@@ -268,5 +268,160 @@ class RunOnceTextcallWiring(unittest.TestCase):
                          "a sub-grace stall must not nudge yet: %r" % logs)
 
 
+# --- job 6: 5-hour SESSION LIMIT — ping once, `continue` only AFTER the reset ------
+
+SESSION_LIMIT_BANNER = (
+    "❯ continue\n"
+    "  ⎿  You've hit your session limit · resets 6:10pm (Europe/Prague)\n"
+    "     /usage-credits to finish what you're working on.\n\n❯ ")
+
+
+class SessionLimitDetector(unittest.TestCase):
+    def test_banner_matches(self):
+        self.assertTrue(wd.pane_session_limited(SESSION_LIMIT_BANNER))
+
+    def test_healthy_pane_does_not_match(self):
+        self.assertFalse(wd.pane_session_limited("built ok\n❯ "))
+        self.assertFalse(wd.pane_session_limited(""))
+
+    def test_parse_reset_epoch_today(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()
+        epoch = wd.parse_reset_epoch(SESSION_LIMIT_BANNER, now)
+        self.assertIsNotNone(epoch)
+        self.assertGreater(epoch, now)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M")
+        self.assertEqual(got, "2026-07-01 18:10")
+
+    def test_recently_passed_reset_resumes_now_not_tomorrow(self):
+        # A reset only slightly in the past means it JUST happened → resume now
+        # (epoch <= now), NOT wait a whole day. This is what makes the after-reset
+        # `continue` fire promptly when the watchdog sees the banner just past reset.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 19, 0, tzinfo=tz).timestamp()   # 50 min past 18:10
+        epoch = wd.parse_reset_epoch(SESSION_LIMIT_BANNER, now)
+        self.assertLessEqual(epoch, now)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M")
+        self.assertEqual(got, "2026-07-01 18:10")
+
+    def test_late_night_am_reset_rolls_to_next_day(self):
+        # A late-night "resets 12:10am" seen at 23:50 is > 6h in the past as 'today'
+        # → it is really tomorrow's early-morning reset → roll forward.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 23, 50, tzinfo=tz).timestamp()
+        epoch = wd.parse_reset_epoch("resets 12:10am (Europe/Prague)", now)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M")
+        self.assertEqual(got, "2026-07-02 00:10")
+
+    def test_parse_24h_and_am_pm(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 8, 0, tzinfo=tz).timestamp()
+        for banner, expect in (("resets 18:10 (Europe/Prague)", "18:10"),
+                               ("resets 11am (Europe/Prague)", "11:00"),
+                               ("resets 12pm (Europe/Prague)", "12:00")):
+            epoch = wd.parse_reset_epoch(banner, now)
+            got = datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+            self.assertEqual(got, expect, "banner %r" % banner)
+
+    def test_parse_missing_time_returns_none(self):
+        self.assertIsNone(wd.parse_reset_epoch("You've hit your session limit", 0))
+
+
+class SessionLimitWiring(unittest.TestCase):
+    """run_once job 6: ping once on the banner, NO `continue` before the reset,
+    exactly ONE `continue` after it."""
+
+    CWD = "/home/newlevel/devel/odoo-erp"
+    PANE = "%7"
+    SID = "s1t2u3v4"
+
+    def _harness(self, now, seed_state=None):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, [_assistant("pracujem…")])       # healthy transcript, no api-error
+        os.utime(tpath, (now - 60, now - 60))
+        state_path = Path(tmp.name) / "state.json"
+        if seed_state is not None:
+            state_path.write_text(json.dumps(seed_state))
+        sent, keys = [], []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "capture-pane" in j:
+                return SESSION_LIMIT_BANNER
+            if "send-keys" in j:
+                keys.append(argv)
+                return ""
+            return ""
+
+        def fake_send(body, **k):
+            sent.append(body)
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"))
+        return logs, sent, keys, state_path
+
+    def test_pings_once_and_no_continue_before_reset(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        logs, sent, keys, _ = self._harness(now)
+        self.assertTrue(any(ln.startswith("session-limit") and "ping" in ln for ln in logs),
+                        "expected a session-limit ping log, got: %r" % logs)
+        self.assertTrue(any("5-hodinový limit" in b for b in sent),
+                        "expected the 5h-limit Discord ping: %r" % sent)
+        self.assertEqual(keys, [], "NO keystroke may be sent before the reset")
+
+    def test_continue_after_reset(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()  # past the 18:10 reset
+        # already pinged in a prior poll (reset now in the past) → this poll resumes.
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": False,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, _ = self._harness(now, seed_state=seed)
+        self.assertTrue(any("reset passed" in ln for ln in logs),
+                        "expected a reset-passed resume log: %r" % logs)
+        self.assertTrue(any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys),
+                        "expected exactly one `continue` keystroke after reset: %r" % keys)
+        self.assertTrue(any("resetol" in b for b in sent),
+                        "expected the resume Discord ping: %r" % sent)
+
+    def test_no_double_continue_when_already_resumed(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": True,   # already resumed
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, _ = self._harness(now, seed_state=seed)
+        self.assertEqual(keys, [], "must not re-send `continue` once resumed: %r" % keys)
+
+
 if __name__ == "__main__":
     unittest.main()

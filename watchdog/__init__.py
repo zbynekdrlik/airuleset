@@ -1,4 +1,4 @@
-"""api-watchdog — keep unattended Claude Code sessions moving. Five jobs per poll:
+"""api-watchdog — keep unattended Claude Code sessions moving. Six jobs per poll:
 
   (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
       rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
@@ -52,6 +52,15 @@
       CURRENT last marker is STILL ✅ — a session that re-fired (a background task
       re-invoked it → now ⏳) has its stale ✅ cleared WITHOUT pinging, so the device
       is never told "done" for work that kept going. PING ONLY; claim-then-send.
+  (6) 5-HOUR SESSION-LIMIT AUTO-RESUME: the session hit Claude Code's 5-hour
+      session limit ("You've hit your session limit · resets <time>"), shown in the
+      PANE (not reliably a transcript api-error). This is TIME-BASED — `continue`
+      BEFORE the reset is a no-op that just re-hits the limit (the user's incident:
+      repeated `continue` → "You've hit your session limit"). So the watchdog PINGS
+      ONCE with the reset time, waits for the reset clock, then sends ONE `continue`
+      AFTER it to resume — never before. State (`sesslimit:<sid>`) carries the parsed
+      reset epoch + pinged/continued flags across polls; a genuinely new limit window
+      (5h → weekly) re-arms both.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -501,7 +510,8 @@ def project_label(cwd):
 # nudged. Kept narrow so a transient 529 / "rate limited" / overloaded (which a
 # retry CAN clear) is NOT caught here and still gets the 3×continue lifecycle.
 _USAGE_CAP_RX = re.compile(
-    r"usage limit|quota|limit (?:reached|will reset|resets)|reset at|reached your", re.I)
+    r"usage limit|quota|limit (?:reached|will reset|resets)|reset at|reached your"
+    r"|hit your (?:session|usage) limit", re.I)
 # Transient SERVER-side throttles — a retry / `continue` CAN clear these, so they
 # must NOT be read as a quota cap. Checked FIRST. Critically this catches
 # "(not your usage limit)" — Claude Code's transient rate-limit banner literally
@@ -530,6 +540,85 @@ _WAITING_RX = re.compile(
 
 def pane_waiting_on_user(captured):
     return bool(captured) and bool(_WAITING_RX.search(captured))
+
+
+# --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
+# Claude Code's session-limit banner shows in the PANE, e.g.
+#   "You've hit your session limit · resets 6:10pm (Europe/Prague)"
+#   "/usage-credits to finish what you're working on."
+# It is NOT a transient 529 and NOT reliably an `isApiErrorMessage` transcript
+# entry — it lives on screen. Unlike a server throttle, `continue` BEFORE the
+# reset is a no-op that just re-hits the limit (the incident: repeated `continue`
+# → "You've hit your session limit"). So job (6) reads it from the PANE, PINGS
+# ONCE with the reset time, does NOTHING until the reset clock, then sends ONE
+# `continue` AFTER it — never before.
+_SESSION_LIMIT_RX = re.compile(
+    r"hit your (?:session|usage) limit|/usage-credits to finish", re.I)
+# "resets 6:10pm" / "resets 6pm" / "resets at 18:10" — capture the clock.
+_RESET_TIME_RX = re.compile(
+    r"reset(?:s|ting)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
+# The tz the banner names, e.g. "(Europe/Prague)"; default Bratislava (same offset).
+_RESET_TZ_RX = re.compile(r"\(([A-Za-z]+/[A-Za-z_]+)\)")
+
+
+def pane_session_limited(captured):
+    """True if the pane shows Claude Code's 5-hour session-limit banner."""
+    return bool(captured) and bool(_SESSION_LIMIT_RX.search(captured))
+
+
+def parse_reset_epoch(captured, now):
+    """Parse 'resets <clock>' from the banner into an epoch >= now, or None.
+    The clock is read in the tz the banner names (Europe/Prague) — default
+    Europe/Bratislava (same offset) — and rolled to tomorrow if already past.
+    Fail-safe: any parse/tz error returns None (job 6 then pings but cannot
+    auto-resume — the user handles it)."""
+    try:
+        m = _RESET_TIME_RX.search(captured or "")
+        if not m:
+            return None
+        hh = int(m.group(1))
+        mm = int(m.group(2) or 0)
+        ap = (m.group(3) or "").lower()
+        if ap == "pm" and hh != 12:
+            hh += 12
+        elif ap == "am" and hh == 12:
+            hh = 0
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        from datetime import datetime, timedelta
+        tz = None
+        try:
+            from zoneinfo import ZoneInfo
+            tzm = _RESET_TZ_RX.search(captured or "")
+            tz = ZoneInfo(tzm.group(1)) if tzm else ZoneInfo("Europe/Bratislava")
+        except Exception:
+            tz = None
+        base = datetime.fromtimestamp(now, tz)
+        target = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        ts = target.timestamp()
+        # The 5-hour reset window is short. A clock only SLIGHTLY in the past means
+        # the reset just happened (or the banner is momentarily stale) → resume NOW,
+        # don't wait a whole day. Only a clock > 6h in the past is really a next-day
+        # time (e.g. a late-night "resets 12:10am" seen at 23:50) → roll to tomorrow.
+        if ts <= now - 6 * 3600:
+            ts = (target + timedelta(days=1)).timestamp()
+        return ts
+    except Exception:
+        return None
+
+
+def _human_clock(epoch):
+    """Epoch → 'HH:MM' in Europe/Bratislava, for the ping text."""
+    try:
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Europe/Bratislava")
+        except Exception:
+            tz = None
+        return datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+    except Exception:
+        return "?"
 
 
 def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
@@ -970,7 +1059,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (`stall_textcall`), no 30-min wait, regardless of marker;
       (5) a session that ended `✅ DONE` and went idle ≥ `done_grace` → DELIVER the
           pending ✅ device ping the unreliable idle_prompt event failed to send
-          (only while the session is STILL ✅ — a re-fired one is cleared silently).
+          (only while the session is STILL ✅ — a re-fired one is cleared silently);
+      (6) a session showing the 5-HOUR SESSION-LIMIT banner in its pane → PING ONCE
+          with the reset time, then send ONE `continue` AFTER the reset clock passes
+          (never before — `continue` pre-reset just re-hits the limit).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -1012,6 +1104,53 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
             if not account_owner:
                 account_owner = owner      # first owner seen → the account/usage owner
+
+        # Capture the pane ONCE per session (reused by job 6 + the job-2 waiting check).
+        captured = capture_pane(pid, run)
+
+        # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
+        # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
+        # incident), so we ping ONCE with the reset time, do NOTHING until the reset
+        # clock, then send ONE `continue` AFTER it — never before. Read from the PANE
+        # (the banner is on screen, not reliably a transcript api-error). While a
+        # session is limited job 6 owns it (skips the api-error / nudge paths).
+        if pane_session_limited(captured):
+            skey = "sesslimit:" + key
+            s = state.get(skey)
+            if s is None:
+                # Parse the reset clock ONCE at first detection and keep it stable for
+                # the whole episode — re-parsing after the reset would roll the same
+                # "6:10pm" forward to tomorrow and wrongly re-ping instead of resuming.
+                s = {"resets_at": parse_reset_epoch(captured, now),
+                     "pinged": False, "continued": False, "first_seen": int(now)}
+                state[skey] = s
+            elif s.get("resets_at") is None:
+                # an earlier poll couldn't read the clock — try again to refine it.
+                s["resets_at"] = parse_reset_epoch(captured, now)
+            s["last_seen"] = int(now)
+            ra = s.get("resets_at")
+            if not s.get("pinged"):
+                s["pinged"] = True
+                when = _human_clock(ra) if ra else "čoskoro"
+                logs.append("session-limit %s — ping (reset %s)" % (project, when))
+                send_fn("⏳ **%s** — dosiahnutý 5-hodinový limit\n> Reset o %s. Po "
+                        "resete pošlem `continue` automaticky — nič nemusíš robiť."
+                        % (project, when),
+                        owner=owner, dedup_key="sesslimit:%s:%s" % (key, ra or s["first_seen"]),
+                        dry_run=dry_run)
+            elif ra and now >= ra and not s.get("continued"):
+                if pane_in_mode(pid, run):          # never type into a scrolled pane
+                    logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
+                    continue
+                s["continued"] = True
+                logs.append("session-limit %s — reset passed → continue" % project)
+                if not dry_run:
+                    send_continue(pid, NUDGE_TEXT, run)
+                send_fn("✅ **%s** — 5h limit sa resetol, poslal som `continue` — "
+                        "pokračujem." % project,
+                        owner=owner, dedup_key="sesslimit-resume:%s:%s" % (key, ra),
+                        dry_run=dry_run)
+            continue                                # job 6 owns this session this poll
 
         # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
         # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
@@ -1073,7 +1212,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         # without it. So a multi-question dialog / re-ask loop that jitters the
         # transcript (idle dipping, a momentary capture miss) does NOT re-ping the
         # SAME open prompt — `pinged` stays set for the whole episode.
-        if pane_waiting_on_user(capture_pane(pid, run)):
+        if pane_waiting_on_user(captured):
             wkey = "wait:" + key
             w = state.get(wkey)
             if w is None:
@@ -1196,7 +1335,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     for k in list(state.keys()):
         if k == "usage":
             continue                       # account-wide usage state, not a session
-        if k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:"):
+        if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
+                or k.startswith("sesslimit:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly
