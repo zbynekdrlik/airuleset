@@ -893,9 +893,13 @@ def usage_windows(usage):
     return out
 
 
-def write_usage_cache(usage, now, path=_USAGE_CACHE_PATH):
+def write_usage_cache(usage, now, path=None):
     """Best-effort: persist {ts, windows} so the statusline renders a per-model
-    window without hitting the 429-prone endpoint. Never raises."""
+    window without hitting the 429-prone endpoint. Never raises. `path` defaults to
+    the module global resolved AT CALL TIME (so tests can patch _USAGE_CACHE_PATH to
+    a tmp file — a def-time default would bind the real ~/.claude path and clobber
+    the user's live cache during the suite)."""
+    path = path or _USAGE_CACHE_PATH
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:

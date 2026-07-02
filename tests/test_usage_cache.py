@@ -76,6 +76,20 @@ class TestUsageCacheWrite(TestCase):
         # A non-writable path must be swallowed, not raised.
         watchdog.write_usage_cache(SAMPLE_USAGE, 1, path="/nonexistent-dir/x/cache.json")
 
+    def test_default_path_resolved_at_call_time(self):
+        # The default path MUST be resolved from the module global at call time, not
+        # bound at def time — else patching it (in tests) can't stop check_usage from
+        # clobbering the real ~/.claude cache. This is the regression that leaked once.
+        orig = watchdog._USAGE_CACHE_PATH
+        with tempfile.TemporaryDirectory() as d:
+            patched = os.path.join(d, "cache.json")
+            watchdog._USAGE_CACHE_PATH = patched
+            try:
+                watchdog.write_usage_cache(SAMPLE_USAGE, 42)   # NO explicit path
+            finally:
+                watchdog._USAGE_CACHE_PATH = orig
+            self.assertTrue(os.path.exists(patched), "must write to the patched global path")
+
 
 class TestStatuslineRendersEndToEnd(TestCase):
     """Run the ACTUAL generated shim with a controlled HOME + stdin. Locks the

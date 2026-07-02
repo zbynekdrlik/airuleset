@@ -2484,6 +2484,13 @@ class TestApiWatchdog(TestCase):
         self.projects.mkdir()
         self.state = str(Path(self.tmp) / "state.json")
         self.pings = []
+        # Isolate the usage cache so check_usage's write can NEVER clobber the real
+        # ~/.claude/airuleset-usage-cache.json during the suite (it did once).
+        self._orig_usage_cache = self.w._USAGE_CACHE_PATH
+        self.w._USAGE_CACHE_PATH = str(Path(self.tmp) / "usage-cache.json")
+
+    def tearDown(self):
+        self.w._USAGE_CACHE_PATH = self._orig_usage_cache
 
     def _send(self, body, owner=None, dedup_key=None, dry_run=False):
         self.pings.append((body, dedup_key, owner))
