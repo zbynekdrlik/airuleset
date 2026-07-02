@@ -864,6 +864,47 @@ def weekly_percent(usage):
     return best
 
 
+# --------------------------------------------------------------------------- #
+# Usage cache for the statusline. The oauth/usage endpoint 429s hard, so the
+# statusline can NOT poll it per render. The watchdog already fetches it every
+# ~15 min (check_usage) — piggyback a tiny cache of the flattened windows so the
+# statusline can show a PER-MODEL window (e.g. Fable's weekly) that CC's statusLine
+# stdin `rate_limits` does not expose (stdin only carries the shared 5h + weekly).
+# NB the 5-hour "session" window is account-wide (scope=null) — there is NO
+# per-model 5h; the only per-model split is the weekly (`weekly_scoped`).
+# --------------------------------------------------------------------------- #
+
+_USAGE_CACHE_PATH = os.path.expanduser("~/.claude/airuleset-usage-cache.json")
+
+
+def usage_windows(usage):
+    """Flatten the oauth/usage limits[] into simple dicts: kind, group, percent,
+    model (display_name or None for the shared windows), resets_at, is_active."""
+    out = []
+    for lim in (usage or {}).get("limits", []):
+        pct = lim.get("percent")
+        if pct is None:
+            continue
+        model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        out.append({"kind": lim.get("kind"), "group": lim.get("group"),
+                    "percent": int(pct), "model": model,
+                    "resets_at": lim.get("resets_at"),
+                    "is_active": bool(lim.get("is_active"))})
+    return out
+
+
+def write_usage_cache(usage, now, path=_USAGE_CACHE_PATH):
+    """Best-effort: persist {ts, windows} so the statusline renders a per-model
+    window without hitting the 429-prone endpoint. Never raises."""
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"ts": int(now), "windows": usage_windows(usage)}, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def _human_reset(iso):
     if not iso:
         return "?"
@@ -888,6 +929,7 @@ def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
     data = fetch()
     if not data:
         return ""                          # 429 / error → try again next interval
+    write_usage_cache(data, now)           # feed the statusline's per-model window
     wk = weekly_percent(data)
     if not wk:
         return ""

@@ -174,6 +174,26 @@ for key, label in (("five_hour", "5h"), ("seven_day", "wk")):
     p = max(0, min(100, int(p)))
     c = colr(p, 70, 90)
     segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, label, p, reset(w.get("resets_at"))))
+# --- per-model usage window (Fable etc.) from the api-watchdog's oauth/usage cache.
+# CC stdin `rate_limits` only carries the SHARED 5h + weekly; the per-model weekly
+# (e.g. Fable's own limit — the binding one under max-performance) lives only in the
+# oauth/usage limits[], which the watchdog polls every ~15 min and caches here. The
+# 5h "session" window is account-wide (no per-model 5h exists). Never calls the API.
+try:
+    cc = json.load(open(os.path.expanduser("~/.claude/airuleset-usage-cache.json")))
+except Exception:
+    cc = None
+if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
+    for w in cc.get("windows") or []:
+        model = w.get("model")
+        if not model:            # skip the shared windows (already shown above)
+            continue
+        p = w.get("percent")
+        if p is None:
+            continue
+        p = max(0, min(100, int(p)))
+        c = colr(p, 70, 90)
+        segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, model, p, reset(w.get("resets_at"))))
 if not segs:
     raise SystemExit
 print("  ".join(segs))
