@@ -156,9 +156,17 @@ if pct is not None:
 rl = d.get("rate_limits") or {}
 now = time.time()
 def reset(ts):
+    # CC stdin gives an epoch int; the watchdog cache gives an ISO-8601 string.
     if not ts:
         return ""
-    s = int(ts) - now
+    try:
+        s = int(ts) - now
+    except (ValueError, TypeError):
+        try:
+            from datetime import datetime
+            s = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() - now
+        except Exception:
+            return ""
     if s <= 0:
         return ""
     if s >= 86400:
