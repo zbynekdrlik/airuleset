@@ -25,7 +25,7 @@ A wait that only terminates on SUCCESS waits FOREVER when the work dies, because
 #### Bound the wait, schedule the re-check, return to the session
 
 - **Every wait has an expected duration.** Exceeding it by a margin is a SIGNAL to check, not a reason to assume "still going". A 2-minute job silent for 30 minutes is dead, not slow.
-- **End a turn `⏳ WORKING` only with a scheduled re-check armed** — a `ScheduleWakeup`, a self-re-invoking background poll, or a bounded `Monitor` that returns. NEVER a blind indefinite wait on a single notification that a dead process can't send.
+- **End a turn `⏳ WORKING` only with a scheduled re-check armed that SURVIVES session events.** A bare `run_in_background` poll does NOT survive — context compaction (fires as the conversation grows, i.e. during any long wait) SIGTERMs all tracked background tasks with NO re-invocation, so the poll dies silently and the wait hangs forever (confirmed CC behavior — the recurring "background polly ma harness zabíja"; anthropics/claude-code #25188, #43944). Reliable re-checks: a **foreground bounded poll loop** (in-turn — nothing to kill), a **`ScheduleWakeup` with a PLAIN prompt** (never a slash command — CC #54086 re-fires it → duplicate runs), or a bounded `Monitor` that returns. NEVER a blind indefinite wait, and NEVER a detached background poll you assume will re-invoke you across a compaction.
 - **The result must come BACK to your session** (re-invoking mechanism), so a silent death is caught within a bounded time — never a fully-detached wait you can't observe.
 
 #### A subagent / subprocess that has gone SILENT is presumed DEAD — re-check it, don't trust it
@@ -45,6 +45,7 @@ The api-watchdog backstops this — and it no longer merely pings. A turn that e
 - Inferring "still running / still processing / still decoding" from the absence of a notification — **WRONG.** Run `ps`. Read the log's mtime. Prove it's alive.
 - `until grep -q SUCCESS file` (or a success-only `Monitor` filter) with no death / timeout branch — **WRONG.** Waits forever on a silent death.
 - `Monitor` with `persistent: true` for an "until it finishes" wait — **WRONG.** Bound it with `timeout_ms`.
+- Launching a detached `run_in_background` poll for a long (CI / rebuild) wait and assuming it will re-invoke you — **WRONG.** Context compaction SIGKILLs it silently with NO callback; the wait then hangs forever. Use a foreground bounded poll loop, or `ScheduleWakeup` with a PLAIN prompt (not a slash command).
 - Ending `⏳ WORKING` and then never re-checking the thing — **WRONG.** `⏳` is a promise to re-verify on a cadence.
 - Trusting a subagent's "it's processing" / a launched job's last "progress" line as proof it's STILL alive minutes later — **WRONG.** Re-poll; the last line may be its dying breath.
 - "Poll the running subagent for liveness" via `SendMessage` — **WRONG.** It's gated off (`subagent-continuation.md`); a foreground dispatch blocks until it returns, a background one re-invokes you on exit. For a subagent you can't observe live, the liveness signal is its DURABLE state (the branch/PR/files/gh it should be producing), not an in-process ping.
