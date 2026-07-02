@@ -34,6 +34,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it and it ALWAYS pings; then either BLOCK (`❓ NEEDS YOU`) or ask-and-continue (`❓ ASKED` + track on the issue, work other tickets meanwhile) — never buried, never a reason to abandon the issue, never a reason to reproach you (except the 00:00–06:00 — hours `00..05` — Europe/Bratislava sleep window, when it defers with no ping)
+- `user-questions-slovak.md` — HOW to phrase it: SELF-CONTAINED (a person with ZERO terminal context understands it — which project, what happened, every cross-project/ticket link explained), plain Slovak, no jargon; delivered as the `❓` text marker (waits UNLIMITED), NEVER a 60-second `AskUserQuestion` dialog for an away user
 
 ## How it works
 
@@ -286,7 +287,12 @@ idle-blocked when there is other work — it is a reason to ASK YOU (with a phon
 issue needs it.** The user does NOT watch the terminal 24/7; **the Discord ping is the ONLY way the
 question reaches them, so it MUST fire — every time, no exception (waking hours).** A question printed
 but never pinged does NOT count as asked, and you may NEVER later stop the loop blaming the user's
-silence. Handle it BY THE CLOCK:
+silence. **Deliver every question as a SELF-CONTAINED `❓` text marker (NOT a 60-second
+`AskUserQuestion` dialog — from a background worker it auto-continues in ~60 s so an away user never
+answers; the `❓` marker pings AND waits UNLIMITED). Write it so someone with ZERO terminal context
+understands it — which project + what it does, what happened, and EVERY cross-project / cross-ticket
+link explained in plain Slovak (`user-questions-slovak.md`); never assume the user read the history or
+knows two projects are related.** Handle it BY THE CLOCK:
 
 - **Waking hours — 06:00–23:59 Europe/Bratislava (check `TZ=Europe/Bratislava date +%H` → hour
   `06..23`): ASK NOW — it PINGS — then pick the honest form by whether OTHER work is available:**

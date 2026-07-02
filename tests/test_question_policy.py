@@ -75,6 +75,31 @@ class TestQuestionPolicy(TestCase):
         self.assertIn("Europe/Bratislava", t)
         self.assertIn("00..05", t)
 
+    def test_questions_must_be_self_contained(self):
+        # The #1 repeated complaint: questions assume context the away user does not
+        # have. Every question must be self-contained (zero-context briefing) and
+        # every cross-project/ticket link explained. Locks the rule + the incident.
+        uq = read("modules/core/user-questions-slovak.md")
+        self.assertIn("ZERO context", uq)
+        self.assertIn("cross-reference", uq)          # explain every cross-project link
+        self.assertIn("restreamer", uq)               # the real incident as banned example
+        # The autopilot ask-path + worker must cite self-containment.
+        self.assertIn("self-contained", read("skills/autopilot/SKILL.md").lower())
+        self.assertIn("zero context", read("agents/autopilot-worker.md").lower())
+
+    def test_away_user_question_uses_text_marker_not_60s_dialog(self):
+        # A genuine away-user question is delivered via the ❓ text marker (unlimited
+        # wait + phone ping), NOT a 60-second AskUserQuestion dialog (auto-continues).
+        for rel in ["modules/core/user-questions-slovak.md",
+                    "modules/core/message-status-marker.md"]:
+            t = read(rel)
+            self.assertIn("60", t)
+            self.assertIn("UNLIMITED", t)
+            self.assertIn("AskUserQuestion", t)
+        # worker + skill say not-a-60s-dialog too
+        self.assertIn("AskUserQuestion", read("agents/autopilot-worker.md"))
+        self.assertIn("60-second", read("skills/autopilot/SKILL.md"))
+
     def test_main_context_hygiene_module_exists_and_wired(self):
         mod = ROOT / "modules" / "core" / "main-context-hygiene.md"
         self.assertTrue(mod.is_file(), "main-context-hygiene.md must exist")

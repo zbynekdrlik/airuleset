@@ -36,7 +36,12 @@ The user explicitly, emphatically wants the important per-issue calls raised WIT
 choices, scope ambiguity, anything you genuinely cannot settle from the issue + the code. **The
 Discord ping is the ONLY way the question reaches them (they do NOT watch the terminal), so it must
 fire every time — a question printed but never pinged does not count, and you may NEVER later blame
-the user's silence.** ASK directly (your prompts surface in the user's main session). During waking
+the user's silence.** ASK by surfacing the question to the supervisor as a **self-contained `❓` TEXT marker — NOT an
+`AskUserQuestion` dialog** (from a background worker the dialog auto-continues in ~60 s, so an away
+user never answers it; the `❓` marker pings the phone and waits UNLIMITED). Write it per
+`user-questions-slovak.md`: OPEN with a plain-Slovak briefing a person with ZERO context understands —
+which project + what it does, what was happening, and EVERY cross-project / cross-ticket reference
+explained (never assume the user read the history or knows two projects are related). During waking
 hours pick the honest form: if nothing else is workable without the answer, BLOCK (`❓ NEEDS YOU`,
 wait); if there is other answer-independent work, ASK-AND-CONTINUE — raise it (`❓ ASKED`, it pings),
 track it durably on the issue (`gh issue comment <N>` + `gh issue edit <N> --add-label needs-answer`),

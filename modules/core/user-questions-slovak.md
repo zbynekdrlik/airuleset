@@ -14,7 +14,39 @@
 - **Translate the jargon — do NOT paste it.** A raw issue number, gate name, infra term, class/exception name means nothing to the user. Say what it IS for the project. Keep a `#N` for reference (per `issue-reference-context.md`) but ALWAYS put the plain-language meaning right next to it.
 - **Options = short Slovak label + plain consequence.** Each option's description says plainly what happens if chosen and the trade-off — not the technical mechanism. Lead with your recommendation and mark it `(odporúčam)`.
 
-#### Anti-pattern (this exact question — BANNED)
+#### Self-contained — write EVERY question for someone with ZERO context (the #1 repeated complaint)
+
+**The user is NOT at the terminal and has NOT read the history you printed while working.** They see ONLY the question — on a phone, cold, maybe days later, across many different projects. So the question must carry ALL the context needed to understand and decide FROM ITS OWN TEXT ALONE. Never assume the user knows what the ticket is, what you were doing, or how two things relate.
+
+Every question OPENS with a 2–4 sentence plain-Slovak briefing, in this order:
+1. **Which project + what it is** — one plain phrase: "V projekte camera-box (ovládanie kamier a OBS pre kostolný živý prenos)…". Never just "#137".
+2. **What was happening / what led here** — the situation in everyday words: what you were doing, what happened, why a decision is now needed.
+3. **Explain EVERY cross-reference** — any OTHER project, ticket, or component you name MUST be explained: what it IS *and* why it is relevant HERE. A bare "restreamer #255 už to opravil" is BANNED — the user has no idea camera-box and restreamer are connected, or that restreamer even touches OBS. Spell out the link in plain words.
+4. **THEN the decision** + each option's real-world consequence (time, risk), recommendation marked `(odporúčam)`.
+
+**The gate — apply to EVERY question before sending:** "Could a person who has NOT watched this terminal for a week, and does NOT know this project's internals, understand this question and decide — from the question text ALONE?" If no → it is BANNED; add the missing context and re-write. "It's all in the scrollback / I explained it earlier" is exactly the excuse this kills — the user does NOT read the scrollback and is not watching 24/7 (they say this over and over).
+
+#### Deliver an away-user question as the `❓` TEXT marker — NOT a 60-second `AskUserQuestion` dialog
+
+In an `/autopilot` / `/goal` / any autonomous run the user is AWAY. When a background subagent surfaces an `AskUserQuestion` to the main session, Claude Code **auto-continues after ~60 s** unanswered (observed live: `No response after 60s — continued without an answer`) — so an away user NEVER answers it in time and the loop wrongly proceeds as if resolved. That is a core cause of "it asked, I never got it, then it moved on / then it blamed me". **That 60 s is baked into the Claude Code binary — airuleset cannot safely raise it** (patching a 248 MB binary that is replaced on every CC update would rot instantly). The fix is not a bigger timeout — it is the RIGHT channel: the **`❓` text marker has NO timeout at all** (it pings the phone and waits UNLIMITED, however long you need — far better than any 30-minute dialog).
+
+- **For a genuine question during an autonomous/away run, deliver it as the `❓ NEEDS YOU:` / `❓ ASKED:` TEXT marker** (Slovak, with the self-contained briefing above). That pings the phone AND waits indefinitely — it does not time out. The user replies in text whenever they see the ping.
+- **A timed-out `AskUserQuestion` is NOT an answer.** If you used the dialog and it auto-continued unanswered, do NOT treat that as resolved — re-deliver the SAME question (self-contained) as the `❓` text marker and wait / ask-and-continue (`message-status-marker.md`).
+- `AskUserQuestion`'s structured dialog is fine only when the user is PRESENT (interactive design/brainstorm at the terminal). For an away user it is the wrong channel.
+
+#### Anti-pattern #2 — assumed context + unexplained cross-project link (this exact question — BANNED)
+
+> *Ticket #137: nasadenie novej OBS knižnice (obs.dll) reštartne OBS, čo predtým rozbíjalo stream. Skutočnú príčinu už vyriešil a živo nasadil susedný projekt restreamer (jeho #255, zmergované). Chýba len živé potvrdenie na rigu. Čo s #137?*
+
+The user's real reaction: *"nerozumiem!!! akoze ty si zasiahol do projektu restreamer? restreamer projekt ma vlastne obs?!!! o co tu ide!!!"*. It assumes the user knows what #137 is, that camera-box and restreamer are related, and that restreamer touches OBS. Jargon: `obs.dll`, `rig`, "reštart prehryzne". **WRONG.**
+
+#### Correct #2 (same question — self-contained, cross-link explained, plain)
+
+> **Otázka — projekt camera-box (ovláda kamery a OBS pre kostolný živý prenos):** Chystáme aktualizáciu jednej súčasti OBS. Pri takej aktualizácii sa OBS musí reštartovať a kedysi to na pár sekúnd rozhodilo zvuk a obraz na výstupe. Medzitým sa ukázalo, že tú istú chybu (~25 s rozladenie pri reštarte) opravil náš DRUHÝ projekt — restreamer (ten berie hotový prenos z OBS a posiela ho ďalej na web); oprava je už nasadená a beží, takže reštart OBS by dnes mal prejsť bez rozhodenia. Ostáva jediné: overiť si to naživo priamo na kostolnom počítači. Ako s tým naložiť?
+> • **Zavrieť ako vyriešené (odporúčam)** — príčinu naozaj opravil restreamer a beží; úlohu zavriem s odkazom naň. (rýchle)
+> • **Najprv overiť naživo** — nechám úlohu otvorenú, počkám a pri najbližšom prenose reálne vyskúšam aktualizáciu OBS, až potom zavriem. (istejšie, čaká na živý prenos)
+
+#### Anti-pattern — English + jargon (this exact question — BANNED)
 
 > *FB-push E2E gate (#227) is fragile and now BLOCKING #258 … only the unrelated FB-push job fails … it runs on EVERY PR, so it blocks the whole cluster. How to proceed?*
 > *1. Fix #227 now, then resume cluster — … widen VPS-registration timeout root-cause, scope/shorten FB soak, stabilize.*
