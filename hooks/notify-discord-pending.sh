@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: Stop — device notification on ❓ NEEDS YOU (immediate) / ✅ DONE (idle).
+# Hook: Stop — device notification on ❓ NEEDS YOU / ❓ ASKED (immediate) / ✅ DONE (idle).
 #
 # Mobile-app notification model — the device is pinged ONLY when Claude genuinely
 # ASKS the user (❓ NEEDS YOU) or FULLY completed work (✅ DONE); never on
 # ⏳ WORKING, never on routine progress. Split delivery by urgency:
-#   - ❓ NEEDS YOU → SENT IMMEDIATELY from here (the user is blocked on us; the
-#     question must reach the phone even over tmux/SSH, where Claude Code's
-#     `idle_prompt` event is unreliable — depending on it is why pings "stopped").
+#   - ❓ NEEDS YOU (blocked, last line) OR ❓ ASKED (raised while continuing other
+#     answer-independent work; turn ends ⏳ WORKING) → SENT IMMEDIATELY from here. A
+#     genuine question must reach the phone even over tmux/SSH, where Claude Code's
+#     `idle_prompt` event is unreliable, and is NEVER suppressed — the old "❓ +
+#     continuing language → swallow the ping" logic was the reported bug (the user
+#     asked, no ping came, then got reproached hours later).
 #   - ✅ DONE → recorded to a per-session pending file; notify-discord.sh delivers
 #     it ONLY when the user is genuinely idle/away (a finished turn is less urgent,
 #     and pinging every completed turn while the user watches the terminal = spam).
@@ -65,27 +68,33 @@ send_now() {
     ND_EMOJI="$1" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
 }
 
-# A turn that asks ❓ but ALSO says it will KEEP WORKING (a /goal or autopilot loop
-# continuing to the next ticket) is a MALFORMED marker — ❓ means "your turn, I'm
-# waiting", which contradicts continuing. Such a ❓ must NOT ping the phone (it
-# misleads the user that Claude is blocked when it actually moved on). The
-# status-marker Stop hook forces the agent to fix it to ⏳ + defer the question.
-_CONTINUING='keep (working|going|grind|grinding|processing|moving)|continu(e|es|ing) (now|with|on|to (work|grind|process|the))|move on( to)?|next (ticket|issue|batch|one|item)|per the goal i keep|grinding (these|the backlog|on)|keep grinding|i.?ll (process|handle|surface|tackle|do|get to) (it|that|the|its|them|those|#) .* (later|next|when you|after)|surface (it|them|those|the .*) later|process its callback'
+# A genuine question to the user ALWAYS fires the device ping — NO suppression,
+# ever. Two honest forms (message-status-marker.md):
+#   ❓ ASKED: <q>      — a body line; the turn ENDS ⏳ WORKING because you keep
+#     doing OTHER answer-independent work. The question is pinged NOW and tracked
+#     durably on its ticket; you resume that ticket whenever the user answers.
+#   ❓ NEEDS YOU: <q>  — the LAST line; you are BLOCKED (no other useful work) and
+#     STOP. Pinged NOW.
+# Either way the phone is pinged. The removed "❓ + continuing language → swallow
+# the ping" logic was the exact bug the user reported: a mid-loop question that
+# never reached the phone, then a reproach hours later. Continuing is fine; the
+# ping is not optional. (An ❓ ASKED line takes precedence over the terminal ⏳:
+# a question you raise this turn must ping even though the turn keeps working.)
+ASKED_LINE=$(printf '%s\n' "$MSG" | grep -iE '❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:' | tail -1 || true)
 
-if printf '%s' "$LAST_LINE" | grep -q "❓"; then
-    if printf '%s' "$MSG" | grep -qiE "$_CONTINUING"; then
-        # ❓ but the turn is CONTINUING the loop → not a genuine block. Suppress the
-        # phone ping (clear pending). The agent should have used ⏳ + deferred the
-        # question; the status-marker hook will make it.
-        rm -f "$PENDING" 2>/dev/null || true
-    else
-        # ❓ on the last line, genuinely blocked on the user → fire the device ping
-        # IMMEDIATELY (the question must reach the phone even over SSH, where the
-        # idle_prompt event is unreliable). No pending left → idle hook won't re-send.
-        C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
-        rm -f "$PENDING" 2>/dev/null || true
-        send_now "❓" "$C"
-    fi
+if [ -n "$ASKED_LINE" ]; then
+    # ask-and-continue: ping the freshly-raised question NOW; the turn keeps
+    # working (⏳). No pending left → idle hook won't re-send.
+    C=$(printf '%s' "$ASKED_LINE" | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
+    rm -f "$PENDING" 2>/dev/null || true
+    send_now "❓" "$C"
+elif printf '%s' "$LAST_LINE" | grep -q "❓"; then
+    # ❓ NEEDS YOU on the last line, genuinely blocked on the user → fire the device
+    # ping IMMEDIATELY (the question must reach the phone even over SSH, where the
+    # idle_prompt event is unreliable). No pending left → idle hook won't re-send.
+    C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
+    rm -f "$PENDING" 2>/dev/null || true
+    send_now "❓" "$C"
 elif printf '%s' "$LAST_LINE" | grep -q "⏳"; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear

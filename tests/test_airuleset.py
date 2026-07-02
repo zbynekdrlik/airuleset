@@ -414,20 +414,43 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("posledný preset?", sent)
         self.assertFalse(os.path.exists(p))
 
-    def test_question_while_continuing_loop_is_not_pinged(self):
-        # A ❓ on a turn that ALSO says it KEEPS WORKING (a /goal or autopilot loop
-        # moving to the next ticket) is a malformed marker — it must NOT ping the
-        # phone (the agent actually moved on; the status-marker hook forces ⏳).
+    def test_question_always_pings_even_mid_loop(self):
+        # A genuine question ALWAYS reaches the phone — there is NO suppression.
+        # The old behavior (❓ + "continuing" language → swallow the ping) was the
+        # exact bug the user reported: a mid-loop question that never pinged, then a
+        # reproach hours later. Removed. Continuing is fine; the ping is not optional.
         for cont in ["Remaining backlog (14). I can keep grinding these.",
                      "PP OAuth is out to your phone; continuing now with #426.",
                      "I'll surface the blocked trio later; moving on to the next ticket."]:
             sid, _ = self._sid()
             self._stop(sid, cont + "\n\n❓ NEEDS YOU: čo s 3 blokovanými ticketmi?")
-            self.assertEqual(self._sent(), "", "❓ while continuing must NOT ping: %r" % cont)
-        # a genuine ❓ (no continuing language) DOES ping
+            self.assertIn("❓", self._sent(), "❓ must ping even mid-loop: %r" % cont)
+        # a genuine ❓ (no continuing language) DOES ping too
         sid2, _ = self._sid()
         self._stop(sid2, "❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertIn("❓", self._sent())
+
+    def test_asked_line_pings_while_turn_continues_working(self):
+        # ask-and-continue: the turn raises a per-ticket question (pings + tracked
+        # on the ticket) and ENDS ⏳ WORKING because it keeps doing other answer-
+        # independent work. The ❓ ASKED body line must fire the ping even though the
+        # terminal marker is ⏳ (which alone would clear pending). Precedence: ASKED
+        # over the trailing ⏳.
+        sid, p = self._sid()
+        self._stop(sid, "❓ ASKED: #58 (kontrola pred štartom) — reset na 0 dB "
+                        "alebo posledný preset?\n\n"
+                        "⏳ WORKING: medzitým robím #59, #60 (nezávislé od odpovede)")
+        sent = self._sent()
+        self.assertIn("❓", sent)
+        self.assertIn("reset na 0 dB", sent)
+        self.assertNotIn("ASKED", sent)          # the label is stripped from the ping
+        self.assertFalse(os.path.exists(p), "❓ ASKED must not leave a pending")
+
+    def test_asked_line_bold_markdown_form_pings(self):
+        # tolerate the bold form "❓ **ASKED:** <q>"
+        sid, _ = self._sid()
+        self._stop(sid, "❓ **ASKED:** schváliš nový layout?\n\n⏳ WORKING: robím #61")
+        self.assertIn("schváliš nový layout?", self._sent())
 
     def test_immediate_question_is_structured_markdown(self):
         # the ❓ device line must be Discord-markdown structured (bold header +

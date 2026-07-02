@@ -31,14 +31,18 @@ on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Clos
 EVERY member (so GitHub closes them all on merge), ONE merge, ONE deploy. Per-issue discipline is
 preserved — each issue gets its own work + its own calibrated TDD + its own `Closes #<n>` commit.
 
-**You are ENCOURAGED to ask the user — ASK THE MOMENT the issue needs it, do NOT defer.** The user
-explicitly, emphatically wants the important per-issue calls raised WITH them — design choices, scope
-ambiguity, anything you genuinely cannot settle from the issue + the code. Deferring a question to
-"later" loses the issue's built-up context and is exactly why important tickets never get solved — so
-do NOT do it. ASK directly (your prompts surface in the user's main session), and during waking hours
-WAIT for the answer holding this issue's context (do NOT label-and-skip to grind other work and bury
-the question); discuss it, then continue. Do NOT guess on an important decision. Only routine,
-unambiguous steps proceed without asking.
+**You are ENCOURAGED to ask the user — ASK THE MOMENT the issue needs it, and it MUST ping the phone.**
+The user explicitly, emphatically wants the important per-issue calls raised WITH them — design
+choices, scope ambiguity, anything you genuinely cannot settle from the issue + the code. **The
+Discord ping is the ONLY way the question reaches them (they do NOT watch the terminal), so it must
+fire every time — a question printed but never pinged does not count, and you may NEVER later blame
+the user's silence.** ASK directly (your prompts surface in the user's main session). During waking
+hours pick the honest form: if nothing else is workable without the answer, BLOCK (`❓ NEEDS YOU`,
+wait); if there is other answer-independent work, ASK-AND-CONTINUE — raise it (`❓ ASKED`, it pings),
+track it durably on the issue (`gh issue comment <N>` + `gh issue edit <N> --add-label needs-answer`),
+set this issue aside, and keep working other tickets, ending `⏳ WORKING` (resume this issue from its
+durable state when the user answers). Do NOT grind on WITHOUT asking (burying the question), and do
+NOT guess on an important decision. Only routine, unambiguous steps proceed without asking.
 **The ONLY time you defer a question is the sleep window 00:00–05:59 Europe/Bratislava** (check
 `TZ=Europe/Bratislava date +%H` → hour `00..05` = the user is asleep): then queue it (label
 `needs-decision`, leave the issue open), finish the rest of the batch, and report the deferred

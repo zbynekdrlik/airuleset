@@ -33,7 +33,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `milestone-notifications.md` — short `❓`/`✅` idle pings only on a worker's ❓ question or the FINAL ✅ (mobile model); BUT each finished+deployed ticket ALSO sends ONE structured Discord completion card (the worker fires it directly at merge — the user's explicit per-ticket ask); every device message @mentions the tmux owner (zbynek/marek)
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
-- `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it (never deferred while you grind other work, except the 00:00–06:00 — hours `00..05` — Europe/Bratislava sleep window) — never a reason to abandon the issue
+- `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it and it ALWAYS pings; then either BLOCK (`❓ NEEDS YOU`) or ask-and-continue (`❓ ASKED` + track on the issue, work other tickets meanwhile) — never buried, never a reason to abandon the issue, never a reason to reproach you (except the 00:00–06:00 — hours `00..05` — Europe/Bratislava sleep window, when it defers with no ping)
 
 ## How it works
 
@@ -131,7 +131,7 @@ needs extra approval.)
 The agent cannot type `/goal` — print this line for the user to paste once:
 
 ```
-/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up (the background autopilot-worker's prompts surface in my main session) and wait for my answer holding that issue's context — do NOT defer it or bury it under other tickets, EXCEPT 00:00–06:00 (hours 00..05) Europe/Bratislava when I'm asleep (then queue it and ask after 06:00). After every merge immediately pick the next issue.
+/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up — it ALWAYS pings my phone (the background autopilot-worker's prompts surface in my main session) — then either BLOCK on it (`❓ NEEDS YOU`) if nothing else is workable, or ASK-AND-CONTINUE (`❓ ASKED` + track the question on the issue with a `needs-answer` comment, set that issue aside, and work other answer-independent tickets, ending `⏳ WORKING`); NEVER bury a question by continuing without pinging it, and NEVER stop the loop blaming my silence. EXCEPT 00:00–06:00 (hours 00..05) Europe/Bratislava when I'm asleep (then queue it and ask after 06:00, no ping). After every merge immediately pick the next issue.
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -281,45 +281,55 @@ Each loop turn:
 - **A gate that won't go clean / the same CI failure twice** after a real fix attempt → surface
   it, never bypass (`autonomous-quality-discipline.md`).
 
-A per-issue **design question is NOT a reason to abandon the issue — it is a reason to ASK YOU, the
-MOMENT the issue needs it.** The user's explicit, hard instruction: they WANT the per-ticket
-questions (answering them is their job) — deferring a question loses the issue's built-up context and
-leaves important tickets forever unsolved, because a never-empty backlog means "backlog exhausted"
-never arrives and the question never gets asked. So handle it BY THE CLOCK:
+A per-issue **design question is NOT a reason to abandon the issue, and NOT a reason to sit
+idle-blocked when there is other work — it is a reason to ASK YOU (with a phone PING) the MOMENT the
+issue needs it.** The user does NOT watch the terminal 24/7; **the Discord ping is the ONLY way the
+question reaches them, so it MUST fire — every time, no exception (waking hours).** A question printed
+but never pinged does NOT count as asked, and you may NEVER later stop the loop blaming the user's
+silence. Handle it BY THE CLOCK:
 
 - **Waking hours — 06:00–23:59 Europe/Bratislava (check `TZ=Europe/Bratislava date +%H` → hour
-  `06..23`): ASK NOW and HOLD.** The background worker surfaces the question in your main session and
-  HOLDS that issue's full context (paused, alive); you end the turn `❓ NEEDS YOU` (Slovak, the real
-  decision) — it pings the phone immediately. The loop STOPS on this issue and resumes the instant the
-  user answers (the worker continues with its context intact — and if your CC build RETURNS the
-  background dispatch instead of holding it blocked, the worker resumes from DURABLE state, the open
-  branch / PR / gh issue, per `subagent-continuation.md`; the answer is never lost). Do **NOT** set the issue aside / label
-  `needs-decision` / grind other tickets to bury the question; do **NOT** wait for "backlog
-  exhausted". Asking-and-holding ends `❓` — that is the loop legitimately pausing for the user, NOT a
-  violation of "❓ and continuing are mutually exclusive" (you are NOT continuing — you are waiting).
+  `06..23`): ASK NOW — it PINGS — then pick the honest form by whether OTHER work is available:**
+  - **Other answer-independent work exists → ASK-AND-CONTINUE (the user's requested model).** Raise
+    the question so it pings (`❓ ASKED: <q>` — Slovak, the real decision), track it DURABLY on the
+    issue (`gh issue comment <N>` with the question + `gh issue edit <N> --add-label needs-answer`, so
+    it is never lost in the scrollback), set THAT issue aside (paused, not abandoned), and move the
+    loop to the next answer-independent ticket. End the turn `⏳ WORKING: <what you continue>`. When
+    the user answers (any time), resume the paused issue from its DURABLE state (the open branch / PR /
+    the `needs-answer` comment) per `subagent-continuation.md`. Give the user a genuine chance (~10
+    min) before bulldozing a ticket that hinges on their taste — but do NOT block the whole loop for
+    an answer you don't yet need.
+  - **Nothing else is workable without the answer → BLOCK.** End the turn `❓ NEEDS YOU` (Slovak, the
+    real decision) — it pings, the loop pauses on this issue, and it resumes the instant the user
+    answers. Use this only when the question truly blocks all remaining work.
+  Do **NOT** grind on WITHOUT asking (burying the question) — ask-and-continue means you ASKED (pinged
+  + tracked) FIRST, then continued. Do **NOT** write `❓ NEEDS YOU` and then move to another ticket
+  anyway (that pings "I'm blocked" while you moved on — use `❓ ASKED` + `⏳`).
 - **Sleep window — 00:00–05:59 Europe/Bratislava (hour `00..05`): DEFER, don't wake the user.** Queue
   the question (label `needs-decision`, leave the issue open), keep grinding the rest, end `⏳
-  WORKING`. Raise the queued questions as ONE `❓ NEEDS YOU` once the window ends (after 06:00) or the
-  user is next active.
-- **NEVER** end a turn `❓ NEEDS YOU` and then move to a DIFFERENT ticket anyway — that pings "I'm
-  waiting" while you've moved on. Waking-hours asking ends `❓` (you wait); sleep-window deferral ends
-  `⏳` (`message-status-marker.md`).
+  WORKING` with NO `❓ ASKED` line (so nothing pings). Raise the queued questions as ONE `❓ NEEDS YOU`
+  once the window ends (after 06:00) or the user is next active.
 
-"Nothing is hands-off" is **NOT a stop** — work the tickets; when one needs your decision, ask it NOW
-(waking) or queue it (sleep). Finishing a merge is **NOT a stop** — pick the next issue.
+"Nothing is hands-off" is **NOT a stop** — work the tickets; when one needs your decision, ASK it NOW
+(ping) and either continue other work (ask-and-continue) or block if nothing else is workable.
+Finishing a merge is **NOT a stop** — pick the next issue. An **unanswered pinged question is NEVER a
+reason to stop the loop or blame the user** — it just waits (tracked on its issue, `needs-answer`)
+while you work everything else; you reach the end only when the WHOLE backlog is either merged or
+blocked on a pinged question, and even then you re-surface those as ONE `❓ NEEDS YOU`, never as a
+reproach.
 
-**BANNED rationalization — this recurred LIVE, kill it explicitly:** "the loop must not stand
-waiting", "**loop nemá stáť na čakaní**", "there's other workable work so I'll move to the next ticket
-and ask later", "**pokračujem na ďalšom tickete, otázku položím neskôr**", "medzitým robím iné".
-**WRONG.** During waking hours, WAITING for the user's answer to a genuine per-ticket question IS the
-loop correctly doing its job (ask-and-hold) — it is NOT an idle/dead wait and NOT a breach of "keep
-the loop going" or `/goal`'s "don't stop merely because". Moving to a DIFFERENT ticket to AVOID the
-wait is the banned defer: it buries the question, the user gets NO question, and the important ticket
-never gets solved — the exact failure this whole policy exists to kill. The loop legitimately STOPS on
-the `❓` and resumes when answered. The ONLY thing that licenses moving on instead of asking is the
-00:00–06:00 (hours 00..05) Europe/Bratislava sleep window. (Post-MERGE "pick the next issue" is
-correct and DIFFERENT — that is continuing after a ticket is DONE, not skipping a ticket that needs
-your answer; do not confuse the two.)
+**BANNED rationalizations — both directions, kill both:**
+- **Burying:** "there's other workable work so I'll move to the next ticket and ask later",
+  "**pokračujem na ďalšom tickete, otázku položím neskôr**", "medzitým robím iné" — **WRONG when you
+  did NOT ask+ping+track first.** Continuing is allowed ONLY after the question pinged the phone AND
+  was recorded on the issue (`❓ ASKED` + `needs-answer` comment). Moving to a DIFFERENT ticket to
+  AVOID asking is the banned defer — the user gets NO question and the important ticket never gets
+  solved.
+- **Reproach / false-stop:** "the loop is waiting on your answers so I'm stopping", "**skončil som,
+  lebo tickety čakajú na tvoje odpovede**", surfacing hours-old questions the user was never pinged
+  about as the reason for stopping — **WRONG.** Every question pings when raised; unanswered ones wait
+  without blame while you do other work. (Post-MERGE "pick the next issue" is correct and DIFFERENT —
+  that is continuing after a ticket is DONE, not skipping a ticket that needs your answer.)
 
 ## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
 
