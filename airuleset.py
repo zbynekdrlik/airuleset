@@ -1474,6 +1474,19 @@ def cmd_watchdog(args):
             print(line)
 
 
+def cmd_fable_gate(args):
+    """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
+    exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
+    (< threshold, default 80% / AIRULESET_FABLE_GATE_PCT), exit 1 + `CLOSED ...`
+    otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn). The
+    orchestrator / autopilot supervisor runs this ONCE per hard task/batch before
+    dispatching `model: fable`; CLOSED → dispatch opus instead."""
+    from watchdog import fable_gate
+    ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
+    print(("OPEN " if ok else "CLOSED ") + reason)
+    sys.exit(0 if ok else 1)
+
+
 def setup_watchdog_service():
     """Install + start the api-watchdog systemd --user timer on THIS machine
     (every host — autopilot runs on dev1 and dev2). Mirrors the file-drop setup:
@@ -1613,6 +1626,12 @@ def main():
     p_watchdog.add_argument("--verbose", action="store_true",
                             help="Print the actions taken this cycle")
 
+    p_gate = sub.add_parser(
+        "fable-gate", help="Budget gate for automatic Fable escalation — exit 0 "
+                           "(OPEN, dispatch fable) / 1 (CLOSED, dispatch opus)")
+    p_gate.add_argument("--threshold", type=int, default=None,
+                        help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -1633,6 +1652,7 @@ SUBCOMMANDS = {
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
+    "fable-gate": cmd_fable_gate,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

@@ -1015,6 +1015,88 @@ def _human_reset(iso):
         return str(iso)[:16]
 
 
+# --------------------------------------------------------------------------- #
+# Fable budget gate — `airuleset.py fable-gate`. The 2026-07-03 model-tiering
+# policy escalates genuinely HARD judgment work to Fable 5 AUTOMATICALLY — but
+# the 2026-07-01 Fable-everywhere incident (limits tripped mid-work, user's work
+# stopped) must never repeat, so every automatic escalation is BUDGET-GATED:
+# Fable fires only while its weekly window (and the shared weekly) has headroom.
+# Reads the same usage cache the watchdog writes every ~15 min (never hits the
+# 429-prone endpoint). FAIL-SAFE: missing/stale/empty cache → CLOSED (Opus),
+# never a blind Fable burn.
+# --------------------------------------------------------------------------- #
+
+FABLE_GATE_PCT = 80            # default: escalate only below 80% used (leaves the
+                               # user headroom for their own manual /model Fable)
+FABLE_GATE_MAX_AGE = 6 * 3600  # cache older than this = unknown → CLOSED (same
+                               # staleness bound the statusline uses)
+
+
+def fable_gate(now=None, path=None, threshold=None):
+    """(open, reason) — may automatic HARD-task escalation dispatch to Fable NOW?
+
+    OPEN  ⇔ the cache is fresh AND every gating window is below `threshold`%:
+      - the Fable-scoped weekly window (the binding one under heavy Fable use), and
+      - the shared account weekly (Fable burn counts there too).
+    The 5h session window deliberately does NOT gate (it resets within hours and
+    would keep the gate closed exactly when the user works most; the incident
+    being prevented was the WEEKLY trip). A fresh cache with NO Fable-scoped
+    window gates on the shared weekly alone; a fresh cache with NO weekly windows
+    at all is unknown → CLOSED."""
+    now = now if now is not None else time.time()
+    if threshold is None:
+        try:
+            threshold = int(os.environ.get("AIRULESET_FABLE_GATE_PCT", FABLE_GATE_PCT))
+        except ValueError:
+            threshold = FABLE_GATE_PCT
+    path = path or _USAGE_CACHE_PATH
+    # The ENTIRE evaluation is fail-safe: any unexpected shape/type in the cache
+    # (list top-level, string ts, bool/str percents, garbage windows) must return
+    # CLOSED, never raise — a caller unpacking (ok, reason) on a corrupt cache
+    # crashing IS a gate failure (review finding F3).
+    try:
+        with open(path) as f:
+            cache = json.load(f)
+        # Clock-skew guard (F1): a FUTURE ts makes age negative, which a plain
+        # `age > MAX` check calls "fresh" FOREVER — fail-open on frozen numbers.
+        # Any age outside [0, MAX] is unknown → stale.
+        age = now - float(cache.get("ts") or 0)
+        if not (0 <= age <= FABLE_GATE_MAX_AGE):
+            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use opus" % (
+                abs(age) // 3600)
+        # Window selection (F2): gate ONLY on WEEKLY windows (a per-model session/
+        # surface window must neither gate nor mask), and across MULTIPLE matching
+        # windows take the MAX percent — the binding one decides.
+        fable_pct = shared_pct = None
+        for w in cache.get("windows") or []:
+            pct = w.get("percent")
+            if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+                continue                    # bool/str/None percent = unknown, never 0%
+            if w.get("group") != "weekly":
+                continue
+            model = w.get("model") or ""
+            if "fable" in str(model).lower():
+                fable_pct = pct if fable_pct is None else max(fable_pct, pct)
+            elif not model:
+                shared_pct = pct if shared_pct is None else max(shared_pct, pct)
+        if fable_pct is None and shared_pct is None:
+            return False, "no weekly window in cache — fail-safe CLOSED, use opus"
+        parts = []
+        for label, pct in (("fable", fable_pct), ("weekly", shared_pct)):
+            if pct is None:
+                continue
+            parts.append("%s=%d%%" % (label, pct))
+            if pct >= threshold:
+                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use opus"
+                               % (label, pct, threshold))
+        return True, " ".join(parts) + " (< %d%% gate)" % threshold
+    except FileNotFoundError:
+        return False, "no usage cache (%s) — fail-safe CLOSED, use opus" % path
+    except Exception as e:
+        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use opus" % (
+            type(e).__name__, e)
+
+
 def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
                 threshold=USAGE_THRESHOLD, interval=USAGE_INTERVAL):
     """Rate-limited weekly-usage poll: at most once per `interval`, and an alert

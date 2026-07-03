@@ -165,5 +165,165 @@ class TestWiring(TestCase):
         self.assertIn("skip the shared windows", src)
 
 
+class TestFableGate(TestCase):
+    """Budget gate for AUTOMATIC Fable escalation (model-tiering 2026-07-03).
+
+    The user wants hard tasks escalated to Fable AUTOMATICALLY — but the
+    2026-07-01 Fable-everywhere incident (weekly limits tripped mid-work, work
+    stopped) must never repeat, so the gate is fail-safe CLOSED on any doubt and
+    CLOSED once either weekly window (Fable-scoped or shared) reaches the
+    threshold."""
+
+    NOW = 1_700_000_000
+
+    def _cache(self, d, windows, ts=None):
+        path = os.path.join(d, "cache.json")
+        with open(path, "w") as f:
+            json.dump({"ts": ts if ts is not None else self.NOW,
+                       "windows": windows}, f)
+        return path
+
+    def _win(self, percent, model=None, group="weekly"):
+        return {"kind": "weekly_scoped" if model else "weekly_all",
+                "group": group, "percent": percent, "model": model,
+                "resets_at": "2026-07-06T10:00:00+00:00", "is_active": bool(model)}
+
+    def test_open_when_both_windows_have_headroom(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(44), self._win(52, model="Fable")])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertTrue(ok)
+            self.assertIn("fable=52%", reason)
+            self.assertIn("weekly=44%", reason)
+
+    def test_closed_when_fable_window_at_threshold(self):
+        # >= is CLOSED (boundary included — 80% used with an 80 gate = no headroom).
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(10), self._win(80, model="Fable")])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertFalse(ok)
+            self.assertIn("fable window at 80%", reason)
+
+    def test_closed_when_shared_weekly_high_even_if_fable_low(self):
+        # Fable burn counts against the shared weekly too — a nearly-spent shared
+        # window closes the gate regardless of Fable's own headroom.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(92), self._win(10, model="Fable")])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertFalse(ok)
+            self.assertIn("weekly window at 92%", reason)
+
+    def test_missing_cache_is_fail_safe_closed(self):
+        ok, reason = watchdog.fable_gate(now=self.NOW, path="/nonexistent/cache.json")
+        self.assertFalse(ok)
+        self.assertIn("no usage cache", reason)
+
+    def test_stale_cache_is_fail_safe_closed(self):
+        # Older than the 6h staleness bound → the numbers are unknown → CLOSED.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(1), self._win(1, model="Fable")],
+                            ts=self.NOW - 7 * 3600)
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p)
+            self.assertFalse(ok)
+            self.assertIn("stale", reason)
+
+    def test_no_weekly_windows_is_fail_safe_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(13, group="session")])
+            # a session-only cache has no weekly signal at all → CLOSED
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p)
+            self.assertFalse(ok)
+            self.assertIn("no weekly window", reason)
+
+    def test_no_fable_window_gates_on_shared_weekly_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(30)])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertTrue(ok)
+            self.assertIn("weekly=30%", reason)
+
+    def test_session_window_does_not_gate(self):
+        # The 5h session window resets within hours — it must NOT close the gate
+        # (that would block escalation exactly when the user works most; the
+        # incident being prevented was the WEEKLY trip).
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(99, group="session"),
+                                self._win(40), self._win(50, model="Fable")])
+            ok, _ = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertTrue(ok)
+
+    def test_env_threshold_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(40), self._win(50, model="Fable")])
+            os.environ["AIRULESET_FABLE_GATE_PCT"] = "45"
+            try:
+                ok, _ = watchdog.fable_gate(now=self.NOW, path=p)
+                self.assertFalse(ok)          # fable 50 >= env gate 45
+            finally:
+                del os.environ["AIRULESET_FABLE_GATE_PCT"]
+
+    # --- review findings F1/F2/F3 (adversarial pass, 2026-07-03) — each was a
+    # verified FAIL-OPEN or contract violation before the fix. -----------------
+
+    def test_future_ts_is_fail_safe_closed(self):
+        # F1: a FUTURE ts (writer clock skew / corrupt write) makes age negative;
+        # a plain `age > MAX` check calls that "fresh" FOREVER — the gate would
+        # stay OPEN on frozen numbers even after the watchdog died. Any age
+        # outside [0, MAX] is unknown → CLOSED.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [self._win(10), self._win(10, model="Fable")],
+                            ts=self.NOW + 1_000_000_000)
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p)
+            self.assertFalse(ok)
+            self.assertIn("stale", reason)
+
+    def test_multiple_fable_windows_take_the_max_and_only_weekly(self):
+        # F2: selection was last-wins with no group filter — a fable-scoped
+        # SESSION window at 10% could mask a fable WEEKLY at 95% (order-dependent
+        # fail-open). Only weekly windows gate, and the MAX percent decides.
+        with tempfile.TemporaryDirectory() as d:
+            p = self._cache(d, [
+                self._win(95, model="Fable"),                       # weekly, binding
+                self._win(10, model="Fable 5", group="session"),    # must not mask
+                self._win(40),
+            ])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p, threshold=80)
+            self.assertFalse(ok)
+            self.assertIn("fable window at 95%", reason)
+
+    def test_corrupt_cache_shapes_are_closed_not_raised(self):
+        # F3: valid-JSON-but-wrong-shape must return (False, reason), never raise —
+        # a caller unpacking (ok, reason) crashing IS a gate failure.
+        cases = [
+            "[1, 2, 3]",                                            # list top-level
+            '{"ts": "abc", "windows": []}',                         # string ts
+            '{"ts": %d, "windows": "garbage"}' % self.NOW,          # string windows
+            '{"ts": %d, "windows": [{"group": "weekly", "model": null,'
+            ' "percent": "95"}]}' % self.NOW,                       # string percent
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for i, raw in enumerate(cases):
+                p = os.path.join(d, "c%d.json" % i)
+                Path(p).write_text(raw)
+                ok, reason = watchdog.fable_gate(now=self.NOW, path=p)
+                self.assertFalse(ok, "case %d must be CLOSED: %s" % (i, raw))
+
+    def test_bool_percent_is_unknown_not_one_percent(self):
+        # F3 sub-case: JSON `true` percent parsed as int 1 would read "1% used" →
+        # OPEN on a corrupt value. bool is not a percent — skip the window; with
+        # no other weekly window left the gate is CLOSED.
+        with tempfile.TemporaryDirectory() as d:
+            win = self._win(0, model="Fable")
+            win["percent"] = True
+            p = self._cache(d, [win])
+            ok, reason = watchdog.fable_gate(now=self.NOW, path=p)
+            self.assertFalse(ok)
+            self.assertIn("no weekly window", reason)
+
+    def test_cli_registration(self):
+        self.assertIn("fable-gate", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.SUBCOMMANDS["fable-gate"], airuleset.cmd_fable_gate)
+
+
 if __name__ == "__main__":
     main()

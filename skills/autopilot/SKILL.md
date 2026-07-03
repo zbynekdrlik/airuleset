@@ -191,14 +191,17 @@ Each loop turn:
    2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in <repo>
    as ONE bundled PR (Closes all).` (or `Work issue #<N> in <repo>.` for a solo batch) plus any
    repo-specific note. ONE worker, ONE `dev` branch, ONE PR, ONE CI cycle.
-   - **Model = Sonnet 5 by default; escalate rarely** (`model-awareness.md` `opusplan` split,
-     2026-07-02: Sonnet executes, Opus plans/reviews). The `autopilot-worker` frontmatter defaults to
-     `model: sonnet` — dispatch it AS-IS for a routine ticket (bug fix, scoped feature). **Override to
-     `model: opus`** when the ticket-validator or the issue signals genuinely HARD work (architecture,
-     subtle multi-file reasoning, ambiguous design, a frontier bug); **override to `model: fable` ONLY
-     for a genuinely FRONTIER ticket even Opus struggles with — RARE (Fable burns tokens + trips the
-     usage limits).** You (the Opus main session) re-verify every line of the worker's evidence block
-     regardless. Do NOT reflexively uptier a routine ticket.
+   - **Model = Sonnet 5 by default; HARD tickets escalate — Fable through the budget gate**
+     (`model-awareness.md` ACTIVE policy 2026-07-03). The `autopilot-worker` frontmatter defaults to
+     `model: sonnet` — dispatch it AS-IS for a routine ticket (bug fix, scoped feature). When the
+     ticket-validator or the issue signals genuinely HARD work — **architectural / cross-cutting /
+     ambiguous-design, a multi-component or concurrency bug, or a ticket a prior worker already
+     FAILED on** — escalate AUTOMATICALLY: run `python3 ~/devel/airuleset/airuleset.py fable-gate`
+     ONCE for the ticket/batch; **gate OPEN (exit 0) → dispatch `model: fable`; gate CLOSED (exit 1)
+     → dispatch `model: opus`.** Merely non-trivial (but not HARD-criteria) work → `model: opus`, no
+     gate needed. Never dispatch an automatic `model: fable` without the gate check, and do NOT
+     reflexively uptier a routine ticket — Sonnet + the Opus review bookend carries it. You (the
+     main session) re-verify every line of the worker's evidence block regardless.
    - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
      `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
    - **Serial per repo (hard).** Before dispatching, if a background `autopilot-worker` for THIS repo
