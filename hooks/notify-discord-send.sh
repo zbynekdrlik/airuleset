@@ -70,12 +70,14 @@ if [ -f "$ENVF" ]; then
     BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" 2>/dev/null | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n' || true)
 fi
 
-# Emit ONE message per target. The PRIMARY target ALWAYS emits — even when the owner
-# is empty/unknown (no @mention, shared-or-no channel) — so a machine with no tmux
-# owner still notifies exactly as before. Mirrors are EXTRA and only fire when
-# DISCORD_MIRROR_<OWNER> lists them; a mirror whose thread equals the primary's (or
-# is empty) is skipped, so a misconfig can't double-post into one thread.
-PRIMARY_CH=""
+# Emit ONE message per DISTINCT target thread. The PRIMARY target ALWAYS emits — even
+# when the owner is empty/unknown (no @mention, shared-or-no channel) — so a machine
+# with no tmux owner still notifies exactly as before. Mirrors are EXTRA and only fire
+# when DISCORD_MIRROR_<OWNER> lists them; a target whose thread was ALREADY delivered
+# to (the primary's, OR an earlier mirror's — e.g. two owners sharing the fallback
+# channel) is skipped, so a misconfig can't double-post into one thread. The same
+# de-dup applies in dry-run, so the preview matches real delivery.
+POSTED_CHANNELS=" "            # space-delimited set of channels already emitted to
 emit_one() {
     # $1 = owner (may be empty for the primary). Forces AIRULESET_NOTIFY_OWNER onto
     # both resolver calls so mention+thread ALWAYS agree (the Python send() invariant).
@@ -83,11 +85,16 @@ emit_one() {
     local MENTION CH CONTENT
     MENTION=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
     CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id 2>/dev/null | tr -d '\r\n' || echo "")
+    # Skip a target whose (non-empty) thread was already emitted to — no double-post.
+    if [ -n "$CH" ]; then
+        case "$POSTED_CHANNELS" in *" $CH "*) return 0;; esac
+    fi
     CONTENT="${MENTION}${CONTENT_BASE}"
 
     if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
-        # dry-run: one block per target (single-owner boxes emit exactly one — the
-        # unchanged test contract). File mode appends; stdout mode prints.
+        # dry-run: one block per DISTINCT target (single-owner boxes emit exactly one —
+        # the unchanged test contract). File mode appends; stdout mode prints.
+        [ -n "$CH" ] && POSTED_CHANNELS="${POSTED_CHANNELS}${CH} "
         if [ -n "${ND_DRYRUN_FILE:-}" ]; then
             printf '%s\n' "$CONTENT" >> "$ND_DRYRUN_FILE"
         else
@@ -96,15 +103,11 @@ emit_one() {
         return 0
     fi
 
-    # Real delivery. Skip when we can't post, or when this thread was already used.
+    # Real delivery. Skip when we can't post.
     [ -z "$BOT_TOKEN" ] && return 0
     [ -z "$CH" ] && return 0
     command -v jq &>/dev/null || return 0
-    if [ -z "$PRIMARY_CH" ]; then
-        PRIMARY_CH="$CH"
-    elif [ "$CH" = "$PRIMARY_CH" ]; then
-        return 0
-    fi
+    POSTED_CHANNELS="${POSTED_CHANNELS}${CH} "
 
     (curl -s --max-time 5 -X POST \
         "https://discord.com/api/v10/channels/${CH}/messages" \

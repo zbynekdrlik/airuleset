@@ -2453,6 +2453,36 @@ class TestDiscordAutopilotNotify(TestCase):
                     self.notify.send("hi", env=env, owner="david")
         self.assertEqual(len(posts), 1, f"double-posted to one thread: {posts}")
 
+    def test_send_two_mirrors_sharing_a_channel_post_once(self):
+        # #2: two mirror owners with NO per-owner thread both fall back to the shared
+        # channel — the message must land there ONCE (dedup vs earlier mirrors, not
+        # only vs the primary). david has its own thread, so david's thread + the
+        # shared thread = exactly 2 posts.
+        import unittest.mock as m
+        posts = []
+
+        def fake_urlopen(req, timeout=None):
+            posts.append(req.full_url)
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
+               "DISCORD_MIRROR_DAVID": "zbynek marek"}   # neither has own thread
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    self.notify.send("hi", env=env, owner="david")
+        self.assertEqual(len(posts), 2, f"expected dthread + one shared: {posts}")
+        self.assertTrue(any("dthread" in u for u in posts))
+        self.assertEqual(sum(1 for u in posts if "/channels/shared/" in u), 1,
+                         "shared channel must receive exactly one copy")
+
     def test_send_dry_run_shows_one_line_per_target(self):
         # dry-run mirrors the real fan-out: one line per target, primary first.
         import io, contextlib

@@ -388,15 +388,30 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     # (a tmux re-query between them could otherwise disagree).
     if owner is None:
         owner = resolve_owner()
-    # Primary owner first, then the parallel mirror recipients — each gets the SAME
-    # body in THEIR OWN thread with THEIR OWN @mention.
-    targets = [owner] + mirror_owners(env, owner)
+
+    # Build the delivery list ONCE: primary owner first, then the parallel mirror
+    # recipients (each gets the SAME body in THEIR OWN thread with THEIR OWN @mention).
+    # The PRIMARY is ALWAYS kept (even with no channel — dry-run previews it, real
+    # delivery reports no-config). A mirror whose channel duplicates one ALREADY in the
+    # list is dropped, so no double-post — not just vs the primary, but vs any earlier
+    # mirror too (e.g. two owners both falling back to the shared channel). dry-run and
+    # real delivery iterate this SAME list, so the preview is faithful.
+    targets, seen_channels = [], set()      # targets: list of (owner, channel)
+    for i, t in enumerate([owner] + mirror_owners(env, owner)):
+        ch = notification_channel(env, t)
+        if i == 0:                          # primary: always included
+            targets.append((t, ch))
+            if ch:
+                seen_channels.add(ch)
+        elif ch and ch not in seen_channels:
+            seen_channels.add(ch)
+            targets.append((t, ch))
 
     # dry-run never claims dedup (so previews / tests stay re-runnable). One line per
-    # target (a single line when no mirror is configured — the unchanged contract).
+    # DISTINCT target (a single line when no mirror is configured — unchanged contract).
     if dry_run:
         print("\n".join((mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT]
-                         for t in targets))
+                         for t, _ch in targets))
         return "dry-run"
 
     # Claim FIRST so a racing duplicate can't double-post; RELEASE only when the
@@ -406,7 +421,7 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         return "dedup"
 
     token = env.get("DISCORD_BOT_TOKEN", "")
-    primary_channel = notification_channel(env, owner)
+    primary_owner, primary_channel = targets[0]
     if not token or not primary_channel:
         _dedup_release(dedup_key)
         return "no-config"
@@ -414,9 +429,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     # Primary send determines the return status; mirror sends are best-effort (a
     # mirror failure never fails the whole notification, never releases the dedup).
     status = "sent" if _post_discord(
-        token, primary_channel, (mention_prefix(env, owner) + (body or ""))[:_MAX_CONTENT]) else "error"
-    for t in targets[1:]:
-        ch = notification_channel(env, t)
-        if ch and ch != primary_channel:
-            _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
+        token, primary_channel,
+        (mention_prefix(env, primary_owner) + (body or ""))[:_MAX_CONTENT]) else "error"
+    for t, ch in targets[1:]:
+        _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
     return status

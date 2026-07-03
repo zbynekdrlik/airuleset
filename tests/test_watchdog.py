@@ -297,6 +297,18 @@ class PaneWaitingOnUser(unittest.TestCase):
         self.assertFalse(wd.pane_waiting_on_user(
             "  Enter to select\n❯ nejaký text\n  ctx caveman:lite"))
 
+    def test_menu_pointer_option_is_still_waiting(self):
+        # REGRESSION (review finding #1): CC renders the highlighted menu option with a
+        # leading `❯` (e.g. `❯ 1. Yes` in a tool-permission / plan-approval dialog). That
+        # is an OPEN menu — the session IS blocked. The free-prompt guard must NOT treat
+        # `❯ 1. Yes` as an idle prompt (which would suppress the "čaká na teba" ping).
+        self.assertTrue(wd.pane_waiting_on_user(
+            "  Do you want to proceed?\n❯ 1. Yes\n  2. No\n"
+            "  Enter to select · Tab/Arrow keys to navigate\n"))
+        # and with the pointer as the very last line (menu at the bottom)
+        self.assertTrue(wd.pane_waiting_on_user(
+            "  Do you want to proceed?\n  Enter to select\n  1. Yes\n❯ 2. No\n"))
+
 
 class WaitingPersistenceGate(unittest.TestCase):
     """Job 2 must NOT ping on the FIRST poll that sees a dialog footer (a transient

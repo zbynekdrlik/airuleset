@@ -536,6 +536,9 @@ def is_usage_cap(text):
 # / flag-only precisely because it injects keystrokes.)
 _WAITING_RX = re.compile(
     r"Tab/Arrow keys to navigate|Enter to select|Do you want to proceed", re.I)
+# A menu SELECTION pointer: `❯ 1. Yes` (CC numbers its options). Distinguishes an OPEN
+# numbered menu (still waiting) from a FREE `❯ <typed text>` input prompt (not waiting).
+_MENU_POINTER_RX = re.compile(r"❯ \d+\.")
 
 
 def pane_waiting_on_user(captured):
@@ -551,7 +554,14 @@ def pane_waiting_on_user(captured):
         return False
     for ln in [l for l in captured.splitlines() if l.strip()][-6:]:
         s = ln.strip()
-        if s == "❯" or s.startswith("❯ "):   # a free `❯` prompt → not blocked
+        # A FREE idle input prompt is a bare `❯` (empty box) or `❯ <typed text>` — it
+        # means the session is at the prompt, NOT blocked. BUT a menu SELECTION pointer
+        # renders as `❯ 1. Yes` and ALSO starts with `❯ `; treating it as a free prompt
+        # would wrongly classify an OPEN permission/approval menu (the exact thing
+        # `_WAITING_RX` targets via "Do you want to proceed") as not-waiting and SUPPRESS
+        # the ping. CC numbers its menu options, so `❯ <digit>.` is the pointer and is
+        # NOT a free prompt; everything else after `❯ ` is user-typed input.
+        if s == "❯" or (s.startswith("❯ ") and not _MENU_POINTER_RX.match(s)):
             return False
     return True
 
