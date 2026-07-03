@@ -268,6 +268,96 @@ class RunOnceTextcallWiring(unittest.TestCase):
                          "a sub-grace stall must not nudge yet: %r" % logs)
 
 
+class PaneWaitingOnUser(unittest.TestCase):
+    """The false-"čaká na teba" fix: a dialog footer matching the loose regex ANYWHERE
+    is not enough. A LIVE blocking dialog occupies the input area (no free `❯` prompt
+    at the bottom); a CLOSED dialog's footer lingering above a free `❯` prompt is NOT
+    a wait."""
+    LIVE = ("● Claude asked:\n  · Zavrieť #137 alebo overiť naživo?\n"
+            "     1. Zavrieť\n     2. Overiť\n"
+            "  Tab/Arrow keys to navigate · Enter to select\n")
+    CLOSED_FOOTER_ABOVE_PROMPT = (
+        "● Claude asked:\n     Enter to select\n"
+        "● Odpovedané — pokračujem.\n"
+        "❯ \n"
+        "  ctx ███░░  caveman:lite\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+    def test_live_dialog_is_waiting(self):
+        self.assertTrue(wd.pane_waiting_on_user(self.LIVE))
+
+    def test_lingering_footer_above_free_prompt_is_not_waiting(self):
+        self.assertFalse(wd.pane_waiting_on_user(self.CLOSED_FOOTER_ABOVE_PROMPT))
+
+    def test_no_footer_or_empty_is_not_waiting(self):
+        self.assertFalse(wd.pane_waiting_on_user("built ok\n❯ "))
+        self.assertFalse(wd.pane_waiting_on_user(""))
+
+    def test_typed_at_prompt_is_not_waiting(self):
+        self.assertFalse(wd.pane_waiting_on_user(
+            "  Enter to select\n❯ nejaký text\n  ctx caveman:lite"))
+
+
+class WaitingPersistenceGate(unittest.TestCase):
+    """Job 2 must NOT ping on the FIRST poll that sees a dialog footer (a transient
+    bypass-permissions / 60s-auto-continue flash) — only after it PERSISTS to a later
+    poll. A flash that is gone by the next poll never pings."""
+    CWD = "/home/newlevel/devel/codex-bridge"
+    PANE = "%7"
+    WAITING = ("● Claude asked:\n  · Zavrieť #137 alebo overiť?\n"
+               "     1. Zavrieť\n     2. Overiť\n"
+               "  Tab/Arrow keys to navigate · Enter to select\n")
+
+    def _poll(self, tmp, capture, now):
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        d = proj / enc
+        d.mkdir(parents=True, exist_ok=True)
+        tpath = d / "sess.jsonl"
+        _write_jsonl(tpath, [_assistant("⏳ WORKING: robím ETL.")])
+        os.utime(tpath, (now - 600, now - 600))
+        state_path = Path(tmp.name) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "capture-pane" in j:
+                return capture
+            return ""
+
+        return wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"))
+
+    def test_first_poll_silent_second_poll_pings(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        now = time.time()
+        logs1 = self._poll(tmp, self.WAITING, now)
+        self.assertFalse(any("waiting" in ln for ln in logs1),
+                         "first sight must NOT ping (persistence gate): %r" % logs1)
+        logs2 = self._poll(tmp, self.WAITING, now + 90)
+        self.assertTrue(any("waiting" in ln for ln in logs2),
+                        "a persisted footer must ping on the 2nd poll: %r" % logs2)
+
+    def test_transient_flash_never_pings(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        now = time.time()
+        self._poll(tmp, self.WAITING, now)                     # flash seen once
+        logs2 = self._poll(tmp, "postavené ok\n❯ ", now + 90)  # gone by next poll
+        self.assertFalse(any("waiting" in ln for ln in logs2),
+                         "a transient flash must never ping: %r" % logs2)
+
+
 # --- job 6: 5-hour SESSION LIMIT — ping once, `continue` only AFTER the reset ------
 
 SESSION_LIMIT_BANNER = (

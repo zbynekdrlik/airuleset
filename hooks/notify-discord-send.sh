@@ -44,51 +44,80 @@ case "$EMOJI" in
 esac
 HEADER="**${EMOJI} ${PROJECT}**"
 [ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
-CONTENT=$(printf '%s\n> %s' "$HEADER" "$TEXT")
+# BASE body (header + quoted text) WITHOUT the @mention — the mention is per-target,
+# because each recipient gets THEIR OWN @mention in THEIR OWN thread.
+CONTENT_BASE=$(printf '%s\n> %s' "$HEADER" "$TEXT")
 
-# @mention the tmux owner (zbynek / marek). Single source of truth =
-# `airuleset.py notify` (reads owner from the tmux session group + the channel .env).
-# Path is relative to THIS file.
+# @mention + thread routing via `airuleset.py notify` (single source of truth: it
+# reads the owner from the tmux session group + the channel .env). Path is relative
+# to THIS file.
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
-# Resolve the owner ONCE and force it onto BOTH downstream calls (--mention-prefix
-# and --channel-id) via AIRULESET_NOTIFY_OWNER, so the @mention and the per-owner
-# thread target ALWAYS agree — mirrors the Python send() "resolve owner once"
-# invariant (a second independent tmux re-query could otherwise disagree, mentioning
-# one person while posting to the other's thread). It also means only ONE tmux query
-# runs: the two calls below short-circuit on the forced owner.
-export AIRULESET_NOTIFY_OWNER="$(python3 "$AIRULESET_PY" notify --owner 2>/dev/null || echo "")"
-MENTION=$(python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
-[ -n "$MENTION" ] && CONTENT="${MENTION}${CONTENT}"
+# Resolve the PRIMARY owner ONCE, then its parallel mirror recipients
+# (DISCORD_MIRROR_<OWNER> — e.g. david → also zbynek, so a persona's notifications
+# ALSO ping a real person). For a normal single-owner box (zbynek / marek) the mirror
+# list is EMPTY → the loop runs exactly once → unchanged single-post behavior.
+PRIMARY_OWNER="$(python3 "$AIRULESET_PY" notify --owner 2>/dev/null || echo "")"
+MIRRORS="$(AIRULESET_NOTIFY_OWNER="$PRIMARY_OWNER" python3 "$AIRULESET_PY" notify --mirror-owners 2>/dev/null || echo "")"
 
-if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
-    if [ -n "${ND_DRYRUN_FILE:-}" ]; then
-        printf '%s\n' "$CONTENT" > "$ND_DRYRUN_FILE"
-    else
-        printf '%s\n' "$CONTENT"
-    fi
-    exit 0
-fi
-
-# Real delivery — bot token from the Discord channel config; channel/THREAD id
-# from the owner-aware resolver so each person's notifications land in THEIR own
-# thread (DISCORD_NOTIFICATION_CHANNEL_<OWNER>, else the shared id). The resolver
-# (airuleset.py notify --channel-id) is the SINGLE source of truth shared with the
-# Python send() path — no duplicated per-owner logic in bash.
+# Real-delivery prerequisites (shared across all targets). Resolved once — and, since
+# this now runs BEFORE the dry-run branch, the grep MUST tolerate a tokenless .env
+# (no DISCORD_BOT_TOKEN line): `grep` returns 1 on no-match, which under
+# `set -euo pipefail` would kill the script before any message is emitted. `|| true`
+# keeps BOT_TOKEN="" so dry-run still prints and real delivery falls through the guard.
 ENVF=~/.claude/channels/discord/.env
 BOT_TOKEN=""
 if [ -f "$ENVF" ]; then
-    BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n')
+    BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' "$ENVF" 2>/dev/null | cut -d'=' -f2- | tr -d "\"'" | tr -d '\r\n' || true)
 fi
-CHANNEL_ID=$(python3 "$AIRULESET_PY" notify --channel-id 2>/dev/null | tr -d '\r\n' || echo "")
-[ -z "$BOT_TOKEN" ] && exit 0
-[ -z "$CHANNEL_ID" ] && exit 0
-command -v jq &>/dev/null || exit 0
 
-(curl -s --max-time 5 -X POST \
-    "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
-    -H "Authorization: Bot ${BOT_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
-    >/dev/null 2>&1) &
+# Emit ONE message per target. The PRIMARY target ALWAYS emits — even when the owner
+# is empty/unknown (no @mention, shared-or-no channel) — so a machine with no tmux
+# owner still notifies exactly as before. Mirrors are EXTRA and only fire when
+# DISCORD_MIRROR_<OWNER> lists them; a mirror whose thread equals the primary's (or
+# is empty) is skipped, so a misconfig can't double-post into one thread.
+PRIMARY_CH=""
+emit_one() {
+    # $1 = owner (may be empty for the primary). Forces AIRULESET_NOTIFY_OWNER onto
+    # both resolver calls so mention+thread ALWAYS agree (the Python send() invariant).
+    local T="$1"
+    local MENTION CH CONTENT
+    MENTION=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
+    CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id 2>/dev/null | tr -d '\r\n' || echo "")
+    CONTENT="${MENTION}${CONTENT_BASE}"
+
+    if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
+        # dry-run: one block per target (single-owner boxes emit exactly one — the
+        # unchanged test contract). File mode appends; stdout mode prints.
+        if [ -n "${ND_DRYRUN_FILE:-}" ]; then
+            printf '%s\n' "$CONTENT" >> "$ND_DRYRUN_FILE"
+        else
+            printf '%s\n' "$CONTENT"
+        fi
+        return 0
+    fi
+
+    # Real delivery. Skip when we can't post, or when this thread was already used.
+    [ -z "$BOT_TOKEN" ] && return 0
+    [ -z "$CH" ] && return 0
+    command -v jq &>/dev/null || return 0
+    if [ -z "$PRIMARY_CH" ]; then
+        PRIMARY_CH="$CH"
+    elif [ "$CH" = "$PRIMARY_CH" ]; then
+        return 0
+    fi
+
+    (curl -s --max-time 5 -X POST \
+        "https://discord.com/api/v10/channels/${CH}/messages" \
+        -H "Authorization: Bot ${BOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
+        >/dev/null 2>&1) &
+}
+
+emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
+for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
+    [ -n "$T" ] || continue
+    emit_one "$T"
+done
 
 exit 0

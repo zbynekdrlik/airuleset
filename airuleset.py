@@ -1230,7 +1230,7 @@ def cmd_notify(args):
                            --done --remaining --tickets-json). Deduped on repo#pr.
       --body "<markdown>"  send arbitrary markdown (the general primitive).
     """
-    from notify import (compose_autopilot_card, mention_prefix,
+    from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
                         notification_channel, resolve_owner, send)
 
     if getattr(args, "owner", False):
@@ -1243,6 +1243,11 @@ def cmd_notify(args):
 
     if getattr(args, "channel_id", False):
         sys.stdout.write(notification_channel())
+        return
+
+    if getattr(args, "mirror_owners", False):
+        # space-separated parallel/CC recipients for the current owner (shell path)
+        sys.stdout.write(" ".join(mirror_owners()))
         return
 
     if getattr(args, "run_card", False):
@@ -1558,6 +1563,10 @@ def main():
     p_notify.add_argument("--owner", dest="owner", action="store_true",
                           help="Print the resolved tmux owner (so a caller can resolve "
                                "once and pass AIRULESET_NOTIFY_OWNER to keep mention+channel in sync)")
+    p_notify.add_argument("--mirror-owners", dest="mirror_owners", action="store_true",
+                          help="Print the space-separated parallel/CC recipients for the "
+                               "current owner (DISCORD_MIRROR_<OWNER>) — the shell send path "
+                               "posts a copy to each one's own thread + @mention")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")

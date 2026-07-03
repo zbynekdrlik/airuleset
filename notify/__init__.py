@@ -146,6 +146,28 @@ def mention_prefix(env=None, owner=None):
     return val + " "
 
 
+def mirror_owners(env=None, owner=None):
+    """Owners to ALSO notify, IN PARALLEL, when a notification is for `owner` — the
+    CC / supervisor recipients. Config lives in the .env as `DISCORD_MIRROR_<OWNER>`,
+    a comma/space-separated list of other owner names — e.g.
+    `DISCORD_MIRROR_DAVID=zbynek` makes every david notification ALSO land in
+    zbynek's own thread with zbynek's @mention. Returns a de-duplicated list of
+    lowercase owners, excluding the primary owner itself; empty when unset or the
+    owner can't be determined. Fail-safe (never raises)."""
+    env = _read_env() if env is None else env
+    owner = resolve_owner() if owner is None else owner
+    if not owner:
+        return []
+    raw = (env.get("DISCORD_MIRROR_" + owner.upper()) or "").strip()
+    out, seen = [], {owner.lower()}
+    for tok in re.split(r"[,\s]+", raw):
+        t = tok.strip().lower()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def _plural_done(n):
     if n == 1:
         return "ticket dokončený"
@@ -336,33 +358,11 @@ def _prune_dedup(d):
 
 
 # --- send ----------------------------------------------------------------
-def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
-    """Prepend the owner @mention to `body` and POST it to the Discord
-    notification channel. Deduped on `dedup_key`. Returns a short status string
-    ('sent' / 'dedup' / 'dry-run' / 'no-config' / 'error'). Never raises."""
-    env = _read_env() if env is None else env
-    # Resolve the owner ONCE so the @mention and the per-owner thread target agree
-    # (a tmux re-query between them could otherwise disagree).
-    if owner is None:
-        owner = resolve_owner()
-    content = (mention_prefix(env, owner) + (body or ""))[:_MAX_CONTENT]
-
-    # dry-run never claims dedup (so previews / tests stay re-runnable).
-    if dry_run:
-        print(content)
-        return "dry-run"
-
-    # Claim FIRST so a racing duplicate can't double-post; RELEASE on any
-    # non-success so a transient failure can be retried (the card is "vzdy").
-    if dedup_key and not _dedup_claim(dedup_key):
-        return "dedup"
-
-    token = env.get("DISCORD_BOT_TOKEN", "")
-    # Per-owner thread (claude-zbynek / claude-marek) when configured, else shared.
-    channel = notification_channel(env, owner)
-    if not token or not channel:
-        _dedup_release(dedup_key)
-        return "no-config"
+def _post_discord(token, channel, content):
+    """POST one message to one Discord channel/thread. Returns True on success.
+    Discord REQUIRES a User-Agent — Cloudflare 403s the default "Python-urllib/*"
+    ("error code: 1010"); a DiscordBot UA (per spec) gets through (the same reason
+    the curl-based hook works). Never raises."""
     try:
         req = urllib.request.Request(
             "https://discord.com/api/v10/channels/%s/messages" % channel,
@@ -370,17 +370,53 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
             method="POST",
             headers={"Authorization": "Bot " + token,
                      "Content-Type": "application/json",
-                     # Discord's API REQUIRES a User-Agent, and Cloudflare blocks
-                     # the default "Python-urllib/*" with 403 "error code: 1010".
-                     # A DiscordBot UA (per Discord's spec) gets through — the same
-                     # reason the curl-based hook works.
                      "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
         urllib.request.urlopen(req, timeout=6).read()
-        return "sent"
+        return True
     except Exception:
-        # Do NOT release the dedup claim here: a timeout can fire AFTER Discord
-        # already accepted the message, so releasing would re-send a duplicate on
-        # the next merge report. No-dups beats a possibly-lost card on a genuine
-        # (rare) transient failure. ("no-config" above DID release — it provably
-        # never sent.)
-        return "error"
+        return False
+
+
+def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
+    """Prepend the owner @mention to `body` and POST it to the Discord notification
+    channel — AND, in parallel, to every mirror owner's own thread with their own
+    @mention (DISCORD_MIRROR_<OWNER>, e.g. david → also zbynek). Deduped on
+    `dedup_key`. Returns a short status string ('sent' / 'dedup' / 'dry-run' /
+    'no-config' / 'error') reflecting the PRIMARY send. Never raises."""
+    env = _read_env() if env is None else env
+    # Resolve the owner ONCE so the @mention and the per-owner thread target agree
+    # (a tmux re-query between them could otherwise disagree).
+    if owner is None:
+        owner = resolve_owner()
+    # Primary owner first, then the parallel mirror recipients — each gets the SAME
+    # body in THEIR OWN thread with THEIR OWN @mention.
+    targets = [owner] + mirror_owners(env, owner)
+
+    # dry-run never claims dedup (so previews / tests stay re-runnable). One line per
+    # target (a single line when no mirror is configured — the unchanged contract).
+    if dry_run:
+        print("\n".join((mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT]
+                         for t in targets))
+        return "dry-run"
+
+    # Claim FIRST so a racing duplicate can't double-post; RELEASE only when the
+    # primary provably never sent (no token / no channel), so a transient failure
+    # can NOT re-send (a timeout can fire AFTER Discord accepted the message).
+    if dedup_key and not _dedup_claim(dedup_key):
+        return "dedup"
+
+    token = env.get("DISCORD_BOT_TOKEN", "")
+    primary_channel = notification_channel(env, owner)
+    if not token or not primary_channel:
+        _dedup_release(dedup_key)
+        return "no-config"
+
+    # Primary send determines the return status; mirror sends are best-effort (a
+    # mirror failure never fails the whole notification, never releases the dedup).
+    status = "sent" if _post_discord(
+        token, primary_channel, (mention_prefix(env, owner) + (body or ""))[:_MAX_CONTENT]) else "error"
+    for t in targets[1:]:
+        ch = notification_channel(env, t)
+        if ch and ch != primary_channel:
+            _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
+    return status

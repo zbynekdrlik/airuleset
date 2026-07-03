@@ -505,6 +505,33 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertTrue(out.startswith("<@773451844110385193> **✅"),
                         f"idle ping not @mention-prefixed: {out!r}")
 
+    def _mirror_home(self):
+        # a persona box: owner=david, mirrored to zbynek. Each has its own thread +
+        # @mention so both people get the notification in their OWN thread.
+        home = tempfile.mkdtemp()
+        d = Path(home) / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        (d / ".env").write_text(
+            "DISCORD_MENTION_DAVID=90000\nDISCORD_MENTION_ZBYNEK=10000\n"
+            "DISCORD_NOTIFICATION_CHANNEL_DAVID=dthread\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread\n"
+            "DISCORD_MIRROR_DAVID=zbynek\n")
+        return home
+
+    def test_shell_send_mirrors_question_to_parallel_owner(self):
+        # The shell send path (used by the ❓/✅ hooks) must fan out to the primary
+        # owner AND every DISCORD_MIRROR_<OWNER> — david's ❓ ALSO reaches zbynek's
+        # thread with zbynek's @mention. Two blocks in the dry-run file, primary first.
+        sid, _p = self._sid()
+        self._stop(sid, "❓ NEEDS YOU: reštartovať most?",
+                   owner="david", home=self._mirror_home())
+        sent = self._sent()
+        blocks = [b for b in sent.split("<@") if b.strip()]
+        self.assertEqual(len(blocks), 2, f"expected david + zbynek blocks: {sent!r}")
+        self.assertIn("<@90000> ", sent)    # david's own @mention
+        self.assertIn("<@10000> ", sent)    # zbynek mirror @mention
+        self.assertTrue(sent.startswith("<@90000> "), "primary (david) not first")
+
     def test_governance_no_hand_fired_per_merge_ping(self):
         # pr-merge-policy.md must NOT instruct an active per-merge device ping
         # (contradicts the mobile model); milestone-notifications.md must state it
@@ -2026,6 +2053,22 @@ class TestDiscordAutopilotNotify(TestCase):
     def test_notification_channel_empty_when_nothing_set(self):
         self.assertEqual(self.notify.notification_channel(env={}, owner="zbynek"), "")
 
+    # --- parallel mirror recipients (DISCORD_MIRROR_<OWNER>) ---------------
+    def test_mirror_owners_parses_list_dedups_and_excludes_self(self):
+        # david → also zbynek (a persona's notifications ALSO ping a real person);
+        # comma/space separated, self excluded, dupes collapsed, all lowercased.
+        env = {"DISCORD_MIRROR_DAVID": "zbynek, marek zbynek DAVID"}
+        self.assertEqual(self.notify.mirror_owners(env=env, owner="david"),
+                         ["zbynek", "marek"])
+
+    def test_mirror_owners_empty_when_unset_or_no_owner(self):
+        self.assertEqual(self.notify.mirror_owners(env={}, owner="david"), [])
+        self.assertEqual(self.notify.mirror_owners(
+            env={"DISCORD_MIRROR_ZBYNEK": "marek"}, owner=""), [])
+        # a normal single-owner box (no mirror configured) → no fan-out
+        self.assertEqual(self.notify.mirror_owners(
+            env={"DISCORD_MENTION_ZBYNEK": "1"}, owner="zbynek"), [])
+
     # --- card composition -------------------------------------------------
     def test_card_has_goal_achieved_review_progress(self):
         card = self.notify.compose_autopilot_card(
@@ -2171,10 +2214,11 @@ class TestDiscordAutopilotNotify(TestCase):
         # repo + issue are passed explicitly (no board run_id fallback).
         import unittest.mock as m
         # NOTE: m.Mock auto-creates EVERY attr truthy, so every cmd_notify
-        # early-return flag (mention_prefix / channel_id / owner / autopilot_done)
-        # MUST be pinned False here — a new flag left unpinned hijacks this test.
+        # early-return flag (mention_prefix / channel_id / owner / mirror_owners /
+        # autopilot_done) MUST be pinned False here — a new flag left unpinned hijacks
+        # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                      channel_id=False, owner=False,
+                      channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
@@ -2222,7 +2266,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                      channel_id=False, owner=False,
+                      channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,
                           merge_sha=None, url=None, review="ok", dedup_key=None,
@@ -2346,6 +2390,83 @@ class TestDiscordAutopilotNotify(TestCase):
                         self.notify.send("hi", env=env, owner="marek"), "sent")
         self.assertIn("/channels/mthread/messages", captured["url"])
         self.assertNotIn("shared", captured["url"])
+
+    def test_send_mirrors_to_parallel_owner_thread(self):
+        # david's notification must ALSO land in zbynek's thread with zbynek's
+        # @mention — the persona-runs-parallel-to-a-real-person requirement. One
+        # POST per target; the return status reflects the PRIMARY send only.
+        import unittest.mock as m
+        posts = []
+
+        def fake_urlopen(req, timeout=None):
+            posts.append((req.full_url, json.loads(req.data.decode())["content"]))
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x",
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_MENTION_DAVID": "90000",
+               "DISCORD_MENTION_ZBYNEK": "10000",
+               "DISCORD_MIRROR_DAVID": "zbynek"}
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    r = self.notify.send("hi", env=env, owner="david")
+        self.assertEqual(r, "sent")
+        urls = {u for u, _ in posts}
+        # BOTH threads received the message
+        self.assertTrue(any("/channels/dthread/messages" in u for u in urls),
+                        f"david thread not posted: {urls}")
+        self.assertTrue(any("/channels/zthread/messages" in u for u in urls),
+                        f"zbynek mirror thread not posted: {urls}")
+        # each target got ITS OWN @mention (david=<@90000>, zbynek=<@10000>)
+        d = next(c for u, c in posts if "dthread" in u)
+        z = next(c for u, c in posts if "zthread" in u)
+        self.assertTrue(d.startswith("<@90000> "), f"david mention wrong: {d!r}")
+        self.assertTrue(z.startswith("<@10000> "), f"zbynek mention wrong: {z!r}")
+
+    def test_send_mirror_skips_when_same_thread(self):
+        # A mirror that resolves to the SAME thread as the primary must NOT double-post.
+        import unittest.mock as m
+        posts = []
+
+        def fake_urlopen(req, timeout=None):
+            posts.append(req.full_url)
+
+            class _R:
+                def read(self):
+                    return b""
+            return _R()
+
+        env = {"DISCORD_BOT_TOKEN": "x",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "shared",  # both fall back to shared
+               "DISCORD_MIRROR_DAVID": "zbynek"}
+        with tempfile.TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                with m.patch("notify.urllib.request.urlopen",
+                             side_effect=fake_urlopen):
+                    self.notify.send("hi", env=env, owner="david")
+        self.assertEqual(len(posts), 1, f"double-posted to one thread: {posts}")
+
+    def test_send_dry_run_shows_one_line_per_target(self):
+        # dry-run mirrors the real fan-out: one line per target, primary first.
+        import io, contextlib
+        env = {"DISCORD_MENTION_DAVID": "90000",
+               "DISCORD_MENTION_ZBYNEK": "10000",
+               "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_MIRROR_DAVID": "zbynek"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = self.notify.send("BODY", env=env, owner="david", dry_run=True)
+        lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+        self.assertEqual(r, "dry-run")
+        self.assertEqual(lines, ["<@90000> BODY", "<@10000> BODY"])
 
     def test_send_unknown_owner_posts_to_shared(self):
         import unittest.mock as m
@@ -3070,15 +3191,21 @@ class TestApiWatchdog(TestCase):
         self.assertFalse(self.w.pane_waiting_on_user(""))
 
     def test_run_once_pings_waiting_session_never_acts(self):
+        # #33: the waiting footer must survive ≥2 polls before it pings (the
+        # persistence gate) — a lone poll that matched the loose footer regex on a
+        # lingering / auto-continued dialog false-pinged "čaká na teba". First poll
+        # records (silent); the confirmed second poll pings once, never injects keys.
         now = 1_000_000
         cwd = "/devel/asking"
         self._transcript(cwd, [self._OK], 200, now)   # not flagged; 200s stale
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", captures={"%5": self._WAIT_CAP})
-        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
-                               projects_dir=self.projects, state_path=self.state,
-                               grace=300, wait_grace=120)
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, wait_grace=120)
+        self.w.run_once(now=now, **kw)                       # first sight → silent
+        self.assertEqual(self.pings, [], "first poll must NOT ping (unconfirmed)")
+        logs = self.w.run_once(now=now + 60, **kw)           # confirmed → pings
         self.assertEqual(fake.continues_sent(), 0, "waiting must NEVER inject keys")
-        self.assertEqual(len(self.pings), 1, "waiting pings once")
+        self.assertEqual(len(self.pings), 1, "waiting pings once, on confirmation")
         self.assertIn("asking", self.pings[0][0])
         self.assertTrue(self.pings[0][1].startswith("waiting:"))
         self.assertTrue(any("waiting" in l for l in logs))
@@ -3140,14 +3267,17 @@ class TestApiWatchdog(TestCase):
     def test_run_once_ping_mentions_pane_owner(self):
         # the ping must @mention the OWNER of the waiting pane (resolved from that
         # pane's tmux session group) — the watchdog runs headless with no tmux of
-        # its own, so it can't use the current-context owner
+        # its own, so it can't use the current-context owner. Two polls: the #33
+        # persistence gate pings on the confirmed second poll.
         now = 1_000_000
         cwd = "/devel/ownertest"
         self._transcript(cwd, [self._OK], 200, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
                          captures={"%5": self._WAIT_CAP}, owners={"%5": "marek-12"})
-        self.w.run_once(now=now, run=fake, send_fn=self._send, projects_dir=self.projects,
-                        state_path=self.state, grace=300, wait_grace=120)
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, wait_grace=120)
+        self.w.run_once(now=now, **kw)              # first sight → silent
+        self.w.run_once(now=now + 60, **kw)         # confirmed → pings
         self.assertEqual(self.pings[0][2], "marek", "ping must carry the pane's owner")
 
     # --- weekly token-usage alert -------------------------------------------

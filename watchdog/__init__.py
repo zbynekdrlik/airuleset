@@ -539,7 +539,21 @@ _WAITING_RX = re.compile(
 
 
 def pane_waiting_on_user(captured):
-    return bool(captured) and bool(_WAITING_RX.search(captured))
+    # A LIVE blocking dialog (AskUserQuestion / permission / plan approval) occupies
+    # the input area — there is NO free `❯` input-prompt line at the bottom. A CLOSED
+    # dialog can leave its footer text on screen while the session sits at the normal
+    # `❯` prompt (idle) or works past it — that is NOT waiting, and matching the loose
+    # footer regex anywhere in the pane false-pinged "čaká na teba" (bypass-permissions
+    # flashes + AskUserQuestions that auto-continue after ~60s). So require the footer
+    # AND the absence of a bottom `❯` input prompt (the persistence gate in run_once
+    # adds the second guard: the footer must survive ≥2 polls before it pings).
+    if not captured or not _WAITING_RX.search(captured):
+        return False
+    for ln in [l for l in captured.splitlines() if l.strip()][-6:]:
+        s = ln.strip()
+        if s == "❯" or s.startswith("❯ "):   # a free `❯` prompt → not blocked
+            return False
+    return True
 
 
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
@@ -1262,23 +1276,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             wkey = "wait:" + key
             w = state.get(wkey)
             if w is None:
-                # approximate when the prompt opened = the last transcript write,
-                # so a prompt that has ALREADY been open >= wait_grace pings on the
-                # first poll (not wait_grace later).
-                w = {"first_seen": int(now - idle), "pinged": False}
+                # FIRST sight of this footer — record, do NOT ping yet. A transient
+                # flash (a bypass-permissions prompt that auto-approves, an
+                # AskUserQuestion that auto-continues after ~60s, a one-capture
+                # lingering footer) is GONE by the next poll and never pings. Only a
+                # footer that PERSISTS to a later poll (a genuinely unanswered wait)
+                # pings — the persistence half of the false-"čaká na teba" fix (the
+                # other half is the bottom-`❯` guard in pane_waiting_on_user).
+                w = {"first_seen": int(now - idle), "pinged": False, "confirmed": False}
                 state[wkey] = w
-            else:
-                # a pre-existing entry (incl. an old-format one with no `pinged`)
-                # was already pinged by a prior poll — never re-ping on upgrade.
-                w.setdefault("pinged", True)
+            w.setdefault("pinged", False)
+            w.setdefault("confirmed", False)
             w["last_seen"] = int(now)
-            if not w.get("pinged") and (now - w["first_seen"]) >= wait_grace:
+            if (not w["pinged"] and w["confirmed"]
+                    and (now - w["first_seen"]) >= wait_grace):
                 w["pinged"] = True
                 logs.append("waiting %s [%s]" % (project, key))
                 send_fn("❓ **%s** — čaká na teba\n> Session sa zastavila "
                         "na otázke (AskUserQuestion) — pozri sa naň." % project,
                         owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
                         dry_run=dry_run)
+            w["confirmed"] = True          # seen this poll → a LATER poll may ping
             continue                       # waiting on the user → not a working-stall
 
         # --- (4a) TEXT-EMITTED TOOL-CALL STALL → nudge immediately (no 30-min wait) --
