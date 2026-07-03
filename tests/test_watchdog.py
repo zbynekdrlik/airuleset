@@ -333,6 +333,16 @@ class PaneWaitingOnUser(unittest.TestCase):
         self.assertTrue(wd.pane_waiting_on_user(
             "  Do you want to proceed?\n  Enter to select\n  1. Yes\n❯ 2. No\n"))
 
+    def test_dialog_with_stray_typed_prompt_above_footer_is_still_waiting(self):
+        # #2 LOW (same root cause as the #1 typing-gate hole): a LIVE dialog whose
+        # transcript ABOVE the footer shows an example command line `❯ git status` must
+        # still register as waiting. The old multi-line window matched that stray
+        # `❯ <text>` and suppressed the "čaká na teba" ping. The boundary line is the
+        # footer (not a `❯`), so the free-prompt check is False → waiting True.
+        self.assertTrue(wd.pane_waiting_on_user(
+            "  Do you want to proceed?\n❯ git status\n"
+            "  Enter to select · Tab/Arrow keys to navigate\n"))
+
 
 class PaneAtIdlePrompt(unittest.TestCase):
     """Never type a stuck-check nudge into a pane that is NOT at a free `❯` idle prompt.
@@ -370,9 +380,32 @@ class PaneAtIdlePrompt(unittest.TestCase):
         # interacting; a nudge keystroke would corrupt their input → NOT typeable.
         self.assertFalse(wd.pane_at_idle_prompt(self.IDLE_TYPED))
 
+    # THE #1 HIGH FINDING (adversarial review, 2026-07-03): a running foreground turn
+    # (spinner is the boundary line) whose STREAMED TRANSCRIPT tail just above the spinner
+    # contains a lone `❯` line — realistic: shell-prompt help, tool output like
+    # `printf '❯'`, or a session editing THIS very pane-detection code. A window that
+    # scanned lines ABOVE the boundary matched that stray `❯`, called the BUSY pane idle,
+    # and would have typed a nudge INTO the running turn (the exact #233 scar). The `❯`
+    # must be the boundary line ITSELF (first non-chrome up from the bottom = the spinner
+    # here), never the transcript above it.
+    BUSY_STRAY_PROMPT = (
+        "The starship prompt symbol is:\n❯\n"
+        "✻ Herding… (esc to interrupt)\n"
+        "  ctx ███  caveman:lite\n  ⏵⏵ bypass permissions on\n")
+    BUSY_STRAY_PROMPT_STRIP = (
+        "● Bash(printf '%s' '❯')\n❯\n"
+        "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
+        "  ctx ██  5h 20%  caveman:lite\n  ⏵⏵ bypass permissions on\n")
+
     def test_busy_foreground_agent_is_not_typeable(self):
         # THE FIX: a running foreground agent (no free `❯`) must NOT be typed into.
         self.assertFalse(wd.pane_at_idle_prompt(self.BUSY))
+
+    def test_busy_with_stray_prompt_in_transcript_is_not_typeable(self):
+        # #1 HIGH: a BUSY pane whose transcript tail ends on a lone `❯` above the spinner
+        # must still be classified BUSY — the boundary line is the spinner, not the stray.
+        self.assertFalse(wd.pane_at_idle_prompt(self.BUSY_STRAY_PROMPT))
+        self.assertFalse(wd.pane_at_idle_prompt(self.BUSY_STRAY_PROMPT_STRIP))
 
     def test_open_menu_is_not_a_free_prompt(self):
         # a `❯ 1.` pointer is an open dialog, not a free prompt → not typeable

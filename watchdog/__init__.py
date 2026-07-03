@@ -562,17 +562,26 @@ def _is_bottom_chrome(s):
 
 
 def _has_free_prompt(captured, bare_only=False):
-    """True if the pane shows a FREE `❯` input prompt near the bottom — the session is
-    IDLE at the prompt, NOT running a foreground turn (which replaces the input box with
-    a spinner / "esc to interrupt" and shows NO `❯`).
+    """True if the pane shows a FREE `❯` input prompt at the bottom — the session is IDLE
+    at the prompt, NOT running a foreground turn (which replaces the input box with a
+    spinner / "esc to interrupt" and shows NO input `❯`).
 
-    The prompt is located by stripping the VARIABLE-height trailing chrome (agent strip +
-    statusline + mode hint + border rules — see `_is_bottom_chrome`) and then checking the
-    last few remaining lines. A FIXED tail window is WRONG: the agent strip adds one `◯`
-    row per concurrent subagent, so a genuinely idle `⏳ WORKING` session with ≥2 background
-    workers renders `❯` past a 6-line tail (live-verified) — a fixed tail would then
-    false-skip the nudge on exactly the fanned-out-then-died case job 4 exists for. The
-    real prompt renders as `❯` + U+00A0, which `str.strip()` reduces to a bare `❯`.
+    The input box is the FIRST non-chrome line up from the bottom. We locate it by peeling
+    the VARIABLE-height trailing chrome (agent strip — `● main` + one `◯ <agent>` row PER
+    concurrent subagent — plus the statusline / mode hint / border rules; see
+    `_is_bottom_chrome`) and then testing ONLY that one boundary line. Chrome-stripping
+    already absorbs the whole agent strip, so a genuinely idle `⏳ WORKING` session with N
+    background workers still lands its `❯` exactly at the boundary regardless of N.
+
+    We must NOT scan a multi-line window above the boundary: during a running foreground
+    turn the boundary line IS the spinner, and the transcript output just above it can
+    contain a lone `❯` (shell-prompt help, tool output, a session editing THIS very code).
+    A window that reached up into that transcript would match the stray `❯`, call a BUSY
+    pane idle, and INTERRUPT the running turn — the exact #233 scar this gate prevents. For
+    a keystroke gate the safe failure is a MISSED nudge (an unrecognized chrome line below
+    the box hides it → we simply don't type), NEVER a false "idle" that types into a turn.
+    So: the `❯` must be the boundary line itself. The real prompt renders as `❯` + U+00A0,
+    which `str.strip()` reduces to a bare `❯`.
 
     bare_only=True (the TYPING gate, `pane_at_idle_prompt`): require a BARE `❯` (empty input
     box). If the user has typed text (`❯ blah`) we must NOT type over it. bare_only=False
@@ -582,14 +591,16 @@ def _has_free_prompt(captured, bare_only=False):
         return False
     lines = [l.strip() for l in captured.splitlines() if l.strip()]
     i, n = len(lines), 0
-    while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 15:
+    while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
         i -= 1
         n += 1
-    for s in lines[max(0, i - 3):i]:
-        if s == "❯":
-            return True
-        if not bare_only and s.startswith("❯ ") and not _MENU_POINTER_RX.match(s):
-            return True
+    if i <= 0:
+        return False
+    s = lines[i - 1]                         # ONLY the boundary line — never the transcript above it
+    if s == "❯":
+        return True
+    if not bare_only and s.startswith("❯ ") and not _MENU_POINTER_RX.match(s):
+        return True
     return False
 
 
