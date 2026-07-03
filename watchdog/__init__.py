@@ -1307,6 +1307,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if pane_in_mode(pid, run):
                 logs.append("skip in-mode %s" % (project or pid))
                 continue
+            # BUSY-PANE guard (uniform with jobs 4/4a/6): the api-error flag on the
+            # last transcript entry means CC ABORTED that turn → the pane is normally
+            # idle at a free `❯`. But if the user MANUALLY resumed within the idle
+            # window, a foreground turn/agent is now running (spinner, no free `❯`) and
+            # its first entry hasn't landed yet — typing `continue` would INTERRUPT it
+            # (the #233 scar). Never inject unless the pane shows a free prompt; skip
+            # WITHOUT burning a retry (the next poll re-checks).
+            if not pane_at_idle_prompt(captured):
+                logs.append("skip busy-pane (api-error) %s" % (project or pid))
+                continue
             stalled.add(key)
             err_hash = _hash(err_text)
             # seed first_seen with now-idle so an already-stale stall counts from

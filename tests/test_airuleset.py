@@ -2788,6 +2788,23 @@ class TestApiWatchdog(TestCase):
         self.assertIn("projx", self.pings[0][0])         # project name in the alert
         self.assertTrue(any("nudge#1" in l for l in logs))
 
+    def test_run_once_apierror_skipped_when_pane_busy(self):
+        # #233 uniform guard: an api-error flag on the last entry normally means CC
+        # aborted the turn (pane idle at `❯`). But if the user MANUALLY resumed within
+        # the idle window, a foreground turn/agent is running (busy pane, no free `❯`)
+        # and typing `continue` would INTERRUPT it. A busy pane → skip, no keystroke,
+        # no ping, no retry burned.
+        now = 1_000_000
+        cwd = "/devel/projbusy"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=_BUSY_PANE)
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 0, "must NOT type into a running agent")
+        self.assertEqual(self.pings, [], "busy pane = not stalled → no ping")
+        self.assertTrue(any("skip busy-pane (api-error)" in l for l in logs))
+
     def test_run_once_ignores_fresh_transcript(self):
         now = 1_000_000
         cwd = "/devel/fresh"
