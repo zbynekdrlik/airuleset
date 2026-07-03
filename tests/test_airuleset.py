@@ -2606,13 +2606,27 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("notify-discord-send.sh", pending)
 
 
+# A pane IDLE at a free `❯` prompt (turn ended, safe to type a nudge). The real prompt
+# renders as `❯`+NBSP → `.strip()` == "❯". No _WAITING_RX footer, no session-limit banner.
+_IDLE_PANE = ("● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+              "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+# A pane actively running a FOREGROUND agent — spinner, no free `❯` (typing interrupts).
+_BUSY_PANE = ("● Validate issue #233\n  ⎿ running…\n"
+              "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n")
+
+
 class _FakeTmux:
     """Stand-in for the watchdog's `run` (tmux exec). Answers list-panes /
     capture-pane from canned data and records every send-keys argv."""
 
-    def __init__(self, panes="", captures=None, modes=None, owners=None):
+    def __init__(self, panes="", captures=None, modes=None, owners=None,
+                 default_capture=_IDLE_PANE):
         self.panes = panes
         self.captures = captures or {}
+        # Panes with no explicit capture default to an IDLE `❯` prompt — i.e. typeable —
+        # so a transcript-stall test fires the nudge (the pre-#233-fix assumption). A
+        # busy-pane test passes default_capture=_BUSY_PANE (or an explicit captures= map).
+        self.default_capture = default_capture
         self.modes = modes or {}          # pane_id -> "1" (in copy-mode) / "0"
         self.owners = owners or {}        # pane_id -> tmux session/group (e.g. marek-12)
         self.sent = []
@@ -2630,7 +2644,7 @@ class _FakeTmux:
             return ""
         if argv[:2] == ["tmux", "capture-pane"]:
             pid = argv[argv.index("-t") + 1]
-            return self.captures.get(pid, "")
+            return self.captures.get(pid, self.default_capture)
         if argv[:2] == ["tmux", "send-keys"]:
             self.sent.append(argv)
             return ""
@@ -2872,6 +2886,38 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 0, "job 4 sends stuck-check, NOT `continue`")
         self.assertEqual(self.pings, [], "a first nudge must NOT ping (no Discord noise)")
         self.assertTrue(any("working-nudge#1" in l for l in logs))
+
+    def test_run_once_working_stall_skipped_when_pane_busy(self):
+        # THE #233 INCIDENT: ⏳ WORKING + idle transcript (a FOREGROUND agent blocks the
+        # parent, freezing its transcript) but the PANE is running the agent (spinner, no
+        # free `❯`). A nudge keystroke would INTERRUPT the live agent → must skip
+        # busy-pane, send NOTHING. Idle here is below 2× threshold → NOT yet a wedge ping.
+        now, cwd = 1_000_000, "/devel/wbusy"
+        self._transcript(cwd, [self._WORKING], 450, now)   # >300 (enters) but <600 (no ping)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=_BUSY_PANE)
+        logs = self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0, "MUST NOT type into a busy pane")
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [], "below 2× threshold → not yet a wedge ping")
+        self.assertTrue(any("skip busy-pane (working-stall)" in l for l in logs))
+
+    def test_run_once_busy_pane_wedged_pings_only(self):
+        # #3: a busy pane (foreground agent, no free `❯`) with NO advancing subagent that
+        # stays stuck a LONG time (≥ 2× stall_working) is a genuinely wedged/hung turn.
+        # A ping never interrupts → escalate to ONE ping, NEVER a keystroke; one/episode.
+        now, cwd = 1_000_000, "/devel/wwedge"
+        self._transcript(cwd, [self._WORKING], 3600, now)   # idle 1h ≥ 2×300
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=_BUSY_PANE)
+        logs = self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent() + fake.continues_sent(), 0,
+                         "wedged busy pane must NEVER be typed into")
+        self.assertEqual(len(self.pings), 1, "exactly one busy-pane-wedged ping")
+        self.assertIn("wwedge", self.pings[0][0])
+        self.assertTrue(self.pings[0][1].startswith("busypane:"))
+        self.assertTrue(any("busy-pane-wedged" in l for l in logs))
+        # second poll in the same episode → no second ping
+        self._run4(now + 60, fake)
+        self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
 
     def test_run_once_working_stall_skipped_when_subagent_active(self):
         # a live SUBAGENT transcript → the parent ⏳ is HEALTHY waiting → NO nudge

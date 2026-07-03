@@ -541,6 +541,58 @@ _WAITING_RX = re.compile(
 _MENU_POINTER_RX = re.compile(r"❯ \d+\.")
 
 
+def _is_bottom_chrome(s):
+    """A trailing 'chrome' line rendered BELOW the input box: the agent strip (`● main`
+    + one `◯ <agent>` row PER concurrent subagent), the mode hint (`⏵⏵ …`), the `ctx …`
+    footer statusline, or a horizontal border rule. Their count is VARIABLE — the agent
+    strip grows one row per running subagent — so these MUST be stripped from the bottom
+    before locating the `❯` prompt. `s` is already stripped."""
+    if not s:
+        return True
+    if s[0] in "●◯":                                    # agent-strip rows
+        return True
+    if s.startswith("⏵⏵"):                              # bypass / mode hint
+        return True
+    if s.startswith("ctx "):                            # footer statusline
+        return True
+    bars = sum(c in "─—━═╌╍┄┅┈┉╭╮╰╯┌┐└┘│┃" for c in s)   # a box border / rule (labelled ok)
+    if bars >= 4 and bars >= len(s.replace(" ", "")) - 12:
+        return True
+    return False
+
+
+def _has_free_prompt(captured, bare_only=False):
+    """True if the pane shows a FREE `❯` input prompt near the bottom — the session is
+    IDLE at the prompt, NOT running a foreground turn (which replaces the input box with
+    a spinner / "esc to interrupt" and shows NO `❯`).
+
+    The prompt is located by stripping the VARIABLE-height trailing chrome (agent strip +
+    statusline + mode hint + border rules — see `_is_bottom_chrome`) and then checking the
+    last few remaining lines. A FIXED tail window is WRONG: the agent strip adds one `◯`
+    row per concurrent subagent, so a genuinely idle `⏳ WORKING` session with ≥2 background
+    workers renders `❯` past a 6-line tail (live-verified) — a fixed tail would then
+    false-skip the nudge on exactly the fanned-out-then-died case job 4 exists for. The
+    real prompt renders as `❯` + U+00A0, which `str.strip()` reduces to a bare `❯`.
+
+    bare_only=True (the TYPING gate, `pane_at_idle_prompt`): require a BARE `❯` (empty input
+    box). If the user has typed text (`❯ blah`) we must NOT type over it. bare_only=False
+    (the inverse used by `pane_waiting_on_user`): `❯ <typed text>` still counts as "at a
+    prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog)."""
+    if not captured:
+        return False
+    lines = [l.strip() for l in captured.splitlines() if l.strip()]
+    i, n = len(lines), 0
+    while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 15:
+        i -= 1
+        n += 1
+    for s in lines[max(0, i - 3):i]:
+        if s == "❯":
+            return True
+        if not bare_only and s.startswith("❯ ") and not _MENU_POINTER_RX.match(s):
+            return True
+    return False
+
+
 def pane_waiting_on_user(captured):
     # A LIVE blocking dialog (AskUserQuestion / permission / plan approval) occupies
     # the input area — there is NO free `❯` input-prompt line at the bottom. A CLOSED
@@ -552,18 +604,27 @@ def pane_waiting_on_user(captured):
     # adds the second guard: the footer must survive ≥2 polls before it pings).
     if not captured or not _WAITING_RX.search(captured):
         return False
-    for ln in [l for l in captured.splitlines() if l.strip()][-6:]:
-        s = ln.strip()
-        # A FREE idle input prompt is a bare `❯` (empty box) or `❯ <typed text>` — it
-        # means the session is at the prompt, NOT blocked. BUT a menu SELECTION pointer
-        # renders as `❯ 1. Yes` and ALSO starts with `❯ `; treating it as a free prompt
-        # would wrongly classify an OPEN permission/approval menu (the exact thing
-        # `_WAITING_RX` targets via "Do you want to proceed") as not-waiting and SUPPRESS
-        # the ping. CC numbers its menu options, so `❯ <digit>.` is the pointer and is
-        # NOT a free prompt; everything else after `❯ ` is user-typed input.
-        if s == "❯" or (s.startswith("❯ ") and not _MENU_POINTER_RX.match(s)):
-            return False
-    return True
+    return not _has_free_prompt(captured)
+
+
+def pane_at_idle_prompt(captured):
+    """True if the pane is IDLE at a free `❯` prompt — safe to type a self-check nudge.
+
+    Job 4 / 4a REQUIRE this before sending a keystroke. A FOREGROUND subagent (a
+    ticket-validator, a Task/Agent dispatch) BLOCKS the parent, so the parent transcript
+    FREEZES and looks idle (`⏳ WORKING`, 30 min stale) while the session is very much
+    ALIVE — and the pane shows the agent running with NO free `❯` prompt. Typing there
+    does not land at a prompt, it INTERRUPTS the running agent (the observed "Agent
+    Validate issue #233 finished · Interrupted" incident). Requiring a free `❯` at the
+    bottom means we only ever type into a genuinely idle session (turn ended, waiting on
+    a background job / input) — never into one blocked on live foreground work. The
+    BACKGROUND-subagent case (main idle at `❯` while an autopilot-worker runs) still
+    shows a free `❯`, so it passes THIS gate but is caught by `subagent_active`.
+
+    Requires a BARE `❯` (empty input box): a session with USER-TYPED but unsubmitted text
+    (`❯ blah`) means the user is present and interacting — not a silent stall — and we
+    must not type over their input, so bare_only=True."""
+    return _has_free_prompt(captured, bare_only=True)
 
 
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
@@ -1212,6 +1273,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 if pane_in_mode(pid, run):          # never type into a scrolled pane
                     logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
                     continue
+                # Race guard: the user may have manually resumed inside the window and the
+                # session is now running a FOREGROUND agent while the "session limit" banner
+                # is still within the captured pane. Typing `continue` there would INTERRUPT
+                # the live work (the #233 harm class). Only resume into a free `❯` idle
+                # prompt; skip WITHOUT setting `continued` (a later poll retries, and if it
+                # already resumed the banner scrolls out and job 6 exits on its own).
+                if not pane_at_idle_prompt(captured):
+                    logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
+                    continue
                 s["continued"] = True
                 logs.append("session-limit %s — reset passed → continue" % project)
                 if not dry_run:
@@ -1325,6 +1395,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if pane_in_mode(pid, run):
                 logs.append("skip in-mode (textcall-stall) %s" % (project or pid))
                 continue
+            # NEVER type into a pane that is NOT at a free `❯` idle prompt — a running
+            # foreground agent / tool blocks the parent transcript (looks idle) while
+            # the pane shows live work; a keystroke would INTERRUPT it (the #233 incident).
+            if not pane_at_idle_prompt(captured):
+                logs.append("skip busy-pane (textcall-stall) %s" % (project or pid))
+                continue
             wkey = "textcall:" + key
             action, entry = decide_working(state, wkey, now, idle,
                                            interval=working_interval,
@@ -1378,6 +1454,38 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if pane_in_mode(pid, run):
                 logs.append("skip in-mode (working-stall) %s" % (project or pid))
                 continue
+            # NEVER type into a pane that is NOT at a free `❯` idle prompt. A FOREGROUND
+            # subagent (a ticket-validator, a Task/Agent dispatch) BLOCKS the parent, so
+            # its transcript freezes and looks 30-min-idle while the session is ALIVE and
+            # the pane shows the agent running — a nudge keystroke there INTERRUPTS the
+            # live work (the observed "Agent Validate issue #233 · Interrupted" incident).
+            # subagent_active covers the BACKGROUND case (main idle at `❯`); this covers
+            # the FOREGROUND case (no free `❯`). We are ALREADY past `not subagent_active`,
+            # so nothing is advancing — a pane that stays busy with NO progress for a LONG
+            # time is a genuinely wedged / hung foreground turn (the 8-hour silent-loss
+            # class). We can't type (that would interrupt), but a PING never interrupts, so
+            # escalate to ONE ping at a LONGER threshold (2× stall_working, so a merely
+            # long-THINKING foreground agent that just isn't writing its transcript isn't
+            # pinged). One ping per episode; last_seen refreshed so cleanup can't drop it
+            # mid-episode. NEVER a keystroke.
+            if not pane_at_idle_prompt(captured):
+                bkey = "busypane:" + key
+                b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
+                b["last_seen"] = int(now)
+                state[bkey] = b
+                if not b["pinged"] and idle >= 2 * stall_working:
+                    b["pinged"] = True
+                    logs.append("busy-pane-wedged %s [%s] idle=%dm — ping only (never type)"
+                                % (project, key, int(idle // 60)))
+                    send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING, beží agent ktorý sa "
+                            "dlho nepohol (%d min)\n> Vyzerá zaseknuto. Nezasahujem "
+                            "klávesami do bežiaceho agenta (rozbilo by to jeho prácu) — "
+                            "over ho prosím." % (project, int(idle // 60)),
+                            owner=owner, dedup_key="busypane:%s:%s" % (key, b["first_seen"]),
+                            dry_run=dry_run)
+                else:
+                    logs.append("skip busy-pane (working-stall) %s" % (project or pid))
+                continue
             wkey = "working:" + key
             action, entry = decide_working(state, wkey, now, idle,
                                            interval=working_interval,
@@ -1410,7 +1518,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         if k == "usage":
             continue                       # account-wide usage state, not a session
         if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
-                or k.startswith("sesslimit:")):
+                or k.startswith("sesslimit:") or k.startswith("busypane:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly

@@ -191,8 +191,19 @@ class RunOnceTextcallWiring(unittest.TestCase):
     CWD = "/home/newlevel/devel/camera-box"
     PANE = "%9"
 
-    def _run_with_transcript(self, entries, idle_seconds=600):
+    # A pane IDLE at a free `❯` prompt (turn ended) — safe to type. `.strip()` of the
+    # real prompt (`❯`+NBSP) is a bare `❯`. No `_WAITING_RX` footer → not waiting-on-user.
+    IDLE_PROMPT_CAP = ("● Predošlá práca hotová.\n❯ \n"
+                       "  ctx ███░  caveman:lite\n"
+                       "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+    # A pane actively RUNNING a foreground agent — spinner, "esc to interrupt", NO free
+    # `❯` prompt. A keystroke here would INTERRUPT the live work.
+    BUSY_CAP = ("● Validate issue #233\n  ⎿ running…\n"
+                "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n")
+
+    def _run_with_transcript(self, entries, idle_seconds=600, capture=None):
         """Build a temp projects dir + state, a fake tmux `run`, call run_once, return logs."""
+        cap = self.IDLE_PROMPT_CAP if capture is None else capture
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -216,7 +227,7 @@ class RunOnceTextcallWiring(unittest.TestCase):
                     return "zbynek"
                 return ""
             if "capture-pane" in j:
-                return ""                      # not waiting on the user
+                return cap
             if "send-keys" in j:
                 sent.append(argv)
                 return ""
@@ -240,6 +251,19 @@ class RunOnceTextcallWiring(unittest.TestCase):
         self.assertTrue(any("send-keys" in " ".join(a) and wd.TEXTCALL_NUDGE_TEXT in a
                             for a in sent),
                         "expected TEXTCALL_NUDGE_TEXT typed into the pane")
+
+    def test_stalled_pane_but_busy_is_not_nudged(self):
+        # THE #233 INCIDENT: the transcript looks stalled (a text-toolcall + 10min idle),
+        # but the pane is actively running a FOREGROUND agent (spinner, no free `❯`). A
+        # keystroke would INTERRUPT it → must skip busy-pane, send NOTHING.
+        logs, sent = self._run_with_transcript([
+            _assistant("Earlier turn."),
+            _assistant(CAMERA_BOX_TEXT),
+            _system(),
+        ], capture=self.BUSY_CAP)
+        self.assertTrue(any("skip busy-pane (textcall-stall)" in ln for ln in logs),
+                        "busy pane must be skipped, got: %r" % logs)
+        self.assertEqual(sent, [], "MUST NOT type into a pane running a foreground agent")
 
     def test_meta_discussion_pane_is_not_nudged(self):
         txt = ("The bug: model emits `<invoke name=\"Read\">` as text. "
@@ -308,6 +332,55 @@ class PaneWaitingOnUser(unittest.TestCase):
         # and with the pointer as the very last line (menu at the bottom)
         self.assertTrue(wd.pane_waiting_on_user(
             "  Do you want to proceed?\n  Enter to select\n  1. Yes\n❯ 2. No\n"))
+
+
+class PaneAtIdlePrompt(unittest.TestCase):
+    """Never type a stuck-check nudge into a pane that is NOT at a free `❯` idle prompt.
+    The #233 incident: a FOREGROUND agent blocked the parent (transcript looked 30-min
+    idle) while the pane ran the agent — the nudge INTERRUPTED it."""
+
+    # real prompt renders as `❯` + U+00A0 + space → strips to a bare `❯`
+    IDLE = "● Hotovo.\n❯  \n  ctx ███  caveman:lite\n  ⏵⏵ bypass permissions on\n"
+    IDLE_TYPED = "● Hotovo.\n❯ nejaký rozpísaný text\n  ctx ███  caveman:lite\n"
+    # THE #1 FINDING: a `⏳ WORKING` session IDLE at `❯` with TWO background validators —
+    # the agent strip (● main + 2× ◯ rows) + statusline + borders push `❯` to position 7
+    # from the bottom. A fixed 6-line tail false-skips; chrome-stripping must still find it.
+    IDLE_TALL_STRIP = (
+        "⏳ WORKING: validujem #459 + #461\n"
+        "✻ Waiting for 2 background agents to finish\n──────────\n❯  \n──────────\n"
+        "  ctx ██  5h 27%  Fable 51%  caveman:lite\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        "● main\n◯ ticket-validator  Checking fps pins in drift-guard.sh\n"
+        "◯ ticket-validator  Checking is_zero in recording-verdict.rs\n")
+    BUSY = ("● Validate issue #233\n  ⎿ running…\n"
+            "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
+            "  ctx ██  5h 20%  caveman:lite\n  ⏵⏵ bypass permissions on\n")
+    MENU = ("  Do you want to proceed?\n❯ 1. Yes\n  2. No\n"
+            "  Enter to select · Tab/Arrow keys to navigate\n")
+
+    def test_bare_idle_prompt_is_typeable(self):
+        self.assertTrue(wd.pane_at_idle_prompt(self.IDLE))
+
+    def test_tall_agent_strip_still_finds_prompt(self):
+        # #1 regression: `❯` past a 6-line tail (2 bg workers) must still be found.
+        self.assertTrue(wd.pane_at_idle_prompt(self.IDLE_TALL_STRIP))
+
+    def test_user_typed_text_is_not_typeable(self):
+        # #4: a prompt with user-typed unsubmitted text → the user is PRESENT and
+        # interacting; a nudge keystroke would corrupt their input → NOT typeable.
+        self.assertFalse(wd.pane_at_idle_prompt(self.IDLE_TYPED))
+
+    def test_busy_foreground_agent_is_not_typeable(self):
+        # THE FIX: a running foreground agent (no free `❯`) must NOT be typed into.
+        self.assertFalse(wd.pane_at_idle_prompt(self.BUSY))
+
+    def test_open_menu_is_not_a_free_prompt(self):
+        # a `❯ 1.` pointer is an open dialog, not a free prompt → not typeable
+        self.assertFalse(wd.pane_at_idle_prompt(self.MENU))
+
+    def test_empty_capture_is_not_typeable(self):
+        self.assertFalse(wd.pane_at_idle_prompt(""))
+        self.assertFalse(wd.pane_at_idle_prompt(None))
 
 
 class WaitingPersistenceGate(unittest.TestCase):
@@ -445,7 +518,7 @@ class SessionLimitWiring(unittest.TestCase):
     PANE = "%7"
     SID = "s1t2u3v4"
 
-    def _harness(self, now, seed_state=None):
+    def _harness(self, now, seed_state=None, capture=SESSION_LIMIT_BANNER):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -470,7 +543,7 @@ class SessionLimitWiring(unittest.TestCase):
                     return "zbynek"
                 return ""
             if "capture-pane" in j:
-                return SESSION_LIMIT_BANNER
+                return capture
             if "send-keys" in j:
                 keys.append(argv)
                 return ""
@@ -523,6 +596,32 @@ class SessionLimitWiring(unittest.TestCase):
             "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
         logs, sent, keys, _ = self._harness(now, seed_state=seed)
         self.assertEqual(keys, [], "must not re-send `continue` once resumed: %r" % keys)
+
+    # a session-limit banner still on screen, but the user manually resumed and the pane
+    # is now running a FOREGROUND agent (spinner, no bare `❯`). Typing `continue` would
+    # interrupt it → job 6 must skip busy-pane WITHOUT setting `continued` (finding #2).
+    LIMITED_BUT_BUSY = (
+        "  ⎿  You've hit your session limit · resets 6:10pm (Europe/Prague)\n"
+        "     /usage-credits to finish what you're working on.\n"
+        "● Validate issue #99\n✳ Baking… (1m 12s · esc to interrupt)\n"
+        "  ctx ██  caveman:lite\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+    def test_no_continue_into_busy_pane_after_reset(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": False,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, sp = self._harness(now, seed_state=seed,
+                                             capture=self.LIMITED_BUT_BUSY)
+        self.assertEqual(keys, [], "MUST NOT type `continue` into a busy pane")
+        self.assertTrue(any("skip busy-pane (session-limit resume)" in ln for ln in logs),
+                        "expected busy-pane skip, got: %r" % logs)
+        # continued must remain False so a later poll (at a genuine idle prompt) can resume
+        st = json.loads(Path(sp).read_text())
+        self.assertFalse(st["sesslimit:" + self.SID]["continued"])
 
 
 if __name__ == "__main__":
