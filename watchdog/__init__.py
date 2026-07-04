@@ -659,8 +659,16 @@ def pane_question_excerpt(captured, max_chars=350):
         inner = s.strip("│┃║").strip()      # peel the box's vertical edges
         if not inner or _DIALOG_HELP_RX.search(inner):
             continue                        # empty in-box line / navigation help footer
-        if inner[0] in "●◯" or inner.startswith("⏵⏵") or inner.startswith("ctx "):
-            continue                        # agent strip / mode hint / statusline
+        if inner[0] in "●◯":
+            # A transcript bullet / agent-strip row is a BLOCK BOUNDARY, not a
+            # plain drop: the common AskUserQuestion dialog renders BORDERLESS
+            # with `● Claude asked:` as its top, and without this marker the
+            # question walk climbed past it into transcript prose (review
+            # finding, 2026-07-04).
+            rows.append(("", True))
+            continue
+        if inner.startswith("⏵⏵") or inner.startswith("ctx "):
+            continue                        # mode hint / statusline
         rows.append((inner, False))
     end = None
     for i in range(len(rows) - 1, -1, -1):  # LAST options block = the open dialog

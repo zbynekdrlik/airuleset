@@ -86,9 +86,16 @@ send_q() {
     if [ -f "$LASTQ" ] && [ "$(cat "$LASTQ" 2>/dev/null)" = "$c" ]; then
         return 0
     fi
-    printf '%s' "$c" > "$LASTQ"
     send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
-    ND_EMOJI="❓" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
+    # ND_CONFIRM: the send runs FOREGROUND and exits 0 only on confirmed HTTP 2xx
+    # delivery. LASTQ is recorded ONLY then — a transient Discord failure on the
+    # FIRST ask must leave the question retryable by the next identical re-emit,
+    # never be silently marked as pinged (review finding, 2026-07-04; the /goal
+    # re-poke's re-emit is the natural retry, and job-2 has no backstop for a
+    # text-marker ❓).
+    if ND_EMOJI="❓" ND_TEXT="$c" ND_CWD="$CWD" ND_CONFIRM=1 bash "$send"; then
+        printf '%s' "$c" > "$LASTQ"
+    fi
 }
 
 # A genuine question to the user ALWAYS fires the device ping — NO suppression,

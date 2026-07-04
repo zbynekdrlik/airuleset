@@ -22,11 +22,18 @@ set -euo pipefail
 #       (the idle hook's existing test contract).
 #   otherwise                                        → POST to Discord, backgrounded
 #       and silent (so the Stop pipeline is never polluted / blocked).
-# Always exit 0.
+#   ND_CONFIRM=1 (the ❓ immediate path)             → POST in the FOREGROUND and
+#       exit non-zero unless every attempted delivery got HTTP 2xx. The caller
+#       records the question as pinged ONLY on success — a transient Discord
+#       failure on the FIRST ask must stay retryable by the next identical
+#       re-emit, never be silently recorded as sent (review finding, 2026-07-04).
+# Without ND_CONFIRM: always exit 0.
 
 EMOJI="${ND_EMOJI:-}"
 TEXT="${ND_TEXT:-}"
 CWD="${ND_CWD:-}"
+CONFIRM="${ND_CONFIRM:-0}"
+DELIVERY_FAILED=0
 [ -n "$EMOJI" ] || exit 0
 [ -n "$TEXT" ]  || exit 0
 
@@ -103,11 +110,30 @@ emit_one() {
         return 0
     fi
 
-    # Real delivery. Skip when we can't post.
-    [ -z "$BOT_TOKEN" ] && return 0
-    [ -z "$CH" ] && return 0
-    command -v jq &>/dev/null || return 0
+    # Real delivery. Skip when we can't post — in confirm mode a skip IS a
+    # failed delivery (the caller must be able to retry later).
+    if [ -z "$BOT_TOKEN" ] || [ -z "$CH" ] || ! command -v jq &>/dev/null; then
+        DELIVERY_FAILED=1
+        return 0
+    fi
     POSTED_CHANNELS="${POSTED_CHANNELS}${CH} "
+
+    if [ "$CONFIRM" = "1" ]; then
+        # FOREGROUND, delivery-confirmed (the ❓ path): only a real HTTP 2xx counts.
+        # --max-time 5 stays well under the Stop-hook timeout (15s in hooks.json).
+        local code
+        code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' -X POST \
+            "https://discord.com/api/v10/channels/${CH}/messages" \
+            -H "Authorization: Bot ${BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
+            2>/dev/null) || code=""
+        case "$code" in
+            2??) ;;
+            *)   DELIVERY_FAILED=1 ;;
+        esac
+        return 0
+    fi
 
     (curl -s --max-time 5 -X POST \
         "https://discord.com/api/v10/channels/${CH}/messages" \
@@ -123,4 +149,9 @@ for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> li
     emit_one "$T"
 done
 
+# Confirm mode reports delivery truthfully; the default stays always-0 (the
+# background curls are fire-and-forget and cannot be confirmed anyway).
+if [ "$CONFIRM" = "1" ] && [ "$DELIVERY_FAILED" = "1" ]; then
+    exit 1
+fi
 exit 0

@@ -376,6 +376,31 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("#280", self._sent(),
                       "after a real user prompt the same text is a FRESH ask → ping")
 
+    def test_failed_delivery_is_not_recorded_as_pinged(self):
+        # Review finding (2026-07-04): LASTQ was written BEFORE the fire-and-forget
+        # send — a transient Discord failure on the FIRST ask would then suppress
+        # every identical re-emit forever (question never reached the phone, and
+        # watchdog job-2 has no backstop for a text-marker ❓). The ❓ path now
+        # confirms delivery (ND_CONFIRM): a failed send leaves LASTQ unwritten so
+        # the next identical re-emit RETRIES.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        home = tempfile.mkdtemp()      # no ~/.claude/channels/discord/.env → no token
+        q = "❓ NEEDS YOU: #280 alebo 0.28.0?"
+        payload = json.dumps({"session_id": sid, "last_assistant_message": q,
+                              "cwd": cwd})
+        subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
+                       capture_output=True,
+                       env={**os.environ, "HOME": home,
+                            "DISCORD_NOTIFY_DRYRUN": "0",
+                            "AIRULESET_NOTIFY_OWNER": ""})
+        self.assertFalse(os.path.exists(f"/tmp/claude-discord-lastq-{sid}"),
+                         "a FAILED delivery must NOT be recorded as pinged")
+        # the identical re-emit retries — and once delivery works, it pings
+        self._stop(sid, q, cwd=cwd)
+        self.assertIn("#280", self._sent(),
+                      "the retry of a never-delivered question must ping")
+
     def test_asked_line_identical_repeat_is_deduped(self):
         # Same dedup on the ask-and-continue form (❓ ASKED + ⏳ WORKING).
         sid, _ = self._sid()

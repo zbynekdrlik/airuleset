@@ -449,6 +449,19 @@ class PaneQuestionExcerpt(unittest.TestCase):
         self.assertIn("Do you want to proceed?", out)
         self.assertIn("1. Yes", out)
 
+    def test_borderless_bullet_header_bounds_question(self):
+        # AskUserQuestion commonly renders BORDERLESS with `● Claude asked:` as
+        # its top. The bullet must act as the question boundary — transcript
+        # prose above it must never leak into the ping (review finding).
+        out = wd.pane_question_excerpt(
+            "nesúvisiaca próza vyššie v transkripte\n"
+            "● Claude asked:\n  · Zavrieť #137 alebo overiť?\n"
+            "     1. Zavrieť\n     2. Overiť\n"
+            "  Tab/Arrow keys to navigate · Enter to select\n")
+        self.assertIn("Zavrieť #137 alebo overiť?", out)
+        self.assertIn("1. Zavrieť", out)
+        self.assertNotIn("nesúvisiaca", out)
+
     def test_no_dialog_returns_empty(self):
         # No numbered options visible → "" (caller falls back to the generic text).
         self.assertEqual(wd.pane_question_excerpt("built ok\n❯ \n"), "")
