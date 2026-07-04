@@ -1059,6 +1059,39 @@ class TestPrePushBaseSyncHook(TestCase):
         self.assertIn("fail-safe", src.lower())
 
 
+class TestDiscordSuppressEmbeds(TestCase):
+    """Every notification POST must carry Discord message flags: 4
+    (SUPPRESS_EMBEDS). A URL in a notification (the run-card's 🔗 link) must
+    never unfurl into a giant link-preview — the codex-bridge card rendered a
+    screen-sized Odoo-logo embed under every message (user complaint,
+    2026-07-04). Links stay clickable; only the preview is dropped."""
+
+    def test_python_post_sends_suppress_embeds_flag(self):
+        import notify
+        import unittest.mock as m
+        captured = {}
+
+        def fake_urlopen(req, timeout=0):
+            captured["data"] = json.loads(req.data.decode())
+            return m.Mock(read=lambda: b"")
+
+        with m.patch.object(notify.urllib.request, "urlopen", fake_urlopen):
+            ok = notify._post_discord("tok", "123", "text s https://example.com")
+        self.assertTrue(ok)
+        self.assertEqual(captured["data"].get("flags"), notify.SUPPRESS_EMBEDS)
+        self.assertEqual(notify.SUPPRESS_EMBEDS, 4)
+
+    def test_shell_send_curls_carry_suppress_embeds(self):
+        src = (airuleset.REPO_DIR / "hooks" / "notify-discord-send.sh").read_text()
+        posts = [seg for seg in src.split("curl ")
+                 if "channels/${CH}/messages" in seg]
+        self.assertGreaterEqual(len(posts), 2,
+                                "expected the confirm + background POST paths")
+        for seg in posts:
+            self.assertIn("flags: 4", seg,
+                          "a POST path is missing SUPPRESS_EMBEDS (flags: 4)")
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [

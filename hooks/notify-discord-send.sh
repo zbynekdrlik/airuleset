@@ -118,6 +118,9 @@ emit_one() {
     fi
     POSTED_CHANNELS="${POSTED_CHANNELS}${CH} "
 
+    # flags: 4 = SUPPRESS_EMBEDS — a URL in a notification must never unfurl
+    # into a giant link-preview (the codex-bridge card grew a screen-sized Odoo
+    # logo under its 🔗 link, 2026-07-04). Links stay clickable.
     if [ "$CONFIRM" = "1" ]; then
         # FOREGROUND, delivery-confirmed (the ❓ path): only a real HTTP 2xx counts.
         # --max-time 5 stays well under the Stop-hook timeout (15s in hooks.json).
@@ -126,7 +129,7 @@ emit_one() {
             "https://discord.com/api/v10/channels/${CH}/messages" \
             -H "Authorization: Bot ${BOT_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
+            -d "$(jq -n --arg content "$CONTENT" '{content: $content, flags: 4}')" \
             2>/dev/null) || code=""
         case "$code" in
             2??) ;;
@@ -139,7 +142,7 @@ emit_one() {
         "https://discord.com/api/v10/channels/${CH}/messages" \
         -H "Authorization: Bot ${BOT_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg content "$CONTENT" '{content: $content}')" \
+        -d "$(jq -n --arg content "$CONTENT" '{content: $content, flags: 4}')" \
         >/dev/null 2>&1) &
 }
 

@@ -358,6 +358,14 @@ def _prune_dedup(d):
 
 
 # --- send ----------------------------------------------------------------
+# Message flag 1<<2 = SUPPRESS_EMBEDS: a notification carrying a URL (the
+# run-card's 🔗 "where to see it" link) must NOT unfurl into a giant link
+# preview — Discord rendered the Odoo login page's og:image logo under every
+# codex-bridge card, making each message screen-sized (user complaint,
+# 2026-07-04). The link stays clickable; only the preview embed is dropped.
+SUPPRESS_EMBEDS = 1 << 2
+
+
 def _post_discord(token, channel, content):
     """POST one message to one Discord channel/thread. Returns True on success.
     Discord REQUIRES a User-Agent — Cloudflare 403s the default "Python-urllib/*"
@@ -366,7 +374,8 @@ def _post_discord(token, channel, content):
     try:
         req = urllib.request.Request(
             "https://discord.com/api/v10/channels/%s/messages" % channel,
-            data=json.dumps({"content": content}).encode(),
+            data=json.dumps({"content": content,
+                             "flags": SUPPRESS_EMBEDS}).encode(),
             method="POST",
             headers={"Authorization": "Bot " + token,
                      "Content-Type": "application/json",
