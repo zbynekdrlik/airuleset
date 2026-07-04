@@ -401,6 +401,20 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("#280", self._sent(),
                       "the retry of a never-delivered question must ping")
 
+    def test_done_line_with_midline_marker_chars_is_done_not_question(self):
+        # LIVE incident (2026-07-04): a final line "✅ DONE: odpoveď na Discord ❓
+        # ping sa…" was mis-classified as a QUESTION (loose `grep -q "❓"` matched
+        # the mid-sentence ❓ character) and pinged "otázka" with garbled content.
+        # Marker detection must anchor to the LINE START — mid-line ❓/⏳ is prose.
+        sid, p = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._stop(sid, "✅ DONE: odpoveď na Discord ❓ ping (predtým ⏳) sa "
+                        "doručí do správnej session", cwd=cwd)
+        self.assertEqual(self._sent(), "", "mid-line ❓ is prose — must NOT ❓-ping")
+        self.assertTrue(os.path.exists(p), "must record the pending ✅ instead")
+        with open(p) as fh:
+            self.assertIn("✅", fh.read())
+
     def test_asked_line_identical_repeat_is_deduped(self):
         # Same dedup on the ask-and-continue form (❓ ASKED + ⏳ WORKING).
         sid, _ = self._sid()
@@ -1103,8 +1117,8 @@ class TestRecordQuestionCLI(TestCase):
         with tempfile.TemporaryDirectory() as home:
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
-                 "notify", "--record-question", "--message-id", "42",
-                 "--channel", "thread-z", "--session", "sid-xyz",
+                 "notify", "--record-question", "--message-id", "424242424242",
+                 "--channel", "900900900900", "--session", "sid-xyz",
                  "--cwd", "/home/x/proj"],
                 capture_output=True, text=True,
                 env={**os.environ, "HOME": home, "PYTHONPATH": str(airuleset.REPO_DIR)})
@@ -1112,8 +1126,8 @@ class TestRecordQuestionCLI(TestCase):
             self.assertEqual(r.stdout.strip(), "recorded")
             qp = Path(home) / ".claude" / "discord-questions.json"
             data = json.loads(qp.read_text())
-            self.assertEqual(data["42"]["session"], "sid-xyz")
-            self.assertEqual(data["42"]["channel"], "thread-z")
+            self.assertEqual(data["424242424242"]["session"], "sid-xyz")
+            self.assertEqual(data["424242424242"]["channel"], "900900900900")
 
 
 class TestSendPathRecordsQuestion(TestCase):

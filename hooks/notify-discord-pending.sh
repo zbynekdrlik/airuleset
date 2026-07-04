@@ -121,17 +121,21 @@ if [ -n "$ASKED_LINE" ]; then
     C=$(printf '%s' "$ASKED_LINE" | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
     rm -f "$PENDING" 2>/dev/null || true
     send_q "$C"
-elif printf '%s' "$LAST_LINE" | grep -q "❓"; then
+elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓'; then
     # ❓ NEEDS YOU on the last line, genuinely blocked on the user → fire the device
     # ping IMMEDIATELY (the question must reach the phone even over SSH, where the
     # idle_prompt event is unreliable). No pending left → idle hook won't re-send.
+    # The marker must START the line (markdown prefixes allowed) — a ❓ character
+    # MID-SENTENCE is prose, not a marker: a `✅ DONE: … Discord ❓ ping …` line was
+    # mis-pinged as "otázka" with garbled content (live incident, 2026-07-04).
     C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
     rm -f "$PENDING" 2>/dev/null || true
     send_q "$C"
-elif printf '%s' "$LAST_LINE" | grep -q "⏳"; then
+elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*⏳'; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear
-    # any stale pending so nothing fires while Claude keeps working.
+    # any stale pending so nothing fires while Claude keeps working. Same
+    # line-START anchoring as the ❓ branch — a ⏳ mid-sentence is prose.
     rm -f "$PENDING" 2>/dev/null || true
 elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'; then
     # Fully-done state. Prefer an explicit "✅ DONE: <outcome>" line; else the

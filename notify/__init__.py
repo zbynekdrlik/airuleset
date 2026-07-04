@@ -400,10 +400,16 @@ def _save_questions(d, path=None):
 def record_question(message_id, channel, session, cwd, now=None, path=None):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
     `session` (transcript stem = CC session id) in `cwd`. Prunes stale + over-cap
-    entries in the same write. Returns True on success. Fail-safe (never raises)."""
+    entries in the same write. Returns True on success. Fail-safe (never raises).
+
+    `message_id` and `channel` must be NUMERIC Discord snowflakes — anything else
+    (a Mock repr from a mis-wired test, a mangled shell var) is refused so garbage
+    can never pollute the live map (real incident: Mock strings landed in
+    ~/.claude/discord-questions.json, 2026-07-04)."""
     message_id = str(message_id or "").strip()
+    channel = str(channel or "").strip()
     session = str(session or "").strip()
-    if not message_id or not session:
+    if not message_id.isdigit() or not channel.isdigit() or not session:
         return False
     now = time.time() if now is None else now
     d = load_questions(path)

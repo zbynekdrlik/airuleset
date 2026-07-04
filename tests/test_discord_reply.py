@@ -31,24 +31,28 @@ class QuestionMap(unittest.TestCase):
 
     def test_record_and_load(self):
         p = self._p()
-        self.assertTrue(notify.record_question("111", "chan", "sid-abc",
+        self.assertTrue(notify.record_question("111", "900", "sid-abc",
                                                "/home/x/proj", now=1000, path=p))
         q = notify.load_questions(p)
         self.assertEqual(q["111"]["session"], "sid-abc")
         self.assertEqual(q["111"]["cwd"], "/home/x/proj")
-        self.assertEqual(q["111"]["channel"], "chan")
+        self.assertEqual(q["111"]["channel"], "900")
         self.assertEqual(q["111"]["ts"], 1000)
 
     def test_missing_ids_are_rejected(self):
         p = self._p()
-        self.assertFalse(notify.record_question("", "c", "sid", "/x", path=p))
-        self.assertFalse(notify.record_question("111", "c", "", "/x", path=p))
+        self.assertFalse(notify.record_question("", "900", "sid", "/x", path=p))
+        self.assertFalse(notify.record_question("111", "900", "", "/x", path=p))
+        # NON-NUMERIC ids/channels refused — a Mock repr / garbage can never
+        # pollute the live map (real incident, 2026-07-04)
+        self.assertFalse(notify.record_question("<Mock id=1>", "900", "s", "/x", path=p))
+        self.assertFalse(notify.record_question("111", "thread-z", "s", "/x", path=p))
         self.assertEqual(notify.load_questions(p), {})
 
     def test_drop_question(self):
         p = self._p()
-        notify.record_question("111", "c", "s", "/x", now=1, path=p)
-        notify.record_question("222", "c", "s2", "/y", now=2, path=p)
+        notify.record_question("111", "900", "s", "/x", now=1, path=p)
+        notify.record_question("222", "900", "s2", "/y", now=2, path=p)
         self.assertTrue(notify.drop_question("111", path=p))
         q = notify.load_questions(p)
         self.assertNotIn("111", q)
@@ -57,22 +61,22 @@ class QuestionMap(unittest.TestCase):
 
     def test_stale_entries_pruned_on_write(self):
         p = self._p()
-        notify.record_question("old", "c", "s", "/x", now=0, path=p)
+        notify.record_question("100", "900", "s", "/x", now=0, path=p)
         # a new write far in the future prunes the >24h-old entry
-        notify.record_question("new", "c", "s", "/x",
+        notify.record_question("200", "900", "s", "/x",
                                now=notify._QUESTIONS_TTL_S + 100, path=p)
         q = notify.load_questions(p)
-        self.assertNotIn("old", q)
-        self.assertIn("new", q)
+        self.assertNotIn("100", q)
+        self.assertIn("200", q)
 
     def test_hard_cap_keeps_newest(self):
         p = self._p()
         for i in range(notify._QUESTIONS_MAX + 5):
-            notify.record_question("m%d" % i, "c", "s%d" % i, "/x", now=i, path=p)
+            notify.record_question("5%04d" % i, "900", "s%d" % i, "/x", now=i, path=p)
         q = notify.load_questions(p)
         self.assertLessEqual(len(q), notify._QUESTIONS_MAX)
-        self.assertIn("m%d" % (notify._QUESTIONS_MAX + 4), q)       # newest kept
-        self.assertNotIn("m0", q)                                   # oldest dropped
+        self.assertIn("5%04d" % (notify._QUESTIONS_MAX + 4), q)     # newest kept
+        self.assertNotIn("50000", q)                                   # oldest dropped
 
     def test_load_bad_file_is_empty(self):
         p = self._p()
@@ -181,7 +185,7 @@ class DeliverDiscordReplies(unittest.TestCase):
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER,
-                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "thread-z"}
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
         for tgt, val in [("_questions_path", lambda: self.qpath),
                          ("_read_env", lambda: dict(self.env))]:
             p = m.patch.object(notify, tgt, val)
@@ -196,16 +200,16 @@ class DeliverDiscordReplies(unittest.TestCase):
             return "0"
         return ""
 
-    def _reply_msg(self, rid="rep1", ref="ping1", author=None, content="najprv 0.28.0"):
+    def _reply_msg(self, rid="rep1", ref="888001", author=None, content="najprv 0.28.0"):
         return {"id": rid, "author": {"id": author or self.OWNER},
                 "message_reference": {"message_id": ref}, "content": content}
 
     def _fetch(self, msgs):
         return lambda ch, token: [m for m in msgs
-                                  if m.get("_channel", "thread-z") == ch]
+                                  if m.get("_channel", "777001") == ch]
 
     def test_delivers_answer_into_idle_pane(self):
-        notify.record_question("ping1", "thread-z", "sid-abc",
+        notify.record_question("888001", "777001", "sid-abc",
                                "/home/x/restreamer", now=time.time(), path=self.qpath)
         state = {}
         panes = {"sid-abc": ("%1", IDLE)}
@@ -214,11 +218,11 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
         # question dropped on delivery; reply id deduped
-        self.assertNotIn("ping1", notify.load_questions(self.qpath))
+        self.assertNotIn("888001", notify.load_questions(self.qpath))
         self.assertIn("rep1", state["dreply_done"])
 
     def test_types_the_answer_when_not_dry_run(self):
-        notify.record_question("ping1", "thread-z", "sid-abc", "/p",
+        notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)
         wd.deliver_discord_replies(
             time.time(), self._run, {}, {"sid-abc": ("%1", IDLE)}, dry_run=False,
@@ -230,7 +234,7 @@ class DeliverDiscordReplies(unittest.TestCase):
         self.assertTrue(any(a[-1] == "Enter" for a in self.sent))
 
     def test_busy_pane_is_not_typed_into(self):
-        notify.record_question("ping1", "thread-z", "sid-abc", "/p",
+        notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)
         state = {}
         logs = wd.deliver_discord_replies(
@@ -240,30 +244,30 @@ class DeliverDiscordReplies(unittest.TestCase):
                          "must NOT inject into a running turn (#233)")
         self.assertTrue(any("busy" in ln for ln in logs), logs)
         # not delivered → question stays for the next cycle, reply not deduped
-        self.assertIn("ping1", notify.load_questions(self.qpath))
+        self.assertIn("888001", notify.load_questions(self.qpath))
         self.assertNotIn("rep1", state.get("dreply_done", []))
 
     def test_absent_pane_retries_later(self):
-        notify.record_question("ping1", "thread-z", "sid-gone", "/p",
+        notify.record_question("888001", "777001", "sid-gone", "/p",
                                now=time.time(), path=self.qpath)
         logs = wd.deliver_discord_replies(
             time.time(), self._run, {}, {}, dry_run=False,      # no live pane
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertTrue(any("no pane" in ln for ln in logs), logs)
-        self.assertIn("ping1", notify.load_questions(self.qpath))   # kept
+        self.assertIn("888001", notify.load_questions(self.qpath))   # kept
 
     def test_non_owner_reply_ignored(self):
-        notify.record_question("ping1", "thread-z", "sid-abc", "/p",
+        notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)
         logs = wd.deliver_discord_replies(
             time.time(), self._run, {}, {"sid-abc": ("%1", IDLE)}, dry_run=False,
             discord_fetch=self._fetch([self._reply_msg(author="666")]))
         self.assertEqual(logs, [])                                  # nothing routed
         self.assertFalse(any("-l" in a for a in self.sent))
-        self.assertIn("ping1", notify.load_questions(self.qpath))
+        self.assertIn("888001", notify.load_questions(self.qpath))
 
     def test_already_delivered_reply_not_reinjected(self):
-        notify.record_question("ping1", "thread-z", "sid-abc", "/p",
+        notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)
         state = {"dreply_done": ["rep1"]}                           # already handled
         logs = wd.deliver_discord_replies(
@@ -279,7 +283,7 @@ class DeliverDiscordReplies(unittest.TestCase):
         self.assertEqual(logs, [])                                  # empty map → skip
 
     def test_no_token_is_a_noop(self):
-        notify.record_question("ping1", "thread-z", "sid-abc", "/p",
+        notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)
         self.env.pop("DISCORD_BOT_TOKEN")
         logs = wd.deliver_discord_replies(
