@@ -208,6 +208,20 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
         p = max(0, min(100, int(p)))
         c = colr(p, 70, 90)
         segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, model, p, reset(w.get("resets_at"))))
+# --- 🎫 ticket progress: autopilot done/total, else open GitHub issues ---
+# Composed from local caches by statusbar.tickets_segment (a stale cache spawns a
+# DETACHED `airuleset.py tickets-status --refresh`; the render never waits on gh).
+# {{REPO_DIR}} is substituted at install time by render_caveman_shim().
+try:
+    import sys
+    sys.path.insert(0, "{{REPO_DIR}}")
+    import statusbar
+    cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or ""
+    seg = statusbar.tickets_segment(cwd)
+    if seg:
+        segs.append(seg)
+except Exception:
+    pass
 if not segs:
     raise SystemExit
 print("  ".join(segs))
@@ -222,6 +236,13 @@ printf '%s' "$out"
 exit 0
 """
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
+
+
+def render_caveman_shim():
+    """The shim content with per-machine placeholders substituted ({{REPO_DIR}} →
+    this checkout, so the embedded python can import statusbar for the 🎫 ticket
+    segment). The install write site MUST use this, never the raw constant."""
+    return CAVEMAN_SHIM_CONTENT.replace("{{REPO_DIR}}", str(REPO_DIR))
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
@@ -1160,7 +1181,7 @@ def setup_caveman():
 
     # 1. stable shim — survives `claude plugin update` cache-hash churn.
     try:
-        CAVEMAN_SHIM_DEST.write_text(CAVEMAN_SHIM_CONTENT)
+        CAVEMAN_SHIM_DEST.write_text(render_caveman_shim())
         os.chmod(str(CAVEMAN_SHIM_DEST), 0o755)
     except OSError as e:
         print(f"    could not write caveman shim ({e})", file=sys.stderr)
@@ -1380,6 +1401,86 @@ def _gh_out(*gh_args, timeout=8):
         return ""
 
 
+def _write_autopilot_progress(name, remaining):
+    """Persist per-repo autopilot run progress for the statusline 🎫 segment
+    (~/.claude/autopilot-progress/<repo>.json). `done` counts the completion
+    cards sent within ONE run window; a card after a ≥6h gap starts a new run.
+    Best-effort — a failure here never blocks the card send."""
+    import re
+    import time
+    import statusbar
+    try:
+        name = re.sub(r"[^A-Za-z0-9._-]", "", str(name or "")).lstrip(".")
+        if not name:
+            return
+        d = statusbar.progress_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (name + ".json")
+        now = int(time.time())
+        try:
+            prev = json.loads(p.read_text())
+        except (OSError, ValueError):
+            prev = None
+        if not isinstance(prev, dict):
+            prev = None
+        done = 1
+        if prev and now - (prev.get("ts") or 0) <= statusbar.AUTOPILOT_RUN_WINDOW_S:
+            done = int(prev.get("done") or 0) + 1
+        if not isinstance(remaining, int):
+            remaining = prev.get("remaining") if prev else None
+        tmp = str(p) + ".tmp"
+        Path(tmp).write_text(json.dumps({"done": done, "remaining": remaining,
+                                         "ts": now}))
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def cmd_tickets_status(args):
+    """Statusline 🎫 ticket segment. Default: PRINT the segment for --cwd
+    (composed from local caches; may spawn a detached refresh). --refresh: the
+    SLOW path — resolve the repo at --cwd via git+gh and rewrite its cache
+    (~/.claude/tickets-status/). The statusline shim never runs the slow path
+    inline; it reads the caches and lets this command refresh in the background."""
+    import subprocess
+    import time
+    import statusbar
+
+    cwd = getattr(args, "cwd", None) or os.getcwd()
+    if not getattr(args, "refresh", False):
+        sys.stdout.write(statusbar.tickets_segment(cwd))
+        return
+
+    def _out(argv, cd):
+        try:
+            r = subprocess.run(argv, cwd=cd, capture_output=True, text=True,
+                               timeout=20)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    entry = {"ts": int(time.time()), "open": None, "name": "", "root": ""}
+    root = _out(["git", "rev-parse", "--show-toplevel"], cwd)
+    if root:
+        entry["root"] = root
+        slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
+                     "-q", ".nameWithOwner"], root)
+        entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
+        n = _out(["gh", "issue", "list", "--state", "open", "--search",
+                  "-label:autopilot-skip", "-L", "200",
+                  "--json", "number", "-q", "length"], root)
+        try:
+            entry["open"] = int(n)
+        except (TypeError, ValueError):
+            entry["open"] = None
+    cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(cache) + ".tmp"
+    Path(tmp).write_text(json.dumps(entry))
+    os.replace(tmp, cache)
+    print("refreshed open=%s name=%s" % (entry["open"], entry["name"] or "-"))
+
+
 def _notify_run_card(args, compose_autopilot_card, send):
     """Send the per-ticket completion card, gathering the issue title (the Cieľ)
     and the remaining backlog count from gh. The autopilot worker fires this
@@ -1426,7 +1527,12 @@ def _notify_run_card(args, compose_autopilot_card, send):
         dedup = getattr(args, "dedup_key", None) or ("%s#%s" % (name, issue))
         # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
         # the detached spawn (its stdout is /dev/null).
-        print(send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False)))
+        status = send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False))
+        print(status)
+        if status == "sent":
+            # Feed the statusline 🎫 done/total segment — a card that actually
+            # went out counts one ticket done in this run (dedup re-sends don't).
+            _write_autopilot_progress(name, remaining)
     except Exception:
         pass
 
@@ -1731,6 +1837,14 @@ def main():
     p_watchdog.add_argument("--verbose", action="store_true",
                             help="Print the actions taken this cycle")
 
+    p_tickets = sub.add_parser(
+        "tickets-status",
+        help="Statusline 🎫 segment — autopilot done/total or open GitHub issues")
+    p_tickets.add_argument("--cwd", help="Session cwd (defaults to $PWD)")
+    p_tickets.add_argument("--refresh", action="store_true",
+                           help="Slow path: refresh the per-repo cache via git+gh "
+                                "(run detached by the statusline, never inline)")
+
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for automatic Fable escalation — exit 0 "
                            "(OPEN, dispatch fable) / 1 (CLOSED, dispatch opus)")
@@ -1758,6 +1872,7 @@ SUBCOMMANDS = {
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
     "fable-gate": cmd_fable_gate,
+    "tickets-status": cmd_tickets_status,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

@@ -264,3 +264,53 @@ class TestCavemanShimBehavior(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestCavemanShimTickets(TestCase):
+    """The shim renders the 🎫 ticket segment (autopilot done/total, else open
+    GitHub issues) via statusbar.py — REPO_DIR is baked in at install time."""
+
+    def test_render_substitutes_repo_dir(self):
+        c = airuleset.render_caveman_shim()
+        self.assertNotIn("{{REPO_DIR}}", c)
+        self.assertIn(str(airuleset.REPO_DIR), c)
+        # the raw constant keeps the placeholder + the segment wiring
+        self.assertIn("{{REPO_DIR}}", airuleset.CAVEMAN_SHIM_CONTENT)
+        self.assertIn("tickets_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_install_write_site_uses_render(self):
+        # the write must go through render_caveman_shim() — a raw-constant write
+        # would ship an unsubstituted {{REPO_DIR}} and silently kill the segment
+        import inspect
+        src = inspect.getsource(airuleset.setup_caveman)
+        self.assertIn("render_caveman_shim()", src)
+
+    def test_shim_renders_ticket_segment_from_caches(self):
+        import json as _json
+        import os as _os
+        import subprocess
+        import tempfile
+        import time as _time
+        import statusbar
+        with tempfile.TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            d = statusbar.cache_dir(home)
+            d.mkdir(parents=True)
+            (d / (statusbar.cwd_key(cwd) + ".json")).write_text(_json.dumps(
+                {"open": 14, "name": "demo", "root": cwd,
+                 "ts": int(_time.time())}))
+            pd = statusbar.progress_dir(home)
+            pd.mkdir(parents=True)
+            (pd / "demo.json").write_text(_json.dumps(
+                {"done": 3, "remaining": 14, "ts": int(_time.time())}))
+            shim = _os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(airuleset.render_caveman_shim())
+            r = subprocess.run(
+                ["bash", shim],
+                input=_json.dumps({"workspace": {"current_dir": cwd},
+                                   "context_window": {"used_percentage": 10}}),
+                capture_output=True, text=True,
+                env={**_os.environ, "HOME": home})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("🎫 3/17", r.stdout)
