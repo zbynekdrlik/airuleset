@@ -57,6 +57,7 @@ Remote machines:
 - Test with `python -m pytest tests/` before committing
 - **Adding a `--flag` early-return to a `cmd_*` dispatcher that has `m.Mock(...)`-based tests:** `m.Mock` auto-creates EVERY attribute as a truthy Mock, so `getattr(args, "flag", False)` is truthy and the new branch hijacks unrelated tests. Pin the new flag `=False` in every `m.Mock(...)` args builder for that command (e.g. the run_card builders for `cmd_notify`).
 - **Wiring local (non-git) config to dev2 while the tree is dirty:** the `pre-deploy-clean-tree.sh` hook blocks `scp`/`rsync` from a dirty tree. For a genuine non-repo transfer (e.g. writing the local `~/.claude/.../.env`), pipe the helper via `ssh dev2 'python3 - <args>' < script.py` (stdin) instead of `scp` — no file-copy, no bypass marker needed.
+- **Truncating user-visible UTF-8 in a bash hook: NEVER `cut -c` / `awk substr`** — both count BYTES on this stack and chop multi-byte Slovak mid-character (the "…sklad zač" truncated-question incident, 2026-07-04). Use `jq -Rrs '.[0:N]'` (codepoint slice; jq is already a hook dependency). Negative slices (`.[-N:]`) work too and clamp safely on short strings.
 
 ## Skill Ownership — DO NOT manage skills belonging to other projects
 
