@@ -313,4 +313,4 @@ class TestCavemanShimTickets(TestCase):
                 capture_output=True, text=True,
                 env={**_os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("🎫 3/17", r.stdout)
+            self.assertIn("Issues 3/17", r.stdout)

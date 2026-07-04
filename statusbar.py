@@ -75,12 +75,12 @@ def _spawn_refresh(cwd, home=None):
 
 
 def tickets_segment(cwd, now=None, home=None, spawn=True):
-    """The 🎫 statusline segment for the session at `cwd`:
+    """The GitHub-tickets statusline segment for the session at `cwd`:
 
-      - '🎫 D/T' during an ACTIVE autopilot run for this repo (D tickets carded
+      - 'Issues D/T' during an ACTIVE autopilot run for this repo (D tickets carded
         this run, T = D + the remaining backlog from the last card; green when
         the backlog is empty),
-      - '🎫 N' otherwise (open non-autopilot-skip GitHub issues),
+      - 'Issues N' otherwise (open non-autopilot-skip GitHub issues),
       - ''  when unknown (not a git/GitHub repo, gh unavailable, no cache yet).
 
     Reads caches only; a stale/missing tickets cache triggers a detached
@@ -103,10 +103,10 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
             done, remaining = prog.get("done"), prog.get("remaining")
             if isinstance(done, int) and isinstance(remaining, int):
                 color = 40 if remaining == 0 else 75    # green when backlog empty
-                return "\033[38;5;%dm🎫 %d/%d\033[0m" % (color, done,
-                                                          done + remaining)
+                return "\033[38;5;%dmIssues %d/%d\033[0m" % (color, done,
+                                                            done + remaining)
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
-        return "\033[38;5;75m🎫 %d\033[0m" % open_n
+        return "\033[38;5;75mIssues %d\033[0m" % open_n
     return ""

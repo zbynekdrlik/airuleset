@@ -52,24 +52,24 @@ class TicketsSegment(unittest.TestCase):
 
     def test_open_issue_count_when_no_autopilot(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
-        self.assertIn("🎫 14", self._seg())
+        self.assertIn("Issues 14", self._seg())
 
     def test_autopilot_progress_wins_when_fresh(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14)
-        self.assertIn("🎫 3/17", self._seg())
+        self.assertIn("Issues 3/17", self._seg())
 
     def test_stale_progress_falls_back_to_open_count(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14,
                        ts=time.time() - statusbar.AUTOPILOT_RUN_WINDOW_S - 60)
-        self.assertIn("🎫 14", self._seg())
+        self.assertIn("Issues 14", self._seg())
 
     def test_backlog_empty_renders_green(self):
         _seed_cache(self.home, self.cwd, open_n=0, name="demo")
         _seed_progress(self.home, "demo", done=17, remaining=0)
         seg = self._seg()
-        self.assertIn("🎫 17/17", seg)
+        self.assertIn("Issues 17/17", seg)
         self.assertIn("38;5;40m", seg)          # green
 
     def test_unknown_repo_renders_nothing(self):
@@ -121,8 +121,8 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 7)
             self.assertEqual(cache["name"], "demo")
             # and the segment composes from that cache
-            self.assertIn("🎫 7", statusbar.tickets_segment(repo, home=home,
-                                                            spawn=False))
+            self.assertIn("Issues 7", statusbar.tickets_segment(repo, home=home,
+                                                               spawn=False))
 
     def test_refresh_outside_git_repo_writes_null(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as nonrepo:

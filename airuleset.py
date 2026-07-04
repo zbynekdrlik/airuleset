@@ -208,7 +208,7 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
         p = max(0, min(100, int(p)))
         c = colr(p, 70, 90)
         segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, model, p, reset(w.get("resets_at"))))
-# --- 🎫 ticket progress: autopilot done/total, else open GitHub issues ---
+# --- github ticket progress: autopilot done/total, else open issues ---
 # Composed from local caches by statusbar.tickets_segment (a stale cache spawns a
 # DETACHED `airuleset.py tickets-status --refresh`; the render never waits on gh).
 # {{REPO_DIR}} is substituted at install time by render_caveman_shim().
@@ -1402,7 +1402,7 @@ def _gh_out(*gh_args, timeout=8):
 
 
 def _write_autopilot_progress(name, remaining):
-    """Persist per-repo autopilot run progress for the statusline 🎫 segment
+    """Persist per-repo autopilot run progress for the statusline github-tickets segment
     (~/.claude/autopilot-progress/<repo>.json). `done` counts the completion
     cards sent within ONE run window; a card after a ≥6h gap starts a new run.
     Best-effort — a failure here never blocks the card send."""
@@ -1437,7 +1437,7 @@ def _write_autopilot_progress(name, remaining):
 
 
 def cmd_tickets_status(args):
-    """Statusline 🎫 ticket segment. Default: PRINT the segment for --cwd
+    """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
     SLOW path — resolve the repo at --cwd via git+gh and rewrite its cache
     (~/.claude/tickets-status/). The statusline shim never runs the slow path
@@ -1530,7 +1530,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
         status = send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False))
         print(status)
         if status == "sent":
-            # Feed the statusline 🎫 done/total segment — a card that actually
+            # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             _write_autopilot_progress(name, remaining)
     except Exception:
@@ -1839,7 +1839,7 @@ def main():
 
     p_tickets = sub.add_parser(
         "tickets-status",
-        help="Statusline 🎫 segment — autopilot done/total or open GitHub issues")
+        help="Statusline github-tickets segment — autopilot done/total or open issues")
     p_tickets.add_argument("--cwd", help="Session cwd (defaults to $PWD)")
     p_tickets.add_argument("--refresh", action="store_true",
                            help="Slow path: refresh the per-repo cache via git+gh "
