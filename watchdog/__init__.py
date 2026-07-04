@@ -644,7 +644,7 @@ _OPTION_ROW_RX = re.compile(r"^(?:❯\s*)?\d+\.\s+\S")
 _DIALOG_HELP_RX = re.compile(r"Tab/Arrow keys to navigate|Enter to select", re.I)
 
 
-def pane_question_excerpt(captured, max_chars=350):
+def pane_question_excerpt(captured, max_chars=900):
     """Extract the OPEN dialog's question + options from a captured pane, so the job-2
     "čaká na teba" ping carries WHAT is being asked — the user's explicit complaint was
     pings saying only "a question is waiting" with no question in them (2026-07-04).

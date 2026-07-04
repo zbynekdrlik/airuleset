@@ -473,6 +473,18 @@ class PaneQuestionExcerpt(unittest.TestCase):
         self.assertLessEqual(len(out), 100)
         self.assertTrue(out.endswith("…"))
 
+    def test_default_cap_fits_a_full_dialog_question(self):
+        # The user's complaint (2026-07-04): device questions arrive CUT — the
+        # default cap must carry a realistic full dialog (long question + option
+        # descriptions, ~600 chars), not chop it at the old 350.
+        q = "Ktorý prístup pre migráciu objednávok zvolíme? " * 8   # ~376 chars
+        out = wd.pane_question_excerpt(
+            q + "\n❯ 1. Skript (odporúčam) — " + "rýchle. " * 20
+            + "\n  2. Nechať tak — " + "nuly ostanú. " * 10 + "\n")
+        self.assertGreater(len(out), 500,
+                           "default cap must fit a full realistic dialog")
+        self.assertIn("2. Nechať tak", out)
+
 
 class WaitingPersistenceGate(unittest.TestCase):
     """Job 2 must NOT ping on the FIRST poll that sees a dialog footer (a transient

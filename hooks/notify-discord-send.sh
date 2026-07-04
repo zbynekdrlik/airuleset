@@ -52,8 +52,11 @@ esac
 HEADER="**${EMOJI} ${PROJECT}**"
 [ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
 # BASE body (header + quoted text) WITHOUT the @mention — the mention is per-target,
-# because each recipient gets THEIR OWN @mention in THEIR OWN thread.
-CONTENT_BASE=$(printf '%s\n> %s' "$HEADER" "$TEXT")
+# because each recipient gets THEIR OWN @mention in THEIR OWN thread. EVERY line
+# of TEXT gets the `> ` quote prefix — a multi-line question block must render as
+# ONE Discord quote block (quoting only the first line visually breaks it).
+TEXT_QUOTED=$(printf '%s\n' "$TEXT" | sed 's/^/> /')
+CONTENT_BASE=$(printf '%s\n%s' "$HEADER" "$TEXT_QUOTED")
 
 # @mention + thread routing via `airuleset.py notify` (single source of truth: it
 # reads the owner from the tmux session group + the channel .env). Path is relative
@@ -97,6 +100,13 @@ emit_one() {
         case "$POSTED_CHANNELS" in *" $CH "*) return 0;; esac
     fi
     CONTENT="${MENTION}${CONTENT_BASE}"
+    # Discord hard-caps a message at 2000 chars — an oversize POST gets a 400,
+    # which in confirm mode would mark the question failed on EVERY retry (it
+    # would never reach the phone). Codepoint-safe cap, belt-and-suspenders
+    # under the pending hook's own 1800-char payload budget.
+    if command -v jq &>/dev/null; then
+        CONTENT=$(printf '%s' "$CONTENT" | jq -Rrs 'rtrimstr("\n") | .[0:1990]')
+    fi
 
     if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
         # dry-run: one block per DISTINCT target (single-owner boxes emit exactly one —
