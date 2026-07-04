@@ -77,6 +77,12 @@ extract_block() {
     # (codex-bridge 2026-07-04): the phone must get the WHOLE question, with its
     # úvod, never a 250-char fragment ("…sklad zač").
     printf '%s\n' "$MSG" | awk -v m="$1" '
+        # Codepoint length, portable across mawk (bytes) and gawk (chars):
+        # UTF-8 continuation bytes are 0x80-0xBF, so bytes minus continuations
+        # = characters. mawk length() counts BYTES — gating the context-pull
+        # on it misjudged a short diacritic-heavy Slovak marker as "long" and
+        # silently dropped its briefing (review finding, 2026-07-04).
+        function cplen(s,  t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
         NR <= m { L[NR] = $0 }
         END {
             if (m < 1 || !(m in L)) exit
@@ -84,7 +90,7 @@ extract_block() {
             while (s > 1 && L[s-1] !~ /^[[:space:]]*$/) s--
             blk = ""
             for (i = s; i <= m; i++) blk = blk (i > s ? "\n" : "") L[i]
-            if (length(blk) < 200) {
+            if (cplen(blk) < 200) {
                 p = s - 1
                 while (p >= 1 && L[p] ~ /^[[:space:]]*$/) p--
                 if (p >= 1) {

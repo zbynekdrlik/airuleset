@@ -103,9 +103,17 @@ emit_one() {
     # Discord hard-caps a message at 2000 chars — an oversize POST gets a 400,
     # which in confirm mode would mark the question failed on EVERY retry (it
     # would never reach the phone). Codepoint-safe cap, belt-and-suspenders
-    # under the pending hook's own 1800-char payload budget.
+    # under the pending hook's own 1800-char payload budget (per-line '> '
+    # quoting can inflate a many-line payload past it). TAIL-PRESERVING: a
+    # blind head slice would chop the final DECISION line off the end —
+    # exactly the truncated-question failure this pipeline exists to prevent
+    # (review finding, 2026-07-04) — so oversize keeps the head + the tail of
+    # the last line (the quoted '> ❓ <rozhodnutie>'), max 1650+4+280 < 2000.
     if command -v jq &>/dev/null; then
-        CONTENT=$(printf '%s' "$CONTENT" | jq -Rrs 'rtrimstr("\n") | .[0:1990]')
+        CONTENT=$(printf '%s' "$CONTENT" | jq -Rrs 'rtrimstr("\n")
+            | if length <= 1990 then .
+              else (split("\n") | last) as $d | .[0:1650] + "\n… " + ($d | .[-280:])
+              end')
     fi
 
     if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
