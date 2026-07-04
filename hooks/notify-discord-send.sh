@@ -124,15 +124,34 @@ emit_one() {
     if [ "$CONFIRM" = "1" ]; then
         # FOREGROUND, delivery-confirmed (the ❓ path): only a real HTTP 2xx counts.
         # --max-time 5 stays well under the Stop-hook timeout (15s in hooks.json).
-        local code
-        code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' -X POST \
+        # Capture the BODY too (not -o /dev/null) so we can record the created
+        # message id for Discord-reply routing: `<body>\n<http_code>`.
+        local resp code body
+        resp=$(curl -s --max-time 5 -w '\n%{http_code}' -X POST \
             "https://discord.com/api/v10/channels/${CH}/messages" \
             -H "Authorization: Bot ${BOT_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg content "$CONTENT" '{content: $content, flags: 4}')" \
-            2>/dev/null) || code=""
+            2>/dev/null) || resp=""
+        code="${resp##*$'\n'}"
+        body="${resp%$'\n'*}"
         case "$code" in
-            2??) ;;
+            2??)
+                # Record message-id → session so a Discord REPLY to this ❓ ping
+                # routes the answer back into the asking session (watchdog job 7).
+                # Only the ❓ Stop-hook path sets ND_SESSION_ID; a bad parse is a
+                # no-op (reply routing just won't work for this one message).
+                if [ -n "${ND_SESSION_ID:-}" ]; then
+                    local mid
+                    mid=$(printf '%s' "$body" | jq -r '.id // empty' 2>/dev/null || echo "")
+                    if [ -n "$mid" ]; then
+                        python3 "$AIRULESET_PY" notify --record-question \
+                            --message-id "$mid" --channel "$CH" \
+                            --session "$ND_SESSION_ID" --cwd "$CWD" \
+                            >/dev/null 2>&1 || true
+                    fi
+                fi
+                ;;
             *)   DELIVERY_FAILED=1 ;;
         esac
         return 0

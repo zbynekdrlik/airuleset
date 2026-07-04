@@ -93,7 +93,10 @@ send_q() {
     # never be silently marked as pinged (review finding, 2026-07-04; the /goal
     # re-poke's re-emit is the natural retry, and job-2 has no backstop for a
     # text-marker ❓).
-    if ND_EMOJI="❓" ND_TEXT="$c" ND_CWD="$CWD" ND_CONFIRM=1 bash "$send"; then
+    # ND_SESSION_ID lets the send path record this ❓ ping's Discord message id →
+    # THIS session, so a Discord REPLY routes the answer back here (watchdog job 7).
+    if ND_EMOJI="❓" ND_TEXT="$c" ND_CWD="$CWD" ND_CONFIRM=1 ND_SESSION_ID="$SID" \
+            bash "$send"; then
         printf '%s' "$c" > "$LASTQ"
     fi
 }

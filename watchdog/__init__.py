@@ -1,4 +1,4 @@
-"""api-watchdog — keep unattended Claude Code sessions moving. Six jobs per poll:
+"""api-watchdog — keep unattended Claude Code sessions moving. Seven jobs per poll:
 
   (1) AUTO-RESUME: a session STALLED ON AN API ERROR (529 / ConnectionRefused /
       rate limit) is resumed with `tmux send-keys "continue"` + a Discord ping.
@@ -61,6 +61,17 @@
       AFTER it to resume — never before. State (`sesslimit:<sid>`) carries the parsed
       reset epoch + pinged/continued flags across polls; a genuinely new limit window
       (5h → weekly) re-arms both.
+  (7) DISCORD REPLY → THE ASKING SESSION: when a ❓ ping is delivered, the send path
+      records the ping's Discord message id → the asking session
+      (notify.record_question). The user ANSWERS by REPLYING to that ping in Discord;
+      this job reads recent messages in the notification thread(s), matches a reply's
+      referenced message id to the local question map, and types the answer into that
+      exact session's IDLE pane (send-keys, gated on pane_at_idle_prompt — the #233
+      invariant). SECURITY: a reply is actioned ONLY when its author is a KNOWN OWNER
+      of this machine (notify.known_owner_ids), it explicitly REPLIES to a ❓ THIS
+      machine sent, and the target pane is idle at a free `❯`. Delivered once (dedup +
+      the question is dropped on delivery), ✅-reacted on success. So the user can
+      answer an autopilot question from their phone and it lands in the right Claude.
 
 WHY A POLLER, NOT A HOOK
 ------------------------
@@ -964,6 +975,169 @@ def send_selfcheck(pane_id, run=None):
 
 
 # --------------------------------------------------------------------------- #
+# Job 7 — Discord REPLY → the Claude session that asked the ❓.
+#
+# When a ❓ ping is delivered, notify.record_question() maps the ping's Discord
+# message id → the asking session. The user answers by REPLYING to that ping in
+# Discord; this job reads recent messages in the notification thread(s), matches
+# a reply's referenced message id against the local question map, and types the
+# answer into that exact session's tmux pane. SECURITY: a reply is actioned ONLY
+# when (a) its author id is a KNOWN OWNER of this machine (notify.known_owner_ids
+# — the DISCORD_MENTION_* set), (b) it explicitly REPLIES to a ❓ ping THIS
+# machine sent (in the local map), and (c) the target pane is IDLE at a free `❯`
+# (pane_at_idle_prompt — never inject into a running turn, the #233 invariant).
+# --------------------------------------------------------------------------- #
+
+DISCORD_REPLY_MAX_CHARS = 1500       # cap a typed answer (Discord msgs ≤ 2000)
+_DREPLY_DONE_CAP = 200               # bounded dedup set of delivered reply ids
+_MENTION_TOKEN_RX = re.compile(r"<@[!&]?\d+>")
+
+
+def clean_reply_text(raw, bot_id=""):
+    """Turn a Discord reply's raw content into a single-line prompt safe to type.
+
+    Strips @mention tokens (`<@id>` / `<@!id>` / `<@&role>` — a reply that pings
+    the bot must not type the ping), collapses ALL whitespace (incl. newlines — a
+    stray newline would submit the prompt early / split it), and caps the length.
+    Returns "" when nothing usable remains (→ the caller ignores the reply)."""
+    if not raw:
+        return ""
+    s = _MENTION_TOKEN_RX.sub(" ", str(raw))
+    if bot_id:
+        s = s.replace("<@%s>" % bot_id, " ").replace("<@!%s>" % bot_id, " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:DISCORD_REPLY_MAX_CHARS]
+
+
+def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
+    """Validate ONE Discord message as an answer to a tracked ❓ ping.
+
+    Returns {reply_id, referenced, session, cwd, channel, text} when `msg` is a
+    reply BY an allowed owner TO a message id in `qmap` with usable text; else
+    None. Pure — all the security checks live here so they are unit-testable."""
+    if not isinstance(msg, dict):
+        return None
+    reply_id = str(msg.get("id") or "").strip()
+    author = msg.get("author") or {}
+    author_id = str(author.get("id") or "").strip()
+    ref = (msg.get("message_reference") or {}).get("message_id")
+    ref = str(ref or "").strip()
+    if not reply_id or not author_id or not ref:
+        return None
+    if author_id not in allowed_ids:            # SECURITY: only a known owner
+        return None
+    q = qmap.get(ref)
+    if not q:                                   # must reply to a ❓ WE sent
+        return None
+    text = clean_reply_text(msg.get("content"), bot_id)
+    if not text:
+        return None
+    return {"reply_id": reply_id, "referenced": ref,
+            "session": str(q.get("session") or ""), "cwd": str(q.get("cwd") or ""),
+            "channel": str(q.get("channel") or ""), "text": text}
+
+
+def _discord_get(url, token, timeout=6):
+    import urllib.request
+    req = urllib.request.Request(
+        url, headers={"Authorization": "Bot " + token,
+                      "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
+    return urllib.request.urlopen(req, timeout=timeout).read()
+
+
+def fetch_channel_messages(channel, token, limit=25):
+    """GET the last `limit` messages of a channel/thread (newest first). Returns a
+    list of message dicts, or [] on any error (fail-safe — never breaks the poll)."""
+    if not channel or not token:
+        return []
+    try:
+        raw = _discord_get(
+            "https://discord.com/api/v10/channels/%s/messages?limit=%d" % (channel, limit),
+            token)
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _react_ok(channel, message_id, token):
+    """React ✅ to a delivered reply as a visible 'answer routed' confirmation.
+    Best-effort (a failed reaction never blocks delivery)."""
+    import urllib.request
+    try:
+        url = ("https://discord.com/api/v10/channels/%s/messages/%s/reactions/%s/@me"
+               % (channel, message_id, "%E2%9C%85"))     # ✅ url-encoded
+        req = urllib.request.Request(
+            url, method="PUT", data=b"",
+            headers={"Authorization": "Bot " + token, "Content-Length": "0",
+                     "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
+        urllib.request.urlopen(req, timeout=6).read()
+        return True
+    except Exception:
+        return False
+
+
+def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
+                            discord_fetch=None, env=None):
+    """Route owner Discord replies into the sessions that asked (job 7).
+
+    `panes_by_sid`: {session_id: (pane_id, captured_pane)} for the live `claude`
+    panes this cycle (collected in run_once). `discord_fetch(channel, token)`:
+    returns recent messages (injectable for tests). Delivers each matching reply
+    ONCE (dedup on reply id + the question is dropped on delivery), only into an
+    IDLE pane, and reacts ✅ on success. Returns log lines. Never raises."""
+    from notify import (bot_token, known_owner_ids, load_questions, drop_question,
+                        _read_env)
+    logs = []
+    env = _read_env() if env is None else env
+    qmap = load_questions()
+    if not qmap:
+        return logs
+    token = bot_token(env)
+    allowed = known_owner_ids(env)
+    if not token or not allowed:
+        return logs
+    fetch = discord_fetch or fetch_channel_messages
+
+    done = state.get("dreply_done")
+    done = list(done) if isinstance(done, list) else []
+    done_set = set(done)
+    channels = {str(v.get("channel") or "") for v in qmap.values()}
+    channels.discard("")
+
+    for ch in sorted(channels):
+        for msg in fetch(ch, token):
+            r = parse_discord_reply(msg, allowed, qmap, bot_id="")
+            if not r or r["reply_id"] in done_set:
+                continue
+            pane = panes_by_sid.get(r["session"])
+            if not pane:
+                # the asking session isn't a live pane right now — retry next
+                # cycle (the question stays in the map; TTL prunes if it's gone).
+                logs.append("reply pending (no pane) %s" % r["session"][:12])
+                continue
+            pid, captured = pane
+            if not pane_at_idle_prompt(captured):
+                # busy mid-turn (e.g. ask-and-continue working another ticket) —
+                # never inject into a running turn (#233); retry when it goes idle.
+                logs.append("reply pending (busy) %s" % r["session"][:12])
+                continue
+            if pane_in_mode(pid, run):
+                continue
+            if not dry_run:
+                send_continue(pid, r["text"], run)
+                _react_ok(r["channel"], r["reply_id"], token)
+            done_set.add(r["reply_id"])
+            done.append(r["reply_id"])
+            drop_question(r["referenced"])
+            qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
+            logs.append("reply→%s [%s]" % (project_label(r["cwd"]), r["session"][:12]))
+
+    state["dreply_done"] = done[-_DREPLY_DONE_CAP:]
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -1341,7 +1515,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              stall_textcall=STALL_TEXTCALL_SECONDS,
              working_interval=WORKING_RETRY_INTERVAL_SECONDS,
              max_working_nudges=MAX_WORKING_NUDGES,
-             done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX):
+             done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
+             discord_fetch=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -1359,7 +1534,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (only while the session is STILL ✅ — a re-fired one is cleared silently);
       (6) a session showing the 5-HOUR SESSION-LIMIT banner in its pane → PING ONCE
           with the reset time, then send ONE `continue` AFTER the reset clock passes
-          (never before — `continue` pre-reset just re-hits the limit).
+          (never before — `continue` pre-reset just re-hits the limit);
+      (7) (only when `discord_fetch` is given) a session's ❓ ping was ANSWERED by
+          the owner REPLYING in Discord → type the answer into that exact session's
+          idle pane (deliver_discord_replies), react ✅ on success.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -1371,6 +1549,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     logs = []
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
+    panes_by_sid = {}                   # session id -> (pane_id, captured), for job 7 reply routing
     account_owner = ""                  # owner to @mention on the account-wide usage alert
 
     # Resolve every `claude` pane to its transcript, grouped BY transcript. A nudge
@@ -1402,8 +1581,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if not account_owner:
                 account_owner = owner      # first owner seen → the account/usage owner
 
-        # Capture the pane ONCE per session (reused by job 6 + the job-2 waiting check).
+        # Capture the pane ONCE per session (reused by job 6 + the job-2 waiting
+        # check + job 7 reply routing).
         captured = capture_pane(pid, run)
+        panes_by_sid[key] = (pid, captured)   # job 7: route a Discord reply here
 
         # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
         # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
@@ -1737,6 +1918,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                      pending_prefix=pending_prefix)
     except Exception:
         pass
+
+    # --- (7) ROUTE DISCORD REPLIES → the asking session (only when a fetcher is
+    # wired). Best-effort: a Discord/network hiccup must never break the tmux jobs.
+    if discord_fetch is not None:
+        try:
+            logs += deliver_discord_replies(now, run, state, panes_by_sid,
+                                            dry_run=dry_run, discord_fetch=discord_fetch)
+        except Exception:
+            pass
 
     save_state(state_path, state)
     return logs

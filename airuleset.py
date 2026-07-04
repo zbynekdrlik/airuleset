@@ -1298,6 +1298,14 @@ def cmd_notify(args):
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
                         notification_channel, resolve_owner, send)
 
+    if getattr(args, "record_question", False):
+        # Record a ❓ ping's Discord message id → the session that asked, so the
+        # watchdog can route the user's Discord REPLY back into that session.
+        from notify import record_question
+        ok = record_question(args.message_id, args.channel, args.session, args.cwd)
+        sys.stdout.write("recorded" if ok else "skip")
+        return
+
     if getattr(args, "owner", False):
         sys.stdout.write(resolve_owner())
         return
@@ -1550,10 +1558,12 @@ WATCHDOG_TIMER_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchd
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
-    and (rate-limited) alert when the weekly token limit nears its cap. Driven by
-    the systemd timer."""
-    from watchdog import run_once, fetch_usage
-    logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage)
+    (rate-limited) alert when the weekly token limit nears its cap, and route an
+    owner's Discord REPLY back into the session that asked the ❓. Driven by the
+    systemd timer."""
+    from watchdog import run_once, fetch_usage, fetch_channel_messages
+    logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
+                    discord_fetch=fetch_channel_messages)
     if getattr(args, "verbose", False):
         for line in logs:
             print(line)
@@ -1675,8 +1685,18 @@ def main():
     p_notify.add_argument("--api-error", dest="api_error", action="store_true",
                           help="Ping IF --text is a real Claude Code API error "
                                "(used by the notify-api-error.sh Stop hook)")
+    p_notify.add_argument("--record-question", dest="record_question",
+                          action="store_true",
+                          help="Record a ❓ ping's Discord message id → the session "
+                               "that asked (for Discord-reply routing); needs "
+                               "--message-id --channel --session --cwd")
+    p_notify.add_argument("--message-id", dest="message_id",
+                          help="Discord message id of the ❓ ping (--record-question)")
+    p_notify.add_argument("--channel", help="Discord channel/thread id the ❓ ping "
+                                            "was posted to (--record-question)")
+    p_notify.add_argument("--cwd", help="Project cwd of the asking session (--record-question)")
     p_notify.add_argument("--text", help="The turn's last assistant message (API-error check)")
-    p_notify.add_argument("--session", help="Session id (API-error dedup scope)")
+    p_notify.add_argument("--session", help="Session id (API-error dedup scope / --record-question)")
     p_notify.add_argument("--project", help="Project name for the API-error ping")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
     p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté') — plain language")

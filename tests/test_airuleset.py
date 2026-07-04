@@ -1092,6 +1092,45 @@ class TestDiscordSuppressEmbeds(TestCase):
                           "a POST path is missing SUPPRESS_EMBEDS (flags: 4)")
 
 
+class TestRecordQuestionCLI(TestCase):
+    """`airuleset.py notify --record-question` persists the ❓ ping's Discord
+    message id → asking session, so the watchdog can route the user's reply back.
+    The shell send path calls this on a confirmed ❓ POST."""
+
+    def test_record_question_writes_map(self):
+        # Real subprocess: point HOME at a tmp dir so notify writes the map under
+        # <tmp>/.claude/ (the CLI resolves ~/.claude, not an in-process patch).
+        with tempfile.TemporaryDirectory() as home:
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "notify", "--record-question", "--message-id", "42",
+                 "--channel", "thread-z", "--session", "sid-xyz",
+                 "--cwd", "/home/x/proj"],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home, "PYTHONPATH": str(airuleset.REPO_DIR)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "recorded")
+            qp = Path(home) / ".claude" / "discord-questions.json"
+            data = json.loads(qp.read_text())
+            self.assertEqual(data["42"]["session"], "sid-xyz")
+            self.assertEqual(data["42"]["channel"], "thread-z")
+
+
+class TestSendPathRecordsQuestion(TestCase):
+    """The ❓ confirm-send path passes ND_SESSION_ID and records the message id;
+    the send script captures the POST body's `.id` and calls --record-question."""
+
+    def test_send_script_wires_record_question(self):
+        src = (airuleset.REPO_DIR / "hooks" / "notify-discord-send.sh").read_text()
+        self.assertIn("--record-question", src)
+        self.assertIn("ND_SESSION_ID", src)
+        self.assertIn(".id // empty", src)      # extracts the created message id
+
+    def test_pending_hook_passes_session_id(self):
+        src = (airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh").read_text()
+        self.assertIn("ND_SESSION_ID=", src)
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [
@@ -2350,6 +2389,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # autopilot_done) MUST be pinned False here — a new flag left unpinned hijacks
         # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                      record_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
@@ -2398,6 +2438,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                          record_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,

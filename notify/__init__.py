@@ -357,6 +357,103 @@ def _prune_dedup(d):
         pass
 
 
+# --- outstanding-question map (Discord reply → the Claude session that asked) --
+# When a ❓ ping is delivered, we record which SESSION asked it, keyed by the
+# Discord message id of the ping. The user answers by REPLYING to that ping in
+# Discord; the watchdog looks the referenced message id up here and types the
+# answer into that exact session's tmux pane. Machine-LOCAL (each machine only
+# answers questions IT asked): the file lives in ~/.claude, never git, never a
+# secret. Bounded + self-pruning so a never-answered question can't accumulate.
+_QUESTIONS_REL = "discord-questions.json"
+_QUESTIONS_TTL_S = 24 * 3600          # an unanswered question older than this is stale
+_QUESTIONS_MAX = 200                  # hard cap on tracked questions (newest kept)
+
+
+def _questions_path():
+    return os.path.join(_claude_dir(), _QUESTIONS_REL)
+
+
+def load_questions(path=None):
+    """The message-id → {session, cwd, channel, ts} map. {} on any error."""
+    path = path or _questions_path()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_questions(d, path=None):
+    path = path or _questions_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as h:
+            json.dump(d, h)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def record_question(message_id, channel, session, cwd, now=None, path=None):
+    """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
+    `session` (transcript stem = CC session id) in `cwd`. Prunes stale + over-cap
+    entries in the same write. Returns True on success. Fail-safe (never raises)."""
+    message_id = str(message_id or "").strip()
+    session = str(session or "").strip()
+    if not message_id or not session:
+        return False
+    now = time.time() if now is None else now
+    d = load_questions(path)
+    d[message_id] = {"session": session, "cwd": str(cwd or ""),
+                     "channel": str(channel or ""), "ts": int(now)}
+    # prune stale
+    for mid in [m for m, v in d.items()
+                if now - (v.get("ts") or 0) > _QUESTIONS_TTL_S]:
+        d.pop(mid, None)
+    # hard cap — keep the newest by ts
+    if len(d) > _QUESTIONS_MAX:
+        for mid, _v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0
+                              )[:len(d) - _QUESTIONS_MAX]:
+            d.pop(mid, None)
+    return _save_questions(d, path)
+
+
+def drop_question(message_id, path=None):
+    """Remove one answered/obsolete question. Fail-safe."""
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return False
+    d = load_questions(path)
+    if message_id in d:
+        d.pop(message_id, None)
+        return _save_questions(d, path)
+    return False
+
+
+def known_owner_ids(env=None):
+    """The set of numeric Discord user ids allowed to DRIVE a session by replying
+    (every `DISCORD_MENTION_<OWNER>` in this machine's .env, unwrapped from any
+    `<@id>` form). This is the SECURITY boundary for reply-injection: only a
+    trusted owner of THIS machine can have their reply typed into a session."""
+    env = _read_env() if env is None else env
+    ids = set()
+    for k, v in env.items():
+        if not k.startswith("DISCORD_MENTION_"):
+            continue
+        m = re.search(r"\d{5,25}", v or "")
+        if m:
+            ids.add(m.group(0))
+    return ids
+
+
+def bot_token(env=None):
+    env = _read_env() if env is None else env
+    return env.get("DISCORD_BOT_TOKEN", "") or ""
+
+
 # --- send ----------------------------------------------------------------
 # Message flag 1<<2 = SUPPRESS_EMBEDS: a notification carrying a URL (the
 # run-card's 🔗 "where to see it" link) must NOT unfurl into a giant link
