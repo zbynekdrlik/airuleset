@@ -2061,6 +2061,20 @@ class TestUltracodeLauncher(TestCase):
         self.assertTrue(airuleset.apply_ultracode_launcher(p))
         self.assertFalse(airuleset.apply_ultracode_launcher(p))   # second run no-op
 
+    def test_block_guarantees_local_bin_on_path(self):
+        # claude installs to ~/.local/bin, which NON-LOGIN interactive shells
+        # (su, tmux default-command, IDE terminals) never get from ~/.profile —
+        # the block itself must ensure it, idempotently (montalu@dev1
+        # "claude: command not found", 2026-07-04).
+        p = self._tmp("# rc\n")
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        self.assertIn('case ":$PATH:" in *":$HOME/.local/bin:"*', text)
+        self.assertIn('PATH="$HOME/.local/bin:$PATH"', text)
+        # the guard must live INSIDE the managed block (so replace updates it)
+        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+        self.assertIn('.local/bin', block.split(airuleset.ULTRACODE_MARK_END)[0])
+
     def test_replaces_block_in_place_no_duplicate(self):
         p = self._tmp("# rc\n")
         airuleset.apply_ultracode_launcher(p)

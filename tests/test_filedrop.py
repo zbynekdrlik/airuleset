@@ -14,10 +14,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 class TestConstants(unittest.TestCase):
     def test_constants_present(self):
         import filedrop
-        self.assertEqual(filedrop.PORT, int(os.getenv("FILEDROP_PORT", "8788")))
+        env = os.getenv("FILEDROP_PORT")
+        expected = int(env) if env else (filedrop.persisted_port()
+                                         or filedrop.DEFAULT_PORT)
+        self.assertEqual(filedrop.PORT, expected)
+        self.assertEqual(filedrop.DEFAULT_PORT, 8788)
         self.assertEqual(filedrop.TOKEN_BYTES, 16)
         self.assertGreater(filedrop.MAX_SHARE_BYTES, 0)
         self.assertGreater(filedrop.PRUNE_AGE_S, 0)
+
+    def test_persisted_port_reads_int_or_none(self):
+        import unittest.mock as m
+        import filedrop
+        with tempfile.TemporaryDirectory() as d:
+            pf = Path(d) / "filedrop.port"
+            with m.patch.object(filedrop, "PORT_FILE", pf):
+                self.assertIsNone(filedrop.persisted_port())   # missing
+                pf.write_text("8791\n")
+                self.assertEqual(filedrop.persisted_port(), 8791)
+                pf.write_text("garbage")
+                self.assertIsNone(filedrop.persisted_port())   # unreadable
 
 
 class TestHostIp(unittest.TestCase):
@@ -329,6 +345,7 @@ class TestAirulesetWiring(unittest.TestCase):
         tmpl = airuleset.FILEDROP_SERVICE_TEMPLATE.read_text()
         self.assertIn("{{REPO_DIR}}", tmpl)
         self.assertIn("{{HOST_IP}}", tmpl)
+        self.assertIn("{{PORT}}", tmpl)
         self.assertIn("filedrop --serve", tmpl)
 
     def test_render_unit_substitutes_placeholders(self):
@@ -337,6 +354,83 @@ class TestAirulesetWiring(unittest.TestCase):
         self.assertNotIn("{{", unit)            # all placeholders substituted
         self.assertIn("FILEDROP_HOST=", unit)
         self.assertIn("airuleset.py filedrop --serve", unit)
+
+    def test_render_unit_bakes_chosen_port(self):
+        import airuleset
+        unit = airuleset._render_filedrop_unit(8791)
+        self.assertIn("Environment=FILEDROP_PORT=8791", unit)
+
+
+class TestChooseFiledropPort(unittest.TestCase):
+    """A second airuleset user on ONE host (montalu@dev1, marek@gatekeeper) must
+    not restart-loop on the first user's :8788 (Errno 98, observed on
+    montalu@dev1 2026-07-04) — install picks + persists a free per-user port."""
+
+    def setUp(self):
+        import unittest.mock as m
+        import airuleset
+        self.m = m
+        self.ar = airuleset
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.port_file = Path(tmp.name) / "filedrop.port"
+        prev = os.environ.pop("FILEDROP_PORT", None)
+        if prev is not None:
+            self.addCleanup(os.environ.__setitem__, "FILEDROP_PORT", prev)
+        for target, val in [
+            ("FILEDROP_PORT_FILE", self.port_file),
+            ("filedrop_persisted_port", lambda: None),
+            ("_run_systemctl", lambda a: (3, "inactive", "")),   # our svc NOT active
+        ]:
+            p = m.patch.object(airuleset, target, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_env_override_wins(self):
+        os.environ["FILEDROP_PORT"] = "9999"
+        try:
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 9999)
+        finally:
+            os.environ.pop("FILEDROP_PORT", None)
+
+    def test_persisted_choice_is_stable(self):
+        # a previously persisted port is reused verbatim — the URL never moves
+        with self.m.patch.object(self.ar, "filedrop_persisted_port", lambda: 8791):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
+
+    def test_own_active_service_keeps_default(self):
+        # our own live instance holds :8788 → that is OURS, no migration
+        with self.m.patch.object(self.ar, "_run_systemctl",
+                                 lambda a: (0, "active\n", "")):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"),
+                             self.ar.FILEDROP_DEFAULT_PORT)
+        self.assertFalse(self.port_file.exists())
+
+    def test_default_free_uses_default_without_persisting(self):
+        import socket
+        # find a base whose port is genuinely free right now
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        base = probe.getsockname()[1]
+        probe.close()
+        with self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", base):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), base)
+        self.assertFalse(self.port_file.exists(),
+                         "default port needs no persisted override")
+
+    def test_default_busy_picks_next_free_and_persists(self):
+        import socket
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", 0))          # OS-assigned free port
+        base = blocker.getsockname()[1]         # keep it BOUND = foreign instance
+        self.addCleanup(blocker.close)
+        with self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", base):
+            chosen = self.ar._choose_filedrop_port("127.0.0.1")
+        self.assertNotEqual(chosen, base)
+        self.assertGreater(chosen, base)
+        self.assertTrue(self.port_file.exists(),
+                        "migrated port must be persisted for the share CLI")
+        self.assertEqual(int(self.port_file.read_text().strip()), chosen)
 
 
 if __name__ == "__main__":

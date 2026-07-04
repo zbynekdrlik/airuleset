@@ -16,7 +16,26 @@ import socket
 import subprocess
 from pathlib import Path
 
-PORT = int(os.environ.get("FILEDROP_PORT", "8788"))
+DEFAULT_PORT = 8788
+
+# A SECOND airuleset user on the same host (montalu@dev1, marek@gatekeeper)
+# collides with the first user's :8788 (Errno 98 restart-loop). When install
+# detects that, it picks a free port and PERSISTS the choice here so the serve
+# unit, the share CLI, and `filedrop status` always agree on the same URL.
+PORT_FILE = Path.home() / ".claude" / "filedrop.port"
+
+
+def persisted_port():
+    """The port a previous install persisted when the default was taken by a
+    FOREIGN file-drop instance on this host. None when unset/unreadable."""
+    try:
+        return int(PORT_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+_env_port = os.environ.get("FILEDROP_PORT")
+PORT = int(_env_port) if _env_port else (persisted_port() or DEFAULT_PORT)
 
 # Shared files live under ~/.claude/filedrop/<token>/<name> — gitignored, outside
 # the repo, never committed. Overridable for tests via FILEDROP_DIR.

@@ -56,11 +56,17 @@ UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 # THAT machine, bound to THAT machine's own LAN IP (discovered at runtime by
 # filedrop.host_ip()).
 try:
-    from filedrop import (PORT as FILEDROP_PORT, host_ip as filedrop_host_ip,
-                          filedrop_url, FILEDROP_DIR)
+    from filedrop import (PORT as FILEDROP_PORT, DEFAULT_PORT as FILEDROP_DEFAULT_PORT,
+                          PORT_FILE as FILEDROP_PORT_FILE, persisted_port as filedrop_persisted_port,
+                          host_ip as filedrop_host_ip, filedrop_url, FILEDROP_DIR)
 except Exception:  # pragma: no cover — filedrop package should always import
     FILEDROP_PORT = int(os.environ.get("FILEDROP_PORT", "8788"))
+    FILEDROP_DEFAULT_PORT = 8788
+    FILEDROP_PORT_FILE = CLAUDE_DIR / "filedrop.port"
     FILEDROP_DIR = CLAUDE_DIR / "filedrop"
+
+    def filedrop_persisted_port():
+        return None
 
     def filedrop_host_ip():
         return os.environ.get("FILEDROP_HOST", "127.0.0.1")
@@ -378,6 +384,12 @@ ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 # new dir or a clean start) and `claude-plain` (vanilla `claude`, no flags).
 ULTRACODE_BASHRC_BLOCK = (
     f"{ULTRACODE_MARK_START}\n"
+    # claude installs to ~/.local/bin, which NON-LOGIN interactive shells (su
+    # without -, tmux with a default-command, IDE terminals) never get — only
+    # ~/.profile adds it, and only login shells read that. Without this guard
+    # the function resolves to nothing there ("claude: command not found" on
+    # montalu@dev1, 2026-07-04). Idempotent: adds the dir once, never twice.
+    'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac\n'
     "claude() { command claude --dangerously-skip-permissions -c "
     "--settings '{\"ultracode\":true}' \"$@\"; }\n"
     "claude-new() { command claude --dangerously-skip-permissions "
@@ -900,16 +912,65 @@ def _whoami():
 # ---------------------------------------------------------------------------
 
 
-def _render_filedrop_unit():
+def _render_filedrop_unit(port=None):
     """Read the file-drop unit template and substitute the per-machine placeholders.
 
     {{REPO_DIR}} -> this checkout's path (ExecStart). {{HOST_IP}} -> the LAN IP
     this machine should bind, computed HERE (unsandboxed, so `hostname -I` works)
     and baked into Environment=FILEDROP_HOST so the sandboxed server never needs
-    AF_NETLINK to discover its own address."""
+    AF_NETLINK to discover its own address. {{PORT}} -> the per-user port chosen
+    by _choose_filedrop_port (a second airuleset user on the same host cannot
+    reuse the first user's :8788)."""
     return (FILEDROP_SERVICE_TEMPLATE.read_text()
             .replace("{{REPO_DIR}}", str(REPO_DIR))
-            .replace("{{HOST_IP}}", filedrop_host_ip()))
+            .replace("{{HOST_IP}}", filedrop_host_ip())
+            .replace("{{PORT}}", str(port if port is not None else FILEDROP_PORT)))
+
+
+def _choose_filedrop_port(bind_ip):
+    """The port this user's file-drop should serve on.
+
+    Two airuleset users on ONE host (montalu@dev1, marek@gatekeeper) collide on
+    the default :8788 — the second user's service restart-loops on Errno 98
+    (observed on montalu@dev1, 2026-07-04). Precedence:
+      1. FILEDROP_PORT env — explicit override, never second-guessed.
+      2. A previously PERSISTED choice (~/.claude/filedrop.port) — stable across
+         installs so the URL never silently moves.
+      3. The default, when OUR OWN service is already actively serving it.
+      4. Probe bind on the actual bind IP: default free → default; taken by a
+         FOREIGN instance → first free port in 8789-8798, persisted so the serve
+         unit, the share CLI, and `filedrop status` all agree on the same URL.
+    Fail-open to the default when nothing binds (the service then fails loudly,
+    exactly as before)."""
+    env = os.environ.get("FILEDROP_PORT")
+    if env:
+        return int(env)
+    persisted = filedrop_persisted_port()
+    if persisted:
+        return persisted
+    rc, out, _err = _run_systemctl(["is-active", "filedrop.service"])
+    if rc == 0 and out.strip() == "active":
+        return FILEDROP_DEFAULT_PORT     # our own live instance owns the default
+    import socket as _socket
+    for cand in range(FILEDROP_DEFAULT_PORT, FILEDROP_DEFAULT_PORT + 11):
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            s.bind((bind_ip, cand))
+        except OSError:
+            continue
+        finally:
+            s.close()
+        if cand != FILEDROP_DEFAULT_PORT:
+            try:
+                FILEDROP_PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+                FILEDROP_PORT_FILE.write_text(f"{cand}\n")
+                print(f"  Port {FILEDROP_DEFAULT_PORT} taken by another file-drop "
+                      f"on this host — using {cand} (persisted to {FILEDROP_PORT_FILE})")
+            except OSError as e:
+                print(f"  could not persist file-drop port choice ({e})",
+                      file=sys.stderr)
+        return cand
+    return FILEDROP_DEFAULT_PORT
 
 
 def _filedrop_is_live(url, timeout=2):
@@ -960,13 +1021,15 @@ def setup_filedrop_service():
     except OSError as e:
         print(f"  could not create {FILEDROP_DIR} ({e})", file=sys.stderr)
 
-    # 2. write the unit
+    # 2. write the unit — with the per-user port (a second airuleset user on the
+    # same host must not restart-loop on the first user's :8788).
     if not FILEDROP_SERVICE_TEMPLATE.exists():
         print(f"  ERROR: file-drop service template missing: "
               f"{FILEDROP_SERVICE_TEMPLATE}", file=sys.stderr)
         return False
+    port = _choose_filedrop_port(filedrop_host_ip())
     FILEDROP_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-    FILEDROP_SERVICE_DEST.write_text(_render_filedrop_unit())
+    FILEDROP_SERVICE_DEST.write_text(_render_filedrop_unit(port))
     print(f"  Wrote unit: {FILEDROP_SERVICE_DEST}")
 
     manual = (
@@ -1001,7 +1064,9 @@ def setup_filedrop_service():
     _run_systemctl(["restart", "filedrop.service"])
 
     # 5. liveness check on the LAN URL (server binds the LAN IP, not loopback).
-    url = filedrop_url()
+    # Built from the port chosen ABOVE — the module-level PORT was resolved at
+    # import time, i.e. before a fresh port choice was persisted this run.
+    url = f"http://{filedrop_host_ip()}:{port}/"
     if _wait_filedrop_live(url):
         print(f"  File-drop is live. LAN base URL: {url}")
         return True

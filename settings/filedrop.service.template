@@ -25,6 +25,10 @@ Type=simple
 # AF_INET6, which blocks the AF_NETLINK socket `hostname -I` needs — so the server
 # must NOT discover its own IP at runtime. {{HOST_IP}} is substituted per machine.
 Environment=FILEDROP_HOST={{HOST_IP}}
+# Per-user port: a second airuleset user on the same host (montalu@dev1,
+# marek@gatekeeper) cannot reuse the first user's 8788 — install picks a free
+# port and persists it to ~/.claude/filedrop.port so the share CLI agrees.
+Environment=FILEDROP_PORT={{PORT}}
 ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py filedrop --serve
 Restart=on-failure
 RestartSec=5
