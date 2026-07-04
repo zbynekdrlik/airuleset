@@ -528,6 +528,120 @@ class TestDiscordNotifyHooks(TestCase):
         self._stop(sid2, "❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertIn("❓", self._sent())
 
+    def test_long_question_survives_untruncated(self):
+        # LIVE incident (2026-07-04, codex-bridge): a full self-contained Slovak
+        # question (briefing + the actual ask, ~1100 chars) reached the phone CUT
+        # at 250 chars mid-word ("…sklad zač") — the intro arrived, the QUESTION
+        # never did. Discord allows ~2000 chars/message; the delivery must carry
+        # the whole question.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = ("❓ NEEDS YOU: V projekte codex-bridge (prenos dát z Codexu do Odoo) "
+             + "— cca 47 000 objednávok z rokov 2024/2025 bolo reálne doručených, "
+               "ale Codex k nim nemá dodací list, takže v Odoo ukazujú "
+               "„doručené = 0“. " * 8
+             + "Mám ich v Odoo označiť ako doručené jednorazovým skriptom?")
+        self._stop(sid, q, cwd=cwd)
+        self.assertIn("označiť ako doručené jednorazovým skriptom?", self._sent(),
+                      "the actual question at the END must reach the phone")
+
+    def test_question_block_above_marker_is_delivered(self):
+        # The rules mandate a SELF-CONTAINED question (briefing + options) written
+        # as the contiguous block ending with the ❓ marker line. The phone ping
+        # must carry that WHOLE block — not just the bare marker line (the user's
+        # complaint: "naraz príde otázka, nemá úvod, nemá súvislosti").
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("dlhá pracovná analýza, ktorá na telefón nepatrí\n\n"
+               "**Otázka — projekt codex-bridge (prenos dát z Codexu do Odoo):** "
+               "47 000 starých objednávok je reálne doručených, ale v Odoo "
+               "ukazujú „doručené = 0“.\n"
+               "• Označiť ich skriptom ako doručené (odporúčam) — rýchle\n"
+               "• Nechať tak — historické čísla ostanú nulové\n"
+               "❓ NEEDS YOU: označiť skriptom, alebo nechať tak?")
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("prenos dát z Codexu do Odoo", sent)   # briefing arrived
+        self.assertIn("Označiť ich skriptom", sent)          # options arrived
+        self.assertIn("nechať tak?", sent)                   # the decision line
+        self.assertNotIn("dlhá pracovná analýza", sent,
+                         "prose above the question block must NOT be pulled in")
+
+    def test_short_marker_pulls_previous_paragraph_as_context(self):
+        # A short bare marker after a blank line still needs its context — the
+        # paragraph directly above IS the explanation, deliver it too.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("Nasadenie čaká len na tvoje rozhodnutie o zálohe pred migráciou "
+               "databázy (trvá ~10 minút navyše).\n\n"
+               "❓ NEEDS YOU: spraviť zálohu pred migráciou?")
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("rozhodnutie o zálohe pred migráciou", sent)
+        self.assertIn("spraviť zálohu pred migráciou?", sent)
+
+    def test_multiline_question_every_line_blockquoted(self):
+        # Discord keeps a quote block only while every line carries the `> `
+        # prefix — quoting only the first line breaks the block visually.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("**Otázka — projekt demo:** kontext v prvej vete, aby bol blok "
+               "dosť dlhý na samostatné doručenie bez naťahovania odstavca vyššie.\n"
+               "• Možnosť A (odporúčam)\n"
+               "• Možnosť B\n"
+               "❓ NEEDS YOU: A alebo B?")
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent().strip()
+        body = [l for l in sent.split("\n")[1:] if l.strip()]
+        self.assertGreater(len(body), 2, sent)
+        for l in body:
+            self.assertTrue(l.startswith("> "), f"unquoted line in block: {l!r}")
+
+    def test_oversize_question_keeps_decision_line(self):
+        # >1800 chars: truncation must never cut the final DECISION away (the
+        # live failure was exactly an intro whose question got chopped off).
+        # Head is kept, the tail of the marker line is re-appended, and the
+        # whole device line stays under Discord's 2000-char message cap.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = ("❓ NEEDS YOU: " + "veľmi dlhý kontext o projekte a migrácii. " * 80
+             + "Rozhodnutie: migrovať hneď?")
+        self._stop(sid, q, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("migrovať hneď?", sent,
+                      "the decision at the END must survive truncation")
+        self.assertLessEqual(len(sent.strip()), 2000,
+                             "device line must fit Discord's message cap")
+
+    def test_dedup_keys_on_marker_line_not_surrounding_context(self):
+        # The dedup (one ping per DISTINCT question) keys on the ❓ marker LINE —
+        # a /goal re-poke repeats the marker verbatim but the surrounding turn
+        # text differs; that must still dedup, not re-ping.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = "❓ NEEDS YOU: spraviť zálohu pred migráciou?"
+        self._stop(sid, "Kontext pokusu č. 1 o vysvetlenie.\n\n" + q, cwd=cwd)
+        self.assertIn("zálohu", self._sent(), "the FIRST ask must ping")
+        self._stop(sid, "Úplne iný sprievodný text po re-poke.\n\n" + q, cwd=cwd)
+        self.assertEqual(self._sent(), "",
+                         "identical marker line must dedup despite changed prose")
+
+    def test_asked_line_pulls_its_context_paragraph(self):
+        # ask-and-continue: the ❓ ASKED ping carries the explanation paragraph
+        # above it, but never the ⏳ continuation below.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("Ticket #58 (kontrola pred štartom) potrebuje tvoje rozhodnutie "
+               "o predvolenej hodnote EQ.\n\n"
+               "❓ ASKED: reset na 0 dB alebo posledný preset?\n\n"
+               "⏳ WORKING: medzitým robím #59 (nezávislé od odpovede)")
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("rozhodnutie o predvolenej hodnote EQ", sent)
+        self.assertIn("reset na 0 dB", sent)
+        self.assertNotIn("WORKING", sent)
+        self.assertNotIn("#59", sent)
+
     def test_asked_line_pings_while_turn_continues_working(self):
         # ask-and-continue: the turn raises a per-ticket question (pings + tracked
         # on the ticket) and ENDS ⏳ WORKING because it keeps doing other answer-
