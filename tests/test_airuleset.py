@@ -626,6 +626,36 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertEqual(self._sent(), "",
                          "identical marker line must dedup despite changed prose")
 
+    def test_manyline_question_near_cap_keeps_decision_line(self):
+        # Review finding (2026-07-04, MEDIUM): the send-path 2000-char cap was
+        # a blind HEAD slice applied AFTER per-line '> ' quoting — a many-line
+        # question under the payload budget still inflated past the cap and
+        # lost its FINAL decision line (the exact failure class this fixes).
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        lines = ["• T%04d ab" % i for i in range(152)]
+        msg = "\n".join(["**Otázka — projekt demo:** dlhý zoznam ticketov."]
+                        + lines + ["❓ NEEDS YOU: migrovať všetko naraz?"])
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("migrovať všetko naraz?", sent,
+                      "the decision line must survive the send-path cap")
+        self.assertLessEqual(len(sent.strip()), 2000)
+
+    def test_diacritic_heavy_short_marker_still_pulls_context(self):
+        # Review finding (2026-07-04, LOW): mawk length() counts BYTES — a
+        # short (<200 chars) but diacritic-heavy Slovak marker measured ≥200
+        # "long" and silently lost its briefing paragraph. Gate on CHARACTERS.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = "žšťčďňáéíóúý" * 10                    # 120 chars, 240 bytes
+        msg = ("Kontext: rozhodnutie o žalúziách v zasadačke, treba tvoj "
+               "súhlas.\n\n"
+               "❓ NEEDS YOU: " + q)
+        self._stop(sid, msg, cwd=cwd)
+        self.assertIn("rozhodnutie o žalúziách", self._sent(),
+                      "the briefing must ride along (count chars, not bytes)")
+
     def test_asked_line_pulls_its_context_paragraph(self):
         # ask-and-continue: the ❓ ASKED ping carries the explanation paragraph
         # above it, but never the ⏳ continuation below.
