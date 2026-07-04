@@ -416,6 +416,51 @@ class PaneAtIdlePrompt(unittest.TestCase):
         self.assertFalse(wd.pane_at_idle_prompt(None))
 
 
+class PaneQuestionExcerpt(unittest.TestCase):
+    """The job-2 "čaká na teba" ping must CARRY the question + options extracted from
+    the pane — the user's explicit complaint (2026-07-04) was pings saying only that
+    "a question is waiting" with no question text in them."""
+
+    DIALOG = (
+        "starý transcript vyššie — nesúvisiaci text\n"
+        "╭──────────────────────────────────────────────╮\n"
+        "│ Ktorý prístup pre reset EQ?                  │\n"
+        "│                                              │\n"
+        "│ ❯ 1. Reset na 0 dB (odporúčam)               │\n"
+        "│   2. Posledný preset                         │\n"
+        "╰──────────────────────────────────────────────╯\n"
+        "  Tab/Arrow keys to navigate · Enter to select\n")
+
+    def test_extracts_question_and_options(self):
+        out = wd.pane_question_excerpt(self.DIALOG)
+        self.assertIn("Ktorý prístup pre reset EQ?", out)
+        self.assertIn("1. Reset na 0 dB (odporúčam)", out)
+        self.assertIn("2. Posledný preset", out)
+
+    def test_border_bounds_question_never_leaks_transcript(self):
+        # The question walk stops at the dialog's border rule — transcript prose
+        # ABOVE the box must never end up in the phone ping.
+        self.assertNotIn("nesúvisiaci", wd.pane_question_excerpt(self.DIALOG))
+
+    def test_borderless_permission_dialog(self):
+        out = wd.pane_question_excerpt(
+            "  Do you want to proceed?\n❯ 1. Yes\n  2. No\n"
+            "  Enter to select · Tab/Arrow keys to navigate\n")
+        self.assertIn("Do you want to proceed?", out)
+        self.assertIn("1. Yes", out)
+
+    def test_no_dialog_returns_empty(self):
+        # No numbered options visible → "" (caller falls back to the generic text).
+        self.assertEqual(wd.pane_question_excerpt("built ok\n❯ \n"), "")
+        self.assertEqual(wd.pane_question_excerpt(""), "")
+
+    def test_truncated_to_max_chars(self):
+        out = wd.pane_question_excerpt(
+            "Otázka?\n❯ 1. " + "x" * 500 + "\n", max_chars=100)
+        self.assertLessEqual(len(out), 100)
+        self.assertTrue(out.endswith("…"))
+
+
 class WaitingPersistenceGate(unittest.TestCase):
     """Job 2 must NOT ping on the FIRST poll that sees a dialog footer (a transient
     bypass-permissions / 60s-auto-continue flash) — only after it PERSISTS to a later
@@ -426,7 +471,7 @@ class WaitingPersistenceGate(unittest.TestCase):
                "     1. Zavrieť\n     2. Overiť\n"
                "  Tab/Arrow keys to navigate · Enter to select\n")
 
-    def _poll(self, tmp, capture, now):
+    def _poll(self, tmp, capture, now, sent=None):
         proj = Path(tmp.name) / "projects"
         enc = wd.encode_project_dir(self.CWD)
         d = proj / enc
@@ -451,7 +496,8 @@ class WaitingPersistenceGate(unittest.TestCase):
             return ""
 
         return wd.run_once(now=now, dry_run=False, run=fake_run,
-                           send_fn=lambda *a, **k: None,
+                           send_fn=(lambda *a, **k: sent.append(a[0]))
+                                   if sent is not None else (lambda *a, **k: None),
                            projects_dir=proj, state_path=state_path,
                            pending_prefix=str(Path(tmp.name) / "pending-"))
 
@@ -474,6 +520,20 @@ class WaitingPersistenceGate(unittest.TestCase):
         logs2 = self._poll(tmp, "postavené ok\n❯ ", now + 90)  # gone by next poll
         self.assertFalse(any("waiting" in ln for ln in logs2),
                          "a transient flash must never ping: %r" % logs2)
+
+    def test_ping_body_carries_the_question(self):
+        # The user's complaint (2026-07-04): "čaká na teba" pings that do NOT say
+        # WHAT is asked force a trip to the terminal just to read the question.
+        # The ping body must carry the pane's question + options.
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        now = time.time()
+        sent = []
+        self._poll(tmp, self.WAITING, now, sent=sent)          # persistence gate
+        self._poll(tmp, self.WAITING, now + 90, sent=sent)     # → pings here
+        self.assertEqual(len(sent), 1, "expected exactly one waiting ping: %r" % sent)
+        self.assertIn("Zavrieť #137 alebo overiť?", sent[0])
+        self.assertIn("1. Zavrieť", sent[0])
 
 
 # --- job 6: 5-hour SESSION LIMIT — ping once, `continue` only AFTER the reset ------

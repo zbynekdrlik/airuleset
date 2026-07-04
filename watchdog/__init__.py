@@ -541,6 +541,15 @@ _WAITING_RX = re.compile(
 _MENU_POINTER_RX = re.compile(r"❯ \d+\.")
 
 
+def _is_border_rule(s):
+    """A box border / horizontal rule line (`╭────╮`, `─── labelled ok ───`). `s` is
+    already stripped. Split out of `_is_bottom_chrome` because `pane_question_excerpt`
+    needs borders as BOUNDARY MARKERS (they delimit the dialog box) while the other
+    chrome rows (agent strip, statusline) are plain drops."""
+    bars = sum(c in "─—━═╌╍┄┅┈┉╭╮╰╯┌┐└┘│┃" for c in s)
+    return bars >= 4 and bars >= len(s.replace(" ", "")) - 12
+
+
 def _is_bottom_chrome(s):
     """A trailing 'chrome' line rendered BELOW the input box: the agent strip (`● main`
     + one `◯ <agent>` row PER concurrent subagent), the mode hint (`⏵⏵ …`), the `ctx …`
@@ -555,8 +564,7 @@ def _is_bottom_chrome(s):
         return True
     if s.startswith("ctx "):                            # footer statusline
         return True
-    bars = sum(c in "─—━═╌╍┄┅┈┉╭╮╰╯┌┐└┘│┃" for c in s)   # a box border / rule (labelled ok)
-    if bars >= 4 and bars >= len(s.replace(" ", "")) - 12:
+    if _is_border_rule(s):                              # a box border / rule (labelled ok)
         return True
     return False
 
@@ -616,6 +624,63 @@ def pane_waiting_on_user(captured):
     if not captured or not _WAITING_RX.search(captured):
         return False
     return not _has_free_prompt(captured)
+
+
+_OPTION_ROW_RX = re.compile(r"^(?:❯\s*)?\d+\.\s+\S")
+# Navigation-help footer ONLY — deliberately NARROWER than _WAITING_RX, whose
+# "Do you want to proceed" alternative IS the question of a permission dialog
+# and must stay in the excerpt.
+_DIALOG_HELP_RX = re.compile(r"Tab/Arrow keys to navigate|Enter to select", re.I)
+
+
+def pane_question_excerpt(captured, max_chars=350):
+    """Extract the OPEN dialog's question + options from a captured pane, so the job-2
+    "čaká na teba" ping carries WHAT is being asked — the user's explicit complaint was
+    pings saying only "a question is waiting" with no question in them (2026-07-04).
+
+    A blocking dialog (AskUserQuestion / permission / plan approval) renders as a box:
+    question text, then numbered option rows (`❯ 1. …` / `  2. …`), then the help
+    footer. Strategy: strip the box edges, locate the LAST contiguous numbered-options
+    block from the bottom, and take up to 6 text lines directly above it (bounded by a
+    border rule, so we never reach past the dialog into transcript prose) as the
+    question. Returns "" when no options block is visible — the caller falls back to
+    the generic text. Read-only (feeds a NOTIFICATION only, never a keystroke), so a
+    slightly messy excerpt is harmless; missing it entirely is the failure."""
+    if not captured:
+        return ""
+    rows = []                               # (text, is_border_marker)
+    for raw in captured.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if _is_border_rule(s):              # dialog edge → keep as a boundary marker
+            rows.append(("", True))
+            continue
+        inner = s.strip("│┃║").strip()      # peel the box's vertical edges
+        if not inner or _DIALOG_HELP_RX.search(inner):
+            continue                        # empty in-box line / navigation help footer
+        if inner[0] in "●◯" or inner.startswith("⏵⏵") or inner.startswith("ctx "):
+            continue                        # agent strip / mode hint / statusline
+        rows.append((inner, False))
+    end = None
+    for i in range(len(rows) - 1, -1, -1):  # LAST options block = the open dialog
+        if not rows[i][1] and _OPTION_ROW_RX.match(rows[i][0]):
+            end = i
+            break
+    if end is None:
+        return ""
+    start = end
+    while start > 0 and not rows[start - 1][1] and _OPTION_ROW_RX.match(rows[start - 1][0]):
+        start -= 1
+    question = []
+    j = start - 1
+    while j >= 0 and not rows[j][1] and len(question) < 6:
+        question.insert(0, rows[j][0])
+        j -= 1
+    out = " · ".join(question + [r[0] for r in rows[start:end + 1]])
+    if len(out) > max_chars:
+        out = out[:max_chars - 1] + "…"
+    return out
 
 
 def pane_at_idle_prompt(captured):
@@ -1475,8 +1540,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     and (now - w["first_seen"]) >= wait_grace):
                 w["pinged"] = True
                 logs.append("waiting %s [%s]" % (project, key))
-                send_fn("❓ **%s** — čaká na teba\n> Session sa zastavila "
-                        "na otázke (AskUserQuestion) — pozri sa naň." % project,
+                # Carry the ACTUAL question (+ options) from the pane — a ping that
+                # says only "a question is waiting" forces the user to the terminal
+                # to even learn what is asked (their explicit complaint, 2026-07-04).
+                excerpt = pane_question_excerpt(captured)
+                detail = excerpt or ("Session sa zastavila na otázke "
+                                     "(AskUserQuestion) — pozri sa naň.")
+                send_fn("❓ **%s** — čaká na teba\n> %s" % (project, detail),
                         owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
                         dry_run=dry_run)
             w["confirmed"] = True          # seen this poll → a LATER poll may ping

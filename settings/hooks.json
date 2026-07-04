@@ -149,6 +149,18 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/clear-question-dedup.sh",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

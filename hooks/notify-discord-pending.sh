@@ -11,7 +11,10 @@ set -euo pipefail
 #     genuine question must reach the phone even over tmux/SSH, where Claude Code's
 #     `idle_prompt` event is unreliable, and is NEVER suppressed — the old "❓ +
 #     continuing language → swallow the ping" logic was the reported bug (the user
-#     asked, no ping came, then got reproached hours later).
+#     asked, no ping came, then got reproached hours later). One ping per DISTINCT
+#     question though: an IDENTICAL repeat with no user input in between (a
+#     /goal-loop re-poke of a still-blocked session) is deduped via LASTQ — see
+#     send_q() and clear-question-dedup.sh (UserPromptSubmit).
 #   - ✅ DONE → recorded to a per-session pending file; notify-discord.sh delivers
 #     it ONLY when the user is genuinely idle/away (a finished turn is less urgent,
 #     and pinging every completed turn while the user watches the terminal = spam).
@@ -38,6 +41,9 @@ SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 PENDING="/tmp/claude-discord-pending-${SID}"
+# Last-pinged ❓ content for this session — the dedup state. Cleared by
+# clear-question-dedup.sh (UserPromptSubmit) whenever the user actually types.
+LASTQ="/tmp/claude-discord-lastq-${SID}"
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
@@ -58,14 +64,31 @@ emit() {
     printf '%s %s' "$1" "$c" > "$PENDING"
 }
 
-send_now() {
-    # $1 = emoji, $2 = raw content — deliver IMMEDIATELY via the shared send path
-    # (no pending file, no waiting for an idle_prompt that may never arrive over
-    # tmux/SSH). Silent + non-blocking: the send backgrounds its own curl.
+send_q() {
+    # $1 = raw ❓ content — clean, DEDUP against the last-pinged question, deliver
+    # IMMEDIATELY via the shared send path (no pending file, no waiting for an
+    # idle_prompt that may never arrive over tmux/SSH). Backgrounds its own curl.
+    #
+    # DEDUP — one ping per DISTINCT question, not per turn. A /goal-loop or a
+    # task-notification re-poke of a session STILL blocked on the SAME unanswered
+    # question re-emits the SAME ❓ line every re-poked turn; without this guard
+    # every one of them re-pinged the phone (the 9× "rovnaká otázka ako predtým"
+    # restreamer spam, 2026-07-04). The FIRST ask ALWAYS pings; only a repeat with
+    # IDENTICAL content and NO user input in between is suppressed. Any real user
+    # prompt clears LASTQ (clear-question-dedup.sh, UserPromptSubmit), so a fresh
+    # ask after the user spoke pings again even if byte-identical. A DIFFERENT
+    # question always pings. This is NOT the removed "❓ + continuing language →
+    # swallow" bug: no new question is ever suppressed — only the already-pinged
+    # one, repeated verbatim to a user who already has it on their phone.
     local c send
-    c=$(strip_md "$2" | cut -c1-250)
+    c=$(strip_md "$1" | cut -c1-250)
+    [ -z "$c" ] && return 0
+    if [ -f "$LASTQ" ] && [ "$(cat "$LASTQ" 2>/dev/null)" = "$c" ]; then
+        return 0
+    fi
+    printf '%s' "$c" > "$LASTQ"
     send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
-    ND_EMOJI="$1" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
+    ND_EMOJI="❓" ND_TEXT="$c" ND_CWD="$CWD" bash "$send" || true
 }
 
 # A genuine question to the user ALWAYS fires the device ping — NO suppression,
@@ -87,14 +110,14 @@ if [ -n "$ASKED_LINE" ]; then
     # working (⏳). No pending left → idle hook won't re-send.
     C=$(printf '%s' "$ASKED_LINE" | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
     rm -f "$PENDING" 2>/dev/null || true
-    send_now "❓" "$C"
+    send_q "$C"
 elif printf '%s' "$LAST_LINE" | grep -q "❓"; then
     # ❓ NEEDS YOU on the last line, genuinely blocked on the user → fire the device
     # ping IMMEDIATELY (the question must reach the phone even over SSH, where the
     # idle_prompt event is unreliable). No pending left → idle hook won't re-send.
     C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
     rm -f "$PENDING" 2>/dev/null || true
-    send_now "❓" "$C"
+    send_q "$C"
 elif printf '%s' "$LAST_LINE" | grep -q "⏳"; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear

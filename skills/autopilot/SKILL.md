@@ -314,6 +314,16 @@ knows two projects are related.** Handle it BY THE CLOCK:
   Do **NOT** grind on WITHOUT asking (burying the question) — ask-and-continue means you ASKED (pinged
   + tracked) FIRST, then continued. Do **NOT** write `❓ NEEDS YOU` and then move to another ticket
   anyway (that pings "I'm blocked" while you moved on — use `❓ ASKED` + `⏳`).
+  - **Re-poked while STILL blocked on the SAME question** (the `/goal` evaluator or a
+    task-notification re-fires a turn although nothing changed and the answer hasn't come): do NOT
+    compose a new wording of the question. **Repeat the previous `❓ NEEDS YOU: <q>` line VERBATIM —
+    byte-identical** — and in the body state the blocked evidence plainly so the goal evaluator can
+    confirm the hold: "BLOCKED on the user's decision — the goal's 'stop only when I must answer a
+    design choice' branch holds; question already pinged + tracked (`needs-answer`)." The device-ping
+    hook dedups an IDENTICAL question per session (no user input in between), so a verbatim repeat
+    does NOT re-ping the phone — a REWORDED repeat DOES re-ping and is exactly the 9× "rovnaká otázka
+    ako predtým" spam the user reported (restreamer, 2026-07-04). A re-poke is never license to
+    bulldoze the pending decision.
 - **Sleep window — 00:00–05:59 Europe/Bratislava (hour `00..05`): DEFER, don't wake the user.** Queue
   the question (label `needs-decision`, leave the issue open), keep grinding the rest, end `⏳
   WORKING` with NO `❓ ASKED` line (so nothing pings). Raise the queued questions as ONE `❓ NEEDS YOU`

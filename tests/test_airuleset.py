@@ -269,14 +269,23 @@ class TestDiscordNotifyHooks(TestCase):
 
     PENDING = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
     IDLE = airuleset.REPO_DIR / "hooks" / "notify-discord.sh"
+    CLEAR = airuleset.REPO_DIR / "hooks" / "clear-question-dedup.sh"
     _n = 0
 
     def _sid(self):
         TestDiscordNotifyHooks._n += 1
         sid = f"test-dn-{os.getpid()}-{TestDiscordNotifyHooks._n}"
         p = f"/tmp/claude-discord-pending-{sid}"
+        q = f"/tmp/claude-discord-lastq-{sid}"
         self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
+        self.addCleanup(lambda: os.path.exists(q) and os.remove(q))
         return sid, p
+
+    def _user_prompt(self, sid):
+        # simulate the UserPromptSubmit hook firing (the user actually typed)
+        payload = json.dumps({"session_id": sid, "prompt": "odpoveď"})
+        return subprocess.run(["bash", str(self.CLEAR)], input=payload, text=True,
+                              capture_output=True)
 
     def _stop(self, sid, msg, cwd="", owner="", home=None):
         # Hermetic: DRYRUN + ND_DRYRUN_FILE → the ❓ immediate-send composes to a
@@ -328,6 +337,56 @@ class TestDiscordNotifyHooks(TestCase):
         # idle afterwards has nothing to send (already delivered on Stop)
         out = self._idle(sid, cwd).stdout
         self.assertEqual(out.strip(), "")
+
+    def test_identical_question_repeat_is_deduped(self):
+        # A /goal-loop re-poke of a session STILL blocked on the SAME unanswered
+        # question re-emits the identical ❓ line every re-poked turn — each one
+        # re-pinged the phone (the 9× "rovnaká otázka ako predtým" restreamer spam,
+        # 2026-07-04). The FIRST ask pings; the identical repeat must NOT.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = "❓ NEEDS YOU: #280 (záloha, odporúčam) alebo najprv 0.28.0?"
+        self._stop(sid, q, cwd=cwd)
+        self.assertIn("#280", self._sent(), "the FIRST ask must always ping")
+        self._stop(sid, "Stojím len na tvojom rozhodnutí.\n\n" + q, cwd=cwd)
+        self.assertEqual(self._sent(), "",
+                         "identical repeated question must be deduped, not re-pinged")
+
+    def test_different_question_always_pings(self):
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._stop(sid, "❓ NEEDS YOU: #280 alebo 0.28.0?", cwd=cwd)
+        self.assertIn("#280", self._sent())
+        self._stop(sid, "❓ NEEDS YOU: mám zmazať starú zálohu?", cwd=cwd)
+        self.assertIn("zmazať starú zálohu", self._sent(),
+                      "a DIFFERENT question must always ping — dedup is per-content")
+
+    def test_user_prompt_clears_question_dedup(self):
+        # After the user actually TYPES, the conversation moved on — a fresh ask
+        # must ping again even if its text is byte-identical to the old one.
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        q = "❓ NEEDS YOU: #280 alebo 0.28.0?"
+        self._stop(sid, q, cwd=cwd)
+        self.assertIn("#280", self._sent())
+        r = self._user_prompt(sid)                 # UserPromptSubmit clears LASTQ
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "", "clear hook must be silent")
+        self._stop(sid, q, cwd=cwd)
+        self.assertIn("#280", self._sent(),
+                      "after a real user prompt the same text is a FRESH ask → ping")
+
+    def test_asked_line_identical_repeat_is_deduped(self):
+        # Same dedup on the ask-and-continue form (❓ ASKED + ⏳ WORKING).
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("❓ ASKED: reset EQ na 0 dB alebo posledný preset?\n\n"
+               "⏳ WORKING: pokračujem na #12")
+        self._stop(sid, msg, cwd=cwd)
+        self.assertIn("reset EQ", self._sent(), "the first ❓ ASKED must ping")
+        self._stop(sid, msg, cwd=cwd)
+        self.assertEqual(self._sent(), "",
+                         "identical re-raised ❓ ASKED must be deduped")
 
     def test_done_multiline_report_records(self):
         sid, p = self._sid()
@@ -987,6 +1046,7 @@ class TestHookScriptsExist(TestCase):
             "stop-check-sendmessage-narration.sh",
             "notify-discord-pending.sh",
             "notify-discord.sh",
+            "clear-question-dedup.sh",
             "pre-push-base-sync.sh",
             "post-push-ci-cleanup.sh",
             "pre-push-lint.sh",
