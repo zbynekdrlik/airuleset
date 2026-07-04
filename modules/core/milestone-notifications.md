@@ -17,9 +17,9 @@ So: a **question (`❓`) reaches the phone right away**; a **done (`✅`) reache
 
 So you do NOT call the discord `reply` tool or `PushNotification` to announce a merge, a deploy, a green CI, or a finished issue. Just write the honest status marker; the hook decides whether the device pings. The ONE thing you control is the marker content (below).
 
-#### Device content = Slovak, short, phone-readable
+#### Device content = Slovak, phone-readable — ❓ carries the WHOLE question, ✅ one line
 
-The hook forwards the text after `❓ NEEDS YOU:` / `❓ ASKED:` / `✅ DONE:` verbatim. So write that content in **Slovak, short (1 line), self-contained, no jargon** — it must be understandable on a phone with no terminal context. Keep the English keyword (`NEEDS YOU` / `ASKED` / `DONE` — the hooks key on it); the content after the colon is Slovak. A question: the actual decision in one Slovak sentence (`❓ NEEDS YOU: reset EQ na 0 dB alebo posledný preset?`). A done: the outcome in one Slovak line (`✅ DONE: nasadené v1.2.3, CI zelené`).
+For `✅ DONE:` the hook forwards the text after the colon verbatim — **ONE short Slovak line** (`✅ DONE: nasadené v1.2.3, CI zelené`). For `❓ NEEDS YOU:` / `❓ ASKED:` it forwards the **FULL final question BLOCK** — the contiguous paragraph ending with the marker line, up to ~1500 chars (a bare marker after a blank line pulls in the ONE paragraph directly above it; an oversize block keeps its head + the decision line). So write the question SELF-CONTAINED right above/on the marker (`user-questions-slovak.md`): úvod 2–4 vety (ktorý projekt + čo sa deje), možnosti s dôsledkami a `(odporúčam)`, posledný riadok `❓ NEEDS YOU: <rozhodnutie>` — the whole block in **Slovak, no jargon**, understandable on a phone with zero terminal context. NEVER compress the question to one line "to keep the ping short" — the truncated, context-free codex-bridge ping ("…sklad zač", 2026-07-04) is the banned outcome. Keep the English keyword (`NEEDS YOU` / `ASKED` / `DONE` — the hooks key on it); everything after it is Slovak.
 
 #### ✅ pings only at FULL completion — the `⏳`-while-looping discipline makes this real
 
