@@ -1380,6 +1380,26 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
+    {
+        # Isolated montalu odoo dev stream — dedicated Linux user on dev1
+        # (odoo-erp #1322: no sudo, no prod keys, scoped PAT). Reached over
+        # tailscale so the entry works even if push ever runs off-dev1;
+        # newlevel@dev1's default key is authorized for this user.
+        "name": "montalu@dev1",
+        "host": "100.104.8.125",
+        "user": "montalu",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        # Marek's isolated user on the gatekeeper VPS (his Claude dev env).
+        # Same access key as the gatekeeper entry (its pubkey is authorized
+        # in marek's authorized_keys).
+        "name": "marek@gatekeeper",
+        "host": "168.119.99.160",
+        "user": "marek",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
 ]
 
 
