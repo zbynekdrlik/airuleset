@@ -362,6 +362,17 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("zmazať starú zálohu", self._sent(),
                       "a DIFFERENT question must always ping — dedup is per-content")
 
+    def test_user_prompt_records_presence_marker(self):
+        # the UserPromptSubmit hook stamps /tmp/claude-user-active-<sid> — the
+        # question-quality gate reads it to skip phone-shape enforcement while
+        # the user is PRESENT at the terminal (camera-box "Hruza", 2026-07-05)
+        sid, _ = self._sid()
+        f = f"/tmp/claude-user-active-{sid}"
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        r = self._user_prompt(sid)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(os.path.exists(f), "presence marker must be stamped")
+
     def test_user_prompt_clears_question_dedup(self):
         # After the user actually TYPES, the conversation moved on — a fresh ask
         # must ping again even if its text is byte-identical to the old one.
@@ -1549,6 +1560,38 @@ class TestQuestionQualityGate(TestCase):
             fh.write("spraviť zálohu pred migráciou?")
         self.addCleanup(lambda: os.path.exists(lastq) and os.remove(lastq))
         r, _ = self._run("❓ NEEDS YOU: zmazať staré nahrávky?", sid=sid)
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def _touch_active(self, sid, age=0):
+        f = f"/tmp/claude-user-active-{sid}"
+        with open(f, "w") as fh:
+            fh.write("")
+        if age:
+            old = time.time() - age
+            os.utime(f, (old, old))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        return f
+
+    def test_present_user_skips_shape_enforcement(self):
+        # "Hruza!!!" (camera-box, 2026-07-05): the gate demanded phone-shape
+        # templates MID-DIALOG while the user was sitting at the terminal
+        # actively typing — every rejection re-printed the question + a huge
+        # hook error into their chat. The template protects the AWAY user's
+        # phone ping; a PRESENT user (real prompt within ~10 min) is in a
+        # conversation → no shape gating.
+        sid = self._sid()
+        self._touch_active(sid)
+        r, _ = self._run("❓ NEEDS YOU: nechať 2 OBS inštancie, alebo spojiť "
+                         "do jednej cez rebuild?", sid=sid)
+        self.assertTrue(self._clean(r),
+                        "present user must not be shape-gated: " + r.stdout)
+
+    def test_away_user_still_fully_gated(self):
+        # the presence marker is stale (>10 min) → the user walked away → the
+        # phone-shape enforcement is back in full
+        sid = self._sid()
+        self._touch_active(sid, age=700)
+        r, _ = self._run("❓ NEEDS YOU: schváliš merge PR #5?", sid=sid)
         self.assertTrue(self._blocked(r), r.stdout)
 
     def test_retry_cap_lets_message_through(self):
