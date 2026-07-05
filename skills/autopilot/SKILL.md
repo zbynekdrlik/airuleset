@@ -34,7 +34,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - `no-dropped-work.md` — workers file issues for everything identified but unfinished
 - `verify-issue-still-valid.md` — the worker FIRST proves the issue still reproduces against current code + live system; obsolete/already-solved tickets get closed with evidence, never blindly implemented
 - `ask-before-assuming.md` — a genuine per-issue question is a CONVERSATION with you, asked the MOMENT the ticket needs it and it ALWAYS pings; then either BLOCK (`❓ NEEDS YOU`) or ask-and-continue (`❓ ASKED` + track on the issue, work other tickets meanwhile) — never buried, never a reason to abandon the issue, never a reason to reproach you (except the 00:00–06:00 — hours `00..05` — Europe/Bratislava sleep window, when it defers with no ping)
-- `user-questions-slovak.md` — HOW to phrase it: SELF-CONTAINED (a person with ZERO terminal context understands it — which project, what happened, every cross-project/ticket link explained), plain Slovak, no jargon; delivered as the `❓` text marker (waits UNLIMITED), NEVER a 60-second `AskUserQuestion` dialog for an away user
+- `user-questions-slovak.md` — HOW to phrase it: SELF-CONTAINED (a person with ZERO terminal context understands it — which project, what happened, every cross-project/ticket link explained), plain Slovak, no jargon; delivered as the `❓` text marker (waits UNLIMITED), NEVER a 60-second `AskUserQuestion` dialog for an away user; structured template + ONE decision per ping is hook-enforced
 
 ## How it works
 
@@ -140,7 +140,14 @@ The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / 
 
 **This is the LAST thing `/autopilot` does.** Present the `/goal` line prominently in a code block,
 tell the user to paste it to start the loop, and **STOP** — end your message with
-`❓ NEEDS YOU: paste the /goal line above to start the autopilot loop`. Do **NOT** proceed to
+a conforming question block (the question-quality gate requires the briefing line):
+
+```
+**Otázka — projekt <repo> (<čo projekt robí>):** autopilot je pripravený — backlog má N otvorených ticketov, loop sa spustí vložením /goal riadku vyššie.
+❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne
+```
+
+Do **NOT** proceed to
 dispatch any worker yourself — **Step 3 is the LOOP BODY that the `/goal` loop runs each turn AFTER
 the user pastes the line**, not part of this initial invocation. Dispatching a worker now (without
 `/goal` running) would do one issue and stop — the exact failure this avoids. If you skip printing
@@ -295,7 +302,7 @@ silence. **Deliver every question as a SELF-CONTAINED `❓` text marker (NOT a 6
 answers; the `❓` marker pings AND waits UNLIMITED). Write it so someone with ZERO terminal context
 understands it — which project + what it does, what happened, and EVERY cross-project / cross-ticket
 link explained in plain Slovak (`user-questions-slovak.md`); never assume the user read the history or
-knows two projects are related.** Handle it BY THE CLOCK:
+knows two projects are related.** The SHAPE is hook-enforced (`stop-check-question-quality.sh`): the block opens `**Otázka — projekt …:**` and carries exactly ONE decision per ping — a ticket with several open questions asks them ONE at a time (next one after the previous answer arrives via Discord reply), never a `(1)/(2)/(3)` pile. Handle it BY THE CLOCK:
 
 - **Waking hours — 06:00–23:59 Europe/Bratislava (check `TZ=Europe/Bratislava date +%H` → hour
   `06..23`): ASK NOW — it PINGS — then pick the honest form by whether OTHER work is available:**

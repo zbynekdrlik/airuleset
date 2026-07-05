@@ -35,6 +35,23 @@ In an `/autopilot` / `/goal` / any autonomous run the user is AWAY. When a backg
 - **A timed-out `AskUserQuestion` is NOT an answer.** If you used the dialog and it auto-continued unanswered, do NOT treat that as resolved — re-deliver the SAME question (self-contained) as the `❓` text marker and wait / ask-and-continue (`message-status-marker.md`).
 - `AskUserQuestion`'s structured dialog is fine only when the user is PRESENT (interactive design/brainstorm at the terminal). For an away user it is the wrong channel.
 
+#### Povinná ŠTRUKTÚRA otázky — HOOK-ENFORCED template + ONE ping = ONE decision
+
+Every `❓ NEEDS YOU` / `❓ ASKED` turn is HARD-GATED by `stop-check-question-quality.sh` — a non-conforming question is BLOCKED at Stop and must be rewritten. Two rules, both from live 2026-07-05 failures:
+
+1. **The question block MUST open with the briefing line** — this EXACT shape, contiguous (no blank lines inside), ending with the marker:
+
+   ```
+   **Otázka — projekt <meno> (<čo projekt robí>):** <čo sa deje a prečo sa pýtaš — 2–4 vety, po slovensky, bez žargónu>
+   • <možnosť A> (odporúčam) — <dôsledok>
+   • <možnosť B> — <dôsledok>
+   ❓ NEEDS YOU: <jedno jasné rozhodnutie>
+   ```
+
+   The killed failure: *"Po zmazaní hneď overím voľné miesto…"* + a bare decision line — the phone reader has no idea WHAT is being deleted, in WHICH project, or WHY.
+
+2. **ONE ❓ ping = ONE decision.** Never `(1) …? (2) …? (3) …?` piles, never *"odpovedz na ktorékoľvek z 3, aj postupne"*. The Discord REPLY to a ping is typed back into the asking session as ONE prompt (watchdog job 7) — a multi-question ping is UNANSWERABLE (which of the 3 does the reply answer?). Multiple pending questions → ask the FIRST one now (its own structured block), track the rest on their tickets (`needs-answer`), and ask the NEXT one after the first answer arrives — small sequential questions are exactly what the user wants (the "Ask in SMALL parts" section below). `(1)/(2)` describing STEPS with a single final question is fine.
+
 #### Anti-pattern #2 — assumed context + unexplained cross-project link (this exact question — BANNED)
 
 > *Ticket #137: nasadenie novej OBS knižnice (obs.dll) reštartne OBS, čo predtým rozbíjalo stream. Skutočnú príčinu už vyriešil a živo nasadil susedný projekt restreamer (jeho #255, zmergované). Chýba len živé potvrdenie na rigu. Čo s #137?*

@@ -112,6 +112,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-question-quality.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-playbook-review.sh",
             "timeout": 5
           },

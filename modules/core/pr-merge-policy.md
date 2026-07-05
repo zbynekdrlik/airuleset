@@ -31,7 +31,7 @@ A project opts OUT of auto-merge by placing this marker in its own `CLAUDE.md`:
 <!-- airuleset:merge=manual -->
 ```
 
-Marker present → manual mode: stop at the green PR, provide the URL, end with `❓ NEEDS YOU: approve merge?`, and wait for the explicit instruction ("merge it", "approved"). The marker covers merge AND the deploy that follows it. Only the USER adds or removes this marker — never the agent. The old opt-in marker `airuleset:autopilot=auto-merge` is superseded (auto is now the default); remove it when touching a CLAUDE.md that still carries one.
+Marker present → manual mode: stop at the green PR, provide the URL, end with the structured question block (`**Otázka — projekt …:**` briefing per `user-questions-slovak.md`, hook-enforced) closing `❓ NEEDS YOU: schváliš merge PR #N?`, and wait for the explicit instruction ("merge it", "approved"). The marker covers merge AND the deploy that follows it. Only the USER adds or removes this marker — never the agent. The old opt-in marker `airuleset:autopilot=auto-merge` is superseded (auto is now the default); remove it when touching a CLAUDE.md that still carries one.
 
 #### Scope — what auto-merge covers
 
