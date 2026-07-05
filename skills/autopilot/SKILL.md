@@ -132,7 +132,7 @@ needs extra approval.)
 The agent cannot type `/goal` — print this line for the user to paste once:
 
 ```
-/goal Every open issue in this repo not labeled autopilot-skip is closed via a merged PR — proven in the transcript by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green — or stop only when I must answer a design choice, approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing), or a CI failure stays unfixable after two real attempts. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up — it ALWAYS pings my phone (the background autopilot-worker's prompts surface in my main session) — then either BLOCK on it (`❓ NEEDS YOU`) if nothing else is workable, or ASK-AND-CONTINUE (`❓ ASKED` + track the question on the issue with a `needs-answer` comment, set that issue aside, and work other answer-independent tickets, ending `⏳ WORKING`); NEVER bury a question by continuing without pinging it, and NEVER stop the loop blaming my silence. EXCEPT 00:00–06:00 (hours 00..05) Europe/Bratislava when I'm asleep (then queue it and ask after 06:00, no ping). After every merge immediately pick the next issue.
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript alone: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it. Waiting for my answer IS the terminal state: NEVER continue me past an unanswered `❓ NEEDS YOU` — every forced continuation just re-prints the same question into my chat (the camera-box wall, 2026-07-05). After I answer, Claude resolves that ticket and, if open issues remain, re-prints this /goal line for me to paste and re-arm the loop. (B) BACKLOG DONE — every open issue in this repo not labeled autopilot-skip is closed via a merged PR, proven by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green. Also stop when I must approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing) or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the backlog: never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up — it ALWAYS pings my phone (the background autopilot-worker's prompts surface in my main session) — preferring ASK-AND-CONTINUE (`❓ ASKED` + track the question on the issue with a `needs-answer` comment, set that issue aside, and work other answer-independent tickets, ending `⏳ WORKING`); `❓ NEEDS YOU` (a full block — the loop then stops per (A)) ONLY when nothing else is workable. NEVER bury a question by continuing without pinging it, and NEVER stop blaming my silence. EXCEPT 00:00–06:00 (hours 00..05) Europe/Bratislava when I'm asleep (then queue it and ask after 06:00, no ping). After every merge immediately pick the next issue.
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -318,21 +318,25 @@ knows two projects are related.** The SHAPE is hook-enforced (`stop-check-questi
     min) before bulldozing a ticket that hinges on their taste — but do NOT block the whole loop for
     an answer you don't yet need.
   - **Nothing else is workable without the answer → BLOCK.** End the turn `❓ NEEDS YOU` (Slovak, the
-    real decision) — it pings, the loop pauses on this issue, and it resumes the instant the user
-    answers. Use this only when the question truly blocks all remaining work.
+    real decision) — it pings, and the `/goal` loop STOPS per its stop-condition (A) (waiting on the
+    user is the terminal state; endless re-pokes of a blocked session were the camera-box chat
+    wall). When the user answers, resolve THAT ticket first; then, if open non-skip issues remain,
+    re-print the /goal line (same block as Step 2) with the conforming start question so the user
+    re-arms the loop with one paste. Use the block only when the question truly blocks all
+    remaining work.
   Do **NOT** grind on WITHOUT asking (burying the question) — ask-and-continue means you ASKED (pinged
   + tracked) FIRST, then continued. Do **NOT** write `❓ NEEDS YOU` and then move to another ticket
   anyway (that pings "I'm blocked" while you moved on — use `❓ ASKED` + `⏳`).
   - **Re-poked while STILL blocked on the SAME question** (the `/goal` evaluator or a
-    task-notification re-fires a turn although nothing changed and the answer hasn't come): do NOT
-    compose a new wording of the question. **Repeat the previous `❓ NEEDS YOU: <q>` line VERBATIM —
-    byte-identical** — and in the body state the blocked evidence plainly so the goal evaluator can
-    confirm the hold: "BLOCKED on the user's decision — the goal's 'stop only when I must answer a
-    design choice' branch holds; question already pinged + tracked (`needs-answer`)." The device-ping
-    hook dedups an IDENTICAL question per session (no user input in between), so a verbatim repeat
-    does NOT re-ping the phone — a REWORDED repeat DOES re-ping and is exactly the 9× "rovnaká otázka
-    ako predtým" spam the user reported (restreamer, 2026-07-04). A re-poke is never license to
-    bulldoze the pending decision.
+    task-notification re-fires a turn although nothing changed and the answer hasn't come): reply
+    with **EXACTLY ONE LINE — the previous `❓ NEEDS YOU: <q>` line repeated VERBATIM,
+    byte-identical.** NOTHING else: no apology, no "stojím a čakám" preamble, and **no re-printed
+    question block** — every re-printed wall lands in the user's chat AGAIN (the camera-box chat
+    spam, 2026-07-05). The device path dedups the identical line (no re-ping) and the shape gate
+    recognizes the repeat (LASTQ match), so the one-liner passes untouched. A REWORDED repeat still
+    counts as a new/edited question and is banned. A re-poke is never license to bulldoze the
+    pending decision. (Stop-condition (A) in the /goal line means the evaluator should STOP instead
+    of re-poking at all — the one-line reply is the damage bound if it misfires anyway.)
 - **Sleep window — 00:00–05:59 Europe/Bratislava (hour `00..05`): DEFER, don't wake the user.** Queue
   the question (label `needs-decision`, leave the issue open), keep grinding the rest, end `⏳
   WORKING` with NO `❓ ASKED` line (so nothing pings). Raise the queued questions as ONE `❓ NEEDS YOU`

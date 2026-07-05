@@ -46,15 +46,43 @@ ASKED_RX='❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:'
 
 # Which line is the ❓ marker? Mirrors notify-discord-pending.sh precedence:
 # an ❓ ASKED body line first, else a ❓ starting the last non-blank line.
+# MARKER_RAW = the marker line's content (same extraction as the pending
+# hook's dedup key source) — used for the verbatim-repeat bypass below.
 N=""
+MARKER_RAW=""
 if printf '%s\n' "$MSG" | grep -qiE "$ASKED_RX"; then
     N=$(printf '%s\n' "$MSG" | grep -inE "$ASKED_RX" | tail -1 | cut -d: -f1)
+    MARKER_RAW=$(printf '%s\n' "$MSG" | grep -iE "$ASKED_RX" | tail -1 \
+        | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
 elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓'; then
     N=$(printf '%s\n' "$MSG" | grep -nvE '^[[:space:]]*$' | tail -1 | cut -d: -f1)
+    MARKER_RAW=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
 fi
 if [ -z "$N" ]; then
     rm -f "$RETRY_FILE" 2>/dev/null || true
     exit 0                       # not a question turn — nothing to gate
+fi
+
+# VERBATIM REPEAT of the already-delivered question → PASS without shape
+# checks. A /goal re-poke while still blocked replies with EXACTLY the one
+# previous ❓ line (message-status-marker.md) — the device path dedups it, and
+# re-gating it on shape would force a rewrite = the block→rewrite→ping churn
+# this whole pipeline exists to kill (camera-box chat wall, 2026-07-05).
+# LASTQ holds the delivered question's dedup key (same derivation as the
+# pending hook's strip_md + codepoint cap).
+if [ -n "$MARKER_RAW" ]; then
+    LASTQF="/tmp/claude-discord-lastq-${SID}"
+    if [ -f "$LASTQF" ]; then
+        KEYLINE=$(printf '%s' "$MARKER_RAW" \
+            | sed -E 's/\*\*//g' \
+            | sed -E 's/^[[:space:]]*(NEEDS[[:space:]]+YOU|Question|DONE)[[:space:]]*:?[[:space:]]*//I' \
+            | sed -E 's/^[[:space:]]+//' \
+            | jq -Rrs 'rtrimstr("\n") | .[0:1500]')
+        if [ -n "$KEYLINE" ] && [ "$(cat "$LASTQF" 2>/dev/null)" = "$KEYLINE" ]; then
+            rm -f "$RETRY_FILE" 2>/dev/null || true
+            exit 0
+        fi
+    fi
 fi
 
 # The block the device ping will carry — SAME extraction as the pending hook

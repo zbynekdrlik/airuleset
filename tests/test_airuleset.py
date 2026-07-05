@@ -1582,7 +1582,7 @@ class TestAutopilotGoalStop(TestCase):
     def test_repoke_reply_is_one_verbatim_line(self):
         s = self._skill()
         self.assertIn("EXACTLY ONE LINE", s)
-        self.assertIn("no re-printed question block", s)
+        self.assertIn("no re-printed", s)      # (wraps: "…question block")
 
 
 class TestEditQuestionCLI(TestCase):
