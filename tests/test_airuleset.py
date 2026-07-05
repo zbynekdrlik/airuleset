@@ -605,11 +605,38 @@ class TestDiscordNotifyHooks(TestCase):
         self._stop(sid, msg, cwd=cwd)
         sent = self._sent()
         self.assertIn("**Otázka — projekt demo (ukážka):**", sent)  # auto-bold header
-        self.assertIn("\n- Možnosť A (odporúčam) — rýchle", sent)  # real list items
-        self.assertIn("\n- Možnosť B — pomalšie", sent)
+        # options NUMBERED — the user answers with just "1"/"2"; a reply "áno"
+        # was ambiguous between the offers (user, 2026-07-05)
+        self.assertIn("\n1. Možnosť A (odporúčam) — rýchle", sent)
+        self.assertIn("\n2. Možnosť B — pomalšie", sent)
         self.assertNotIn("•", sent)
-        self.assertIn("\n\n- Možnosť A", sent)       # blank line before options
+        self.assertNotIn("\n- ", sent)
+        self.assertIn("\n\n1. Možnosť A", sent)      # blank line before options
         self.assertIn("\n\n❓ **A alebo B?**", sent)  # blank line + bold decision
+        self.assertIn("číslo možnosti (1/2)", sent)   # reply hint below decision
+
+    def test_bare_question_without_options_gets_no_reply_hint(self):
+        # a plain one-line question (present-user dialog) must not grow a
+        # "číslo možnosti" hint — there are no numbered options to point at
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._stop(sid, "❓ NEEDS YOU: schváliš merge PR #5?", cwd=cwd)
+        self.assertNotIn("číslo možnosti", self._sent())
+
+    def test_already_numbered_options_kept_and_hinted(self):
+        # a session that numbered its options itself keeps its numbering
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        msg = ("**Otázka — projekt demo (ukážka):** krátky kontext k rozhodnutiu "
+               "o možnostiach, nech je blok samostatný.\n"
+               "1. Prvá možnosť (odporúčam)\n"
+               "2. Druhá možnosť\n"
+               "❓ NEEDS YOU: prvá alebo druhá?")
+        self._stop(sid, msg, cwd=cwd)
+        sent = self._sent()
+        self.assertIn("\n1. Prvá možnosť (odporúčam)", sent)
+        self.assertIn("\n2. Druhá možnosť", sent)
+        self.assertIn("číslo možnosti (1/2)", sent)
 
     def test_oversize_question_keeps_decision_line(self):
         # >1800 chars: truncation must never cut the final DECISION away (the
@@ -1593,6 +1620,15 @@ class TestQuestionQualityGate(TestCase):
         self._touch_active(sid, age=700)
         r, _ = self._run("❓ NEEDS YOU: schváliš merge PR #5?", sid=sid)
         self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_numbered_options_satisfy_bullets_check(self):
+        r, _ = self._run(
+            "**Otázka — projekt demo (ukážka):** krátky úvod čo sa deje a prečo "
+            "sa pýtam.\n"
+            "1. Prvá možnosť (odporúčam) — rýchla\n"
+            "2. Druhá možnosť — pomalšia\n"
+            "❓ NEEDS YOU: prvá alebo druhá?")
+        self.assertTrue(self._clean(r), r.stdout)
 
     def test_retry_cap_lets_message_through(self):
         sid = self._sid()
