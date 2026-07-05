@@ -117,8 +117,10 @@ clean_q() {
     #     `s/\*\*//g` flattened the question into unformatted prose)
     #   - the marker label (NEEDS YOU / ASKED / Question, bold or not) is
     #     reduced to a bare ❓ on its line
-    #   - `• ` option lines become `- ` (a real Discord list item with proper
-    #     indent/wrap; `•` is just a glyph mid-wall)
+    #   - `• `/`- ` option lines become NUMBERED `1.`/`2.` list items (Discord
+    #     ordered list) + a small reply hint below the decision — the user
+    #     answers with just the number; a reply "áno" to a two-option question
+    #     was ambiguous (user, 2026-07-05). Already-numbered options are kept.
     #   - the `Otázka — projekt …:` briefing head is auto-bolded when the
     #     session forgot the **
     #   - a blank line goes before the first option and before the final ❓
@@ -134,20 +136,29 @@ clean_q() {
         | awk '
             { L[NR] = $0 }
             END {
-                optspaced = 0
+                optspaced = 0; opt = 0
                 for (i = 1; i <= NR; i++) {
                     l = L[i]
-                    if (!optspaced && l ~ /^- / && i > 1) { print ""; optspaced = 1 }
+                    isopt = (l ~ /^- /) || (l ~ /^[0-9]+[.)] /)
+                    if (isopt && !optspaced && i > 1) { print ""; optspaced = 1 }
+                    if (l ~ /^- /) { opt++; sub(/^- /, "", l); l = opt ". " l }
+                    else if (isopt) { opt++ }
                     if (i == NR && l ~ /^❓ /) {
                         if (i > 1) print ""
                         if (l !~ /\*\*/) { sub(/^❓ /, "", l); l = "❓ **" l "**" }
                     }
                     print l
                 }
+                if (opt > 0) {
+                    print ""
+                    print "-# Odpovedz reply-om — stačí číslo možnosti (1/" opt ")."
+                }
             }' \
         | jq -Rrs 'rtrimstr("\n")
                    | if length <= 1800 then .
-                     else (split("\n") | last) as $d
+                     else (split("\n")) as $ls
+                          | (($ls | map(select(startswith("❓"))) | last)
+                             // ($ls | last)) as $d
                           | .[0:1500] + "\n… " + ($d | .[-280:])
                      end'
 }

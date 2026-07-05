@@ -164,7 +164,7 @@ fi
 # zhorsenie" report).
 if [ -z "$VIOLATION" ]; then
     BRIEF=$(printf '%s\n' "$BLOCK" | awk '
-        /^[[:space:]]*(•|-)[[:space:]]/ { exit }
+        /^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])/ { exit }
         /^[[:space:]]*[*_>~-]*[[:space:]]*❓/ { exit }
         { print }')
     BRIEF_LEN=$(printf '%s' "$BRIEF" | jq -Rrs 'rtrimstr("\n") | length')
@@ -178,7 +178,7 @@ fi
 # offers candidate answers plus "• iné — napíš vlastnú odpoveď". Same
 # alternation-not-bracket rule as Check 3 (locale-independent multibyte `•`).
 if [ -z "$VIOLATION" ]; then
-    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*(•|-)[[:space:]]'; then
+    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])'; then
         VIOLATION="options"
     fi
 fi
