@@ -480,19 +480,17 @@ class TestDiscordNotifyHooks(TestCase):
         self._stop(sid, "✅ DONE: hotovo\n\nhttp://100.104.8.125:8787/")
         self.assertIn("hotovo", open(p).read())
 
-    def test_question_markdown_form_strips_asterisks(self):
-        # completion-report template uses "❓ **Question:** <q>" — the question TEXT
-        # must reach the device with the **Question:** label + asterisks stripped.
+    def test_question_label_stripped_bold_preserved(self):
+        # the marker label (**Question:** / NEEDS YOU / ASKED) is stripped, but
+        # markdown BOLD in the question itself is PRESERVED — stripping every
+        # ** rendered the phone question as a flat unformatted wall (the
+        # camera-box "ziadne zvyraznenia fontu" complaint, 2026-07-05)
         sid, p = self._sid()
         self._stop(sid, "## ✅ Work Complete\n\n❓ **Question:** schváliš merge PR #5?")
         sent = self._sent()
         self.assertIn("❓", sent)
-        # the blockquote line carries the cleaned question (header legitimately
-        # uses ** bold, so only the > line is asserted asterisk-free)
-        qline = [l for l in sent.splitlines() if l.startswith("> ")][0]
-        self.assertIn("schváliš merge PR #5?", qline)
-        self.assertNotIn("*", qline)
-        self.assertNotIn("Question:", qline)
+        self.assertIn("schváliš merge PR #5?", sent)
+        self.assertNotIn("Question:", sent)      # label stripped
         self.assertFalse(os.path.exists(p), "❓ must not leave a pending")
 
     def test_intermediate_done_with_working_last_line_pings_nothing(self):
@@ -580,22 +578,26 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("rozhodnutie o zálohe pred migráciou", sent)
         self.assertIn("spraviť zálohu pred migráciou?", sent)
 
-    def test_multiline_question_every_line_blockquoted(self):
-        # Discord keeps a quote block only while every line carries the `> `
-        # prefix — quoting only the first line breaks the block visually.
+    def test_question_block_rendered_as_discord_list_with_spacing(self):
+        # `•` options become real Discord list items (`- `), blank lines
+        # separate briefing / options / decision, the briefing line and the
+        # final decision are BOLD — the phone must see structure, never a
+        # text wall ("ziadne odrazky, ziadne zvyraznenia", 2026-07-05)
         sid, _ = self._sid()
         cwd = tempfile.mkdtemp()
-        msg = ("**Otázka — projekt demo:** kontext v prvej vete, aby bol blok "
-               "dosť dlhý na samostatné doručenie bez naťahovania odstavca vyššie.\n"
-               "• Možnosť A (odporúčam)\n"
-               "• Možnosť B\n"
+        msg = ("Otázka — projekt demo (ukážka): kontext v prvej vete, aby bol "
+               "blok dosť dlhý na doručenie bez naťahovania odstavca vyššie.\n"
+               "• Možnosť A (odporúčam) — rýchle\n"
+               "• Možnosť B — pomalšie\n"
                "❓ NEEDS YOU: A alebo B?")
         self._stop(sid, msg, cwd=cwd)
-        sent = self._sent().strip()
-        body = [l for l in sent.split("\n")[1:] if l.strip()]
-        self.assertGreater(len(body), 2, sent)
-        for l in body:
-            self.assertTrue(l.startswith("> "), f"unquoted line in block: {l!r}")
+        sent = self._sent()
+        self.assertIn("**Otázka — projekt demo (ukážka):**", sent)  # auto-bold header
+        self.assertIn("\n- Možnosť A (odporúčam) — rýchle", sent)  # real list items
+        self.assertIn("\n- Možnosť B — pomalšie", sent)
+        self.assertNotIn("•", sent)
+        self.assertIn("\n\n- Možnosť A", sent)       # blank line before options
+        self.assertIn("\n\n❓ **A alebo B?**", sent)  # blank line + bold decision
 
     def test_oversize_question_keeps_decision_line(self):
         # >1800 chars: truncation must never cut the final DECISION away (the
@@ -695,19 +697,21 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("schváliš nový layout?", self._sent())
 
     def test_immediate_question_is_structured_markdown(self):
-        # the ❓ device line must be Discord-markdown structured (bold header +
-        # blockquote on its own line), not one unreadable run-on
+        # the ❓ device line must be Discord-markdown structured: bold header,
+        # blank separator, UNQUOTED body — a `> ` blockquote renders the whole
+        # question as one gray wall ("velky nekonecny text", 2026-07-05)
         sid, p = self._sid()
         cwd = tempfile.mkdtemp()
         self._stop(sid, "❓ NEEDS YOU: reset na 0 dB alebo posledný preset?", cwd=cwd)
         sent = self._sent().strip()
         lines = sent.split("\n")
-        self.assertEqual(len(lines), 2, f"expected header+blockquote, got: {sent!r}")
         self.assertTrue(lines[0].startswith("**❓"), lines[0])  # bold header
         self.assertIn(os.path.basename(cwd), lines[0])          # project in header
         self.assertIn("otázka", lines[0])                        # Slovak status
-        self.assertTrue(lines[1].startswith("> "), lines[1])     # blockquote
-        self.assertIn("posledný preset?", lines[1])
+        self.assertEqual(lines[1], "", "blank separator after the header")
+        self.assertIn("posledný preset?", sent)
+        self.assertFalse(any(l.startswith("> ") for l in lines),
+                         "❓ body must NOT be blockquoted (gray-wall rendering)")
 
     def test_idle_done_is_structured_markdown(self):
         # ✅ still goes through the idle path; same structured markdown
@@ -1384,6 +1388,8 @@ class TestQuestionQualityGate(TestCase):
         r, _ = self._run(
             "**Otázka — projekt demo (ukážka):** postup bude (1) zmažem "
             "staré nahrávky, (2) overím voľné miesto — nič sa nereštartuje.\n"
+            "• Áno, uvoľni disk (odporúčam) — bez rizika\n"
+            "• Nie — disk nechám ako je\n"
             "❓ NEEDS YOU: môžem takto uvoľniť disk?")
         self.assertTrue(self._clean(r), r.stdout)
 
@@ -1396,9 +1402,32 @@ class TestQuestionQualityGate(TestCase):
         r, _ = self._run(
             "**Otázka — projekt iem (mixovanie zvuku v kostole):** ticket #58 "
             "mení správanie tlačidla reset a treba vybrať predvolenú hodnotu.\n"
+            "• 0 dB (odporúčam) — štandardný stav\n"
+            "• Posledný preset — pokračuje kde skončil\n"
             "❓ ASKED: reset na 0 dB (odporúčam) alebo posledný preset?\n\n"
             "⏳ WORKING: medzitým robím #59 (nezávislé od odpovede)")
         self.assertTrue(self._clean(r), r.stdout)
+
+    def test_briefing_wall_of_text_blocked(self):
+        # live 2026-07-05 (camera-box): ~700 chars of thread/lock jargon as
+        # the intro — a wall, not "štruktúrované a ľahko čitateľné". Úvod =
+        # 2–4 SHORT sentences (~400 chars max); details belong in the ticket.
+        long_brief = ("**Otázka — projekt camera-box (ovládanie kamier + OBS):** "
+                      + "veľmi dlhé technické vysvetlenie o vláknach a zámkoch. " * 14)
+        r, _ = self._run(long_brief.rstrip()
+                         + "\n• Zavrieť #508 ako splnené (odporúčam) — nič netreba\n"
+                           "• Odmerať tvoj scenár — povedz aký\n"
+                           "❓ NEEDS YOU: zavrieť #508 ako splnené?")
+        self.assertTrue(self._blocked(r), r.stdout)
+        self.assertIn("2–4", r.stdout)      # the reason teaches the cap
+
+    def test_options_bullets_required(self):
+        # "ziadne odrazky" — options must be bullet lines, not prose
+        r, _ = self._run(
+            "**Otázka — projekt demo (ukážka):** krátky úvod čo sa deje a prečo.\n"
+            "❓ NEEDS YOU: zmazať starú zálohu?")
+        self.assertTrue(self._blocked(r), r.stdout)
+        self.assertIn("odrážk", r.stdout)   # the reason teaches bullets
 
     def test_non_question_turns_pass(self):
         for msg in ["✅ DONE: nasadené v1.2.3, CI zelené",
