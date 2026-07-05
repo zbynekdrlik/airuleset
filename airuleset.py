@@ -1327,6 +1327,16 @@ def cmd_notify(args):
         sys.stdout.write("recorded" if ok else "skip")
         return
 
+    if getattr(args, "edit_question", False):
+        # EDIT the session's recent ❓ ping in place with the reworded question
+        # from stdin (edits don't push-ping — the pending hook's anti-spam path;
+        # camera-box got 3 pings in 3 min for one reworded question, 2026-07-05).
+        # rc 2 = nothing recent/editable → the caller falls back to a fresh POST.
+        from notify import update_question
+        ok = update_question(getattr(args, "session", "") or "", sys.stdin.read())
+        sys.stdout.write("edited" if ok else "no-recent-question")
+        sys.exit(0 if ok else 2)
+
     if getattr(args, "owner", False):
         sys.stdout.write(resolve_owner())
         return
@@ -1796,6 +1806,11 @@ def main():
                           help="Record a ❓ ping's Discord message id → the session "
                                "that asked (for Discord-reply routing); needs "
                                "--message-id --channel --session --cwd")
+    p_notify.add_argument("--edit-question", dest="edit_question",
+                          action="store_true",
+                          help="EDIT the session's recent ❓ ping in place with "
+                               "the reworded question from stdin (edits don't "
+                               "push-ping); rc 2 = nothing recent to edit")
     p_notify.add_argument("--message-id", dest="message_id",
                           help="Discord message id of the ❓ ping (--record-question)")
     p_notify.add_argument("--channel", help="Discord channel/thread id the ❓ ping "

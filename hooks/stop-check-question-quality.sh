@@ -109,26 +109,33 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
-# Check 3 — the briefing must be SHORT: 2–4 plain sentences, ~400 chars max.
+# Check 3 — the briefing must be SHORT: 2–4 plain sentences, ~600 chars max.
 # Live failure (camera-box, 2026-07-05): ~700 chars of thread/lock jargon as
 # the intro — a wall of text, not "štruktúrované a ľahko čitateľné". The
 # briefing = the block's lines BEFORE the first option bullet / the marker.
+# NOTE the option-line regex uses (•|-) ALTERNATION, never a bracket class:
+# mawk brackets are BYTE classes, so `[•-]` split the multi-byte `•` and the
+# terminator silently never matched — option lines got counted INTO the
+# briefing and GOOD ~300-char questions false-positived as walls, looping
+# block→rewrite→block live in camera-box (2026-07-05, the user's "velke
+# zhorsenie" report).
 if [ -z "$VIOLATION" ]; then
     BRIEF=$(printf '%s\n' "$BLOCK" | awk '
-        /^[[:space:]]*[•-][[:space:]]/ { exit }
+        /^[[:space:]]*(•|-)[[:space:]]/ { exit }
         /^[[:space:]]*[*_>~-]*[[:space:]]*❓/ { exit }
         { print }')
     BRIEF_LEN=$(printf '%s' "$BRIEF" | jq -Rrs 'rtrimstr("\n") | length')
-    if [ "${BRIEF_LEN:-0}" -gt 400 ]; then
+    if [ "${BRIEF_LEN:-0}" -gt 600 ]; then
         VIOLATION="briefwall"
     fi
 fi
 
 # Check 4 — options must be BULLET lines ("ziadne odrazky" complaint): the
 # block needs at least one `• `/`- ` option line. Even an open question
-# offers candidate answers plus "• iné — napíš vlastnú odpoveď".
+# offers candidate answers plus "• iné — napíš vlastnú odpoveď". Same
+# alternation-not-bracket rule as Check 3 (locale-independent multibyte `•`).
 if [ -z "$VIOLATION" ]; then
-    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*[•-][[:space:]]'; then
+    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*(•|-)[[:space:]]'; then
         VIOLATION="options"
     fi
 fi
@@ -142,7 +149,7 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
         pile)
             REASON="Your ❓ ping crams MULTIPLE decisions into one question ((1)/(2)/(3) or 'ktorékoľvek z N'). ONE ping = ONE decision: the Discord reply is typed back into this session as ONE prompt, so a multi-question ping is unanswerable — nobody knows which sub-question the reply answers. Ask ONLY the first question now (structured, with its own briefing); ask the next one AFTER the first answer arrives (the user prefers small sequential questions).${TEMPLATE}" ;;
         briefwall)
-            REASON="Your ❓ briefing is a WALL OF TEXT (over 400 chars before the options). Štruktúrované a ľahko čitateľné = úvod 2–4 KRÁTKE vety bez žargónu (~400 znakov max) — WHAT project, WHAT happened, WHY you ask. Technical detail (measurements, architecture, code findings) belongs in the ticket/transcript, NOT in the phone ping. Then bullet options, then ONE decision.${TEMPLATE}" ;;
+            REASON="Your ❓ briefing is a WALL OF TEXT (over 600 chars before the options). Štruktúrované a ľahko čitateľné = úvod 2–4 KRÁTKE vety bez žargónu (~600 znakov max) — WHAT project, WHAT happened, WHY you ask. Technical detail (measurements, architecture, code findings) belongs in the ticket/transcript, NOT in the phone ping. Then bullet options, then ONE decision.${TEMPLATE}" ;;
         options)
             REASON="Your ❓ question has NO option bullets (odrážky) — the phone reader needs concrete choices, not prose. Add '• <možnosť> (odporúčam) — <dôsledok>' lines; even an open question offers candidate answers plus '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
     esac

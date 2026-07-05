@@ -439,6 +439,76 @@ def drop_question(message_id, path=None):
     return False
 
 
+_EDIT_WINDOW_S = 15 * 60              # a reword edits the ping only this soon after it
+
+
+def _discord_api(token, method, url_path, payload=None):
+    """One Discord REST call (GET/PATCH/…). Returns the decoded JSON body
+    (dict; {} for an empty body) on success, None on any failure. Same
+    User-Agent requirement as _post_discord. Never raises."""
+    try:
+        req = urllib.request.Request(
+            "https://discord.com/api/v10/" + url_path,
+            data=None if payload is None else json.dumps(payload).encode(),
+            method=method,
+            headers={"Authorization": "Bot " + token,
+                     "Content-Type": "application/json",
+                     "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
+        body = urllib.request.urlopen(req, timeout=6).read()
+        return json.loads(body) if body else {}
+    except Exception:
+        return None
+
+
+def update_question(session, text, env=None, now=None, path=None, http=None):
+    """EDIT the recent ❓ ping message(s) of `session` in place with `text` —
+    a REWORDED, still-unanswered question. Discord EDITS do not push-ping:
+    the phone got its push on the FIRST ask; a rewrite (a quality-gate retry
+    turn, a /goal re-poke reword) must CONVERGE the existing card, never post
+    a new one (3 pings in 3 minutes for one reworded question — camera-box,
+    2026-07-05). Keeps the original first line (the @mention + header),
+    replaces the body, refreshes the map ts so reply-routing stays alive.
+    Only messages recorded within _EDIT_WINDOW_S are touched, and only when
+    their live content still opens with a ❓ head (never overwrite an
+    arbitrary message). Returns True when at least one message was edited."""
+    session = str(session or "").strip()
+    text = (text or "").strip()
+    if not session or not text:
+        return False
+    env = _read_env() if env is None else env
+    token = bot_token(env)
+    if not token:
+        return False
+    now = time.time() if now is None else now
+    http = _discord_api if http is None else http
+    d = load_questions(path)
+    edited = False
+    for mid, v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0,
+                         reverse=True):
+        if v.get("session") != session:
+            continue
+        if now - (v.get("ts") or 0) > _EDIT_WINDOW_S:
+            continue
+        chan = str(v.get("channel") or "")
+        msg = http(token, "GET", "channels/%s/messages/%s" % (chan, mid))
+        if not isinstance(msg, dict):
+            continue
+        head = str(msg.get("content") or "").split("\n", 1)[0]
+        if "❓" not in head:
+            continue
+        content = head + "\n\n" + text
+        if len(content) > 1990:                    # belt: Discord's 2000 cap
+            content = content[:1990]
+        ok = http(token, "PATCH", "channels/%s/messages/%s" % (chan, mid),
+                  {"content": content, "flags": SUPPRESS_EMBEDS})
+        if ok is not None:
+            v["ts"] = int(now)
+            edited = True
+    if edited:
+        _save_questions(d, path)
+    return edited
+
+
 def known_owner_ids(env=None):
     """The set of numeric Discord user ids allowed to DRIVE a session by replying
     (every `DISCORD_MENTION_<OWNER>` in this machine's .env, unwrapped from any

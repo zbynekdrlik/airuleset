@@ -1484,6 +1484,28 @@ class TestQuestionQualityGate(TestCase):
         self.assertTrue(self._blocked(r), r.stdout)
         self.assertIn("2–4", r.stdout)      # the reason teaches the cap
 
+    def test_good_briefing_with_bullet_options_not_false_positived(self):
+        # LIVE regression (camera-box, 2026-07-05 "velke zhorsenie"): mawk
+        # treats regex brackets as BYTE classes, so `[•-]` never matched the
+        # multi-byte `•` option lines — they got counted INTO the briefing and
+        # this perfectly good ~280-char question looped block→rewrite→block.
+        # Briefing under the cap + `•` options + total over the cap = ALLOWED.
+        r, _ = self._run(
+            "Otázka — projekt camera-box (imag-nb strihací počítač, kostolný "
+            "live): Program na HDMI beží 60fps. Ostáva vrátiť notebook display "
+            "(tam ide multiview) a docky. Zapnutie notebook displaya je zmena "
+            "grafiky, ktorá pred live môže v horšom prípade zhodiť celý "
+            "session aj s projekciou.\n"
+            "• Prevezmi to ty (odporúčam) — myš aj touchpad fungujú, otvoríš "
+            "si to ako zvyčajne; ja spravím presne to, čo mi ukážeš, bez "
+            "rizika a bez ďalšieho babrania sa v grafike pred prenosom\n"
+            "• Zapnem notebook display ja — opatrne, viem to vrátiť, ale malé "
+            "riziko glitchu X pred live, ktorý by mohol zhodiť projekciu\n"
+            "❓ NEEDS YOU: doklikáš si to ty, alebo mám zapnúť notebook "
+            "display ja?")
+        self.assertTrue(self._clean(r),
+                        "options must terminate the briefing count: " + r.stdout)
+
     def test_options_bullets_required(self):
         # "ziadne odrazky" — options must be bullet lines, not prose
         r, _ = self._run(

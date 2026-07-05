@@ -45,6 +45,7 @@ PENDING="/tmp/claude-discord-pending-${SID}"
 # clear-question-dedup.sh (UserPromptSubmit) whenever the user actually types.
 LASTQ="/tmp/claude-discord-lastq-${SID}"
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
 
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
 
@@ -171,7 +172,7 @@ send_q() {
     # DIFFERENT question always pings. This is NOT the removed "❓ + continuing
     # language → swallow" bug: no new question is ever suppressed — only the
     # already-pinged one, repeated verbatim to a user who already has it.
-    local key payload send
+    local key payload send f now m
     key=$(strip_md "$1" | jq -Rrs 'rtrimstr("\n") | .[0:1500]')
     payload=$(clean_q "$2")
     [ -z "$payload" ] && payload="$key"
@@ -180,7 +181,47 @@ send_q() {
     if [ -f "$LASTQ" ] && [ "$(cat "$LASTQ" 2>/dev/null)" = "$key" ]; then
         return 0
     fi
+
+    # A Stop attempt a blocking gate just REJECTED must NOT ping — the session
+    # is rewriting the message and the accepted rewrite delivers the final
+    # question. Every airuleset stop gate writes /tmp/airuleset-*-block-<sid>
+    # BEFORE emitting its block decision; Stop hooks run in PARALLEL, so
+    # settle briefly, then treat a freshly-touched block file as "this attempt
+    # was rejected". Without this, every rejected draft pinged the phone —
+    # camera-box got 3 pings in 3 minutes for ONE reworded question
+    # (05:05 blocked draft, 05:07 blocked rewrite, 05:08 final; 2026-07-05).
+    # The suppressed draft writes NO LASTQ, so the final version still pings.
+    sleep "${ND_BLOCK_SETTLE:-3}"
+    now=$(date +%s)
+    for f in /tmp/airuleset-*-block-"${SID}"; do
+        [ -e "$f" ] || continue
+        m=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ $((now - m)) -lt 12 ]; then
+            return 0
+        fi
+    done
+
     send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
+    # REWORD of a still-unanswered question (LASTQ exists = a ❓ was already
+    # pinged and the user has NOT typed since) → EDIT the existing Discord
+    # message in place. Edits do not push-ping: the phone got its push on the
+    # FIRST ask; the card text just converges to the newest wording (a /goal
+    # re-poke reword, a gate-retry rewrite). A genuinely NEW ask (the user
+    # typed in between → clear-question-dedup.sh removed LASTQ) posts fresh.
+    if [ -f "$LASTQ" ]; then
+        if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
+            { printf '[edit]\n'; printf '%s\n' "$payload"; } \
+                >> "${ND_DRYRUN_FILE:-/dev/null}"
+            printf '%s' "$key" > "$LASTQ"
+            return 0
+        fi
+        if printf '%s' "$payload" | python3 "$AIRULESET_PY" \
+                notify --edit-question --session "$SID" >/dev/null 2>&1; then
+            printf '%s' "$key" > "$LASTQ"
+            return 0
+        fi
+        # nothing recent/editable (expired, deleted) → fall through to a POST
+    fi
     # ND_CONFIRM: the send runs FOREGROUND and exits 0 only on confirmed HTTP 2xx
     # delivery. LASTQ is recorded ONLY then — a transient Discord failure on the
     # FIRST ask must leave the question retryable by the next identical re-emit,
