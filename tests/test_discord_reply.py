@@ -300,3 +300,80 @@ class FetchChannelMessages(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateQuestion(unittest.TestCase):
+    """notify.update_question — EDIT a recent ❓ ping in place (a reworded,
+    still-unanswered question must converge the existing Discord card; edits
+    do not push-ping — 3 pings for one reworded question, camera-box
+    2026-07-05)."""
+
+    HEAD = "<@773451844110385193> **❓ demo** — otázka"
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = str(Path(tmp.name) / "discord-questions.json")
+        self.env = {"DISCORD_BOT_TOKEN": "tok"}
+        self.calls = []
+
+    def _http(self, get_content=None, patch_ok=True):
+        head = self.HEAD
+        def http(token, method, url, payload=None):
+            self.calls.append((method, url, payload))
+            if method == "GET":
+                return {"content": (get_content if get_content is not None
+                                    else head + "\n\nstará verzia otázky?")}
+            return {} if patch_ok else None
+        return http
+
+    def test_edits_recent_entry_keeps_header(self):
+        notify.record_question("111", "222", "sess-a", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "nová verzia otázky?", env=self.env,
+                                    now=1100, path=self.path, http=self._http())
+        self.assertTrue(ok)
+        patch = [c for c in self.calls if c[0] == "PATCH"][0]
+        self.assertEqual(patch[2]["content"],
+                         self.HEAD + "\n\nnová verzia otázky?")
+        self.assertEqual(patch[2]["flags"], notify.SUPPRESS_EMBEDS)
+        d = notify.load_questions(self.path)
+        self.assertEqual(d["111"]["ts"], 1100)      # window refreshed
+
+    def test_old_entry_not_edited(self):
+        notify.record_question("111", "222", "sess-a", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "text", env=self.env,
+                                    now=1000 + 16 * 60, path=self.path,
+                                    http=self._http())
+        self.assertFalse(ok)
+        self.assertEqual(self.calls, [])
+
+    def test_other_session_ignored(self):
+        notify.record_question("111", "222", "sess-b", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "text", env=self.env, now=1050,
+                                    path=self.path, http=self._http())
+        self.assertFalse(ok)
+
+    def test_failed_patch_returns_false(self):
+        notify.record_question("111", "222", "sess-a", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "text", env=self.env, now=1050,
+                                    path=self.path,
+                                    http=self._http(patch_ok=False))
+        self.assertFalse(ok, "failed PATCH must fall back to a fresh POST")
+        self.assertEqual(notify.load_questions(self.path)["111"]["ts"], 1000)
+
+    def test_no_token_returns_false(self):
+        notify.record_question("111", "222", "sess-a", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "text", env={}, now=1050,
+                                    path=self.path, http=self._http())
+        self.assertFalse(ok)
+        self.assertEqual(self.calls, [])
+
+    def test_non_question_message_untouched(self):
+        # a mapped id whose live content lost its ❓ head (edited/foreign) is
+        # left alone — never overwrite an arbitrary message
+        notify.record_question("111", "222", "sess-a", "/p", now=1000, path=self.path)
+        ok = notify.update_question("sess-a", "text", env=self.env, now=1050,
+                                    path=self.path,
+                                    http=self._http(get_content="obyčajná správa"))
+        self.assertFalse(ok)
+        self.assertEqual([c[0] for c in self.calls], ["GET"])

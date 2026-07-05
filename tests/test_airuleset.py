@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import uuid
@@ -296,7 +297,7 @@ class TestDiscordNotifyHooks(TestCase):
             os.remove(sf)
         self._send_file = sf
         env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": sf,
-               "AIRULESET_NOTIFY_OWNER": owner}
+               "AIRULESET_NOTIFY_OWNER": owner, "ND_BLOCK_SETTLE": "0"}
         if home:
             env["HOME"] = home
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
@@ -393,7 +394,7 @@ class TestDiscordNotifyHooks(TestCase):
                        capture_output=True,
                        env={**os.environ, "HOME": home,
                             "DISCORD_NOTIFY_DRYRUN": "0",
-                            "AIRULESET_NOTIFY_OWNER": ""})
+                            "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0"})
         self.assertFalse(os.path.exists(f"/tmp/claude-discord-lastq-{sid}"),
                          "a FAILED delivery must NOT be recorded as pinged")
         # the identical re-emit retries — and once delivery works, it pings
@@ -657,6 +658,68 @@ class TestDiscordNotifyHooks(TestCase):
         self._stop(sid, msg, cwd=cwd)
         self.assertIn("rozhodnutie o žalúziách", self._sent(),
                       "the briefing must ride along (count chars, not bytes)")
+
+    def _touch_block(self, name, sid, age=0):
+        f = f"/tmp/airuleset-{name}-block-{sid}"
+        with open(f, "w") as fh:
+            fh.write("1")
+        if age:
+            old = time.time() - age
+            os.utime(f, (old, old))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        return f
+
+    def test_rejected_draft_attempt_does_not_ping(self):
+        # Stop hooks run in PARALLEL: when a blocking gate rejects the turn
+        # (fresh /tmp/airuleset-*-block-<sid>), the pending hook must NOT ping
+        # that draft — camera-box got 3 pings in 3 minutes for ONE question
+        # because every rejected rewrite attempt pinged too (2026-07-05).
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        blk = self._touch_block("question-quality", sid)
+        self._stop(sid, "❓ NEEDS YOU: draft otázky, ktorý gate zamietol?", cwd=cwd)
+        self.assertEqual(self._sent(), "", "a rejected draft must not ping")
+        self.assertFalse(os.path.exists(f"/tmp/claude-discord-lastq-{sid}"),
+                         "suppressed draft must stay retryable")
+        # the accepted rewrite (gate passed → removed its block file) pings
+        os.remove(blk)
+        self._stop(sid, "❓ NEEDS YOU: finálna verzia otázky?", cwd=cwd)
+        self.assertIn("finálna verzia", self._sent())
+
+    def test_stale_block_file_does_not_suppress(self):
+        # an old leftover retry file (earlier turn, other gate) must not
+        # swallow a legitimate question
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._touch_block("status-marker", sid, age=120)
+        self._stop(sid, "❓ NEEDS YOU: normálna otázka po dlhšom čase?", cwd=cwd)
+        self.assertIn("normálna otázka", self._sent())
+
+    def test_reworded_unanswered_question_edits_in_place(self):
+        # a REWORD of a still-unanswered question must EDIT the existing
+        # Discord message (edits do not push-ping) — never post a new ping
+        # (the 3-pings-for-one-question camera-box spam, 2026-07-05)
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._stop(sid, "❓ NEEDS YOU: prvá verzia otázky?", cwd=cwd)
+        self.assertIn("prvá verzia", self._sent())
+        self._stop(sid, "❓ NEEDS YOU: prepísaná verzia tej istej otázky?", cwd=cwd)
+        sent = self._sent()
+        self.assertIn("[edit]", sent, "a reword must EDIT, not repost")
+        self.assertIn("prepísaná verzia", sent)
+        self.assertNotIn("— otázka", sent, "no fresh POST header on a reword")
+
+    def test_new_question_after_user_prompt_posts_fresh(self):
+        # once the user actually TYPED, the next ask is a genuinely new
+        # question → a fresh POST (fresh push ping), not an edit
+        sid, _ = self._sid()
+        cwd = tempfile.mkdtemp()
+        self._stop(sid, "❓ NEEDS YOU: prvá otázka?", cwd=cwd)
+        self._user_prompt(sid)
+        self._stop(sid, "❓ NEEDS YOU: druhá, úplne iná otázka?", cwd=cwd)
+        sent = self._sent()
+        self.assertIn("druhá, úplne iná otázka?", sent)
+        self.assertNotIn("[edit]", sent)
 
     def test_asked_line_pulls_its_context_paragraph(self):
         # ask-and-continue: the ❓ ASKED ping carries the explanation paragraph
@@ -1445,6 +1508,18 @@ class TestQuestionQualityGate(TestCase):
             self.assertTrue(self._blocked(r), r.stdout)
         r, _ = self._run(bad, sid=sid)
         self.assertTrue(self._clean(r), "retry cap must stop an infinite loop")
+
+
+class TestEditQuestionCLI(TestCase):
+    def test_no_recent_question_exits_2(self):
+        home = tempfile.mkdtemp()
+        r = subprocess.run(
+            [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+             "notify", "--edit-question", "--session", "sess-x"],
+            input="nový text otázky", text=True, capture_output=True,
+            env={**os.environ, "HOME": home})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no-recent-question", r.stdout)
 
 
 class TestHookScriptsExist(TestCase):
@@ -2706,7 +2781,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # autopilot_done) MUST be pinned False here — a new flag left unpinned hijacks
         # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                      record_question=False,
+                      record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
@@ -2755,7 +2830,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
-                          record_question=False,
+                          record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,
