@@ -1289,6 +1289,135 @@ class TestSendPathRecordsQuestion(TestCase):
         self.assertIn("ND_SESSION_ID=", src)
 
 
+class TestQuestionQualityGate(TestCase):
+    """stop-check-question-quality.sh — HARD gate on the SHAPE of every ❓ turn.
+
+    The user's complaint (2026-07-05, after the block-delivery fix): questions
+    STILL arrive without an intro ('Po zmazaní hneď overím…' — deleting WHAT?)
+    and one ping crammed THREE decisions ('odpovedz na ktorékoľvek z 3') which
+    is unanswerable over the Discord-reply routing (the reply is typed back
+    into the session — nobody knows which of the 3 it answers). Rules alone
+    did not change session behavior → hook enforcement:
+      (a) the delivered question block MUST contain the briefing line
+          '**Otázka — projekt …:**' (the úvod),
+      (b) ONE ping = ONE decision (no enumerated multi-question piles)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-question-quality.sh"
+    _counter = 0
+
+    TEMPLATE_Q = ("**Otázka — projekt restreamer (nahrávanie kostolných "
+                  "prenosov):** disk na nahrávacom počítači je takmer plný, "
+                  "preto treba zmazať staré nahrávky, inak zlyhá najbližší "
+                  "prenos.\n"
+                  "• Zmazať staršie ako 3 dni (odporúčam) — uvoľní ~40 GB\n"
+                  "• Zmazať všetky — uvoľní najviac, prídeš o archív\n"
+                  "❓ NEEDS YOU: zmazať nahrávky staršie ako 3 dni?")
+
+    def _sid(self):
+        TestQuestionQualityGate._counter += 1
+        sid = f"test-qq-{os.getpid()}-{TestQuestionQualityGate._counter}"
+        self.addCleanup(
+            lambda: os.path.exists(f"/tmp/airuleset-question-quality-block-{sid}")
+            and os.remove(f"/tmp/airuleset-question-quality-block-{sid}")
+        )
+        return sid
+
+    def _run(self, msg, sid=None):
+        sid = sid or self._sid()
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              text=True, capture_output=True), sid
+
+    def _blocked(self, r):
+        return r.returncode == 0 and '"block"' in r.stdout
+
+    def _clean(self, r):
+        return r.returncode == 0 and r.stdout.strip() == ""
+
+    def test_bare_short_question_without_briefing_blocked(self):
+        r, _ = self._run("❓ NEEDS YOU: schváliš merge PR #5?")
+        self.assertTrue(self._blocked(r), r.stdout)
+        self.assertIn("Otázka — projekt", r.stdout)   # the reason TEACHES the shape
+
+    def test_context_free_restreamer_shape_blocked(self):
+        # the live 2026-07-05 ping: a context sentence that explains nothing
+        # ('Po zmazaní hneď overím…' — deleting WHAT?) + the bare decision line
+        r, _ = self._run(
+            "Po zmazaní hneď overím voľné miesto a nič ďalšie nereštartujem "
+            "(dev oprava ostáva nezmergovaná).\n\n"
+            "❓ NEEDS YOU: ktorú možnosť — staršie ako 3 dni (odporúčam), "
+            "všetky nahrávky, alebo iný dátum?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_structured_template_question_allowed(self):
+        r, _ = self._run("pracovný text vyššie\n\n" + self.TEMPLATE_Q)
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_template_in_paragraph_above_bare_marker_allowed(self):
+        # delivery pulls the ONE paragraph above a short bare marker — the
+        # gate must accept the same shape it delivers
+        head, marker = self.TEMPLATE_Q.rsplit("\n", 1)
+        r, _ = self._run(head + "\n\n" + marker)
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_multi_question_pile_blocked(self):
+        # the live codex-bridge 3-in-1 ping — unanswerable via Discord reply
+        r, _ = self._run(
+            "**Otázka — projekt codex-bridge (prenos dát z Codexu do Odoo):** "
+            "tri tickety čakajú na tvoje rozhodnutie.\n"
+            "❓ NEEDS YOU: Odpovedz na ktorékoľvek z 3, aj postupne — "
+            "(1) #250 vratné obaly: vytvoriť jednoduché produkty (odporúčam) "
+            "alebo nechať tak? (2) #232 alergény: odkiaľ vziať zdroj? "
+            "(3) #253 cena výroby: uložené číslo alebo počítaný rozpad?")
+        self.assertTrue(self._blocked(r), r.stdout)
+        self.assertIn("ONE decision", r.stdout)
+
+    def test_enumerated_two_questions_blocked(self):
+        r, _ = self._run(
+            "**Otázka — projekt demo (ukážka):** dve veci naraz.\n"
+            "❓ NEEDS YOU: (1) zmazať zálohu? (2) reštartnúť službu?")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_enumerated_steps_in_briefing_with_one_question_allowed(self):
+        # (1)/(2) describing STEPS with a single final decision is fine —
+        # the pile heuristic requires ≥2 question marks alongside (1)+(2)
+        r, _ = self._run(
+            "**Otázka — projekt demo (ukážka):** postup bude (1) zmažem "
+            "staré nahrávky, (2) overím voľné miesto — nič sa nereštartuje.\n"
+            "❓ NEEDS YOU: môžem takto uvoľniť disk?")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_asked_form_without_briefing_blocked(self):
+        r, _ = self._run("❓ ASKED: reset na 0 dB alebo posledný preset?\n\n"
+                         "⏳ WORKING: robím #59")
+        self.assertTrue(self._blocked(r), r.stdout)
+
+    def test_asked_form_with_briefing_allowed(self):
+        r, _ = self._run(
+            "**Otázka — projekt iem (mixovanie zvuku v kostole):** ticket #58 "
+            "mení správanie tlačidla reset a treba vybrať predvolenú hodnotu.\n"
+            "❓ ASKED: reset na 0 dB (odporúčam) alebo posledný preset?\n\n"
+            "⏳ WORKING: medzitým robím #59 (nezávislé od odpovede)")
+        self.assertTrue(self._clean(r), r.stdout)
+
+    def test_non_question_turns_pass(self):
+        for msg in ["✅ DONE: nasadené v1.2.3, CI zelené",
+                    "⏳ WORKING: CI beží — nič odo mňa nepotrebuješ",
+                    "len bežný text bez markera",
+                    "✅ DONE: odpoveď na Discord ❓ ping sa doručí správne"]:
+            r, _ = self._run(msg)
+            self.assertTrue(self._clean(r), f"{msg!r}: {r.stdout}")
+
+    def test_retry_cap_lets_message_through(self):
+        sid = self._sid()
+        bad = "❓ NEEDS YOU: schváliš merge?"
+        for _ in range(3):
+            r, _ = self._run(bad, sid=sid)
+            self.assertTrue(self._blocked(r), r.stdout)
+        r, _ = self._run(bad, sid=sid)
+        self.assertTrue(self._clean(r), "retry cap must stop an infinite loop")
+
+
 class TestHookScriptsExist(TestCase):
     def test_hook_scripts_exist(self):
         for script in [
@@ -1297,6 +1426,7 @@ class TestHookScriptsExist(TestCase):
             "pre-deploy-clean-tree.sh",
             "stop-check-untracked-work.sh",
             "stop-check-status-marker.sh",
+            "stop-check-question-quality.sh",
             "stop-check-prod-gating.sh",
             "stop-check-sendmessage-narration.sh",
             "notify-discord-pending.sh",
