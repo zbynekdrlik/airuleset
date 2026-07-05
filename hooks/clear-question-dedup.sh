@@ -26,4 +26,12 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 
 rm -f "/tmp/claude-discord-lastq-${SID}" 2>/dev/null || true
 
+# Presence marker: a REAL user prompt means the user is AT the terminal right
+# now. stop-check-question-quality.sh reads its mtime and skips the phone-shape
+# template enforcement while it is fresh (<10 min) — gating a live dialog
+# re-printed questions + hook errors into the user's chat (the camera-box
+# "Hruza", 2026-07-05). Goal-loop re-pokes / hook feedback do NOT fire
+# UserPromptSubmit, so an away session never looks "present".
+touch "/tmp/claude-user-active-${SID}" 2>/dev/null || true
+
 exit 0

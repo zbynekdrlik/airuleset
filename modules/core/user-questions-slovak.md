@@ -37,7 +37,7 @@ In an `/autopilot` / `/goal` / any autonomous run the user is AWAY. When a backg
 
 #### Povinná ŠTRUKTÚRA otázky — HOOK-ENFORCED template + ONE ping = ONE decision
 
-Every `❓ NEEDS YOU` / `❓ ASKED` turn is HARD-GATED by `stop-check-question-quality.sh` — a non-conforming question is BLOCKED at Stop and must be rewritten. Two rules, both from live 2026-07-05 failures:
+Every `❓ NEEDS YOU` / `❓ ASKED` turn is HARD-GATED by `stop-check-question-quality.sh` — a non-conforming question is BLOCKED at Stop and must be rewritten. **The gate enforces only for an AWAY user** (no real prompt in the last ~10 min — presence marker `/tmp/claude-user-active-<sid>` from UserPromptSubmit): the template protects the cold phone read; when the user is PRESENT and typing, the question is a live conversation and hard-gating it just re-printed questions + hook errors into their chat (camera-box "Hruza", 2026-07-05). Still WRITE questions decently when present — the gate absence is not a style licence. Two rules, both from live 2026-07-05 failures:
 
 1. **The question block MUST open with the briefing line** — this EXACT shape, contiguous (no blank lines inside), ending with the marker:
 

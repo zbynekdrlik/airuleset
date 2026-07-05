@@ -114,6 +114,21 @@ BLOCK=$(printf '%s\n' "$MSG" | awk -v m="$N" '
         print blk
     }')
 
+# PRESENT USER → no shape enforcement. The template exists for the AWAY
+# user's phone ping (zero context, cold read). When the user typed a REAL
+# prompt within the last 10 min they are AT the terminal, mid-conversation —
+# hard-gating that dialog re-printed questions + hook errors into their chat
+# ("Hruza", camera-box 2026-07-05). clear-question-dedup.sh (UserPromptSubmit)
+# stamps the marker; goal re-pokes / hook feedback never do.
+ACTIVE="/tmp/claude-user-active-${SID}"
+if [ -f "$ACTIVE" ]; then
+    AM=$(stat -c %Y "$ACTIVE" 2>/dev/null || echo 0)
+    if [ $(( $(date +%s) - AM )) -lt 600 ]; then
+        rm -f "$RETRY_FILE" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
 VIOLATION=""
 
 # Check 1 — the briefing line. The block must open the question with
@@ -170,16 +185,16 @@ fi
 
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
-    TEMPLATE="\n\nRequired shape of the question block (directly above/ending with the marker, NO blank lines inside — this exact block is what reaches the phone):\n  **Otázka — projekt <meno> (<čo projekt robí>):** <čo sa deje a prečo sa pýtaš — 2–4 vety, po slovensky, bez žargónu>\n  • <možnosť A> (odporúčam) — <dôsledok>\n  • <možnosť B> — <dôsledok>\n  ❓ NEEDS YOU: <jedno jasné rozhodnutie>\nSee user-questions-slovak.md."
+    TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
     case "$VIOLATION" in
         briefing)
-            REASON="Your ❓ question block has NO briefing — the phone reader has ZERO terminal context and cannot tell which project this is or what is going on (the live failure: 'Po zmazaní hneď overím…' — deleting WHAT?). Open the question block with the '**Otázka — projekt <meno> (<čo to je>):**' line followed by 2–4 plain-Slovak sentences of context, then the options, then the ❓ marker line.${TEMPLATE}" ;;
+            REASON="Your ❓ block has no briefing — the away phone reader cannot tell which project or what happened. Open it with the '**Otázka — projekt …:**' line + 2–4 vety kontextu.${TEMPLATE}" ;;
         pile)
-            REASON="Your ❓ ping crams MULTIPLE decisions into one question ((1)/(2)/(3) or 'ktorékoľvek z N'). ONE ping = ONE decision: the Discord reply is typed back into this session as ONE prompt, so a multi-question ping is unanswerable — nobody knows which sub-question the reply answers. Ask ONLY the first question now (structured, with its own briefing); ask the next one AFTER the first answer arrives (the user prefers small sequential questions).${TEMPLATE}" ;;
+            REASON="Your ❓ ping crams MULTIPLE decisions into one question. ONE ping = ONE decision — the Discord reply routes back as ONE prompt, a multi-question ping is unanswerable. Ask only the FIRST question now; the next one after its answer arrives.${TEMPLATE}" ;;
         briefwall)
-            REASON="Your ❓ briefing is a WALL OF TEXT (over 600 chars before the options). Štruktúrované a ľahko čitateľné = úvod 2–4 KRÁTKE vety bez žargónu (~600 znakov max) — WHAT project, WHAT happened, WHY you ask. Technical detail (measurements, architecture, code findings) belongs in the ticket/transcript, NOT in the phone ping. Then bullet options, then ONE decision.${TEMPLATE}" ;;
+            REASON="Your ❓ briefing is a wall of text (${BRIEF_LEN:-?} > 600 chars before the options). Úvod = 2–4 KRÁTKE vety; technical detail belongs in the ticket, not the phone ping.${TEMPLATE}" ;;
         options)
-            REASON="Your ❓ question has NO option bullets (odrážky) — the phone reader needs concrete choices, not prose. Add '• <možnosť> (odporúčam) — <dôsledok>' lines; even an open question offers candidate answers plus '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
+            REASON="Your ❓ question has no option bullets (odrážky). Add '• <možnosť> (odporúčam) — <dôsledok>' lines; an open question offers candidates + '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
