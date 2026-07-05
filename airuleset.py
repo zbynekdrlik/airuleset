@@ -106,7 +106,14 @@ VALID_CAVEMAN_MODES = {
     "lite", "full", "ultra",
     "wenyan-lite", "wenyan-full", "wenyan-ultra",
 }
-CAVEMAN_CACHE_GLOB = "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh"
+# BOTH cache layouts: pre-2026-07 releases shipped <hash>/hooks/…, newer ones
+# ship <hash>/src/hooks/… (a fresh install produces ONLY the new layout — the
+# migrated gatekeeper box surfaced it: the old single-glob check saw "not
+# built" forever and re-installed the plugin on every run).
+CAVEMAN_CACHE_GLOBS = (
+    "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh",
+    "plugins/cache/caveman/caveman/*/src/hooks/caveman-statusline.sh",
+)
 # Hash-independent entry to caveman's statusline + a context-fill meter. Must
 # NEVER error (a broken statusline would break the prompt render). Caveman's real
 # script lives under a content-hashed cache dir that changes on every `claude
@@ -122,7 +129,8 @@ CAVEMAN_SHIM_CONTENT = r"""#!/usr/bin/env bash
 # caveman's real statusline lives under a content-hashed cache dir resolved at
 # runtime (ls -dt ... | head -1) so a `claude plugin update` can never rot it.
 in=$(cat)
-real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh 2>/dev/null | head -1)
+real=$(ls -dt "$HOME"/.claude/plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh \
+       "$HOME"/.claude/plugins/cache/caveman/caveman/*/src/hooks/caveman-statusline.sh 2>/dev/null | head -1)
 badge=""
 if [ -n "$real" ] && [ -f "$real" ]; then badge=$(bash "$real" </dev/null 2>/dev/null); fi
 # de-emphasize caveman (least-important info): strip its bright color, lowercase,
@@ -1163,9 +1171,10 @@ def caveman_mode_or_default(existing) -> str:
 
 
 def _caveman_plugin_built() -> bool:
-    """True iff caveman's plugin cache (the real statusline script) exists on disk."""
+    """True iff caveman's plugin cache (the real statusline script) exists on disk
+    — in EITHER cache layout (old <hash>/hooks/, new <hash>/src/hooks/)."""
     import glob
-    return bool(glob.glob(str(CLAUDE_DIR / CAVEMAN_CACHE_GLOB)))
+    return any(glob.glob(str(CLAUDE_DIR / g)) for g in CAVEMAN_CACHE_GLOBS)
 
 
 def setup_caveman():
