@@ -1522,6 +1522,35 @@ class TestQuestionQualityGate(TestCase):
             r, _ = self._run(msg)
             self.assertTrue(self._clean(r), f"{msg!r}: {r.stdout}")
 
+    def test_verbatim_repeat_of_pinged_question_bypasses_shape_gate(self):
+        # camera-box 2026-07-05 chat wall: the /goal evaluator re-poked a
+        # session BLOCKED on the user every ~40s and each reply re-printed the
+        # whole question block. The mandated re-poke reply is ONE line — the
+        # previous ❓ line VERBATIM — so the gate must recognize the repeat of
+        # an ALREADY-DELIVERED question (LASTQ dedup key matches the marker
+        # line) and skip the shape checks for it.
+        sid = self._sid()
+        q = "spraviť zálohu pred migráciou?"
+        lastq = f"/tmp/claude-discord-lastq-{sid}"
+        with open(lastq, "w") as fh:
+            fh.write(q)
+        self.addCleanup(lambda: os.path.exists(lastq) and os.remove(lastq))
+        r, _ = self._run("❓ NEEDS YOU: " + q, sid=sid)
+        self.assertTrue(self._clean(r),
+                        "verbatim repeat of a pinged question must pass: "
+                        + r.stdout)
+
+    def test_different_question_still_shape_gated_despite_lastq(self):
+        # only the IDENTICAL repeat bypasses — a different bare question is a
+        # NEW ask and must carry the full template
+        sid = self._sid()
+        lastq = f"/tmp/claude-discord-lastq-{sid}"
+        with open(lastq, "w") as fh:
+            fh.write("spraviť zálohu pred migráciou?")
+        self.addCleanup(lambda: os.path.exists(lastq) and os.remove(lastq))
+        r, _ = self._run("❓ NEEDS YOU: zmazať staré nahrávky?", sid=sid)
+        self.assertTrue(self._blocked(r), r.stdout)
+
     def test_retry_cap_lets_message_through(self):
         sid = self._sid()
         bad = "❓ NEEDS YOU: schváliš merge?"
@@ -1530,6 +1559,30 @@ class TestQuestionQualityGate(TestCase):
             self.assertTrue(self._blocked(r), r.stdout)
         r, _ = self._run(bad, sid=sid)
         self.assertTrue(self._clean(r), "retry cap must stop an infinite loop")
+
+
+class TestAutopilotGoalStop(TestCase):
+    """The /goal line must make BLOCKED-ON-USER an explicit transcript-provable
+    STOP condition — the evaluator kept continuing a ❓-blocked session every
+    ~40s and each re-poke re-printed the whole question into the chat
+    (camera-box, 2026-07-05)."""
+
+    def _skill(self):
+        return (airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md").read_text()
+
+    def test_goal_line_stops_on_unanswered_needs_you(self):
+        s = self._skill()
+        self.assertIn("ends with a line starting `❓ NEEDS YOU:` and there is "
+                      "NO user message after it", s)
+        self.assertIn("NEVER continue me past an unanswered", s)
+
+    def test_goal_line_rearm_after_answer(self):
+        self.assertIn("re-prints this /goal line", self._skill())
+
+    def test_repoke_reply_is_one_verbatim_line(self):
+        s = self._skill()
+        self.assertIn("EXACTLY ONE LINE", s)
+        self.assertIn("no re-printed question block", s)
 
 
 class TestEditQuestionCLI(TestCase):
