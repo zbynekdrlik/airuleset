@@ -109,6 +109,30 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 3 — the briefing must be SHORT: 2–4 plain sentences, ~400 chars max.
+# Live failure (camera-box, 2026-07-05): ~700 chars of thread/lock jargon as
+# the intro — a wall of text, not "štruktúrované a ľahko čitateľné". The
+# briefing = the block's lines BEFORE the first option bullet / the marker.
+if [ -z "$VIOLATION" ]; then
+    BRIEF=$(printf '%s\n' "$BLOCK" | awk '
+        /^[[:space:]]*[•-][[:space:]]/ { exit }
+        /^[[:space:]]*[*_>~-]*[[:space:]]*❓/ { exit }
+        { print }')
+    BRIEF_LEN=$(printf '%s' "$BRIEF" | jq -Rrs 'rtrimstr("\n") | length')
+    if [ "${BRIEF_LEN:-0}" -gt 400 ]; then
+        VIOLATION="briefwall"
+    fi
+fi
+
+# Check 4 — options must be BULLET lines ("ziadne odrazky" complaint): the
+# block needs at least one `• `/`- ` option line. Even an open question
+# offers candidate answers plus "• iné — napíš vlastnú odpoveď".
+if [ -z "$VIOLATION" ]; then
+    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*[•-][[:space:]]'; then
+        VIOLATION="options"
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\n\nRequired shape of the question block (directly above/ending with the marker, NO blank lines inside — this exact block is what reaches the phone):\n  **Otázka — projekt <meno> (<čo projekt robí>):** <čo sa deje a prečo sa pýtaš — 2–4 vety, po slovensky, bez žargónu>\n  • <možnosť A> (odporúčam) — <dôsledok>\n  • <možnosť B> — <dôsledok>\n  ❓ NEEDS YOU: <jedno jasné rozhodnutie>\nSee user-questions-slovak.md."
@@ -117,6 +141,10 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ question block has NO briefing — the phone reader has ZERO terminal context and cannot tell which project this is or what is going on (the live failure: 'Po zmazaní hneď overím…' — deleting WHAT?). Open the question block with the '**Otázka — projekt <meno> (<čo to je>):**' line followed by 2–4 plain-Slovak sentences of context, then the options, then the ❓ marker line.${TEMPLATE}" ;;
         pile)
             REASON="Your ❓ ping crams MULTIPLE decisions into one question ((1)/(2)/(3) or 'ktorékoľvek z N'). ONE ping = ONE decision: the Discord reply is typed back into this session as ONE prompt, so a multi-question ping is unanswerable — nobody knows which sub-question the reply answers. Ask ONLY the first question now (structured, with its own briefing); ask the next one AFTER the first answer arrives (the user prefers small sequential questions).${TEMPLATE}" ;;
+        briefwall)
+            REASON="Your ❓ briefing is a WALL OF TEXT (over 400 chars before the options). Štruktúrované a ľahko čitateľné = úvod 2–4 KRÁTKE vety bez žargónu (~400 znakov max) — WHAT project, WHAT happened, WHY you ask. Technical detail (measurements, architecture, code findings) belongs in the ticket/transcript, NOT in the phone ping. Then bullet options, then ONE decision.${TEMPLATE}" ;;
+        options)
+            REASON="Your ❓ question has NO option bullets (odrážky) — the phone reader needs concrete choices, not prose. Add '• <možnosť> (odporúčam) — <dôsledok>' lines; even an open question offers candidate answers plus '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

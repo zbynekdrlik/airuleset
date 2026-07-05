@@ -51,12 +51,19 @@ case "$EMOJI" in
 esac
 HEADER="**${EMOJI} ${PROJECT}**"
 [ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
-# BASE body (header + quoted text) WITHOUT the @mention — the mention is per-target,
-# because each recipient gets THEIR OWN @mention in THEIR OWN thread. EVERY line
-# of TEXT gets the `> ` quote prefix — a multi-line question block must render as
-# ONE Discord quote block (quoting only the first line visually breaks it).
-TEXT_QUOTED=$(printf '%s\n' "$TEXT" | sed 's/^/> /')
-CONTENT_BASE=$(printf '%s\n%s' "$HEADER" "$TEXT_QUOTED")
+# BASE body WITHOUT the @mention — the mention is per-target, because each
+# recipient gets THEIR OWN @mention in THEIR OWN thread.
+#   ND_BLOCK=1 (the ❓ question path): TEXT is a structured markdown block
+#   (bold header, `- ` list, spacing) — post it UNQUOTED under the header with
+#   a blank separator; a `> ` blockquote renders it as one gray text wall (the
+#   camera-box complaint, 2026-07-05).
+#   Otherwise (✅ one-liners): keep the classic `> `-quoted line.
+if [ "${ND_BLOCK:-0}" = "1" ]; then
+    CONTENT_BASE=$(printf '%s\n\n%s' "$HEADER" "$TEXT")
+else
+    TEXT_QUOTED=$(printf '%s\n' "$TEXT" | sed 's/^/> /')
+    CONTENT_BASE=$(printf '%s\n%s' "$HEADER" "$TEXT_QUOTED")
+fi
 
 # @mention + thread routing via `airuleset.py notify` (single source of truth: it
 # reads the owner from the tmux session group + the channel .env). Path is relative

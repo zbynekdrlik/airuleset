@@ -109,16 +109,41 @@ extract_block() {
 }
 
 clean_q() {
-    # Clean a question payload for the device: markdown bold stripped, the
-    # marker label (NEEDS YOU / ASKED / Question) reduced to a bare ❓ on its
-    # line, then a CODEPOINT-safe cap (jq slices by codepoints — `cut -c` counts
-    # bytes and chopped multi-byte Slovak mid-character): ≤1800 chars pass
-    # WHOLE; an oversize block keeps its head and re-appends the tail of the
-    # final DECISION line — truncation must never cut the question itself off
-    # (the live bug: intro delivered, question gone).
+    # Prepare a question payload for the device — the phone must see
+    # STRUCTURE, never a text wall ("ziadne odrazky, ziadne zvyraznenia",
+    # camera-box screenshot 2026-07-05):
+    #   - markdown BOLD is PRESERVED (Discord renders it; the old blanket
+    #     `s/\*\*//g` flattened the question into unformatted prose)
+    #   - the marker label (NEEDS YOU / ASKED / Question, bold or not) is
+    #     reduced to a bare ❓ on its line
+    #   - `• ` option lines become `- ` (a real Discord list item with proper
+    #     indent/wrap; `•` is just a glyph mid-wall)
+    #   - the `Otázka — projekt …:` briefing head is auto-bolded when the
+    #     session forgot the **
+    #   - a blank line goes before the first option and before the final ❓
+    #     decision line, and the decision text is bolded
+    #   - CODEPOINT-safe cap (jq slices by codepoints — `cut -c` counts bytes
+    #     and chopped multi-byte Slovak mid-character): ≤1800 chars pass
+    #     WHOLE; an oversize block keeps its head and re-appends the tail of
+    #     the final DECISION line (truncation must never cut the question off)
     printf '%s' "$1" \
-        | sed -E 's/\*\*//g' \
-        | sed -E 's/^([[:space:]]*[*_>~-]*[[:space:]]*)❓[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED|Question)[[:space:]]*:?[[:space:]]*/❓ /I' \
+        | sed -E 's/^([[:space:]]*[*_>~-]*[[:space:]]*)❓[[:space:]]*\**(NEEDS[[:space:]]+YOU|ASKED|Question)\**[[:space:]]*:?\**[[:space:]]*/❓ /I' \
+        | sed -E 's/^[[:space:]]*•[[:space:]]*/- /' \
+        | sed -E '1s/^(Ot[áa]zka[[:space:]]*[—–-][^:*]*:)/**\1**/' \
+        | awk '
+            { L[NR] = $0 }
+            END {
+                optspaced = 0
+                for (i = 1; i <= NR; i++) {
+                    l = L[i]
+                    if (!optspaced && l ~ /^- / && i > 1) { print ""; optspaced = 1 }
+                    if (i == NR && l ~ /^❓ /) {
+                        if (i > 1) print ""
+                        if (l !~ /\*\*/) { sub(/^❓ /, "", l); l = "❓ **" l "**" }
+                    }
+                    print l
+                }
+            }' \
         | jq -Rrs 'rtrimstr("\n")
                    | if length <= 1800 then .
                      else (split("\n") | last) as $d
@@ -164,8 +189,11 @@ send_q() {
     # text-marker ❓).
     # ND_SESSION_ID lets the send path record this ❓ ping's Discord message id →
     # THIS session, so a Discord REPLY routes the answer back here (watchdog job 7).
-    if ND_EMOJI="❓" ND_TEXT="$payload" ND_CWD="$CWD" ND_CONFIRM=1 ND_SESSION_ID="$SID" \
-            bash "$send"; then
+    # ND_BLOCK=1: the payload is a structured markdown block — the send path
+    # must NOT '> '-blockquote it (a quote renders the question as one gray
+    # wall); it posts header + blank line + the block as-is.
+    if ND_EMOJI="❓" ND_TEXT="$payload" ND_CWD="$CWD" ND_CONFIRM=1 ND_BLOCK=1 \
+            ND_SESSION_ID="$SID" bash "$send"; then
         printf '%s' "$key" > "$LASTQ"
     fi
 }

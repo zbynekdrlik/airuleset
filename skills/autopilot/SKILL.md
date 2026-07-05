@@ -143,7 +143,9 @@ tell the user to paste it to start the loop, and **STOP** — end your message w
 a conforming question block (the question-quality gate requires the briefing line):
 
 ```
-**Otázka — projekt <repo> (<čo projekt robí>):** autopilot je pripravený — backlog má N otvorených ticketov, loop sa spustí vložením /goal riadku vyššie.
+**Otázka — projekt <repo> (<čo projekt robí>):** autopilot je pripravený — backlog má N otvorených ticketov.
+• Vlož /goal riadok vyššie (odporúčam) — loop sa rozbehne a ide sám
+• Nič nevkladaj — autopilot sa nespustí
 ❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne
 ```
 
