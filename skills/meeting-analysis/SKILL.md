@@ -261,6 +261,16 @@ the call against what was already claimed done:
   (`gh issue list --state closed`, `gh pr list --state merged`, the project memory). File a
   **regression/bug ticket** that names the original claim, quotes the call's evidence that it is
   broken, and states the expected behavior. Do NOT re-file it as a fresh feature — link the origin.
+- **VERIFY THE DEPLOYED VERSION the complainer actually ran — before calling anything a regression.**
+  A merged PR is NOT the same as a deployed feature. Establish the git SHA / release the tested
+  environment was running (e.g. `ssh <host> 'git -C <addon> rev-parse HEAD'` / a version label /
+  container uptime) and compare it against each candidate PR's **merge date**. A "delivered but
+  broken" complaint is very often just a **stale test/deploy environment** — the fix is a deploy /
+  env refresh, NOT a new dev bug. Filing already-done work as a fresh regression is the exact
+  wasted-cycle trap the user is burned by. Split the output into *already-fixed-pending-deploy*
+  (file/flag a deploy-and-reverify item) vs *genuinely-not-done*. (Live example: half a cutover
+  call's "regressions" were a 4-day-stale test env; the type-to-filter fix was merged to `develop`
+  but not deployed — filing it as a new bug would have been dead work.)
 - An item the stakeholder found **"unintelligible / unclear / can't tell what it does"** is a real
   finding, not noise → file a **clarity/UX ticket** (labelling, wording, findability — the montalu
   "Peter must FIND it and know the flow" acceptance bar), never silently drop it.
