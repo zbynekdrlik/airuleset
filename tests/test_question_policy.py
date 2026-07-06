@@ -8,7 +8,8 @@ terminal). During waking hours the loop picks one of two honest forms — BLOCK
 answer-independent tickets, ending `⏳ WORKING`). A question is NEVER suppressed,
 NEVER buried (continue only AFTER the ping fired), and an unanswered pinged
 question is NEVER a reason to stop the loop or reproach the user. The sleep window
-00:00-05:59 Europe/Bratislava still defers with no ping. And a general rule
+00:00-05:59 Europe/Bratislava defers ONLY while other work exists; a NECESSARY
+question (nothing else workable) pings even at night. And a general rule
 mandates delegating heavy reading to subagents to keep the main thread thin.
 
 These asserts guard against a regression that silently reinstates either the old
@@ -109,3 +110,49 @@ class TestQuestionPolicy(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestSleepWindowNecessaryQuestion(TestCase):
+    """User (2026-07-06): "nezakázal som v noci robiť, len obmedziť otázkovanie
+    ak je čo iné robiť; ak je otázka nutná, treba ju položiť." The sleep window
+    defers a question ONLY while other answer-independent work exists. When
+    nothing else is workable the question is NECESSARY and is asked (❓ NEEDS
+    YOU, it pings) even at night — otherwise a /goal-armed blocked session can
+    neither ask nor stop (condition (A) needs the ❓) and spins '⏳ parked'
+    turns into the 9-consecutive-block cap (camera-box overnight wall,
+    2026-07-06: 8× "sleep window — parked" + forced turn end)."""
+
+    def test_marker_rule_sleep_defer_conditional(self):
+        t = read("modules/core/message-status-marker.md")
+        self.assertIn("ONLY while other answer-independent work exists", t)
+        self.assertIn("asked NOW even at night", t)
+        self.assertIn("idle-park", t)
+        # The old unconditional night silence must be gone.
+        self.assertNotIn("during it ONLY, do NOT ping", t)
+
+    def test_autopilot_sleep_section_necessary_question_pings(self):
+        t = read("skills/autopilot/SKILL.md")
+        self.assertIn("a NECESSARY question still pings", t)
+        self.assertIn("NEVER idle-park", t)
+        # Night is not an off-air window: rig/prod tickets stay workable.
+        self.assertIn("workable at night", t)
+        # The /goal paste line must not carry the unconditional no-ping clause
+        # (it made a night-blocked loop unstoppable).
+        self.assertNotIn("then queue it and ask after 06:00, no ping", t)
+
+    def test_goal_line_night_block_stops_loop(self):
+        t = read("skills/autopilot/SKILL.md")
+        # The paste line itself must say: night defer only while workable
+        # tickets remain; a necessary question is asked and stops the loop.
+        self.assertIn("NECESSARY", t)
+        self.assertIn("even at night", t)
+
+    def test_worker_sleep_defer_conditional(self):
+        t = read("agents/autopilot-worker.md")
+        self.assertIn("answer-independent work remains", t)
+        self.assertIn("even during the window", t)
+
+    def test_milestone_rule_sleep_defer_conditional(self):
+        t = read("modules/core/milestone-notifications.md")
+        self.assertIn("ONLY while other answer-independent work exists", t)
+        self.assertIn("even at night", t)
