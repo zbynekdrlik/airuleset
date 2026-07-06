@@ -1,6 +1,6 @@
 ---
 name: meeting-analysis
-description: Analyze a meeting/call recording MULTIMODALLY — local GPU transcription + screenshare-frame reading + caption-track diarization — into a complete, structured understanding (requirements, decisions, tickets, summary). Use whenever the user hands you a recorded call/meeting (video or audio) and wants it analyzed, especially screen-shared sales/product/requirements calls. No paid API keys needed; runs on the dev2 GPU.
+description: Analyze a meeting/call recording MULTIMODALLY — Soniox stt-async-v5 transcription with native speaker diarization + screenshare-frame reading — into a complete, structured understanding (requirements, decisions, tickets, summary). Use whenever the user hands you a recorded call/meeting (video or audio) and wants it analyzed, especially screen-shared sales/product/requirements calls. Local dev2-GPU whisper is the fallback. The method SELF-IMPROVES after every run (Phase 6).
 user-invocable: true
 ---
 
@@ -10,8 +10,10 @@ user-invocable: true
 > THREE information channels — **spoken words**, **who said them**, and **what was shown on
 > screen**. Analyzing only the audio (the common failure) throws away half the meeting:
 > screenshared documents, ERP screens, mockups, and numbers are where the real requirements
-> live. This skill processes all three channels locally on the dev2 GPU (no API keys) and
-> ends with a completeness pass so nothing is missed.
+> live. This skill transcribes with **Soniox stt-async-v5** (materially better Slovak +
+> **native speaker diarization**, so "who spoke" needs no caption track; local dev2-GPU
+> whisper is the fallback), reads every shared screen itself, ends with a completeness pass
+> so nothing is missed, and — Phase 6 — **improves its own method after every run**.
 
 ## The hard rules (the failures this skill exists to prevent)
 
@@ -26,12 +28,22 @@ user-invocable: true
    meeting's substance; never reduce a shown spec to a one-line summary. Same weight as rule 1.
 4. **Completeness is priority #1.** End with an adversarial completeness critic (Phase 5).
    When unsure whether something is a requirement, capture it — over-capture, never drop.
-5. **Local + key-free.** Transcription runs on the dev2 GPU. Do NOT reach for a paid API
-   (Soniox/AssemblyAI/Gemini) when the local pipeline works. If the user *lists* paid options,
-   that is them informing you what's available — they want YOU to pick, not to ask which.
-6. **Diarization (who spoke) is free** — from the meeting tool's caption/subtitle track, not a
-   paid diarizer. The caption *text* is low quality (that's why we run real ASR), but its
-   speaker labels + timings are gold.
+5. **Transcription = Soniox stt-async-v5 (PRIMARY); YOU pick, never ask which.** Whisper twice
+   left the user unhappy — it garbles Slovak business terms and needs a caption track for "who
+   spoke". For a requirement-bearing Slovak meeting, transcribe with **Soniox stt-async-v5**
+   (`scripts/transcribe_soniox.py`): far better Slovak, **native speaker diarization**, and it's
+   a cloud API so it runs from **dev1 with NO dev2 GPU contention**. Local whisper on dev2
+   (`transcribe.py`) is the FALLBACK — use it only when the Soniox key/network is unavailable.
+   When the user *lists* options (Soniox/AssemblyAI/Gemini), that is them saying what's available
+   — they want YOU to pick the best (Soniox here), not to ask which. **Verify the newest async
+   model** at `GET https://api.soniox.com/v1/models` (Bearer key) and track it — as of 2026-07
+   it is `stt-async-v5`. **Never reuse the voiceagent BAKERY Soniox context** for a non-bakery
+   meeting — it biases the transcript toward bread terms; the montalu/ERP context ships inside
+   `transcribe_soniox.py`.
+6. **Diarization is native, not caption-derived.** Soniox stt-async-v5 labels speakers itself
+   (`speaker_turns.json` comes straight out of `transcribe_soniox.py`) — no caption/subtitle
+   track required. The caption track is only a fallback speaker source for the local-whisper
+   path; when you fall back to whisper, its caption speaker labels + timings are still gold.
 
 ## Setup & variables
 
@@ -92,10 +104,48 @@ unavailable). **Audio-only input is valid** — it yields 0 frames; Phases 3-fra
 skipped and analysis runs on transcript + captions. No caption track → diarization is
 unavailable (request a captions export, or run a local diarizer); ASR + screen reading proceed.
 
-## Phase 2 — Transcribe on the dev2 GPU (preflight, detached, non-blocking watch)
+## Phase 2 (PRIMARY) — Transcribe with Soniox stt-async-v5 (dev1, native diarization)
 
-ASR takes ~15–20 min for a ~1 h call. Do NOT block the session; launch detached and poll with a
-**background, crash-aware** watch.
+Runs from dev1, no GPU. Soniox does the Slovak transcription AND the speaker labels, so this
+one step produces both `transcript.txt` and `speaker_turns.json`.
+
+```bash
+SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
+WORK=/home/newlevel/uploads/acme-call/work
+export SONIOX_API_KEY=$(grep -oE 'SONIOX_API_KEY=[^[:space:]]+' /home/newlevel/devel/voiceagent/.env | head -1 | cut -d= -f2)
+# sanity: newest async model still stt-async-v5?  (verify + track — user's standing instruction)
+curl -s https://api.soniox.com/v1/models -H "Authorization: Bearer $SONIOX_API_KEY" | grep -o 'stt-async-v[0-9]*' | sort -u | tail -1
+# launch detached + crash-aware watch (a ~1 h call is a few min of Soniox wall-clock)
+cd "$WORK" && rm -f done error && \
+  setsid nohup python3 "$SKILL/scripts/transcribe_soniox.py" audio.wav "$WORK" sk erp \
+  >soniox.log 2>&1 < /dev/null & echo "launched pid $!"
+```
+
+Watch (background, crash-aware — same shape as the fallback below), then read `summary.json`:
+
+```bash
+WORK=/home/newlevel/uploads/acme-call/work
+for i in $(seq 1 60); do
+  [ -f "$WORK/done" ]  && { echo DONE;  cat "$WORK/summary.json"; break; }
+  [ -f "$WORK/error" ] && { echo ERROR; cat "$WORK/error"; tail -5 "$WORK/soniox.log"; break; }
+  pgrep -f transcribe_soniox.py >/dev/null || { echo PROCESS_GONE; tail -8 "$WORK/soniox.log"; break; }
+  sleep 30
+done
+```
+
+- `DONE` → `transcript.txt`, `transcript.json`, `speaker_turns.json`, `summary.json` are in
+  `$WORK`. **Skip the Phase 3 caption-diarization half** — Soniox already produced
+  `speaker_turns.json`; Phase 3 then only dedups screens.
+- `ERROR` → read `$WORK/error` + `soniox.log`, fix the root cause. Only if Soniox is genuinely
+  unavailable (key/network/account) fall back to the dev2-GPU whisper path below.
+- The script is resilient: if the API rejects the diarization flag or the ERP context it retries
+  without them (logged as `WARN`) rather than hanging — a slightly poorer transcript beats none.
+
+## Phase 2 (FALLBACK) — Transcribe on the dev2 GPU with whisper (only if Soniox is down)
+
+Use ONLY when Soniox is unavailable. ASR takes ~15–20 min for a ~1 h call. Do NOT block the
+session; launch detached and poll with a **background, crash-aware** watch. Diarization then
+comes from the caption track (Phase 3), not the model.
 
 ```bash
 SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
@@ -148,8 +198,16 @@ contention, don't assume success.
 SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
 WORK=/home/newlevel/uploads/acme-call/work
 python3 -c 'import PIL' 2>/dev/null || pip install --user Pillow   # dev1 prereq
+# Soniox path already wrote the authoritative speaker_turns.json — preserve it across prep.py
+[ -f "$WORK/speaker_turns.json" ] && cp "$WORK/speaker_turns.json" "$WORK/speaker_turns.soniox.json"
 python3 "$SKILL/scripts/prep.py" "$WORK"
+[ -f "$WORK/speaker_turns.soniox.json" ] && mv "$WORK/speaker_turns.soniox.json" "$WORK/speaker_turns.json"
 ```
+
+**prep.py rewrites `speaker_turns.json` from the CAPTION track** — that is only the whisper-path
+fallback. When you used the Soniox path, its native `speaker_turns.json` is authoritative, so the
+`cp`/`mv` above backs it up and restores it after prep.py's screen dedup. On the whisper fallback
+path there is no Soniox file, so prep.py's caption-derived turns stand.
 
 Produces `$WORK/frames_kept/scr_NNN_tSSSSS.jpg` (one per DISTINCT screen) and
 `$WORK/speaker_turns.json`. **Calibration (proven run): 413 raw frames → 57 distinct screens at
@@ -189,6 +247,47 @@ Then run a **completeness critic** before declaring done:
 - Capture EVERYTHING identified-but-not-done as tracked items (e.g. GitHub issues) — never drop a
   requirement silently (`no-dropped-work.md`).
 
+**Every generated ticket MUST cite its evidence** — the transcript timestamp + speaker, the
+screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line it came from. A ticket
+with no citation is an unverifiable hallucinated requirement; the user must be able to trace each
+one back to the moment in the call it came from.
+
+**Delivered-vs-broken cross-check (mandatory when the meeting is a complaint call).** When the
+meeting exists because the user/stakeholder says previously-"delivered" things are non-functional,
+unclear, or wrong (the recurring montalu/Peto pattern), the synthesis MUST explicitly reconcile
+the call against what was already claimed done:
+
+- For each complaint in the call, find the ticket/PR that claimed to deliver it
+  (`gh issue list --state closed`, `gh pr list --state merged`, the project memory). File a
+  **regression/bug ticket** that names the original claim, quotes the call's evidence that it is
+  broken, and states the expected behavior. Do NOT re-file it as a fresh feature — link the origin.
+- An item the stakeholder found **"unintelligible / unclear / can't tell what it does"** is a real
+  finding, not noise → file a **clarity/UX ticket** (labelling, wording, findability — the montalu
+  "Peter must FIND it and know the flow" acceptance bar), never silently drop it.
+- Separate **NEW requirements** (never promised) from **REGRESSIONS** (promised, now broken) in the
+  output — they are different work and the user reads them differently.
+
+## Phase 6 — Self-improve the method (run EVERY time, before declaring done)
+
+**The user's standing instruction: each analysis must be higher-quality than the last, using a
+more functional approach — the skill develops ITSELF.** After delivering, run a short retrospective
+on the METHOD (not the content), then bank the improvement so the next run inherits it:
+
+1. Ask: what did THIS run reveal was weak, slow, brittle, or missing in the *method*? (ASR quality
+   on this audio, diarization accuracy, screen-dedup threshold, a channel that got under-read, a
+   step that hung, a manual fix-up you had to improvise, a better tool that would have helped.)
+2. Turn each concrete lesson into an **edit of this SKILL.md and/or its scripts** — tighten a
+   threshold, add a preflight, fix a fragile command, adjust the ASR/context choice, add an
+   anti-pattern. Then **commit** it (airuleset is a git repo):
+   `cd /home/newlevel/devel/airuleset && git add skills/meeting-analysis && git commit -m "meeting-analysis: <lesson> (self-improve after <topic> run)"`.
+3. If the lesson is project-state (not method) — e.g. a montalu-specific gotcha — write it to
+   session memory instead, and cross-link.
+4. The completion report MUST end with a one-line `🔧 Self-improve:` note stating what changed in
+   the method (or, rarely, "method held up — no change needed" with the reason).
+
+Skipping Phase 6 is the banned "ran it the same flawed way again" failure — the whole point is that
+the method never stops improving.
+
 ## Deliver files back as clickable LAN URLs
 
 Any artifact the user should open goes back as a clickable link, never a `/tmp` path
@@ -202,15 +301,22 @@ Any artifact the user should open goes back as a clickable link, never a `/tmp` 
   (Hard Rule 3).
 - Asking the user "what was on the screen / describe the document you shared?" → **WRONG.** You
   have vision; read the frames.
-- Reaching for a paid ASR/diarization API because the user mentioned one → **WRONG.** Local dev2
-  pipeline is the default.
-- Blocking the session polling the GPU, or a fixed 40-min cap that calls a long run "dead" →
-  **WRONG.** Background, crash-aware, duration-scaled watch with a HANG branch (Phase 2).
-- Launching ASR into a near-full shared GPU, or killing another process's GPU memory → **WRONG.**
-  Gate on free memory; never kill prod inference.
+- Defaulting to local whisper for a Slovak requirement-bearing meeting → **WRONG.** Soniox
+  stt-async-v5 is the primary (better Slovak + native diarization); whisper is the fallback.
+- ASKING the user which ASR to use when they listed options → **WRONG.** They want YOU to pick
+  (Soniox); asking is the banned over-ask.
+- Reusing the voiceagent BAKERY Soniox context for a non-bakery meeting → **WRONG.** It biases the
+  transcript toward bread terms; use the ERP context in `transcribe_soniox.py` (or none).
+- Blocking the session polling ASR, or a fixed cap that calls a long run "dead" → **WRONG.**
+  Background, crash-aware, duration-scaled watch with a HANG branch (Phase 2).
+- On the whisper fallback: launching ASR into a near-full shared GPU, or killing another process's
+  GPU memory → **WRONG.** Gate on free memory; never kill prod inference.
 - Declaring complete without the Phase 5 completeness critic → **WRONG.** That's the exact
   "looked done but dropped half" failure.
+- Declaring done without the Phase 6 self-improvement pass → **WRONG.** The method must improve
+  every run; skipping it repeats the same flaws.
 
-The intent: every meeting is analyzed across all three channels (words + speakers + screen),
-locally and key-free, ending with a completeness pass — so the user never re-explains the method
-and never loses requirements that were shown but not said.
+The intent: every meeting is analyzed across all three channels (words + speakers + screen) with
+the BEST transcription available (Soniox stt-async-v5, native diarization), ending with a
+completeness pass AND a self-improvement pass — so the user never re-explains the method, never
+loses requirements that were shown but not said, and every run is better than the last.
