@@ -55,9 +55,12 @@ set this issue aside, and keep working other tickets, ending `⏳ WORKING` (resu
 durable state when the user answers). Do NOT grind on WITHOUT asking (burying the question), and do
 NOT guess on an important decision. Only routine, unambiguous steps proceed without asking.
 **The ONLY time you defer a question is the sleep window 00:00–05:59 Europe/Bratislava** (check
-`TZ=Europe/Bratislava date +%H` → hour `00..05` = the user is asleep): then queue it (label
-`needs-decision`, leave the issue open), finish the rest of the batch, and report the deferred
-question in your evidence block so the supervisor raises it after 06:00. **Fallback if a prompt
+`TZ=Europe/Bratislava date +%H` → hour `00..05` = the user is asleep) — **and even then ONLY while
+other answer-independent work remains**: queue it (label `needs-decision`, leave the issue open),
+finish the rest of the batch, and report the deferred question in your evidence block so the
+supervisor raises it after 06:00. When the question blocks EVERYTHING you could do (no other
+workable ticket in the batch), it is NECESSARY — ask it normally (`❓ NEEDS YOU`, it pings)
+even during the window; never sit parked waiting for morning. **Fallback if a prompt
 genuinely can't reach the user** (older CC where background prompts don't surface): same as the sleep
 case — label `needs-decision`, leave it open, report it; never hang, never guess a genuine design
 call. Routine/technical calls you decide yourself and proceed (`ask-before-assuming.md`).
