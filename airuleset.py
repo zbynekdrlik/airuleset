@@ -1572,11 +1572,12 @@ REMOTE_HOSTS = [
     {
         # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
         # NOT the shared "newlevel" password — it is a prod-critical host.
-        # Migrated to a NEW VPS 2026-07-05: tailscale IP 100.77.52.43 (public
-        # 202.148.55.31). Do NOT use the MagicDNS name "odoo-gatekeeper" — it
-        # still resolves to the OLD node (168.119.99.160, kept as fallback).
+        # Migrated 2026-07-07 to Hetzner cx23: tailscale IP 100.90.94.41
+        # (node "gatekeeper-cx23", public 88.99.170.148). Do NOT use the
+        # MagicDNS name "odoo-gatekeeper" — it resolves to a RETIRED node;
+        # the previous HostKey box (100.77.52.43) is retired too.
         "name": "gatekeeper",
-        "host": "100.77.52.43",
+        "host": "100.90.94.41",
         "user": "gatekeeper",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
@@ -1594,10 +1595,10 @@ REMOTE_HOSTS = [
     {
         # Marek's isolated user on the gatekeeper VPS (his Claude dev env).
         # Same access key as the gatekeeper entry (its pubkey is authorized
-        # in marek's authorized_keys). Same new-VPS host as the gatekeeper
-        # entry above (tailscale IP — never the stale MagicDNS name).
+        # in marek's authorized_keys). Same Hetzner-cx23 host as the
+        # gatekeeper entry above (tailscale IP — never the stale MagicDNS name).
         "name": "marek@gatekeeper",
-        "host": "100.77.52.43",
+        "host": "100.90.94.41",
         "user": "marek",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
