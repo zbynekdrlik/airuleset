@@ -1572,10 +1572,11 @@ REMOTE_HOSTS = [
     {
         # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
         # NOT the shared "newlevel" password — it is a prod-critical host.
-        # Migrated 2026-07-07 to Hetzner cx23: tailscale IP 100.90.94.41
-        # (node "gatekeeper-cx23", public 88.99.170.148). Do NOT use the
-        # MagicDNS name "odoo-gatekeeper" — it resolves to a RETIRED node;
-        # the previous HostKey box (100.77.52.43) is retired too.
+        # Migrated 2026-07-07 to Hetzner cx23 "gk.newlevel.media": tailscale
+        # IP 100.90.94.41 (node "gatekeeper-cx23", public 88.99.170.148 =
+        # gk.newlevel.media). Do NOT use the MagicDNS name "odoo-gatekeeper"
+        # — it resolves to a RETIRED node; the previous HostKey box
+        # (100.77.52.43 / 202.148.55.31) is retired too.
         "name": "gatekeeper",
         "host": "100.90.94.41",
         "user": "gatekeeper",
