@@ -2689,17 +2689,84 @@ class TestUltracodeLauncher(TestCase):
     def test_default_launcher_has_skip_perms_and_continue(self):
         p = self._tmp()
         airuleset.apply_ultracode_launcher(p)
-        # the `claude()` default carries all three: auto-approve, continue, ultracode
-        default_line = next(ln for ln in p.read_text().splitlines()
-                            if ln.startswith("claude() {"))
-        self.assertIn("--dangerously-skip-permissions", default_line)
-        self.assertIn(" -c ", default_line)
-        self.assertIn("--settings '{\"ultracode\":true}'", default_line)
+        # the `claude()` default is continue-or-new: BOTH branches carry
+        # auto-approve + ultracode; -c only on the continue branch
+        text = p.read_text()
+        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+        block = block.split(airuleset.ULTRACODE_MARK_END)[0]
+        self.assertEqual(block.count("--dangerously-skip-permissions -c "), 1)
+        self.assertEqual(block.count("--dangerously-skip-permissions"), 3)  # claude x2 + claude-new
+        self.assertEqual(block.count("--settings '{\"ultracode\":true}'"), 3)
+        self.assertIn("compgen -G", block)             # conversation-exists probe
         # claude-new is ultracode + skip-perms but NOT -c (fresh session)
         new_line = next(ln for ln in p.read_text().splitlines()
                         if ln.startswith("claude-new() {"))
         self.assertIn("--dangerously-skip-permissions", new_line)
         self.assertNotIn(" -c ", new_line)
+
+
+class TestClaudeLauncherContinueOrNew(TestCase):
+    """The managed `claude` launcher must CONTINUE (-c) only when the cwd has a
+    prior conversation, and start a FRESH session otherwise — unconditional -c
+    died with "No conversation found to continue" in every new directory
+    (david@gk, 2026-07-09), forcing users to know about claude-new."""
+
+    def _run_launcher(self, home, cwd):
+        bashrc = Path(home) / ".bashrc"
+        airuleset.apply_ultracode_launcher(bashrc)
+        stub_dir = Path(home) / "bin"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "claude"
+        stub.write_text('#!/bin/bash\necho "ARGS:$*"\n')
+        stub.chmod(0o755)
+        env = {**os.environ, "HOME": str(home),
+               "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+        r = subprocess.run(
+            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; claude"],
+            capture_output=True, text=True, env=env)
+        return r.stdout
+
+    @staticmethod
+    def _proj_dir(home, cwd):
+        # Claude Code encodes cwd -> projects dirname: / . _ all become -
+        enc = str(cwd).replace("/", "-").replace(".", "-").replace("_", "-")
+        d = Path(home) / ".claude" / "projects" / enc
+        d.mkdir(parents=True)
+        return d
+
+    def test_fresh_dir_starts_new_session_without_dash_c(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher(home, cwd)
+        self.assertIn("ARGS:", out)                    # stub actually ran
+        self.assertIn("--dangerously-skip-permissions", out)
+        self.assertNotIn(" -c", out)
+
+    def test_dir_with_conversation_continues_with_dash_c(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out = self._run_launcher(home, cwd)
+        self.assertIn(" -c", out)
+
+    def test_memory_only_project_dir_still_starts_fresh(self):
+        # projects/<enc>/ can exist holding only memory/ — no transcript => new
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "memory").mkdir()
+        out = self._run_launcher(home, cwd)
+        self.assertNotIn(" -c", out)
+
+    def test_underscore_and_dot_dirs_encode_to_dashes(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "web_app.ai"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "s.jsonl").write_text("{}")
+        out = self._run_launcher(home, cwd)
+        self.assertIn(" -c", out)
 
 
 class TestDiscordAutopilotNotify(TestCase):
