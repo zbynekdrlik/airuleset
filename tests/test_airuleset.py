@@ -2682,7 +2682,9 @@ class TestUltracodeLauncher(TestCase):
         p = self._tmp()
         airuleset.apply_ultracode_launcher(p)
         text = p.read_text()
-        self.assertIn("claude() { command claude", text)   # function, command-prefixed
+        self.assertIn("claude() {", text)                  # function (multi-line since
+        self.assertNotIn("alias claude=", text)            # continue-or-new), not alias
+        self.assertIn("command claude --dangerously-skip-permissions", text)
         self.assertIn("claude-new()", text)                # fresh-session escape hatch
         self.assertIn("claude-plain()", text)              # vanilla escape hatch
 

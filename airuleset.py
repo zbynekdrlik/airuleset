@@ -402,15 +402,21 @@ BASHRC = Path.home() / ".bashrc"
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 # The managed `claude` launcher (user's explicit default): ultracode + auto-approve
-# permissions + continue the last conversation.
+# permissions + CONTINUE-OR-NEW (2026-07-09): -c only when the cwd actually has a
+# prior conversation; otherwise start fresh — unconditional -c died with
+# "No conversation found to continue" in every new directory (david@gk).
 #   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
 #       accepted in settings.json — GH #64817); --settings is the only doc-blessed
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
+# The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
+# encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
+# transcript) means nothing to continue. Unknown encoding chars fail toward the
+# FRESH branch (worse case: a new session instead of a cryptic error).
 # A bash FUNCTION (not alias) forwards all args; `command` avoids recursing.
-# Escape hatches: `claude-new` (ultracode + skip-perms, FRESH session — no -c, for a
-# new dir or a clean start) and `claude-plain` (vanilla `claude`, no flags).
+# Escape hatches: `claude-new` (ultracode + skip-perms, FRESH session — no -c, force
+# a clean start) and `claude-plain` (vanilla `claude`, no flags).
 ULTRACODE_BASHRC_BLOCK = (
     f"{ULTRACODE_MARK_START}\n"
     # claude installs to ~/.local/bin, which NON-LOGIN interactive shells (su
@@ -419,8 +425,16 @@ ULTRACODE_BASHRC_BLOCK = (
     # the function resolves to nothing there ("claude: command not found" on
     # montalu@dev1, 2026-07-04). Idempotent: adds the dir once, never twice.
     'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac\n'
-    "claude() { command claude --dangerously-skip-permissions -c "
-    "--settings '{\"ultracode\":true}' \"$@\"; }\n"
+    "claude() {\n"
+    '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
+    '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
+    "    command claude --dangerously-skip-permissions -c "
+    "--settings '{\"ultracode\":true}' \"$@\"\n"
+    "  else\n"
+    "    command claude --dangerously-skip-permissions "
+    "--settings '{\"ultracode\":true}' \"$@\"\n"
+    "  fi\n"
+    "}\n"
     "claude-new() { command claude --dangerously-skip-permissions "
     "--settings '{\"ultracode\":true}' \"$@\"; }\n"
     "claude-plain() { command claude \"$@\"; }\n"
