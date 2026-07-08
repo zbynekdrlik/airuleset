@@ -106,5 +106,36 @@ class TestFableOnHardBudgetGated(TestCase):
         self.assertIn("When unsure whether it is HARD → it is NOT; use Opus.", w)
 
 
+
+class TestFableAdvisorShape(TestCase):
+    """Locks the 2026-07-08 refinement: every automatic Fable escalation is an
+    ADVISOR call (digest in, decision out, ONE call), never a worker — the form
+    that keeps Fable-grade judgment without the 2026-07-01 Max-plan burn. Added
+    when the user hit Opus-4.8 decision loops ("točíme sa dokolečka") and asked
+    for the community Fable-orchestrator + Sonnet-executor pattern WITHOUT the
+    token burn Fable-as-main caused."""
+
+    def test_opus_circling_is_a_hard_criterion(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("Opus is CIRCLING", t)
+        self.assertIn("third identical Opus lap", t)
+        # the valve keys on observed behavior, not on degradation rumors
+        self.assertIn("OBSERVED circling", t)
+
+    def test_fable_escalation_is_advisor_shaped(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("SHAPE — Fable escalation = ADVISOR, never worker", t)
+        self.assertIn("TIGHT digest", t)
+        self.assertIn("ONE Fable call", t)
+        self.assertIn("never dispatched as a long-lived worker session", t)
+        # the main-session burn mechanism is documented so it never repeats
+        self.assertIn("re-reads the full conversation context every turn", t)
+
+    def test_workflow_fable_stages_are_advisor_shaped(self):
+        t = read("modules/core/claude-code-tooling.md")
+        self.assertIn("ADVISOR call: digest in, decision out", t)
+        self.assertIn("grounds itself by re-reading the sources", t)
+
+
 if __name__ == "__main__":
     main()
