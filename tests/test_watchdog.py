@@ -486,6 +486,40 @@ class PaneQuestionExcerpt(unittest.TestCase):
         self.assertIn("2. Nechať tak", out)
 
 
+    # CC 2.1.20x (fullscreen renderer): the dialog interleaves WRAPPED option
+    # descriptions and appends UI affordance rows ("4. Type something." +
+    # "5. Chat about this" below a border). Anchoring on the LAST numbered row
+    # from the bottom picked the affordance — Dávid's phone got a ping whose
+    # whole "question" was "5. Chat about this" (gk, 2026-07-09).
+    FULLSCREEN_DIALOG = (
+        "  Tvoja dochadzka NIE JE Odoo — dva zdroje pravdy.\n"
+        "  Jedna vec ale rozhoduje rozsah:\n"
+        "────────────────────────────────────────\n"
+        " ☐ Rozsah\n"
+        "Ktoré časti kiosku majú byť Odoo-native?\n"
+        "❯ 1. Dochádzka + žiadosti o voľno (odporúčam)\n"
+        "     Príchod/odchod/prestávka do Odoo hr.attendance; dovolenka do\n"
+        "     hr.leave. Jeden zdroj pravdy pre mzdy.\n"
+        "  2. Len dochádzka (úplne jadro)\n"
+        "     Iba príchod/odchod/prestávka. Voľno ostáva na grena.sk.\n"
+        "  3. Všetko vrátane zmien/plánovania\n"
+        "     Aj shift-planning prerobiť do Odoo (najväčší kus práce).\n"
+        "  4. Type something.\n"
+        "────────────────────────────────────────\n"
+        "  5. Chat about this\n"
+        "Enter to select · ↑/↓ to navigate · Esc to cancel\n")
+
+    def test_fullscreen_dialog_carries_question_not_ui_affordances(self):
+        out = wd.pane_question_excerpt(self.FULLSCREEN_DIALOG)
+        self.assertIn("Ktoré časti kiosku majú byť Odoo-native?", out)
+        self.assertIn("1. Dochádzka + žiadosti o voľno (odporúčam)", out)
+        self.assertIn("3. Všetko vrátane zmien/plánovania", out)
+        self.assertNotIn("Chat about this", out)     # UI affordance, not an option
+        self.assertNotIn("Type something", out)      # UI affordance, not an option
+        self.assertNotIn("dva zdroje pravdy", out)   # transcript prose above the box
+
+
+
 class WaitingPersistenceGate(unittest.TestCase):
     """Job 2 must NOT ping on the FIRST poll that sees a dialog footer (a transient
     bypass-permissions / 60s-auto-continue flash) — only after it PERSISTS to a later
