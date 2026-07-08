@@ -1604,6 +1604,18 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
+    {
+        # David's isolated external-dev user on the gatekeeper VPS (slovnormal
+        # odoo dev stream, parallel to montalu: no sudo, no prod keys, can't
+        # read other homes). Same access key as the gatekeeper entry (its
+        # pubkey is authorized in david's authorized_keys). Same Hetzner-cx23
+        # host (tailscale IP — never the stale MagicDNS name).
+        "name": "david@gatekeeper",
+        "host": "100.90.94.41",
+        "user": "david",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
 ]
 
 

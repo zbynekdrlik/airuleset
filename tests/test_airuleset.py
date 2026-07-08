@@ -4234,3 +4234,42 @@ class TestTier0BuildBlock(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
         self.assertTrue(any("block-tier0-local-build.sh" in c for c in cmds))
+
+
+class TestRemoteHosts(TestCase):
+    """Deploy-target invariants. The gatekeeper box migrated hosts twice
+    (168.119.99.160 → HostKey → Hetzner cx23); a PARTIAL repoint — one
+    gatekeeper-user entry moved, another left on the old IP — would silently
+    deploy to a dead/stale box. Lock: all gatekeeper entries share ONE host +
+    the key-based identity, and every managed user is present exactly once."""
+
+    GK_USERS = {"gatekeeper", "marek", "david"}
+
+    def _gk_entries(self):
+        return [r for r in airuleset.REMOTE_HOSTS if r["user"] in self.GK_USERS]
+
+    def test_all_expected_targets_present_once(self):
+        names = [r["name"] for r in airuleset.REMOTE_HOSTS]
+        self.assertEqual(len(names), len(set(names)), "duplicate target name")
+        for expected in ("dev2", "gatekeeper", "montalu@dev1",
+                         "marek@gatekeeper", "david@gatekeeper"):
+            self.assertIn(expected, names)
+
+    def test_gatekeeper_users_share_one_host_and_identity(self):
+        entries = self._gk_entries()
+        self.assertEqual({e["user"] for e in entries}, self.GK_USERS)
+        hosts = {e["host"] for e in entries}
+        self.assertEqual(len(hosts), 1,
+                         f"gatekeeper entries diverge across hosts: {hosts} "
+                         "— partial migration repoint")
+        for e in entries:
+            self.assertEqual(e.get("identity"),
+                             "~/.secrets/gatekeeper_access_ed25519",
+                             f"{e['name']} must use the key, never sshpass")
+
+    def test_gatekeeper_host_is_tailscale_ip(self):
+        # always the tailscale IP — MagicDNS name + retired IPs are banned
+        for e in self._gk_entries():
+            self.assertRegex(e["host"], r"^100\.")
+            self.assertNotIn(e["host"], ("100.77.52.43", "168.119.99.160",
+                                         "202.148.55.31"))
