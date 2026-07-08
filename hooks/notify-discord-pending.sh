@@ -77,7 +77,7 @@ extract_block() {
     # This is the fix for the live truncation/context-free complaint
     # (codex-bridge 2026-07-04): the phone must get the WHOLE question, with its
     # úvod, never a 250-char fragment ("…sklad zač").
-    printf '%s\n' "$MSG" | awk -v m="$1" '
+    printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$1" '
         # Codepoint length, portable across mawk (bytes) and gawk (chars):
         # UTF-8 continuation bytes are 0x80-0xBF, so bytes minus continuations
         # = characters. mawk length() counts BYTES — gating the context-pull
@@ -91,19 +91,29 @@ extract_block() {
             while (s > 1 && L[s-1] !~ /^[[:space:]]*$/) s--
             blk = ""
             for (i = s; i <= m; i++) blk = blk (i > s ? "\n" : "") L[i]
-            if (cplen(blk) < 200) {
-                p = s - 1
+            # Pull paragraphs ABOVE while the block is short (a bare marker, or
+            # marker+options split from their briefing by blank lines) — max 3
+            # pulls / 600 cp, stopping once the paragraph carrying the
+            # "Otazka —" briefing head is in: the uvod the phone must never
+            # lose (david@gk 2026-07-09; the old single-paragraph pull kept the
+            # options but dropped the briefing two paragraphs up). NOTE: under
+            # LC_ALL=C a bracket class splits multi-byte chars — diacritics and
+            # dashes go through ALTERNATIONS, never [aa] classes.
+            p = s - 1
+            for (pulls = 0; pulls < 3 && cplen(blk) < 600 \
+                     && blk !~ /Ot(\303\241|a)zka[[:space:]]*(\342\200\224|\342\200\223|-)/; pulls++) {
                 while (p >= 1 && L[p] ~ /^[[:space:]]*$/) p--
-                if (p >= 1) {
-                    q = p
-                    while (q > 1 && L[q-1] !~ /^[[:space:]]*$/) q--
-                    pre = ""
-                    for (i = q; i <= p; i++) {
-                        if (L[i] ~ /^[[:space:]]*(#|---)/) continue
-                        pre = pre (pre != "" ? "\n" : "") L[i]
-                    }
-                    if (pre != "") blk = pre "\n" blk
+                if (p < 1) break
+                q = p
+                while (q > 1 && L[q-1] !~ /^[[:space:]]*$/) q--
+                pre = ""
+                for (i = q; i <= p; i++) {
+                    if (L[i] ~ /^[[:space:]]*(#|---)/) continue
+                    pre = pre (pre != "" ? "\n" : "") L[i]
                 }
+                if (pre != "") blk = pre "\n" blk
+                if (pre ~ /Ot(\303\241|a)zka[[:space:]]*(\342\200\224|\342\200\223|-)/) break
+                p = q - 1
             }
             print blk
         }'

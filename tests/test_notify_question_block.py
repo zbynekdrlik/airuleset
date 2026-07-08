@@ -84,7 +84,7 @@ class TestOctalAwkRunsUnderCLocale(TestCase):
         self.assertTrue(octal_idx, f"no octal class in {path.name}?")
         for i in octal_idx:
             # find the awk invocation opening this program (search upward)
-            for j in range(i, max(-1, i - 15), -1):
+            for j in range(i, -1, -1):
                 if re.search(r"\bawk\b", lines[j]):
                     self.assertIn("LC_ALL=C", lines[j],
                                   f"{path.name}:{j + 1} awk with octal class "
