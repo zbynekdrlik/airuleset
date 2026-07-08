@@ -114,6 +114,18 @@ CAVEMAN_CACHE_GLOBS = (
     "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh",
     "plugins/cache/caveman/caveman/*/src/hooks/caveman-statusline.sh",
 )
+# Managed BASELINE plugins — every managed user's Claude must have these. The
+# airuleset rules invoke their skills DIRECTLY (superpowers:brainstorming,
+# writing-plans, subagent-driven-development, requesting-code-review are baked
+# into the workflow + completion-report gates), so a user without them has
+# commands like /brainstorming simply missing and gated audits reference
+# nonexistent skills (david@gk, 2026-07-09). All from the built-in
+# claude-plugins-official marketplace — no extraKnownMarketplaces entry needed.
+MANAGED_PLUGINS = ("superpowers@claude-plugins-official",)
+MANAGED_PLUGIN_CACHE_GLOBS = {
+    "superpowers@claude-plugins-official":
+        "plugins/cache/claude-plugins-official/superpowers/*/skills",
+}
 # Hash-independent entry to caveman's statusline + a context-fill meter. Must
 # NEVER error (a broken statusline would break the prompt render). Caveman's real
 # script lives under a content-hashed cache dir that changes on every `claude
@@ -831,6 +843,12 @@ def cmd_install(args):
     except Exception as e:
         print(f"  caveman setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 6b. managed baseline plugins: superpowers (the rules invoke its skills) ---
+    try:
+        setup_managed_plugins()
+    except Exception as e:
+        print(f"  managed plugins setup error (non-fatal): {e}", file=sys.stderr)
+
     # --- 7. Discord notify config: warn LOUDLY if this host has no .env ---
     try:
         check_discord_notify_config()
@@ -1214,7 +1232,8 @@ def setup_caveman():
         try:
             r = subprocess.run(
                 ["claude", "plugin", "install", CAVEMAN_PLUGIN_KEY],
-                capture_output=True, text=True, timeout=120)
+                capture_output=True, text=True, timeout=120,
+                env=_claude_cli_env())
             if r.returncode == 0:
                 print(f"    installed {CAVEMAN_PLUGIN_KEY}")
             else:
@@ -1257,6 +1276,84 @@ def setup_caveman():
 def maybe_setup_caveman():
     """Wire the caveman plugin on this machine (every host)."""
     setup_caveman()
+
+
+# ---------------------------------------------------------------------------
+# Managed baseline plugins (every host) — see MANAGED_PLUGINS up top
+# ---------------------------------------------------------------------------
+
+def _claude_cli_env() -> dict:
+    """Env for invoking the `claude` CLI from install: a push's remote install
+    runs in a NON-LOGIN ssh shell whose PATH lacks ~/.local/bin — where the CLI
+    lives — so a bare subprocess call dies with [Errno 2] 'claude' (seen live
+    on the gatekeeper migration, 2026-07-05). Prepend it idempotently."""
+    local_bin = str(Path.home() / ".local" / "bin")
+    path = os.environ.get("PATH", "")
+    if local_bin not in path.split(":"):
+        path = f"{local_bin}:{path}" if path else local_bin
+    return {**os.environ, "PATH": path}
+
+
+def reconcile_managed_plugins(settings: dict) -> dict:
+    """Pure: return a new settings dict with every managed baseline plugin
+    enabled. Every other key preserved untouched; idempotent."""
+    result = dict(settings)
+    enabled = dict(result.get("enabledPlugins", {}))
+    for key in MANAGED_PLUGINS:
+        enabled[key] = True
+    result["enabledPlugins"] = enabled
+    return result
+
+
+def _managed_plugin_built(key: str) -> bool:
+    """True iff the plugin's cache exists on disk (any version dir)."""
+    import glob
+    return bool(glob.glob(str(CLAUDE_DIR / MANAGED_PLUGIN_CACHE_GLOBS[key])))
+
+
+def setup_managed_plugins():
+    """Ensure the managed baseline plugins are installed + enabled (idempotent).
+
+    1. install any plugin whose cache is missing (best-effort, time-boxed),
+    2. reconcile settings.json (enabledPlugins keys true).
+    Non-fatal: prints the manual step on failure rather than aborting install."""
+    import subprocess
+    print("  Wiring managed baseline plugins")
+
+    for key in MANAGED_PLUGINS:
+        if _managed_plugin_built(key):
+            continue
+        try:
+            r = subprocess.run(
+                ["claude", "plugin", "install", key],
+                capture_output=True, text=True, timeout=180,
+                env=_claude_cli_env())
+            if r.returncode == 0:
+                print(f"    installed {key}")
+            else:
+                print(f"    could not install {key} (rc={r.returncode}): "
+                      f"{(r.stderr or r.stdout).strip()[:200]}\n"
+                      f"    Run manually: claude plugin install {key}",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"    {key} install skipped ({e}); run: "
+                  f"claude plugin install {key}", file=sys.stderr)
+
+    raw = read_file_safe(SETTINGS_JSON)
+    try:
+        settings = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        print("    settings.json invalid JSON — skipped plugin reconcile",
+              file=sys.stderr)
+        return
+    new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
+    if new_str.strip() != raw.strip():
+        if SETTINGS_JSON.exists():
+            shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
+        SETTINGS_JSON.write_text(new_str)
+        print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
+    else:
+        print("    settings.json: already correct")
 
 
 def _filedrop_serve():
