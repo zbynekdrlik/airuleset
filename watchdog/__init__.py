@@ -642,6 +642,14 @@ _OPTION_ROW_RX = re.compile(r"^(?:❯\s*)?\d+\.\s+\S")
 # "Do you want to proceed" alternative IS the question of a permission dialog
 # and must stay in the excerpt.
 _DIALOG_HELP_RX = re.compile(r"Tab/Arrow keys to navigate|Enter to select", re.I)
+# Dialog UI AFFORDANCES the fullscreen renderer (CC 2.1.20x) appends below the
+# real options ("4. Type something." / "5. Chat about this", often past a border
+# rule) — they are chrome, not options, and anchoring on them shipped a phone
+# ping whose entire "question" was "Chat about this" (david@gk, 2026-07-09).
+_DIALOG_UI_ROW_RX = re.compile(
+    r"^(?:❯\s*)?(?:\d+\.\s+)?(?:Type something\.?|Chat about this)\s*$", re.I)
+# The dialog's FIRST option row — the anchor for the question walk.
+_FIRST_OPTION_RX = re.compile(r"^(?:❯\s*)?1\.\s+\S")
 
 
 def pane_question_excerpt(captured, max_chars=900):
@@ -649,13 +657,19 @@ def pane_question_excerpt(captured, max_chars=900):
     "čaká na teba" ping carries WHAT is being asked — the user's explicit complaint was
     pings saying only "a question is waiting" with no question in them (2026-07-04).
 
-    A blocking dialog (AskUserQuestion / permission / plan approval) renders as a box:
-    question text, then numbered option rows (`❯ 1. …` / `  2. …`), then the help
-    footer. Strategy: strip the box edges, locate the LAST contiguous numbered-options
-    block from the bottom, and take up to 6 text lines directly above it (bounded by a
-    border rule, so we never reach past the dialog into transcript prose) as the
-    question. Returns "" when no options block is visible — the caller falls back to
-    the generic text. Read-only (feeds a NOTIFICATION only, never a keystroke), so a
+    A blocking dialog (AskUserQuestion / permission / plan approval) renders as
+    question text, then numbered option rows (`❯ 1. …` / `  2. …`) — since CC
+    2.1.20x (fullscreen renderer) with WRAPPED description lines interleaved and
+    UI affordance rows appended below — then the help footer. Strategy: strip
+    box edges / help footer / UI affordances, anchor on the dialog's FIRST
+    option row (`1. …`) nearest the bottom, take up to 6 text lines directly
+    above it (bounded by a border rule or a ● bullet, so we never reach past the
+    dialog into transcript prose) as the question, and every numbered option row
+    from the anchor down as the options (descriptions between them are skipped —
+    they'd blow the cap). Anchoring on the LAST numbered row instead picked the
+    "Chat about this" affordance and lost the question (david@gk, 2026-07-09).
+    Returns "" when no options block is visible — the caller falls back to the
+    generic text. Read-only (feeds a NOTIFICATION only, never a keystroke), so a
     slightly messy excerpt is harmless; missing it entirely is the failure."""
     if not captured:
         return ""
@@ -680,23 +694,24 @@ def pane_question_excerpt(captured, max_chars=900):
             continue
         if inner.startswith("⏵⏵") or inner.startswith("ctx "):
             continue                        # mode hint / statusline
+        if _DIALOG_UI_ROW_RX.match(inner):
+            continue                        # renderer affordance, never an option
         rows.append((inner, False))
-    end = None
-    for i in range(len(rows) - 1, -1, -1):  # LAST options block = the open dialog
-        if not rows[i][1] and _OPTION_ROW_RX.match(rows[i][0]):
-            end = i
+    anchor = None
+    for i in range(len(rows) - 1, -1, -1):  # dialog's `1. …` nearest the bottom
+        if not rows[i][1] and _FIRST_OPTION_RX.match(rows[i][0]):
+            anchor = i
             break
-    if end is None:
+    if anchor is None:
         return ""
-    start = end
-    while start > 0 and not rows[start - 1][1] and _OPTION_ROW_RX.match(rows[start - 1][0]):
-        start -= 1
     question = []
-    j = start - 1
+    j = anchor - 1
     while j >= 0 and not rows[j][1] and len(question) < 6:
         question.insert(0, rows[j][0])
         j -= 1
-    out = " · ".join(question + [r[0] for r in rows[start:end + 1]])
+    options = [r[0] for r in rows[anchor:]
+               if not r[1] and _OPTION_ROW_RX.match(r[0])]
+    out = " · ".join(question + options)
     if len(out) > max_chars:
         out = out[:max_chars - 1] + "…"
     return out
