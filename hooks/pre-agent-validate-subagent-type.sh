@@ -42,6 +42,28 @@ if [ -n "$AGENT_BASENAME" ] && [ "$AGENT_BASENAME" = "$SUBAGENT_TYPE" ]; then
     fi
 fi
 
+# Accept REAL plugin-provided subagents — `<plugin>:<agent>` is VALID iff the
+# installed plugin's cache carries agents/<agent>.md (caveman 0d95a81d ships
+# cavecrew-builder/investigator/reviewer; the old "plugin-prefixed = always a
+# hallucination" assumption is stale). Glob BOTH cache layouts (<hash>/agents/
+# and <hash>/src/agents/ — upstreams move their layout; a single glob rots).
+# Both halves sanitized to bare basenames so a crafted name can't traverse paths.
+case "$SUBAGENT_TYPE" in
+    *:*)
+        PLUGIN_PART=${SUBAGENT_TYPE%%:*}
+        AGENT_PART=${SUBAGENT_TYPE#*:}
+        PLUGIN_SAFE=$(printf '%s' "$PLUGIN_PART" | tr -cd 'A-Za-z0-9_-')
+        AGENT_SAFE=$(printf '%s' "$AGENT_PART" | tr -cd 'A-Za-z0-9_-')
+        if [ -n "$PLUGIN_SAFE" ] && [ "$PLUGIN_SAFE" = "$PLUGIN_PART" ] \
+           && [ -n "$AGENT_SAFE" ] && [ "$AGENT_SAFE" = "$AGENT_PART" ]; then
+            if compgen -G "$HOME/.claude/plugins/cache/*/${PLUGIN_SAFE}/*/agents/${AGENT_SAFE}.md" >/dev/null 2>&1 \
+               || compgen -G "$HOME/.claude/plugins/cache/*/${PLUGIN_SAFE}/*/src/agents/${AGENT_SAFE}.md" >/dev/null 2>&1; then
+                exit 0
+            fi
+        fi
+        ;;
+esac
+
 # Unknown / hallucinated subagent_type. Block.
 echo "BLOCKED: subagent_type '$SUBAGENT_TYPE' is not in the known-valid agent-type list." >&2
 echo "" >&2
@@ -54,10 +76,10 @@ echo "    - Plan                 (architect, plans implementations)" >&2
 echo "    - statusline-setup     (statusline config)" >&2
 echo "    - fork                 (forks the parent agent — inherits context)" >&2
 echo "" >&2
-echo "  Plugin-prefixed names like 'caveman:cavecrew-builder', 'caveman:builder', 'superpowers:implementer', 'superpowers:reviewer', '<plugin>:<role>' are NOT valid agent types — they are hallucinations." >&2
+echo "  A plugin-prefixed '<plugin>:<agent>' is valid ONLY when that plugin's installed cache actually ships agents/<agent>.md — this one does not, so the name is a hallucination." >&2
 echo "" >&2
 echo "  Notes:" >&2
-echo "    - caveman plugin has ZERO subagents (it's a communication mode, not an agent provider)" >&2
+echo "    - most plugins ship skills, NOT agents ('superpowers:implementer', 'superpowers:reviewer' = hallucinations)" >&2
 echo "    - superpowers:subagent-driven-development uses general-purpose for ALL three roles" >&2
 echo "      (implementer / spec-reviewer / code-quality-reviewer)" >&2
 echo "    - Skills (superpowers:brainstorming, caveman:caveman, etc.) are NOT subagent types" >&2
