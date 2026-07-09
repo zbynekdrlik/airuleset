@@ -4437,3 +4437,51 @@ class TestRemoteHosts(TestCase):
             self.assertNotIn(e["host"], ("100.77.52.43", "168.119.99.160",
                                          "202.148.55.31"))
 
+
+class TestCmdPushRuffGate(TestCase):
+    """issue #7: `git push` runs as an internal subprocess call inside
+    cmd_push, so the PreToolUse pre-push-lint.sh hook (which only fires for a
+    real Bash `git push` tool call) never sees the sanctioned `airuleset.py
+    push` flow — lint errors could ship. cmd_push must run `ruff check .`
+    itself, FIRST (before the test suite, before `git push`), fail-closed."""
+
+    def _fake_run(self, calls, ruff_rc):
+        import unittest.mock as m
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=ruff_rc, stdout="", stderr="ruff issues")
+            return m.Mock(returncode=0, stdout="", stderr="")
+        return fake_run
+
+    def test_push_aborts_when_ruff_fails_before_tests_or_push(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls, ruff_rc=1)):
+            with m.patch.object(airuleset, "cmd_install") as fake_install:
+                with self.assertRaises(SystemExit) as cm:
+                    airuleset.cmd_push(args)
+                self.assertEqual(cm.exception.code, 1)
+                fake_install.assert_not_called()
+        self.assertTrue(any(c[:2] == ["ruff", "check"] for c in calls),
+                        "ruff must actually run")
+        self.assertFalse(any("unittest" in c for c in calls),
+                         "ruff must gate BEFORE the test suite runs")
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in calls),
+                         "ruff must gate BEFORE git push")
+
+    def test_push_runs_ruff_before_tests_and_proceeds_when_clean(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls, ruff_rc=0)):
+            with m.patch.object(airuleset, "cmd_install"):
+                with m.patch.object(airuleset, "REMOTE_HOSTS", []):
+                    airuleset.cmd_push(args)
+        ruff_idx = next(i for i, c in enumerate(calls) if c[:2] == ["ruff", "check"])
+        test_idx = next(i for i, c in enumerate(calls) if "unittest" in c)
+        push_idx = next(i for i, c in enumerate(calls) if c[:2] == ["git", "push"])
+        self.assertLess(ruff_idx, test_idx, "ruff gate must run BEFORE the test suite")
+        self.assertLess(test_idx, push_idx, "tests must still run before git push")
