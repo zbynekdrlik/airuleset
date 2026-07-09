@@ -491,10 +491,19 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       autopilot-worker) — those are a separate, session-scoped mechanism that dies
       with the session. Takes effect on the NEXT `claude` launch.
 
+    - `tui = "default"` pins the CLASSIC inline renderer. Without the key an
+      Anthropic A/B gate decides, and the fullscreen-renderer onboarding dialog can
+      set `tui = "fullscreen"` on a fresh account — then output lives in the tmux
+      ALTERNATE screen, nothing reaches scrollback and `Ctrl+B [` history is EMPTY
+      (recurring complaint; hit again on david@gatekeeper 2026-07-09). Deliberately
+      OVERRIDES an existing "fullscreen" value: the user wants keyboard scrollback
+      on every managed box, always. Takes effect on the NEXT `claude` launch.
+
     Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
+    result["tui"] = "default"
     return result
 
 
