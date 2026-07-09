@@ -4736,6 +4736,50 @@ class TestBlockHistoryRewriteHook(TestCase):
         r = self._run("git commit -m 'mentions git push --force in the message'")
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    # --- adversarial-review findings (autopilot cumulative-diff review) -----
+
+    def test_commit_message_hash_before_amend_not_swallowed_as_comment(self):
+        # tokens_of() stripped everything after the FIRST '#' with a naive
+        # `segment.split('#', 1)[0]` — quote-UNAWARE. A commit message
+        # containing "#12" (a routine issue reference) truncates the
+        # segment mid-quote, shlex then fails to parse it (unmatched quote)
+        # and falls back to a naive .split() that drops --amend entirely.
+        r = self._run('git commit -m "fix #12: adjust" --amend')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("amend", r.stdout)
+
+    def test_bypass_marker_inside_unrelated_quotes_does_not_bypass_real_violation(self):
+        # same class of bug as block-destructive-remote.sh: the marker text
+        # merely MENTIONED inside an unrelated quoted string must not
+        # bypass a genuinely dangerous, UNRELATED command on the same line.
+        cmd = ('echo "we use the marker like # airuleset:history-ok '
+               'explaining it" ; git push --force origin main')
+        r = self._run(cmd)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("force", r.stdout.lower())
+
+    def test_assignment_prefix_does_not_defeat_detection(self):
+        # a leading `VAR=val` token before the real git command must not
+        # hide it from strip_prefix (only sudo/env were skipped before).
+        r = self._run("GIT_AUTHOR_DATE=x git push --force origin main")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_gh_admin_merge_detected_via_reachable_branch_only(self):
+        # locks in the CURRENT detection path (the first, reachable branch
+        # at "if len(tk) < 2 or tk[0] != 'git':") so the dead
+        # `elif tk[0] == "gh"` INSIDE the git-only branch can be deleted
+        # without silently losing gh-admin-merge coverage.
+        r = self._run("gh pr merge 5 --admin")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("admin", r.stdout)
+
+    def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
+        tmpbin = _path_without_python3()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpbin, ignore_errors=True))
+        r = self._run("git reset --hard HEAD~1", env_extra={"PATH": tmpbin})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("internal error", r.stdout.lower() + r.stderr.lower())
+
     def test_bypass_inline_marker_allows_and_logs(self):
         import shutil
         home = tempfile.mkdtemp()
