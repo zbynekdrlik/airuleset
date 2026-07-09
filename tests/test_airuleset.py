@@ -34,6 +34,40 @@ def _path_without_python3():
     return tmpbin
 
 
+def _path_with_failing_heredoc_python3():
+    """Like `_path_without_python3`, but installs a FAKE `python3` shim
+    instead of removing it entirely: `python3 -c ...` invocations (the
+    early JSON-payload-parsing step every hook does first) still delegate
+    to the REAL python3 and succeed, while a `python3 - ... <<HEREDOC`
+    invocation (script fed via stdin, no `-c` — the content-scanning
+    child every hook runs SECOND) exits 42 without running anything. Some
+    hooks (e.g. block-test-skips.sh) parse the tool payload with the FIRST
+    shape before ever reaching the "is this even a push?" gate — killing
+    python3 entirely makes that early step fall back in a way that never
+    reaches the code path this test targets. This shim isolates failure to
+    exactly the second, content-scanning invocation."""
+    tmpbin = tempfile.mkdtemp()
+    src_dir = "/usr/bin"
+    for name in os.listdir(src_dir):
+        if name.startswith("python3"):
+            continue
+        try:
+            os.symlink(os.path.join(src_dir, name), os.path.join(tmpbin, name))
+        except OSError as e:
+            print("symlink skipped for %s: %r" % (name, e))
+    wrapper = os.path.join(tmpbin, "python3")
+    with open(wrapper, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            "for a in \"$@\"; do\n"
+            "    if [ \"$a\" = \"-c\" ]; then exec /usr/bin/python3 \"$@\"; fi\n"
+            "done\n"
+            "exit 42\n"
+        )
+    os.chmod(wrapper, 0o755)
+    return tmpbin
+
+
 class TestParseProfile(TestCase):
     def test_universal_profile_parses(self):
         entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
@@ -4578,6 +4612,35 @@ class TestBlockTestSkipsHook(TestCase):
         g("commit", "-qm", msg)
         return root
 
+    def _repo_full(self, rel_path, base_content, new_content):
+        """Like `_repo` but (a) an explicit relative path (for testing the
+        test-file extension filter against non-code paths like docs/*.md)
+        and (b) the second commit REPLACES the file's full content instead
+        of only appending — needed to construct two textually DISTANT,
+        separately-hunked edits (git diff -U0 groups nearby changes into
+        one hunk; only genuinely far-apart edits land in separate hunks)."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        full = os.path.join(root, rel_path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as fh:
+            fh.write(base_content)
+        g("add", rel_path)
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        with open(full, "w") as fh:
+            fh.write(new_content)
+        g("add", rel_path)
+        g("commit", "-qm", "test: add coverage")
+        return root
+
     def test_blocks_rust_ignore_added(self):
         root = self._repo("", "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
         r = self._run("git push origin main", root)
@@ -4635,6 +4698,77 @@ class TestBlockTestSkipsHook(TestCase):
         )
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- adversarial-review findings (autopilot cumulative-diff review) -----
+
+    def test_allows_doc_md_file_merely_containing_spec_substring(self):
+        # the test-file heuristic matched ANY path SUBSTRING including
+        # ".md" — "docs/xspec.md" contains "spec" as a substring, so prose
+        # in a markdown DOC that merely mentions `test.skip(` falsely
+        # blocks every push in every managed repo. Must be restricted to
+        # actual code extensions.
+        root = self._repo_full("docs/xspec.md", "", "Some doc mentioning test.skip('x')\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_still_blocks_real_code_extension_with_spec_in_name(self):
+        # sanity check for the extension-filter fix above: a REAL code file
+        # (.py) whose name happens to contain "spec" must still be scanned.
+        root = self._repo_full("tests/xspec_test.py", "",
+                               "def test_x():\n    pass\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_no_phantom_empty_body_match_across_distant_hunks(self):
+        # `git diff -U0` added-lines from ALL hunks were joined into ONE
+        # blob, ignoring hunk boundaries — a lone `def test_broken():`
+        # added in one hunk and a completely UNRELATED lone `pass` added
+        # far away in a DIFFERENT hunk concatenate into a phantom
+        # "def test_broken():\n    pass" empty-test-body match, even though
+        # neither addition has anything to do with the other.
+        base = ("def helper_one():\n    return 1\n\n\n"
+                "def helper_two():\n    return 2\n\n\n"
+                "def helper_three():\n    return 3\n")
+        new = ("def helper_one():\n    return 1\n\n\n"
+               "def test_broken():\n"                # hunk 1: lone def
+               "def helper_two():\n    return 2\n\n\n"
+               "def helper_three():\n    return 3\n"
+               "    pass\n")                          # hunk 2: lone, unrelated pass
+        root = self._repo_full("tests/test_thing.py", base, new)
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_filename_with_space_is_not_silently_skipped(self):
+        # `$TEST_CHANGES` was passed UNQUOTED into the python3 argv list —
+        # a filename containing a space word-splits into multiple (bogus)
+        # argv entries, `git diff -- <bogus-path>` then fails, the
+        # exception is swallowed (`except Exception: continue`), and the
+        # file is silently never scanned at all — a real #[ignore] added to
+        # it sails through unblocked (fail-open).
+        root = self._repo_full("tests/test spaced file.py", "",
+                               "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
+        # any python3-child exit OTHER than the deliberate `sys.exit(2)`
+        # must never be reported as if it were a real test-skip violation
+        # with an EMPTY reason. Uses a shim that only fails the SECOND
+        # (content-scanning) python3 invocation — killing python3 entirely
+        # would make the earlier JSON-payload-parsing step fall back in a
+        # way that never even reaches the "is this a push?" gate.
+        root = self._repo("", "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
+        tmpbin = _path_with_failing_heredoc_python3()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpbin, ignore_errors=True))
+        env = dict(os.environ)
+        env["PATH"] = tmpbin
+        env["HOME"] = tempfile.mkdtemp()
+        payload = json.dumps({"tool_input": {"command": "git push origin main"}})
+        r = subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                           input=payload, text=True, capture_output=True,
+                           cwd=root, timeout=30, env=env)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("internal error", r.stdout.lower() + r.stderr.lower())
 
     def test_non_push_is_noop(self):
         import shutil
