@@ -858,5 +858,160 @@ class RunOnceLoopIsolation(unittest.TestCase):
                         "got: %r" % saved)
 
 
+def _assistant_apierror(text="API Error: 529 Overloaded"):
+    return {"type": "assistant", "isApiErrorMessage": True,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+class RunOnceSubagentVisibility(unittest.TestCase):
+    """(issue #6) run_once must apply job 1's api-error detector AND job 4a's
+    text-toolcall-stall detector to the newest subagents/*.jsonl too, not just the
+    SUPERVISOR transcript — so a dying BACKGROUND WORKER (e.g. an autopilot-worker)
+    is caught fast (idle pane → a targeted nudge naming the worker; busy pane →
+    ping-only, never a keystroke) instead of waiting up to ~30 min for job 4's
+    indirect subagent_active() mtime path."""
+
+    CWD = "/home/newlevel/devel/some-project"
+    PANE = "%3"
+    SID = "sess-abc"
+    WORKER = "worker-1"
+
+    IDLE_CAP = ("● Predošlá práca hotová.\n❯ \n"
+               "  ctx ███░  caveman:lite\n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+    BUSY_CAP = ("● Validate issue #233\n  ⎿ running…\n"
+               "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n")
+
+    def _build(self, tmp, sup_entries, sub_entries, sup_age, sub_age):
+        proj = Path(tmp) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        now = time.time()
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, sup_entries)
+        os.utime(tpath, (now - sup_age, now - sup_age))
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        spath = subdir / (self.WORKER + ".jsonl")
+        _write_jsonl(spath, sub_entries)
+        os.utime(spath, (now - sub_age, now - sub_age))
+        return proj, now
+
+    def _run(self, proj, now, state_path, capture):
+        sent, pings = [], []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "capture-pane" in j:
+                return capture
+            if "display-message" in argv[0:2] or "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "send-keys" in j:
+                sent.append(argv)
+                return ""
+            return ""
+
+        def fake_send(body, **k):
+            pings.append((body, k))
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(proj).parent / "pending-"))
+        return logs, sent, pings
+
+    # --- (1b) subagent api-error ------------------------------------------------
+
+    def test_subagent_apierror_undetected_by_default_detectors(self):
+        # sanity: the SUPERVISOR-level detectors alone see nothing wrong — this is
+        # exactly the blind spot issue #6 describes (proves the scenario is real).
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            sup_age=10, sub_age=400)
+        sup_tpath = proj / wd.encode_project_dir(self.CWD) / (self.SID + ".jsonl")
+        self.assertEqual(wd.transcript_last_error(sup_tpath), "",
+                         "supervisor transcript itself has no error (as designed)")
+
+    def test_subagent_apierror_nudges_idle_pane(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            sup_age=10, sub_age=400)          # sub_age > GRACE_SECONDS (300)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs),
+                        "expected a subagent-apierr nudge log line, got: %r" % logs)
+        nudges = [a for a in sent if "-l" in a
+                 and any("background worker" in x and self.WORKER in x for x in a)]
+        self.assertTrue(nudges, "expected a targeted nudge naming the worker, "
+                                "sent=%r" % sent)
+        self.assertTrue(any("api-error" in x for a in nudges for x in a))
+
+    def test_subagent_apierror_busy_pane_pings_only(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            sup_age=10, sub_age=400)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.BUSY_CAP)
+        self.assertEqual(sent, [], "MUST NOT type into a busy pane")
+        self.assertTrue(any("subagent-apierr-busy" in ln for ln in logs),
+                        "expected a busy-pane ping-only log line, got: %r" % logs)
+        self.assertTrue(pings, "expected a Discord ping instead of a keystroke")
+
+    def test_subagent_apierror_within_grace_does_not_nudge_yet(self):
+        # a fresh subagent error (younger than GRACE_SECONDS) may still recover on
+        # its own — mirrors job 1's own grace before its first supervisor nudge.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            sup_age=10, sub_age=30)           # well under GRACE_SECONDS (300)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertEqual(sent, [], "must not nudge before grace elapses")
+        self.assertFalse(any("subagent-apierr" in ln for ln in logs), logs)
+
+    # --- (4a-sub) subagent text-toolcall stall -----------------------------------
+
+    def test_subagent_textcall_stall_nudges_idle_pane(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")],
+            [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT)],
+            sup_age=10, sub_age=200)          # sub_age > STALL_TEXTCALL_SECONDS (120)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-textcall-nudge#1") for ln in logs),
+                        "expected a subagent-textcall nudge log line, got: %r" % logs)
+        nudges = [a for a in sent if "-l" in a
+                 and any("background worker" in x and self.WORKER in x for x in a)]
+        self.assertTrue(nudges, "expected a targeted nudge naming the worker, "
+                                "sent=%r" % sent)
+
+    def test_subagent_textcall_stall_busy_pane_pings_only(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")],
+            [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT)],
+            sup_age=10, sub_age=200)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.BUSY_CAP)
+        self.assertEqual(sent, [], "MUST NOT type into a busy pane")
+        self.assertTrue(any("subagent-textcall-busy" in ln for ln in logs), logs)
+        self.assertTrue(pings, "expected a Discord ping instead of a keystroke")
+
+
+def tempfile_mkdtemp_cleanup(testcase):
+    tmp = TemporaryDirectory()
+    testcase.addCleanup(tmp.cleanup)
+    return tmp.name
+
+
 if __name__ == "__main__":
     unittest.main()
