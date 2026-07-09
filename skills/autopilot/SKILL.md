@@ -69,6 +69,7 @@ git fetch origin && git rev-parse --abbrev-ref HEAD && git status --porcelain   
 gh auth status
 gh issue list --state open -L 100
 grep -n "airuleset:merge=manual" CLAUDE.md || true                              # merge mode
+grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.py authority   # authority profile
 ```
 
 - Confirm the `autopilot-worker` subagent is available (`@agent-autopilot-worker` resolves). If
@@ -88,7 +89,15 @@ grep -n "airuleset:merge=manual" CLAUDE.md || true                              
   hardware / prod / streaming / OBS / HDMI / DRM issue is worked end-to-end on the rig like any other;
   the USER alone guards whether prod is live and stops you in the moment. (Same in Slovak: no
   `off-air okná`, `musíš byť pri tom`, `odporúčam autopilot-skip`, `vedene so mnou nie naslepo`.)
-- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · N issues · solving the whole backlog`.
+- **Authority profile (issue #16):** resolve it FIRST — a project CLAUDE.md marker
+  `airuleset:authority=<full|branch-merge|fork-no-merge>` wins; else `python3
+  ~/devel/airuleset/airuleset.py authority` (maps the linux user: david=fork-no-merge,
+  marek/montalu=branch-merge, default full). The profile decides WHICH /goal template Step 2
+  prints and what "done" means per ticket. **Reduced authority (branch-merge / fork-no-merge)
+  additionally scopes the backlog to ISSUES ASSIGNED TO THIS STREAM** — use `gh issue list
+  --state open --assignee @me -L 100` everywhere this skill lists the backlog (shared trackers:
+  marek + david both work odoo-erp; never grab another stream's tickets).
+- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · authority=<profile> · N issues · solving the whole backlog`.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
@@ -129,10 +138,24 @@ needs extra approval.)
 
 ## Step 2 — Start the engine (the one manual paste)
 
-The agent cannot type `/goal` — print this line for the user to paste once:
+The agent cannot type `/goal` — print the ONE line matching the resolved authority profile for the user to paste once.
+
+**AUTHORITY: full** (default — merge to main + deploy):
 
 ```
 /goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript alone: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it. Waiting for my answer IS the terminal state: NEVER continue me past an unanswered `❓ NEEDS YOU` — every forced continuation just re-prints the same question into my chat (the camera-box wall, 2026-07-05). After I answer, Claude resolves that ticket and, if open issues remain, re-prints this /goal line for me to paste and re-arm the loop. (B) BACKLOG DONE — every open issue in this repo not labeled autopilot-skip is closed via a merged PR, proven by `gh issue list --state open --search "-label:autopilot-skip"` showing none remain AND `gh run list -b main -L 1` showing main green. Also stop when I must approve a genuinely-irreversible action (host reboot / data deletion / DB drop — NOT a deploy, a prod test, or restarting the app/device you're testing) or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the backlog: never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK me the moment it comes up — it ALWAYS pings my phone (the background autopilot-worker's prompts surface in my main session) — preferring ASK-AND-CONTINUE (`❓ ASKED` + track the question on the issue with a `needs-answer` comment, set that issue aside, and work other answer-independent tickets, ending `⏳ WORKING`); `❓ NEEDS YOU` (a full block — the loop then stops per (A)) ONLY when nothing else is workable. NEVER bury a question by continuing without pinging it, and NEVER stop blaming my silence. During 00:00–06:00 (hours 00..05) Europe/Bratislava defer a question ONLY while other tickets are workable (queue it `needs-decision`, ask after 06:00); when nothing else is workable the question is NECESSARY — ask it as the full `❓ NEEDS YOU` block even at night (it pings; the loop stops per (A)); NEVER idle-park the loop waiting for morning (night is not an off-air window — rig/prod tickets stay workable at night like any other). After every merge immediately pick the next issue.
+```
+
+**AUTHORITY: branch-merge** (montalu / marek shape — own PR merged into the project's INTEGRATION branch only, never staging/main, never deploy):
+
+```
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript alone: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if assigned issues remain). (B) BACKLOG DONE — every open issue ASSIGNED TO ME in this repo not labeled autopilot-skip is closed via my own PR merged into the project's INTEGRATION branch (develop unless the project CLAUDE.md branch policy names another), proven by `gh issue list --state open --assignee @me --search "-label:autopilot-skip"` showing none remain AND the integration branch's latest CI run green (`gh run list -b <integration> -L 1`) — my authority ENDS there: never promote to staging/main, never deploy, never touch tickets assigned to other streams. Also stop when I must approve a genuinely-irreversible action or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the assigned backlog; when an issue needs my input, ASK the moment it comes up (it ALWAYS pings my phone) — prefer ASK-AND-CONTINUE (`❓ ASKED` + a `needs-answer` comment on the issue, work other answer-independent tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only when nothing else is workable. NEVER bury a question, NEVER stop blaming my silence. During 00:00–06:00 Europe/Bratislava defer a question ONLY while other tickets are workable; a NECESSARY question is asked even at night. After every merge immediately pick the next assigned issue.
+```
+
+**AUTHORITY: fork-no-merge** (David shape — fork branch + local verification + ready hand-off; NEVER open or merge a PR, never close the issue yourself):
+
+```
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript alone: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if assigned issues remain). (B) BACKLOG HANDED OFF — every open issue ASSIGNED TO ME in this repo not labeled autopilot-skip either is closed (by the maintainer) OR carries my READY hand-off: label `ready-for-review` plus an issue comment naming the pushed fork branch and the local verification evidence (tests/lint green), proven by `gh issue list --state open --assignee @me --search "-label:autopilot-skip -label:ready-for-review"` showing none remain. My authority ENDS at the hand-off: I push MY fork branches and comment evidence — I NEVER open or merge a PR, never push to upstream branches, never deploy, never close the issue myself (the maintainer closes it at merge), never touch tickets assigned to other streams. Also stop when I must approve a genuinely-irreversible action or local verification stays unfixable after two real attempts. While NEITHER holds, work the assigned backlog; when an issue needs my input, ASK the moment it comes up (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + a `needs-answer` comment, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only when nothing else is workable. During 00:00–06:00 Europe/Bratislava defer a question ONLY while other tickets are workable; a NECESSARY question is asked even at night. After every hand-off immediately pick the next assigned issue.
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -211,6 +234,16 @@ Each loop turn:
      gate needed. Never dispatch an automatic `model: fable` without the gate check, and do NOT
      reflexively uptier a routine ticket — Sonnet + the Opus review bookend carries it. You (the
      main session) re-verify every line of the worker's evidence block regardless.
+   - **Authority rides the dispatch.** Include the resolved profile in every worker prompt
+     (`Authority profile: <profile>` + what "done" means for it). branch-merge: the worker's PR
+     targets and merges into the INTEGRATION branch (develop unless the project CLAUDE.md names
+     another) — nothing further, never staging/main, never deploy. fork-no-merge: the worker ends
+     at fork-branch push + local verification green + `gh issue edit <N> --add-label
+     ready-for-review` + an evidence comment (branch name, test/lint results) — it must NEVER open
+     or merge a PR and never close the issue itself; the per-ticket Discord card fires at THIS
+     hand-off point (`--achieved "... pripravené na review"`). Step 4 verification then checks the
+     PROFILE's done-point (PR merged into integration / ready-for-review label + comment present),
+     NOT a merge to main.
    - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
      `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
    - **Serial per repo (hard) — session-local check PLUS a cross-session lock (issue #8).** Before

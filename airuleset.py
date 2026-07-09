@@ -1857,6 +1857,48 @@ def cmd_watchdog(args):
             print(line)
 
 
+# Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a
+# property of its LINUX USER (streams are separate users by construction: david /
+# marek / montalu), resolved at RUNTIME — no per-box state to lose on a home-dir
+# migration (the AIRULESET_NOTIFY_OWNER loss pattern), and every push carries the
+# map to every managed target. Profiles:
+#   full          — merge PR to main + main green + deploy verified (default)
+#   branch-merge  — own PR merged into the project INTEGRATION branch (develop)
+#                   only; never staging/main promotion, never deploy
+#   fork-no-merge — fork branch pushed + local verification green + ready-for-review
+#                   hand-off on the issue; never opens/merges a PR, never closes
+#                   the issue itself (the maintainer does, at merge)
+# A project CLAUDE.md marker `airuleset:authority=<profile>` OVERRIDES the user
+# default (checked by the /autopilot skill, not here). Only the user adds markers.
+AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
+AUTHORITY_BY_USER = {
+    "david": "fork-no-merge",
+    "marek": "branch-merge",
+    "montalu": "branch-merge",
+}
+
+
+def _current_user() -> str:
+    import getpass
+
+    return getpass.getuser()
+
+
+def resolve_authority() -> str:
+    """Map the current linux user to their autopilot authority profile."""
+    return AUTHORITY_BY_USER.get(_current_user(), "full")
+
+
+def cmd_authority(args):
+    """Print the current stream's autopilot authority profile (one word)."""
+    profile = resolve_authority()
+    print(profile)
+    if getattr(args, "explain", False):
+        user = _current_user()
+        print(f"user={user} (map: {AUTHORITY_BY_USER.get(user, 'unmapped -> full')}); "
+              f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
+
+
 def cmd_fable_gate(args):
     """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
     exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
@@ -2244,6 +2286,13 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_auth = sub.add_parser(
+        "authority",
+        help="Print this stream's autopilot authority profile "
+             "(full / branch-merge / fork-no-merge)")
+    p_auth.add_argument("--explain", action="store_true",
+                        help="Also print how the profile was resolved")
+
     p_lock = sub.add_parser(
         "autopilot-lock",
         help="Cross-session serial-per-repo dispatch lock for /autopilot")
@@ -2280,6 +2329,7 @@ SUBCOMMANDS = {
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
     "fable-gate": cmd_fable_gate,
+    "authority": cmd_authority,
     "tickets-status": cmd_tickets_status,
     "autopilot-lock": cmd_autopilot_lock,
 }

@@ -35,6 +35,8 @@ Marker present → manual mode: stop at the green PR, provide the URL, end with 
 
 #### Scope — what auto-merge covers
 
+- **Reduced-authority streams stop earlier:** `python3 ~/devel/airuleset/airuleset.py authority` != `full` (david / marek / montalu sub-dev streams) means this policy's merge-to-main + deploy steps are OUT of the stream's authority — `branch-merge` ends at its PR merged into the project's INTEGRATION branch, `fork-no-merge` ends at the `ready-for-review` hand-off (no PR at all). See the autopilot skill's authority profiles.
+
 - Covers: the agent's own dev→main workflow PRs in the user's repos (the two-branch flow).
 - Does NOT cover: foreign/third-party repos, PRs the agent didn't drive, release tags to external registries, anything outside the two-branch flow → ask first.
 - Destructive actions and destructive DB ops are NEVER part of a merge (`no-destructive-remote-actions.md`, `database-migrations.md`).
