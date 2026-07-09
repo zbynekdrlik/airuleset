@@ -635,7 +635,7 @@ def _has_free_prompt(captured, bare_only=False):
     prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog)."""
     if not captured:
         return False
-    lines = [l.strip() for l in captured.splitlines() if l.strip()]
+    lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
     i, n = len(lines), 0
     while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
         i -= 1

@@ -869,8 +869,8 @@ def cmd_status(args):
     if CLAUDE_MD.exists():
         content = CLAUDE_MD.read_text()
         if MANAGED_MARKER in content:
-            imports = [l.strip() for l in content.splitlines()
-                       if l.strip().startswith("@~/")]
+            imports = [ln.strip() for ln in content.splitlines()
+                       if ln.strip().startswith("@~/")]
             print(f"  Managed by airuleset ({len(imports)} imports)")
             for imp in imports:
                 # Check if the referenced file exists

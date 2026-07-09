@@ -1,7 +1,9 @@
 # tests/test_playbook.py
-import subprocess, sys
+import json
+import subprocess
+import sys
 from pathlib import Path
-from unittest import TestCase, main
+from unittest import TestCase
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 
@@ -34,8 +36,6 @@ class TestPlaybookReviewSkill(TestCase):
         self.assertIn("📔 Playbook:", text)          # emits the gated line
         self.assertIn("routing", text.lower())        # applies the routing rule
 
-
-import json
 
 class TestPlaybookStopHook(TestCase):
     HOOK = str(REPO / "hooks" / "stop-check-playbook-review.sh")

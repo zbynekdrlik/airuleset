@@ -80,7 +80,7 @@ class TestOctalAwkRunsUnderCLocale(TestCase):
 
     def _check(self, path):
         lines = path.read_text().splitlines()
-        octal_idx = [i for i, l in enumerate(lines) if "\\200" in l]
+        octal_idx = [i for i, ln in enumerate(lines) if "\\200" in ln]
         self.assertTrue(octal_idx, f"no octal class in {path.name}?")
         for i in octal_idx:
             # find the awk invocation opening this program (search upward)

@@ -9,7 +9,6 @@ the cache if missing, force the enabledPlugins key true, idempotently.
 """
 
 import inspect
-import json
 import os
 import sys
 import tempfile

@@ -183,10 +183,12 @@ class TestPrune(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as td:
                 root = Path(td) / "drop"
-                a = root / "atoken"; a.mkdir(parents=True)
+                a = root / "atoken"
+                a.mkdir(parents=True)
                 (a / "f").write_bytes(b"x" * 8)
                 os.utime(a, (time.time() - 50, time.time() - 50))  # older
-                b = root / "btoken"; b.mkdir(parents=True)
+                b = root / "btoken"
+                b.mkdir(parents=True)
                 (b / "f").write_bytes(b"x" * 8)
                 sh.prune(base_dir=root)
                 # combined 16 > cap 10 -> oldest (a) evicted, newest (b) kept

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from unittest import TestCase, main
+from unittest import TestCase
 
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -811,7 +811,7 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertIn("otázka", lines[0])                        # Slovak status
         self.assertEqual(lines[1], "", "blank separator after the header")
         self.assertIn("posledný preset?", sent)
-        self.assertFalse(any(l.startswith("> ") for l in lines),
+        self.assertFalse(any(ln.startswith("> ") for ln in lines),
                          "❓ body must NOT be blockquoted (gray-wall rendering)")
 
     def test_idle_done_is_structured_markdown(self):
@@ -1071,17 +1071,23 @@ class TestPostPushCiCleanupHook(TestCase):
         stub `gh` on PATH returning: an ANCESTOR in_progress run (must cancel), the
         push+pull pair at HEAD (must keep), and a DIVERGED run (must keep). Returns
         (repo, env, head, old)."""
-        import subprocess, shutil, stat
+        import subprocess
+        import shutil
+        import stat
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         repo = os.path.join(root, "repo")
         bind = os.path.join(root, "bin")
-        os.makedirs(repo); os.makedirs(bind)
-        g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        os.makedirs(repo)
+        os.makedirs(bind)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
         g("init", "-q", "-b", "dev")
-        g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
         open(os.path.join(repo, "f"), "w").write("a\n")
-        g("add", "f"); g("commit", "-qm", "a")
+        g("add", "f")
+        g("commit", "-qm", "a")
         old = g("rev-parse", "HEAD").stdout.strip()
         open(os.path.join(repo, "f"), "a").write("b\n")
         g("commit", "-qam", "b")
@@ -1103,7 +1109,8 @@ fi
 exit 0
 ''')
         os.chmod(gh, os.stat(gh).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        env = dict(os.environ); env["PATH"] = bind + os.pathsep + env["PATH"]
+        env = dict(os.environ)
+        env["PATH"] = bind + os.pathsep + env["PATH"]
         return repo, env, cancels, head, old
 
     def _run_env(self, repo, env, command):
@@ -1121,7 +1128,8 @@ exit 0
         self.assertEqual(recorded, ["111"], f"cancelled set wrong: {recorded}")
         self.assertIn("cancelled 1 superseded", r.stdout)
         # monitor instruction lists BOTH current-HEAD runs
-        self.assertIn("444", r.stdout); self.assertIn("555", r.stdout)
+        self.assertIn("444", r.stdout)
+        self.assertIn("555", r.stdout)
 
     def test_no_cancel_when_push_did_not_land(self):
         repo, env, cancels, head, old = self._cancel_fixture()
@@ -1144,36 +1152,57 @@ class TestPrePushGatesFire(TestCase):
         payload = json.dumps({"tool_input": {"command": command}})
         # isolate HOME so pre-push-test-check's audit log ($HOME/devel/airuleset/
         # audits/no-test-skips.log) is written under a temp dir, never the real one
-        env = dict(os.environ); env["HOME"] = tempfile.mkdtemp()
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
         return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / hook)],
                               input=payload, text=True, capture_output=True,
                               cwd=cwd, timeout=60, env=env)
 
     def test_test_check_blocks_feature_without_test(self):
         # a feature-code change with no test file must block (exit 2) via stdin
-        import subprocess, shutil
-        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
-        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
         open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
-        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("branch", "-q", "dev")
+        g("checkout", "-q", "dev")
         g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
         open(os.path.join(root, "feature.py"), "w").write("def g():\n    return 2\n")
-        g("add", "feature.py"); g("commit", "-qm", "feat: add g")
+        g("add", "feature.py")
+        g("commit", "-qm", "feat: add g")
         r = self._run("pre-push-test-check.sh", "git push origin dev", root)
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("BLOCKED", r.stdout)
 
     def test_test_check_no_test_bypass(self):
-        import subprocess, shutil
-        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
-        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
-        with open(os.path.join(root, "app.py"), "w") as fh: fh.write("x=1\n")
-        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        with open(os.path.join(root, "app.py"), "w") as fh:
+            fh.write("x=1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("branch", "-q", "dev")
+        g("checkout", "-q", "dev")
         g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
-        with open(os.path.join(root, "feature.py"), "w") as fh: fh.write("y=2\n")
-        g("add", "feature.py"); g("commit", "-qm", "config tweak\n\n[no-test: config-only change]")
+        with open(os.path.join(root, "feature.py"), "w") as fh:
+            fh.write("y=2\n")
+        g("add", "feature.py")
+        g("commit", "-qm", "config tweak\n\n[no-test: config-only change]")
         r = self._run("pre-push-test-check.sh", "git push origin dev", root)
         self.assertEqual(r.returncode, 0, r.stdout)
 
@@ -1183,14 +1212,24 @@ class TestPrePushGatesFire(TestCase):
         # without normalizing the message first, the closing "]" on a later line
         # never matches on the SAME line as the opening "[no-test:" and the
         # bypass silently fails, falling through to the strict feature-code gate.
-        import subprocess, shutil
-        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
-        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
-        with open(os.path.join(root, "app.py"), "w") as fh: fh.write("x=1\n")
-        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        with open(os.path.join(root, "app.py"), "w") as fh:
+            fh.write("x=1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("branch", "-q", "dev")
+        g("checkout", "-q", "dev")
         g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
-        with open(os.path.join(root, "feature.py"), "w") as fh: fh.write("y=2\n")
+        with open(os.path.join(root, "feature.py"), "w") as fh:
+            fh.write("y=2\n")
         g("add", "feature.py")
         g("commit", "-qm",
           "config tweak\n\n[no-test: this reason genuinely wraps\nonto a second line]")
@@ -1230,7 +1269,8 @@ class TestPrePushBaseSyncHook(TestCase):
         self._g(repo, "config", "user.name", "t")
         self._g(repo, "symbolic-ref", "HEAD", "refs/heads/main")
         open(os.path.join(repo, "shared"), "w").write("line1\nline2\nline3\n")
-        self._g(repo, "add", "shared"); self._g(repo, "commit", "-qm", "base")
+        self._g(repo, "add", "shared")
+        self._g(repo, "commit", "-qm", "base")
         self._g(repo, "push", "-q", "origin", "main")
         self._g(repo, "checkout", "-q", "-b", "dev")
         self._g(repo, "push", "-q", "origin", "dev")
@@ -1238,7 +1278,6 @@ class TestPrePushBaseSyncHook(TestCase):
         return repo
 
     def _edit_line2(self, repo, branch, text):
-        import subprocess
         self._g(repo, "checkout", "-q", branch)
         p = os.path.join(repo, "shared")
         open(p, "w").write(f"line1\n{text}\nline3\n")
@@ -1267,14 +1306,16 @@ class TestPrePushBaseSyncHook(TestCase):
         # is "behind" main by the merge-commit object but has NO content to merge.
         repo = self._base_repo()
         open(os.path.join(repo, "d"), "w").write("devwork\n")
-        self._g(repo, "add", "d"); self._g(repo, "commit", "-qm", "devwork")
+        self._g(repo, "add", "d")
+        self._g(repo, "commit", "-qm", "devwork")
         self._g(repo, "push", "-q", "origin", "dev")
         self._g(repo, "checkout", "-q", "main")
         self._g(repo, "merge", "-q", "--no-ff", "dev", "-m", "Merge PR")
         self._g(repo, "push", "-q", "origin", "main")
         self._g(repo, "checkout", "-q", "dev")
         open(os.path.join(repo, "version"), "w").write("v2\n")
-        self._g(repo, "add", "version"); self._g(repo, "commit", "-qm", "bump")
+        self._g(repo, "add", "version")
+        self._g(repo, "commit", "-qm", "bump")
         self._g(repo, "remote", "set-head", "origin", "-a")
         r = self._run(repo, "git push origin dev")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -1284,11 +1325,13 @@ class TestPrePushBaseSyncHook(TestCase):
         repo = self._base_repo()
         self._g(repo, "checkout", "-q", "main")
         open(os.path.join(repo, "newfile"), "w").write("x\n")
-        self._g(repo, "add", "newfile"); self._g(repo, "commit", "-qm", "newfile")
+        self._g(repo, "add", "newfile")
+        self._g(repo, "commit", "-qm", "newfile")
         self._g(repo, "push", "-q", "origin", "main")
         self._g(repo, "checkout", "-q", "dev")
         open(os.path.join(repo, "dd"), "w").write("y\n")
-        self._g(repo, "add", "dd"); self._g(repo, "commit", "-qm", "dwork")
+        self._g(repo, "add", "dd")
+        self._g(repo, "commit", "-qm", "dwork")
         self._g(repo, "remote", "set-head", "origin", "-a")
         r = self._run(repo, "git push origin dev")
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -3111,7 +3154,8 @@ class TestDiscordAutopilotNotify(TestCase):
 
     # --- send: dry-run + dedup -------------------------------------------
     def test_send_dry_run_prepends_mention_and_does_not_claim(self):
-        import io, contextlib
+        import io
+        import contextlib
         env = {"DISCORD_MENTION_ZBYNEK": "111222333"}
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -3293,7 +3337,8 @@ class TestDiscordAutopilotNotify(TestCase):
 
     def test_send_dry_run_shows_one_line_per_target(self):
         # dry-run mirrors the real fan-out: one line per target, primary first.
-        import io, contextlib
+        import io
+        import contextlib
         env = {"DISCORD_MENTION_DAVID": "90000",
                "DISCORD_MENTION_ZBYNEK": "10000",
                "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread",
@@ -3302,7 +3347,7 @@ class TestDiscordAutopilotNotify(TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             r = self.notify.send("BODY", env=env, owner="david", dry_run=True)
-        lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
         self.assertEqual(r, "dry-run")
         self.assertEqual(lines, ["<@90000> BODY", "<@10000> BODY"])
 
@@ -3553,17 +3598,27 @@ class TestApiWatchdog(TestCase):
         # a FRESH stall (seed=now) waits a full grace before the first nudge
         st, now = {}, 1_000_000
         a, e = self._dec(st, "k", "h", now, seed=now)
-        self.assertEqual(a, "wait"); st["k"] = e
+        self.assertEqual(a, "wait")
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 100, seed=now)
-        self.assertEqual(a, "wait"); st["k"] = e
+        self.assertEqual(a, "wait")
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 300, seed=now)    # grace elapsed → nudge #1
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["k"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 1)
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 600, seed=now)    # +interval → #2
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 2); st["k"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 2)
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 900, seed=now)    # #3
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 3); st["k"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 3)
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 1200, seed=now)   # max → escalate once
-        self.assertEqual(a, "escalate"); self.assertTrue(e["escalated"]); st["k"] = e
+        self.assertEqual(a, "escalate")
+        self.assertTrue(e["escalated"])
+        st["k"] = e
         a, e = self._dec(st, "k", "h", now + 1500, seed=now)   # then noop
         self.assertEqual(a, "noop")
 
@@ -3594,7 +3649,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 1, "should send exactly one `continue`")
         self.assertEqual(len(self.pings), 1, "should ping once on the first nudge")
         self.assertIn("projx", self.pings[0][0])         # project name in the alert
-        self.assertTrue(any("nudge#1" in l for l in logs))
+        self.assertTrue(any("nudge#1" in ln for ln in logs))
 
     def test_run_once_apierror_skipped_when_pane_busy(self):
         # #233 uniform guard: an api-error flag on the last entry normally means CC
@@ -3611,7 +3666,7 @@ class TestApiWatchdog(TestCase):
                                grace=300, interval=300, max_nudges=3)
         self.assertEqual(fake.continues_sent(), 0, "must NOT type into a running agent")
         self.assertEqual(self.pings, [], "busy pane = not stalled → no ping")
-        self.assertTrue(any("skip busy-pane (api-error)" in l for l in logs))
+        self.assertTrue(any("skip busy-pane (api-error)" in ln for ln in logs))
 
     def test_run_once_ignores_fresh_transcript(self):
         now = 1_000_000
@@ -3710,7 +3765,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.selfchecks_sent(), 1, "exactly one stuck-check nudge")
         self.assertEqual(fake.continues_sent(), 0, "job 4 sends stuck-check, NOT `continue`")
         self.assertEqual(self.pings, [], "a first nudge must NOT ping (no Discord noise)")
-        self.assertTrue(any("working-nudge#1" in l for l in logs))
+        self.assertTrue(any("working-nudge#1" in ln for ln in logs))
 
     def test_run_once_working_stall_skipped_when_pane_busy(self):
         # THE #233 INCIDENT: ⏳ WORKING + idle transcript (a FOREGROUND agent blocks the
@@ -3724,7 +3779,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.selfchecks_sent(), 0, "MUST NOT type into a busy pane")
         self.assertEqual(fake.continues_sent(), 0)
         self.assertEqual(self.pings, [], "below 2× threshold → not yet a wedge ping")
-        self.assertTrue(any("skip busy-pane (working-stall)" in l for l in logs))
+        self.assertTrue(any("skip busy-pane (working-stall)" in ln for ln in logs))
 
     def test_run_once_busy_pane_wedged_pings_only(self):
         # #3: a busy pane (foreground agent, no free `❯`) with NO advancing subagent that
@@ -3739,7 +3794,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(len(self.pings), 1, "exactly one busy-pane-wedged ping")
         self.assertIn("wwedge", self.pings[0][0])
         self.assertTrue(self.pings[0][1].startswith("busypane:"))
-        self.assertTrue(any("busy-pane-wedged" in l for l in logs))
+        self.assertTrue(any("busy-pane-wedged" in ln for ln in logs))
         # second poll in the same episode → no second ping
         self._run4(now + 60, fake)
         self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
@@ -3859,15 +3914,24 @@ class TestApiWatchdog(TestCase):
         # every interval up to MAX, then escalate once, then noop.
         st, now = {}, 1_000_000
         a, e = self._decw(st, "w", now, 3000)            # idle past threshold
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 1); st["w"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 1)
+        st["w"] = e
         a, e = self._decw(st, "w", now + 100, 3100)      # within interval → hold
-        self.assertEqual(a, "wait"); st["w"] = e
+        self.assertEqual(a, "wait")
+        st["w"] = e
         a, e = self._decw(st, "w", now + 300, 3300)      # +interval → nudge#2
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 2); st["w"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 2)
+        st["w"] = e
         a, e = self._decw(st, "w", now + 600, 3600)      # nudge#3
-        self.assertEqual(a, "nudge"); self.assertEqual(len(e["nudges"]), 3); st["w"] = e
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 3)
+        st["w"] = e
         a, e = self._decw(st, "w", now + 900, 3900)      # MAX → escalate once
-        self.assertEqual(a, "escalate"); self.assertTrue(e["escalated"]); st["w"] = e
+        self.assertEqual(a, "escalate")
+        self.assertTrue(e["escalated"])
+        st["w"] = e
         a, e = self._decw(st, "w", now + 1200, 4200)     # then noop
         self.assertEqual(a, "noop")
 
@@ -3898,10 +3962,12 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_sends_when_idle_and_still_done(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidA", [self._DONE], 300, now, cwd="/devel/projx")
-        pf = prefix + "sidA"; Path(pf).write_text("✅ hotová práca, čakám")
+        pf = prefix + "sidA"
+        Path(pf).write_text("✅ hotová práca, čakám")
         self._deliver(now, prefix)
         self.assertEqual(len(self.pings), 1, "delivers the ✅ idle_prompt missed")
-        self.assertIn("hotovo", self.pings[0][0]); self.assertIn("projx", self.pings[0][0])
+        self.assertIn("hotovo", self.pings[0][0])
+        self.assertIn("projx", self.pings[0][0])
         self.assertFalse(os.path.exists(pf), "pending claimed/consumed")
 
     def test_deliver_done_cleared_when_refired(self):
@@ -3909,7 +3975,8 @@ class TestApiWatchdog(TestCase):
         # (now ⏳) must NOT be pinged "done" — clear the stale pending silently.
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidB", [self._DONE, self._WORKING], 300, now)
-        pf = prefix + "sidB"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidB"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix)
         self.assertEqual(self.pings, [], "re-fired session → never ping done")
         self.assertFalse(os.path.exists(pf), "stale ✅ cleared")
@@ -3917,7 +3984,8 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_too_fresh_keeps(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidC", [self._DONE], 30, now)
-        pf = prefix + "sidC"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidC"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix)
         self.assertEqual(self.pings, [])
         self.assertTrue(os.path.exists(pf), "too fresh → keep for next poll / idle hook")
@@ -3925,7 +3993,8 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_stale_cleared_no_ping(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidD", [self._DONE], 99999, now)   # idle > max_stale
-        pf = prefix + "sidD"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidD"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix)
         self.assertEqual(self.pings, [], "legacy orphan → clear, don't ping a day-old done")
         self.assertFalse(os.path.exists(pf))
@@ -3933,7 +4002,8 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_bg_monitor_defers(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidE", [self._DONE], 300, now)
-        pf = prefix + "sidE"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidE"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix, bg_check=lambda c: True)
         self.assertEqual(self.pings, [], "bg monitor alive → ✅ likely intermediate")
         self.assertTrue(os.path.exists(pf), "deferred, not consumed")
@@ -3941,14 +4011,16 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_uses_session_owner(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidF", [self._DONE], 300, now)
-        pf = prefix + "sidF"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidF"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix, owner_by_sid={"sidF": "marek"})
         self.assertEqual(self.pings[0][2], "marek", "@mentions the session's owner")
 
     def test_deliver_done_orphan_no_transcript(self):
         # session pane closed, transcript gone → trust the recorded ✅, deliver on age
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
-        pf = prefix + "sidGHOST"; Path(pf).write_text("✅ hotovo orphan")
+        pf = prefix + "sidGHOST"
+        Path(pf).write_text("✅ hotovo orphan")
         os.utime(pf, (now - 300, now - 300))
         self._deliver(now, prefix)
         self.assertEqual(len(self.pings), 1, "orphaned pending delivered on its own age")
@@ -3957,7 +4029,8 @@ class TestApiWatchdog(TestCase):
     def test_deliver_done_dry_run_nondestructive(self):
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
         self._txn_for_sid("sidH", [self._DONE], 300, now)
-        pf = prefix + "sidH"; Path(pf).write_text("✅ hotovo")
+        pf = prefix + "sidH"
+        Path(pf).write_text("✅ hotovo")
         self._deliver(now, prefix, dry_run=True)
         self.assertTrue(os.path.exists(pf), "dry_run must NOT remove the pending")
 
@@ -4027,7 +4100,7 @@ class TestApiWatchdog(TestCase):
                                projects_dir=self.projects, state_path=self.state, grace=300)
         self.assertEqual(fake.continues_sent(), 0, "ambiguous cwd must NOT be nudged")
         self.assertEqual(self.pings, [])
-        self.assertTrue(any("ambiguous" in l for l in logs))
+        self.assertTrue(any("ambiguous" in ln for ln in logs))
 
     def test_run_once_skips_pane_in_copy_mode(self):
         # user is scrolling (pane_in_mode=1) → keys would corrupt their selection
@@ -4109,7 +4182,7 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(len(self.pings), 1, "waiting pings once, on confirmation")
         self.assertIn("asking", self.pings[0][0])
         self.assertTrue(self.pings[0][1].startswith("waiting:"))
-        self.assertTrue(any("waiting" in l for l in logs))
+        self.assertTrue(any("waiting" in ln for ln in logs))
 
     def test_run_once_waiting_pings_once_not_every_poll(self):
         now = 1_000_000
@@ -4207,7 +4280,8 @@ class TestApiWatchdog(TestCase):
 
     def test_check_usage_alerts_at_threshold_once_per_window(self):
         st, now = {}, 1_000_000
-        f = lambda: self._wk(98, "RW1")
+        def f():
+            return self._wk(98, "RW1")
         line = self.w.check_usage(now, st, self._send, fetch=f, threshold=98, interval=900)
         self.assertTrue(line.startswith("usage-alert"))
         self.assertEqual(len(self.pings), 1)
@@ -4246,7 +4320,7 @@ class TestApiWatchdog(TestCase):
         logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
                                projects_dir=self.projects, state_path=self.state,
                                usage_fetch=lambda: self._wk(98, "RW"))
-        self.assertTrue(any("usage-alert" in l for l in logs))
+        self.assertTrue(any("usage-alert" in ln for ln in logs))
         self.assertEqual(len(self.pings), 1)
 
     def test_run_once_skips_usage_without_fetcher(self):
@@ -4362,3 +4436,4 @@ class TestRemoteHosts(TestCase):
             self.assertRegex(e["host"], r"^100\.")
             self.assertNotIn(e["host"], ("100.77.52.43", "168.119.99.160",
                                          "202.148.55.31"))
+

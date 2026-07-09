@@ -23,7 +23,6 @@ import sys
 import shutil
 from pathlib import Path
 from datetime import datetime
-from collections import Counter
 
 
 def find_latest_branch(path: Path) -> dict:
@@ -54,7 +53,7 @@ def find_latest_branch(path: Path) -> dict:
                 uuid_to_idx[uid] = i
                 if parent:
                     children.setdefault(parent, []).append(uid)
-        except:
+        except Exception:
             entries.append(None)
 
     # Find leaf nodes (uuids not referenced as parent by anyone)
@@ -112,7 +111,7 @@ def find_latest_branch(path: Path) -> dict:
                     break
         elif isinstance(c, str):
             content_preview = c[:100]
-    except:
+    except Exception:
         pass
 
     return {
@@ -149,7 +148,7 @@ def scan_session(path: Path) -> dict:
                 if d.get('type') == 'file-history-snapshot' and mid:
                     if mid in uuid_first and uuid_first[mid] != i:
                         collisions += 1
-            except:
+            except Exception:
                 pass
 
     size_mb = path.stat().st_size / (1024 * 1024)
@@ -178,7 +177,7 @@ def fix_session(path: Path) -> bool:
     print(f"  Leaf: {result['leaf_ts'][:19]} — {result['leaf_content']}")
 
     if result['chain_size'] >= result['total_lines'] * 0.9:
-        print(f"  Skipping — chain covers >90% of file, likely not corrupted")
+        print("  Skipping — chain covers >90% of file, likely not corrupted")
         return False
 
     # Backup
@@ -191,8 +190,6 @@ def fix_session(path: Path) -> bool:
 
     # Write only chain entries
     kept = sorted(chain)
-    new_lines = [lines[i] + '\n' if not lines[i].endswith('\n') else lines[i] + '\n'
-                 for i in kept if i < len(lines) and lines[i].strip()]
 
     with open(path, 'w') as f:
         for i in kept:
@@ -200,7 +197,7 @@ def fix_session(path: Path) -> bool:
                 f.write(lines[i] if lines[i].endswith('\n') else lines[i] + '\n')
 
     new_size = path.stat().st_size / (1024 * 1024)
-    old_size = sum(len(l) for l in lines) / (1024 * 1024)
+    old_size = sum(len(ln) for ln in lines) / (1024 * 1024)
     print(f"  Truncated: {result['total_lines']} → {len(kept)} lines ({round(old_size, 1)}MB → {round(new_size, 1)}MB)")
     return True
 
