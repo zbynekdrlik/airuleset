@@ -10,11 +10,11 @@
 - Stopping / killing (`Stop-Service`, `sc stop`, `taskkill /F`, `systemctl stop`) a prod service or process **UNRELATED to the work in hand** — **NEVER** without asking first
 - Rollbacks that overwrite newer production state with older bytes — **NEVER** without asking first
 
-#### NOT gated — the WORK itself (incl. prod + hardware), and NEVER pre-classify an issue
+#### NOT gated — the WORK itself (incl. prod + hardware)
 
 The deploy's restart AND restarting / driving the app / service / device / rig you are **developing or testing** are the WORK, not gated destructive ops — even on prod, even hardware: restart prod OBS to debug the stall you're fixing, grab/release the DRM master to test an HDMI output you're building, restart the camera/stream app, power-cycle a device you're bringing up. Milestone-ping it; do NOT ask. "No CI/deploy pipeline" does NOT make any of this approval-gated.
 
-The USER — and only the user — guards whether the moment is live and stops Claude then. So Claude **NEVER** asks "is there a live event / is prod in use / is it off-air / is it safe now", **NEVER** pre-classifies an issue as "🔴 PROD / HARDWARE / off-air / invasive / risky / needs-you-present", and **NEVER** recommends `autopilot-skip` (or any skip/defer/"be there for it") for an issue because it touches prod / hardware / the rig — on the autopilot/issue-triage surface as much as the deploy surface, in any language (`approval-scope.md` → "NEVER gate on events / prod-usage / hardware / off-air"). A project the USER wants gated uses the `<!-- airuleset:merge=manual -->` per-project marker instead — Claude never adds it by inferring a project is "sensitive".
+The USER — and only the user — guards whether the moment is live and stops Claude then. Claude never gates, pre-classifies, skips, or warns based on prod-usage / events / off-air / hardware — that whole rule (EVERY surface, any language, incl. never recommending `autopilot-skip` and never inferring a project is "sensitive") is `approval-scope.md`'s "NEVER gate on events / prod-usage / hardware / off-air", the user's hardest rule.
 
 #### How to ask
 
@@ -34,4 +34,4 @@ A `block-destructive-remote.sh` PreToolUse(Bash) hook automatically BLOCKS three
 
 #### The rule
 
-**You can READ anything. You can DEPLOY the new version end-to-end AND do the rig/dev work — push the artifact/config, restart/drive the app/service/device you're deploying, developing, or testing (including prod, including hardware, including manual `scp`/`rsync`/MCP — the standing-approved flow, `approval-scope.md`). But you NEVER reboot the HOST, stop/kill a prod service UNRELATED to the work, or delete data on remote machines without asking first — and you NEVER gate, classify, skip, or warn based on prod-usage / events / off-air / hardware (the user guards live-timing).**
+**You can READ anything. You can DEPLOY the new version end-to-end AND do the rig/dev work — push the artifact/config, restart/drive the app/service/device you're deploying, developing, or testing (including prod, including hardware, including manual `scp`/`rsync`/MCP — the standing-approved flow, `approval-scope.md`). But you NEVER reboot the HOST, stop/kill an UNRELATED prod service, or delete data on remote machines without asking first. (Prod-usage / events / off-air / hardware are NEVER a gate — that is `approval-scope.md`, the user guards live-timing.)**
