@@ -1177,6 +1177,26 @@ class TestPrePushGatesFire(TestCase):
         r = self._run("pre-push-test-check.sh", "git push origin dev", root)
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    def test_test_check_no_test_bypass_multiline_reason(self):
+        # (issue #2) a [no-test: ...] reason that wraps onto a second line inside
+        # the commit body must still be honored — grep is line-oriented, so
+        # without normalizing the message first, the closing "]" on a later line
+        # never matches on the SAME line as the opening "[no-test:" and the
+        # bypass silently fails, falling through to the strict feature-code gate.
+        import subprocess, shutil
+        root = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+        with open(os.path.join(root, "app.py"), "w") as fh: fh.write("x=1\n")
+        g("add", "app.py"); g("commit", "-qm", "base"); g("branch", "-q", "dev"); g("checkout", "-q", "dev")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        with open(os.path.join(root, "feature.py"), "w") as fh: fh.write("y=2\n")
+        g("add", "feature.py")
+        g("commit", "-qm",
+          "config tweak\n\n[no-test: this reason genuinely wraps\nonto a second line]")
+        r = self._run("pre-push-test-check.sh", "git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_non_push_is_noop_for_both_gates(self):
         d = tempfile.mkdtemp()
         for hook in ("pre-push-lint.sh", "pre-push-test-check.sh"):
