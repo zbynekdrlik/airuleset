@@ -42,3 +42,5 @@ design-*.png
 
 # machine-local TDD-skip audit trail (regression-test-first.md)
 audits/no-test-skips.log
+audits/test-skip-bypasses.log
+audits/history-rewrite-bypasses.log

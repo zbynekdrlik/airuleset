@@ -1758,6 +1758,7 @@ class TestHookScriptsExist(TestCase):
             "pre-push-lint.sh",
             "pre-push-test-check.sh",
             "block-test-skips.sh",
+            "block-history-rewrite.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -4603,3 +4604,113 @@ class TestBlockTestSkipsHook(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
         self.assertTrue(any("block-test-skips.sh" in c for c in cmds))
+
+
+class TestBlockHistoryRewriteHook(TestCase):
+    """hooks/block-history-rewrite.sh (issue #11) — two absolute bans that
+    previously existed only as prose: git history rewrite (commit-conventions.md)
+    and `gh pr merge --admin` branch-protection bypass (pr-merge-policy.md /
+    autonomous-quality-discipline.md)."""
+
+    HOOK = "block-history-rewrite.sh"
+
+    def _run(self, command, cwd=None, env_extra=None):
+        import shutil
+        d = cwd or tempfile.mkdtemp()
+        if cwd is None:
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=d, timeout=30, env=env)
+
+    def test_blocks_rebase_interactive(self):
+        r = self._run("git rebase -i HEAD~3")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("rebase", r.stdout)
+
+    def test_blocks_rebase_interactive_long_flag(self):
+        r = self._run("git rebase --interactive HEAD~3")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_commit_amend(self):
+        r = self._run("git commit --amend -m 'fix'")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("amend", r.stdout)
+
+    def test_blocks_push_force_long_flag(self):
+        r = self._run("git push --force origin main")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("force", r.stdout)
+
+    def test_blocks_push_force_short_flag(self):
+        r = self._run("git push -f origin main")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_push_force_with_lease(self):
+        r = self._run("git push --force-with-lease origin main")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_reset_hard(self):
+        r = self._run("git reset --hard HEAD~1")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("reset --hard", r.stdout)
+
+    def test_allows_reset_soft(self):
+        r = self._run("git reset --soft HEAD~1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_reset_plain(self):
+        # plain `git reset` (mixed, on unpushed local work) is common and must
+        # NOT block — only the destructive --hard form does.
+        r = self._run("git reset HEAD~1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_blocks_gh_admin_merge(self):
+        r = self._run("gh pr merge 5 --admin --merge")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("admin", r.stdout)
+
+    def test_allows_normal_gh_merge(self):
+        r = self._run("gh pr merge 5 --merge")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_normal_push(self):
+        r = self._run("git push origin main")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_normal_commit(self):
+        r = self._run("git commit -m 'fix: normal commit'")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_no_false_positive_on_quoted_mention(self):
+        # the banned phrase appears only INSIDE a quoted string (a commit
+        # message) — must not be tokenized as a real --force/--amend flag.
+        r = self._run("git commit -m 'mentions git push --force in the message'")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_bypass_inline_marker_allows_and_logs(self):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = self._run(
+            "git push --force origin main  # airuleset:history-ok user asked for it",
+            env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        log = os.path.join(home, "devel", "airuleset", "audits", "history-rewrite-bypasses.log")
+        self.assertTrue(os.path.exists(log), "bypass must be logged")
+        self.assertIn("user asked for it", open(log).read())
+
+    def test_bypass_env_var_allows(self):
+        r = self._run("git reset --hard HEAD~1", env_extra={"AIRULESET_ALLOW_HISTORY_REWRITE": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("block-history-rewrite.sh" in c for c in cmds))
