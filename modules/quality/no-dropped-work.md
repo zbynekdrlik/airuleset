@@ -5,6 +5,7 @@
 - `completion-report.md` — 🔵 review findings inside the diff = MUST FIX; out-of-diff = file an issue
 - `autonomous-batch-issue-development.md` — bundling/follow-up gate decides same-PR vs new issue
 - `tdd-workflow.md` / `regression-test-first.md` — a discovered bug is a missing-test report; file it AND test it
+- `durable-decisions-to-tickets.md` — DECISIONS and FINDINGS get the same treatment as work items, and the deadline is THE MOMENT they land (compaction eats anything that lives only in the conversation)
 
 **The single rule: any piece of work you IDENTIFY but do NOT complete in this session MUST be captured as a tracked GitHub issue BEFORE you stop. Work is never silently dropped. The only three fates for an identified task are: (1) do it now, (2) `gh issue create` and cite the returned `#N`, (3) it was already a tracked issue you can point at. There is no fourth fate.**
 

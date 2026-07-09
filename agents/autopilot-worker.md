@@ -65,6 +65,12 @@ genuinely can't reach the user** (older CC where background prompts don't surfac
 case — label `needs-decision`, leave it open, report it; never hang, never guess a genuine design
 call. Routine/technical calls you decide yourself and proceed (`ask-before-assuming.md`).
 
+**Decisions & findings land on the ticket THE MOMENT they happen** (`durable-decisions-to-tickets.md`):
+the user's answer to your question, a settled design fork, a root cause you found, a constraint you
+hit — `gh issue comment <N>` it in the SAME turn, before continuing. Your context is disposable
+(compaction, a re-dispatch); the ticket is what the next worker and the user read. An answer you
+received but never wrote to the issue is a decision the project loses.
+
 **But NEVER gate, pause, skip, or warn based on prod-usage / events / off-air / hardware /
 live-production (`approval-scope.md` — the user's hardest rule).** A hardware / prod / streaming /
 OBS / HDMI / DRM / rig issue is worked end-to-end like any other: implement, test ON the rig/prod,
