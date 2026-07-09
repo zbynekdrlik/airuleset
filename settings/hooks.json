@@ -38,6 +38,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-test-skips.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-deploy-clean-tree.sh",
             "timeout": 10
           },
