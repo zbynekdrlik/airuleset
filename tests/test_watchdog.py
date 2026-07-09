@@ -1037,7 +1037,11 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     def test_subagent_apierror_nudges_idle_pane(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            # supervisor must itself still be `⏳ WORKING` — the marker gate
+            # added by the adversarial-review fix requires it (a historical
+            # worker file must not nudge into an already-DONE session).
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
+            [_assistant_apierror()],
             sup_age=10, sub_age=400)          # sub_age > GRACE_SECONDS (300)
         state_path = Path(tmp) / "state.json"
         logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
@@ -1052,7 +1056,8 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     def test_subagent_apierror_busy_pane_pings_only(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
+            [_assistant_apierror()],
             sup_age=10, sub_age=400)
         state_path = Path(tmp) / "state.json"
         logs, sent, pings = self._run(proj, now, state_path, self.BUSY_CAP)
@@ -1064,9 +1069,12 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     def test_subagent_apierror_within_grace_does_not_nudge_yet(self):
         # a fresh subagent error (younger than GRACE_SECONDS) may still recover on
         # its own — mirrors job 1's own grace before its first supervisor nudge.
+        # Supervisor is `⏳ WORKING` here too, so this exercises the GRACE reason
+        # specifically, not the (also-new) marker gate.
         tmp = tempfile_mkdtemp_cleanup(self)
         proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")], [_assistant_apierror()],
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
+            [_assistant_apierror()],
             sup_age=10, sub_age=30)           # well under GRACE_SECONDS (300)
         state_path = Path(tmp) / "state.json"
         logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
@@ -1078,7 +1086,7 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     def test_subagent_textcall_stall_nudges_idle_pane(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")],
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
             [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT)],
             sup_age=10, sub_age=200)          # sub_age > STALL_TEXTCALL_SECONDS (120)
         state_path = Path(tmp) / "state.json"
@@ -1093,7 +1101,7 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     def test_subagent_textcall_stall_busy_pane_pings_only(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")],
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
             [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT)],
             sup_age=10, sub_age=200)
         state_path = Path(tmp) / "state.json"

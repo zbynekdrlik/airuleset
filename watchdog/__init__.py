@@ -413,6 +413,21 @@ def newest_subagent_transcript(transcript_path):
         return None
 
 
+# Jobs 1b / 4a-sub (subagent api-error / text-toolcall-stall detectors) apply
+# to whatever `newest_subagent_transcript` returns — which is always the MOST
+# RECENTLY WRITTEN file under subagents/, even if that file itself is hours
+# or days old. Without an upper age bound, a single historical dying-worker
+# file (its frozen last-entry an old api-error or stuck text-toolcall) would
+# nudge/escalate FOREVER, on every poll, indefinitely — even once the
+# supervisor session has long since reported `✅ DONE`. Both detectors also
+# gate on the SUPERVISOR's own last marker being `⏳ WORKING` (see their call
+# sites) — the marker gate handles "the supervisor moved on"; this ceiling is
+# the independent backstop for "the file itself is simply too old to still
+# be about a CURRENT dispatch", even for a supervisor that is genuinely still
+# `⏳ WORKING` on something else entirely.
+SUBAGENT_MAX_AGE_SECONDS = 2 * 3600
+
+
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
 _TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)
@@ -1816,19 +1831,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # on a hit (past `grace`, mirroring job 1's own grace before its first
             # nudge — CC's own retries may still recover it), nudge/ping via the shared
             # busy/idle helper. Purely additive: no existing keystroke gate is touched.
+            # Gated on the SUPERVISOR's own last marker being `⏳ WORKING` AND the
+            # subagent file's age being under SUBAGENT_MAX_AGE_SECONDS — without
+            # both, a HISTORICAL worker file (the supervisor long done, or the file
+            # simply ancient) would nudge/escalate forever (adversarial-review
+            # finding). `continue`s after handling — one keystroke injection per
+            # pane per poll, the same discipline every other job keeps; without it,
+            # job 4 below could fall through in the SAME poll and inject a SECOND
+            # keystroke into this pane, gated on the now-stale pre-injection capture.
             sub_path = newest_subagent_transcript(tpath)
-            if sub_path is not None:
+            if (sub_path is not None
+                    and transcript_last_marker(tpath) == "⏳"):
                 sub_err = transcript_last_error(sub_path)
                 if sub_err:
                     try:
                         sub_idle = now - sub_path.stat().st_mtime
                     except OSError:
                         sub_idle = 0
-                    if sub_idle >= grace:
+                    if grace <= sub_idle <= SUBAGENT_MAX_AGE_SECONDS:
                         _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
                                               project, owner, now, sub_path, sub_idle,
                                               "api-error", "apierr", interval, max_nudges,
                                               dry_run)
+                        continue
 
             # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
             # Blocked on an interactive prompt the human must answer. NEVER send keys
@@ -1926,17 +1951,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # SAME detector to the newest subagent transcript directly; on a hit (past
             # `stall_textcall`, mirroring job 4a's own short grace against a mid-write
             # turn), nudge/ping via the shared busy/idle helper. Purely additive.
+            # Same two gates as job 1b (SUPERVISOR marker == `⏳`, subagent file age
+            # under SUBAGENT_MAX_AGE_SECONDS) and the same `continue` afterward — one
+            # keystroke injection per pane per poll (see job 1b's comment for the
+            # double-injection failure this prevents: job 4 below could otherwise
+            # fall through in the SAME poll and inject a second keystroke).
             sub_path = newest_subagent_transcript(tpath)
-            if sub_path is not None and transcript_text_toolcall_stall(sub_path):
+            if (sub_path is not None
+                    and transcript_last_marker(tpath) == "⏳"
+                    and transcript_text_toolcall_stall(sub_path)):
                 try:
                     sub_idle = now - sub_path.stat().st_mtime
                 except OSError:
                     sub_idle = 0
-                if sub_idle >= stall_textcall:
+                if stall_textcall <= sub_idle <= SUBAGENT_MAX_AGE_SECONDS:
                     _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
                                           project, owner, now, sub_path, sub_idle,
                                           "text-toolcall-stall", "textcall",
                                           working_interval, max_working_nudges, dry_run)
+                    continue
 
             # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
             # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
@@ -2022,12 +2055,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 else:
                     logs.append("working-%s %s [%s]" % (action, project, key))
 
-        except Exception:
+        except Exception as e:
             # one bad pane (corrupted transcript, unexpected tmux-shim
             # output shape, a raise inside a job handler) must never
             # abort the whole poll and blank state for every OTHER
-            # healthy pane this cycle — isolate it and move on.
-            logs.append("skip error %s" % Path(tkey).stem)
+            # healthy pane this cycle — isolate it and move on. A
+            # TRANSIENT capture/read error here must NOT be conflated with
+            # "the session recovered": if job 1 (api-error) had this
+            # session mid-episode, its bare-key state entry must survive
+            # this failed poll (add it to `stalled`) so the cleanup pass
+            # below does not delete it — a later successful poll then
+            # continues the SAME nudge/escalation episode instead of
+            # silently resetting to nudge#1. `tkey` (the loop variable
+            # itself) is always available here regardless of where inside
+            # the try block the exception fired, unlike the local `key`.
+            err_key = Path(tkey).stem
+            stalled.add(err_key)
+            logs.append("skip error %s: %r" % (err_key, e))
             continue
 
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
