@@ -4900,16 +4900,16 @@ class TestPreWriteScriptCheckHook(TestCase):
 
     HOOK = "pre-write-script-check.sh"
 
-    def _run_write(self, file_path, content, env_extra=None):
+    def _run_write(self, file_path, content, env_extra=None, cwd=None):
         payload = json.dumps({"tool_input": {"file_path": file_path, "content": content}})
         env = dict(os.environ)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
                               input=payload, text=True, capture_output=True,
-                              timeout=30, env=env)
+                              timeout=30, env=env, cwd=cwd)
 
-    def _run_edit(self, file_path, new_string, old_string="x", env_extra=None):
+    def _run_edit(self, file_path, new_string, old_string="x", env_extra=None, cwd=None):
         payload = json.dumps({"tool_input": {"file_path": file_path,
                                               "old_string": old_string,
                                               "new_string": new_string}})
@@ -4918,7 +4918,7 @@ class TestPreWriteScriptCheckHook(TestCase):
             env.update(env_extra)
         return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
                               input=payload, text=True, capture_output=True,
-                              timeout=30, env=env)
+                              timeout=30, env=env, cwd=cwd)
 
     # --- .sh shebang / pipefail check (Write only) --------------------------
 
@@ -4976,6 +4976,78 @@ class TestPreWriteScriptCheckHook(TestCase):
 
     def test_allows_edit_with_no_except(self):
         r = self._run_edit("mid_body.py", "    logger.info('just a normal edit')\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- adversarial-review findings (autopilot cumulative-diff review) -----
+
+    def test_large_payload_over_arg_max_does_not_false_block(self):
+        # >~128KB (Linux MAX_ARG_STRLEN) used to be passed as a SINGLE argv
+        # string to the embedded python3 child ("python3 - $PAYLOAD") — that
+        # blows execve's per-argument limit ("Argument list too long") and
+        # the hook then falsely BLOCKS every large Write/Edit with an EMPTY
+        # reason, regardless of file type or actual content. A legitimate
+        # large write with ZERO violations must not be blocked.
+        big_content = "".join("print('line %d')\n" % i for i in range(20000))
+        self.assertGreater(len(big_content), 131072)
+        r = self._run_write("big.py", big_content)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_blocks_one_liner_except_pass(self):
+        # `except X: pass` on ONE line evades the old multi-line-only regex
+        # entirely — same silent-swallow the multi-line form is blocked for.
+        content = "def f():\n    try:\n        risky()\n    except Exception: pass\n"
+        r = self._run_write("oneliner.py", content)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("pass", r.stderr.lower())
+
+    def test_allows_except_pass_text_inside_docstring(self):
+        # the OLD line-regex scan has no syntax awareness — literal
+        # "except X:\n    pass" text sitting inside a DOCSTRING (documenting
+        # the very anti-pattern this hook bans, e.g. in a code example) is
+        # not real code and must never false-block.
+        content = ('def f():\n    """Example of what NOT to do:\n'
+                   '    except Exception:\n        pass\n    """\n    return 1\n')
+        r = self._run_write("docstring_example.py", content)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_edit_carrying_preexisting_except_pass_as_unique_match_context(self):
+        # Edit's old_string/new_string often carry surrounding UNCHANGED
+        # lines purely to make old_string a unique match — an except-pass
+        # block that already existed IDENTICALLY in old_string is not being
+        # introduced by this edit, only carried as context. Only "return 1"
+        # -> "return 2" actually changed.
+        old = "    except Exception:\n        pass\n    return 1\n"
+        new = "    except Exception:\n        pass\n    return 2\n"
+        r = self._run_edit("existing_ctx.py", new, old_string=old)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_edit_introducing_new_except_pass_still_blocked(self):
+        # the old_string carve-out must not become a blanket bypass — a
+        # GENUINELY new except-pass (absent from old_string) still blocks.
+        old = "    return 1\n"
+        new = "    except Exception:\n        pass\n    return 1\n"
+        r = self._run_edit("existing_new.py", new, old_string=old)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_allows_full_rewrite_of_existing_sh_file(self):
+        # a Write is a FULL-FILE REWRITE of a legacy script ALREADY on disk —
+        # same "never retroactively flag pre-existing content" principle as
+        # the except-pass check. Only a genuinely NEW file is enforced.
+        import shutil
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        existing = os.path.join(tmp, "legacy.sh")
+        with open(existing, "w") as f:
+            f.write("#!/usr/bin/env bash\necho old\n")
+        r = self._run_write(existing, "#!/usr/bin/env bash\necho new, no pipefail\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_new_sourced_lib_with_no_shebang(self):
+        # a sourced lib/env .sh is CONVENTIONALLY shebang-less (it's meant to
+        # be `source`d, never executed directly) — `set -euo pipefail` in
+        # such a file would leak into the SOURCING shell, which is wrong.
+        # Must not be forced to add a shebang it should never have.
+        r = self._run_write("lib.sh", "FOO=bar\nexport FOO\n")
         self.assertEqual(r.returncode, 0, r.stdout)
 
     # --- bypass --------------------------------------------------------
