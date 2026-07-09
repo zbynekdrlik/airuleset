@@ -8,7 +8,7 @@ disable-model-invocation: true
 # Rules & Memory Audit
 
 Systematic review of airuleset + project rules + auto-memory to prevent bloat, contradictions, and orphaned content. Run when:
-- Global CLAUDE.md resolved size grows (target <400 lines / <30 KB)
+- Global CLAUDE.md resolved size grew >10% since the last audit (size = review-due trigger, NEVER a target — see mdreview)
 - A project reports recurring rule non-compliance
 - After adding 3+ new modules in a short period
 - A new Claude model ships — bump stale version refs + re-scan best practices
@@ -59,10 +59,10 @@ done
 - [ ] For each violation, **file an alignment issue on that repo** (diff-scoped ≤20-min PR gate + weekly async, or async-only if covering tests are too slow) — do NOT edit the project's CI yourself ([[feedback-stay-in-repo-lane]]). Precedents: codex-bridge#119, bakerion-ai#341, spinbike#102, songplayer#123, devbridge#62, reaperiem#200.
 - [ ] Diff-scoped + ≤20-min + (weekly async or PR-only-with-skip) = compliant, no action.
 
-### 1. Size budget
-- [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`). Target: <400 lines, <30 KB
-- [ ] Which 5 modules contribute most tokens? (`wc -l modules/*/*.md | sort -rn | head -10`)
-- [ ] Any module >60 lines? Candidate for trimming
+### 1. Size metric (tracked, never a target)
+- [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`) — record it + Δ vs the previous audit. Review-due trigger + prioritizer (largest modules reviewed first), NOT a number to hit.
+- [ ] Which 5 modules contribute most tokens? (`wc -l modules/*/*.md | sort -rn | head -10`) — review order, not a cut list
+- [ ] Any SITUATIONAL module (fires only for one task-type/area)? Candidate for CONVERSION to skill / `paths:`-scoped rule / hook (mdreview axis 3) — never bare deletion
 - [ ] Total module count vs. universal.profile count — orphans?
 
 ### 2. Duplicates & overlap
@@ -131,7 +131,7 @@ Return a punch list ordered by impact:
 ## Rules Audit — YYYY-MM-DD
 
 ### Size
-- Global CLAUDE.md: N lines / K KB (target <400/<30)
+- Global CLAUDE.md: N lines / K KB (Δ vs last audit — metric, not a target)
 - Top bloat: module1 (L lines), module2 (L lines), ...
 
 ### Duplicates

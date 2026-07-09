@@ -59,6 +59,15 @@ Remote machines:
 - **Wiring local (non-git) config to dev2 while the tree is dirty:** the `pre-deploy-clean-tree.sh` hook blocks `scp`/`rsync` from a dirty tree. For a genuine non-repo transfer (e.g. writing the local `~/.claude/.../.env`), pipe the helper via `ssh dev2 'python3 - <args>' < script.py` (stdin) instead of `scp` — no file-copy, no bypass marker needed.
 - **Truncating user-visible UTF-8 in a bash hook: NEVER `cut -c` / `awk substr`** — both count BYTES on this stack and chop multi-byte Slovak mid-character (the "…sklad zač" truncated-question incident, 2026-07-04). Use `jq -Rrs '.[0:N]'` (codepoint slice; jq is already a hook dependency). Negative slices (`.[-N:]`) work too and clamp safely on short strings.
 
+## Rule intake gate — before ADDING any new always-on module
+
+Every new rule originates from a real problem — but it must land on the RIGHT surface, not reflexively in the always-on profile (content loads context every turn of every project; the gate picks the surface, never drops the content):
+
+1. **Mechanically checkable?** → a hook (deterministic) + at most a one-line pointer in an existing module.
+2. **Situational** (fires only for one task-type/area — deploy, migration, hardware, mutation, one language)? → an on-demand skill or a `rules/` path-scoped rule.
+3. **Topic already owned by an existing module?** → extend that module; never create a parallel new one.
+4. Only a genuinely always-relevant, cross-project discipline becomes a NEW module — and its body cites the originating incident + date, so future `/mdreview` native-now passes have something to re-validate against.
+
 ## Skill Ownership — DO NOT manage skills belonging to other projects
 
 airuleset only manages skills it created: `ci-monitor`, `deploy-ssh`, `windows-remote-gui`.

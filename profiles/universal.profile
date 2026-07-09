@@ -1,6 +1,6 @@
 # Universal profile — modules imported into ~/.claude/CLAUDE.md
 # These apply to ALL projects via the global config.
-# Target: <800 lines, <50KB total resolved content.
+# Size = tracked metric, never a target (mdreview: CONTENT is the indicator). Review due when resolved size grows >10% since last audit.
 # Current (2026-05-30): Opus 4.8 literalism-optimized. Use /rules-audit to review periodically.
 
 modules/core/machine-identities.md
