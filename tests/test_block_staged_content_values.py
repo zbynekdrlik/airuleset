@@ -189,6 +189,22 @@ class TestBypassMarker(SecretScanTestCase):
         self.assertTrue(os.path.exists(log), "bypass must be logged")
         self.assertIn("test fixture value", open(log).read())
 
+    def test_marker_mentioned_inside_a_commit_message_body_is_not_a_bypass(self):
+        # A commit message that merely DOCUMENTS the bypass syntax (e.g. this
+        # hook's own commit history) must NOT be treated as an actual bypass
+        # — only a genuine TRAILING comment on the command counts. Without
+        # this, any commit whose message happens to mention the marker text
+        # silently skips scanning its own diff.
+        self._write("skills/bar/SKILL.md", "FB_APP_SECRET: \"abcd1234efgh5678\"\n")
+        _git(self.repo, "add", "skills/bar/SKILL.md")
+        commit_cmd = (
+            'git commit -m "docs: mention the bypass syntax '
+            '# airuleset:secret-ok <reason> in the body, not as a real bypass"'
+        )
+        r = self._run(commit_cmd)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("SKILL.md", r.stdout)
+
 
 if __name__ == "__main__":
     main()

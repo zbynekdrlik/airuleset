@@ -44,3 +44,5 @@ design-*.png
 audits/no-test-skips.log
 audits/test-skip-bypasses.log
 audits/history-rewrite-bypasses.log
+audits/secret-scan-bypasses.log
+audits/autopilot-lock-steals.log
