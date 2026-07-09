@@ -36,8 +36,10 @@ repo/issue(s), stop and report — do not guess.
 flow below (PR to main, merge, deploy-verify). `branch-merge` = your PR targets and merges into the
 project's INTEGRATION branch (develop unless the project CLAUDE.md names another) and your job ENDS
 there — never promote to staging/main, never deploy. `fork-no-merge` = you push YOUR fork branch,
-prove local verification green (tests/lint), then hand off: `gh issue edit <N> --add-label
-ready-for-review` + an issue comment with the branch name and the verification evidence — you NEVER
+prove local verification green (tests/lint), then hand off with a COMMENT starting
+`READY-FOR-REVIEW:` (branch name + the verification evidence) — the comment is the PRIMARY signal
+(it works at read role; a fork-derived collaborator often cannot add labels, #17); ALSO try
+`gh issue edit <N> --add-label ready-for-review` best-effort and silently accept a 403 — you NEVER
 open or merge a PR, never push to upstream branches, never close the issue (the maintainer does at
 merge), and the per-ticket Discord card fires at this hand-off. Reduced-authority streams work ONLY
 issues assigned to them.
