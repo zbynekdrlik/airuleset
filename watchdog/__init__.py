@@ -1583,309 +1583,318 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
 
     for tkey, owners in by_transcript.items():
-        if len(owners) > 1:
-            logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
-            continue
-        pid, cwd, tmtime, tpath = owners[0]
-        idle = now - tmtime
-        project = project_label(cwd)
-        key = tpath.stem                   # session id (stable across grouped panes)
-        owner = pane_owner(pid, run)       # @mention the right person for THIS pane
-        if owner:
-            owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
-            if not account_owner:
-                account_owner = owner      # first owner seen → the account/usage owner
+        try:
+            if len(owners) > 1:
+                logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
+                continue
+            pid, cwd, tmtime, tpath = owners[0]
+            idle = now - tmtime
+            project = project_label(cwd)
+            key = tpath.stem                   # session id (stable across grouped panes)
+            owner = pane_owner(pid, run)       # @mention the right person for THIS pane
+            if owner:
+                owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
+                if not account_owner:
+                    account_owner = owner      # first owner seen → the account/usage owner
 
-        # Capture the pane ONCE per session (reused by job 6 + the job-2 waiting
-        # check + job 7 reply routing).
-        captured = capture_pane(pid, run)
-        panes_by_sid[key] = (pid, captured)   # job 7: route a Discord reply here
+            # Capture the pane ONCE per session (reused by job 6 + the job-2 waiting
+            # check + job 7 reply routing).
+            captured = capture_pane(pid, run)
+            panes_by_sid[key] = (pid, captured)   # job 7: route a Discord reply here
 
-        # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
-        # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
-        # incident), so we ping ONCE with the reset time, do NOTHING until the reset
-        # clock, then send ONE `continue` AFTER it — never before. Read from the PANE
-        # (the banner is on screen, not reliably a transcript api-error). While a
-        # session is limited job 6 owns it (skips the api-error / nudge paths).
-        if pane_session_limited(captured):
-            skey = "sesslimit:" + key
-            s = state.get(skey)
-            if s is None:
-                # Parse the reset clock ONCE at first detection and keep it stable for
-                # the whole episode — re-parsing after the reset would roll the same
-                # "6:10pm" forward to tomorrow and wrongly re-ping instead of resuming.
-                s = {"resets_at": parse_reset_epoch(captured, now),
-                     "pinged": False, "continued": False, "first_seen": int(now)}
-                state[skey] = s
-            elif s.get("resets_at") is None:
-                # an earlier poll couldn't read the clock — try again to refine it.
-                s["resets_at"] = parse_reset_epoch(captured, now)
-            s["last_seen"] = int(now)
-            ra = s.get("resets_at")
-            if not s.get("pinged"):
-                s["pinged"] = True
-                when = _human_clock(ra) if ra else "čoskoro"
-                logs.append("session-limit %s — ping (reset %s)" % (project, when))
-                send_fn("⏳ **%s** — dosiahnutý 5-hodinový limit\n> Reset o %s. Po "
-                        "resete pošlem `continue` automaticky — nič nemusíš robiť."
-                        % (project, when),
-                        owner=owner, dedup_key="sesslimit:%s:%s" % (key, ra or s["first_seen"]),
-                        dry_run=dry_run)
-            elif ra and now >= ra and not s.get("continued"):
-                if pane_in_mode(pid, run):          # never type into a scrolled pane
-                    logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
+            # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
+            # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
+            # incident), so we ping ONCE with the reset time, do NOTHING until the reset
+            # clock, then send ONE `continue` AFTER it — never before. Read from the PANE
+            # (the banner is on screen, not reliably a transcript api-error). While a
+            # session is limited job 6 owns it (skips the api-error / nudge paths).
+            if pane_session_limited(captured):
+                skey = "sesslimit:" + key
+                s = state.get(skey)
+                if s is None:
+                    # Parse the reset clock ONCE at first detection and keep it stable for
+                    # the whole episode — re-parsing after the reset would roll the same
+                    # "6:10pm" forward to tomorrow and wrongly re-ping instead of resuming.
+                    s = {"resets_at": parse_reset_epoch(captured, now),
+                         "pinged": False, "continued": False, "first_seen": int(now)}
+                    state[skey] = s
+                elif s.get("resets_at") is None:
+                    # an earlier poll couldn't read the clock — try again to refine it.
+                    s["resets_at"] = parse_reset_epoch(captured, now)
+                s["last_seen"] = int(now)
+                ra = s.get("resets_at")
+                if not s.get("pinged"):
+                    s["pinged"] = True
+                    when = _human_clock(ra) if ra else "čoskoro"
+                    logs.append("session-limit %s — ping (reset %s)" % (project, when))
+                    send_fn("⏳ **%s** — dosiahnutý 5-hodinový limit\n> Reset o %s. Po "
+                            "resete pošlem `continue` automaticky — nič nemusíš robiť."
+                            % (project, when),
+                            owner=owner, dedup_key="sesslimit:%s:%s" % (key, ra or s["first_seen"]),
+                            dry_run=dry_run)
+                elif ra and now >= ra and not s.get("continued"):
+                    if pane_in_mode(pid, run):          # never type into a scrolled pane
+                        logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
+                        continue
+                    # Race guard: the user may have manually resumed inside the window and the
+                    # session is now running a FOREGROUND agent while the "session limit" banner
+                    # is still within the captured pane. Typing `continue` there would INTERRUPT
+                    # the live work (the #233 harm class). Only resume into a free `❯` idle
+                    # prompt; skip WITHOUT setting `continued` (a later poll retries, and if it
+                    # already resumed the banner scrolls out and job 6 exits on its own).
+                    if not pane_at_idle_prompt(captured):
+                        logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
+                        continue
+                    s["continued"] = True
+                    logs.append("session-limit %s — reset passed → continue" % project)
+                    if not dry_run:
+                        send_continue(pid, NUDGE_TEXT, run)
+                    send_fn("✅ **%s** — 5h limit sa resetol, poslal som `continue` — "
+                            "pokračujem." % project,
+                            owner=owner, dedup_key="sesslimit-resume:%s:%s" % (key, ra),
+                            dry_run=dry_run)
+                continue                                # job 6 owns this session this poll
+
+            # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
+            # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
+            # assistant entry — the ONLY trigger (an earlier pane-text fallback false-
+            # nudged a meta-conversation merely DISPLAYING api-error text). The grace is
+            # tracked from when the last reply BECAME an error (in state, via decide),
+            # NOT from transcript mtime: CC's own retries + queue/snapshot writes keep
+            # touching the transcript, so an mtime-idle gate never trips for a rate-
+            # limited session (that bug left `presenter` unnudged).
+            err_text = transcript_last_error(tpath)
+            if err_text:
+                # user scrolling / a menu open → keys would be swallowed or corrupt the
+                # selection. Skip WITHOUT advancing state (no retry burned).
+                if pane_in_mode(pid, run):
+                    logs.append("skip in-mode %s" % (project or pid))
                     continue
-                # Race guard: the user may have manually resumed inside the window and the
-                # session is now running a FOREGROUND agent while the "session limit" banner
-                # is still within the captured pane. Typing `continue` there would INTERRUPT
-                # the live work (the #233 harm class). Only resume into a free `❯` idle
-                # prompt; skip WITHOUT setting `continued` (a later poll retries, and if it
-                # already resumed the banner scrolls out and job 6 exits on its own).
+                # BUSY-PANE guard (uniform with jobs 4/4a/6): the api-error flag on the
+                # last transcript entry means CC ABORTED that turn → the pane is normally
+                # idle at a free `❯`. But if the user MANUALLY resumed within the idle
+                # window, a foreground turn/agent is now running (spinner, no free `❯`) and
+                # its first entry hasn't landed yet — typing `continue` would INTERRUPT it
+                # (the #233 scar). Never inject unless the pane shows a free prompt; skip
+                # WITHOUT burning a retry (the next poll re-checks).
                 if not pane_at_idle_prompt(captured):
-                    logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
+                    logs.append("skip busy-pane (api-error) %s" % (project or pid))
                     continue
-                s["continued"] = True
-                logs.append("session-limit %s — reset passed → continue" % project)
-                if not dry_run:
-                    send_continue(pid, NUDGE_TEXT, run)
-                send_fn("✅ **%s** — 5h limit sa resetol, poslal som `continue` — "
-                        "pokračujem." % project,
-                        owner=owner, dedup_key="sesslimit-resume:%s:%s" % (key, ra),
-                        dry_run=dry_run)
-            continue                                # job 6 owns this session this poll
-
-        # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
-        # ERROR signal = Claude Code's OWN `isApiErrorMessage` flag on the last
-        # assistant entry — the ONLY trigger (an earlier pane-text fallback false-
-        # nudged a meta-conversation merely DISPLAYING api-error text). The grace is
-        # tracked from when the last reply BECAME an error (in state, via decide),
-        # NOT from transcript mtime: CC's own retries + queue/snapshot writes keep
-        # touching the transcript, so an mtime-idle gate never trips for a rate-
-        # limited session (that bug left `presenter` unnudged).
-        err_text = transcript_last_error(tpath)
-        if err_text:
-            # user scrolling / a menu open → keys would be swallowed or corrupt the
-            # selection. Skip WITHOUT advancing state (no retry burned).
-            if pane_in_mode(pid, run):
-                logs.append("skip in-mode %s" % (project or pid))
-                continue
-            # BUSY-PANE guard (uniform with jobs 4/4a/6): the api-error flag on the
-            # last transcript entry means CC ABORTED that turn → the pane is normally
-            # idle at a free `❯`. But if the user MANUALLY resumed within the idle
-            # window, a foreground turn/agent is now running (spinner, no free `❯`) and
-            # its first entry hasn't landed yet — typing `continue` would INTERRUPT it
-            # (the #233 scar). Never inject unless the pane shows a free prompt; skip
-            # WITHOUT burning a retry (the next poll re-checks).
-            if not pane_at_idle_prompt(captured):
-                logs.append("skip busy-pane (api-error) %s" % (project or pid))
-                continue
-            stalled.add(key)
-            err_hash = _hash(err_text)
-            # seed first_seen with now-idle so an already-stale stall counts from
-            # when it really began (idle = age of the last transcript write).
-            action, entry = decide(state, key, err_hash, now, grace, interval,
-                                   max_nudges, first_seen_seed=now - idle)
-            state[key] = entry
-            # first_seen in the dedup key so a recover→re-stall still pings
-            # (notify's own dedup TTL is 14 days).
-            fs = int(entry.get("first_seen", now))
-            if action == "nudge" and is_usage_cap(err_text):
-                # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
-                # mark escalated (no nudge, no retries, no false giveup).
-                entry["nudges"], entry["escalated"] = [], True
+                stalled.add(key)
+                err_hash = _hash(err_text)
+                # seed first_seen with now-idle so an already-stale stall counts from
+                # when it really began (idle = age of the last transcript write).
+                action, entry = decide(state, key, err_hash, now, grace, interval,
+                                       max_nudges, first_seen_seed=now - idle)
                 state[key] = entry
-                logs.append("usage-cap %s — ping only, no continue" % project)
-                send_fn(compose_api_error_alert(project, err_text)
-                        + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
-                        owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-            elif action == "nudge":
-                n = len(entry["nudges"])
-                logs.append("nudge#%d %s [%s]" % (n, project, key))
-                if not dry_run:
-                    send_continue(pid, NUDGE_TEXT, run)
-                if n == 1:                 # first nudge → tell the user it stalled
-                    send_fn(compose_api_error_alert(project, err_text),
+                # first_seen in the dedup key so a recover→re-stall still pings
+                # (notify's own dedup TTL is 14 days).
+                fs = int(entry.get("first_seen", now))
+                if action == "nudge" and is_usage_cap(err_text):
+                    # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
+                    # mark escalated (no nudge, no retries, no false giveup).
+                    entry["nudges"], entry["escalated"] = [], True
+                    state[key] = entry
+                    logs.append("usage-cap %s — ping only, no continue" % project)
+                    send_fn(compose_api_error_alert(project, err_text)
+                            + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-            elif action == "escalate":
-                logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
-                body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                        "stále nepohlo — treba zásah." % (project, max_nudges))
-                send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                        dry_run=dry_run)
-            else:
-                logs.append("%s %s [%s]" % (action, project, key))
-            continue                       # handled as an api-error stall
-
-        # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
-        # Blocked on an interactive prompt the human must answer. NEVER send keys
-        # (a design decision needs the user), so the loose pane-text match is safe.
-        # Dedup is by the FOOTER EPISODE, NOT per-poll idle: the episode lives while
-        # the prompt footer keeps appearing, and ends only after WAIT_CLEAR seconds
-        # without it. So a multi-question dialog / re-ask loop that jitters the
-        # transcript (idle dipping, a momentary capture miss) does NOT re-ping the
-        # SAME open prompt — `pinged` stays set for the whole episode.
-        if pane_waiting_on_user(captured):
-            wkey = "wait:" + key
-            w = state.get(wkey)
-            if w is None:
-                # FIRST sight of this footer — record, do NOT ping yet. A transient
-                # flash (a bypass-permissions prompt that auto-approves, an
-                # AskUserQuestion that auto-continues after ~60s, a one-capture
-                # lingering footer) is GONE by the next poll and never pings. Only a
-                # footer that PERSISTS to a later poll (a genuinely unanswered wait)
-                # pings — the persistence half of the false-"čaká na teba" fix (the
-                # other half is the bottom-`❯` guard in pane_waiting_on_user).
-                w = {"first_seen": int(now - idle), "pinged": False, "confirmed": False}
-                state[wkey] = w
-            w.setdefault("pinged", False)
-            w.setdefault("confirmed", False)
-            w["last_seen"] = int(now)
-            if (not w["pinged"] and w["confirmed"]
-                    and (now - w["first_seen"]) >= wait_grace):
-                w["pinged"] = True
-                logs.append("waiting %s [%s]" % (project, key))
-                # Carry the ACTUAL question (+ options) from the pane — a ping that
-                # says only "a question is waiting" forces the user to the terminal
-                # to even learn what is asked (their explicit complaint, 2026-07-04).
-                excerpt = pane_question_excerpt(captured)
-                detail = excerpt or ("Session sa zastavila na otázke "
-                                     "(AskUserQuestion) — pozri sa naň.")
-                send_fn("❓ **%s** — čaká na teba\n> %s" % (project, detail),
-                        owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
-                        dry_run=dry_run)
-            w["confirmed"] = True          # seen this poll → a LATER poll may ping
-            continue                       # waiting on the user → not a working-stall
-
-        # --- (4a) TEXT-EMITTED TOOL-CALL STALL → nudge immediately (no 30-min wait) --
-        # The model emitted a tool call as TEXT (a `<invoke name=...>` block in an
-        # assistant text block) instead of a structured tool_use → it never ran, the
-        # turn ENDED, and the session sits idle (often on a now-stale `⏳`, or no marker
-        # at all). Detectable instantly from the transcript SHAPE (see
-        # transcript_text_toolcall_stall — precise, so a meta-conversation merely
-        # DISCUSSING `<invoke>` does not match), so unlike job 4 this fires after only a
-        # short grace (guarding a mid-write turn), REGARDLESS of marker. Reuses job 4's
-        # nudge lifecycle (decide_working: nudge → retry → escalate) under a distinct
-        # `textcall:` key. Same copy-mode / advancing-subagent skips as job 4.
-        if (idle >= stall_textcall
-                and transcript_text_toolcall_stall(tpath)
-                and not subagent_active(tpath, now, stall_textcall)):
-            if pane_in_mode(pid, run):
-                logs.append("skip in-mode (textcall-stall) %s" % (project or pid))
-                continue
-            # NEVER type into a pane that is NOT at a free `❯` idle prompt — a running
-            # foreground agent / tool blocks the parent transcript (looks idle) while
-            # the pane shows live work; a keystroke would INTERRUPT it (the #233 incident).
-            if not pane_at_idle_prompt(captured):
-                logs.append("skip busy-pane (textcall-stall) %s" % (project or pid))
-                continue
-            wkey = "textcall:" + key
-            action, entry = decide_working(state, wkey, now, idle,
-                                           interval=working_interval,
-                                           max_nudges=max_working_nudges)
-            state[wkey] = entry
-            fs = int(entry.get("first_seen", now))
-            if action == "nudge":
-                n = len(entry["nudges"])
-                logs.append("textcall-nudge#%d %s [%s] idle=%dm"
-                            % (n, project, key, int(idle // 60)))
-                if not dry_run:
-                    send_continue(pid, TEXTCALL_NUDGE_TEXT, run)
-            elif action == "escalate":
-                logs.append("textcall-escalate %s [%s] — wedged after %d nudges"
-                            % (project, key, max_working_nudges))
-                send_fn("\U0001f6d1 **%s** — turn sa zlomil (tool-call vypísaný ako "
-                        "text) a nereaguje\n> Po %d× automatickom stuck-check pingu sa "
-                        "session stále nepohla — pravdepodobne zamrzol samotný Claude "
-                        "proces. Treba zásah." % (project, max_working_nudges),
-                        owner=owner, dedup_key="textcall-giveup:%s:%s" % (key, fs),
-                        dry_run=dry_run)
-            else:
-                logs.append("textcall-%s %s [%s]" % (action, project, key))
-            continue                        # handled as a text-toolcall stall
-
-        # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
-        # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
-        # it'll report when done) but nothing has happened for `stall_working` AND no
-        # subagent transcript is advancing → the launched work MIGHT have died silently.
-        # We send the autonomous form of the user's manual "stucked?": a `stuck-check`
-        # self-check nudge telling the session to verify the liveness of its launched
-        # work and intervene if dead. Safe where a blind `continue` was the user's scar
-        # (see the STALL_WORKING / WORKING_NUDGE_TEXT block): the nudge is a QUESTION
-        # that delegates the healthy-vs-dead call to the session (which has eyes); a
-        # landed nudge resets idle so the episode self-resolves in ONE nudge with no
-        # Discord noise; only a wedged session (no response across `max_working_nudges`
-        # retries) escalates to ONE ping. Gates: advancing-subagent (skips the common
-        # healthy long wait), high threshold (skips CI ≤25 min / mutation ≤20 min),
-        # copy-mode skip (never type into a scrolled pane).
-        if (transcript_last_marker(tpath) == "⏳" and idle >= stall_working
-                and not subagent_active(tpath, now, stall_working)):
-            # user scrolling / a menu open → keys would be swallowed or corrupt the
-            # selection. Skip WITHOUT advancing state (no retry burned) — same gate as
-            # job 1's api-error nudge. (Adversarial-review finding #3: we deliberately do
-            # NOT add a "pane input buffer non-empty" guard. tmux cannot tell typed text
-            # from the CC input PLACEHOLDER, so such a guard would false-positive and
-            # SUPPRESS the overnight nudge — the exact failure the user is angry about.
-            # The residual — a user typing into a 30-min-stale ⏳ pane in the same 60s
-            # window gets one interleaved, recoverable, visible buffer line while PRESENT
-            # — matches job 1's accepted residual and is not the forced-resume scar.)
-            if pane_in_mode(pid, run):
-                logs.append("skip in-mode (working-stall) %s" % (project or pid))
-                continue
-            # NEVER type into a pane that is NOT at a free `❯` idle prompt. A FOREGROUND
-            # subagent (a ticket-validator, a Task/Agent dispatch) BLOCKS the parent, so
-            # its transcript freezes and looks 30-min-idle while the session is ALIVE and
-            # the pane shows the agent running — a nudge keystroke there INTERRUPTS the
-            # live work (the observed "Agent Validate issue #233 · Interrupted" incident).
-            # subagent_active covers the BACKGROUND case (main idle at `❯`); this covers
-            # the FOREGROUND case (no free `❯`). We are ALREADY past `not subagent_active`,
-            # so nothing is advancing — a pane that stays busy with NO progress for a LONG
-            # time is a genuinely wedged / hung foreground turn (the 8-hour silent-loss
-            # class). We can't type (that would interrupt), but a PING never interrupts, so
-            # escalate to ONE ping at a LONGER threshold (2× stall_working, so a merely
-            # long-THINKING foreground agent that just isn't writing its transcript isn't
-            # pinged). One ping per episode; last_seen refreshed so cleanup can't drop it
-            # mid-episode. NEVER a keystroke.
-            if not pane_at_idle_prompt(captured):
-                bkey = "busypane:" + key
-                b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
-                b["last_seen"] = int(now)
-                state[bkey] = b
-                if not b["pinged"] and idle >= 2 * stall_working:
-                    b["pinged"] = True
-                    logs.append("busy-pane-wedged %s [%s] idle=%dm — ping only (never type)"
-                                % (project, key, int(idle // 60)))
-                    send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING, beží agent ktorý sa "
-                            "dlho nepohol (%d min)\n> Vyzerá zaseknuto. Nezasahujem "
-                            "klávesami do bežiaceho agenta (rozbilo by to jeho prácu) — "
-                            "over ho prosím." % (project, int(idle // 60)),
-                            owner=owner, dedup_key="busypane:%s:%s" % (key, b["first_seen"]),
+                elif action == "nudge":
+                    n = len(entry["nudges"])
+                    logs.append("nudge#%d %s [%s]" % (n, project, key))
+                    if not dry_run:
+                        send_continue(pid, NUDGE_TEXT, run)
+                    if n == 1:                 # first nudge → tell the user it stalled
+                        send_fn(compose_api_error_alert(project, err_text),
+                                owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
+                elif action == "escalate":
+                    logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
+                    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+                            "stále nepohlo — treba zásah." % (project, max_nudges))
+                    send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
                             dry_run=dry_run)
                 else:
-                    logs.append("skip busy-pane (working-stall) %s" % (project or pid))
-                continue
-            wkey = "working:" + key
-            action, entry = decide_working(state, wkey, now, idle,
-                                           interval=working_interval,
-                                           max_nudges=max_working_nudges)
-            state[wkey] = entry
-            fs = int(entry.get("first_seen", now))
-            if action == "nudge":
-                n = len(entry["nudges"])
-                logs.append("working-nudge#%d %s [%s] idle=%dm"
-                            % (n, project, key, int(idle // 60)))
-                if not dry_run:
-                    send_selfcheck(pid, run)
-            elif action == "escalate":
-                logs.append("working-escalate %s [%s] — wedged after %d nudges"
-                            % (project, key, max_working_nudges))
-                send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING a nereaguje\n> Po %d× "
-                        "automatickom stuck-check pingu sa session stále nepohla — "
-                        "pravdepodobne zamrzol samotný Claude proces. Treba zásah."
-                        % (project, max_working_nudges),
-                        owner=owner, dedup_key="workingstall-giveup:%s:%s" % (key, fs),
-                        dry_run=dry_run)
-            else:
-                logs.append("working-%s %s [%s]" % (action, project, key))
+                    logs.append("%s %s [%s]" % (action, project, key))
+                continue                       # handled as an api-error stall
+
+            # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
+            # Blocked on an interactive prompt the human must answer. NEVER send keys
+            # (a design decision needs the user), so the loose pane-text match is safe.
+            # Dedup is by the FOOTER EPISODE, NOT per-poll idle: the episode lives while
+            # the prompt footer keeps appearing, and ends only after WAIT_CLEAR seconds
+            # without it. So a multi-question dialog / re-ask loop that jitters the
+            # transcript (idle dipping, a momentary capture miss) does NOT re-ping the
+            # SAME open prompt — `pinged` stays set for the whole episode.
+            if pane_waiting_on_user(captured):
+                wkey = "wait:" + key
+                w = state.get(wkey)
+                if w is None:
+                    # FIRST sight of this footer — record, do NOT ping yet. A transient
+                    # flash (a bypass-permissions prompt that auto-approves, an
+                    # AskUserQuestion that auto-continues after ~60s, a one-capture
+                    # lingering footer) is GONE by the next poll and never pings. Only a
+                    # footer that PERSISTS to a later poll (a genuinely unanswered wait)
+                    # pings — the persistence half of the false-"čaká na teba" fix (the
+                    # other half is the bottom-`❯` guard in pane_waiting_on_user).
+                    w = {"first_seen": int(now - idle), "pinged": False, "confirmed": False}
+                    state[wkey] = w
+                w.setdefault("pinged", False)
+                w.setdefault("confirmed", False)
+                w["last_seen"] = int(now)
+                if (not w["pinged"] and w["confirmed"]
+                        and (now - w["first_seen"]) >= wait_grace):
+                    w["pinged"] = True
+                    logs.append("waiting %s [%s]" % (project, key))
+                    # Carry the ACTUAL question (+ options) from the pane — a ping that
+                    # says only "a question is waiting" forces the user to the terminal
+                    # to even learn what is asked (their explicit complaint, 2026-07-04).
+                    excerpt = pane_question_excerpt(captured)
+                    detail = excerpt or ("Session sa zastavila na otázke "
+                                         "(AskUserQuestion) — pozri sa naň.")
+                    send_fn("❓ **%s** — čaká na teba\n> %s" % (project, detail),
+                            owner=owner, dedup_key="waiting:%s:%s" % (key, w["first_seen"]),
+                            dry_run=dry_run)
+                w["confirmed"] = True          # seen this poll → a LATER poll may ping
+                continue                       # waiting on the user → not a working-stall
+
+            # --- (4a) TEXT-EMITTED TOOL-CALL STALL → nudge immediately (no 30-min wait) --
+            # The model emitted a tool call as TEXT (a `<invoke name=...>` block in an
+            # assistant text block) instead of a structured tool_use → it never ran, the
+            # turn ENDED, and the session sits idle (often on a now-stale `⏳`, or no marker
+            # at all). Detectable instantly from the transcript SHAPE (see
+            # transcript_text_toolcall_stall — precise, so a meta-conversation merely
+            # DISCUSSING `<invoke>` does not match), so unlike job 4 this fires after only a
+            # short grace (guarding a mid-write turn), REGARDLESS of marker. Reuses job 4's
+            # nudge lifecycle (decide_working: nudge → retry → escalate) under a distinct
+            # `textcall:` key. Same copy-mode / advancing-subagent skips as job 4.
+            if (idle >= stall_textcall
+                    and transcript_text_toolcall_stall(tpath)
+                    and not subagent_active(tpath, now, stall_textcall)):
+                if pane_in_mode(pid, run):
+                    logs.append("skip in-mode (textcall-stall) %s" % (project or pid))
+                    continue
+                # NEVER type into a pane that is NOT at a free `❯` idle prompt — a running
+                # foreground agent / tool blocks the parent transcript (looks idle) while
+                # the pane shows live work; a keystroke would INTERRUPT it (the #233 incident).
+                if not pane_at_idle_prompt(captured):
+                    logs.append("skip busy-pane (textcall-stall) %s" % (project or pid))
+                    continue
+                wkey = "textcall:" + key
+                action, entry = decide_working(state, wkey, now, idle,
+                                               interval=working_interval,
+                                               max_nudges=max_working_nudges)
+                state[wkey] = entry
+                fs = int(entry.get("first_seen", now))
+                if action == "nudge":
+                    n = len(entry["nudges"])
+                    logs.append("textcall-nudge#%d %s [%s] idle=%dm"
+                                % (n, project, key, int(idle // 60)))
+                    if not dry_run:
+                        send_continue(pid, TEXTCALL_NUDGE_TEXT, run)
+                elif action == "escalate":
+                    logs.append("textcall-escalate %s [%s] — wedged after %d nudges"
+                                % (project, key, max_working_nudges))
+                    send_fn("\U0001f6d1 **%s** — turn sa zlomil (tool-call vypísaný ako "
+                            "text) a nereaguje\n> Po %d× automatickom stuck-check pingu sa "
+                            "session stále nepohla — pravdepodobne zamrzol samotný Claude "
+                            "proces. Treba zásah." % (project, max_working_nudges),
+                            owner=owner, dedup_key="textcall-giveup:%s:%s" % (key, fs),
+                            dry_run=dry_run)
+                else:
+                    logs.append("textcall-%s %s [%s]" % (action, project, key))
+                continue                        # handled as a text-toolcall stall
+
+            # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
+            # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
+            # it'll report when done) but nothing has happened for `stall_working` AND no
+            # subagent transcript is advancing → the launched work MIGHT have died silently.
+            # We send the autonomous form of the user's manual "stucked?": a `stuck-check`
+            # self-check nudge telling the session to verify the liveness of its launched
+            # work and intervene if dead. Safe where a blind `continue` was the user's scar
+            # (see the STALL_WORKING / WORKING_NUDGE_TEXT block): the nudge is a QUESTION
+            # that delegates the healthy-vs-dead call to the session (which has eyes); a
+            # landed nudge resets idle so the episode self-resolves in ONE nudge with no
+            # Discord noise; only a wedged session (no response across `max_working_nudges`
+            # retries) escalates to ONE ping. Gates: advancing-subagent (skips the common
+            # healthy long wait), high threshold (skips CI ≤25 min / mutation ≤20 min),
+            # copy-mode skip (never type into a scrolled pane).
+            if (transcript_last_marker(tpath) == "⏳" and idle >= stall_working
+                    and not subagent_active(tpath, now, stall_working)):
+                # user scrolling / a menu open → keys would be swallowed or corrupt the
+                # selection. Skip WITHOUT advancing state (no retry burned) — same gate as
+                # job 1's api-error nudge. (Adversarial-review finding #3: we deliberately do
+                # NOT add a "pane input buffer non-empty" guard. tmux cannot tell typed text
+                # from the CC input PLACEHOLDER, so such a guard would false-positive and
+                # SUPPRESS the overnight nudge — the exact failure the user is angry about.
+                # The residual — a user typing into a 30-min-stale ⏳ pane in the same 60s
+                # window gets one interleaved, recoverable, visible buffer line while PRESENT
+                # — matches job 1's accepted residual and is not the forced-resume scar.)
+                if pane_in_mode(pid, run):
+                    logs.append("skip in-mode (working-stall) %s" % (project or pid))
+                    continue
+                # NEVER type into a pane that is NOT at a free `❯` idle prompt. A FOREGROUND
+                # subagent (a ticket-validator, a Task/Agent dispatch) BLOCKS the parent, so
+                # its transcript freezes and looks 30-min-idle while the session is ALIVE and
+                # the pane shows the agent running — a nudge keystroke there INTERRUPTS the
+                # live work (the observed "Agent Validate issue #233 · Interrupted" incident).
+                # subagent_active covers the BACKGROUND case (main idle at `❯`); this covers
+                # the FOREGROUND case (no free `❯`). We are ALREADY past `not subagent_active`,
+                # so nothing is advancing — a pane that stays busy with NO progress for a LONG
+                # time is a genuinely wedged / hung foreground turn (the 8-hour silent-loss
+                # class). We can't type (that would interrupt), but a PING never interrupts, so
+                # escalate to ONE ping at a LONGER threshold (2× stall_working, so a merely
+                # long-THINKING foreground agent that just isn't writing its transcript isn't
+                # pinged). One ping per episode; last_seen refreshed so cleanup can't drop it
+                # mid-episode. NEVER a keystroke.
+                if not pane_at_idle_prompt(captured):
+                    bkey = "busypane:" + key
+                    b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
+                    b["last_seen"] = int(now)
+                    state[bkey] = b
+                    if not b["pinged"] and idle >= 2 * stall_working:
+                        b["pinged"] = True
+                        logs.append("busy-pane-wedged %s [%s] idle=%dm — ping only (never type)"
+                                    % (project, key, int(idle // 60)))
+                        send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING, beží agent ktorý sa "
+                                "dlho nepohol (%d min)\n> Vyzerá zaseknuto. Nezasahujem "
+                                "klávesami do bežiaceho agenta (rozbilo by to jeho prácu) — "
+                                "over ho prosím." % (project, int(idle // 60)),
+                                owner=owner, dedup_key="busypane:%s:%s" % (key, b["first_seen"]),
+                                dry_run=dry_run)
+                    else:
+                        logs.append("skip busy-pane (working-stall) %s" % (project or pid))
+                    continue
+                wkey = "working:" + key
+                action, entry = decide_working(state, wkey, now, idle,
+                                               interval=working_interval,
+                                               max_nudges=max_working_nudges)
+                state[wkey] = entry
+                fs = int(entry.get("first_seen", now))
+                if action == "nudge":
+                    n = len(entry["nudges"])
+                    logs.append("working-nudge#%d %s [%s] idle=%dm"
+                                % (n, project, key, int(idle // 60)))
+                    if not dry_run:
+                        send_selfcheck(pid, run)
+                elif action == "escalate":
+                    logs.append("working-escalate %s [%s] — wedged after %d nudges"
+                                % (project, key, max_working_nudges))
+                    send_fn("\U0001f6d1 **%s** — visí na ⏳ WORKING a nereaguje\n> Po %d× "
+                            "automatickom stuck-check pingu sa session stále nepohla — "
+                            "pravdepodobne zamrzol samotný Claude proces. Treba zásah."
+                            % (project, max_working_nudges),
+                            owner=owner, dedup_key="workingstall-giveup:%s:%s" % (key, fs),
+                            dry_run=dry_run)
+                else:
+                    logs.append("working-%s %s [%s]" % (action, project, key))
+
+        except Exception:
+            # one bad pane (corrupted transcript, unexpected tmux-shim
+            # output shape, a raise inside a job handler) must never
+            # abort the whole poll and blank state for every OTHER
+            # healthy pane this cycle — isolate it and move on.
+            logs.append("skip error %s" % Path(tkey).stem)
+            continue
 
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
     # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
