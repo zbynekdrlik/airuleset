@@ -54,9 +54,13 @@ if echo "$LAST_MSG" | grep -qE '\[no-test\](\s|$)'; then
     exit 2
 fi
 
-# Honor [no-test: <reason>] but log it
-if echo "$LAST_MSG" | grep -qE '\[no-test:\s*[^]]+\]'; then
-    REASON=$(echo "$LAST_MSG" | grep -oE '\[no-test:\s*[^]]+\]' | head -1)
+# Honor [no-test: <reason>] but log it. Normalize newlines to spaces first —
+# grep matches per LINE, so a reason that genuinely wraps onto a second line in
+# the commit body would otherwise never have its opening "[no-test:" and
+# closing "]" on the same line, silently failing the match (issue #2).
+LAST_MSG_FLAT=$(printf '%s' "$LAST_MSG" | tr '\n' ' ')
+if echo "$LAST_MSG_FLAT" | grep -qE '\[no-test:\s*[^]]+\]'; then
+    REASON=$(echo "$LAST_MSG_FLAT" | grep -oE '\[no-test:\s*[^]]+\]' | head -1)
     echo "$(date -Iseconds)  project=$PROJECT  sha=$LAST_SHA  $REASON" >> "$AUDIT_LOG"
     exit 0
 fi
