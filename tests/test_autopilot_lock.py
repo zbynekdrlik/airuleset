@@ -17,7 +17,6 @@ a brief `fcntl.flock` on a sibling `.mutex` file so two concurrent
 `acquire` calls on the SAME repo can't both win a stale-steal race.
 """
 
-import json
 import subprocess
 import sys
 import tempfile
@@ -84,7 +83,8 @@ class TestAcquireRelease(TestCase):
         r1 = run(["acquire", "--repo", self.repo, "--pid", str(dp)], home=home)
         self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
         r2 = run(["acquire", "--repo", self.repo, "--pid", "424242"], home=home)
-        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr, "must steal a dead holder's lock")
+        self.assertEqual(r2.returncode, 0,
+                         "must steal a dead holder's lock: " + r2.stdout + r2.stderr)
         log = Path(home) / "devel" / "airuleset" / "audits" / "autopilot-lock-steals.log"
         self.assertTrue(log.exists(), "the steal must be logged")
         self.assertIn(str(dp), log.read_text())
@@ -117,11 +117,16 @@ class TestAcquireRelease(TestCase):
         self.assertEqual(r2.returncode, 0, r2.stdout)
 
     def test_lock_path_stable_across_trailing_slash(self):
-        r1 = run(["acquire", "--repo", self.repo, "--pid", "333"])
+        # pid=1 (init) is guaranteed to exist on any Linux box, so the second
+        # acquire below is unambiguously testing "same lock file, live
+        # holder" rather than depending on an arbitrary pid happening to be
+        # alive on whatever machine runs this test.
+        r1 = run(["acquire", "--repo", self.repo, "--pid", "1"])
         self.assertEqual(r1.returncode, 0, r1.stdout)
         r2 = run(["acquire", "--repo", self.repo + "/", "--pid", "444"])
-        self.assertEqual(r2.returncode, 1, r2.stdout + r2.stderr,
-                         "trailing slash must resolve to the SAME lock file")
+        self.assertEqual(r2.returncode, 1,
+                         "trailing slash must resolve to the SAME lock file: "
+                         + r2.stdout + r2.stderr)
 
 
 class TestWiring(TestCase):

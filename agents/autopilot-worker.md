@@ -135,6 +135,12 @@ confirmed-still-valid issues proceed to the cycle below.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
+**The supervisor holds the cross-session dispatch lock, not you.** Before dispatching you, the
+supervisor acquired the repo's lock via `airuleset.py autopilot-lock acquire --repo <path>` (issue
+#8 — serializes dispatch across SEPARATE `/autopilot` sessions on the same repo, not just within
+one session) and releases it after verifying your evidence block. You never call `autopilot-lock`
+yourself — just do your work; the lock is the supervisor's concern.
+
 1. `git fetch origin`; confirm you are on `dev` with a clean tree. **RESUME, don't restart:** you may
    be a RE-DISPATCH of an earlier worker on this same issue (the supervisor cold-starts a fresh worker
    because `SendMessage` continuation isn't available by default — that's expected, not an error).

@@ -1855,6 +1855,173 @@ def cmd_fable_gate(args):
     sys.exit(0 if ok else 1)
 
 
+# ---------------------------------------------------------------------------
+# autopilot-lock — cross-session serial-per-repo dispatch lock (issue #8)
+# ---------------------------------------------------------------------------
+
+
+def _autopilot_lock_path(repo):
+    """Repo-path-keyed lockfile under the system tempdir. Resolved (realpath)
+    so relative paths, symlinks, and a trailing slash all hash to the SAME
+    lock — a real cross-session lock must not fork on cosmetic path forms."""
+    import hashlib
+    import tempfile as _tempfile
+    real = str(Path(repo).resolve())
+    h = hashlib.sha1(real.encode()).hexdigest()
+    return Path(_tempfile.gettempdir()) / f"airuleset-autopilot-{h}.lock"
+
+
+def _proc_parent_pid(pid):
+    """Linux-only /proc read (both managed machines are Linux). Returns None
+    off-Linux or on any read failure — callers fall back gracefully."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except Exception:
+        return None
+    return None
+
+
+def _campaign_pid():
+    """The PID that should stay alive for the WHOLE autopilot campaign (the
+    span between an `acquire` call and the LATER, separate `release` call).
+
+    Each Claude Code Bash tool call spawns a fresh ephemeral shell that dies
+    the instant that one tool call returns — so os.getppid() alone (this
+    process's immediate parent) is USELESS for staleness detection: it would
+    already look "dead" moments after `acquire` prints success. One level
+    further up is the long-lived `claude` CLI process itself, which persists
+    for the entire session (verified live: a Bash tool call's own PPID is
+    the per-call ephemeral shell; THAT shell's PPID is the stable `claude`
+    process). Walking one extra level up is what makes staleness detection
+    actually mean something across the acquire/release gap.
+    """
+    ppid = os.getppid()
+    grandparent = _proc_parent_pid(ppid)
+    return grandparent or ppid
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by someone else — still alive
+    except Exception:
+        return False
+
+
+def _autopilot_lock_read(lock_path):
+    try:
+        return json.loads(lock_path.read_text())
+    except Exception:
+        return {}
+
+
+def cmd_autopilot_lock(args):
+    """Cross-session serial-per-repo dispatch lock for /autopilot (issue #8).
+
+    The "serial per repo" rule (skills/autopilot/SKILL.md,
+    two-branch-workflow.md) previously had only SESSION-LOCAL enforcement (a
+    supervisor checks its own agent strip) — a SEPARATE `/autopilot` session
+    on the same repo has no visibility into that and can dispatch a
+    colliding worker onto the same `dev` branch (camera-box #495, and the
+    #499/#500-vs-#505 collision).
+
+    `acquire` FAILS (exit 1) when a LIVE holder exists; a DEAD holder's lock
+    is stolen (logged) and acquisition proceeds. `release` only removes a
+    lock it actually owns (matched by pid) — it never touches someone
+    else's lock, and is a no-op success when nothing is locked. `status` is
+    a read-only report. The acquire critical section (check-then-write) is
+    guarded by a brief `fcntl.flock` on a sibling `.mutex` file so two
+    concurrent `acquire` calls on the SAME repo can't both win a
+    stale-steal race — the lock's real persistence across the
+    acquire/release CLI-invocation gap comes from the recorded holder PID
+    staying alive (see `_campaign_pid`), not from the OS-held flock itself
+    (which necessarily releases the instant this short-lived CLI process
+    exits).
+    """
+    import fcntl
+    from datetime import datetime, timezone
+
+    action = args.action
+    repo = args.repo or "."
+    lock_path = _autopilot_lock_path(repo)
+    holder_pid = args.pid if getattr(args, "pid", None) is not None else _campaign_pid()
+
+    if action == "status":
+        if not lock_path.exists():
+            print(f"UNLOCKED {lock_path}")
+            sys.exit(0)
+        holder = _autopilot_lock_read(lock_path)
+        alive = _pid_alive(holder.get("pid"))
+        state = "LOCKED" if alive else "LOCKED (stale — holder pid dead)"
+        print(f"{state} pid={holder.get('pid')} session={holder.get('session', '')} "
+              f"since={holder.get('acquired_at', '')} repo={holder.get('repo', '')}")
+        sys.exit(0)
+
+    if action == "release":
+        if not lock_path.exists():
+            print(f"already unlocked: {lock_path}")
+            sys.exit(0)
+        holder = _autopilot_lock_read(lock_path)
+        if holder.get("pid") == holder_pid:
+            lock_path.unlink(missing_ok=True)
+            print(f"RELEASED {lock_path}")
+            sys.exit(0)
+        print(f"REFUSING to release — held by a DIFFERENT holder "
+              f"(pid={holder.get('pid')}, session={holder.get('session', '')}); "
+              f"not releasing a lock this caller does not own.", file=sys.stderr)
+        sys.exit(1)
+
+    if action == "acquire":
+        payload = {
+            "pid": holder_pid,
+            "session": args.session or "",
+            "repo": str(Path(repo).resolve()),
+            "acquired_at": datetime.now(timezone.utc).isoformat(),
+        }
+        mutex_path = str(lock_path) + ".mutex"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        mfd = os.open(mutex_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(mfd, fcntl.LOCK_EX)
+            if lock_path.exists():
+                holder = _autopilot_lock_read(lock_path)
+                if _pid_alive(holder.get("pid")):
+                    print(f"BLOCKED: {payload['repo']} already has an active "
+                          f"autopilot worker (held by pid={holder.get('pid')}, "
+                          f"session={holder.get('session', '')}, "
+                          f"since={holder.get('acquired_at', '')}). Serial-per-repo "
+                          f"dispatch — wait for it to finish (`autopilot-lock status "
+                          f"--repo {repo}`), do NOT dispatch a second worker.",
+                          file=sys.stderr)
+                    sys.exit(1)
+                # Holder's pid is dead — steal it, log the steal.
+                steal_log = Path.home() / "devel" / "airuleset" / "audits" / "autopilot-lock-steals.log"
+                steal_log.parent.mkdir(parents=True, exist_ok=True)
+                with open(steal_log, "a") as f:
+                    f.write(f"{datetime.now(timezone.utc).isoformat()}  "
+                            f"repo={payload['repo']}  stole from dead "
+                            f"pid={holder.get('pid')} session={holder.get('session', '')}\n")
+            lock_path.write_text(json.dumps(payload))
+            print(f"ACQUIRED {lock_path} pid={holder_pid}")
+            sys.exit(0)
+        finally:
+            fcntl.flock(mfd, fcntl.LOCK_UN)
+            os.close(mfd)
+
+
 def setup_watchdog_service():
     """Install + start the api-watchdog systemd --user timer on THIS machine
     (every host — autopilot runs on dev1 and dev2). Mirrors the file-drop setup:
@@ -2023,6 +2190,21 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_lock = sub.add_parser(
+        "autopilot-lock",
+        help="Cross-session serial-per-repo dispatch lock for /autopilot")
+    p_lock.add_argument("action", choices=["acquire", "release", "status"],
+                        help="acquire (fails if a LIVE holder exists), "
+                             "release (only removes a lock this caller owns), "
+                             "or status (read-only report)")
+    p_lock.add_argument("--repo", default=".", help="Repo path to lock (default: cwd)")
+    p_lock.add_argument("--session", default="",
+                        help="Free-text session id recorded for display only "
+                             "(matching for release/steal is by pid, not this)")
+    p_lock.add_argument("--pid", type=int, default=None,
+                        help="Override the recorded/compared holder pid "
+                             "(default: auto-detect the long-lived campaign process)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -2045,6 +2227,7 @@ SUBCOMMANDS = {
     "watchdog": cmd_watchdog,
     "fable-gate": cmd_fable_gate,
     "tickets-status": cmd_tickets_status,
+    "autopilot-lock": cmd_autopilot_lock,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

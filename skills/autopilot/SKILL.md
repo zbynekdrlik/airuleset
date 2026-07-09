@@ -213,10 +213,20 @@ Each loop turn:
      main session) re-verify every line of the worker's evidence block regardless.
    - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
      `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
-   - **Serial per repo (hard).** Before dispatching, if a background `autopilot-worker` for THIS repo
-     is STILL running (check the agent strip / running tasks), do **NOTHING** this turn — end
-     `⏳ WORKING` and let it finish (it re-invokes you). NEVER dispatch a second worker on the same
-     repo while one runs — two would collide on `dev`. (A batch is still ONE worker.)
+   - **Serial per repo (hard) — session-local check PLUS a cross-session lock (issue #8).** Before
+     dispatching, if a background `autopilot-worker` for THIS repo is STILL running in THIS session
+     (check the agent strip / running tasks), do **NOTHING** this turn — end `⏳ WORKING` and let it
+     finish (it re-invokes you). That check alone has NO visibility into a SEPARATE `/autopilot`
+     session on the same repo (another terminal/tmux window) — the proven root cause of camera-box
+     #495 and the #499/#500-vs-#505 collision. So ALSO acquire the cross-session lock immediately
+     before dispatch: `python3 ~/devel/airuleset/airuleset.py autopilot-lock acquire --repo <repo
+     path>` (exit 0 = acquired, proceed to dispatch; exit 1 = a DIFFERENT live session already holds
+     it — do **NOTHING** this turn, same as the session-local case, end `⏳ WORKING`, it re-invokes
+     you and you retry). NEVER dispatch a second worker on the same repo while either check says
+     busy — two would collide on `dev`. (A batch is still ONE worker, one lock.) **Release the lock**
+     after the worker's evidence block is verified in Step 4 — see the release step there — so a
+     crashed/never-returning worker doesn't wedge the lock forever (a dead holder's lock is also
+     auto-stolen by the NEXT `acquire`, logged to `audits/autopilot-lock-steals.log`, as a backstop).
 3. The worker re-validates each batched issue is still real (`verify-issue-still-valid.md` — defense
    in depth on top of 1b), then runs ONE cycle for the whole batch on one `dev` branch: version bump
    → per-issue TDD (each bug RED→GREEN, each member committed with its own `Closes #<n>`) → ONE push
@@ -282,6 +292,14 @@ Each loop turn:
    > (one card per ticket, re-dispatches never double-post). So the supervisor does NOT call `notify`;
    > just confirm the worker carded each merged member. The short `❓`/`✅` idle ping stays suppressed
    > (this loop turn ends `⏳ WORKING`).
+   > **Release the cross-session lock now that verification is done:** `python3
+   > ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees the repo
+   > for another `/autopilot` session's `acquire` to succeed. Release even when the batch was
+   > partially dropped (Step 3 note) or the worker's evidence looked wrong — the lock's job is
+   > "is a worker actively running", not "did the batch fully succeed". If a worker never returns at
+   > all (crashed mid-run), do NOT hand-release from a DIFFERENT campaign — the NEXT `acquire` attempt
+   > (this session or another) auto-steals a dead holder's lock (logged to
+   > `audits/autopilot-lock-steals.log`), so a stuck lock self-heals without manual intervention.
 5. **Immediately assemble the next batch** — including right after a merge. Do NOT stop to report
    between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
 
