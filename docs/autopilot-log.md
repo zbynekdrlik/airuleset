@@ -4,3 +4,6 @@
 2026-07-09 autopilot batch2: #7 ruff cleanup 102→0 errors (b6fe3ba) + cmd_push ruff gate test:a2b19da[red]→fix:e7105b0[green]
 2026-07-09 autopilot batch2: #10 block-test-skips.sh hook, test:88ab805[red]→feat:62d8245[green]
 2026-07-09 autopilot batch2: #11 block-history-rewrite.sh hook, test:0ce0a47[red]→feat:0d3afd4[green]
+2026-07-09 autopilot batch3: #4 secret-scan hook content-value Gate 2, test:9b7bad8[red]→feat:f3d648e[green]; follow-up bypass-marker quote bug found+fixed same batch, test:0d1d91f[red]→fix:d1fde9b[green]; empirical finding: PreToolUse hooks DO fire for in-session background subagents (self-tested live from inside this autopilot-worker)
+2026-07-09 autopilot batch3: #8 cross-session autopilot-lock (fcntl.flock + pid-liveness), test:548e14e[red]→feat:74c2660[green]; wired into skills/autopilot/SKILL.md + agents/autopilot-worker.md
+2026-07-09 autopilot batch3: #12 investigated CC 2.1.198 agent_needs_input/agent_completed — confirmed scoped to claude agents/--bg fleet daemon (disabled here via disableAgentView), not the interactive session; closed not-actionable with evidence; split "send-to-user tool" idea to #15
