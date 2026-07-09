@@ -863,6 +863,102 @@ def _assistant_apierror(text="API Error: 529 Overloaded"):
             "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
 
+class RunOncePreservesStateOnError(unittest.TestCase):
+    """(adversarial-review finding) A TRANSIENT per-pane exception (a
+    corrupted capture, an unexpected tmux-shim shape) must NOT be conflated
+    with "the session recovered" — job 1's own bare-key state entry (its
+    nudge/escalation history) must survive a poll where THIS session's
+    processing raised, so a LATER successful poll continues the SAME
+    episode instead of silently resetting to nudge#1 (and re-pinging /
+    re-counting from scratch)."""
+
+    CWD = "/home/newlevel/devel/some-project"
+    PANE = "%9"
+    SID = "sess-transient"
+
+    def test_transient_capture_error_preserves_job1_state(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, [_assistant_apierror()])
+        now = time.time()
+        idle_seconds = 600
+        os.utime(tpath, (now - idle_seconds, now - idle_seconds))
+
+        err_hash = wd._hash("API Error: 529 Overloaded")
+        state_path = Path(tmp.name) / "state.json"
+        seeded = {self.SID: {"hash": err_hash, "first_seen": int(now - idle_seconds),
+                             "nudges": [int(now - 400)], "escalated": False}}
+        wd.save_state(state_path, seeded)
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "capture-pane" in j:
+                # simulate a transient tmux-shim / capture failure for THIS pane
+                raise RuntimeError("simulated transient capture failure")
+            if "display-message" in argv[0:2] or "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "send-keys" in j:
+                return ""
+            return ""
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"))
+
+        self.assertTrue(any("skip error" in ln and self.SID in ln for ln in logs),
+                        "expected a 'skip error' log line naming the session, "
+                        "got: %r" % logs)
+        saved = json.loads(state_path.read_text())
+        self.assertIn(self.SID, saved,
+                      "a TRANSIENT per-pane error must not clear an existing "
+                      "job-1 episode — saved keys: %r" % list(saved.keys()))
+        self.assertEqual(len(saved[self.SID].get("nudges", [])), 1,
+                         "nudge history must survive a transient per-pane error, "
+                         "got: %r" % saved.get(self.SID))
+
+    def test_skip_error_log_includes_exception_repr(self):
+        # the bare "skip error <sid>" log line carried NO exception detail
+        # at all — impossible to diagnose a recurring transient failure
+        # from the log alone.
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, [_assistant("hello")])
+        now = time.time()
+        os.utime(tpath, (now - 60, now - 60))
+        state_path = Path(tmp.name) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "capture-pane" in j:
+                raise RuntimeError("boom-detail-12345")
+            return ""
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"))
+        self.assertTrue(any("boom-detail-12345" in ln for ln in logs),
+                        "expected the exception detail in the skip-error log, "
+                        "got: %r" % logs)
+
+
 class RunOnceSubagentVisibility(unittest.TestCase):
     """(issue #6) run_once must apply job 1's api-error detector AND job 4a's
     text-toolcall-stall detector to the newest subagents/*.jsonl too, not just the
@@ -1005,6 +1101,68 @@ class RunOnceSubagentVisibility(unittest.TestCase):
         self.assertEqual(sent, [], "MUST NOT type into a busy pane")
         self.assertTrue(any("subagent-textcall-busy" in ln for ln in logs), logs)
         self.assertTrue(pings, "expected a Discord ping instead of a keystroke")
+
+    # --- adversarial-review findings (autopilot cumulative-diff review) ---------
+
+    def test_subagent_apierror_nudge_does_not_double_inject_with_job4(self):
+        # Job 1b (subagent api-error) and job 4 (supervisor ⏳-working-stall)
+        # can BOTH be true for the SAME pane in the SAME poll: the
+        # supervisor itself is `⏳ WORKING` and idle past STALL_WORKING_
+        # SECONDS, AND its own subagent is dying. Job 1b's own nudge did
+        # not `continue` afterward, so job 4 fell through and injected a
+        # SECOND keystroke into the same pane, gated on the now-STALE
+        # pre-injection pane capture. Exactly ONE literal-text nudge must
+        # be sent per pane per poll.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("⏳ WORKING: čakám na workera.")],
+            [_assistant_apierror()],
+            sup_age=2000, sub_age=2000)      # both > STALL_WORKING_SECONDS (1800)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        literal_nudges = [a for a in sent if "-l" in a]
+        self.assertEqual(len(literal_nudges), 1,
+                         "exactly ONE keystroke injection per pane per poll, "
+                         "got: %r" % sent)
+        self.assertTrue(any("background worker" in x and self.WORKER in x
+                            for a in literal_nudges for x in a),
+                        "the one injection must be job 1b's targeted subagent "
+                        "nudge, not job 4's generic self-check: sent=%r" % sent)
+
+    def test_subagent_apierror_skipped_once_supervisor_reports_done(self):
+        # A dying background worker whose transcript happens to be the
+        # newest file under subagents/ must stop nudging once the
+        # SUPERVISOR itself has moved past `⏳ WORKING` (here: `✅ DONE`) —
+        # a historical worker's frozen last-entry api-error must never
+        # keep firing into an already-finished session.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("✅ DONE: hotovo, PR zmergovaný.")],
+            [_assistant_apierror()],
+            sup_age=10, sub_age=2000)         # sub_age well past GRACE_SECONDS (300)
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertEqual(sent, [], "must NOT type into a pane whose session is done")
+        self.assertFalse(any("subagent-apierr" in ln for ln in logs),
+                         "must not even attempt the subagent-apierr detector "
+                         "once the supervisor reports done: %r" % logs)
+
+    def test_subagent_apierror_skipped_when_file_older_than_max_age(self):
+        # `newest_subagent_transcript` always returns the MOST RECENTLY
+        # WRITTEN file under subagents/, even if that file itself is
+        # ancient — with no age ceiling, a single old dying-worker file
+        # would nudge/escalate FOREVER. Supervisor is genuinely still
+        # `⏳ WORKING` here (so the marker gate alone would NOT stop it) —
+        # only the max-age ceiling on the subagent file itself does.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("⏳ WORKING: stále bežím.")],
+            [_assistant_apierror()],
+            sup_age=10, sub_age=3 * 3600)     # 3h — older than the 2h ceiling
+        state_path = Path(tmp) / "state.json"
+        logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertEqual(sent, [], "must NOT nudge for a subagent file past the age ceiling")
+        self.assertFalse(any("subagent-apierr" in ln for ln in logs), logs)
 
 
 def tempfile_mkdtemp_cleanup(testcase):
