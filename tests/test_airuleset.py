@@ -16,6 +16,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 
 
+def _path_without_python3():
+    """A PATH directory (symlinks to everything in /usr/bin except python3*)
+    for reproducing a hook's embedded-python3-child failing to launch —
+    used by the exit-code-discipline tests (a hook malfunction, e.g.
+    python3 missing, must never be reported as a real content violation
+    with an empty reason)."""
+    tmpbin = tempfile.mkdtemp()
+    src_dir = "/usr/bin"
+    for name in os.listdir(src_dir):
+        if name.startswith("python3"):
+            continue
+        try:
+            os.symlink(os.path.join(src_dir, name), os.path.join(tmpbin, name))
+        except OSError as e:
+            print("symlink skipped for %s: %r" % (name, e))
+    return tmpbin
+
+
 class TestParseProfile(TestCase):
     def test_universal_profile_parses(self):
         entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
@@ -4864,6 +4882,48 @@ class TestBlockDestructiveRemoteHook(TestCase):
     def test_allows_unrelated_git_command(self):
         r = self._run("git push --force origin main")
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- adversarial-review findings (autopilot cumulative-diff review) -----
+
+    def test_bypass_marker_inside_unrelated_quotes_does_not_bypass_real_violation(self):
+        # the marker text merely being MENTIONED inside an unrelated quoted
+        # string (documentation, an echo) must NOT bypass a genuinely
+        # dangerous, UNRELATED command elsewhere in the same line — same
+        # class of bug fixed in block-sensitive-staging.sh (d1fde9b): a real
+        # bash `#` only starts a comment when it is NOT inside quotes.
+        cmd = ('echo "we use the marker like # airuleset:destructive-ok '
+               'explaining it" ; ssh host "sudo reboot"')
+        r = self._run(cmd)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("reboot", r.stderr.lower())
+
+    def test_assignment_prefix_does_not_defeat_detection(self):
+        # `FOO=1 ssh host reboot` — a leading env-var assignment token
+        # before the real command must not hide it from strip_prefix
+        # (which already skips sudo/env/time/nice/ionice but not `VAR=val`).
+        r = self._run('FOO=1 ssh host "reboot"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_psql_dash_H_is_html_output_not_a_host_flag(self):
+        # psql's -H means "HTML output", NOT a remote-host flag (that's
+        # -h/--host). Treating -H as a host flag makes a purely LOCAL
+        # `psql -H -c 'DROP TABLE ...'` false-positive as a remote-DB drop.
+        r = self._run("psql -H -c 'DROP TABLE users;'")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
+        # any python3-child exit OTHER than the deliberate `sys.exit(2)`
+        # (missing python3 => 127, permission => 126, an unexpected crash)
+        # must never be reported as if it were a real content violation
+        # with an EMPTY reason — it's a HOOK MALFUNCTION, say so honestly,
+        # and still fail closed (never silently let the command through).
+        tmpbin = _path_without_python3()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpbin, ignore_errors=True))
+        r = self._run('ssh host "shutdown -h now"', env_extra={"PATH": tmpbin})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("internal error", r.stderr.lower())
+        self.assertNotIn("BLOCKED: destructive command aimed at a REMOTE host/database.\n\n  \n",
+                         r.stderr, "must not reuse the empty-reason 'real violation' message")
 
     # --- bypass --------------------------------------------------------
 
