@@ -4,6 +4,8 @@
 
 #### Model tiering — Opus 4.8 + Sonnet 5 default; Fable 5 AUTO-escalates on genuinely HARD tasks, budget-gated (ACTIVE policy, 2026-07-03)
 
+*(This section is the GENERAL tiering policy. `claude-code-tooling.md` → "Tier the model PER STAGE" restates the same tiers as their Workflow-specific application (`opts.model`/`opts.effort` per `agent()` stage) — that overlap is INTENTIONAL, not a dedup target: general policy here, its Workflow application there.)*
+
 **History that shapes this policy:** the 2026-07-01 Fable-everywhere mode burned tokens brutally and kept tripping the usage limits mid-work — the user reverted it 2026-07-02 (reverted the 2026-07-01 policy). New standing directive (2026-07-03): the user does NOT want all work to be only Opus + Sonnet — **genuinely HARD tasks escalate to Fable 5 AUTOMATICALLY** (in autopilot, brainstorming/design, workflows, hard debugging), WITHOUT asking. What makes this safe where Fable-everywhere was not: (1) only the HARD subset escalates (routine work stays Opus/Sonnet), and (2) **every automatic escalation is BUDGET-GATED** — `python3 ~/devel/airuleset/airuleset.py fable-gate` (exit 0 `OPEN` / exit 1 `CLOSED`) checks the Fable weekly + shared weekly windows from the watchdog's usage cache and closes automatic Fable once headroom runs out (default gate 80%, env `AIRULESET_FABLE_GATE_PCT`), so the limit-trip-stops-work failure cannot repeat. Gate CLOSED → the same task runs Opus. Fail-safe: missing/stale cache = CLOSED. (The 5-hour session window intentionally does NOT gate — only the weekly windows do; don't 'fix' that.)
 
 **The lineup:**
