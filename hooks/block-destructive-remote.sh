@@ -65,11 +65,30 @@ if [ "${AIRULESET_ALLOW_DESTRUCTIVE_REMOTE:-}" = "1" ]; then
 fi
 
 # Bypass 2: inline '# airuleset:destructive-ok <reason>' trailing the command.
-if echo "$INPUT" | grep -qE '#[[:space:]]*airuleset:destructive-ok'; then
+# The marker must be OUTSIDE any quoted string — a real bash `#` only starts
+# a comment when it is not inside quotes, so quoted spans are stripped
+# FIRST. Without this, the marker text merely being MENTIONED inside an
+# unrelated quoted string (documentation, an echo) would bypass the ENTIRE
+# check, including a genuinely dangerous UNRELATED command elsewhere on the
+# same line — same class of bug already fixed in block-sensitive-staging.sh
+# (d1fde9b).
+BYPASS_REASON=$(printf '%s' "$INPUT" | python3 -c 'import re,sys
+cmd=sys.stdin.read()
+SQ=chr(39)
+DQ=chr(34)
+unquoted=re.sub(SQ+"[^"+SQ+"]*"+SQ, "", cmd)     # strip '"'"'...'"'"' spans
+unquoted=re.sub(DQ+"[^"+DQ+"]*"+DQ, "", unquoted)  # strip "..." spans
+m=None
+for mm in re.finditer(r"#[ \t]*airuleset:destructive-ok[ \t]+([^\n]+)", unquoted):
+    m=mm
+if m:
+    print(m.group(1).rstrip())
+' 2>/dev/null || echo "")
+
+if [ -n "$BYPASS_REASON" ]; then
     PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
     mkdir -p "$(dirname "$AUDIT_LOG")"
-    REASON=$(echo "$INPUT" | grep -oE '#[[:space:]]*airuleset:destructive-ok.*' | head -1)
-    echo "$(date -Iseconds)  project=$PROJECT  inline-bypass  $REASON" >> "$AUDIT_LOG"
+    echo "$(date -Iseconds)  project=$PROJECT  inline-bypass  # airuleset:destructive-ok $BYPASS_REASON" >> "$AUDIT_LOG"
     exit 0
 fi
 
@@ -141,9 +160,17 @@ def tokens_of(segment):
         return segment.split()
 
 
+ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
 def strip_prefix(tk):
+    # drop a leading sudo/env/time/nice/ionice runner AND any leading
+    # `VAR=val` environment-assignment token(s) — `FOO=1 ssh host reboot`
+    # must be detected exactly like `ssh host reboot`, not hidden by the
+    # assignment prefix.
     i = 0
-    while i < len(tk) and tk[i] in ("sudo", "env", "time", "nice", "ionice"):
+    while i < len(tk) and (tk[i] in ("sudo", "env", "time", "nice", "ionice")
+                            or ASSIGN_RE.match(tk[i])):
         i += 1
     return tk[i:]
 
@@ -236,8 +263,12 @@ def has_db_client(tokens):
 
 
 def has_remote_db_host(tokens):
+    # NOTE: -H is deliberately NOT a host flag here — in psql, -H means
+    # "HTML output" (mysql's -H doesn't exist either); only -h/--host name
+    # a remote host. Treating -H as a host flag made a purely LOCAL
+    # `psql -H -c 'DROP TABLE ...'` false-positive as a remote DROP.
     for i, t in enumerate(tokens):
-        if t in ("-h", "--host", "-H") and i + 1 < len(tokens):
+        if t in ("-h", "--host") and i + 1 < len(tokens):
             if tokens[i + 1].lower() not in LOCAL_HOSTS:
                 return True
         m = re.match(r'--host=(.+)', t)
@@ -294,7 +325,7 @@ PYEOF
 ) || RC=$?
 RC=${RC:-0}
 
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 2 ]; then
     echo "" >&2
     echo "🚫 BLOCKED: destructive command aimed at a REMOTE host/database." >&2
     echo "" >&2
@@ -313,6 +344,20 @@ if [ "$RC" -ne 0 ]; then
     echo "  Bypass (rare, user-instructed only, logged): append" >&2
     echo "  '# airuleset:destructive-ok <reason>' to the command, or set" >&2
     echo "  AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1." >&2
+    echo "" >&2
+    exit 2
+elif [ "$RC" -ne 0 ]; then
+    # A non-2 nonzero exit means the CHECK ITSELF malfunctioned (missing
+    # python3, an internal bug) — never a real destructive-command
+    # violation. Fail CLOSED but say so HONESTLY instead of reusing the
+    # "BLOCKED: destructive command" message with an empty reason.
+    echo "" >&2
+    echo "🚫 BLOCKED (fail-closed): block-destructive-remote.sh internal error" >&2
+    echo "  — python3 exited $RC instead of running the check." >&2
+    echo "$VIOLATION" >&2
+    echo "" >&2
+    echo "  This is a HOOK MALFUNCTION, not necessarily a real violation —" >&2
+    echo "  investigate and fix the hook (or install python3) before retrying." >&2
     echo "" >&2
     exit 2
 fi
