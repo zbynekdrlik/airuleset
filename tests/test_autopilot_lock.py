@@ -144,5 +144,69 @@ class TestWiring(TestCase):
         self.assertIn("autopilot-lock", text)
 
 
+class TestCampaignPidAncestryWalk(TestCase):
+    """(adversarial-review finding) `_campaign_pid()` must stay alive for
+    the WHOLE autopilot campaign (acquire..release). It walks up from
+    os.getppid() looking for the long-lived `claude` process. The OLD
+    implementation walked exactly ONE hop up (`_proc_parent_pid(ppid)`,
+    the "grandparent" of the current process) — correct ONLY when there is
+    EXACTLY one ephemeral shell layer between this process and `claude`.
+    An EXTRA shell layer (a `bash -c '...'` wrapper, or any nested
+    invocation) makes that one-hop walk land on ANOTHER ephemeral shell
+    instead of `claude` — that shell dies the instant its own tool call
+    returns, so the recorded holder PID looks stale almost immediately,
+    and a concurrent `/autopilot` session on the same repo steals the
+    "live" lock (reintroducing the exact #8 collision this lock exists to
+    prevent). The fix walks UP the ancestry an unbounded number of hops
+    (bounded only as a safety cap) until it finds a process whose `comm`
+    is a known long-lived one (`claude` / `node`), not a fixed hop count."""
+
+    def setUp(self):
+        sys.path.insert(0, str(REPO))
+        import airuleset
+        self.airuleset = airuleset
+
+    def test_single_shell_layer_still_returns_grandparent(self):
+        # the common case (unchanged from before): one ephemeral shell
+        # between this process and `claude` — walking up from ppid finds
+        # `claude` after exactly one hop, same as the old grandparent-only
+        # behavior.
+        import unittest.mock as mock
+        parents = {2000: 3000}
+        comms = {2000: "bash", 3000: "claude"}
+        with mock.patch.object(self.airuleset.os, "getppid", return_value=2000), \
+             mock.patch.object(self.airuleset, "_proc_parent_pid",
+                               side_effect=lambda p: parents.get(p)), \
+             mock.patch.object(self.airuleset, "_proc_comm",
+                               side_effect=lambda p: comms.get(p)):
+            self.assertEqual(self.airuleset._campaign_pid(), 3000)
+
+    def test_extra_shell_layer_still_finds_claude_not_the_extra_shell(self):
+        # a `bash -c '...'` wrapper adds an EXTRA ephemeral shell layer
+        # between this process and `claude`. Walking only ONE hop up (the
+        # old, buggy behavior) would land on that extra shell (pid 3000,
+        # comm "bash") instead of `claude` (pid 4000) — the lock would go
+        # stale the instant that extra shell exits.
+        import unittest.mock as mock
+        parents = {2000: 3000, 3000: 4000}
+        comms = {2000: "bash", 3000: "bash", 4000: "claude"}
+        with mock.patch.object(self.airuleset.os, "getppid", return_value=2000), \
+             mock.patch.object(self.airuleset, "_proc_parent_pid",
+                               side_effect=lambda p: parents.get(p)), \
+             mock.patch.object(self.airuleset, "_proc_comm",
+                               side_effect=lambda p: comms.get(p)):
+            self.assertEqual(self.airuleset._campaign_pid(), 4000)
+
+    def test_no_claude_found_falls_back_to_last_known_pid(self):
+        # /proc reads can fail (off-Linux, permission, the ancestry chain
+        # genuinely ends) — must never crash, and must fall back to SOME
+        # usable pid rather than None.
+        import unittest.mock as mock
+        with mock.patch.object(self.airuleset.os, "getppid", return_value=2000), \
+             mock.patch.object(self.airuleset, "_proc_parent_pid", return_value=None), \
+             mock.patch.object(self.airuleset, "_proc_comm", return_value=None):
+            self.assertEqual(self.airuleset._campaign_pid(), 2000)
+
+
 if __name__ == "__main__":
     main()

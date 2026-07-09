@@ -4566,6 +4566,34 @@ class TestCmdPushRuffGate(TestCase):
         self.assertLess(ruff_idx, test_idx, "ruff gate must run BEFORE the test suite")
         self.assertLess(test_idx, push_idx, "tests must still run before git push")
 
+    def test_push_missing_ruff_binary_exits_cleanly_not_a_traceback(self):
+        # adversarial-review finding: a missing `ruff` binary raised an
+        # UNHANDLED FileNotFoundError straight out of cmd_push (a raw
+        # traceback dumped at the user instead of a clean fail-closed
+        # message) — push still correctly aborted (the traceback IS fatal),
+        # but the failure mode must be a handled, readable message, not an
+        # unhandled exception escaping the function.
+        import unittest.mock as m
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                raise FileNotFoundError(2, "No such file or directory", "ruff")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run):
+            with m.patch.object(airuleset, "cmd_install") as fake_install:
+                with self.assertRaises(SystemExit) as cm:
+                    airuleset.cmd_push(args)
+                self.assertEqual(cm.exception.code, 1)
+                fake_install.assert_not_called()
+        self.assertFalse(any("unittest" in c for c in calls),
+                         "must abort before the test suite runs")
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in calls),
+                         "must abort before git push")
+
 
 class TestBlockTestSkipsHook(TestCase):
     """hooks/block-test-skips.sh (issue #10) — mechanical enforcement of
