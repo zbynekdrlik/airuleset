@@ -1757,6 +1757,7 @@ class TestHookScriptsExist(TestCase):
             "post-push-ci-cleanup.sh",
             "pre-push-lint.sh",
             "pre-push-test-check.sh",
+            "block-test-skips.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -4485,3 +4486,120 @@ class TestCmdPushRuffGate(TestCase):
         push_idx = next(i for i, c in enumerate(calls) if c[:2] == ["git", "push"])
         self.assertLess(ruff_idx, test_idx, "ruff gate must run BEFORE the test suite")
         self.assertLess(test_idx, push_idx, "tests must still run before git push")
+
+
+class TestBlockTestSkipsHook(TestCase):
+    """hooks/block-test-skips.sh (issue #10) — mechanical enforcement of
+    test-strictness.md's banned skip/tautology syntax. Only ADDED lines
+    (this push's diff) in TEST files are scanned; pre-existing tech debt
+    the pusher didn't touch must NOT block them."""
+
+    HOOK = "block-test-skips.sh"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        # isolate HOME so the audit log write lands in a temp dir, never the real one
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=cwd, timeout=60, env=env)
+
+    def _repo(self, base_test_content, added_test_content, extra_commit_msg=""):
+        """main branch with `base_test_content` already committed (simulating
+        pre-existing content), then a second commit APPENDING
+        `added_test_content` to the same test file — the diff this push is
+        about to send."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        test_path = os.path.join(root, "tests", "test_thing.py")
+        os.makedirs(os.path.dirname(test_path), exist_ok=True)
+        with open(test_path, "w") as fh:
+            fh.write(base_test_content)
+        g("add", "tests/test_thing.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        with open(test_path, "a") as fh:
+            fh.write(added_test_content)
+        g("add", "tests/test_thing.py")
+        msg = "test: add coverage" + (("\n\n" + extra_commit_msg) if extra_commit_msg else "")
+        g("commit", "-qm", msg)
+        return root
+
+    def test_blocks_rust_ignore_added(self):
+        root = self._repo("", "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("BLOCKED", r.stdout)
+        self.assertIn("#[ignore]", r.stdout)
+
+    def test_blocks_pytest_mark_skip(self):
+        root = self._repo("", "@pytest.mark.skip\ndef test_x():\n    assert 1 == 1\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("pytest.mark.skip", r.stdout)
+
+    def test_blocks_js_test_skip(self):
+        root = self._repo("", "test.skip('does the thing', () => { expect(1).toBe(1); });\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("test.skip", r.stdout)
+
+    def test_blocks_assert_true_tautology(self):
+        root = self._repo("", "fn test_x() { assert!(true); }\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("assert!(true)", r.stdout)
+
+    def test_blocks_empty_test_body_python(self):
+        root = self._repo("", "def test_x():\n    pass\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("empty test body", r.stdout)
+
+    def test_blocks_empty_test_body_js_arrow(self):
+        root = self._repo("", "it('does nothing', () => {});\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("empty test body", r.stdout)
+
+    def test_allows_preexisting_skip_untouched_by_this_push(self):
+        # the skip already existed BEFORE this push (base commit) — this push
+        # only adds an unrelated real test. Must NOT block on old tech debt.
+        base = "#[ignore]\nfn test_old() { assert!(1 == 1); }\n"
+        root = self._repo(base, "fn test_new() { assert_eq!(2 + 2, 4); }\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_real_test_addition(self):
+        root = self._repo("", "def test_adds_correctly():\n    assert 2 + 2 == 4\n")
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_bypass_with_reason_is_logged(self):
+        root = self._repo(
+            "", "#[ignore]\nfn test_x() { assert!(1 == 1); }\n",
+            extra_commit_msg="# airuleset:test-skip-ok flaky on CI runner, tracked in #99",
+        )
+        r = self._run("git push origin main", root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_non_push_is_noop(self):
+        import shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        r = self._run("ls -la", d)
+        self.assertEqual(r.returncode, 0)
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("block-test-skips.sh" in c for c in cmds))
