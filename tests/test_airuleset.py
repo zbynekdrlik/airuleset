@@ -2465,6 +2465,30 @@ class TestSubagentTypeHook(TestCase):
         r = self._run("autopilot-worker", home=self._tmp_home())
         self.assertEqual(r.returncode, 2)
 
+    # Plugin-provided agents (REAL since caveman 0d95a81d ships cavecrew-*):
+    # `<plugin>:<agent>` is VALID iff the plugin cache carries agents/<agent>.md
+    # (either layout: <hash>/agents/ or <hash>/src/agents/ — layout-rot lesson).
+    def _plugin_home(self, layout="agents"):
+        home = self._tmp_home()
+        d = home / ".claude" / "plugins" / "cache" / "mkt" / "plug" / "abc123"
+        if layout == "src":
+            d = d / "src"
+        (d / "agents").mkdir(parents=True)
+        (d / "agents" / "myagent.md").write_text("---\nname: myagent\n---\nbody")
+        return home
+
+    def test_plugin_cache_agent_allowed(self):
+        r = self._run("plug:myagent", home=self._plugin_home())
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_plugin_cache_agent_src_layout_allowed(self):
+        r = self._run("plug:myagent", home=self._plugin_home(layout="src"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_plugin_prefixed_without_cache_still_blocked(self):
+        r = self._run("plug:ghost", home=self._plugin_home())
+        self.assertEqual(r.returncode, 2)
+
 
 class TestRulesHaveFrontmatter(TestCase):
     def test_all_rules_have_paths_frontmatter(self):
