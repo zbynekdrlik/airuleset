@@ -39,22 +39,7 @@ If you catch yourself listing items in a "custom layer" without having read the 
 
 #### What investigation looks like in practice
 
-For an Odoo / OCA scenario:
-
-```bash
-# Read the upstream manifest to see what's shipped
-curl -s "https://raw.githubusercontent.com/OCA/<repo>/<branch>/<module>/__manifest__.py"
-
-# List the upstream wizards / views / reports
-curl -s "https://api.github.com/repos/OCA/<repo>/contents/<module>?ref=<branch>"
-
-# Read specific files that map to your proposed custom items
-curl -s "https://raw.githubusercontent.com/OCA/<repo>/<branch>/<module>/wizard/foo.py"
-```
-
-For an npm / pypi scenario: read the package's `index.d.ts` / type stubs, read the README on github (not just npmjs.com), read recent issues for known gaps.
-
-For a framework scenario: read the framework source for the area you're touching. Don't trust general knowledge.
+Read the ACTUAL source for each item you'd otherwise call "custom" — never estimate from memory. For a library, read the package's `index.d.ts` / type stubs, the GitHub README (not just the registry page), and recent issues for known gaps. For a framework or an OCA/upstream module, read the source / manifest / shipped wizard-view-report list for the area you're touching (`curl -s raw.githubusercontent.com/...`; project-specific recipes — e.g. Odoo/OCA manifest+wizard reads — live in that project's own playbook skill, not here). Don't trust general knowledge.
 
 #### When existing solution is partial
 

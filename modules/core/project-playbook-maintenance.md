@@ -28,6 +28,6 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 
 #### Post-ticket mandate
 
-After **po každom tickete** run the `playbook-review` skill before the completion report; the report MUST carry a `📔 Playbook:` line stating whether the playbook was updated and what (or "no update needed").
+Run the `playbook-review` skill **po každom tickete**, before the completion report — it emits the required `📔 Playbook:` line and `stop-check-playbook-review.sh` enforces its presence. Both own the mandate; this module just points at it.
 
 Applies to all rewordings and semantic equivalents.

@@ -30,17 +30,12 @@ already answered.
 
 #### Hard gate for `/autopilot` + `/issue-planner` — the `ticket-validator` subagent
 
-A glance by the implementer is not enough (this keeps recurring). `/autopilot` (supervisor, before
-dispatching the worker for an issue) and `/issue-planner` (per open issue, before selection) MUST
-dispatch the read-only **`ticket-validator`** subagent first. Its verdict gates the work:
-- **STILL_VALID** → proceed. **PARTIAL** → rescope to `still_to_do`.
-- **OVERCOME — hybrid close policy** (user's choice): **auto-close ONLY clear-cut hard-overcome**
-  (`overcome_confidence: hard` — a concrete merged PR resolved it OR a passing repro proves it) with the
-  validator's evidence as a closing comment (reopenable in one click) + milestone-ping. **Soft-overcome**
-  (`overcome_confidence: soft`, inference, no proof artifact) → do NOT auto-close; ask the user with the evidence.
-- **UNCLEAR** → ask the user, quoting the validator's `premise_check` so nothing already-answered is re-asked.
-- The validator is read-only (it reports; the caller acts). Its deep checklist (current code, history
-  incl. CLOSED PRs/issues, live reproduction, per-premise check) is the "deeply verified" the user relies on.
+A glance by the implementer is not enough (this keeps recurring): `/autopilot` (before dispatching a
+worker for an issue) and `/issue-planner` (before selecting an issue) MUST first dispatch the
+read-only **`ticket-validator`** subagent, and its verdict gates the work. The full dispatch protocol
+— the STILL_VALID / PARTIAL / OVERCOME (hard-overcome auto-close vs soft-overcome ask) / UNCLEAR
+verdicts and how each is actioned — lives in the `autopilot` and `issue-planner` skills (which own it);
+this rule just mandates the gate.
 
 #### Anti-patterns (all rewordings apply)
 
