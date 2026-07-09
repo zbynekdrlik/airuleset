@@ -63,12 +63,25 @@ if echo "$LAST_MSG_FLAT" | grep -qE '#[[:space:]]*airuleset:test-skip-ok[[:space
 fi
 
 # Test files touched by this push (same detection as pre-push-test-check.sh).
+# Restricted to actual CODE extensions — the bare (test|spec|e2e|playwright)
+# substring match also matched non-code paths like "docs/xspec.md" ("xspec"
+# contains "spec"), false-blocking a push whose ONLY change is prose in a
+# doc that merely mentions a banned pattern as an example.
 CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
-TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' || echo "")
+TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' \
+    | grep -iE '\.(rs|py|ts|tsx|js|jsx|mjs|cjs|go|rb|java|kt|kts|cs|cpp|cc|c|swift|scala)$' \
+    || echo "")
 
 if [ -z "$TEST_CHANGES" ]; then
     exit 0
 fi
+
+# Read into an ARRAY (one filename per line) instead of interpolating the
+# variable unquoted — an unquoted `$TEST_CHANGES` word-splits a filename
+# containing a space into bogus argv entries; `git diff -- <bogus-path>`
+# then fails, the swallowed exception silently skips the file (fail-open),
+# and a real violation added to a spaced filename sails through unblocked.
+mapfile -t TEST_FILES_ARR <<< "$TEST_CHANGES"
 
 # Scan each test file's ADDED lines for banned patterns. Delegated to Python
 # for reliable multiline matching (the empty-body `def test_x():\n    pass`
@@ -77,7 +90,7 @@ fi
 # (before RC=$? can even run) — the `|| RC=$?` keeps this in a tested
 # context so set -e does not fire, and lets the block message print below.
 RC=0
-VIOLATIONS=$(python3 - "$DEFAULT_BRANCH" $TEST_CHANGES <<'PYEOF'
+VIOLATIONS=$(python3 - "$DEFAULT_BRANCH" "${TEST_FILES_ARR[@]}" <<'PYEOF'
 import re
 import subprocess
 import sys
@@ -106,6 +119,8 @@ EMPTY_BODY = re.compile(
     re.MULTILINE,
 )
 
+HUNK_HEADER_RE = re.compile(r'(?m)^@@.*@@.*$')
+
 violations = []
 for tf in test_files:
     tf = tf.strip()
@@ -118,25 +133,33 @@ for tf in test_files:
         ).stdout
     except Exception:
         continue
-    added_lines = [ln[1:] for ln in out.splitlines()
-                   if ln.startswith("+") and not ln.startswith("+++")]
-    added_content = "\n".join(added_lines)
-    if not added_content:
-        continue
-    for pat, label in PATTERNS:
-        if pat.search(added_content):
-            violations.append(f"  {tf}: {label}")
-    if EMPTY_BODY.search(added_content):
-        violations.append(f"  {tf}: empty test body — passes without exercising real code")
+    # Process PER HUNK, never the whole file's added lines joined into one
+    # blob. `git diff -U0` emits a SEPARATE hunk per contiguous change —
+    # joining added lines ACROSS hunks concatenated a lone `def test_x():`
+    # from one hunk with a completely UNRELATED lone `pass` added far away
+    # in a DIFFERENT hunk into a phantom multi-line EMPTY_BODY match. The
+    # single-line PATTERNS are unaffected by this split (they never spanned
+    # hunk boundaries to begin with).
+    for hunk in HUNK_HEADER_RE.split(out):
+        added_lines = [ln[1:] for ln in hunk.splitlines()
+                       if ln.startswith("+") and not ln.startswith("+++")]
+        added_content = "\n".join(added_lines)
+        if not added_content:
+            continue
+        for pat, label in PATTERNS:
+            if pat.search(added_content):
+                violations.append(f"  {tf}: {label}")
+        if EMPTY_BODY.search(added_content):
+            violations.append(f"  {tf}: empty test body — passes without exercising real code")
 
 if violations:
-    print("\n".join(violations))
+    print("\n".join(dict.fromkeys(violations)))
     sys.exit(2)
 sys.exit(0)
 PYEOF
 ) || RC=$?
 
-if [ "$RC" -ne 0 ]; then
+if [ "$RC" -eq 2 ]; then
     echo ""
     echo "🚫 BLOCKED: test-skip / tautology pattern added in this push."
     echo ""
@@ -151,6 +174,20 @@ if [ "$RC" -ne 0 ]; then
     echo "  test-strictness.md's dependency-unavailable protocol, not a skip."
     echo "  Bypass (rare, logged): add '# airuleset:test-skip-ok <reason>' to your"
     echo "  commit message."
+    echo ""
+    exit 2
+elif [ "$RC" -ne 0 ]; then
+    # A non-2 nonzero exit means the CHECK ITSELF malfunctioned (missing
+    # python3, an internal bug) — never a real test-skip/tautology
+    # violation. Fail CLOSED but say so HONESTLY instead of reusing the
+    # empty-reason "BLOCKED: test-skip" message.
+    echo ""
+    echo "🚫 BLOCKED (fail-closed): block-test-skips.sh internal error"
+    echo "  — python3 exited $RC instead of running the check."
+    echo "$VIOLATIONS"
+    echo ""
+    echo "  This is a HOOK MALFUNCTION, not necessarily a real violation —"
+    echo "  investigate and fix the hook (or install python3) before retrying."
     echo ""
     exit 2
 fi
