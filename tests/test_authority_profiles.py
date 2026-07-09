@@ -63,6 +63,21 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         self.assertIn("ready-for-review", t)
         self.assertIn("NEVER open or merge a PR", t)
 
+    def test_fork_handoff_is_comment_primary_label_best_effort(self):
+        # #17: David's fork-derived GitHub role is `read` — CANNOT add labels
+        # (needs triage+). The hand-off signal must work at pure read role:
+        # a READY-FOR-REVIEW: comment is PRIMARY; the label is best-effort only,
+        # and the /goal proof must NOT hinge on a label search.
+        t = read(self.SKILL)
+        self.assertIn("READY-FOR-REVIEW:", t)
+        self.assertIn("best-effort", t)
+        self.assertNotIn('-label:ready-for-review', t)
+
+    def test_worker_handoff_is_comment_primary(self):
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("READY-FOR-REVIEW:", w)
+        self.assertIn("best-effort", w)
+
     def test_branch_merge_profile_stops_at_integration_branch(self):
         t = read(self.SKILL)
         self.assertIn("INTEGRATION branch", t)
