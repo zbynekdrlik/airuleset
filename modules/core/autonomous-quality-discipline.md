@@ -20,7 +20,7 @@ By design, by architecture, by SOTA practice, the harder path is correct. Time-s
 
 #### BANNED shortcut options — never propose any of these
 
-- `gh pr merge --admin` / "admin-merge" / "bypass branch protection" — **NEVER.** Branch protection exists to keep main green. Bypassing it = merging broken code.
+- `gh pr merge --admin` / "admin-merge" / "bypass branch protection" — **NEVER.** Branch protection exists to keep main green. Bypassing it = merging broken code. Hook-enforced: `hooks/block-history-rewrite.sh` blocks the literal `gh pr merge ... --admin` command on every Bash call (bypass logged).
 - "Close the PR and roll the fix into the next PR" used to avoid fixing CI — **NEVER.** Postponing a failure makes it the next session's problem and silently degrades main.
 - "Skip the failing test" / `#[ignore]` / `test.skip` / "ignore this regression for now" — **NEVER.** A failing gate is a stop-the-line event. See `test-strictness.md`.
 - "Merge to main and we'll fix it in a follow-up" / "ship it now, fix later" — **NEVER.** Main stays green. Always.
