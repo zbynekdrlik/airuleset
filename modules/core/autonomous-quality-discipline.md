@@ -56,19 +56,9 @@ CI failures are NOT interruptions. They are part of the work.
 
 #### Banned phrases (intent, not just exact wording)
 
-Do NOT write any of these — or any rewording of the same intent — in messages to the user:
-- "Your call"
-- "What would you like me to do?"
-- "How would you like to proceed?" (when CI is failing — fix it)
-- "I can't proceed without your input" (almost never true during autonomous work)
-- "Realistic options: 1) admin-merge ... 2) close PR ..." (when one option is the obvious quality-correct path)
-- "Cheaper / quicker / easier" paired with a quality-degrading shortcut
-- "Same options as before" (when "before" included shortcuts that are banned)
-- "You decide on merge" / "You decide" / "Your decision" / "Up to you" — same intent as "your call"
-- "Want me to investigate ... or merge despite ...?" — investigation is not an option, it's the only path. Don't offer "merge despite" as the alternative.
-- "Functionally ready" / "essentially mergeable" / "I won't claim it's clean but..." — minimizing language for an unfinished PR
+Do NOT shift a decision back to the user when the goals already determine the answer. Representative: "Your call", "You decide" / "Your decision" / "Up to you", "Realistic options: 1) admin-merge 2) close PR", "Cheaper / quicker / easier" paired with a shortcut, "Functionally ready" / "I won't claim it's clean but…", "Want me to investigate … or merge despite …?". This "your call" / merge-bypass / "functionally ready" / "merge despite" / "informational check" family is HARD-blocked at Stop by `stop-check-prose-violations.sh`.
 
-The intent is banned: shifting a decision back to the user when the goals already determine the answer.
+The hook is a backstop — these it does NOT catch are equally banned and self-policed: "What would you like me to do?", "How would you like to proceed?" (when CI is failing — fix it), "I can't proceed without your input", "Same options as before". The intent is banned, not the wording — applies to all rewordings and semantic equivalents.
 
 #### The rule
 

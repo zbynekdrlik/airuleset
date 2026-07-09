@@ -71,24 +71,9 @@ When verification fails because of a tool error, auth failure, sandbox limit, mi
 
 #### Banned hand-off phrases (intent — all rewordings apply)
 
-These phrases all mean "user, you are my tester now" and are FORBIDDEN. The Stop hook blocks them:
+All mean "user, you are my tester now" and are FORBIDDEN — shifting verification from YOUR tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks. Representative: "Can you test it on your end?", "Please verify it works", "Let me know if it works / breaks", "Tell me what you see", "Ping me when you've checked", "Report back when…", "Next user test", "Using you as tester", "I'll fix locally before next user test". This family is HARD-blocked at Stop by `stop-check-prose-violations.sh` (locked by the `TestTesterHandoffHook` tests) — with one escape: an explicit `UNVERIFIED:` line stating what you cannot test and why.
 
-- "Can you test it (on your end | in your browser | in production)?"
-- "Please verify it works"
-- "Let me know if it works / breaks / shows X"
-- "Ping me when you've checked"
-- "Tell me what you see"
-- "Report back when X"
-- "Could you click through the flow?"
-- "Try it and tell me what happens"
-- "Run it and confirm"
-- "Test it in your browser / on your machine"
-- "Next user test" (admission you're queueing them up)
-- "Using you as tester" / "stop using you as tester" (you're already mid-violation)
-- "I'll fix locally before next user test" (correct fix, wrong framing — there should be no "next user test" planned)
-- "On your end" / "in your environment" (when about testing, not about user-only access)
-
-The intent is banned: shifting verification from your tools to the user's eyes/clicks.
+The hook is a backstop, not the whole rule — these semantic variants it does NOT reliably catch are equally banned and must be self-policed: "Try it and tell me what happens", "Run it and confirm", "Test it in your browser / on your machine", a bare "On your end" / "in your environment" (when about testing). The intent — not the exact wording — is banned; applies to all rewordings and semantic equivalents.
 
 #### Before giving up — ASK FOR THE TOOL, not the test
 
