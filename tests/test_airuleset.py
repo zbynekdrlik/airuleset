@@ -1759,6 +1759,8 @@ class TestHookScriptsExist(TestCase):
             "pre-push-test-check.sh",
             "block-test-skips.sh",
             "block-history-rewrite.sh",
+            "block-destructive-remote.sh",
+            "pre-write-script-check.sh",
         ]:
             path = airuleset.REPO_DIR / "hooks" / script
             self.assertTrue(path.exists(), f"Missing hook: {path}")
@@ -4714,3 +4716,353 @@ class TestBlockHistoryRewriteHook(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
         self.assertTrue(any("block-history-rewrite.sh" in c for c in cmds))
+
+
+class TestBlockDestructiveRemoteHook(TestCase):
+    """hooks/block-destructive-remote.sh (issue #13 sub-item 1) — narrow,
+    high-confidence subset of no-destructive-remote-actions.md: remote HOST
+    shutdown/reboot, a filesystem-root wipe over ssh, and SQL DROP/TRUNCATE
+    against a remote database. Deliberately does NOT cover the sanctioned
+    deploy flow (systemctl stop/start/restart, taskkill /F) or rm -rf on a
+    non-root path — see the hook's own FP-corpus comment header."""
+
+    HOOK = "block-destructive-remote.sh"
+
+    def _run(self, command, cwd=None, env_extra=None):
+        import shutil
+        d = cwd or tempfile.mkdtemp()
+        if cwd is None:
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=d, timeout=30, env=env)
+
+    # --- true positives ----------------------------------------------------
+
+    def test_blocks_remote_shutdown(self):
+        r = self._run('ssh user@host "shutdown -h now"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("shutdown", r.stderr.lower())
+
+    def test_blocks_remote_reboot_with_sudo(self):
+        r = self._run('ssh user@host "sudo reboot"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_remote_systemctl_poweroff(self):
+        r = self._run('ssh user@host "systemctl poweroff"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_remote_rm_rf_root(self):
+        r = self._run('ssh user@host "rm -rf /"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("root", r.stderr.lower())
+
+    def test_blocks_remote_sql_drop_table(self):
+        r = self._run("""ssh user@host "psql -c 'DROP TABLE users;'\"""")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_direct_remote_host_truncate(self):
+        r = self._run("psql -h prod-db.example.com -c 'TRUNCATE TABLE sessions;'")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_direct_remote_host_drop_database_long_flag(self):
+        r = self._run("mysql --host=prod.db.internal -e 'DROP DATABASE app;'")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    # --- false-positive corpus (sanctioned deploy-flow commands) -----------
+
+    def test_allows_systemctl_stop_start_service(self):
+        r = self._run('ssh user@host "systemctl stop myapp && systemctl start myapp"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_rm_rf_temp_dir(self):
+        r = self._run('ssh user@host "rm -rf /tmp/build-1234"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_rm_rf_relative_build_dir(self):
+        r = self._run('ssh user@host "rm -rf ./build"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_rm_rf_non_root_home_subpath(self):
+        r = self._run('ssh user@host "rm -rf ~/old-releases/v1"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_taskkill(self):
+        r = self._run('ssh USER@HOST "taskkill /F /IM app.exe"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_sc_start(self):
+        r = self._run('ssh USER@HOST "sc start SERVICE"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_remote_piped_read_command(self):
+        r = self._run('ssh USER@HOST "tasklist | findstr app"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_journalctl_read(self):
+        r = self._run('ssh USER@HOST "journalctl -u SERVICE -n 50"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_airuleset_push_style_ssh_install(self):
+        r = self._run(
+            'ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no dev2 '
+            '"cd ~/devel/airuleset && git pull --ff-only && python3 airuleset.py install"'
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_sshpass_wrapped_install(self):
+        r = self._run(
+            'sshpass -p newlevel ssh -o StrictHostKeyChecking=no user@dev2 '
+            '"cd repo && git pull --ff-only && python3 airuleset.py install"'
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_local_host_sql_drop(self):
+        r = self._run("psql -h localhost -c 'DROP TABLE tmp;'")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_delete_from_no_host(self):
+        r = self._run("mysql -e 'DELETE FROM sessions WHERE expired'")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_quoted_mention_of_rm_rf(self):
+        r = self._run('ssh host "echo this mentions rm -rf / in a comment but is just an echo"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_scp_deploy(self):
+        r = self._run("scp binary USER@HOST:/path/to/install/dir/")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_unrelated_git_command(self):
+        r = self._run("git push --force origin main")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- bypass --------------------------------------------------------
+
+    def test_bypass_inline_marker_allows_and_logs(self):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = self._run(
+            'ssh host "shutdown -h now"  # airuleset:destructive-ok tested, user approved',
+            env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        log = os.path.join(home, "devel", "airuleset", "audits", "destructive-remote-bypasses.log")
+        self.assertTrue(os.path.exists(log), "bypass must be logged")
+        self.assertIn("user approved", open(log).read())
+
+    def test_bypass_env_var_allows(self):
+        r = self._run('ssh host "rm -rf /"',
+                       env_extra={"AIRULESET_ALLOW_DESTRUCTIVE_REMOTE": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("block-destructive-remote.sh" in c for c in cmds))
+
+
+class TestPreWriteScriptCheckHook(TestCase):
+    """hooks/pre-write-script-check.sh (issue #13 sub-item 2,
+    script-failure-policy.md) — PreToolUse(Write|Edit): new .sh files need
+    `set -euo pipefail`; new Python content must not swallow an exception
+    with a bare `pass`."""
+
+    HOOK = "pre-write-script-check.sh"
+
+    def _run_write(self, file_path, content, env_extra=None):
+        payload = json.dumps({"tool_input": {"file_path": file_path, "content": content}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              timeout=30, env=env)
+
+    def _run_edit(self, file_path, new_string, old_string="x", env_extra=None):
+        payload = json.dumps({"tool_input": {"file_path": file_path,
+                                              "old_string": old_string,
+                                              "new_string": new_string}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              timeout=30, env=env)
+
+    # --- .sh shebang / pipefail check (Write only) --------------------------
+
+    def test_blocks_new_sh_missing_pipefail(self):
+        r = self._run_write("new.sh", "#!/usr/bin/env bash\necho hi\n")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("pipefail", r.stderr.lower())
+
+    def test_allows_new_sh_with_pipefail(self):
+        r = self._run_write("good.sh", "#!/usr/bin/env bash\nset -euo pipefail\necho hi\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_edit_of_sh_file_not_checked_for_pipefail(self):
+        # Edit payloads are a partial diff — the header check is Write-only
+        # (documented gap). An Edit touching an unrelated body line must
+        # never be flagged for a header property it cannot see.
+        r = self._run_edit("existing.sh", "echo more stuff\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- python except:pass check (Write + Edit) -----------------------------
+
+    def test_blocks_bare_except_pass_write(self):
+        content = "def f():\n    try:\n        risky()\n    except:\n        pass\n"
+        r = self._run_write("bad.py", content)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("pass", r.stderr.lower())
+
+    def test_blocks_except_exception_pass_write(self):
+        content = "def f():\n    try:\n        risky()\n    except Exception:\n        pass\n"
+        r = self._run_write("bad2.py", content)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_except_typed_pass_on_edit(self):
+        new_string = "    try:\n        risky()\n    except OSError:\n        pass\n"
+        r = self._run_edit("existing.py", new_string)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_allows_except_with_logging(self):
+        content = ("def f():\n    try:\n        risky()\n"
+                   "    except Exception as e:\n        logger.error('failed: %s', e)\n")
+        r = self._run_write("good.py", content)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_except_pass_not_sole_statement(self):
+        # `pass` followed by a real statement at the same indent is not a
+        # silent swallow — the block does real work.
+        content = ("def f():\n    try:\n        risky()\n"
+                   "    except Exception:\n        pass\n        do_more()\n")
+        r = self._run_write("edge.py", content)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_non_script_file(self):
+        r = self._run_write("notes.txt", "no shebang needed here\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_edit_with_no_except(self):
+        r = self._run_edit("mid_body.py", "    logger.info('just a normal edit')\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- bypass --------------------------------------------------------
+
+    def test_bypass_inline_marker_allows_and_logs(self):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        content = ("def f():\n    try:\n        risky()\n"
+                   "    except Exception:\n        pass  # airuleset:script-ok legacy probe\n")
+        r = self._run_write("bypass.py", content, env_extra={"HOME": home})
+        self.assertEqual(r.returncode, 0, r.stdout)
+        log = os.path.join(home, "devel", "airuleset", "audits", "script-check-bypasses.log")
+        self.assertTrue(os.path.exists(log), "bypass must be logged")
+        self.assertIn("legacy probe", open(log).read())
+
+    def test_wired_into_pretooluse_write_and_edit(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        for matcher in ("Write", "Edit"):
+            cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                    if blk.get("matcher") == matcher for h in blk.get("hooks", [])]
+            self.assertTrue(any("pre-write-script-check.sh" in c for c in cmds),
+                            f"pre-write-script-check.sh not wired to matcher={matcher}")
+
+
+class TestLocalhostOnGlobeLineHook(TestCase):
+    """stop-check-prose-violations.sh (issue #13 sub-item 3, no-localhost-urls.md)
+    — a 🌐-marked URL line pointing at localhost/127.0.0.1/0.0.0.0 is a HARD
+    block. Scoped ONLY to 🌐 lines (near-zero FP: code/prose discussing
+    localhost is untouched)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _run(self, msg, session_id=None):
+        sid = session_id or f"localhost-test-{uuid.uuid4().hex[:8]}"
+        retry_file = f"/tmp/airuleset-stop-block-{sid}"
+        if os.path.exists(retry_file):
+            os.remove(retry_file)
+        self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, timeout=30)
+
+    def test_blocks_globe_line_with_localhost(self):
+        r = self._run("Here's the preview: \U0001F310 Dev: http://localhost:5173")
+        self.assertIn('"decision": "block"', r.stdout)
+        self.assertIn("localhost", r.stdout.lower())
+
+    def test_blocks_globe_line_with_127001(self):
+        r = self._run("Check it: \U0001F310 http://127.0.0.1:8080/dashboard")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_allows_localhost_in_prose_without_globe(self):
+        r = self._run("The dev server runs on localhost:5173 during development.")
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+    def test_allows_globe_line_with_real_ip_localhost_elsewhere(self):
+        msg = ("For local testing use localhost, but the deployed URL is:\n\n"
+              "\U0001F310 Dev: http://100.104.8.125:5173")
+        r = self._run(msg)
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+
+class TestTesterHandoffHook(TestCase):
+    """stop-check-prose-violations.sh (issue #13 sub-item 4) — VERIFIES the
+    autonomous-verification.md claim 'The Stop hook blocks them' for banned
+    user-as-tester hand-off phrases. This check already existed in the hook
+    (untested before this ticket) — these tests lock the claim as TRUE and
+    guard the UNVERIFIED: escape hatch."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _run(self, msg, session_id=None):
+        sid = session_id or f"handoff-test-{uuid.uuid4().hex[:8]}"
+        retry_file = f"/tmp/airuleset-stop-block-{sid}"
+        if os.path.exists(retry_file):
+            os.remove(retry_file)
+        self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, timeout=30)
+
+    def test_blocks_can_you_test_it(self):
+        r = self._run("I fixed the EQ bug. Can you test it on your end and let me know if it works?")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_blocks_let_me_know_if_it_works(self):
+        r = self._run("Deployed the change. Let me know if it works on your side.")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_blocks_please_verify(self):
+        r = self._run("The fix is in. Please verify it works in production.")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_blocks_next_user_test(self):
+        r = self._run("I'll fix locally before the next user test.")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_allows_documented_unverified_escape(self):
+        msg = ("Deployed the fix. UNVERIFIED: Cannot simulate the claude.ai OAuth flow — "
+              "requires the user's authenticated browser session against their actual "
+              "claude.ai account. Tool-request asked + rejected.")
+        r = self._run(msg)
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+    def test_allows_normal_message_with_no_handoff(self):
+        r = self._run("Verified via Playwright: clicked the button, confirmed the value updated to 42.")
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+    def test_wired_into_stop(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["Stop"]
+                for h in blk.get("hooks", [])]
+        self.assertTrue(any("stop-check-prose-violations.sh" in c for c in cmds))

@@ -14,3 +14,7 @@
 - User reports URL broken → "let me restart it" → **WRONG — you should have checked first**
 
 This applies to ALL URLs: visual companion, dev servers, dashboards, preview mockups, and deploy targets.
+
+#### Enforcement — the Stop hook checks 🌐 lines only
+
+`stop-check-prose-violations.sh` HARD-blocks a `localhost`/`127.0.0.1`/`0.0.0.0` URL on a `🌐`-marked line (the completion-report's "user-clickable URL" marker, per `completion-report.md`) — never the whole message, so a code block or a prose sentence discussing "the dev server runs on localhost" is untouched. This is deliberately narrow: outside a 🌐 line there is no reliable way to tell "a URL being presented to the user" from "a URL mentioned in passing", so it stays discipline-only there.

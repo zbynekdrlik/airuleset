@@ -380,6 +380,24 @@ if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && echo "$MSG
     fi
 fi
 
+# Check for a localhost/127.0.0.1/0.0.0.0 URL on a 🌐 line — issue #13 sub-item 3.
+# Scoped ONLY to lines carrying the 🌐 marker (never the whole message) — that
+# marker is used EXCLUSIVELY for "USER-CLICKABLE URL being presented right now"
+# per completion-report.md, so this has near-zero FP risk: a code block or
+# prose paragraph discussing "the dev server runs on localhost:5173" is never
+# touched, only an actual 🌐-prefixed URL line. Not gated on IS_COMPLETION —
+# a mid-work "here's the preview: 🌐 http://localhost:3000" is exactly the
+# no-localhost-urls.md violation ("the user works remotely and cannot open
+# localhost on their own machine"), completion report or not. HARD block:
+# no-localhost-urls.md documents no legitimate exception for presenting one.
+GLOBE_LOCALHOST=$(echo "$MSG" | grep -E "🌐" | grep -iE "localhost|127\.0\.0\.1|0\.0\.0\.0" || true)
+if [ -n "$GLOBE_LOCALHOST" ]; then
+    echo "VIOLATION: A 🌐 URL line points at localhost/127.0.0.1/0.0.0.0. The user works remotely and cannot open a localhost URL on their own machine. Use the machine's real LAN/tailscale IP instead (\`hostname -I\`), and verify it returns 200 before presenting it. See no-localhost-urls.md." >&2
+    echo "  Offending line(s):" >&2
+    echo "$GLOBE_LOCALHOST" | sed 's/^/    /' >&2
+    add_hard "🌐 URL line points at localhost/127.0.0.1/0.0.0.0 — use the real LAN IP"
+fi
+
 # Final: if HARD violations found AND retry budget not exhausted, output JSON to block Stop.
 # Per Claude Code hooks docs: {"decision":"block","reason":"..."} prevents Claude from stopping.
 # Retry limit prevents loops if a violation is genuinely unfixable in this session.

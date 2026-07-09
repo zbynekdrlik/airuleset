@@ -46,3 +46,5 @@ audits/test-skip-bypasses.log
 audits/history-rewrite-bypasses.log
 audits/secret-scan-bypasses.log
 audits/autopilot-lock-steals.log
+audits/destructive-remote-bypasses.log
+audits/script-check-bypasses.log

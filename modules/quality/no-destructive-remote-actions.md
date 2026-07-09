@@ -24,6 +24,10 @@ Before executing any destructive command on a remote machine, ask:
 
 Wait for explicit "yes", "go ahead", or "approved". Silence is NOT approval.
 
+#### Enforcement — the hook covers a narrow, high-confidence subset
+
+A `block-destructive-remote.sh` PreToolUse(Bash) hook automatically BLOCKS three shapes without asking: remote HOST shutdown/reboot/halt/poweroff over ssh, a filesystem-root wipe (`rm -rf /`, not any `rm -rf` — a temp/build-dir wipe is routine and NOT blocked) over ssh, and SQL `DROP TABLE/DATABASE/SCHEMA` or `TRUNCATE` against a remote database (ssh-wrapped, or a direct `psql`/`mysql` call naming an explicit non-local host). It deliberately does NOT block the sanctioned deploy flow (`systemctl stop/start/restart`, `taskkill /F`, `sc start/stop` — those are the WORK, see "NOT gated" above) or plain `DELETE FROM` (too common in routine app cleanup to gate without false positives). Bypass (rare, logged): `# airuleset:destructive-ok <reason>` inline, or `AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1`. The hook is a narrow backstop, not the whole rule — most of this module's scope (a rollback overwriting prod, killing an unrelated service, a destructive action reached through a wrapper script) has no reliable argv-level signature and stays discipline-only.
+
 #### Context does not matter
 
 "Just testing", "just a dev machine", "the user asked about it", "it'll come back in 2 minutes" — none of these justify unannounced destructive actions. Asking IF something works ≠ approval to do it. You might be wrong about which machine is production.
