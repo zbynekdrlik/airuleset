@@ -386,6 +386,33 @@ def subagent_active(transcript_path, now, window):
         return False
 
 
+def newest_subagent_transcript(transcript_path):
+    """Path to the most-recently-written subagents/**/*.jsonl for this session, or
+    None if there is no subagents/ dir or it holds no transcripts (issue #6). Lets
+    jobs 1/4a apply their OWN detectors (transcript_last_error /
+    transcript_text_toolcall_stall) to a BACKGROUND WORKER's own transcript, not
+    just the supervisor's — a worker that dies on an api-error or a text-emitted
+    tool-call is otherwise invisible until job 4's indirect ~30-min
+    subagent_active() staleness path (and worse: a FRESH worker write is exactly
+    what makes job 4a's `not subagent_active(...)` gate skip the supervisor check,
+    since a fresh subagent write normally reads as healthy activity)."""
+    try:
+        d = Path(transcript_path).parent / Path(transcript_path).stem / "subagents"
+        if not d.is_dir():
+            return None
+        newest, newest_m = None, -1.0
+        for p in d.rglob("*.jsonl"):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > newest_m:
+                newest, newest_m = p, m
+        return newest
+    except Exception:
+        return None
+
+
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
 _TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)
@@ -987,6 +1014,68 @@ def send_selfcheck(pane_id, run=None):
     Types WORKING_NUDGE_TEXT into the pane and submits it, prompting the session to
     verify the liveness of its launched work and intervene if it died silently."""
     send_continue(pane_id, WORKING_NUDGE_TEXT, run)
+
+
+def send_subagent_nudge(pane_id, worker_id, kind, run=None):
+    """(issue #6) Nudge the SUPERVISOR pane about a dying BACKGROUND WORKER —
+    `kind` is a short human label ('api-error' or 'text-toolcall-stall'). Types a
+    stuck-check-style self-check message naming the worker's own transcript file,
+    so the supervisor — the only thing that can decide resume vs re-dispatch —
+    investigates. Never acts on the worker's behalf directly."""
+    text = ("stuck-check: background worker %s vyzerá mŕtvy (%s v subagents/%s.jsonl) "
+            "— over jeho transcript a zasiahni (dispatchni znova alebo naň nadviaž), "
+            "nič nerob naslepo." % (worker_id, kind, worker_id))
+    send_continue(pane_id, text, run)
+
+
+def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, owner,
+                          now, sub_path, sub_idle, kind, dedup_prefix,
+                          interval, max_nudges, dry_run):
+    """(issue #6) Shared busy/idle nudge-or-ping logic for a detected dying SUBAGENT
+    (jobs 1b / 4a-sub). `kind` is a human label for the nudge/ping text; `dedup_prefix`
+    namespaces the state/dedup keys per detector ('apierr' / 'textcall'). Mutates
+    `state` and `logs` in place. Same keystroke discipline as every other job: NEVER
+    type into a copy-mode or busy (no free `❯`) pane — ping instead, mirroring job 4's
+    busy-pane-wedged path — and reuse decide_working's nudge → retry → escalate
+    lifecycle for the idle-pane case, so a wedged supervisor still only pings once."""
+    wid = sub_path.stem
+    if pane_in_mode(pid, run):
+        logs.append("skip in-mode (subagent-%s) %s" % (dedup_prefix, project or pid))
+        return
+    if not pane_at_idle_prompt(captured):
+        bkey = "subagent-busypane:%s:%s" % (dedup_prefix, wid)
+        b = state.get(bkey) or {"first_seen": int(now - sub_idle), "pinged": False}
+        b["last_seen"] = int(now)
+        state[bkey] = b
+        if not b["pinged"]:
+            b["pinged"] = True
+            logs.append("subagent-%s-busy %s [%s] — ping only" % (dedup_prefix, project, wid))
+            send_fn("\U0001f6d1 **%s** — background worker `%s` (%s), ale hlavná session "
+                    "je zaneprázdnená\n> Nezasahujem klávesami (rozbilo by to bežiacu "
+                    "prácu) — over `subagents/%s.jsonl`." % (project, wid, kind, wid),
+                    owner=owner, dedup_key="subagent-%s-busy:%s" % (dedup_prefix, wid),
+                    dry_run=dry_run)
+        else:
+            logs.append("skip busy-pane (subagent-%s) %s [%s]" % (dedup_prefix, project, wid))
+        return
+    wkey = "subagent-%s:%s" % (dedup_prefix, wid)
+    action, entry = decide_working(state, wkey, now, sub_idle,
+                                   interval=interval, max_nudges=max_nudges)
+    state[wkey] = entry
+    if action == "nudge":
+        n = len(entry["nudges"])
+        logs.append("subagent-%s-nudge#%d %s [%s]" % (dedup_prefix, n, project, wid))
+        if not dry_run:
+            send_subagent_nudge(pid, wid, kind, run)
+    elif action == "escalate":
+        logs.append("subagent-%s-escalate %s [%s] — gave up after %d nudges"
+                    % (dedup_prefix, project, wid, max_nudges))
+        send_fn("\U0001f6d1 **%s** — background worker `%s` (%s) a session nereaguje na "
+                "nudge\n> Treba zásah." % (project, wid, kind),
+                owner=owner, dedup_key="subagent-%s-giveup:%s" % (dedup_prefix, wid),
+                dry_run=dry_run)
+    else:
+        logs.append("subagent-%s-%s %s [%s]" % (dedup_prefix, action, project, wid))
 
 
 # --------------------------------------------------------------------------- #
@@ -1717,6 +1806,30 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     logs.append("%s %s [%s]" % (action, project, key))
                 continue                       # handled as an api-error stall
 
+            # --- (1b) SUBAGENT API-ERROR → nudge the supervisor, naming the worker ----
+            # (issue #6) Job 1 above only reads the SUPERVISOR transcript. A dispatched
+            # BACKGROUND WORKER that stalls on an api-error writes it to
+            # subagents/<id>.jsonl — invisible to job 1, caught only indirectly (up to
+            # STALL_WORKING_SECONDS later) by job 4's mtime-based subagent_active()
+            # gate. Reached only when the SUPERVISOR itself has no error (err_text was
+            # falsy above). Apply the SAME detector to the newest subagent transcript;
+            # on a hit (past `grace`, mirroring job 1's own grace before its first
+            # nudge — CC's own retries may still recover it), nudge/ping via the shared
+            # busy/idle helper. Purely additive: no existing keystroke gate is touched.
+            sub_path = newest_subagent_transcript(tpath)
+            if sub_path is not None:
+                sub_err = transcript_last_error(sub_path)
+                if sub_err:
+                    try:
+                        sub_idle = now - sub_path.stat().st_mtime
+                    except OSError:
+                        sub_idle = 0
+                    if sub_idle >= grace:
+                        _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
+                                              project, owner, now, sub_path, sub_idle,
+                                              "api-error", "apierr", interval, max_nudges,
+                                              dry_run)
+
             # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
             # Blocked on an interactive prompt the human must answer. NEVER send keys
             # (a design decision needs the user), so the loose pane-text match is safe.
@@ -1803,6 +1916,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 else:
                     logs.append("textcall-%s %s [%s]" % (action, project, key))
                 continue                        # handled as a text-toolcall stall
+
+            # --- (4a-sub) SUBAGENT TEXT-TOOLCALL STALL → nudge the supervisor ----------
+            # (issue #6) Job 4a above only reads the SUPERVISOR transcript — and worse,
+            # its own `not subagent_active(...)` gate SKIPS the supervisor check
+            # whenever the subagent transcript is FRESH, which is exactly the case right
+            # after a worker's stalled turn writes its last (broken) entry. Reached only
+            # when job 4a's own block above did not already fire/continue. Apply the
+            # SAME detector to the newest subagent transcript directly; on a hit (past
+            # `stall_textcall`, mirroring job 4a's own short grace against a mid-write
+            # turn), nudge/ping via the shared busy/idle helper. Purely additive.
+            sub_path = newest_subagent_transcript(tpath)
+            if sub_path is not None and transcript_text_toolcall_stall(sub_path):
+                try:
+                    sub_idle = now - sub_path.stat().st_mtime
+                except OSError:
+                    sub_idle = 0
+                if sub_idle >= stall_textcall:
+                    _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
+                                          project, owner, now, sub_path, sub_idle,
+                                          "text-toolcall-stall", "textcall",
+                                          working_interval, max_working_nudges, dry_run)
 
             # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
             # Claude ended the turn `⏳ WORKING` (a background job / subagent is running,
@@ -1904,7 +2038,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         if k == "usage":
             continue                       # account-wide usage state, not a session
         if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
-                or k.startswith("sesslimit:") or k.startswith("busypane:")):
+                or k.startswith("sesslimit:") or k.startswith("busypane:")
+                or k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
+                or k.startswith("subagent-busypane:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly
