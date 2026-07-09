@@ -199,7 +199,8 @@ class TestBypassMarker(SecretScanTestCase):
         _git(self.repo, "add", "skills/bar/SKILL.md")
         commit_cmd = (
             'git commit -m "docs: mention the bypass syntax '
-            '# airuleset:secret-ok <reason> in the body, not as a real bypass"'
+            '# airuleset:secret-ok <reason> right here, but then keep writing '
+            'more real content afterwards so it is clearly NOT a trailing comment"'
         )
         r = self._run(commit_cmd)
         self.assertEqual(r.returncode, 2, r.stdout)

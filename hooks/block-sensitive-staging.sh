@@ -51,23 +51,43 @@ if [ -z "$INPUT" ]; then
     esac
 fi
 
-# Bypass marker short-circuits EVERYTHING below (both gates), same shape as
-# the other airuleset inline-marker bypasses. Requires a non-empty reason.
-if echo "$INPUT" | grep -qE '#[[:space:]]*airuleset:secret-ok[[:space:]]+[^#]+'; then
-    REASON=$(echo "$INPUT" | grep -oE '#[[:space:]]*airuleset:secret-ok[[:space:]]+[^#]+' | head -1 | sed 's/[[:space:]]*$//')
-    AUDIT_LOG="$HOME/devel/airuleset/audits/secret-scan-bypasses.log"
-    mkdir -p "$(dirname "$AUDIT_LOG")"
-    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)")
-    echo "$(date -Iseconds)  project=$PROJECT  $REASON" >> "$AUDIT_LOG"
-    exit 0
-fi
-
-# Only relevant for git add / git commit commands.
+# Only relevant for git add / git commit commands. Checked BEFORE the
+# bypass marker below so an unrelated command is never touched at all.
 IS_ADD=0
 IS_COMMIT=0
 echo "$INPUT" | grep -qE 'git\s+add' && IS_ADD=1
 echo "$INPUT" | grep -qE 'git\s+commit' && IS_COMMIT=1
 if [ "$IS_ADD" = 0 ] && [ "$IS_COMMIT" = 0 ]; then
+    exit 0
+fi
+
+# Bypass marker short-circuits BOTH gates below, same shape as the other
+# airuleset inline-marker bypasses. Requires a non-empty reason, AND the
+# marker must be OUTSIDE any quoted string — a real bash `#` only starts a
+# comment when it is not inside quotes, so quoted spans are stripped FIRST.
+# Without this, the marker text merely being MENTIONED inside a commit
+# message body (e.g. this very hook's own commit messages document the
+# syntax) would match too, silently bypassing the scan for a commit that
+# carries a real secret (this happened for real, twice, while authoring
+# this hook — see the audits/secret-scan-bypasses.log entries it produced).
+BYPASS_REASON=$(printf '%s' "$INPUT" | python3 -c 'import re,sys
+cmd=sys.stdin.read()
+SQ=chr(39)
+DQ=chr(34)
+unquoted=re.sub(SQ+"[^"+SQ+"]*"+SQ, "", cmd)     # strip '"'"'...'"'"' spans
+unquoted=re.sub(DQ+"[^"+DQ+"]*"+DQ, "", unquoted)  # strip "..." spans
+m=None
+for mm in re.finditer(r"#[ \t]*airuleset:secret-ok[ \t]+([^\n]+)", unquoted):
+    m=mm
+if m:
+    print(m.group(1).rstrip())
+' 2>/dev/null || echo "")
+
+if [ -n "$BYPASS_REASON" ]; then
+    AUDIT_LOG="$HOME/devel/airuleset/audits/secret-scan-bypasses.log"
+    mkdir -p "$(dirname "$AUDIT_LOG")"
+    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)")
+    echo "$(date -Iseconds)  project=$PROJECT  $BYPASS_REASON" >> "$AUDIT_LOG"
     exit 0
 fi
 
