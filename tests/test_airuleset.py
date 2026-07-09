@@ -2741,6 +2741,17 @@ class TestManagedSettingsDefaults(TestCase):
         out = airuleset.apply_managed_settings_defaults({})
         self.assertIs(out["disableAgentView"], True)
 
+    def test_forces_classic_tui_renderer(self):
+        # tui="default" pins the classic inline renderer. Without the key, an
+        # Anthropic A/B gate decides — a fresh account (david@gk, 2026-07-09) got
+        # tui="fullscreen": output stays in the tmux ALTERNATE screen, nothing
+        # lands in scrollback, Ctrl+B [ history is empty (user: "neprijatelne").
+        # Must also OVERRIDE an existing "fullscreen" (the accepted-dialog case).
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(out["tui"], "default")
+        out = airuleset.apply_managed_settings_defaults({"tui": "fullscreen"})
+        self.assertEqual(out["tui"], "default")
+
     def test_preserves_other_keys(self):
         out = airuleset.apply_managed_settings_defaults(
             {"model": "opus", "hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
