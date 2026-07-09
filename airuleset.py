@@ -1747,10 +1747,16 @@ def cmd_push(args):
     # check is the only way to guarantee it; keep it fast by keeping the repo
     # clean (see the ruff cleanup commit for #7 — this is cheap post-cleanup).
     print("Running ruff check (fail-closed before push)...")
-    ruff_result = subprocess.run(
-        ["ruff", "check", "."],
-        cwd=str(REPO_DIR),
-    )
+    try:
+        ruff_result = subprocess.run(
+            ["ruff", "check", "."],
+            cwd=str(REPO_DIR),
+        )
+    except FileNotFoundError:
+        print("  RUFF NOT INSTALLED — refusing to push unlinted code.", file=sys.stderr)
+        print("  Install ruff (e.g. `pip install ruff` / `pipx install ruff`) and retry.",
+              file=sys.stderr)
+        sys.exit(1)
     if ruff_result.returncode != 0:
         print("  RUFF FAILED — refusing to push unlinted code.", file=sys.stderr)
         sys.exit(1)
@@ -1884,6 +1890,23 @@ def _proc_parent_pid(pid):
     return None
 
 
+def _proc_comm(pid):
+    """Linux-only /proc read of a process's command name (`/proc/<pid>/comm`).
+    Returns None off-Linux or on any read failure — callers fall back
+    gracefully. Used by `_campaign_pid` to recognize the long-lived `claude`
+    (or `node`) process regardless of how many ephemeral shell layers sit
+    between it and this process."""
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+_CAMPAIGN_LONG_LIVED_COMMS = {"claude", "node"}
+_CAMPAIGN_ANCESTRY_MAX_HOPS = 10
+
+
 def _campaign_pid():
     """The PID that should stay alive for the WHOLE autopilot campaign (the
     span between an `acquire` call and the LATER, separate `release` call).
@@ -1891,16 +1914,38 @@ def _campaign_pid():
     Each Claude Code Bash tool call spawns a fresh ephemeral shell that dies
     the instant that one tool call returns — so os.getppid() alone (this
     process's immediate parent) is USELESS for staleness detection: it would
-    already look "dead" moments after `acquire` prints success. One level
-    further up is the long-lived `claude` CLI process itself, which persists
-    for the entire session (verified live: a Bash tool call's own PPID is
-    the per-call ephemeral shell; THAT shell's PPID is the stable `claude`
-    process). Walking one extra level up is what makes staleness detection
-    actually mean something across the acquire/release gap.
+    already look "dead" moments after `acquire` prints success. The
+    long-lived `claude` CLI process itself, which persists for the entire
+    session, sits further up the ancestry chain.
+
+    This WALKS the ancestry (by `comm` name, not a fixed hop count) until it
+    finds a known long-lived process. A FIXED one-hop walk (the previous
+    implementation) is correct only when there is EXACTLY one ephemeral
+    shell layer between this process and `claude` — an EXTRA layer (e.g. a
+    `bash -c '...'` wrapper invoking this command) makes a fixed-hop walk
+    land on ANOTHER ephemeral shell instead of `claude`. That shell dies the
+    instant its own tool call returns, so the recorded holder PID looks
+    stale almost immediately, and a concurrent `/autopilot` session on the
+    same repo can steal the "live" lock — reintroducing the exact #8
+    collision this lock exists to prevent. Bounded by
+    `_CAMPAIGN_ANCESTRY_MAX_HOPS` as a sanity cap (real ancestry chains are
+    a handful of hops); if no long-lived process is ever found, the last
+    pid reached is returned (never None/0) — same fail-safe shape as the
+    old implementation's `grandparent or ppid`.
     """
-    ppid = os.getppid()
-    grandparent = _proc_parent_pid(ppid)
-    return grandparent or ppid
+    pid = os.getppid()
+    seen = set()
+    for _ in range(_CAMPAIGN_ANCESTRY_MAX_HOPS):
+        if not pid or pid in seen:
+            break
+        seen.add(pid)
+        if _proc_comm(pid) in _CAMPAIGN_LONG_LIVED_COMMS:
+            return pid
+        parent = _proc_parent_pid(pid)
+        if not parent or parent == pid:
+            break
+        pid = parent
+    return pid
 
 
 def _pid_alive(pid):
