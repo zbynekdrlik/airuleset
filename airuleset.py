@@ -1733,11 +1733,30 @@ REMOTE_HOSTS = [
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
-    Fail-closed: the full test suite runs FIRST; a single failing test aborts the
-    push (and therefore the dev2 deploy) so untested code never ships."""
+    Fail-closed: `ruff check .` runs FIRST, then the full test suite — a lint
+    error or a single failing test aborts the push (and therefore the dev2
+    deploy) so unlinted/untested code never ships. `git push` here is an
+    internal subprocess call, so the PreToolUse pre-push-lint.sh hook (which
+    only fires for a real Bash `git push` tool invocation) never sees this
+    flow — this in-process gate is what actually protects it (issue #7)."""
     import subprocess
 
-    # 0. Run the full test suite — fail-closed before any push/deploy.
+    # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
+    # PreToolUse hook (which lints only the files a real `git push` command
+    # changed), this runs from inside the process itself, so a whole-repo
+    # check is the only way to guarantee it; keep it fast by keeping the repo
+    # clean (see the ruff cleanup commit for #7 — this is cheap post-cleanup).
+    print("Running ruff check (fail-closed before push)...")
+    ruff_result = subprocess.run(
+        ["ruff", "check", "."],
+        cwd=str(REPO_DIR),
+    )
+    if ruff_result.returncode != 0:
+        print("  RUFF FAILED — refusing to push unlinted code.", file=sys.stderr)
+        sys.exit(1)
+    print("  Ruff clean.")
+
+    # 0b. Run the full test suite — fail-closed before any push/deploy.
     print("Running test suite (fail-closed before push)...")
     test_result = subprocess.run(
         [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
