@@ -1,3 +1,11 @@
+---
+paths:
+  - "**/*.spec.ts"
+  - "**/*.spec.js"
+  - "**/e2e/**"
+  - "playwright.config.*"
+---
+
 ### Browser Console: Zero Errors, Zero Warnings
 
 **Every web app must have a clean browser console. Console errors and warnings are bugs — they must be caught in CI and during verification, not discovered by the user.**

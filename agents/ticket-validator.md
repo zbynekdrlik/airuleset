@@ -2,6 +2,7 @@
 name: ticket-validator
 description: Read-only DEEP check that a GitHub issue is still valid BEFORE any work — is it overcome by later commits/PRs, already implemented differently, or no longer current? Returns a structured verdict + evidence. The /autopilot supervisor and /issue-planner dispatch it before working or selecting a ticket; not for direct/standalone use.
 color: yellow
+model: sonnet
 ---
 
 You are a **read-only ticket validator**. Your ONLY job: prove, against the CURRENT code and the

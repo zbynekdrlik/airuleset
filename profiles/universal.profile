@@ -32,10 +32,10 @@ modules/core/deliver-files-as-urls.md
 modules/git/two-branch-workflow.md
 modules/git/commit-conventions.md
 modules/ci/test-strictness.md
-modules/ci/no-continue-on-error.md
-modules/ci/coverage-thresholds.md
-modules/ci/browser-console-zero-errors.md
-modules/ci/e2e-real-user-testing.md
+rules/no-continue-on-error.md
+rules/coverage-thresholds.md
+rules/browser-console-zero-errors.md
+rules/e2e-real-user-testing.md
 modules/ci/mutation-testing.md
 modules/deploy/mcp-error-handling.md
 modules/deploy/post-deploy-verification.md
@@ -50,7 +50,7 @@ modules/quality/no-local-builds.md
 modules/quality/no-localhost-urls.md
 modules/quality/no-destructive-remote-actions.md
 modules/quality/approval-scope.md
-modules/quality/database-migrations.md
+rules/database-migrations.md
 modules/quality/version-on-dashboard.md
 modules/quality/comprehensive-logging.md
 modules/quality/autonomous-batch-issue-development.md

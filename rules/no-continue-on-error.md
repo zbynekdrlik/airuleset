@@ -1,3 +1,9 @@
+---
+paths:
+  - ".github/workflows/*.yml"
+  - ".github/workflows/*.yaml"
+---
+
 ### No continue-on-error in CI
 
 **Every CI step must be binary: succeed and continue, or fail and stop the build.**

@@ -2,7 +2,7 @@
 
 **Context gate — related rules you MUST also apply:**
 - `regression-test-first.md` — bug fixes: failing test committed BEFORE the fix (RED→GREEN order, hook-enforced)
-- `e2e-real-user-testing.md` — UI features need Playwright (browser), not curl
+- `e2e-real-user-testing.md` (path-scoped rule — auto-loads on E2E/Playwright files) — UI features need Playwright (browser), not curl
 - `test-strictness.md` — no `#[ignore]`, no `skip`, no `assume()`, no mocked internal code
 - `browser-console-zero-errors.md` — Playwright tests must assert zero console errors
 

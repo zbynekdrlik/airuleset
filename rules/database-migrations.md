@@ -1,3 +1,10 @@
+---
+paths:
+  - "**/migrations/**"
+  - "**/*migration*"
+  - "**/*.sql"
+---
+
 ### Database Migration Policy
 
 **If a project has users or production data, ALWAYS use incremental migrations. NEVER edit or replace the initial migration on a production project.**

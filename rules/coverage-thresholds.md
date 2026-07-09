@@ -1,3 +1,11 @@
+---
+paths:
+  - ".github/workflows/*.yml"
+  - ".github/workflows/*.yaml"
+  - "codecov.yml"
+  - ".cargo/mutants.toml"
+---
+
 ### Coverage Thresholds
 
 **Context gate — related rules you MUST also apply:**

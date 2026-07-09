@@ -1,3 +1,11 @@
+---
+paths:
+  - "**/*.spec.ts"
+  - "**/*.spec.js"
+  - "**/e2e/**"
+  - "playwright.config.*"
+---
+
 ### E2E Tests Must Simulate Real Users (MANDATORY)
 
 **An E2E test that curls an API and checks for 200 is NOT an E2E test — it's an API smoke test.** Real E2E opens a browser and interacts with the UI like a user.

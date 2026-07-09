@@ -25,7 +25,7 @@ disable-model-invocation: true
 no "nothing is hands-off so I'm stopping". You answer the important questions; everything else runs.
 
 **Context gate — apply all:**
-- `autonomous-batch-issue-development.md` — bundle bundle-safe issues into ONE PR/CI cycle (the gate + ceiling below)
+- `autonomous-batch-issue-development.md` → **load the `batch-issue-development` skill at run start** (full policy lives there since 2026-07-09) — bundle bundle-safe issues into ONE PR/CI cycle (the gate + ceiling below)
 - `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker (or the `manual` arg) = stop at green PR
 - `tdd-workflow.md` / `regression-test-first.md` — calibrated TDD per issue
 - `ci-monitoring.md` — 2-branch single-CI repo: the worker monitors its OWN CI **foreground** (NEVER `run_in_background` — that ends the subagent), the main loop verifies the result; long / multi-stage pipeline (3-branch): the SUPERVISOR owns the CI waits and the worker returns per stage (Step 3 multi-stage note)

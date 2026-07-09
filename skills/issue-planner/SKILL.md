@@ -242,7 +242,7 @@ Include for each issue:
 
 ### 4a. Pre-classify each issue against the bundling gate
 
-Before presenting, label each issue with its bundle eligibility per `autonomous-batch-issue-development.md`:
+Before presenting, label each issue with its bundle eligibility per `autonomous-batch-issue-development.md` (**load the `batch-issue-development` skill** — the full gate lives there since 2026-07-09):
 
 - **🟢 Bundle-safe** — ≤300 LoC est., no schema, no API break, no security boundary, no cross-cut refactor
 - **🔴 Solo-PR** — fails ≥1 gate criterion (schema migration, public API change, auth/security, large refactor)

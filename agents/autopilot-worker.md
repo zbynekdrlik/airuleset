@@ -32,7 +32,7 @@ The dispatch message tells you the repo and either ONE issue (`Work issue #41 in
 the bundling gate, so the named set is safe to ship in one PR. If the dispatch is missing the
 repo/issue(s), stop and report — do not guess.
 
-**Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md`): all members land
+**Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md` — load the `batch-issue-development` skill for the full gate): all members land
 on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Closes #<n>` line for
 EVERY member (so GitHub closes them all on merge), ONE merge, ONE deploy. Per-issue discipline is
 preserved — each issue gets its own work + its own calibrated TDD + its own `Closes #<n>` commit.
