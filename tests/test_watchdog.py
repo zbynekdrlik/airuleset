@@ -776,5 +776,87 @@ class SessionLimitWiring(unittest.TestCase):
         self.assertFalse(st["sesslimit:" + self.SID]["continued"])
 
 
+class RunOnceLoopIsolation(unittest.TestCase):
+    """(issue #3) One pane raising inside the per-transcript loop body — a
+    corrupted transcript, an unexpected tmux-shim output shape, a raise inside a
+    job handler — must NOT abort the whole poll and blank state for every OTHER
+    healthy pane this cycle. The bad pane is skipped with a clear log line; the
+    healthy pane's work (and its state) still lands."""
+
+    BAD_CWD = "/home/newlevel/devel/bad-project"
+    GOOD_CWD = "/home/newlevel/devel/camera-box"
+    BAD_PANE = "%1"
+    GOOD_PANE = "%2"
+
+    def test_one_bad_pane_does_not_abort_the_whole_poll(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+
+        bad_enc = wd.encode_project_dir(self.BAD_CWD)
+        (proj / bad_enc).mkdir(parents=True)
+        bad_tpath = proj / bad_enc / "bad1111a.jsonl"
+        _write_jsonl(bad_tpath, [_assistant("hello")])
+
+        good_enc = wd.encode_project_dir(self.GOOD_CWD)
+        (proj / good_enc).mkdir(parents=True)
+        good_tpath = proj / good_enc / "90bc51f3.jsonl"
+        _write_jsonl(good_tpath, [
+            _assistant("Earlier turn."),
+            _assistant(CAMERA_BOX_TEXT),
+            _system(),
+        ])
+
+        now = time.time()
+        idle_seconds = 600
+        os.utime(bad_tpath, (now - idle_seconds, now - idle_seconds))
+        os.utime(good_tpath, (now - idle_seconds, now - idle_seconds))
+
+        state_path = Path(tmp.name) / "state.json"
+        idle_cap = ("● Predošlá práca hotová.\n❯ \n"
+                    "  ctx ███░  caveman:lite\n"
+                    "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return ("%s\tclaude\t%s\n%s\tclaude\t%s\n"
+                        % (self.BAD_PANE, self.BAD_CWD, self.GOOD_PANE, self.GOOD_CWD))
+            if "capture-pane" in j:
+                # simulate a corrupt/unexpected tmux-shim response for the bad pane
+                # only — this is what raises inside the loop body for that pane.
+                if self.BAD_PANE in argv:
+                    raise RuntimeError("simulated corrupt tmux-shim output")
+                return idle_cap
+            if "display-message" in argv[0:2] or "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "send-keys" in j:
+                return ""
+            return ""
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"))
+
+        # the healthy pane's work still happened despite the bad pane raising
+        self.assertTrue(any(ln.startswith("textcall-nudge#1") for ln in logs),
+                        "expected the healthy pane to still be processed, got: %r" % logs)
+        # the bad pane was skipped with a clear log line, not silently dropped
+        self.assertTrue(any("skip error" in ln and "bad1111a" in ln for ln in logs),
+                        "expected a 'skip error' log line naming the bad transcript, "
+                        "got: %r" % logs)
+        # state was actually persisted (save_state ran despite the raise)
+        self.assertTrue(state_path.exists(), "expected state to be saved despite the raise")
+        saved = json.loads(state_path.read_text())
+        self.assertTrue(any(k.startswith("textcall:") for k in saved.keys()),
+                        "expected the healthy pane's textcall state to be saved, "
+                        "got: %r" % saved)
+
+
 if __name__ == "__main__":
     unittest.main()
