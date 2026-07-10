@@ -20,10 +20,18 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# The LAN IP to bind is baked in at install time (computed UNSANDBOXED, where
-# `hostname -I` works). The sandbox below restricts address families to AF_INET/
-# AF_INET6, which blocks the AF_NETLINK socket `hostname -I` needs — so the server
-# must NOT discover its own IP at runtime. {{HOST_IP}} is substituted per machine.
+# The IPs to bind are baked in at install time (computed UNSANDBOXED, where
+# `hostname -I` / `tailscale ip` work). The sandbox below restricts address families
+# to AF_INET/AF_INET6, which blocks the AF_NETLINK socket `hostname -I` needs — so
+# the server must NOT discover its own IP at runtime.
+#   FILEDROP_HOSTS = comma list of ALL private interfaces (tailscale + LAN) the
+#     server binds, so the file-drop answers whether the user is on tailscale or the
+#     LAN. NEVER the box's public IP (bind_ips() excludes it). A bind that fails
+#     (stale LAN IP after a network switch) is skipped, not fatal — tailscale stays up.
+#   FILEDROP_HOST = the primary (tailscale-first) IP, kept for status/URL + as the
+#     single-host fallback if FILEDROP_HOSTS is empty.
+# Both are substituted per machine.
+Environment=FILEDROP_HOSTS={{HOST_IPS}}
 Environment=FILEDROP_HOST={{HOST_IP}}
 # Per-user port: a second airuleset user on the same host (montalu@dev1,
 # marek@gatekeeper) cannot reuse the first user's 8788 — install picks a free

@@ -58,7 +58,8 @@ UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 try:
     from filedrop import (PORT as FILEDROP_PORT, DEFAULT_PORT as FILEDROP_DEFAULT_PORT,
                           PORT_FILE as FILEDROP_PORT_FILE, persisted_port as filedrop_persisted_port,
-                          host_ip as filedrop_host_ip, filedrop_url, FILEDROP_DIR)
+                          host_ip as filedrop_host_ip, bind_ips as filedrop_bind_ips,
+                          filedrop_url, FILEDROP_DIR)
 except Exception:  # pragma: no cover — filedrop package should always import
     FILEDROP_PORT = int(os.environ.get("FILEDROP_PORT", "8788"))
     FILEDROP_DEFAULT_PORT = 8788
@@ -70,6 +71,9 @@ except Exception:  # pragma: no cover — filedrop package should always import
 
     def filedrop_host_ip():
         return os.environ.get("FILEDROP_HOST", "127.0.0.1")
+
+    def filedrop_bind_ips():
+        return [filedrop_host_ip()]
 
     def filedrop_url():
         return f"http://{filedrop_host_ip()}:{FILEDROP_PORT}/"
@@ -554,6 +558,8 @@ def _validate_filedrop():
             errors.append("File-drop service template missing {{REPO_DIR}} placeholder")
         if "{{HOST_IP}}" not in tmpl:
             errors.append("File-drop service template missing {{HOST_IP}} placeholder")
+        if "{{HOST_IPS}}" not in tmpl:
+            errors.append("File-drop service template missing {{HOST_IPS}} placeholder")
         if "filedrop --serve" not in tmpl:
             errors.append("File-drop service template ExecStart missing `filedrop --serve`")
 
@@ -985,14 +991,17 @@ def _whoami():
 def _render_filedrop_unit(port=None):
     """Read the file-drop unit template and substitute the per-machine placeholders.
 
-    {{REPO_DIR}} -> this checkout's path (ExecStart). {{HOST_IP}} -> the LAN IP
-    this machine should bind, computed HERE (unsandboxed, so `hostname -I` works)
-    and baked into Environment=FILEDROP_HOST so the sandboxed server never needs
-    AF_NETLINK to discover its own address. {{PORT}} -> the per-user port chosen
-    by _choose_filedrop_port (a second airuleset user on the same host cannot
-    reuse the first user's :8788)."""
+    {{REPO_DIR}} -> this checkout's path (ExecStart). {{HOST_IP}} -> the primary
+    (tailscale-first) IP, for status/URL. {{HOST_IPS}} -> the comma list of ALL
+    private IPs to bind (tailscale + LAN — filedrop.bind_ips()), so the server
+    answers on every interface the user might be on. Both are computed HERE
+    (unsandboxed, so `hostname -I` / `tailscale ip` work) and baked into the
+    Environment so the sandboxed server never needs AF_NETLINK to discover its own
+    address. {{PORT}} -> the per-user port chosen by _choose_filedrop_port (a
+    second airuleset user on the same host cannot reuse the first user's :8788)."""
     return (FILEDROP_SERVICE_TEMPLATE.read_text()
             .replace("{{REPO_DIR}}", str(REPO_DIR))
+            .replace("{{HOST_IPS}}", ",".join(filedrop_bind_ips()))
             .replace("{{HOST_IP}}", filedrop_host_ip())
             .replace("{{PORT}}", str(port if port is not None else FILEDROP_PORT)))
 
@@ -1368,7 +1377,9 @@ def setup_managed_plugins():
 def _filedrop_serve():
     """Run the file-drop HTTP server in the FOREGROUND (systemd ExecStart target)."""
     from filedrop.server import run_server
-    run_server(host=filedrop_host_ip(), port=FILEDROP_PORT)
+    hosts_env = os.environ.get("FILEDROP_HOSTS", "").strip()
+    hosts = [h for h in hosts_env.split(",") if h] or None
+    run_server(host=filedrop_host_ip(), port=FILEDROP_PORT, hosts=hosts)
 
 
 def cmd_share(args):
@@ -1377,6 +1388,9 @@ def cmd_share(args):
     Prints ONLY the URL on stdout (easy to copy); diagnostics go to stderr. Per
     no-localhost-urls.md, the URL is live-checked before printing — if the server
     is down it tries one restart, and refuses to print a dead URL."""
+    from urllib.parse import urlsplit
+
+    from filedrop import advertise_urls
     from filedrop.share import ShareError, share
     try:
         url, dest = share(args.path)
@@ -1387,20 +1401,24 @@ def cmd_share(args):
         print(f"share: unexpected error ({e})", file=sys.stderr)
         sys.exit(1)
 
-    if _filedrop_is_live(url):
-        print(url)
-        return
-    # Down — try a single restart, then re-check.
-    print("share: file-drop not responding — attempting service restart...",
-          file=sys.stderr)
-    _restart_filedrop_service()
-    if _wait_filedrop_live(url):
-        print(url)
-        return
-    print(f"share: file copied to {dest} but the file-drop server is DOWN at "
-          f"{filedrop_url()} — start it with "
-          f"`systemctl --user start filedrop.service`.", file=sys.stderr)
-    sys.exit(1)
+    if not _filedrop_is_live(url):
+        # Down — try a single restart, then re-check the primary before printing.
+        print("share: file-drop not responding — attempting service restart...",
+              file=sys.stderr)
+        _restart_filedrop_service()
+        if not _wait_filedrop_live(url):
+            print(f"share: file copied to {dest} but the file-drop server is DOWN at "
+                  f"{filedrop_url()} — start it with "
+                  f"`systemctl --user start filedrop.service`.", file=sys.stderr)
+            sys.exit(1)
+
+    # Primary is live — print ONE URL per private interface (tailscale + LAN) that
+    # actually answers, so the user has a working link whichever network they are on.
+    sp = urlsplit(url)
+    reachable = [u for u in advertise_urls(port=sp.port, path=sp.path)
+                 if _filedrop_is_live(u)]
+    for u in (reachable or [url]):
+        print(u)
 
 
 def _filedrop_status():
@@ -1906,31 +1924,26 @@ def cmd_upload(args):
     receiving a file FROM them is ALWAYS a drag-drop web URL, NEVER an scp/sftp
     ask (modules/core/receive-files-via-upload-url.md; incident david@gk
     2026-07-10). Spawns filedrop/upload_server.py DETACHED with an unguessable
-    token, advertises the TAILSCALE IP when available (stable across the user's
-    LAN switches — machine-identities), verifies the URL answers 200 BEFORE
-    printing it (no-localhost-urls), and self-expires after --ttl seconds."""
+    token, binds every PRIVATE interface (tailscale + LAN — bind_ips(); never the
+    public IP, since this is a WRITE endpoint) and advertises ONE URL per interface
+    so the user has a working link whether they are on tailscale or the LAN. Each
+    URL is verified to answer 200 BEFORE printing (no-localhost-urls); the endpoint
+    self-expires after --ttl seconds."""
     import secrets as _secrets
     import socket
     import subprocess
     import time
     import urllib.request
 
+    from filedrop import bind_ips
+
     dest = Path(getattr(args, "dir", None) or (Path.home() / "uploads")).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
     ttl = int(getattr(args, "ttl", None) or 7200)
 
-    # advertise IP: tailscale (stable) > filedrop host_ip fallback
-    ip = ""
-    try:
-        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
-                           text=True, timeout=5)
-        if r.returncode == 0:
-            ip = r.stdout.strip().splitlines()[0].strip()
-    except (OSError, subprocess.TimeoutExpired, IndexError):
-        ip = ""
-    if not ip:
-        from filedrop import host_ip
-        ip = host_ip()
+    # Bind + advertise every private interface (tailscale first, then LAN). Computed
+    # FRESH here (unsandboxed) so it always reflects the current network.
+    ips = bind_ips()
 
     port = int(getattr(args, "port", None) or 0) or None
     if port is None:
@@ -1948,22 +1961,34 @@ def cmd_upload(args):
     with open(log, "ab") as lf:
         subprocess.Popen(
             [sys.executable, str(REPO_DIR / "filedrop" / "upload_server.py"),
-             token, str(port), ip, str(dest), str(ttl)],
+             token, str(port), ",".join(ips), str(dest), str(ttl)],
             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
             start_new_session=True)
-    url = f"http://{ip}:{port}/{token}/"
-    for _ in range(20):  # verify live before presenting (no-localhost-urls)
+
+    def _live(u):
         try:
-            if urllib.request.urlopen(url, timeout=2).status == 200:
-                break
+            return urllib.request.urlopen(u, timeout=2).status == 200
         except OSError:
-            time.sleep(0.25)
+            return False
+
+    urls = [f"http://{ip}:{port}/{token}/" for ip in ips]
+    # Wait for ANY interface to come up (no-localhost-urls) — NOT urls[0]
+    # specifically: the upload_server skips an interface that fails to bind (a
+    # transiently-down tailscale while the LAN binds fine), so gating on the first
+    # URL alone would abort + orphan a working endpoint on another interface.
+    for _ in range(20):
+        if any(_live(u) for u in urls):
+            break
+        time.sleep(0.25)
     else:
         print(f"upload: endpoint failed to come up — see {log}", file=sys.stderr)
         sys.exit(1)
-    print(url)
+    reachable = [u for u in urls if _live(u)] or [urls[0]]
+    for u in reachable:   # one URL per interface — open whichever your network reaches
+        print(u)
     print(f"dest={dest}  ttl={ttl}s  log={log}")
-    print("Po nahratí over: grep SAVED " + str(log))
+    print("Otvor ktorúkoľvek URL v prehliadači (podľa siete). Po nahratí over: grep SAVED "
+          + str(log))
 
 
 def cmd_fable_gate(args):

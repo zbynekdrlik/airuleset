@@ -347,6 +347,7 @@ class TestAirulesetWiring(unittest.TestCase):
         tmpl = airuleset.FILEDROP_SERVICE_TEMPLATE.read_text()
         self.assertIn("{{REPO_DIR}}", tmpl)
         self.assertIn("{{HOST_IP}}", tmpl)
+        self.assertIn("{{HOST_IPS}}", tmpl)     # multi-interface bind list
         self.assertIn("{{PORT}}", tmpl)
         self.assertIn("filedrop --serve", tmpl)
 
@@ -355,7 +356,19 @@ class TestAirulesetWiring(unittest.TestCase):
         unit = airuleset._render_filedrop_unit()
         self.assertNotIn("{{", unit)            # all placeholders substituted
         self.assertIn("FILEDROP_HOST=", unit)
+        self.assertIn("FILEDROP_HOSTS=", unit)  # comma list of private bind IPs
         self.assertIn("airuleset.py filedrop --serve", unit)
+
+    def test_render_unit_bakes_the_bind_list(self):
+        import unittest.mock as m2
+
+        import airuleset
+        with m2.patch.object(airuleset, "filedrop_bind_ips",
+                             return_value=["100.90.94.41", "10.77.9.21"]):
+            unit = airuleset._render_filedrop_unit()
+        self.assertIn("Environment=FILEDROP_HOSTS=100.90.94.41,10.77.9.21", unit)
+        # {{HOST_IP}} must not be corrupted by the {{HOST_IPS}} substitution
+        self.assertNotIn("S}}", unit)
 
     def test_render_unit_bakes_chosen_port(self):
         import airuleset
@@ -433,6 +446,133 @@ class TestChooseFiledropPort(unittest.TestCase):
         self.assertTrue(self.port_file.exists(),
                         "migrated port must be persisted for the share CLI")
         self.assertEqual(int(self.port_file.read_text().strip()), chosen)
+
+
+class TestBindIps(unittest.TestCase):
+    """bind_ips() / advertise_urls() — the multi-interface URL fix (2026-07-10).
+
+    The user is remote and switches between tailscale and the LAN; a single-IP URL
+    kept being unreachable on the network he was NOT on. bind_ips() is the one
+    source of truth for which PRIVATE addresses both servers bind and both CLIs
+    advertise — tailscale first, LAN next, never the public/loopback/docker IPs."""
+
+    def setUp(self):
+        import filedrop
+        self._fd = filedrop
+        self._orig = filedrop._ordered_ips
+        self._orig_if = filedrop._iface_ips
+        # These tests exercise the CIDR-only fallback path — force _iface_ips empty
+        # so bind_ips() uses the mocked _ordered_ips (the iface path is tested below).
+        filedrop._iface_ips = lambda: []
+
+    def tearDown(self):
+        self._fd._ordered_ips = self._orig
+        self._fd._iface_ips = self._orig_if
+
+    def test_is_private_classification(self):
+        p = self._fd._is_private
+        self.assertTrue(p("100.90.94.41"))     # tailscale
+        self.assertTrue(p("10.77.9.21"))       # dev LAN
+        self.assertTrue(p("192.168.1.5"))      # RFC1918 /16
+        self.assertFalse(p("88.99.170.148"))   # gatekeeper PUBLIC — never bind
+        self.assertFalse(p("127.0.0.1"))       # loopback
+        self.assertFalse(p("172.17.0.1"))      # docker bridge — noise
+        self.assertFalse(p("fe80::1"))         # IPv6
+
+    def test_bind_ips_tailscale_first_then_lan_excludes_public_and_docker(self):
+        self._fd._ordered_ips = lambda: [
+            "88.99.170.148", "172.17.0.1", "10.77.9.21",
+            "100.90.94.41", "192.168.1.5", "127.0.0.1"]
+        self.assertEqual(
+            self._fd.bind_ips(),
+            ["100.90.94.41", "10.77.9.21", "192.168.1.5"])
+
+    def test_bind_ips_dedups(self):
+        self._fd._ordered_ips = lambda: ["10.77.9.21", "10.77.9.21", "100.90.94.41"]
+        self.assertEqual(self._fd.bind_ips(), ["100.90.94.41", "10.77.9.21"])
+
+    def test_bind_ips_falls_back_to_loopback_when_nothing_private(self):
+        self._fd._ordered_ips = lambda: ["88.99.170.148", "172.17.0.1"]
+        self.assertEqual(self._fd.bind_ips(), ["127.0.0.1"])
+
+    def test_advertise_urls_one_per_interface(self):
+        self._fd._ordered_ips = lambda: ["100.90.94.41", "10.77.9.21"]
+        self.assertEqual(
+            self._fd.advertise_urls(port=8788, path="tok/f.bin"),
+            ["http://100.90.94.41:8788/tok/f.bin",
+             "http://10.77.9.21:8788/tok/f.bin"])
+
+    def test_advertise_urls_adds_leading_slash(self):
+        self._fd._ordered_ips = lambda: ["10.77.9.21"]
+        self.assertEqual(self._fd.advertise_urls(port=9, path="tok/"),
+                         ["http://10.77.9.21:9/tok/"])
+
+    def test_iface_aware_drops_container_bridges_keeps_tailscale_and_lan(self):
+        # `ip -o -4 addr` view: tailscale + a real LAN iface + docker/podman bridges.
+        # The bridge RFC1918 IPs (10.88.* podman, 172.17.* docker) must be dropped by
+        # interface name even though 10.88.* passes the RFC1918 CIDR test.
+        self._fd._iface_ips = lambda: [
+            ("100.90.94.41", "tailscale0"),
+            ("10.77.9.21", "eth0"),
+            ("10.88.1.112", "cni-podman0"),
+            ("172.17.0.1", "docker0"),
+            ("192.168.10.20", "wlan0"),
+        ]
+        self.assertEqual(self._fd.bind_ips(),
+                         ["100.90.94.41", "10.77.9.21", "192.168.10.20"])
+
+    def test_iface_aware_keeps_tailscale_even_on_odd_iface_name(self):
+        # tailscale is kept by CIDR regardless of interface name.
+        self._fd._iface_ips = lambda: [("100.90.94.41", "cni0")]
+        self.assertEqual(self._fd.bind_ips(), ["100.90.94.41"])
+
+
+class TestMultiBindServer(unittest.TestCase):
+    """The persistent file-drop server binds every private interface, and a host
+    that fails to bind is SKIPPED (a stale LAN IP must not crash-loop the unit)."""
+
+    def test_make_servers_binds_each_host(self):
+        from filedrop.server import make_servers
+        base = tempfile.mkdtemp()
+        servers = make_servers(["127.0.0.1", "127.0.0.2"], port=0, base_dir=base)
+        self.addCleanup(lambda: [s.server_close() for s in servers])
+        self.assertEqual(len(servers), 2)
+
+    def test_make_servers_skips_unbindable_but_keeps_the_rest(self):
+        from filedrop.server import make_servers
+        base = tempfile.mkdtemp()
+        # 203.0.113.9 (TEST-NET-3) is not a local address → bind fails → skipped;
+        # 127.0.0.1 binds fine → server stays up on it.
+        servers = make_servers(["203.0.113.9", "127.0.0.1"], port=0, base_dir=base)
+        self.addCleanup(lambda: [s.server_close() for s in servers])
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0].server_address[0], "127.0.0.1")
+
+    def test_make_servers_raises_when_none_bind(self):
+        from filedrop.server import make_servers
+        with self.assertRaises(OSError):
+            make_servers(["203.0.113.9"], port=0)
+
+    def test_run_server_serves_on_bound_host(self):
+        import socket as _s
+
+        from filedrop.server import run_server
+        base = Path(tempfile.mkdtemp())
+        tok = "abcdef0123456789tok"       # >=16 chars — _TOKEN_RE requires it
+        (base / tok).mkdir()
+        (base / tok / "f.txt").write_bytes(b"hi")
+        sk = _s.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        t = threading.Thread(
+            target=run_server,
+            kwargs={"hosts": ["127.0.0.1"], "port": port, "base_dir": str(base)},
+            daemon=True)
+        t.start()
+        time.sleep(0.4)
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/{tok}/f.txt", timeout=3)
+        self.assertEqual(r.read(), b"hi")
 
 
 if __name__ == "__main__":

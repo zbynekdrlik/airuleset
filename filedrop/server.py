@@ -145,12 +145,49 @@ def make_server(host=None, port=None, base_dir=None):
     return httpd
 
 
-def run_server(host=None, port=None, base_dir=None):
+def make_servers(hosts, port=None, base_dir=None):
+    """Build one ThreadingHTTPServer per host (the private IPs from bind_ips()),
+    so the file-drop answers on tailscale AND the LAN — whichever the user is on.
+
+    A host that fails to bind is SKIPPED with a warning, never fatal: a baked LAN
+    IP can go stale after the user switches the underlying network (machine-
+    identities), and the tailscale address stays stable — so skipping the dead one
+    keeps the server up on the interfaces that DO bind instead of crash-looping the
+    whole unit. Raises only when NONE of the hosts can bind."""
+    port = PORT if port is None else port
+    bd = Path(base_dir) if base_dir is not None else FILEDROP_DIR
+    servers = []
+    for h in hosts:
+        try:
+            httpd = ThreadingHTTPServer((h, port), Handler)
+        except OSError as e:
+            sys.stderr.write(f"filedrop: skip bind {h}:{port} ({e})\n")
+            continue
+        httpd.daemon_threads = True
+        httpd.base_dir = bd
+        servers.append(httpd)
+    if not servers:
+        raise OSError(f"filedrop: no host in {list(hosts)} could bind :{port}")
+    return servers
+
+
+def run_server(host=None, port=None, base_dir=None, hosts=None):
     """Serve forever (systemd ExecStart target). Read-only: never creates or
     writes the drop dir (the client/setup does), so it runs cleanly under a
-    read-only-home sandbox even before the first file is shared."""
-    httpd = make_server(host=host, port=port, base_dir=base_dir)
-    h, p = httpd.server_address[0], httpd.server_address[1]
-    sys.stderr.write(
-        f"filedrop: serving {httpd.base_dir} on http://{h}:{p}/\n")
-    httpd.serve_forever()
+    read-only-home sandbox even before the first file is shared.
+
+    Binds every host in `hosts` (private IPs baked into FILEDROP_HOSTS at install)
+    so the box is reachable on all its private interfaces; `hosts=None` falls back
+    to the single `host` (or the resolved primary) for backward compatibility."""
+    import threading
+    if hosts is None:
+        hosts = [host] if host else [host_ip()]
+    servers = make_servers(hosts, port=port, base_dir=base_dir)
+    for s in servers:
+        h, p = s.server_address[0], s.server_address[1]
+        sys.stderr.write(f"filedrop: serving {s.base_dir} on http://{h}:{p}/\n")
+    # Serve all but the last in daemon threads; block on the last in the main
+    # thread (so the process stays alive and systemd sees it as running).
+    for s in servers[:-1]:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    servers[-1].serve_forever()

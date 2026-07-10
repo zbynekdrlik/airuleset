@@ -8,6 +8,9 @@ skill, invisible to every other session. Promoted to a first-class CLI
 (`airuleset.py upload`) + an always-on module banning scp-to-user asks.
 """
 
+import contextlib
+import io
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import TestCase, main
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
@@ -88,6 +92,81 @@ class TestReceiveFilesModule(TestCase):
     def test_meeting_analysis_uses_the_cli(self):
         t = read("skills/meeting-analysis/SKILL.md")
         self.assertIn("airuleset.py upload", t)
+
+
+class TestMultiInterfaceUrls(TestCase):
+    """The URL must be shown on EVERY private interface (tailscale + LAN), because
+    the user switches networks (2026-07-10). Both the upload server and the CLIs
+    bind/advertise all of bind_ips() — never the public IP (write endpoint)."""
+
+    def test_upload_server_skips_unbindable_ip_but_serves_the_rest(self):
+        dest = Path(tempfile.mkdtemp())
+        port = 8796
+        # 203.0.113.9 (TEST-NET-3) is not local → bind fails → skipped; 127.0.0.1
+        # binds → the endpoint still comes up. Proves multi-bind is resilient.
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
+             "tok", str(port), "203.0.113.9,127.0.0.1", str(dest), "20"],
+            stderr=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        time.sleep(0.6)
+        page = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/tok/", timeout=5).read()
+        self.assertIn(b"Upload", page)
+
+    def test_cmd_upload_prints_a_url_per_interface(self):
+        import airuleset
+        import filedrop
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        dest = Path(tempfile.mkdtemp())
+        # two loopback addresses both bind on Linux → two advertised URLs
+        with m.patch.object(filedrop, "bind_ips",
+                            return_value=["127.0.0.1", "127.0.0.2"]):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+            out = buf.getvalue()
+        self.assertIn(f"http://127.0.0.1:{port}/", out)
+        self.assertIn(f"http://127.0.0.2:{port}/", out)
+
+    def test_cmd_upload_survives_first_interface_unbindable(self):
+        # Review-found gap (2026-07-10): the readiness wait must key on ANY
+        # interface, not urls[0]. Here urls[0] (203.0.113.9 TEST-NET) cannot bind
+        # while 127.0.0.1 binds fine — cmd_upload must still print the working URL,
+        # never abort on the first interface and orphan the endpoint.
+        import airuleset
+        import filedrop
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        dest = Path(tempfile.mkdtemp())
+        with m.patch.object(filedrop, "bind_ips",
+                            return_value=["203.0.113.9", "127.0.0.1"]):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+            out = buf.getvalue()
+        self.assertIn(f"http://127.0.0.1:{port}/", out)
+        self.assertNotIn("203.0.113.9", out)   # unbindable interface not advertised
+
+    def test_cmd_share_prints_a_url_per_interface(self):
+        import airuleset
+        import filedrop
+        with m.patch("filedrop.share.share",
+                     return_value=("http://100.90.94.41:8788/tok/f.bin", "/x")), \
+             m.patch.object(filedrop, "bind_ips",
+                            return_value=["100.90.94.41", "10.77.9.21"]), \
+             m.patch.object(airuleset, "_filedrop_is_live", return_value=True):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_share(m.Mock(path="/x"))
+            out = buf.getvalue()
+        self.assertIn("http://100.90.94.41:8788/tok/f.bin", out)
+        self.assertIn("http://10.77.9.21:8788/tok/f.bin", out)
 
 
 if __name__ == "__main__":

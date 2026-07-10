@@ -8,25 +8,32 @@ chunks (never buffers the whole multi-GB file in RAM). LAN/VPN-internal; the
 unguessable token in the path is the auth.
 
 Usage:
-    python3 upload_server.py <token> <port> <advertise_ip> <dest_dir> [ttl_seconds]
+    python3 upload_server.py <token> <port> <bind_ips_csv> <dest_dir> [ttl_seconds]
 
   GET  /<token>/         -> serves the drag-drop upload page
   PUT  /<token>/<name>   -> streams the bytes to <dest_dir>/<name>
 
+<bind_ips_csv> is a comma-separated list of the PRIVATE addresses to listen on
+(tailscale + LAN — filedrop.bind_ips()), so the user reaches the endpoint whether
+they are on tailscale or the LAN. It deliberately does NOT bind 0.0.0.0: this is a
+WRITE endpoint and the box may have a public IP (gatekeeper), which must never
+carry an open upload port. A single IP (e.g. `127.0.0.1`) is a valid one-item list.
+
 Pick an unguessable token (e.g. `openssl rand -hex 8`) and a free port (8799).
-Print the URL to the user; they open it and drop the file. Verify the saved
+Print the URL(s) to the user; they open one and drop the file. Verify the saved
 size matches before proceeding.
 """
 import os
 import re
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 if len(sys.argv) < 5:
-    sys.exit("usage: upload_server.py <token> <port> <advertise_ip> <dest_dir> [ttl_seconds]")
+    sys.exit("usage: upload_server.py <token> <port> <bind_ips_csv> <dest_dir> [ttl_seconds]")
 TOKEN = sys.argv[1]
 PORT = int(sys.argv[2])
-ADVERTISE_IP = sys.argv[3]
+BIND_IPS = [x for x in sys.argv[3].split(",") if x] or ["127.0.0.1"]
 DEST = sys.argv[4]
 TTL = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 os.makedirs(DEST, exist_ok=True)
@@ -156,8 +163,24 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
 
-httpd = ThreadingHTTPServer(("0.0.0.0", PORT), H)
-httpd.daemon_threads = True
-sys.stderr.write("upload-server: http://%s:%d/%s/\n" % (ADVERTISE_IP, PORT, TOKEN))
+# Bind each private IP (never 0.0.0.0 — see the module docstring). A host that
+# fails to bind is skipped, not fatal, so a stale LAN IP never takes the whole
+# endpoint down; require at least one successful bind.
+_servers = []
+for _h in BIND_IPS:
+    try:
+        _s = ThreadingHTTPServer((_h, PORT), H)
+    except OSError as _e:
+        sys.stderr.write("upload: skip bind %s:%d (%s)\n" % (_h, PORT, _e))
+        continue
+    _s.daemon_threads = True
+    _servers.append(_s)
+if not _servers:
+    sys.exit("upload: no address in %r could bind :%d" % (BIND_IPS, PORT))
+for _s in _servers:
+    sys.stderr.write("upload-server: http://%s:%d/%s/\n"
+                     % (_s.server_address[0], PORT, TOKEN))
 sys.stderr.flush()
-httpd.serve_forever()
+for _s in _servers[:-1]:
+    threading.Thread(target=_s.serve_forever, daemon=True).start()
+_servers[-1].serve_forever()

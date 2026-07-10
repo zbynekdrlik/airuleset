@@ -18,13 +18,14 @@ A recording / audio / video, an image or screenshot, a PDF, a CSV / dataset / ex
 python3 ~/devel/airuleset/airuleset.py share <path-to-file>
 ```
 
-It copies the file into the always-on file-drop server (systemd `--user`, runs on dev1 AND dev2) and prints a clickable URL:
+It copies the file into the always-on file-drop server (systemd `--user`, runs on dev1 AND dev2) and prints **one clickable URL per private interface** — the tailscale IP AND the LAN IP — because the user switches networks (sometimes on tailscale, sometimes on the LAN); a single-IP link kept being unreachable on the network he was NOT on:
 
 ```
-http://100.104.8.125:8788/<token>/<name>
+http://100.104.8.125:8788/<token>/<name>   ← tailscale
+http://10.77.9.165:8788/<token>/<name>     ← LAN
 ```
 
-The unguessable token IS the link's authorization (click-to-open, no login). The command auto-prunes old files and runs on whichever machine you are on (it uses that machine's LAN IP). Present THAT URL to the user. It already live-checks for 200 before printing — if it errors, fix the file-drop service (it's yours — `airuleset.py filedrop status`), do not fall back to a path.
+The unguessable token IS the link's authorization (click-to-open, no login). The command auto-prunes old files, binds every private interface (never the box's PUBLIC IP), and 200-checks each URL before printing it. Present ALL printed URLs to the user — they open whichever their current network reaches. If it errors, fix the file-drop service (it's yours — `airuleset.py filedrop status`), do not fall back to a path.
 
 #### Banned (intent — all rewordings and semantic equivalents)
 
