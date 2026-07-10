@@ -8,13 +8,11 @@ skill, invisible to every other session. Promoted to a first-class CLI
 (`airuleset.py upload`) + an always-on module banning scp-to-user asks.
 """
 
-import io
-import json
-import os
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import TestCase, main
@@ -62,7 +60,7 @@ class TestUploadCli(TestCase):
         req2 = urllib.request.Request(
             f"http://127.0.0.1:{port}/WRONG/x.bin", data=b"x", method="PUT")
         try:
-            r2 = urllib.request.urlopen(req2, timeout=5)
+            urllib.request.urlopen(req2, timeout=5)
             self.fail("wrong token accepted")
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 404)

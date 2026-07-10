@@ -1899,6 +1899,73 @@ def cmd_authority(args):
               f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
 
 
+def cmd_upload(args):
+    """Stand up a web UPLOAD endpoint the user opens in their own browser.
+
+    The user works over SSH with NO local filesystem access to any managed box —
+    receiving a file FROM them is ALWAYS a drag-drop web URL, NEVER an scp/sftp
+    ask (modules/core/receive-files-via-upload-url.md; incident david@gk
+    2026-07-10). Spawns filedrop/upload_server.py DETACHED with an unguessable
+    token, advertises the TAILSCALE IP when available (stable across the user's
+    LAN switches — machine-identities), verifies the URL answers 200 BEFORE
+    printing it (no-localhost-urls), and self-expires after --ttl seconds."""
+    import secrets as _secrets
+    import socket
+    import subprocess
+    import time
+    import urllib.request
+
+    dest = Path(getattr(args, "dir", None) or (Path.home() / "uploads")).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    ttl = int(getattr(args, "ttl", None) or 7200)
+
+    # advertise IP: tailscale (stable) > filedrop host_ip fallback
+    ip = ""
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                           text=True, timeout=5)
+        if r.returncode == 0:
+            ip = r.stdout.strip().splitlines()[0].strip()
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        ip = ""
+    if not ip:
+        from filedrop import host_ip
+        ip = host_ip()
+
+    port = int(getattr(args, "port", None) or 0) or None
+    if port is None:
+        for cand in range(8799, 8820):
+            with socket.socket() as s:
+                if s.connect_ex(("127.0.0.1", cand)) != 0:
+                    port = cand
+                    break
+        else:
+            print("upload: no free port in 8799-8819", file=sys.stderr)
+            sys.exit(1)
+
+    token = _secrets.token_urlsafe(12)
+    log = Path(f"/tmp/airuleset-upload-{port}.log")
+    with open(log, "ab") as lf:
+        subprocess.Popen(
+            [sys.executable, str(REPO_DIR / "filedrop" / "upload_server.py"),
+             token, str(port), ip, str(dest), str(ttl)],
+            stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+    url = f"http://{ip}:{port}/{token}/"
+    for _ in range(20):  # verify live before presenting (no-localhost-urls)
+        try:
+            if urllib.request.urlopen(url, timeout=2).status == 200:
+                break
+        except OSError:
+            time.sleep(0.25)
+    else:
+        print(f"upload: endpoint failed to come up — see {log}", file=sys.stderr)
+        sys.exit(1)
+    print(url)
+    print(f"dest={dest}  ttl={ttl}s  log={log}")
+    print("Po nahratí over: grep SAVED " + str(log))
+
+
 def cmd_fable_gate(args):
     """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
     exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
@@ -2286,6 +2353,15 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_up = sub.add_parser(
+        "upload",
+        help="Web upload URL for receiving a file FROM the user (never ask for scp)")
+    p_up.add_argument("--dir", default=None, help="Destination dir (default ~/uploads)")
+    p_up.add_argument("--ttl", type=int, default=7200,
+                      help="Endpoint self-shutdown after N seconds (default 7200)")
+    p_up.add_argument("--port", type=int, default=None,
+                      help="Port (default: first free in 8799-8819)")
+
     p_auth = sub.add_parser(
         "authority",
         help="Print this stream's autopilot authority profile "
@@ -2330,6 +2406,7 @@ SUBCOMMANDS = {
     "watchdog": cmd_watchdog,
     "fable-gate": cmd_fable_gate,
     "authority": cmd_authority,
+    "upload": cmd_upload,
     "tickets-status": cmd_tickets_status,
     "autopilot-lock": cmd_autopilot_lock,
 }

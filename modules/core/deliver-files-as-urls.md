@@ -3,6 +3,7 @@
 **Context gate — related rules you MUST also apply:**
 - `no-localhost-urls.md` — use the machine's real LAN IP, never localhost; verify the URL is live (200) before presenting it
 - `view-image-urls.md` — the INPUT counterpart (user→you: view an image URL via Playwright); this is the OUTPUT counterpart (you→user: hand back a file URL)
+- `receive-files-via-upload-url.md` — the FILE-INPUT counterpart (user→you: they upload via a web URL from `airuleset.py upload`; NEVER ask them to scp)
 - `security-basics.md` — never `share` a credentials/secret file unless the user explicitly asked for that exact file
 
 **The user has NO direct filesystem access to the dev machines.** A `/tmp/...` path, an absolute path, or "the file is saved at `<path>`" is USELESS to them — they cannot open it. When the user asks you for a file, or you produce a file they need to open, you MUST deliver it as a **clickable web URL on the machine's LAN IP**, every time, no exceptions. This is the rule that ends the recurring "I keep explaining I can't reach /tmp" friction.

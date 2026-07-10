@@ -8,7 +8,7 @@ chunks (never buffers the whole multi-GB file in RAM). LAN/VPN-internal; the
 unguessable token in the path is the auth.
 
 Usage:
-    python3 upload_server.py <token> <port> <advertise_ip> <dest_dir>
+    python3 upload_server.py <token> <port> <advertise_ip> <dest_dir> [ttl_seconds]
 
   GET  /<token>/         -> serves the drag-drop upload page
   PUT  /<token>/<name>   -> streams the bytes to <dest_dir>/<name>
@@ -23,18 +23,25 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 if len(sys.argv) < 5:
-    sys.exit("usage: upload_server.py <token> <port> <advertise_ip> <dest_dir>")
+    sys.exit("usage: upload_server.py <token> <port> <advertise_ip> <dest_dir> [ttl_seconds]")
 TOKEN = sys.argv[1]
 PORT = int(sys.argv[2])
 ADVERTISE_IP = sys.argv[3]
 DEST = sys.argv[4]
+TTL = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 os.makedirs(DEST, exist_ok=True)
+
+if TTL > 0:
+    # self-shutdown so detached upload endpoints never accumulate as orphans
+    import threading
+
+    threading.Timer(TTL, lambda: os._exit(0)).start()
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Upload — meeting recording</title>
+<title>Upload — airuleset file-drop</title>
 <style>
  body{{font:16px system-ui;margin:0;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;min-height:100vh}}
  .card{{background:#1e293b;padding:32px;border-radius:14px;width:min(560px,92vw);box-shadow:0 10px 40px #0006}}
@@ -48,7 +55,7 @@ PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
  .ok{{color:#4ade80}} .err{{color:#f87171}}
 </style>
 <div class=card>
- <h1>Upload videa / nahrávky</h1>
+ <h1>Upload súboru na server</h1>
  <p>Potiahni súbor sem alebo klikni. Veľké súbory OK — streamuje sa priamo na server.</p>
  <div id=drop>📁 <b>Vyber alebo potiahni súbor</b></div>
  <input id=f type=file>
