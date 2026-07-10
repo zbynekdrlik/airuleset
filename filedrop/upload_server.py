@@ -50,16 +50,16 @@ PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Upload — airuleset file-drop</title>
 <style>
- body{{font:16px system-ui;margin:0;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;min-height:100vh}}
- .card{{background:#1e293b;padding:32px;border-radius:14px;width:min(560px,92vw);box-shadow:0 10px 40px #0006}}
- h1{{font-size:18px;margin:0 0 4px}} p{{color:#94a3b8;margin:.2em 0 1em}}
- #drop{{border:2px dashed #475569;border-radius:12px;padding:36px;text-align:center;cursor:pointer;transition:.15s}}
- #drop.hot{{border-color:#38bdf8;background:#0c4a6e33}}
- input[type=file]{{display:none}}
- .bar{{height:10px;background:#334155;border-radius:6px;overflow:hidden;margin-top:16px;display:none}}
- .bar>i{{display:block;height:100%;width:0;background:#38bdf8;transition:width .2s}}
- #status{{margin-top:12px;font-size:14px;color:#cbd5e1;white-space:pre-line}}
- .ok{{color:#4ade80}} .err{{color:#f87171}}
+ body{font:16px system-ui;margin:0;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;min-height:100vh}
+ .card{background:#1e293b;padding:32px;border-radius:14px;width:min(560px,92vw);box-shadow:0 10px 40px #0006}
+ h1{font-size:18px;margin:0 0 4px} p{color:#94a3b8;margin:.2em 0 1em}
+ #drop{border:2px dashed #475569;border-radius:12px;padding:36px;text-align:center;cursor:pointer;transition:.15s}
+ #drop.hot{border-color:#38bdf8;background:#0c4a6e33}
+ input[type=file]{display:none}
+ .bar{height:10px;background:#334155;border-radius:6px;overflow:hidden;margin-top:16px;display:none}
+ .bar>i{display:block;height:100%;width:0;background:#38bdf8;transition:width .2s}
+ #status{margin-top:12px;font-size:14px;color:#cbd5e1;white-space:pre-line}
+ .ok{color:#4ade80} .err{color:#f87171}
 </style>
 <div class=card>
  <h1>Upload súboru na server</h1>
@@ -73,23 +73,23 @@ PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 const drop=document.getElementById('drop'),f=document.getElementById('f'),
  bar=document.querySelector('.bar'),fill=document.getElementById('fill'),st=document.getElementById('status');
 drop.onclick=()=>f.click();
-['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{{ev.preventDefault();drop.classList.add('hot')}}));
-['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{{ev.preventDefault();drop.classList.remove('hot')}}));
-drop.addEventListener('drop',ev=>{{if(ev.dataTransfer.files.length)send(ev.dataTransfer.files[0])}});
-f.onchange=()=>{{if(f.files.length)send(f.files[0])}};
-function fmt(b){{return (b/1073741824).toFixed(2)+' GB'}}
-function send(file){{
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hot')}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('hot')}));
+drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)send(ev.dataTransfer.files[0])});
+f.onchange=()=>{if(f.files.length)send(f.files[0])};
+function fmt(b){return (b/1073741824).toFixed(2)+' GB'}
+function send(file){
  st.className='';st.textContent='Nahrávam '+file.name+' ('+fmt(file.size)+')…';bar.style.display='block';
  const xhr=new XMLHttpRequest();
  xhr.open('PUT',location.pathname.replace(/\\/$/,'')+'/'+encodeURIComponent(file.name));
- xhr.upload.onprogress=e=>{{if(e.lengthComputable){{const p=e.loaded/e.total*100;fill.style.width=p+'%';
-   st.textContent='Nahrávam '+file.name+'  '+p.toFixed(1)+'%  ('+fmt(e.loaded)+' / '+fmt(file.size)+')'}}}};
- xhr.onload=()=>{{if(xhr.status===200){{fill.style.width='100%';st.className='ok';
-   st.textContent='✅ Hotovo — '+file.name+' je na serveri. Môžeš zavrieť okno.'}}
-   else{{st.className='err';st.textContent='❌ Chyba '+xhr.status+': '+xhr.responseText}}}};
- xhr.onerror=()=>{{st.className='err';st.textContent='❌ Sieťová chyba pri nahrávaní.'}};
+ xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=e.loaded/e.total*100;fill.style.width=p+'%';
+   st.textContent='Nahrávam '+file.name+'  '+p.toFixed(1)+'%  ('+fmt(e.loaded)+' / '+fmt(file.size)+')'}};
+ xhr.onload=()=>{if(xhr.status===200){fill.style.width='100%';st.className='ok';
+   st.textContent='✅ Hotovo — '+file.name+' je na serveri. Môžeš zavrieť okno.'}
+   else{st.className='err';st.textContent='❌ Chyba '+xhr.status+': '+xhr.responseText}};
+ xhr.onerror=()=>{st.className='err';st.textContent='❌ Sieťová chyba pri nahrávaní.'};
  xhr.send(file);
-}}
+}
 </script></html>"""
 
 

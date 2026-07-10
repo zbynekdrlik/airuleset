@@ -38,6 +38,24 @@ class TestUploadCli(TestCase):
     def test_upload_server_lives_in_filedrop_package(self):
         self.assertTrue((ROOT / "filedrop" / "upload_server.py").exists())
 
+    def test_served_page_has_no_escaped_brace_leak(self):
+        # PAGE is served RAW (PAGE.encode(), no .format()), so doubled `{{`/`}}`
+        # would render LITERALLY and break the CSS/JS. Regression for david@gk's
+        # live-found fix (2026-07-10): the served HTML must contain real single
+        # braces (`body{font`), never an escaped `{{`.
+        dest = Path(tempfile.mkdtemp())
+        port = 8794
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
+             "toktoktoktoktok16", str(port), "127.0.0.1", str(dest), "20"],
+            stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.kill)
+        time.sleep(0.6)
+        html = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/toktoktoktoktok16/", timeout=5).read().decode()
+        self.assertNotIn("{{", html)            # no escaped-brace leak
+        self.assertIn("body{font", html)        # real CSS rule survived
+
     def test_server_saves_a_put_and_respects_ttl(self):
         dest = Path(tempfile.mkdtemp())
         port = 8797
