@@ -46,6 +46,18 @@
 
 Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — then you are NOT done; wait until everything is ✅ before sending.
 
+#### Reduced-authority (fork-no-merge / branch-merge) variant — SAME template, hand-off lines instead of merge/deploy
+
+A stream with `airuleset.py authority` != full has no PR-to-main / merge / deploy — but the report obligations are IDENTICAL (heading + audits + `---` + Goal + What changed; the PR-less gate in `stop-check-prose-violations.sh` enforces it — a bare `✅ DONE: #N hotové` is blocked, the david@gk failure 2026-07-11). Replace only the flow-shaped lines:
+
+```
+✅ Lokálne overenie: <tests + lint result on the fork/integration branch>
+✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge
+✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there)
+```
+
+No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay mandatory and plain-language.
+
 #### Hard rules
 
 - **FULL template every time.** Writing `## ✅ Work Complete` is a contract — every required field MUST appear. Prose substitutes ("STOP at green PR URL", "Awaiting merge", "Phase N gated") are banned. Any rewording of the same intent is also banned.

@@ -136,6 +136,24 @@ IS_COMPLETION_SIGNAL=0
 if [ "$HAS_PR_URL" = "1" ] && { [ "$HAS_COMPLETION_PHRASE" = "1" ] || [ "$HAS_GOAL_AND_OUTCOME" = "1" ]; }; then
     IS_COMPLETION_SIGNAL=1
 fi
+
+# PR-LESS ticket completion (the david@gk blind spot, 2026-07-11): a fork-no-merge /
+# hand-off stream NEVER produces a PR URL, so the PR-anchored route above never fired
+# there and bare '✅ DONE: #1400 a #1408 hotové' one-liners sailed through — the user
+# never saw a proper Work Complete report on that box. A ✅ DONE marker line that
+# names ticket(s) #N together with done-vocab (SK/EN), or is paired with a
+# READY-FOR-REVIEW hand-off, IS a ticket completion — same template obligations.
+# (A conversational '✅ DONE: odpovedané na otázku o #123' has no done-vocab → clean.)
+DONE_LINE=$(echo "$MSG" | grep -E "^✅ DONE:" | tail -1 || echo "")
+if [ "$IS_COMPLETION_SIGNAL" = "0" ] && [ -n "$DONE_LINE" ]; then
+    if printf '%s' "$DONE_LINE" | grep -qE "#[0-9]+" \
+       && printf '%s' "$DONE_LINE" | grep -qiE "hotov|opraven|zavret|uzavret|vyrie[sš]en|dokon[cč]en|implementovan|nasaden|zmerg|zl[uú][cč]en|odovzdan|merged|deployed|fixed|closed|resolved|implemented|shipped|handed.?off"; then
+        IS_COMPLETION_SIGNAL=1
+    elif echo "$MSG" | grep -qiE "READY-FOR-REVIEW|odovzdan[eéáý]?[^.]{0,40}review|ready for (the )?(gatekeeper|maintainer) review"; then
+        IS_COMPLETION_SIGNAL=1
+    fi
+fi
+
 # A message that ends still-working (⏳ marker) is not a completion report — the signal
 # route must not force the template mid-loop (e.g. fleet merged #N, dispatching the next).
 if [ "$IS_COMPLETION_SIGNAL" = "1" ] && echo "$MSG" | grep -q "⏳"; then
@@ -174,6 +192,11 @@ if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
     echo "" >&2
     echo "    **[<project>] PR #N: <full title>**" >&2
     echo "    <full PR URL> — merged <sha> (default-auto) / mergeable, clean (manual-marker)" >&2
+    echo "" >&2
+    echo "  FORK-NO-MERGE / hand-off stream (no PR/merge/deploy exists): keep the heading +" >&2
+    echo "  audits + Goal/What changed, and replace the Deploy/🌐/PR lines with the hand-off:" >&2
+    echo "    ✅ Lokálne overenie: <tests+lint result on the fork branch>" >&2
+    echo "    ✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta" >&2
     echo "" >&2
     echo "  See completion-report.md → 'MANDATORY structure (use this EXACT template)'." >&2
     add_hard "Prose completion report missing canonical '## ✅ Work Complete' heading — use the full template, not a prose summary"
