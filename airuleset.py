@@ -1623,13 +1623,32 @@ def cmd_tickets_status(args):
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
-        n = _out(["gh", "issue", "list", "--state", "open", "--search",
-                  "-label:autopilot-skip", "-L", "200",
-                  "--json", "number", "-q", "length"], root)
-        try:
-            entry["open"] = int(n)
-        except (TypeError, ValueError):
-            entry["open"] = None
+        # A reduced-authority stream (sub-dev box: david/montalu/marek — resolved
+        # marker-aware via resolve_authority) counts only ITS OWN slice: open,
+        # non-skip, assigned-to-me OR authored-by-me. The full repo backlog on a
+        # sub-dev statusline was noise ("Issues 16" where David's slice is 6 —
+        # gatekeeper goal, 2026-07-11). Full-authority boxes keep the full count.
+        if resolve_authority(cwd=root) != "full":
+            entry["scope"] = "mine"
+            mine, failed = set(), False
+            for qual in ("assignee:@me", "author:@me"):
+                raw = _out(["gh", "issue", "list", "--state", "open", "--search",
+                            "-label:autopilot-skip " + qual, "-L", "200",
+                            "--json", "number"], root)
+                try:
+                    mine |= {x["number"] for x in json.loads(raw)}
+                except (ValueError, TypeError, KeyError):
+                    failed = True   # gh error ≠ empty slice — keep open=None
+            entry["open"] = None if failed else len(mine)
+        else:
+            entry["scope"] = "all"
+            n = _out(["gh", "issue", "list", "--state", "open", "--search",
+                      "-label:autopilot-skip", "-L", "200",
+                      "--json", "number", "-q", "length"], root)
+            try:
+                entry["open"] = int(n)
+            except (TypeError, ValueError):
+                entry["open"] = None
     cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(cache) + ".tmp"
