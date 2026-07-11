@@ -40,9 +40,16 @@ prove local verification green (tests/lint), then hand off with a COMMENT starti
 `READY-FOR-REVIEW:` (branch name + the verification evidence) — the comment is the PRIMARY signal
 (it works at read role; a fork-derived collaborator often cannot add labels, #17); ALSO try
 `gh issue edit <N> --add-label ready-for-review` best-effort and silently accept a 403 — you NEVER
-open or merge a PR, never push to upstream branches, never close the issue (the maintainer does at
-merge), and the per-ticket Discord card fires at this hand-off. Reduced-authority streams work ONLY
-issues assigned to them.
+open or merge a PR, and never push to upstream branches. **You NEVER close the issue — not a DONE
+one, not an OBSOLETE one — the gatekeeper MAINTAINER closes it at review/merge** (this is
+HOOK-ENFORCED: `block-fork-no-merge-issue-close.sh` blocks `gh issue close` for this stream; do not
+try to route around it). Self-closing was the 2026-07-10 drift that gave the user terse "✅ DONE"
+outcomes and NO review. Instead, at each ticket's hand-off, **FIRE THE FORK-NO-MERGE CARD** (the
+per-ticket evaluation the user reads on their phone — the merge-shaped card never fires for this
+stream, so you MUST use `--handoff`):
+`python3 ~/devel/airuleset/airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal "<plain Slovak>" --achieved "<plain Slovak: čo je hotové + lokálne overené>" [--url "<kde to vidno=…>"]`
+(no `--version`/`--pr` — nothing merged/deployed; the card shows a 🔎 "odovzdané na review" status).
+Reduced-authority streams work ONLY issues assigned to them.
 
 **Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md` — load the `batch-issue-development` skill for the full gate): all members land
 on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Closes #<n>` line for
@@ -144,6 +151,9 @@ EVIDENCE (what you ran + observed) — `gh issue close <N> --comment "<evidence>
 that one member (do NOT add its `Closes #N` to the PR), note it on the evidence block's
 `obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after closing. Only
 confirmed-still-valid issues proceed to the cycle below.
+**fork-no-merge EXCEPTION:** you MUST NOT `gh issue close` (hook-blocked). For an obsolete ticket,
+COMMENT the finding instead — `gh issue comment <N> --body "OBSOLETE: <evidence>"` — leave it OPEN,
+note it on the evidence block's `obsolete_handed_off:` line, and let the maintainer close it.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
@@ -248,6 +258,24 @@ deployed_version: <string read from DOM | "no deploy pipeline">
 issue_state: <#A=closed, #B=closed, … (each member)>
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">
+unverified: <list | "none">
+filed: <#K list | "none">
+```
+
+**fork-no-merge variant of the FINAL MESSAGE** (no PR / merge / deploy exists for this stream — do
+NOT free-style a terse "hotové" and do NOT invent merge fields; report the HAND-OFF, issues left
+OPEN):
+
+```
+issues: #<A> <title>, #<B> <title>, …
+validated: <per issue: how you proved each is still real | "OBSOLETE — commented, left OPEN: <what>">
+achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
+branch: <your fork branch name, pushed>
+local_verify: <tests + lint command → result (green), the proof the maintainer will re-check>
+ready_for_review: <#A: comment posted ✓, label added/403; #B: …>  (the READY-FOR-REVIEW: hand-off)
+cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
+issue_state: <#A=OPEN (handed off), #B=OPEN (handed off), …>   ← NEVER closed by you
+obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
 filed: <#K list | "none">
 ```

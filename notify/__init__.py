@@ -175,7 +175,8 @@ def _plural_done(n):
 
 
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
-                           review_ok=True, done=None, remaining=None, urls=None):
+                           review_ok=True, done=None, remaining=None, urls=None,
+                           handoff=False):
     """Build the canonical per-ticket completion card (Slovak, Discord markdown).
 
     `tickets` is a list of dicts {n, title, goal, achieved}. `urls` is a list of
@@ -183,13 +184,23 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     "Money Gate stav=https://…/money-gate"). `pr` is accepted for call-compatibility
     but NOT rendered (the user wants the live view, not the code/diff). Structure is
     fixed here so every card is consistent regardless of who calls it. No @mention
-    here — send() prepends it."""
+    here — send() prepends it.
+
+    `handoff=True` renders the FORK-NO-MERGE variant: the stream cannot merge or
+    deploy, so instead of the 📦 "nasadené <version>" line it shows a 🔎 "odovzdané
+    na review" status (locally verified, waiting for the gatekeeper to merge/close).
+    Without this, a fork-no-merge worker had NO card shape that fit — the merge-only
+    card never fired, so the user got no per-ticket evaluation at all (incident
+    2026-07-10, david@gk / odoo-erp)."""
     tickets = tickets or []
     # Show only the repo NAME (last path segment), not "owner/name": the @mention
     # send() prepends already names the person, so an "owner/" prefix repeats it
     # (e.g. "@Zbynek Drlik … zbynekdrlik/bakerion-ai" said "zbynek" twice).
     repo_name = (_clean(repo) or "?").rstrip("/").split("/")[-1] or "?"
-    lines = ["🚀 **%s** — %s" % (repo_name, _plural_done(len(tickets) or 1))]
+    n_tk = len(tickets) or 1
+    header = ("%d ticket odovzdaný na review" % n_tk if handoff
+              else _plural_done(n_tk))
+    lines = ["🚀 **%s** — %s" % (repo_name, header)]
     for t in tickets:
         n = t.get("n")
         # Header is JUST the number — the issue title is technical/long and was
@@ -205,16 +216,22 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     # user does not need to re-read. `review_ok` is kept in the signature so the
     # worker's `--review` arg stays valid, but it no longer prints.)
 
-    # Deploy line leads with the DEPLOYED VERSION (the fact the user actually wants
-    # — "which version went live?"). The PR number was removed at the user's request
-    # (noise). `pr` is still accepted in the signature so callers don't break.
-    deploy = []
-    v = _clean(version)
-    if v and v not in ("—", "-"):
-        deploy.append("nasadené **%s**" % v)
-    if merge_sha:
-        deploy.append("`%s`" % _clean(str(merge_sha))[:12])
-    lines.append("📦 " + (" · ".join(deploy) if deploy else "zmergnuté"))
+    if handoff:
+        # Fork-no-merge: nothing merged/deployed. The stream verified locally and
+        # handed the branch to the gatekeeper — say exactly that (no 📦 version line).
+        lines.append("🔎 **Odovzdané na review** — lokálne overené (testy/lint), "
+                     "čaká na gatekeeper merge")
+    else:
+        # Deploy line leads with the DEPLOYED VERSION (the fact the user actually
+        # wants — "which version went live?"). The PR number was removed at the
+        # user's request (noise). `pr` is still accepted so callers don't break.
+        deploy = []
+        v = _clean(version)
+        if v and v not in ("—", "-"):
+            deploy.append("nasadené **%s**" % v)
+        if merge_sha:
+            deploy.append("`%s`" % _clean(str(merge_sha))[:12])
+        lines.append("📦 " + (" · ".join(deploy) if deploy else "zmergnuté"))
 
     # 🔗 links — WHERE to SEE the change LIVE: the app's web page, or the specific
     # dashboard sub-page / route the change is visible on. NOT the PR/diff (the user

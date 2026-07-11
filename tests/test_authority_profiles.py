@@ -43,6 +43,110 @@ class TestAuthorityResolution(TestCase):
                 airuleset.cmd_authority(m.Mock(explain=False))
         p.assert_any_call("branch-merge")
 
+    def test_project_marker_overrides_the_user_map(self):
+        # cmd_authority's explain text has always PROMISED the marker override; it must
+        # actually be honored now (single source of truth for the CLI + the close-guard
+        # hook). A project can RAISE david's default (fork-no-merge) to full…
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text("<!-- airuleset:authority=full -->\n")
+        with m.patch.object(airuleset, "_current_user", return_value="david"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "full")
+
+    def test_project_marker_can_lower_authority(self):
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text("<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+    def test_no_marker_falls_back_to_user_map(self):
+        import tempfile
+        d = tempfile.mkdtemp()  # no CLAUDE.md
+        with m.patch.object(airuleset, "_current_user", return_value="david"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+    def test_bogus_marker_value_ignored(self):
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text("<!-- airuleset:authority=superuser -->\n")
+        with m.patch.object(airuleset, "_current_user", return_value="david"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+    def test_bare_prose_mention_does_NOT_change_authority(self):
+        # Security (review 2026-07-11): only the HTML-comment marker counts. A prose
+        # / doc mention of a profile MUST NOT silently elevate a fork-no-merge stream
+        # to full and disable the close guard (the UNSAFE direction).
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "Streams: set airuleset:authority=full to grant full rights.\n")
+        with m.patch.object(airuleset, "_current_user", return_value="david"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+    def test_last_comment_marker_wins_over_an_example(self):
+        # An operative marker placed AFTER a documentation example must not be shadowed.
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "Example: <!-- airuleset:authority=full -->\n"
+            "<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+
+class TestForkNoMergeHandoffCard(TestCase):
+    """The fork-no-merge card variant (incident 2026-07-10): the merge-shaped card
+    never fired for david's stream, so the user got no per-ticket evaluation. The
+    --handoff card shows a 🔎 review status instead of the 📦 deploy line."""
+
+    def test_handoff_card_shows_review_status_not_deploy(self):
+        from notify import compose_autopilot_card
+        body = compose_autopilot_card(
+            repo="kvaskodev/odoo-erp",
+            tickets=[{"n": 1408, "title": "t", "goal": "Cieľ X",
+                      "achieved": "Hotové, lokálne overené"}],
+            version=None, remaining=3, handoff=True)
+        self.assertIn("🔎", body)
+        self.assertIn("Odovzdané na review", body)
+        self.assertIn("odovzdaný na review", body)   # header, not "vyriešené"
+        self.assertNotIn("📦", body)                 # no deploy/version line
+        self.assertNotIn("zmergnuté", body)
+        self.assertIn("🎯 **Cieľ:** Cieľ X", body)
+
+    def test_non_handoff_card_still_shows_deploy_line(self):
+        from notify import compose_autopilot_card
+        body = compose_autopilot_card(
+            repo="o/n", tickets=[{"n": 5, "goal": "g", "achieved": "a"}],
+            version="v1.2.3", handoff=False)
+        self.assertIn("📦", body)
+        self.assertIn("nasadené **v1.2.3**", body)
+        self.assertNotIn("Odovzdané na review", body)
+
+    def test_cmd_notify_passes_handoff_through(self):
+        import unittest.mock as mk
+        args = mk.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       record_question=False, edit_question=False, channel_id=False,
+                       owner=False, mirror_owners=False, body=None, run=None,
+                       repo="kvaskodev/odoo-erp", issue=1408, pr=None,
+                       achieved="hotové", result=None, goal="cieľ", version=None,
+                       merge_sha=None, url=None, review="ok", handoff=True,
+                       dedup_key=None, dry_run=False)
+        captured = {}
+
+        with mk.patch.object(airuleset, "_gh_out",
+                             side_effect=lambda *a, **k: "T" if "view" in a else "3"):
+            with mk.patch("notify.send",
+                          side_effect=lambda body, **k: captured.setdefault("b", body) or "sent"):
+                airuleset.cmd_notify(args)
+        self.assertIn("Odovzdané na review", captured["b"])
+        self.assertNotIn("📦", captured["b"])
+
 
 class TestAutopilotSkillCarriesProfiles(TestCase):
     SKILL = "skills/autopilot/SKILL.md"
@@ -98,6 +202,22 @@ class TestWorkerCarriesProfiles(TestCase):
     def test_merge_policy_notes_reduced_authority(self):
         self.assertIn("airuleset.py authority",
                       read("modules/core/pr-merge-policy.md"))
+
+    def test_worker_forbids_self_close_and_fires_handoff_card(self):
+        # Incident 2026-07-10: fork-no-merge worker self-closed issues + never carded.
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("NEVER close the issue", w)
+        self.assertIn("block-fork-no-merge-issue-close", w)   # names the enforcing hook
+        self.assertIn("--handoff", w)                          # fires the fork-no-merge card
+        self.assertIn("OBSOLETE:", w)                          # obsolete → comment, not close
+        self.assertIn("obsolete_handed_off:", w)               # fork-no-merge FINAL MESSAGE field
+
+    def test_close_guard_hook_is_wired(self):
+        import json
+        d = json.loads(read("settings/hooks.json"))
+        bash = [x for x in d["hooks"]["PreToolUse"] if x.get("matcher") == "Bash"][0]
+        cmds = " ".join(h["command"] for h in bash["hooks"])
+        self.assertIn("block-fork-no-merge-issue-close.sh", cmds)
 
 
 if __name__ == "__main__":

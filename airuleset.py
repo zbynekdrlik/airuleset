@@ -1674,7 +1674,8 @@ def _notify_run_card(args, compose_autopilot_card, send):
             pr=getattr(args, "pr", None), version=getattr(args, "version", None),
             merge_sha=getattr(args, "merge_sha", None),
             review_ok=(getattr(args, "review", "ok") != "fail"),
-            done=None, remaining=remaining, urls=getattr(args, "url", None))
+            done=None, remaining=remaining, urls=getattr(args, "url", None),
+            handoff=getattr(args, "handoff", False))
         # Dedup on the REPO-NAME#ISSUE — the stable unit. /autopilot re-dispatches a
         # fresh worker each turn (SendMessage is gated), so the same issue can be
         # carded more than once; keying on repo-name#issue collapses those to one.
@@ -1896,15 +1897,49 @@ AUTHORITY_BY_USER = {
 }
 
 
+AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
+
+
 def _current_user() -> str:
     import getpass
 
     return getpass.getuser()
 
 
-def resolve_authority() -> str:
-    """Map the current linux user to their autopilot authority profile."""
-    return AUTHORITY_BY_USER.get(_current_user(), "full")
+def _authority_marker(cwd=None):
+    """Read an `<!-- airuleset:authority=<profile> -->` override from the project
+    CLAUDE.md (cwd-relative), or None. Lets a project raise/lower a stream's default
+    authority (e.g. grant `full` to a montalu repo). The single place the marker is
+    parsed, so the CLI, the autopilot skill, and the issue-close guard hook agree.
+
+    The marker MUST be the HTML-COMMENT form (exactly like `<!-- airuleset:merge=manual
+    -->`) — a bare/prose mention of `airuleset:authority=…` is deliberately NOT honored:
+    an unanchored match could let a documentation sentence naming a profile silently
+    ELEVATE a fork-no-merge stream to `full` and disable the issue-close guard (the
+    UNSAFE direction). If several comment markers exist (a misconfig) the LAST one wins,
+    so an operative marker placed after any example cannot be shadowed."""
+    import re
+    try:
+        p = (Path(cwd) if cwd else Path.cwd()) / "CLAUDE.md"
+        if p.is_file():
+            hits = re.findall(r"<!--\s*airuleset:authority=([a-z-]+)\s*-->",
+                              p.read_text(errors="ignore"))
+            for tok in reversed(hits):
+                if tok in AUTHORITY_PROFILES:
+                    return tok
+    except OSError:
+        return None
+    return None
+
+
+def resolve_authority(cwd=None) -> str:
+    """The current stream's autopilot authority profile: a project CLAUDE.md
+    `airuleset:authority=<profile>` marker (cwd-relative) OVERRIDES the per-user
+    default map. This makes `airuleset.py authority` authoritative for both the
+    autopilot skill and the `block-fork-no-merge-issue-close` hook (single source
+    of truth) — cmd_authority's explain text has always PROMISED this override; it
+    is now actually honored, not just documented."""
+    return _authority_marker(cwd) or AUTHORITY_BY_USER.get(_current_user(), "full")
 
 
 def cmd_authority(args):
@@ -2343,6 +2378,10 @@ def main():
                                "or 'Label=URL' (e.g. 'Prod=https://…'); repeatable")
     p_notify.add_argument("--merge-sha", dest="merge_sha", help="Merge commit SHA")
     p_notify.add_argument("--version", help="Deployed version read from the DOM")
+    p_notify.add_argument("--handoff", action="store_true",
+                          help="Fork-no-merge card: fired at the READY-FOR-REVIEW "
+                               "hand-off (locally verified, waiting for gatekeeper "
+                               "merge) — no merge/version, shows a 🔎 review status")
     p_notify.add_argument("--review", choices=["ok", "fail"], default="ok",
                           help="Double-review verdict (default ok)")
     p_notify.add_argument("--done", help="Tickets completed so far this run")

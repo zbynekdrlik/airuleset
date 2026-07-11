@@ -3164,7 +3164,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
                       url=["Prod=https://montalu.sk/dash"], review="ok",
-                      dedup_key=None, dry_run=False)
+                      handoff=False, dedup_key=None, dry_run=False)
         captured = {}
 
         def fake_gh(*a, **k):
@@ -3211,8 +3211,8 @@ class TestDiscordAutopilotNotify(TestCase):
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,
-                          merge_sha=None, url=None, review="ok", dedup_key=None,
-                          dry_run=False)
+                          merge_sha=None, url=None, review="ok", handoff=False,
+                          dedup_key=None, dry_run=False)
 
         with m.patch.object(airuleset, "_gh_out",
                             side_effect=lambda *a, **k: "T" if "view" in a else "3"):
