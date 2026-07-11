@@ -241,15 +241,23 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("Issues 1", seg)
             self.assertIn("gk 2", seg)
 
-    def test_refresh_full_authority_keeps_full_count(self):
-        # A full-authority box (no marker, user not in the reduced map) is unchanged.
+    def test_refresh_full_authority_excludes_other_streams_labels(self):
+        # Stream-label ownership (odoo-erp PR #1440, 2026-07-11): the FULL box's
+        # counter = tickets THIS box should work via /autopilot — open minus
+        # autopilot-skip minus stream:david/montalu/marek (sub-dev-owned). The fake
+        # gh returns 10 ONLY when the search carries the stream exclusions (17
+        # without) — gatekeeper's live numbers.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
-                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else echo 16; fi\n')
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *-label:stream:david*-label:stream:marek*-label:stream:montalu*) echo 10;;\n'
+                '  *) echo 17;;\n'
+                'esac\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
@@ -260,8 +268,41 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 16)
-            self.assertEqual(cache.get("scope"), "all")
+            self.assertEqual(cache["open"], 10)      # own slice, NOT the 17 backlog
+            self.assertEqual(cache.get("scope"), "core")
+
+    def test_refresh_subdev_slice_includes_own_stream_label(self):
+        # Consistency with the ownership convention: a ticket labeled
+        # stream:<this-stream> belongs to this box even when not assigned/authored
+        # by it — it must land in the sub-dev slice too.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *author:@me*)   echo \'[{"number":2,"labels":[]}]\';;\n'
+                # the stream-labeled ticket nobody assigned yet — union adds #9
+                '  *label:stream:*) echo \'[{"number":9,"labels":[]}]\';;\n'
+                '  *) echo 17;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 3)       # {1} ∪ {2} ∪ {9}
+            self.assertEqual(cache.get("scope"), "mine")
 
     def test_refresh_outside_git_repo_writes_null(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as nonrepo:
