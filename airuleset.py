@@ -1630,16 +1630,28 @@ def cmd_tickets_status(args):
         # gatekeeper goal, 2026-07-11). Full-authority boxes keep the full count.
         if resolve_authority(cwd=root) != "full":
             entry["scope"] = "mine"
-            mine, failed = set(), False
+            # Partition the own slice into ACTIVE-on-me vs already HANDED OFF to the
+            # gatekeeper: a ticket carrying the `ready-for-review` label (auto-labeled
+            # by the repo's subdev-handoff-label workflow at the hand-off comment) is
+            # waiting on the gatekeeper, not on the sub-dev — the statusline shows
+            # both numbers ("Issues 1 · gk 5") so handed-off work is visibly parked.
+            handed, mine, failed = {}, set(), False
             for qual in ("assignee:@me", "author:@me"):
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "-label:autopilot-skip " + qual, "-L", "200",
-                            "--json", "number"], root)
+                            "--json", "number,labels"], root)
                 try:
-                    mine |= {x["number"] for x in json.loads(raw)}
+                    for x in json.loads(raw):
+                        n_num = x["number"]
+                        mine.add(n_num)
+                        labels = {(lb or {}).get("name") for lb in (x.get("labels") or [])}
+                        handed[n_num] = handed.get(n_num, False) or \
+                            ("ready-for-review" in labels)
                 except (ValueError, TypeError, KeyError):
                     failed = True   # gh error ≠ empty slice — keep open=None
-            entry["open"] = None if failed else len(mine)
+            gk = sum(1 for n_num in mine if handed.get(n_num))
+            entry["open"] = None if failed else len(mine) - gk
+            entry["gk"] = None if failed else gk
         else:
             entry["scope"] = "all"
             n = _out(["gh", "issue", "list", "--state", "open", "--search",
