@@ -183,11 +183,24 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("Issues 0", seg)
             self.assertIn("gk 5", seg)
 
-    def test_scoped_render_gk_zero_stays_plain(self):
-        # Nothing handed off → no "gk" noise, plain single number.
+    def test_scoped_render_gk_zero_is_still_shown(self):
+        # gk=0 MUST render too ("Issues 4 · gk 0"): hiding the zero bucket looks
+        # exactly like a broken/regressed counter — the user panicked when the
+        # gatekeeper returned tickets (labels off → gk 0 → "gk" vanished):
+        # "zase tam ukazuje issues 6 a ziadne gk N!!!" (2026-07-11). On a scoped
+        # box the split is ALWAYS visible so it's clear the mechanism lives.
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=4, name="demo", gk=0, scope="mine")
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 4", seg)
+            self.assertIn("gk 0", seg)
+
+    def test_full_authority_render_has_no_gk(self):
+        # A full box's cache has no gk key → plain single number, never "gk".
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=4, name="demo")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
             self.assertIn("Issues 4", seg)
             self.assertNotIn("gk", seg)
