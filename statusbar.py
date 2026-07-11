@@ -110,9 +110,11 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     if isinstance(open_n, int):
         # Sub-dev slice split (scope=mine): "Issues <active> · gk <handed-off>" — the
         # gk bucket is own tickets labeled ready-for-review, i.e. parked with the
-        # gatekeeper, so the sub-dev sees at a glance what is theirs vs waiting.
+        # gatekeeper. Rendered ALWAYS when the cache carries gk, INCLUDING gk 0: a
+        # hidden zero bucket looks exactly like a broken counter (the user panicked
+        # when the gatekeeper returned tickets and "gk" vanished — 2026-07-11).
         gk = cache.get("gk")
-        if isinstance(gk, int) and gk > 0:
+        if isinstance(gk, int):
             return ("\033[38;5;75mIssues %d\033[0m \033[38;5;245m· gk %d\033[0m"
                     % (open_n, gk))
         return "\033[38;5;75mIssues %d\033[0m" % open_n
