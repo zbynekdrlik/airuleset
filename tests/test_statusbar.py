@@ -22,12 +22,16 @@ import airuleset
 import statusbar
 
 
-def _seed_cache(home, cwd, open_n=None, name="", ts=None):
+def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None):
     d = statusbar.cache_dir(home)
     d.mkdir(parents=True, exist_ok=True)
-    (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(
-        {"open": open_n, "name": name, "root": str(cwd),
-         "ts": int(time.time() if ts is None else ts)}))
+    entry = {"open": open_n, "name": name, "root": str(cwd),
+             "ts": int(time.time() if ts is None else ts)}
+    if gk is not None:
+        entry["gk"] = gk
+    if scope is not None:
+        entry["scope"] = scope
+    (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(entry))
 
 
 def _seed_progress(home, name, done, remaining, ts=None):
@@ -158,6 +162,71 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache.get("scope"), "mine")
             self.assertIn("Issues 3", statusbar.tickets_segment(repo, home=home,
                                                                 spawn=False))
+
+    def test_scoped_render_splits_active_vs_gk_bucket(self):
+        # Gatekeeper follow-up (2026-07-11): the sub-dev slice renders TWO numbers —
+        # active-on-me vs already handed off to the gatekeeper ("aby bolo jasne ze
+        # dalsie tickety su uz preradene na gatekeeper"). Format: "Issues 1 · gk 5".
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=1, name="demo", gk=5, scope="mine")
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 1", seg)
+            self.assertIn("gk 5", seg)
+
+    def test_scoped_render_zero_active_still_shows_gk(self):
+        # David's expected live state: "Issues 0 · gk 5" — nothing active, 5 waiting.
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=0, name="demo", gk=5, scope="mine")
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 0", seg)
+            self.assertIn("gk 5", seg)
+
+    def test_scoped_render_gk_zero_stays_plain(self):
+        # Nothing handed off → no "gk" noise, plain single number.
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=4, name="demo", gk=0, scope="mine")
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 4", seg)
+            self.assertNotIn("gk", seg)
+
+    def test_refresh_partitions_slice_by_ready_for_review_label(self):
+        # The gk bucket = own-slice tickets carrying the ready-for-review label
+        # (auto-labeled at the sub-dev hand-off by subdev-handoff-label.yml, PR #1420).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                # union {1 (no label), 2 (r4r), 3 (r4r)} → open=1 active, gk=2
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]},'
+                '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
+                '  *author:@me*)   echo \'[{"number":2,"labels":[{"name":"ready-for-review"}]},'
+                '{"number":3,"labels":[{"name":"ready-for-review"}]}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # active on the sub-dev
+            self.assertEqual(cache["gk"], 2)        # handed off, waiting on gatekeeper
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("Issues 1", seg)
+            self.assertIn("gk 2", seg)
 
     def test_refresh_full_authority_keeps_full_count(self):
         # A full-authority box (no marker, user not in the reduced map) is unchanged.
