@@ -1628,15 +1628,19 @@ def cmd_tickets_status(args):
         # non-skip, assigned-to-me OR authored-by-me. The full repo backlog on a
         # sub-dev statusline was noise ("Issues 16" where David's slice is 6 —
         # gatekeeper goal, 2026-07-11). Full-authority boxes keep the full count.
+        # The counter's meaning on EVERY box: "tickets THIS box should work via
+        # /autopilot so they don't rot" (stream-label ownership convention — odoo-erp
+        # PR #1440: stream:<name> labels a sub-dev-owned ticket; unlabeled = core).
         if resolve_authority(cwd=root) != "full":
             entry["scope"] = "mine"
-            # Partition the own slice into ACTIVE-on-me vs already HANDED OFF to the
-            # gatekeeper: a ticket carrying the `ready-for-review` label (auto-labeled
-            # by the repo's subdev-handoff-label workflow at the hand-off comment) is
-            # waiting on the gatekeeper, not on the sub-dev — the statusline shows
-            # both numbers ("Issues 1 · gk 5") so handed-off work is visibly parked.
+            # Own slice = assigned-to-me ∪ authored-by-me ∪ labeled stream:<me>,
+            # partitioned into ACTIVE-on-me vs already HANDED OFF to the gatekeeper:
+            # a ticket carrying `ready-for-review` (auto-labeled by the repo's
+            # subdev-handoff-label workflow at the hand-off comment) is waiting on
+            # the gatekeeper — the statusline shows both ("Issues 1 · gk 5").
             handed, mine, failed = {}, set(), False
-            for qual in ("assignee:@me", "author:@me"):
+            for qual in ("assignee:@me", "author:@me",
+                         "label:stream:" + _current_user()):
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "-label:autopilot-skip " + qual, "-L", "200",
                             "--json", "number,labels"], root)
@@ -1653,9 +1657,14 @@ def cmd_tickets_status(args):
             entry["open"] = None if failed else len(mine) - gk
             entry["gk"] = None if failed else gk
         else:
-            entry["scope"] = "all"
+            # Full-authority (core/gatekeeper) slice: the whole backlog MINUS the
+            # sub-dev-owned stream:<user> tickets (each reduced stream in
+            # AUTHORITY_BY_USER). On repos without stream labels the exclusions
+            # match nothing → the full count, unchanged.
+            entry["scope"] = "core"
+            excl = " ".join("-label:stream:%s" % u for u in sorted(AUTHORITY_BY_USER))
             n = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "-label:autopilot-skip", "-L", "200",
+                      "-label:autopilot-skip " + excl, "-L", "200",
                       "--json", "number", "-q", "length"], root)
             try:
                 entry["open"] = int(n)

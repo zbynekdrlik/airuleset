@@ -146,6 +146,7 @@ class RefreshCLI(unittest.TestCase):
                 # scoped calls return JSON arrays; union {1,2} ∪ {2,3} = 3 issues
                 '  *assignee:@me*) echo \'[{"number":1},{"number":2}]\';;\n'
                 '  *author:@me*)   echo \'[{"number":2},{"number":3}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
                 '  *) echo 16;;\n'   # the full-repo count a scoped box must NOT use
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -223,6 +224,7 @@ class RefreshCLI(unittest.TestCase):
                 '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
                 '  *author:@me*)   echo \'[{"number":2,"labels":[{"name":"ready-for-review"}]},'
                 '{"number":3,"labels":[{"name":"ready-for-review"}]}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
