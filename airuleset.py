@@ -85,6 +85,38 @@ FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard"]
 
+# --- Per-box skill scoping (user complaint 2026-07-11: "slash cmd by nemali byt
+# vsetky vsade ale len relevantne k danemu projektu") ---
+# Skills deploy per USER at install time; every user-invocable skill shows in that
+# box's slash-command list, so an irrelevant skill is pure noise there. Two scopes:
+#   MAINTAINER_ONLY — relevant only on the airuleset-maintainer's own boxes
+#     (newlevel@dev1/dev2): airuleset self-maintenance (mdreview, rules-audit),
+#     his personal workflows (meeting-analysis), his projects' tooling
+#     (windows-remote-gui = win-* MCP rigs, fast-iterate + mutation-sweep = his
+#     Rust/mutation-era repos). Sub-dev / gatekeeper boxes never invoke these.
+#   FULL_AUTHORITY_ONLY — deploys are OUTSIDE a reduced-authority stream's job
+#     (pr-merge-policy scope), so deploy-ssh stays off david/marek/montalu boxes.
+# Hidden on-demand skills (user-invocable: false — mutation-testing, local-builds,
+# batch-issue-development, view-image-urls, version-on-dashboard) deploy EVERYWHERE:
+# rule stubs point at them and they never appear in the slash list, so they cost
+# nothing. install prunes previously-linked skills that fall outside the box's set.
+SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
+                          "mutation-sweep", "windows-remote-gui", "fast-iterate"}
+SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh"}
+MAINTAINER_USERS = {"newlevel"}
+
+
+def skill_names_for_user(user=None):
+    """The skill set THIS box's user should have installed (see scoping above)."""
+    import getpass
+    user = user or getpass.getuser()
+    names = list(SKILL_NAMES)
+    if user not in MAINTAINER_USERS:
+        names = [n for n in names if n not in SKILLS_MAINTAINER_ONLY]
+    if AUTHORITY_BY_USER.get(user, "full") != "full":
+        names = [n for n in names if n not in SKILLS_FULL_AUTHORITY_ONLY]
+    return names
+
 # ---------------------------------------------------------------------------
 # Caveman plugin — managed wiring (kept correct on every host by `install`)
 # ---------------------------------------------------------------------------
@@ -709,9 +741,9 @@ def cmd_diff(args):
         else:
             print("~/.claude/settings.json: no changes")
 
-    # Skills diff
+    # Skills diff (this box's set — scoped per skill_names_for_user)
     print("\n=== ~/.claude/skills/ (symlinks) ===")
-    for skill in SKILL_NAMES:
+    for skill in skill_names_for_user():
         target = REPO_DIR / "skills" / skill
         link = SKILLS_DIR / skill
         if link.is_symlink():
@@ -756,8 +788,9 @@ def cmd_install(args):
         CLAUDE_MD.write_text(new_claude_md)
         print(f"  Created:   {CLAUDE_MD}")
 
-    # --- 2. Symlink skills ---
-    for skill in SKILL_NAMES:
+    # --- 2. Symlink skills (per-box set — see skill_names_for_user) ---
+    box_skills = skill_names_for_user()
+    for skill in box_skills:
         source = REPO_DIR / "skills" / skill
         link = SKILLS_DIR / skill
 
@@ -784,6 +817,23 @@ def cmd_install(args):
 
         link.symlink_to(source)
         print(f"  Linked:    {link} -> {source}")
+
+    # --- 2a. Prune managed skills OUTSIDE this box's set (a maintainer-only /
+    # full-authority-only skill previously linked here shows as slash-command noise
+    # on this box). Only OUR symlinks pointing into this repo's skills/ are removed —
+    # foreign or hand-made skills are never touched (skill-ownership rule).
+    for skill in SKILL_NAMES:
+        if skill in box_skills:
+            continue
+        link = SKILLS_DIR / skill
+        if link.is_symlink():
+            try:
+                target = Path(os.readlink(link))
+            except OSError:
+                continue
+            if str(target).startswith(str(REPO_DIR / "skills")):
+                link.unlink()
+                print(f"  Pruned:    {skill} (not relevant on this box)")
 
     # --- 2b. Symlink agents (subagent definitions, single .md files) ---
     AGENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -899,9 +949,9 @@ def cmd_status(args):
     else:
         print("  Does not exist")
 
-    # --- Skills ---
+    # --- Skills (this box's set — scoped per skill_names_for_user) ---
     print("\n~/.claude/skills/:")
-    for skill in SKILL_NAMES:
+    for skill in skill_names_for_user():
         link = SKILLS_DIR / skill
         expected_target = REPO_DIR / "skills" / skill
         if link.is_symlink():

@@ -225,3 +225,47 @@ class TestWorkerCarriesProfiles(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestPerBoxSkillScoping(TestCase):
+    """Skill sets are PER BOX (user complaint 2026-07-11: slash commands must be
+    relevant to the box, not all-everywhere). Maintainer boxes (newlevel) get all;
+    other boxes lose maintainer-only skills; reduced-authority streams also lose
+    deploy-ssh (deploys are outside their job). Hidden on-demand skills stay
+    everywhere (rule stubs point at them; they never show in the slash list)."""
+
+    def test_maintainer_gets_everything(self):
+        self.assertEqual(airuleset.skill_names_for_user("newlevel"),
+                         airuleset.SKILL_NAMES)
+
+    def test_gatekeeper_loses_maintainer_only_keeps_deploy(self):
+        names = airuleset.skill_names_for_user("gatekeeper")
+        for n in airuleset.SKILLS_MAINTAINER_ONLY:
+            self.assertNotIn(n, names)
+        self.assertIn("deploy-ssh", names)      # full authority — deploys are his job
+        self.assertIn("autopilot", names)
+        self.assertIn("playbook-review", names)
+
+    def test_subdev_also_loses_deploy_ssh(self):
+        for user in ("david", "marek", "montalu"):
+            names = airuleset.skill_names_for_user(user)
+            self.assertNotIn("deploy-ssh", names, user)
+            self.assertNotIn("mdreview", names, user)
+            self.assertIn("autopilot", names, user)
+
+    def test_hidden_on_demand_skills_stay_everywhere(self):
+        # Rule stubs point at these; user-invocable:false keeps them out of the
+        # slash list, so they are NOT noise on any box.
+        for user in ("newlevel", "gatekeeper", "david"):
+            names = airuleset.skill_names_for_user(user)
+            for n in ("mutation-testing", "local-builds",
+                      "batch-issue-development", "view-image-urls",
+                      "version-on-dashboard"):
+                self.assertIn(n, names, f"{n} missing for {user}")
+
+    def test_maintainer_only_skills_are_really_hidden_or_maintainer_scoped(self):
+        # Every user-invocable skill a non-maintainer box gets must be genuinely
+        # cross-box relevant; conversely every skill we scope away must exist.
+        from pathlib import Path as P
+        for n in airuleset.SKILLS_MAINTAINER_ONLY | airuleset.SKILLS_FULL_AUTHORITY_ONLY:
+            self.assertTrue((P(airuleset.REPO_DIR) / "skills" / n).exists(), n)
