@@ -203,13 +203,16 @@ class TestWorkerCarriesProfiles(TestCase):
         self.assertIn("airuleset.py authority",
                       read("modules/core/pr-merge-policy.md"))
 
-    def test_worker_forbids_self_close_and_fires_handoff_card(self):
-        # Incident 2026-07-10: fork-no-merge worker self-closed issues + never carded.
+    def test_worker_forbids_foreign_close_and_fires_handoff_card(self):
+        # 2026-07-10 incident + 2026-07-11 gatekeeper refinement: a fork-no-merge
+        # worker never closes ASSIGNED/foreign-authored tickets (maintainer closes at
+        # review) but MAY close its own self-authored sub-findings with evidence.
         w = read("agents/autopilot-worker.md")
-        self.assertIn("NEVER close the issue", w)
+        self.assertIn("NEVER close an ASSIGNED", w)
+        self.assertIn("self-authored sub-findings", w)         # the allowed class
         self.assertIn("block-fork-no-merge-issue-close", w)   # names the enforcing hook
         self.assertIn("--handoff", w)                          # fires the fork-no-merge card
-        self.assertIn("OBSOLETE:", w)                          # obsolete → comment, not close
+        self.assertIn("OBSOLETE:", w)                          # foreign obsolete → comment
         self.assertIn("obsolete_handed_off:", w)               # fork-no-merge FINAL MESSAGE field
 
     def test_close_guard_hook_is_wired(self):

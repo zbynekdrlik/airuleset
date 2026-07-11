@@ -40,13 +40,16 @@ prove local verification green (tests/lint), then hand off with a COMMENT starti
 `READY-FOR-REVIEW:` (branch name + the verification evidence) — the comment is the PRIMARY signal
 (it works at read role; a fork-derived collaborator often cannot add labels, #17); ALSO try
 `gh issue edit <N> --add-label ready-for-review` best-effort and silently accept a 403 — you NEVER
-open or merge a PR, and never push to upstream branches. **You NEVER close the issue — not a DONE
-one, not an OBSOLETE one — the gatekeeper MAINTAINER closes it at review/merge** (this is
-HOOK-ENFORCED: `block-fork-no-merge-issue-close.sh` blocks `gh issue close` for this stream; do not
-try to route around it). Self-closing was the 2026-07-10 drift that gave the user terse "✅ DONE"
-outcomes and NO review. Instead, at each ticket's hand-off, **FIRE THE FORK-NO-MERGE CARD** (the
-per-ticket evaluation the user reads on their phone — the merge-shaped card never fires for this
-stream, so you MUST use `--handoff`):
+open or merge a PR, and never push to upstream branches. **You NEVER close an ASSIGNED /
+foreign-authored issue — the gatekeeper MAINTAINER closes it at cross-fork review/merge** (this is
+HOOK-ENFORCED: `block-fork-no-merge-issue-close.sh` blocks `gh issue close` unless the issue's
+AUTHOR is your own gh login; do not route around it). Closing a foreign ticket removes the
+READY-FOR-REVIEW hand-off event and bypasses the review this stream exists for. **Your OWN
+self-authored sub-findings** (tickets YOU filed while working) you MAY close, with evidence in the
+closing comment — that is normal bookkeeping (gatekeeper-refined semantics, 2026-07-11). At each
+ASSIGNED ticket's hand-off, **FIRE THE FORK-NO-MERGE CARD** (the per-ticket evaluation the user
+reads on their phone — the merge-shaped card never fires for this stream, so you MUST use
+`--handoff`):
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal "<plain Slovak>" --achieved "<plain Slovak: čo je hotové + lokálne overené>" [--url "<kde to vidno=…>"]`
 (no `--version`/`--pr` — nothing merged/deployed; the card shows a 🔎 "odovzdané na review" status).
 Reduced-authority streams work ONLY issues assigned to them.
@@ -151,9 +154,11 @@ EVIDENCE (what you ran + observed) — `gh issue close <N> --comment "<evidence>
 that one member (do NOT add its `Closes #N` to the PR), note it on the evidence block's
 `obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after closing. Only
 confirmed-still-valid issues proceed to the cycle below.
-**fork-no-merge EXCEPTION:** you MUST NOT `gh issue close` (hook-blocked). For an obsolete ticket,
-COMMENT the finding instead — `gh issue comment <N> --body "OBSOLETE: <evidence>"` — leave it OPEN,
-note it on the evidence block's `obsolete_handed_off:` line, and let the maintainer close it.
+**fork-no-merge EXCEPTION:** you may `gh issue close` ONLY your OWN self-authored sub-findings
+(hook-verified: author == your gh login). An obsolete ASSIGNED / foreign-authored ticket you MUST
+NOT close — COMMENT the finding instead: `gh issue comment <N> --body "OBSOLETE: <evidence>"`,
+leave it OPEN, note it on the evidence block's `obsolete_handed_off:` line, and let the maintainer
+close it.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 

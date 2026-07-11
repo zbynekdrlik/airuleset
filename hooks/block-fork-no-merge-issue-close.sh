@@ -3,20 +3,22 @@ set -euo pipefail
 
 # Hook: PreToolUse (Bash)
 # Blocks `gh issue close` (and the equivalent `gh api ... PATCH state=closed`) when
-# THIS stream's autopilot authority is `fork-no-merge`. Exit 2 = block; Claude sees
-# stderr as the reason.
+# THIS stream's autopilot authority is `fork-no-merge` — UNLESS the issue being
+# closed is the stream's OWN (self-authored). Exit 2 = block; Claude sees stderr.
 #
-# Why this exists (incident 2026-07-10, david@gk / odoo-erp):
-#   A fork-no-merge worker's OWN instructions forbid closing issues ("the maintainer
-#   does at merge") — but the worker drifted mid-session and ran `gh issue close`
-#   directly on ~10 issues (#1400, #1408, …). Self-closing an issue short-circuits
-#   the cross-fork gatekeeper review this authority stream exists to enforce AND
-#   removes the READY-FOR-REVIEW hand-off event the per-ticket Discord card keys off
-#   — so the user got no proper work-completed evaluation, just a terse "✅ DONE".
-#   A rule in prose drifted; a deterministic hook cannot. (rule-intake gate:
-#   mechanically checkable -> hook.)
+# Semantics (refined by the gatekeeper, 2026-07-11):
+#   - ASSIGNED / foreign-authored tickets: NEVER closed by a fork-no-merge stream —
+#     the gatekeeper maintainer closes them at cross-fork review/merge. Self-closing
+#     one removes the READY-FOR-REVIEW hand-off event and bypasses review.
+#   - SELF-AUTHORED sub-findings (tickets the stream itself filed while working,
+#     e.g. kvaskodev-authored kiosk sub-issues): closing them WITH evidence is the
+#     stream's normal bookkeeping — ALLOWED. The 2026-07-10 "drift" suspicion was
+#     falsified: those ~10 closes were David's own sub-findings, review was NOT
+#     bypassed (the hand-off tickets stayed open).
+#   The check is mechanical: issue author == the stream's authenticated gh login.
+#   Undeterminable (gh error, no auth) → fail-SAFE: block, with the hand-off recipe.
 #
-# Scope: only a `fork-no-merge` stream is blocked. `full` / `branch-merge` streams
+# Scope: only a `fork-no-merge` stream is gated. `full` / `branch-merge` streams
 # legitimately close issues (obsolete tickets, or via a merged PR's `Closes #N`), so
 # they pass untouched — resolved per-stream via `airuleset.py authority` (marker-aware).
 
@@ -61,13 +63,30 @@ if [ -z "$AUTH" ]; then
 fi
 [ "$AUTH" != "fork-no-merge" ] && exit 0
 
-echo "BLOCKED: this is a fork-no-merge stream — it must NEVER close a GitHub issue." >&2
+# fork-no-merge: allow closing a SELF-AUTHORED issue (the stream's own sub-finding).
+# Extract the issue number + optional -R/--repo from the `gh issue close` form; the
+# `gh api PATCH` form is never exempted (use `gh issue close` for legit self-closes).
+ISSUE_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
+REPO_ARG=$(printf '%s' "$CMD" | grep -oE '(-R|--repo)[[:space:]=]+"?[A-Za-z0-9._/-]+' | head -1 | sed -E 's/^(-R|--repo)[[:space:]=]+"?//' || echo "")
+if [ -n "$ISSUE_NUM" ]; then
+    ME=$(gh api user -q .login 2>/dev/null || echo "")
+    if [ -n "$REPO_ARG" ]; then
+        AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
+    else
+        AUTHOR=$(gh issue view "$ISSUE_NUM" --json author -q .author.login 2>/dev/null || echo "")
+    fi
+    if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ]; then
+        exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
+    fi
+fi
+
+echo "BLOCKED: fork-no-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
 echo "" >&2
-echo "  The gatekeeper MAINTAINER closes the issue at review/merge. Closing it yourself" >&2
-echo "  short-circuits the cross-fork review this authority stream exists to enforce, and" >&2
-echo "  removes the READY-FOR-REVIEW hand-off event the per-ticket Discord card keys off" >&2
-echo "  (incident 2026-07-10: a worker self-closed ~10 odoo-erp issues, so the user got no" >&2
-echo "  proper work-completed evaluation — just a terse '✅ DONE')." >&2
+echo "  This issue is assigned / foreign-authored (or its author could not be verified):" >&2
+echo "  the gatekeeper MAINTAINER closes it at cross-fork review/merge. Closing it yourself" >&2
+echo "  removes the READY-FOR-REVIEW hand-off event and bypasses the review this authority" >&2
+echo "  stream exists to enforce. (Self-authored sub-findings ARE closable — the hook" >&2
+echo "  verifies author == your gh login; if gh failed just now, fix auth and retry.)" >&2
 echo "" >&2
 echo "  HAND OFF instead, leaving the issue OPEN:" >&2
 echo "    - DONE ticket:     gh issue comment <N> --body \"READY-FOR-REVIEW: <branch> — <local verify evidence>\"" >&2

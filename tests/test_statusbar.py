@@ -124,6 +124,63 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("Issues 7", statusbar.tickets_segment(repo, home=home,
                                                                spawn=False))
 
+    def test_refresh_scopes_count_to_own_slice_for_reduced_authority(self):
+        # Gatekeeper goal (2026-07-11): a sub-dev stream's statusline must show ITS
+        # OWN slice (assignee:@me OR author:@me, open, non-skip), not the whole repo
+        # backlog — David saw "Issues 16" instead of his 6 ("je to chaos"). Authority
+        # comes from resolve_authority (marker-aware); full boxes keep the full count.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                # scoped calls return JSON arrays; union {1,2} ∪ {2,3} = 3 issues
+                '  *assignee:@me*) echo \'[{"number":1},{"number":2}]\';;\n'
+                '  *author:@me*)   echo \'[{"number":2},{"number":3}]\';;\n'
+                '  *) echo 16;;\n'   # the full-repo count a scoped box must NOT use
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 3)          # own slice, NOT 16
+            self.assertEqual(cache.get("scope"), "mine")
+            self.assertIn("Issues 3", statusbar.tickets_segment(repo, home=home,
+                                                                spawn=False))
+
+    def test_refresh_full_authority_keeps_full_count(self):
+        # A full-authority box (no marker, user not in the reduced map) is unchanged.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else echo 16; fi\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 16)
+            self.assertEqual(cache.get("scope"), "all")
+
     def test_refresh_outside_git_repo_writes_null(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as nonrepo:
             r = subprocess.run(
