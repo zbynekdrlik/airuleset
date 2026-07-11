@@ -2592,6 +2592,73 @@ class TestProseViolationsAutoMergeSignals(TestCase):
         self.assertNotIn('"block"', r.stdout)
 
 
+class TestProseViolationsPrlessCompletion(TestCase):
+    """PR-LESS ticket completions must ALSO trigger the full-template gate.
+
+    Incident (david@gk, 2026-07-10/11): the completion-report enforcement fired only
+    when the message carried a GitHub PR URL — but a fork-no-merge stream NEVER has a
+    PR, so its bare '✅ DONE: #1400 a #1408 hotové' one-liners sailed through and the
+    user never saw a proper Work Complete report on that box ("nikdy tam nevidim
+    normalne work complete reporty"). A ✅ DONE line naming ticket(s) #N with
+    done-vocab (SK/EN), or a READY-FOR-REVIEW hand-off, IS a completion — heading +
+    audits + Goal/What changed are required exactly as in the merge flow."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _sid(self):
+        sid = f"test-prless-{uuid.uuid4().hex[:12]}"
+        self.addCleanup(lambda: Path(f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
+        return sid
+
+    def _run(self, msg):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_bare_slovak_ticket_done_blocked(self):
+        # david's literal failure message — no PR URL, no heading, no audits.
+        r = self._run("Už hotové — presne toto som spravil v predošlom ťahu.\n\n"
+                      "✅ DONE: #1400 a #1408 hotové, ako v poslednom súhrne.")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('"block"', r.stdout)
+
+    def test_bare_handoff_done_blocked(self):
+        r = self._run("Vetva pushnutá, testy zelené, komentár poslaný.\n\n"
+                      "✅ DONE: #1393 odovzdané — READY-FOR-REVIEW komentár na tickete.")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('"block"', r.stdout)
+
+    def test_full_fork_shaped_report_without_pr_is_clean(self):
+        # The fork-no-merge Work Complete shape: audits + hand-off lines, NO PR/merge.
+        msg = ("## ✅ Work Complete\n\n"
+               "**Audits & deploy:**\n"
+               "✅ /plan-check: 3/3 fulfilled\n"
+               "✅ /review: clean — 0 🔴 0 🟡 0 🔵\n"
+               "✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵\n"
+               "✅ Lokálne overenie: testy + lint zelené (fork vetva david/kiosk)\n"
+               "✅ Hand-off: READY-FOR-REVIEW komentár na #1393 (dochádzkový kiosk) + karta\n\n"
+               "---\n\n"
+               "**Goal:** Dochádzkový kiosk pre výrobu.\n"
+               "**What changed:** Kiosk beží na erp-test-david, odovzdané gatekeeperovi.\n\n"
+               "✅ DONE: #1393 (kiosk) odovzdané na review, nič ďalšie nečaká.")
+        r = self._run(msg)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"block"', r.stdout, r.stderr)
+
+    def test_conversational_done_about_a_ticket_is_clean(self):
+        # Answering a question ABOUT a ticket is not a completion — no done-vocab.
+        r = self._run("Ten ticket rieši mapovanie skladov, detaily som vysvetlil vyššie.\n\n"
+                      "✅ DONE: odpovedané na tvoju otázku o #123 (mapovanie skladov).")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"block"', r.stdout, r.stderr)
+
+    def test_midloop_working_marker_stays_clean(self):
+        r = self._run("Ticket #1400 (kiosk oprava) hotový, pokračujem na #1408.\n\n"
+                      "⏳ WORKING: ďalší ticket v behu — nič odo mňa netreba.")
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn('"block"', r.stdout, r.stderr)
+
+
 class TestIssueRefTitles(TestCase):
     """issue-reference-context.md: every issue/PR ref carries its title — ALL messages.
 
