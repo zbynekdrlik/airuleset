@@ -57,6 +57,7 @@ Remote machines:
 - Every module must be standalone, actionable, and 5-20 lines
 - Rules must have YAML `paths:` frontmatter
 - Skills use the SKILL.md format with YAML frontmatter
+- **Skills deploy per box (`skill_names_for_user()`): when scoping a skill away from a box, check whether that box's WORKFLOW actually uses it** — `SKILLS_EXTRA_BY_USER` re-grants a scoped-away skill per user (montalu ← meeting-analysis, 2026-07-14). And a skill deployed to isolated sub-dev users must be user-agnostic: `$HOME` paths, never `/home/newlevel/...`; per-user secrets read from `~/.claude/secrets/*.env` (provisioned via ssh-stdin, NEVER git).
 - Test with `python -m pytest tests/` before committing
 - **Adding a `--flag` early-return to a `cmd_*` dispatcher that has `m.Mock(...)`-based tests:** `m.Mock` auto-creates EVERY attribute as a truthy Mock, so `getattr(args, "flag", False)` is truthy and the new branch hijacks unrelated tests. Pin the new flag `=False` in every `m.Mock(...)` args builder for that command (e.g. the run_card builders for `cmd_notify`).
 - **Wiring local (non-git) config to dev2 while the tree is dirty:** the `pre-deploy-clean-tree.sh` hook blocks `scp`/`rsync` from a dirty tree. For a genuine non-repo transfer (e.g. writing the local `~/.claude/.../.env`), pipe the helper via `ssh dev2 'python3 - <args>' < script.py` (stdin) instead of `scp` — no file-copy, no bypass marker needed.
