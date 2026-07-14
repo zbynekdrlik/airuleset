@@ -269,3 +269,20 @@ class TestPerBoxSkillScoping(TestCase):
         from pathlib import Path as P
         for n in airuleset.SKILLS_MAINTAINER_ONLY | airuleset.SKILLS_FULL_AUTHORITY_ONLY:
             self.assertTrue((P(airuleset.REPO_DIR) / "skills" / n).exists(), n)
+
+    def test_per_user_extras_regrant_a_scoped_skill_where_relevant(self):
+        # 2026-07-14 incident: aacd29e classified meeting-analysis maintainer-only
+        # and the push PRUNED it off montalu — but the user analyzes montalu
+        # meeting recordings IN that stream's session. Per-user extras re-grant a
+        # scoped-away skill on exactly the boxes where it IS relevant.
+        self.assertIn("meeting-analysis",
+                      airuleset.skill_names_for_user("montalu"))
+        for user in ("david", "marek", "gatekeeper"):
+            self.assertNotIn("meeting-analysis",
+                             airuleset.skill_names_for_user(user), user)
+        # extras never leak anything beyond the named skill
+        self.assertNotIn("mdreview", airuleset.skill_names_for_user("montalu"))
+        # every extras entry must name real skills (typo guard)
+        for user, extras in airuleset.SKILLS_EXTRA_BY_USER.items():
+            for n in extras:
+                self.assertIn(n, airuleset.SKILL_NAMES, f"{user}:{n}")
