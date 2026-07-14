@@ -104,17 +104,22 @@ SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
                           "mutation-sweep", "windows-remote-gui", "fast-iterate"}
 SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh"}
 MAINTAINER_USERS = {"newlevel"}
+# Per-user re-grants: a scoped-away skill that IS relevant on one specific box
+# (montalu meeting recordings get analyzed IN that stream's session — the
+# 2026-07-14 incident where the scoping prune took /meeting-analysis off montalu).
+SKILLS_EXTRA_BY_USER = {"montalu": {"meeting-analysis"}}
 
 
 def skill_names_for_user(user=None):
     """The skill set THIS box's user should have installed (see scoping above)."""
     import getpass
     user = user or getpass.getuser()
+    extra = SKILLS_EXTRA_BY_USER.get(user, set())
     names = list(SKILL_NAMES)
     if user not in MAINTAINER_USERS:
-        names = [n for n in names if n not in SKILLS_MAINTAINER_ONLY]
+        names = [n for n in names if n not in SKILLS_MAINTAINER_ONLY or n in extra]
     if AUTHORITY_BY_USER.get(user, "full") != "full":
-        names = [n for n in names if n not in SKILLS_FULL_AUTHORITY_ONLY]
+        names = [n for n in names if n not in SKILLS_FULL_AUTHORITY_ONLY or n in extra]
     return names
 
 # ---------------------------------------------------------------------------

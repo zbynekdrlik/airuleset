@@ -48,8 +48,8 @@ user-invocable: true
 ## Setup & variables
 
 - **Skill scripts dir** (also printed as "Base directory for this skill" when the skill loads):
-  `SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis`
-- **Per-meeting work dir** — pick a concrete topic, e.g. `WORK=/home/newlevel/uploads/acme-call/work`
+  `SKILL=$HOME/devel/airuleset/skills/meeting-analysis`
+- **Per-meeting work dir** — pick a concrete topic, e.g. `WORK=$HOME/uploads/acme-call/work`
 - **IMPORTANT:** each Bash tool call is a FRESH shell — env vars do NOT persist between calls.
   Re-export `SKILL=...` and `WORK=...` at the top of EVERY phase's bash block (shown below), or
   use absolute paths.
@@ -66,8 +66,8 @@ filedrop is download-only. Do NOT ask them to `scp` (they've asked repeatedly no
 the bundled push endpoint, verify it's live, give them the URL:
 
 ```bash
-SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
-WORK=/home/newlevel/uploads/acme-call/work          # <- pick a real topic
+SKILL=$HOME/devel/airuleset/skills/meeting-analysis
+WORK=$HOME/uploads/acme-call/work          # <- pick a real topic
 mkdir -p "$WORK"
 python3 ~/devel/airuleset/airuleset.py upload --dir "$(dirname "$WORK")" --ttl 14400
 # (the upload server is the shared filedrop/upload_server.py — CLI spawns it detached,
@@ -81,17 +81,17 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path (the filename is sanitized — spaces /
   accents / parens become `_`, so you cannot guess it): `grep SAVED /tmp/airuleset-upload-<port>.log` →
-  `/home/newlevel/uploads/acme-call/<sanitized-name>`. Confirm the byte count matches the user's
+  `$HOME/uploads/acme-call/<sanitized-name>`. Confirm the byte count matches the user's
   file size, then stop the server: `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.
 
 ## Phase 1 — Extract the three channels (dev1, ffmpeg)
 
 ```bash
-SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
-WORK=/home/newlevel/uploads/acme-call/work
+SKILL=$HOME/devel/airuleset/skills/meeting-analysis
+WORK=$HOME/uploads/acme-call/work
 ls -la "$(dirname "$WORK")"                          # resolve the real uploaded filename
-VIDEO=/home/newlevel/uploads/acme-call/<sanitized-name>   # from the ls above / upload.log
+VIDEO=$HOME/uploads/acme-call/<sanitized-name>   # from the ls above / upload.log
 bash "$SKILL/scripts/extract.sh" "$VIDEO" "$WORK"
 ```
 
@@ -108,9 +108,11 @@ Runs from dev1, no GPU. Soniox does the Slovak transcription AND the speaker lab
 one step produces both `transcript.txt` and `speaker_turns.json`.
 
 ```bash
-SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
-WORK=/home/newlevel/uploads/acme-call/work
-export SONIOX_API_KEY=$(grep -oE 'SONIOX_API_KEY=[^[:space:]]+' /home/newlevel/devel/voiceagent/.env | head -1 | cut -d= -f2)
+SKILL=$HOME/devel/airuleset/skills/meeting-analysis
+WORK=$HOME/uploads/acme-call/work
+# key sources, first hit wins: env already set → per-user local secret (isolated boxes,
+# e.g. montalu — provisioned outside git) → the maintainer box's voiceagent .env
+export SONIOX_API_KEY=${SONIOX_API_KEY:-$(grep -hoE 'SONIOX_API_KEY=[^[:space:]]+' "$HOME/.claude/secrets/soniox.env" /home/newlevel/devel/voiceagent/.env 2>/dev/null | head -1 | cut -d= -f2)}
 # sanity: newest async model still stt-async-v5?  (verify + track — user's standing instruction)
 curl -s https://api.soniox.com/v1/models -H "Authorization: Bearer $SONIOX_API_KEY" | grep -o 'stt-async-v[0-9]*' | sort -u | tail -1
 # launch detached + crash-aware watch (a ~1 h call is a few min of Soniox wall-clock)
@@ -122,7 +124,7 @@ cd "$WORK" && rm -f done error && \
 Watch (background, crash-aware — same shape as the fallback below), then read `summary.json`:
 
 ```bash
-WORK=/home/newlevel/uploads/acme-call/work
+WORK=$HOME/uploads/acme-call/work
 for i in $(seq 1 60); do
   [ -f "$WORK/done" ]  && { echo DONE;  cat "$WORK/summary.json"; break; }
   [ -f "$WORK/error" ] && { echo ERROR; cat "$WORK/error"; tail -5 "$WORK/soniox.log"; break; }
@@ -146,8 +148,8 @@ session; launch detached and poll with a **background, crash-aware** watch. Diar
 comes from the caption track (Phase 3), not the model.
 
 ```bash
-SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
-WORK=/home/newlevel/uploads/acme-call/work
+SKILL=$HOME/devel/airuleset/skills/meeting-analysis
+WORK=$HOME/uploads/acme-call/work
 # 1. preflight deps on dev2 (one-time; missing deps otherwise crash the run)
 ssh newlevel@100.82.64.27 'python3 -c "import torch,transformers,accelerate,soundfile" 2>/dev/null \
   || pip install --user "transformers>=4.40" accelerate soundfile'
@@ -193,8 +195,8 @@ contention, don't assume success.
 ## Phase 3 — Fuse: dedup screens + speaker turns (dev1)
 
 ```bash
-SKILL=/home/newlevel/devel/airuleset/skills/meeting-analysis
-WORK=/home/newlevel/uploads/acme-call/work
+SKILL=$HOME/devel/airuleset/skills/meeting-analysis
+WORK=$HOME/uploads/acme-call/work
 python3 -c 'import PIL' 2>/dev/null || pip install --user Pillow   # dev1 prereq
 # Soniox path already wrote the authoritative speaker_turns.json — preserve it across prep.py
 [ -f "$WORK/speaker_turns.json" ] && cp "$WORK/speaker_turns.json" "$WORK/speaker_turns.soniox.json"
@@ -287,7 +289,10 @@ on the METHOD (not the content), then bank the improvement so the next run inher
 2. Turn each concrete lesson into an **edit of this SKILL.md and/or its scripts** — tighten a
    threshold, add a preflight, fix a fragile command, adjust the ASR/context choice, add an
    anti-pattern. Then **commit** it (airuleset is a git repo):
-   `cd /home/newlevel/devel/airuleset && git add skills/meeting-analysis && git commit -m "meeting-analysis: <lesson> (self-improve after <topic> run)"`.
+   `cd ~/devel/airuleset && git add skills/meeting-analysis && git commit -m "meeting-analysis: <lesson> (self-improve after <topic> run)"`.
+   On a box whose airuleset checkout can't push (isolated sub-dev users like montalu), do NOT
+   commit — put the concrete lesson into the completion report's `🔧 Self-improve:` line so the
+   maintainer session applies it to the repo.
 3. If the lesson is project-state (not method) — e.g. a montalu-specific gotcha — write it to
    session memory instead, and cross-link.
 4. The completion report MUST end with a one-line `🔧 Self-improve:` note stating what changed in
