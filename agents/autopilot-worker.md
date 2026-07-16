@@ -52,7 +52,9 @@ reads on their phone — the merge-shaped card never fires for this stream, so y
 `--handoff`):
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal "<plain Slovak>" --achieved "<plain Slovak: čo je hotové + lokálne overené>" [--url "<kde to vidno=…>"]`
 (no `--version`/`--pr` — nothing merged/deployed; the card shows a 🔎 "odovzdané na review" status).
-Reduced-authority streams work ONLY issues assigned to them.
+At the hand-off also clear the bounce lane best-effort: `gh issue edit <N> --remove-label
+prio:bounce 2>/dev/null || true` (silently accept a 403 at read role — the maintainer clears it at
+review otherwise). Reduced-authority streams work ONLY issues assigned to them.
 
 **Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md` — load the `batch-issue-development` skill for the full gate): all members land
 on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Closes #<n>` line for
@@ -215,7 +217,10 @@ yourself — just do your work; the lock is the supervisor's concern.
    read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --goal "<plain goal>"
    --achieved "<plain what landed>" --version "<version read in step 7>" --url "<Label=URL where the
    change shows>"` — `--goal`/`--achieved` PLAIN non-technical Slovak; `--url` is the deep link to SEE
-   the change live (NOT a PR/diff); see the PER-TICKET DISCORD CARD note above).
+   the change live (NOT a PR/diff); see the PER-TICKET DISCORD CARD note above). For each resolved
+   member also clear the bounce lane: `gh issue edit <N> --remove-label prio:bounce 2>/dev/null ||
+   true` (best-effort no-op when the label isn't there — a resolved reviewer-injected priority
+   ticket must leave the lane so the supervisor's seed ordering moves on).
 7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
