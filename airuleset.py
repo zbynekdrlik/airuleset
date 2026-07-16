@@ -1711,6 +1711,19 @@ def cmd_tickets_status(args):
             gk = sum(1 for n_num in mine if handed.get(n_num))
             entry["open"] = None if failed else len(mine) - gk
             entry["gk"] = None if failed else gk
+            # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
+            # filter — how many of MY tickets are excluded from autopilot runs.
+            skipped, sfailed = set(), False
+            for qual in ("assignee:@me", "author:@me",
+                         "label:stream:" + _current_user()):
+                raw = _out(["gh", "issue", "list", "--state", "open", "--search",
+                            "label:autopilot-skip " + qual, "-L", "200",
+                            "--json", "number"], root)
+                try:
+                    skipped.update(x["number"] for x in json.loads(raw))
+                except (ValueError, TypeError, KeyError):
+                    sfailed = True   # gh error ≠ zero skips — keep skipped=None
+            entry["skipped"] = None if sfailed else len(skipped)
         else:
             # Full-authority (core/gatekeeper) slice: the whole backlog MINUS the
             # sub-dev-owned stream:<user> tickets (each reduced stream in
@@ -1725,6 +1738,15 @@ def cmd_tickets_status(args):
                 entry["open"] = int(n)
             except (TypeError, ValueError):
                 entry["open"] = None
+            # Skipped bucket (2026-07-16): the POSITIVE label query over the
+            # same core slice — how many tickets are excluded from autopilot.
+            s = _out(["gh", "issue", "list", "--state", "open", "--search",
+                      "label:autopilot-skip " + excl, "-L", "200",
+                      "--json", "number", "-q", "length"], root)
+            try:
+                entry["skipped"] = int(s)
+            except (TypeError, ValueError):
+                entry["skipped"] = None
     cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(cache) + ".tmp"

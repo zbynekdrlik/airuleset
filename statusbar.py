@@ -95,6 +95,13 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     if not cache:
         return ""
 
+    # Skipped bucket (2026-07-16): tickets labeled autopilot-skip. An EXCLUSION
+    # count, not a partition of the visible tickets (unlike gk, whose zero must
+    # stay visible) — so it renders only when >= 1 and stays off the line at 0.
+    skipped = cache.get("skipped")
+    skip_sfx = (" \033[38;5;245m· skipped %d\033[0m" % skipped
+                if isinstance(skipped, int) and skipped > 0 else "")
+
     # Active autopilot run for this repo → done/total from the last run-card.
     name = cache.get("name") or ""
     if name:
@@ -103,8 +110,8 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
             done, remaining = prog.get("done"), prog.get("remaining")
             if isinstance(done, int) and isinstance(remaining, int):
                 color = 40 if remaining == 0 else 75    # green when backlog empty
-                return "\033[38;5;%dmIssues %d/%d\033[0m" % (color, done,
-                                                            done + remaining)
+                return "\033[38;5;%dmIssues %d/%d\033[0m%s" % (
+                    color, done, done + remaining, skip_sfx)
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
@@ -115,7 +122,7 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         # when the gatekeeper returned tickets and "gk" vanished — 2026-07-11).
         gk = cache.get("gk")
         if isinstance(gk, int):
-            return ("\033[38;5;75mIssues %d\033[0m \033[38;5;245m· gk %d\033[0m"
-                    % (open_n, gk))
-        return "\033[38;5;75mIssues %d\033[0m" % open_n
+            return ("\033[38;5;75mIssues %d\033[0m \033[38;5;245m· gk %d\033[0m%s"
+                    % (open_n, gk, skip_sfx))
+        return "\033[38;5;75mIssues %d\033[0m%s" % (open_n, skip_sfx)
     return ""
