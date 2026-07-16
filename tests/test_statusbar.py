@@ -22,7 +22,8 @@ import airuleset
 import statusbar
 
 
-def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None):
+def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None,
+                skipped=None):
     d = statusbar.cache_dir(home)
     d.mkdir(parents=True, exist_ok=True)
     entry = {"open": open_n, "name": name, "root": str(cwd),
@@ -31,6 +32,8 @@ def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None):
         entry["gk"] = gk
     if scope is not None:
         entry["scope"] = scope
+    if skipped is not None:
+        entry["skipped"] = skipped
     (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(entry))
 
 
@@ -323,6 +326,119 @@ class RefreshCLI(unittest.TestCase):
             # until the TTL passes)
             self.assertEqual(statusbar.tickets_segment(nonrepo, home=home,
                                                        spawn=False), "")
+
+
+class SkippedBucket(unittest.TestCase):
+    """User ask (2026-07-16): the statusline should also show how many tickets
+    are labeled autopilot-skip ("Issues N ... · skipped K"). Unlike the gk
+    bucket (a partition of the user's own visible tickets — hiding its zero
+    looked like a broken counter), skipped is an EXCLUSION count: 0 means "no
+    exclusions", so it renders only when ≥ 1 and stays off the line otherwise.
+    """
+
+    def _seg(self, home, cwd):
+        return statusbar.tickets_segment(cwd, home=home, spawn=False)
+
+    def test_render_shows_skipped_when_positive(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=12, name="demo", skipped=3)
+            seg = self._seg(home, cwd)
+            self.assertIn("Issues 12", seg)
+            self.assertIn("skipped 3", seg)
+
+    def test_render_hides_skipped_at_zero_or_missing(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=12, name="demo", skipped=0)
+            self.assertNotIn("skipped", self._seg(home, cwd))
+            _seed_cache(home, cwd, open_n=12, name="demo")
+            self.assertNotIn("skipped", self._seg(home, cwd))
+
+    def test_render_combines_with_gk_bucket(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=1, name="demo", gk=5, scope="mine",
+                        skipped=2)
+            seg = self._seg(home, cwd)
+            self.assertIn("Issues 1", seg)
+            self.assertIn("gk 5", seg)
+            self.assertIn("skipped 2", seg)
+
+    def test_render_shows_skipped_during_autopilot_run(self):
+        # done/total mode must not hide the skip info — skips are exactly the
+        # tickets the run will NOT touch.
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
+            _seed_progress(home, "demo", done=1, remaining=3)
+            seg = self._seg(home, cwd)
+            self.assertIn("Issues 1/4", seg)
+            self.assertIn("skipped 2", seg)
+
+    def test_refresh_counts_skipped_for_full_authority(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+                # the POSITIVE label query (skip count) — must match before the
+                # open-count query, whose search embeds -label:autopilot-skip
+                '  *"--search label:autopilot-skip"*) echo 2;;\n'
+                '  *) echo 7;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 7)
+            self.assertEqual(cache["skipped"], 2)
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("Issues 7", seg)
+            self.assertIn("skipped 2", seg)
+
+    def test_refresh_counts_skipped_for_own_slice(self):
+        # Reduced authority: skipped = union of the SAME slice quals, but with
+        # the POSITIVE label:autopilot-skip filter ({9} ∪ {9,10} = 2).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *"--search label:autopilot-skip assignee:@me"*) echo \'[{"number":9}]\';;\n'
+                '  *"--search label:autopilot-skip author:@me"*) echo \'[{"number":9},{"number":10}]\';;\n'
+                '  *"--search label:autopilot-skip label:stream:"*) echo "[]";;\n'
+                '  *assignee:@me*) echo \'[{"number":1},{"number":2}]\';;\n'
+                '  *author:@me*)   echo \'[{"number":2},{"number":3}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 3)
+            self.assertEqual(cache["skipped"], 2)
 
 
 class AutopilotProgressFeed(unittest.TestCase):
