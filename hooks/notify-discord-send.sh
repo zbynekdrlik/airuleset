@@ -170,6 +170,10 @@ emit_one() {
                     local mid
                     mid=$(printf '%s' "$body" | jq -r '.id // empty' 2>/dev/null || echo "")
                     if [ -n "$mid" ]; then
+                        # The posted ❓ CONTENT rides on stdin — the reply
+                        # delivery wraps the user's answer with the question it
+                        # answers (a bare '1' typed days later is meaningless).
+                        printf '%s' "$CONTENT" | \
                         python3 "$AIRULESET_PY" notify --record-question \
                             --message-id "$mid" --channel "$CH" \
                             --session "$ND_SESSION_ID" --cwd "$CWD" \

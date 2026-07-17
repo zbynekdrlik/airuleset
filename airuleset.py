@@ -1524,8 +1524,18 @@ def cmd_notify(args):
     if getattr(args, "record_question", False):
         # Record a ❓ ping's Discord message id → the session that asked, so the
         # watchdog can route the user's Discord REPLY back into that session.
+        # The send hook pipes the posted ❓ CONTENT on stdin (arbitrary quotes /
+        # backticks never touch shell argv) — stored so the reply delivery can
+        # wrap the answer with the question it answers (2026-07-17).
         from notify import record_question
-        ok = record_question(args.message_id, args.channel, args.session, args.cwd)
+        q_text = ""
+        try:
+            if not sys.stdin.isatty():
+                q_text = sys.stdin.read()
+        except (OSError, ValueError):
+            q_text = ""
+        ok = record_question(args.message_id, args.channel, args.session,
+                             args.cwd, question=q_text)
         sys.stdout.write("recorded" if ok else "skip")
         return
 

@@ -1153,7 +1153,30 @@ def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
         return None
     return {"reply_id": reply_id, "referenced": ref,
             "session": str(q.get("session") or ""), "cwd": str(q.get("cwd") or ""),
-            "channel": str(q.get("channel") or ""), "text": text}
+            "channel": str(q.get("channel") or ""), "text": text,
+            "question": " ".join(str(q.get("question") or "").split()),
+            "asked_ts": q.get("ts") or 0}
+
+
+def compose_reply_prompt(r):
+    """The ONE-LINE prompt typed into the asking session for a Discord reply.
+
+    A reply may land hours/days after the ❓ was asked — a bare '1' is
+    meaningless once the session's context no longer holds the question (user
+    ask, 2026-07-17), so the prompt carries WHEN + WHAT was asked + the answer.
+    One line only: send_continue types the text literally then presses Enter, a
+    newline would submit early. A legacy map entry without stored question text
+    falls back to the raw reply (the pre-2026-07-17 behavior)."""
+    q = str(r.get("question") or "").strip()
+    if not q:
+        return r["text"]
+    ts = r.get("asked_ts") or 0
+    when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts
+            else "nedávno")
+    return ("Odpoveď z Discordu: %s ti bola cez Discord položená táto otázka: "
+            "«%s» Užívateľ na ňu teraz odpovedal: «%s» — zariaď sa podľa tejto "
+            "odpovede (číslo = poradie ponúknutej možnosti)."
+            % (when, q, " ".join(str(r.get("text") or "").split())))
 
 
 def _discord_get(url, token, timeout=6):
@@ -1244,7 +1267,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if pane_in_mode(pid, run):
                 continue
             if not dry_run:
-                send_continue(pid, r["text"], run)
+                send_continue(pid, compose_reply_prompt(r), run)
                 _react_ok(r["channel"], r["reply_id"], token)
             done_set.add(r["reply_id"])
             done.append(r["reply_id"])

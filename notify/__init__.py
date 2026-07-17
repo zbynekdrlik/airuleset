@@ -384,6 +384,8 @@ def _prune_dedup(d):
 _QUESTIONS_REL = "discord-questions.json"
 _QUESTIONS_TTL_S = 24 * 3600          # an unanswered question older than this is stale
 _QUESTIONS_MAX = 200                  # hard cap on tracked questions (newest kept)
+_QUESTION_TEXT_MAX = 1200             # stored question text cap (codepoints — the
+                                      # delivery wraps it into ONE typed prompt line)
 
 
 def _questions_path():
@@ -414,10 +416,17 @@ def _save_questions(d, path=None):
         return False
 
 
-def record_question(message_id, channel, session, cwd, now=None, path=None):
+def record_question(message_id, channel, session, cwd, now=None, path=None,
+                    question=""):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
     `session` (transcript stem = CC session id) in `cwd`. Prunes stale + over-cap
     entries in the same write. Returns True on success. Fail-safe (never raises).
+
+    `question` = the posted ❓ text: stored single-line (collapsed whitespace,
+    leading @mentions stripped, codepoint-capped) so the watchdog's reply
+    delivery can wrap the user's answer with the question it answers — a bare
+    '1' typed hours/days later is meaningless once the session's context no
+    longer holds the question (user ask, 2026-07-17).
 
     `message_id` and `channel` must be NUMERIC Discord snowflakes — anything else
     (a Mock repr from a mis-wired test, a mangled shell var) is refused so garbage
@@ -429,9 +438,12 @@ def record_question(message_id, channel, session, cwd, now=None, path=None):
     if not message_id.isdigit() or not channel.isdigit() or not session:
         return False
     now = time.time() if now is None else now
+    q = " ".join(str(question or "").split())
+    q = re.sub(r"^(?:<@[!&]?\d+>\s*)+", "", q)[:_QUESTION_TEXT_MAX]
     d = load_questions(path)
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
-                     "channel": str(channel or ""), "ts": int(now)}
+                     "channel": str(channel or ""), "ts": int(now),
+                     "question": q}
     # prune stale
     for mid in [m for m, v in d.items()
                 if now - (v.get("ts") or 0) > _QUESTIONS_TTL_S]:
