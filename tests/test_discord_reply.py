@@ -377,3 +377,117 @@ class UpdateQuestion(unittest.TestCase):
                                     http=self._http(get_content="obyčajná správa"))
         self.assertFalse(ok)
         self.assertEqual([c[0] for c in self.calls], ["GET"])
+
+
+# --------------------------------------------------------------------------- #
+# Reply prompt carries the QUESTION context (user ask, 2026-07-17)
+# --------------------------------------------------------------------------- #
+class ReplyPromptCarriesQuestion(unittest.TestCase):
+    """A Discord reply may land hours/days after the ❓ was asked — a bare '1'
+    typed into the session is meaningless once its context no longer holds the
+    question. The prompt typed into the pane must carry WHEN the question was
+    asked, its full text, and the user's answer; a legacy map entry without
+    stored question text falls back to the raw reply (old behavior)."""
+
+    OWNER = "773451844110385193"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "discord-questions.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER,
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.sent = []
+
+    def _run(self, argv, timeout=8):
+        self.sent.append(argv)
+        return "0" if "pane_in_mode" in " ".join(argv) else ""
+
+    QUESTION = ("<@773451844110385193> **Otázka — projekt restreamer:** "
+                "ktorú verziu nasadiť?\n• 1. najprv 0.28.0\n• 2. rovno 0.29.0")
+
+    def test_record_question_stores_single_line_text(self):
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=1000, path=self.qpath,
+                               question=self.QUESTION)
+        q = notify.load_questions(self.qpath)["888001"]["question"]
+        self.assertIn("ktorú verziu nasadiť?", q)
+        self.assertNotIn("\n", q)                       # send-keys types ONE line
+        self.assertFalse(q.startswith("<@"))            # mention prefix stripped
+
+    def test_record_question_truncates_codepoint_safe(self):
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=1000, path=self.qpath,
+                               question="š" * 5000)
+        q = notify.load_questions(self.qpath)["888001"]["question"]
+        self.assertLessEqual(len(q), notify._QUESTION_TEXT_MAX)
+
+    def test_parse_reply_carries_question_and_ts(self):
+        qmap = {"ping1": {"session": "sid-abc", "cwd": "/p", "channel": "ch",
+                          "ts": 1234, "question": "ktorú verziu nasadiť?"}}
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+               "message_reference": {"message_id": "ping1"}, "content": "1"}
+        r = wd.parse_discord_reply(msg, {self.OWNER}, qmap)
+        self.assertEqual(r["question"], "ktorú verziu nasadiť?")
+        self.assertEqual(r["asked_ts"], 1234)
+
+    def test_typed_prompt_wraps_reply_with_question_context(self):
+        asked = time.time() - 3600
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=asked, path=self.qpath,
+                               question=self.QUESTION)
+        wd.deliver_discord_replies(
+            time.time(), self._run, {}, {"sid-abc": ("%1", IDLE)},
+            dry_run=False,
+            discord_fetch=lambda ch, tok: [
+                {"id": "rep1", "author": {"id": self.OWNER},
+                 "message_reference": {"message_id": "888001"},
+                 "content": "1"}])
+        typed = [a for a in self.sent if "-l" in a]
+        self.assertTrue(typed, self.sent)
+        text = typed[0][-1]
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(asked)))
+        self.assertIn(when, text)                       # kedy bola položená
+        self.assertIn("ktorú verziu nasadiť?", text)    # znenie otázky
+        self.assertIn("odpovedal", text)                # + odpoveď užívateľa
+        self.assertIn("«1»", text)
+        self.assertNotIn("\n", text)                    # one line, one submit
+
+    def test_legacy_entry_without_question_types_raw_reply(self):
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=self.qpath)
+        wd.deliver_discord_replies(
+            time.time(), self._run, {}, {"sid-abc": ("%1", IDLE)},
+            dry_run=False,
+            discord_fetch=lambda ch, tok: [
+                {"id": "rep1", "author": {"id": self.OWNER},
+                 "message_reference": {"message_id": "888001"},
+                 "content": "najprv 0.28.0"}])
+        typed = [a for a in self.sent if "-l" in a]
+        self.assertEqual(typed[0][-1], "najprv 0.28.0")
+
+    def test_record_question_cli_reads_question_from_stdin(self):
+        # The send hook pipes the posted ❓ CONTENT via stdin — arbitrary quotes/
+        # backticks never touch shell argv.
+        import os
+        import subprocess
+        import json as _json
+        import airuleset
+        with TemporaryDirectory() as home:
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "notify", "--record-question", "--message-id", "999",
+                 "--channel", "888", "--session", "sid-x", "--cwd", "/p"],
+                input=self.QUESTION, capture_output=True, text=True,
+                env={**os.environ, "HOME": home})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = _json.loads(Path(home, ".claude",
+                                 "discord-questions.json").read_text())
+            self.assertIn("ktorú verziu nasadiť?", d["999"]["question"])
