@@ -93,6 +93,25 @@ BLOCK=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$N" '
     NR <= m { L[NR] = $0 }
     END {
         if (m < 1 || !(m in L)) exit
+        # HEAD-ANCHORED extraction first (2026-07-18) — SAME as the pending
+        # hook: a structured question (briefing / options / decision as
+        # separate paragraphs) is bounded by its "**Otazka —" head line; when
+        # present within 40 lines, block = head..marker verbatim (blank lines
+        # kept, chrome dropped), no 600cp pull gate — a long options paragraph
+        # never drops the briefing, so the gate validates the same block the
+        # device ping will actually carry.
+        h = 0
+        for (i = m; i >= 1 && i > m - 40; i--)
+            if (L[i] ~ /Ot(\303\241|a)zka[[:space:]]*(\342\200\224|\342\200\223|-)/) { h = i; break }
+        if (h) {
+            blk = ""
+            for (i = h; i <= m; i++) {
+                if (L[i] ~ /^[[:space:]]*(#|---)/) continue
+                blk = blk (i > h ? "\n" : "") L[i]
+            }
+            print blk
+            exit
+        }
         s = m
         while (s > 1 && L[s-1] !~ /^[[:space:]]*$/) s--
         blk = ""

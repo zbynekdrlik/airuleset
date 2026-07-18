@@ -87,6 +87,25 @@ extract_block() {
         NR <= m { L[NR] = $0 }
         END {
             if (m < 1 || !(m in L)) exit
+            # HEAD-ANCHORED extraction first (2026-07-18): a STRUCTURED question
+            # — briefing / options / decision as SEPARATE paragraphs (terminal-
+            # readable; the odoo-erp #1173 "je to necitatelne" wall complaint) —
+            # is bounded by its "**Otazka —" head line above the marker. When
+            # the head exists within 40 lines, the block = head..marker VERBATIM
+            # (blank lines kept, report chrome dropped) with NO 600cp pull gate,
+            # so a long options paragraph can never drop the briefing again.
+            h = 0
+            for (i = m; i >= 1 && i > m - 40; i--)
+                if (L[i] ~ /Ot(\303\241|a)zka[[:space:]]*(\342\200\224|\342\200\223|-)/) { h = i; break }
+            if (h) {
+                blk = ""
+                for (i = h; i <= m; i++) {
+                    if (L[i] ~ /^[[:space:]]*(#|---)/) continue
+                    blk = blk (i > h ? "\n" : "") L[i]
+                }
+                print blk
+                exit
+            }
             s = m
             while (s > 1 && L[s-1] !~ /^[[:space:]]*$/) s--
             blk = ""
