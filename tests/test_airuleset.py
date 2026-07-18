@@ -1294,6 +1294,77 @@ class TestPrePushGatesFire(TestCase):
             self.assertEqual(self._run(hook, "ls -la", d).returncode, 0, hook)
 
 
+class TestPrePushTestCheckBaseRef(TestCase):
+    """pre-push-test-check.sh range bug (odoo-erp, 2026-07-18): the diff/commit
+    range was ALWAYS origin/<default>..HEAD, so on a multi-branch repo
+    (develop→staging→main) every push of ANY branch re-flagged fix commits
+    ALREADY MERGED into develop via green-CI PRs — a docs-only push was blocked
+    for merged PR #1694's fix commit (odoo-erp e3d34e37 bypass note). The base
+    must be the PR TARGET — the integration branch the work merges into
+    (origin/develop there) — while a 2-branch repo's dev→main keeps today's
+    whole-PR origin/main range (RED→GREEN ordering still spans the whole PR)."""
+
+    def _run(self, command, cwd):
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / "pre-push-test-check.sh")],
+            input=payload, text=True, capture_output=True, cwd=cwd, timeout=60,
+            env=env)
+
+    def _mkrepo(self):
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        return root, g
+
+    def test_docs_push_of_new_branch_ignores_merged_develop_fixes(self):
+        # The odoo-erp repro: develop is AHEAD of origin/main by a MERGED fix
+        # commit; a new docs-only branch cut from develop must push clean.
+        root, g = self._mkrepo()
+        base = g("rev-parse", "HEAD").stdout.strip()
+        g("checkout", "-qb", "develop")
+        open(os.path.join(root, "app.py"), "a").write("# fixed\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #1694")
+        g("update-ref", "refs/remotes/origin/main", base)
+        g("update-ref", "refs/remotes/origin/develop",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "docs-tweak")
+        open(os.path.join(root, "README.md"), "w").write("# docs\n")
+        g("add", "README.md")
+        g("commit", "-qm", "docs: tweak readme")
+        r = self._run("git push origin docs-tweak", root)
+        self.assertEqual(r.returncode, 0,
+                         "merged develop history must NOT re-flag: %s" % r.stdout)
+
+    def test_two_branch_dev_keeps_whole_pr_range(self):
+        # No develop → dev's PR target stays origin/main: an unmerged fix
+        # commit with no test still blocks (gate 2 semantics unchanged).
+        root, g = self._mkrepo()
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "dev")
+        open(os.path.join(root, "app.py"), "a").write("# fixed\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #7")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("BLOCKED", r.stdout)
+
+
 class TestPrePushBaseSyncHook(TestCase):
     """pre-push-base-sync.sh — GLOBAL conflict-churn guard. Blocks a push ONLY when
     a trial merge of the base into HEAD has a REAL CONFLICT (git merge-tree). It
