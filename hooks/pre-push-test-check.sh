@@ -33,6 +33,36 @@ fi
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
 PROJECT=$(basename "$(git rev-parse --show-toplevel)")
 
+# BASE for every range below = the PR TARGET (the branch this work merges
+# into), NOT the default branch. On a multi-branch repo (develop→staging→main)
+# origin/<default> lags develop by many MERGED, green-CI PRs, so a
+# default-branch base re-flagged already-merged fix commits on EVERY push of
+# any branch (odoo-erp: docs-only push blocked for merged PR #1694's fix —
+# e3d34e37 bypass note, 2026-07-18). The ..HEAD / ...HEAD ranges are
+# merge-base-scoped, so a PR-target base yields exactly this branch's own
+# unmerged commits. Resolution: a feature branch targets the integration
+# branch (origin/develop, else origin/dev, else default); develop promotes to
+# staging; staging/default/detached keep the default base (2-branch dev→main
+# is unchanged — the whole open PR is still the range, so RED→GREEN ordering
+# spans multi-push PRs).
+CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+BASE_REF="origin/${DEFAULT_BRANCH}"
+case "$CUR_BRANCH" in
+    HEAD|"$DEFAULT_BRANCH"|staging) ;;
+    develop)
+        git rev-parse -q --verify origin/staging >/dev/null && BASE_REF="origin/staging" ;;
+    *)
+        for CAND in develop dev; do
+            if [ "$CAND" != "$CUR_BRANCH" ] && \
+               git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                BASE_REF="origin/${CAND}"
+                break
+            fi
+        done ;;
+esac
+# The base ref may not exist at all (fresh repo, no origin) — the ranges below
+# already fall back on error, so BASE_REF is used as-is.
+
 # Audit log for bypasses
 AUDIT_LOG="$HOME/devel/airuleset/audits/no-test-skips.log"
 mkdir -p "$(dirname "$AUDIT_LOG")"
@@ -66,7 +96,7 @@ if echo "$LAST_MSG_FLAT" | grep -qE '\[no-test:\s*[^]]+\]'; then
 fi
 
 # Get files changed compared to default branch
-CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
+CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
 
 if [ -z "$CHANGED_FILES" ]; then
     exit 0
@@ -84,7 +114,7 @@ TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' || 
 # inline-test recognition here so a feature/bugfix that DOES ship inline tests is not
 # wrongly flagged "no test files modified". Look at lines ADDED in the branch diff.
 INLINE_TEST_ADDED=0
-BRANCH_DIFF_ADDED=$(git diff -U0 "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null \
+BRANCH_DIFF_ADDED=$(git diff -U0 "${BASE_REF}...HEAD" 2>/dev/null \
     | grep -E '^\+' || true)
 if printf '%s' "$BRANCH_DIFF_ADDED" \
     | grep -qE '#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|it\(|describe\('; then
@@ -112,7 +142,7 @@ fi
 #   - OR body containing Closes/Fixes/Resolves #N
 # For each bug-fix commit, a TEST commit (touching tests/, e2e/, *test*, *spec*) must exist
 # EARLIER in the branch's history (older commit timestamp).
-COMMITS=$(git log --reverse --pretty='%H' "origin/${DEFAULT_BRANCH}..HEAD" 2>/dev/null || echo "")
+COMMITS=$(git log --reverse --pretty='%H' "${BASE_REF}..HEAD" 2>/dev/null || echo "")
 
 if [ -n "$COMMITS" ]; then
     # Walk commits in order; track whether we've seen a test commit yet
