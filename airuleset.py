@@ -1989,15 +1989,23 @@ WATCHDOG_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watc
 WATCHDOG_TIMER_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchdog.timer"
 
 
+def _watchdog_bounce_fetch(root):
+    """Job 8's real gh fetch (wired here so run_once unit tests stay network-free)."""
+    from watchdog import _fetch_bounce_tickets
+    return _fetch_bounce_tickets(root)
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
-    (rate-limited) alert when the weekly token limit nears its cap, and route an
-    owner's Discord REPLY back into the session that asked the ❓. Driven by the
-    systemd timer."""
+    (rate-limited) alert when the weekly token limit nears its cap, route an
+    owner's Discord REPLY back into the session that asked the ❓, and backstop
+    gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping).
+    Driven by the systemd timer."""
     from watchdog import run_once, fetch_usage, fetch_channel_messages
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
-                    discord_fetch=fetch_channel_messages)
+                    discord_fetch=fetch_channel_messages,
+                    bounce_fetch=_watchdog_bounce_fetch)
     if getattr(args, "verbose", False):
         for line in logs:
             print(line)

@@ -1280,6 +1280,175 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# Bounce backstop (job 8, 2026-07-19) — gatekeeper-returned work must never rot.
+# The gatekeeper's /process-subdev files findings as `prio:bounce` tickets and
+# nudges over brittle ssh/tmux paths; when the sub-dev's autopilot loop has
+# ended (or the nudge missed), the tickets sit unworked until the user notices
+# (the 4 stalled david re-handoffs). This job is the machine-local backstop:
+# every ~30 min, check the repos this box touches for open prio:bounce tickets
+# scoped to the pane's stream; a live IDLE claude pane gets a typed nudge (the
+# autopilot skill's nudge-ack dispatches a worker even with no /goal armed); a
+# repo with NO live pane (known from the tickets-status cache) gets ONE deduped
+# Discord ping. A BUSY pane gets NOTHING — a running loop re-queries the
+# backlog each turn, so the label alone is the insertion (never interrupt
+# mid-work — the user's standing rule). NB: montalu's claude runs inside
+# NEWLEVEL's tmux (a `sudo su - montalu` window) — pane-driven detection is
+# what reaches it; a montalu-side watchdog sees no tmux at all.
+# --------------------------------------------------------------------------- #
+
+BOUNCE_INTERVAL = 30 * 60            # min seconds between bounce sweeps
+BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this often
+_REDUCED_STREAM_USERS = ("david", "marek", "montalu")
+
+BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
+                "gatekeeper-returned work is waiting. Per the autopilot "
+                "skill's bounce nudge-ack: if a /goal loop is armed the label "
+                "alone queues them; with NO loop armed, validate and dispatch "
+                "the background autopilot-worker for them now.")
+
+
+def _bounce_quals(cwd):
+    """gh search quals scoping the bounce query to the PANE's stream, derived
+    from its /home/<user>/ prefix (montalu's claude runs under newlevel's tmux,
+    so the WATCHDOG user is meaningless; and gh identity is the same account
+    everywhere, so @me cannot scope). Reduced streams → their stream label (the
+    #1599 convention: findings tickets carry stream:<name>); else unscoped."""
+    for u in _REDUCED_STREAM_USERS:
+        if str(cwd or "").startswith("/home/%s/" % u):
+            return ["label:stream:%s" % u]
+    return [""]
+
+
+def _gh_env(home=None, base=None):
+    """Env for gh subprocesses. david's box keeps GH_TOKEN only as an `export`
+    in ~/.bashrc (no hosts.yml), which a systemd --user service never sources —
+    parse that one line as a fallback. An already-set token is never touched;
+    the value is never logged."""
+    env = dict(os.environ if base is None else base)
+    if env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
+        return env
+    try:
+        rc = Path(os.path.join(home or os.path.expanduser("~"), ".bashrc")
+                  ).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return env                      # no .bashrc → gh runs with what it has
+    m = re.search(r'^\s*export\s+(GH_TOKEN|GITHUB_TOKEN)=["\x27]?'
+                  r'([^\s"\x27]+)', rc, re.M)
+    if m:
+        env[m.group(1)] = m.group(2)
+    return env
+
+
+def _fetch_bounce_tickets(root, home=None):
+    """Open prio:bounce ticket numbers for the repo at `root`, scoped to the
+    root's stream. None on any error (fail-safe — an auth/network hiccup must
+    never look like 'no bounces')."""
+    import subprocess
+    nums, env = set(), _gh_env(home)
+    for qual in _bounce_quals(root):
+        try:
+            r = subprocess.run(
+                ["gh", "issue", "list", "--state", "open", "--label",
+                 "prio:bounce", "--search",
+                 ("-label:autopilot-skip " + qual).strip(), "-L", "100",
+                 "--json", "number"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return None
+            nums.update(x["number"] for x in json.loads(r.stdout))
+        except Exception:
+            return None
+    return sorted(nums)
+
+
+def _cache_repo_roots(home=None):
+    """{root: name} from the tickets-status cache — the repos this box recently
+    worked (the Discord-fallback candidate set for panes that no longer exist)."""
+    import statusbar
+    roots = {}
+    try:
+        files = list(statusbar.cache_dir(home).glob("*.json"))
+    except OSError:
+        return roots                    # unreadable cache dir → empty candidate set
+    for f in files:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue                    # one corrupt cache entry never kills the sweep
+        root, name = str(d.get("root") or ""), str(d.get("name") or "")
+        if root and name:
+            roots[root] = name
+    return roots
+
+
+def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
+                    gh_fetch=None, interval=BOUNCE_INTERVAL,
+                    renudge=BOUNCE_RENUDGE_SECONDS):
+    """Job 8 — see the section comment. Mutates state['bounce']; returns log
+    lines. Best-effort (never raises)."""
+    b = state.get("bounce") or {}
+    if (now - b.get("last_check", 0)) < interval:
+        return []
+    b["last_check"] = int(now)
+    seen = b.get("seen") or {}
+    state["bounce"] = b
+    fetch = gh_fetch or (lambda root: _fetch_bounce_tickets(root, home))
+    logs = []
+
+    panes = list_claude_panes(run)
+    # candidate repos: every live pane cwd (nudge path) + cached roots (Discord
+    # fallback for repos whose session is gone)
+    targets = {}                               # root -> (name, pane_id | None)
+    for pid, cwd in panes:
+        targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
+    pane_cwds = [c for _p, c in panes]
+    for root, name in _cache_repo_roots(home).items():
+        if not any(c == root or c.startswith(root + "/") for c in pane_cwds):
+            targets.setdefault(root, (name, None))
+
+    new_seen = {}
+    for root, (name, pid) in sorted(targets.items()):
+        tickets = fetch(root)
+        if tickets is None:                    # gh error → keep prior state
+            if name in seen:
+                new_seen[name] = seen[name]
+            continue
+        if not tickets:
+            continue                           # clean → entry drops out
+        prev = seen.get(name) or {}
+        same = prev.get("tickets") == tickets
+        fresh = (now - prev.get("ts", 0)) < renudge
+        if same and fresh:
+            new_seen[name] = prev
+            continue                           # already nudged/pinged this set
+        tick_str = " ".join("#%d" % n for n in tickets)
+        if pid:
+            captured = capture_pane(pid, run)
+            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run):
+                # busy = a loop is likely running; the label IS the insertion
+                # (never interrupt mid-work). Keep prior state so the set is
+                # re-considered next sweep.
+                if prev:
+                    new_seen[name] = prev
+                continue
+            if not dry_run:
+                send_continue(pid, BOUNCE_NUDGE % (tick_str, name), run)
+            logs.append("bounce-nudge %s %s" % (name, tick_str))
+        else:
+            body = ("⚠️ **%s: %d vrátené tikety čakajú**\n> Gatekeeper vrátil "
+                    "prácu (%s), ale nebeží žiadna Claude session, ktorá by ju "
+                    "spracovala. Spusti session v `%s` (autopilot ich zoberie "
+                    "cez prio:bounce)." % (name, len(tickets), tick_str, root))
+            send_fn(body, dedup_key="bounce:%s:%s" % (name, tick_str),
+                    dry_run=dry_run)
+            logs.append("bounce-ping %s %s" % (name, tick_str))
+        new_seen[name] = {"tickets": tickets, "ts": int(now)}
+    b["seen"] = new_seen
+    state["bounce"] = b
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -1658,7 +1827,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              working_interval=WORKING_RETRY_INTERVAL_SECONDS,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
-             discord_fetch=None):
+             discord_fetch=None, bounce_fetch=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -1679,7 +1848,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (never before — `continue` pre-reset just re-hits the limit);
       (7) (only when `discord_fetch` is given) a session's ❓ ping was ANSWERED by
           the owner REPLYING in Discord → type the answer into that exact session's
-          idle pane (deliver_discord_replies), react ✅ on success.
+          idle pane (deliver_discord_replies), react ✅ on success;
+      (8) (only when `bounce_fetch` is given) BOUNCE BACKSTOP — open `prio:bounce`
+          (gatekeeper-returned) tickets for a repo this box touches → nudge the
+          repo's IDLE claude pane (busy pane = the label alone queues them; never
+          interrupt mid-work), or ONE deduped Discord ping when no session runs
+          (bounce_backstop, ~30 min cadence).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -2154,6 +2328,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             dry_run=dry_run, discord_fetch=discord_fetch)
         except Exception:
             pass
+
+    # Job 8 — bounce backstop (gatekeeper-returned prio:bounce tickets must
+    # never rot after a loop ends). Only when a fetch is wired (cmd_watchdog
+    # passes the real one; unit tests of other jobs stay network-free).
+    # Cadence-gated internally; best-effort.
+    if bounce_fetch is not None:
+        try:
+            logs += bounce_backstop(now, run, state, send_fn, dry_run=dry_run,
+                                    gh_fetch=bounce_fetch)
+        except Exception as e:
+            logs.append("bounce-backstop error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
