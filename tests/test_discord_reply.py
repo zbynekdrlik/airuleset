@@ -483,7 +483,8 @@ class ReplyPromptCarriesQuestion(unittest.TestCase):
         with TemporaryDirectory() as home:
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
-                 "notify", "--record-question", "--message-id", "999",
+                 "notify", "--record-question", "--question-stdin",
+                 "--message-id", "999",
                  "--channel", "888", "--session", "sid-x", "--cwd", "/p"],
                 input=self.QUESTION, capture_output=True, text=True,
                 env={**os.environ, "HOME": home})
@@ -491,3 +492,28 @@ class ReplyPromptCarriesQuestion(unittest.TestCase):
             d = _json.loads(Path(home, ".claude",
                                  "discord-questions.json").read_text())
             self.assertIn("ktorú verziu nasadiť?", d["999"]["question"])
+
+
+class TestRecordQuestionNeverBlocksOnStdin(unittest.TestCase):
+    def test_no_flag_with_open_pipe_stdin_completes(self):
+        # 2026-07-19 push-gate hang: --record-question read stdin whenever it
+        # was not a TTY; a caller spawning it with an inherited NEVER-CLOSING
+        # pipe as stdin blocked forever in read(). Without --question-stdin
+        # the command must never touch stdin.
+        import os
+        import subprocess
+        import airuleset
+        r, w = os.pipe()          # write end stays OPEN — the hang condition
+        try:
+            with TemporaryDirectory() as home:
+                p = subprocess.run(
+                    [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                     "notify", "--record-question", "--message-id", "111",
+                     "--channel", "222", "--session", "sid-h", "--cwd", "/p"],
+                    stdin=r, capture_output=True, text=True, timeout=15,
+                    env={**os.environ, "HOME": home})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertIn("recorded", p.stdout)
+        finally:
+            os.close(r)
+            os.close(w)
