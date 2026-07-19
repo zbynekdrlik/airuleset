@@ -111,5 +111,32 @@ class TestReviewWatchLifecycle(TestCase):
         self.assertIn("dispatch the background `autopilot-worker` for the bounce ticket", t)
 
 
+class TestCrossStreamProtocolCanonical(TestCase):
+    """2026-07-19 user directive: airuleset OWNS the gatekeeper↔sub-dev
+    protocol ('musis pochopit co vsetko sa pod gatekeeper rules riesilo a
+    prevziat to pod svoju spravu'). The autopilot skill carries the canonical
+    section BOTH sides read; repo-local commands (odoo-erp /process-subdev)
+    must conform to it, never define their own variant."""
+
+    SKILL = "skills/autopilot/SKILL.md"
+
+    def test_canonical_section_exists(self):
+        self.assertIn("## Cross-stream protocol", read(self.SKILL))
+
+    def test_no_prompt_interrupts_rule(self):
+        t = read(self.SKILL)
+        self.assertIn("NEVER a payload prompt into a working session", t)
+
+    def test_label_lifecycle_owned(self):
+        t = read(self.SKILL)
+        self.assertIn("who removes `prio:bounce`", t)
+        self.assertIn("read-only role cannot remove labels", t)
+
+    def test_both_loops_hold_alive(self):
+        t = read(self.SKILL)
+        self.assertIn("BOTH loops stay alive", t)
+        self.assertIn("gatekeeper's own loop", t)
+
+
 if __name__ == "__main__":
     main()
