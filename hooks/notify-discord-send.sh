@@ -175,6 +175,7 @@ emit_one() {
                         # answers (a bare '1' typed days later is meaningless).
                         printf '%s' "$CONTENT" | \
                         python3 "$AIRULESET_PY" notify --record-question \
+                            --question-stdin \
                             --message-id "$mid" --channel "$CH" \
                             --session "$ND_SESSION_ID" --cwd "$CWD" \
                             >/dev/null 2>&1 || true

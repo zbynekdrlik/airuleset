@@ -1527,13 +1527,18 @@ def cmd_notify(args):
         # The send hook pipes the posted ❓ CONTENT on stdin (arbitrary quotes /
         # backticks never touch shell argv) — stored so the reply delivery can
         # wrap the answer with the question it answers (2026-07-17).
+        # stdin is read ONLY on the explicit --question-stdin flag (the hook
+        # sets it when piping). An unconditional isatty()-guarded read HUNG
+        # forever when a caller spawned this command with an inherited
+        # never-closing pipe as stdin (the 2026-07-19 push-gate hang — the
+        # unittest child inherited the push's stdin and blocked in read()).
         from notify import record_question
         q_text = ""
-        try:
-            if not sys.stdin.isatty():
+        if getattr(args, "question_stdin", False):
+            try:
                 q_text = sys.stdin.read()
-        except (OSError, ValueError):
-            q_text = ""
+            except (OSError, ValueError):
+                q_text = ""
         ok = record_question(args.message_id, args.channel, args.session,
                              args.cwd, question=q_text)
         sys.stdout.write("recorded" if ok else "skip")
@@ -2488,6 +2493,13 @@ def main():
                           help="Record a ❓ ping's Discord message id → the session "
                                "that asked (for Discord-reply routing); needs "
                                "--message-id --channel --session --cwd")
+    p_notify.add_argument("--question-stdin", dest="question_stdin",
+                          action="store_true",
+                          help="With --record-question: read the posted ❓ text "
+                               "from stdin (the send hook pipes it). Without "
+                               "this flag stdin is NEVER touched — an "
+                               "unconditional read blocked forever on an "
+                               "inherited never-closing pipe")
     p_notify.add_argument("--edit-question", dest="edit_question",
                           action="store_true",
                           help="EDIT the session's recent ❓ ping in place with "
