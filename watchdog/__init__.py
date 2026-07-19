@@ -1397,18 +1397,32 @@ def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     prompt while WAITING on a background Workflow, so a bare idle-prompt check
     pasted the nudge 4× into a mid-review session — the user's hardest rule
     violated ('nesmie sa pastovat do promptu pocas behu'). Refuse when the
-    pane shows a background-wait spinner, an armed /goal (the statusline's
-    `◎ /goal` — the label alone queues bounce tickets there), or a previous
-    nudge still on screen (belt against lost dedup state); and when the
-    session transcript is readable, refuse while its last marker is
-    ⏳ WORKING (mid-flight even if the prompt looks free)."""
-    for sig in ("✳", "✻", "Waiting for", "esc to interrupt", "◎ /goal",
-                "bounce-backstop:"):
+    pane shows live-work signals (an active spinner's `esc to interrupt`, a
+    background `Waiting for`, a `⏳ WORKING` tail), an ARMED WORKING /goal
+    (the statusline's `◎ /goal` — the label alone queues bounce tickets
+    there), or a previous nudge still on screen (belt against lost dedup
+    state); and when the session transcript is readable, refuse while its
+    last marker is ⏳ (mid-flight even if the prompt looks free) or ❓
+    (waiting on the user's answer — never interject before it).
+
+    DONE-PARKED override (the 2026-07-20 deadlock): a SATISFIED /goal keeps
+    `◎ /goal` lit although no turn will ever fire again — david's session sat
+    at ✅ DONE while a bounce rotted and the gatekeeper waited on him. A pane
+    whose tail shows `✅ DONE` with no live-work signal is AT REST: the
+    ◎ /goal indicator alone must not block the nudge there (the ✻/✳ glyphs
+    are NOT used as signals — they appear in finished-turn summaries too)."""
+    if "bounce-backstop:" in captured:
+        return False
+    for sig in ("esc to interrupt", "Waiting for", "⏳ WORKING"):
         if sig in captured:
             return False
-    tinfo = find_active_transcript(Path(projects_dir), cwd)
-    if tinfo and "⏳" in (transcript_last_marker(tinfo[0]) or ""):
+    if "◎ /goal" in captured and "✅ DONE" not in captured:
         return False
+    tinfo = find_active_transcript(Path(projects_dir), cwd)
+    if tinfo:
+        m = transcript_last_marker(tinfo[0]) or ""
+        if "⏳" in m or "❓" in m:
+            return False
     return True
 
 

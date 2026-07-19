@@ -286,3 +286,48 @@ class TestStatePersistedBeforeTyping(unittest.TestCase):
             self.assertIn("persist", order)
             self.assertIn("send", order)
             self.assertLess(order.index("persist"), order.index("send"))
+
+
+DONE_PARKED = ("● Hotový beh.\n"
+               "  ✅ DONE: celý backlog odovzdaný — 3 čakajú na review.\n"
+               "✻ Worked for 1h 5m · 1 monitor still running\n"
+               "❯ \n  ctx ███░  ◎ /goal active (3h)  caveman\n")
+
+
+class TestDoneParkedLoopIsNudged(unittest.TestCase):
+    """2026-07-20 deadlock: david's session sat at ✅ DONE under a SATISFIED
+    old /goal — the ◎ /goal indicator stays lit but no turn will ever fire, so
+    'the label alone is the insertion' was a dead assumption and the bounce
+    rotted while the gatekeeper waited. A pane whose last output is ✅ DONE is
+    AT REST — the ◎ /goal + turn-summary ✻ lines must not block the nudge.
+    (A pane with USER-TYPED unsubmitted text still always refuses.)"""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+
+    def _go(self, captured):
+        tmux = FakeTmux([("%1", self.root)], captured)
+        wd.bounce_backstop(time.time(), tmux, {}, lambda b, **k: None,
+                           home=self.home, gh_fetch=lambda r: [1528])
+        return tmux
+
+    def test_done_parked_goal_session_gets_the_nudge(self):
+        self.assertTrue(self._go(DONE_PARKED).typed())
+
+    def test_live_workflow_wait_still_refused(self):
+        self.assertFalse(self._go(WORKFLOW_WAIT).typed())
+
+    def test_armed_working_loop_still_refused(self):
+        self.assertFalse(self._go(GOAL_ACTIVE.replace(
+            "● Hotovo, pokračujem ďalším ticketom.",
+            "● Dispatchol som workera, pokračujem.")).typed())
+
+    def test_user_typed_text_always_refuses(self):
+        parked_with_input = DONE_PARKED.replace(
+            "❯ \n", "❯ chekni ci nemas nieco nove\n")
+        self.assertFalse(self._go(parked_with_input).typed())
