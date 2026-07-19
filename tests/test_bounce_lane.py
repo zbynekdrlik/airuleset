@@ -71,5 +71,45 @@ class TestWorkerClearsBounceLabel(TestCase):
                       read("agents/autopilot-worker.md"))
 
 
+class TestReviewWatchLifecycle(TestCase):
+    """2026-07-19 incident: BOTH sides of the gatekeeper↔sub-dev ping-pong
+    stall because each side's loop ends while the counterpart still has work
+    in flight (4 bounced david tickets sat re-handed-off with no re-review;
+    a sub-dev loop that ended at hand-off never picks up later bounces). The
+    sub-dev /goal templates must hold the loop ALIVE in an hourly REVIEW-WATCH
+    until the gatekeeper closes/releases everything, and a nudge arriving with
+    NO armed loop must dispatch the worker directly instead of a dead ACK."""
+
+    SKILL = "skills/autopilot/SKILL.md"
+
+    def reduced_goal_lines(self):
+        import re
+        lines = re.findall(r"^/goal STOP CONDITIONS.*$", read(self.SKILL),
+                           re.MULTILINE)
+        self.assertEqual(len(lines), 3)
+        # order in the file: full, branch-merge, fork-no-merge
+        return lines[1], lines[2]
+
+    def test_branch_merge_holds_until_release_and_no_bounce(self):
+        bm, _ = self.reduced_goal_lines()
+        self.assertIn("REVIEW-WATCH", bm)
+        self.assertIn("contained in origin/main", bm)
+
+    def test_fork_holds_until_maintainer_closes(self):
+        _, fk = self.reduced_goal_lines()
+        self.assertIn("REVIEW-WATCH", fk)
+        self.assertIn("CLOSED by the maintainer", fk)
+
+    def test_review_watch_cadence_is_hourly_and_working(self):
+        for line in self.reduced_goal_lines():
+            self.assertIn("hourly", line)
+            self.assertIn("never park", line)
+
+    def test_nudge_without_armed_loop_dispatches_worker(self):
+        t = read(self.SKILL)
+        self.assertIn("NO `/goal` loop is armed", t)
+        self.assertIn("dispatch the background `autopilot-worker` for the bounce ticket", t)
+
+
 if __name__ == "__main__":
     main()
