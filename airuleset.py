@@ -1785,13 +1785,30 @@ def _notify_run_card(args, compose_autopilot_card, send):
 
         title = _gh_out("issue", "view", str(issue), "-R", repo,
                         "--json", "title", "-q", ".title") or ("#%s" % issue)
-        rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
-                          "--search", "-label:autopilot-skip", "-L", "200",
-                          "--json", "number", "-q", "length")
-        try:
-            remaining = int(rem_raw)
-        except (TypeError, ValueError):
-            remaining = None
+        # remaining feeds the statusline's D/T — on a reduced-authority box it
+        # must be the STREAM's slice, not the whole repo (david saw 'Issues
+        # 2/26' while his slice was 5 — 2026-07-19). Same quals as
+        # tickets-status; gh error → None, never a wrong number.
+        if resolve_authority() != "full":
+            nums, failed = set(), False
+            for qual in ("assignee:@me", "author:@me",
+                         "label:stream:" + _current_user()):
+                raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
+                              "--search", "-label:autopilot-skip " + qual,
+                              "-L", "200", "--json", "number")
+                try:
+                    nums.update(x["number"] for x in json.loads(raw))
+                except (ValueError, TypeError, KeyError):
+                    failed = True
+            remaining = None if failed else len(nums)
+        else:
+            rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
+                              "--search", "-label:autopilot-skip", "-L", "200",
+                              "--json", "number", "-q", "length")
+            try:
+                remaining = int(rem_raw)
+            except (TypeError, ValueError):
+                remaining = None
 
         achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
         # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable); the

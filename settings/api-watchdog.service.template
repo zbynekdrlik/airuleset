@@ -20,5 +20,6 @@ Type=oneshot
 # Reads ~/.claude transcripts, talks to the user's tmux server (default socket
 # /tmp/tmux-<uid>/), and POSTs to Discord — so NO network/socket sandbox here.
 ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py watchdog --once
-# A poll must never pile up behind a slow tmux/network call.
-TimeoutStartSec=45
+# Generous budget: job 8 runs gh queries (8s timeout each); a run must still
+# never pile up behind a hung network call.
+TimeoutStartSec=120

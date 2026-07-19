@@ -1315,9 +1315,15 @@ def _bounce_quals(cwd):
     #1599 convention: findings tickets carry stream:<name>); a full-authority
     box takes the CORE slice — sub-dev streams EXCLUDED (live dry-run finding
     2026-07-19: an unscoped dev1 query picked up david's bounces and would
-    have pinged the wrong person; the sub-dev's own box nudges those)."""
+    have pinged the wrong person; the sub-dev's own box nudges those). The
+    GATEKEEPER is skipped ENTIRELY ([] = no query, no nudge): the bounce lane's
+    direction is reviewer→sub-dev — nudging the reviewer about bounces IT filed
+    is backwards (the live gatekeeper-pane spam incident, 2026-07-19)."""
+    c = str(cwd or "")
+    if c.startswith("/home/gatekeeper/"):
+        return []
     for u in _REDUCED_STREAM_USERS:
-        if str(cwd or "").startswith("/home/%s/" % u):
+        if c.startswith("/home/%s/" % u):
             return ["label:stream:%s" % u]
     return [" ".join("-label:stream:%s" % u for u in _REDUCED_STREAM_USERS)]
 
@@ -1355,7 +1361,7 @@ def _fetch_bounce_tickets(root, home=None):
                  "prio:bounce", "--search",
                  ("-label:autopilot-skip " + qual).strip(), "-L", "100",
                  "--json", "number"],
-                cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                cwd=root, env=env, capture_output=True, text=True, timeout=8)
             if r.returncode != 0:
                 return None
             nums.update(x["number"] for x in json.loads(r.stdout))
@@ -1384,18 +1390,48 @@ def _cache_repo_roots(home=None):
     return roots
 
 
+def _safe_to_bounce_nudge(captured, cwd, projects_dir):
+    """Is the pane a session at TRUE REST — safe to type the bounce nudge?
+
+    The live incident (2026-07-19, gatekeeper pane): CC renders a free `❯`
+    prompt while WAITING on a background Workflow, so a bare idle-prompt check
+    pasted the nudge 4× into a mid-review session — the user's hardest rule
+    violated ('nesmie sa pastovat do promptu pocas behu'). Refuse when the
+    pane shows a background-wait spinner, an armed /goal (the statusline's
+    `◎ /goal` — the label alone queues bounce tickets there), or a previous
+    nudge still on screen (belt against lost dedup state); and when the
+    session transcript is readable, refuse while its last marker is
+    ⏳ WORKING (mid-flight even if the prompt looks free)."""
+    for sig in ("✳", "✻", "Waiting for", "esc to interrupt", "◎ /goal",
+                "bounce-backstop:"):
+        if sig in captured:
+            return False
+    tinfo = find_active_transcript(Path(projects_dir), cwd)
+    if tinfo and "⏳" in (transcript_last_marker(tinfo[0]) or ""):
+        return False
+    return True
+
+
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=BOUNCE_INTERVAL,
-                    renudge=BOUNCE_RENUDGE_SECONDS):
-    """Job 8 — see the section comment. Mutates state['bounce']; returns log
-    lines. Best-effort (never raises)."""
+                    renudge=BOUNCE_RENUDGE_SECONDS, persist=None,
+                    projects_dir=None):
+    """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
+    caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
+    the process — the live incident: TimeoutStartSec killed the run after the
+    nudge but before run_once's save, so dedup had no memory and the same
+    nudge repeated every sweep. Returns log lines. Best-effort (never raises)."""
     b = state.get("bounce") or {}
     if (now - b.get("last_check", 0)) < interval:
         return []
     b["last_check"] = int(now)
-    seen = b.get("seen") or {}
+    seen = dict(b.get("seen") or {})
+    b["seen"] = seen
     state["bounce"] = b
     fetch = gh_fetch or (lambda root: _fetch_bounce_tickets(root, home))
+    persist = persist or (lambda: None)
+    projects_dir = projects_dir or PROJECTS_DIR
+    persist()                                  # cadence stamp survives a kill
     logs = []
 
     panes = list_claude_panes(run)
@@ -1409,31 +1445,30 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
         if not any(c == root or c.startswith(root + "/") for c in pane_cwds):
             targets.setdefault(root, (name, None))
 
-    new_seen = {}
     for root, (name, pid) in sorted(targets.items()):
+        if not _bounce_quals(root):
+            continue                           # gatekeeper: never bounce-nudged
         tickets = fetch(root)
-        if tickets is None:                    # gh error → keep prior state
-            if name in seen:
-                new_seen[name] = seen[name]
-            continue
+        if tickets is None:
+            continue                           # gh error → keep prior state
         if not tickets:
-            continue                           # clean → entry drops out
+            seen.pop(name, None)               # clean → forget the set
+            continue
         prev = seen.get(name) or {}
         same = prev.get("tickets") == tickets
         fresh = (now - prev.get("ts", 0)) < renudge
         if same and fresh:
-            new_seen[name] = prev
             continue                           # already nudged/pinged this set
         tick_str = " ".join("#%d" % n for n in tickets)
         if pid:
             captured = capture_pane(pid, run)
-            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run):
-                # busy = a loop is likely running; the label IS the insertion
-                # (never interrupt mid-work). Keep prior state so the set is
-                # re-considered next sweep.
-                if prev:
-                    new_seen[name] = prev
+            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run) \
+                    or not _safe_to_bounce_nudge(captured, root, projects_dir):
+                # working / armed-loop / already-nudged pane gets NOTHING —
+                # the label alone is the insertion (never interrupt mid-work).
                 continue
+            seen[name] = {"tickets": tickets, "ts": int(now)}
+            persist()                          # dedup memory BEFORE the keystroke
             if not dry_run:
                 send_continue(pid, BOUNCE_NUDGE % (tick_str, name), run)
             logs.append("bounce-nudge %s %s" % (name, tick_str))
@@ -1442,12 +1477,11 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     "prácu (%s), ale nebeží žiadna Claude session, ktorá by ju "
                     "spracovala. Spusti session v `%s` (autopilot ich zoberie "
                     "cez prio:bounce)." % (name, len(tickets), tick_str, root))
+            seen[name] = {"tickets": tickets, "ts": int(now)}
+            persist()                          # dedup memory BEFORE the ping
             send_fn(body, dedup_key="bounce:%s:%s" % (name, tick_str),
                     dry_run=dry_run)
             logs.append("bounce-ping %s %s" % (name, tick_str))
-        new_seen[name] = {"tickets": tickets, "ts": int(now)}
-    b["seen"] = new_seen
-    state["bounce"] = b
     return logs
 
 
@@ -2338,8 +2372,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Cadence-gated internally; best-effort.
     if bounce_fetch is not None:
         try:
-            logs += bounce_backstop(now, run, state, send_fn, dry_run=dry_run,
-                                    gh_fetch=bounce_fetch)
+            logs += bounce_backstop(
+                now, run, state, send_fn, dry_run=dry_run,
+                gh_fetch=bounce_fetch, projects_dir=projects_dir,
+                persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
 

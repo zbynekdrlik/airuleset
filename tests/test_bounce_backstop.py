@@ -188,3 +188,101 @@ class TestGhEnvTokenFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+WORKFLOW_WAIT = ("● Review beží\n"
+                 "  ⏳ WORKING: review Workflow beží — verdikt čaká. Nič netreba.\n"
+                 "✻ Waiting for 1 dynamic workflow to finish\n"
+                 "❯ \n  ctx ███░  ultracode\n")
+GOAL_ACTIVE = ("● Hotovo, pokračujem ďalším ticketom.\n"
+               "❯ \n  ctx ███░  ◎ /goal active (58m)\n")
+NUDGED_ALREADY = ("● predtým prišiel nudge\n"
+                  "❯ bounce-backstop: open prio:bounce tickets #1 in demo — x\n"
+                  "❯ \n")
+
+
+class TestNeverTypeIntoWorkingSession(unittest.TestCase):
+    """2026-07-19 LIVE incident (user: 'dokolecka sa mu nieco pastuje do
+    promptu pocas behu!!!'): the gatekeeper session sat at a `❯` prompt while
+    WAITING on a background review Workflow (CC renders a free prompt then) and
+    job 8 pasted the same nudge 4×. The safe-to-type gate must refuse: a pane
+    showing a background-wait spinner (✻ / esc to interrupt), an armed /goal
+    (◎ /goal active in the statusline), a still-visible previous nudge (belt
+    against state loss), and a transcript whose last marker is ⏳ WORKING."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+        self.pings = []
+
+    def _go(self, captured, state=None):
+        tmux = FakeTmux([("%1", self.root)], captured)
+        wd.bounce_backstop(time.time(), tmux, state if state is not None else {},
+                           lambda body, **kw: self.pings.append(body),
+                           home=self.home, gh_fetch=lambda root: [1705])
+        return tmux
+
+    def test_background_workflow_wait_is_not_typed_into(self):
+        self.assertFalse(self._go(WORKFLOW_WAIT).typed())
+
+    def test_armed_goal_loop_is_not_typed_into(self):
+        # the label alone is the insertion — the loop re-queries each turn
+        self.assertFalse(self._go(GOAL_ACTIVE).typed())
+
+    def test_visible_previous_nudge_blocks_repeat_even_with_lost_state(self):
+        self.assertFalse(self._go(NUDGED_ALREADY).typed())
+
+    def test_working_marker_in_transcript_blocks_nudge(self):
+        # transcript readable + last marker ⏳ → session mid-flight, never type
+        proj = Path(self.home, ".claude", "projects",
+                    wd.encode_project_dir(self.root))
+        proj.mkdir(parents=True)
+        entry = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "robím\n⏳ WORKING: čakám na worker"}]}}
+        (proj / "s1.jsonl").write_text(json.dumps(entry) + "\n")
+        tmux = FakeTmux([("%1", self.root)], IDLE)
+        wd.bounce_backstop(time.time(), tmux, {},
+                           lambda body, **kw: self.pings.append(body),
+                           home=self.home, gh_fetch=lambda root: [1705],
+                           projects_dir=str(Path(self.home, ".claude", "projects")))
+        self.assertFalse(tmux.typed())
+
+    def test_truly_resting_session_is_nudged(self):
+        self.assertTrue(self._go(IDLE).typed())
+
+
+class TestGatekeeperNeverBounceNudged(unittest.TestCase):
+    def test_gatekeeper_home_is_skipped_entirely(self):
+        # bounce lane direction is reviewer→sub-dev; the gatekeeper is the
+        # reviewer — nudging IT about bounces it filed is backwards (the live
+        # incident). No quals = no query = no nudge for /home/gatekeeper/.
+        self.assertEqual(wd._bounce_quals("/home/gatekeeper/devel/odoo-erp"), [])
+
+
+class TestStatePersistedBeforeTyping(unittest.TestCase):
+    def test_persist_callback_fires_before_send(self):
+        # TimeoutStartSec killed the run AFTER the nudge but BEFORE run_once's
+        # save_state → no dedup memory → the 4× repeat. Job 8 must persist its
+        # seen-set BEFORE any keystroke/ping leaves the process.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "demo")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "demo")
+            order = []
+            tmux = FakeTmux([("%1", root)], IDLE)
+            real_call = tmux.__call__
+
+            def spy(argv, timeout=8):
+                if "-l" in argv:
+                    order.append("send")
+                return real_call(argv, timeout)
+            wd.bounce_backstop(time.time(), spy, {}, lambda b, **k: None,
+                               home=home, gh_fetch=lambda r: [7],
+                               persist=lambda: order.append("persist"))
+            self.assertIn("persist", order)
+            self.assertIn("send", order)
+            self.assertLess(order.index("persist"), order.index("send"))
