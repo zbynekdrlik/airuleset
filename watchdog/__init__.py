@@ -1312,11 +1312,14 @@ def _bounce_quals(cwd):
     from its /home/<user>/ prefix (montalu's claude runs under newlevel's tmux,
     so the WATCHDOG user is meaningless; and gh identity is the same account
     everywhere, so @me cannot scope). Reduced streams → their stream label (the
-    #1599 convention: findings tickets carry stream:<name>); else unscoped."""
+    #1599 convention: findings tickets carry stream:<name>); a full-authority
+    box takes the CORE slice — sub-dev streams EXCLUDED (live dry-run finding
+    2026-07-19: an unscoped dev1 query picked up david's bounces and would
+    have pinged the wrong person; the sub-dev's own box nudges those)."""
     for u in _REDUCED_STREAM_USERS:
         if str(cwd or "").startswith("/home/%s/" % u):
             return ["label:stream:%s" % u]
-    return [""]
+    return [" ".join("-label:stream:%s" % u for u in _REDUCED_STREAM_USERS)]
 
 
 def _gh_env(home=None, base=None):

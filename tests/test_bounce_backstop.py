@@ -155,8 +155,15 @@ class TestBounceQuals(unittest.TestCase):
         self.assertEqual(wd._bounce_quals("/home/david/devel/x"),
                          ["label:stream:david"])
 
-    def test_full_authority_home_is_unscoped(self):
-        self.assertEqual(wd._bounce_quals("/home/newlevel/devel/demo"), [""])
+    def test_full_authority_home_excludes_subdev_streams(self):
+        # Live dry-run finding (2026-07-19): an unscoped full-box query picked
+        # up DAVID's stream bounces from newlevel's dev1 checkout and would
+        # have pinged the wrong person — the sub-dev's own box nudges those.
+        # Full authority = the core slice (same exclusions as tickets-status).
+        quals = wd._bounce_quals("/home/newlevel/devel/demo")
+        self.assertEqual(len(quals), 1)
+        for u in ("david", "marek", "montalu"):
+            self.assertIn("-label:stream:%s" % u, quals[0])
 
 
 class TestGhEnvTokenFallback(unittest.TestCase):
