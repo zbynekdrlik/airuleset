@@ -286,3 +286,52 @@ class TestPerBoxSkillScoping(TestCase):
         for user, extras in airuleset.SKILLS_EXTRA_BY_USER.items():
             for n in extras:
                 self.assertIn(n, airuleset.SKILL_NAMES, f"{user}:{n}")
+
+
+class TestRunCardRemainingScopedToStream(TestCase):
+    """david incident 2026-07-19: the statusline showed 'Issues 2/26' — the
+    run-card's remaining was the WHOLE repo's open backlog (26) although
+    david's own slice was 5. On a reduced-authority box the card's remaining
+    (which feeds the statusline D/T) must count the STREAM's slice — the same
+    quals as tickets-status (assignee:@me ∪ author:@me ∪ label:stream:<user>,
+    non-skip); full boxes keep the repo-wide count."""
+
+    def _args(self, **over):
+        import unittest.mock as mk
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+                    record_question=False, edit_question=False, channel_id=False,
+                    owner=False, mirror_owners=False, body=None, run=None,
+                    repo="kvaskodev/odoo-erp", issue=1408, pr=None,
+                    achieved="hotové", result=None, goal="cieľ", version=None,
+                    merge_sha=None, url=None, review="ok", handoff=True,
+                    dedup_key=None, dry_run=False)
+        base.update(over)
+        return mk.Mock(**base)
+
+    def test_reduced_authority_counts_own_slice(self):
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "assignee:@me" in j:
+                return '[{"number":1},{"number":2}]'
+            if "author:@me" in j:
+                return '[{"number":2}]'
+            if "label:stream:" in j:
+                return "[]"
+            return "26"          # the repo-wide count a scoped box must NOT use
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="fork-no-merge"):
+                with mk.patch("notify.send",
+                              side_effect=lambda body, **k:
+                              captured.setdefault("b", body) or "sent"):
+                    airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(m.group(1), "2", captured["b"])   # slice, NOT 26
