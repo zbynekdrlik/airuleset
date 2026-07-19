@@ -5577,3 +5577,30 @@ class TestTesterHandoffHook(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["Stop"]
                 for h in blk.get("hooks", [])]
         self.assertTrue(any("stop-check-prose-violations.sh" in c for c in cmds))
+
+
+class TestStatuslineVocabularyModule(TestCase):
+    """User ask 2026-07-19: every Claude session must understand that when the
+    user says 'issues N', 'gk N' (or 'skipped N') they usually mean the
+    STATUSLINE footer segment — the Issues counter airuleset renders at the
+    bottom of Claude Code — not a GitHub search to run from scratch."""
+
+    MODULE = airuleset.REPO_DIR / "modules" / "core" / "statusline-vocabulary.md"
+
+    def test_module_exists_and_in_profile(self):
+        self.assertTrue(self.MODULE.exists())
+        entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
+        self.assertIn("modules/core/statusline-vocabulary.md", entries)
+
+    def test_module_explains_every_segment_form(self):
+        t = self.MODULE.read_text(encoding="utf-8")
+        for phrase in ("Issues N", "Issues D/T", "gk N", "skipped K",
+                       "statusline"):
+            self.assertIn(phrase, t, phrase)
+
+    def test_module_names_the_backing_caches(self):
+        # The session should read the SAME local caches the segment renders
+        # from (never guess): tickets-status + autopilot-progress.
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("tickets-status", t)
+        self.assertIn("autopilot-progress", t)
