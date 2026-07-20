@@ -557,13 +557,29 @@ def _hash(text):
 _GENERIC_DIRS = {"repo", "src", "app", "code", "main", "checkout", "work", "dist"}
 
 
+def _stream_user():
+    """The box's unix user when it IS a stream identity (gatekeeper / montalu /
+    david / marek boxes), '' on the personal boxes. Appended to ping labels so
+    the phone can tell WHICH stream speaks (user complaint 2026-07-20: every
+    stream pinged as bare 'odoo-erp')."""
+    try:
+        import getpass
+        u = getpass.getuser()
+    except Exception:
+        return ""
+    return "" if u in ("newlevel", "root", "") else u
+
+
 def project_label(cwd):
     parts = [p for p in str(cwd).rstrip("/").split("/") if p]
     if not parts:
-        return "unknown"
-    if parts[-1].lower() in _GENERIC_DIRS and len(parts) >= 2:
-        return parts[-2] + "/" + parts[-1]
-    return parts[-1]
+        label = "unknown"
+    elif parts[-1].lower() in _GENERIC_DIRS and len(parts) >= 2:
+        label = parts[-2] + "/" + parts[-1]
+    else:
+        label = parts[-1]
+    u = _stream_user()
+    return label + "-" + u if u else label
 
 
 # A subscription / quota USAGE cap is time-based — `continue` cannot fix it (only

@@ -43,6 +43,14 @@ if [ -n "$CWD" ]; then
     PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || basename "$CWD")
 fi
 [ -z "$PROJECT" ] && PROJECT="unknown"
+# Stream identity in the label (user, 2026-07-20): gatekeeper/montalu/david all
+# pinged as bare "odoo-erp" — append the box's unix user for stream users so
+# the phone can tell WHICH stream speaks; personal boxes (newlevel) stay plain.
+STREAM_USER=$(id -un 2>/dev/null)
+case "$STREAM_USER" in
+    newlevel|root|"") ;;
+    *) PROJECT="${PROJECT}-${STREAM_USER}" ;;
+esac
 
 case "$EMOJI" in
     "❓") STATUS="otázka" ;;
