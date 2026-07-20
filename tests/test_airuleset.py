@@ -5604,3 +5604,44 @@ class TestStatuslineVocabularyModule(TestCase):
         t = self.MODULE.read_text(encoding="utf-8")
         self.assertIn("tickets-status", t)
         self.assertIn("autopilot-progress", t)
+
+
+class TestProseHookIgnoresGoalTemplateLines(TestCase):
+    """Montalu spin 2026-07-20: the autopilot Step 2 message (banner + printed
+    /goal template + the sanctioned 'vlož /goal' question) got hard-blocked as
+    a 'pre-implementation pause' — the REVIEW-WATCH clauses added to the /goal
+    template ('start…run…immediately…or…check') trip the dispatch-or-hold
+    regex, so every /autopilot arm message loops on the Stop hook. /goal
+    template lines are sanctioned machinery text — stripped before the
+    pre-answered-question checks."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _run(self, msg):
+        sid = f"test-goal-{uuid.uuid4().hex[:12]}"
+        self.addCleanup(lambda: Path(
+            f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_autopilot_arm_message_with_goal_template_passes(self):
+        goal = (airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md").read_text(
+            encoding="utf-8")
+        import re as _re
+        line = _re.findall(r"^/goal STOP CONDITIONS.*$", goal, _re.M)[1]
+        msg = ("autopilot · merge=auto · authority=branch-merge · 7 ticketov\n\n"
+               "```\n" + line + "\n```\n\n"
+               "**Otázka — projekt odoo-erp (Money→Odoo import):** autopilot je "
+               "pripravený — backlog má 7 otvorených ticketov.\n"
+               "• Vlož /goal riadok vyššie (odporúčam) — loop sa rozbehne a ide sám\n"
+               "• Nič nevkladaj — autopilot sa nespustí\n"
+               "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne")
+        r = self._run(msg)
+        self.assertNotIn("pre-implementation pause", r.stdout,
+                         r.stdout + r.stderr)
+
+    def test_real_pre_implementation_pause_still_blocked(self):
+        r = self._run("Plan committed. Dispatch the subagents now, "
+                      "or hold for your review of the plan first?")
+        self.assertIn("pre-implementation pause", r.stdout)
