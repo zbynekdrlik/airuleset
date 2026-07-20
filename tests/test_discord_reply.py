@@ -537,3 +537,200 @@ class TestReplyPromptRemindsGoalRearm(unittest.TestCase):
         r = {"question": "", "asked_ts": 0, "text": "nechaj tak"}
         p = wd.compose_reply_prompt(r)
         self.assertIn("continuation /goal", p)
+
+
+# --------------------------------------------------------------------------- #
+# 2026-07-20 (#1832 incident): a DRAFT wedged in the input box blocked delivery
+# FOREVER with no signal — the never-idle master loop's pane never went bare and
+# the user's answer silently rotted. Two fixes locked here: wedge SELF-HEAL
+# (verify after typing; corrective Enter; Enter-only retry for our own stuck
+# text — never retype/duplicate) and the TICKET-FALLBACK (a reply blocked
+# longer than DREPLY_TICKET_FALLBACK_S is delivered as a gh comment on the #N
+# parsed from the stored question text, then ✅-reacted + dropped).
+# --------------------------------------------------------------------------- #
+RUNNING_DRAFT = ("✻ Waiting for 2 background agents to finish\n"
+                 "──────────── ultracode ─\n"
+                 "❯\xa0nech to tak\n"
+                 "────────────\n"
+                 "  ctx ██░░  caveman\n"
+                 "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+
+class ScriptedPaneRun:
+    """argv recorder whose capture-pane output follows a script (list of pane
+    states returned in order; last one repeats)."""
+
+    def __init__(self, captures):
+        self.captures = list(captures)
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "pane_in_mode" in j:
+            return "0"
+        if "capture-pane" in j:
+            return self.captures.pop(0) if len(self.captures) > 1 else self.captures[0]
+        return ""
+
+
+class TicketFallbackDelivery(unittest.TestCase):
+    OWNER = "773451844110385193"
+    QTEXT = "**Otázka — odoo-erp:** Ticket #1832 je rozhodovací — nechať ako je?"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.gh_calls = []
+
+    def _gh(self, cwd, num, text):
+        self.gh_calls.append((cwd, num, text))
+        return True
+
+    def _fetch(self, msgs):
+        return lambda ch, token: msgs
+
+    def _reply(self, content="1"):
+        return {"id": "repX", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888001"},
+                "content": content}
+
+    def _record(self):
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question=self.QTEXT)
+
+    def test_blocked_reply_falls_back_to_ticket_comment(self):
+        self._record()
+        now = time.time()
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        logs = wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=False,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(len(self.gh_calls), 1, logs)
+        cwd, num, text = self.gh_calls[0]
+        self.assertEqual((cwd, num), ("/repo/x", "1832"))
+        self.assertIn("«1»", text)
+        # delivered-via-ticket: map dropped, reply deduped, blocked entry gone
+        self.assertNotIn("888001", notify.load_questions(self.qpath))
+        self.assertIn("repX", state["dreply_done"])
+        self.assertNotIn("repX", state.get("dreply_blocked", {}))
+        self.assertTrue(any("ticket" in ln for ln in logs), logs)
+
+    def test_blocked_reply_before_deadline_stays_pending(self):
+        self._record()
+        now = time.time()
+        state = {}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=False,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("888001", notify.load_questions(self.qpath))
+        # first-blocked timestamp recorded for the fallback clock
+        self.assertIn("repX", state.get("dreply_blocked", {}))
+
+    def test_question_without_ticket_number_never_falls_back(self):
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question="Otázka bez čísla tiketu — pokračovať?")
+        now = time.time()
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=False,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_absent_pane_also_reaches_ticket_fallback(self):
+        # the asking session died — the keystroke path can never deliver; the
+        # ticket fallback is the only route left
+        self._record()
+        now = time.time()
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        run = ScriptedPaneRun([""])
+        wd.deliver_discord_replies(
+            now, run, state, {}, dry_run=False,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(len(self.gh_calls), 1)
+
+
+class WedgeSelfHeal(unittest.TestCase):
+    OWNER = "773451844110385193"
+    IDLE = "● done\n❯\xa0\n  ctx ███░  caveman\n"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question="Ticket #99 — pokračovať?")
+
+    def _reply(self):
+        return {"id": "repW", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888001"}, "content": "1"}
+
+    def _wedged_pane(self, text):
+        return ("──── ultracode ─\n❯\xa0" + text + "\n────\n  ctx ██░░  caveman\n")
+
+    def test_swallowed_enter_gets_corrective_enter_then_delivers(self):
+        # after typing, verify-capture still shows OUR text at ❯ (Enter was
+        # swallowed) → ONE corrective Enter; second verify shows bare → delivered
+        composed_tail = "auto-arm ho nalepí sám."
+        run = ScriptedPaneRun([self._wedged_pane(composed_tail), self.IDLE, self.IDLE])
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
+        enters = [a for a in run.sent if a[-1] == "Enter"]
+        self.assertGreaterEqual(len(enters), 2, run.sent)   # send + corrective
+        self.assertIn("repW", state["dreply_done"])
+        self.assertNotIn("888001", notify.load_questions(self.qpath))
+
+    def test_still_wedged_after_retry_is_not_marked_delivered(self):
+        stuck = self._wedged_pane("auto-arm ho nalepí sám.")
+        run = ScriptedPaneRun([stuck, stuck, stuck])
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
+        self.assertNotIn("repW", state.get("dreply_done", []))
+        self.assertIn("888001", notify.load_questions(self.qpath))
+        self.assertIn("repW", state.get("dreply_blocked", {}))
+        self.assertTrue(any("wedge" in ln.lower() for ln in logs), logs)
+
+    def test_own_stuck_text_is_entered_not_retyped(self):
+        # a PRIOR wedged delivery left OUR composed text in the input box — the
+        # next cycle must press Enter only, never type the text again (the
+        # doubled-text corruption)
+        stuck = self._wedged_pane("auto-arm ho nalepí sám.")
+        run = ScriptedPaneRun([stuck, self.IDLE, self.IDLE])
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", stuck)}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
+        literal = [a for a in run.sent if "-l" in a]
+        self.assertEqual(literal, [], "must NOT retype over own stuck text")
+        enters = [a for a in run.sent if a[-1] == "Enter"]
+        self.assertGreaterEqual(len(enters), 1)
+        self.assertIn("repW", state["dreply_done"])
