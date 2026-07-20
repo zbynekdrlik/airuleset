@@ -209,3 +209,30 @@ class TestBypassMarker(SecretScanTestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestLockfileWhitelist(SecretScanTestCase):
+    """#19: npm/yarn/cargo lockfile integrity hashes are NOT secrets — the
+    entropy gate false-flagged package-lock.json sha512 blobs (bkshading e2e,
+    bypassed with airuleset:secret-ok). Known lockfile basenames skip the
+    content scan entirely; the same blob in any other file still blocks."""
+
+    BLOB = ('    "integrity": "sha512-'
+            "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb3dEf6h" '==",\n')
+
+    def test_package_lock_integrity_hash_is_allowed(self):
+        self._write("e2e/package-lock.json", "{\n" + self.BLOB + "}\n")
+        r = self._run("git add e2e/package-lock.json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_other_lockfiles_allowed(self):
+        for name in ("yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum",
+                     "poetry.lock", "flake.lock"):
+            self._write(name, self.BLOB)
+            r = self._run("git add " + name)
+            self.assertEqual(r.returncode, 0, name + ": " + r.stdout + r.stderr)
+
+    def test_same_blob_in_regular_file_still_blocked(self):
+        self._write("notes.md", self.BLOB)
+        r = self._run("git add notes.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
