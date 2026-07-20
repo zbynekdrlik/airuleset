@@ -353,3 +353,23 @@ class TestGhEnvCatSubstitution(unittest.TestCase):
                 "export GH_TOKEN=$(some-helper --fetch)\n")
             env = wd._gh_env(home, base={"PATH": "/usr/bin"})
             self.assertNotIn("GH_TOKEN", env)   # never a garbage literal
+
+
+class TestForeignTmuxUserNeverPings(unittest.TestCase):
+    def test_montalu_user_watchdog_is_a_noop(self):
+        # False Discord ping 2026-07-20 ("nebeží žiadna Claude session" while
+        # the montalu session ran in NEWLEVEL's tmux): the montalu user has no
+        # own tmux server BY DESIGN, so its watchdog can never see the pane —
+        # its job 8 must not run at all (newlevel's watchdog on the same
+        # machine owns the pane-driven nudge).
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "demo")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "demo")
+            pings = []
+            logs = wd.bounce_backstop(
+                time.time(), FakeTmux([]), {},
+                lambda b, **k: pings.append(b), home=home,
+                gh_fetch=lambda r: [1727], user="montalu")
+            self.assertFalse(pings)
+            self.assertFalse(logs)

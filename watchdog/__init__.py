@@ -1509,15 +1509,31 @@ def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     return True
 
 
+# Users whose claude sessions live in ANOTHER user's tmux (montalu runs inside
+# newlevel's tmux via `sudo su`) — their own watchdog can never see the pane,
+# so its job 8 would ALWAYS conclude "no session runs" and fire a false Discord
+# ping (live incident 2026-07-20, #1727/#1732/#1827). The machine's primary
+# watchdog owns the pane-driven nudge there; these users skip job 8 entirely.
+_FOREIGN_TMUX_USERS = ("montalu",)
+
+
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=BOUNCE_INTERVAL,
                     renudge=BOUNCE_RENUDGE_SECONDS, persist=None,
-                    projects_dir=None):
+                    projects_dir=None, user=None):
     """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
     caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
     the process — the live incident: TimeoutStartSec killed the run after the
     nudge but before run_once's save, so dedup had no memory and the same
     nudge repeated every sweep. Returns log lines. Best-effort (never raises)."""
+    if user is None:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = ""
+    if user in _FOREIGN_TMUX_USERS:
+        return []                          # pane lives in another user's tmux
     b = state.get("bounce") or {}
     if (now - b.get("last_check", 0)) < interval:
         return []
