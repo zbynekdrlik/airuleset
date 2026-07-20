@@ -89,6 +89,11 @@ class TestQuestionLane(TestCase):
         self.assertIn("ONE at a time", t)
         self.assertIn("needs-decision", t)
 
+    def test_answers_also_read_from_ticket_comments(self):
+        # the watchdog's ticket-fallback (2026-07-20 #1832 incident) delivers a
+        # blocked answer as a gh comment — the lane must re-read asked tickets
+        self.assertIn("ticket-fallback", read(SKILL))
+
 
 class TestCanonicalBodiesReused(TestCase):
     def test_lanes_delegate_to_canonical_skills(self):

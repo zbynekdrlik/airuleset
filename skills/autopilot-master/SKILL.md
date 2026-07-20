@@ -101,7 +101,10 @@ flowing. The loop **NEVER idles while ANY lane has work**.
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via
   `❓ ASKED` + `⏳ WORKING` (ask-and-continue; the answer routes back through the
   Discord reply path and resolves that ticket; then the next question). Never batch
-  several decisions into one ping.
+  several decisions into one ping. **Each scheduler pass RE-READS the asked tickets:**
+  an answer may arrive as a TICKET COMMENT instead of a typed prompt (the watchdog's
+  ticket-fallback delivers there when the session input is busy/wedged) — a comment
+  carrying the user's decision resolves the ticket exactly like a typed answer.
 - **HOLD** — every lane empty (waiting only on sub-dev fixes, the user's answers, or a
   deploy window)? Hold the turn open with a FOREGROUND sleep-poll (repeated short
   sleep + re-check tool calls; NEVER a wakeup/schedule mechanism inside the armed

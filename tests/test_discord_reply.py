@@ -699,7 +699,7 @@ class WedgeSelfHeal(unittest.TestCase):
         composed_tail = "auto-arm ho nalepí sám."
         run = ScriptedPaneRun([self._wedged_pane(composed_tail), self.IDLE, self.IDLE])
         state = {}
-        logs = wd.deliver_discord_replies(
+        wd.deliver_discord_replies(
             time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
             discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
         enters = [a for a in run.sent if a[-1] == "Enter"]

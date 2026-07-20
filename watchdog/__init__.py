@@ -1220,6 +1220,55 @@ def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
             "asked_ts": q.get("ts") or 0}
 
 
+DREPLY_TICKET_FALLBACK_S = 600      # reply blocked this long → deliver via the ticket
+_TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
+
+
+def _input_line_text(captured):
+    """Text sitting in the pane's INPUT BOX: '' = bare prompt, None = no input
+    box at the chrome boundary (running-turn spinner / dialog / no pane). Same
+    boundary-line discipline as _has_free_prompt — never scans the transcript
+    above the box. For a long WRAPPED input, capture-pane (no -J) renders it as
+    multiple lines and the boundary is the LAST one — i.e. the TAIL of the
+    typed text — which is why callers match with endswith()."""
+    if not captured:
+        return None
+    lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
+    i, n = len(lines), 0
+    while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
+        i -= 1
+        n += 1
+    if i <= 0:
+        return None
+    s = lines[i - 1]
+    if not s.startswith("❯"):
+        return None
+    return s[1:].strip()
+
+
+def _ticket_fallback_text(r):
+    q = " ".join(str(r.get("question") or "").split())[:400]
+    return ("**ODPOVEĎ UŽÍVATEĽA Z DISCORDU** (doručená na ticket — session input "
+            "bol obsadený/wedged, watchdog ticket-fallback): «%s»\n\n"
+            "Otázka: %s\n\n"
+            "Zariaď sa podľa odpovede (číslo = poradie ponúknutej možnosti)."
+            % (" ".join(str(r.get("text") or "").split()), q))
+
+
+def _gh_comment(cwd, num, text):
+    """Post `text` as a comment on issue #num of the repo at `cwd` (the DURABLE
+    delivery lane of the ticket-fallback). Best-effort: False on any failure —
+    the reply then stays pending on the keystroke path."""
+    import subprocess
+    try:
+        p = subprocess.run(["gh", "issue", "comment", str(num), "-F", "-"],
+                           cwd=cwd or None, env=_gh_env(), input=text,
+                           capture_output=True, text=True, timeout=25)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
 def compose_reply_prompt(r):
     """The ONE-LINE prompt typed into the asking session for a Discord reply.
 
@@ -1290,14 +1339,27 @@ def _react_ok(channel, message_id, token):
 
 
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
-                            discord_fetch=None, env=None):
+                            discord_fetch=None, env=None, gh_comment=None):
     """Route owner Discord replies into the sessions that asked (job 7).
 
     `panes_by_sid`: {session_id: (pane_id, captured_pane)} for the live `claude`
     panes this cycle (collected in run_once). `discord_fetch(channel, token)`:
     returns recent messages (injectable for tests). Delivers each matching reply
     ONCE (dedup on reply id + the question is dropped on delivery), only into an
-    IDLE pane, and reacts ✅ on success. Returns log lines. Never raises."""
+    IDLE-input pane, and reacts ✅ on success. Returns log lines. Never raises.
+
+    2026-07-20 (#1832 incident) hardening:
+    - VERIFY after typing: a swallowed Enter (queued-prompt wedge, airuleset#20)
+      leaves the text sitting at `❯` — up to 2 corrective Enters; still stuck →
+      NOT delivered (the fallback clock keeps ticking), and the next cycle
+      recognizes OUR OWN stuck text (prompt tail at `❯`) and presses Enter only,
+      never retypes (no doubled text).
+    - TICKET-FALLBACK: a reply blocked > DREPLY_TICKET_FALLBACK_S (busy pane
+      with a foreign draft, dead session, persistent wedge) is delivered as a
+      gh comment on the #N parsed from the stored question text — the DURABLE
+      lane (the loop's question tracking lives on the ticket anyway); then
+      ✅-reacted + dropped like a normal delivery. No #N / gh failure → the
+      keystroke path keeps retrying as before."""
     from notify import (bot_token, known_owner_ids, load_questions, drop_question,
                         _read_env)
     logs = []
@@ -1310,12 +1372,41 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     if not token or not allowed:
         return logs
     fetch = discord_fetch or fetch_channel_messages
+    gh_fn = gh_comment or _gh_comment
 
     done = state.get("dreply_done")
     done = list(done) if isinstance(done, list) else []
     done_set = set(done)
+    blocked = state.get("dreply_blocked")
+    blocked = dict(blocked) if isinstance(blocked, dict) else {}
     channels = {str(v.get("channel") or "") for v in qmap.values()}
     channels.discard("")
+
+    def _delivered(r, via_ticket=None):
+        done_set.add(r["reply_id"])
+        done.append(r["reply_id"])
+        drop_question(r["referenced"])
+        qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
+        blocked.pop(r["reply_id"], None)
+        if via_ticket:
+            logs.append("reply→ticket #%s [%s]" % (via_ticket, r["session"][:12]))
+        else:
+            logs.append("reply→%s [%s]" % (project_label(r["cwd"]), r["session"][:12]))
+
+    def _pending(r, why):
+        blocked.setdefault(r["reply_id"], now)
+        # the durable lane once the keystroke path has been blocked long enough
+        if now - blocked[r["reply_id"]] >= DREPLY_TICKET_FALLBACK_S:
+            m = _TICKET_NUM_RX.search(r.get("question") or "")
+            if m:
+                ok = True if dry_run else gh_fn(r["cwd"], m.group(1),
+                                               _ticket_fallback_text(r))
+                if ok:
+                    if not dry_run:
+                        _react_ok(r["channel"], r["reply_id"], token)
+                    _delivered(r, via_ticket=m.group(1))
+                    return
+        logs.append("reply pending (%s) %s" % (why, r["session"][:12]))
 
     for ch in sorted(channels):
         for msg in fetch(ch, token):
@@ -1326,26 +1417,45 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if not pane:
                 # the asking session isn't a live pane right now — retry next
                 # cycle (the question stays in the map; TTL prunes if it's gone).
-                logs.append("reply pending (no pane) %s" % r["session"][:12])
+                _pending(r, "no pane")
                 continue
             pid, captured = pane
-            if not pane_at_idle_prompt(captured):
-                # busy mid-turn (e.g. ask-and-continue working another ticket) —
-                # never inject into a running turn (#233); retry when it goes idle.
-                logs.append("reply pending (busy) %s" % r["session"][:12])
+            prompt = compose_reply_prompt(r)
+            itext = _input_line_text(captured)
+            # a PRIOR wedged delivery of THIS reply left our own text at `❯`
+            # (endswith: a wrapped input renders its TAIL as the boundary line)
+            own_stuck = bool(itext) and prompt.endswith(itext)
+            if not (pane_at_idle_prompt(captured) or own_stuck):
+                # busy mid-turn with no input box, a dialog, or a FOREIGN draft
+                # we must never type over (#233) — retry / fallback clock.
+                _pending(r, "busy")
                 continue
             if pane_in_mode(pid, run):
                 continue
             if not dry_run:
-                send_continue(pid, compose_reply_prompt(r), run)
+                if own_stuck:
+                    run(["tmux", "send-keys", "-t", pid, "Enter"])
+                else:
+                    send_continue(pid, prompt, run)
+                # verify the input box emptied — a swallowed Enter (#20) leaves
+                # the text at `❯`; up to 2 corrective Enters, then give up.
+                t2 = _input_line_text(capture_pane(pid, run, lines=30))
+                tries = 0
+                while t2 and tries < 2:
+                    run(["tmux", "send-keys", "-t", pid, "Enter"])
+                    t2 = _input_line_text(capture_pane(pid, run, lines=30))
+                    tries += 1
+                if t2:
+                    blocked.setdefault(r["reply_id"], now)
+                    logs.append("reply wedged (enter swallowed) %s"
+                                % r["session"][:12])
+                    continue
                 _react_ok(r["channel"], r["reply_id"], token)
-            done_set.add(r["reply_id"])
-            done.append(r["reply_id"])
-            drop_question(r["referenced"])
-            qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
-            logs.append("reply→%s [%s]" % (project_label(r["cwd"]), r["session"][:12]))
+            _delivered(r)
 
     state["dreply_done"] = done[-_DREPLY_DONE_CAP:]
+    state["dreply_blocked"] = {k: v for k, v in blocked.items()
+                               if now - v < 86400}
     return logs
 
 
