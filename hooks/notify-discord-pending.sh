@@ -291,6 +291,19 @@ send_q() {
 # never reached the phone, then a reproach hours later. Continuing is fine; the
 # ping is not optional. (An ❓ ASKED line takes precedence over the terminal ⏳:
 # a question you raise this turn must ping even though the turn keeps working.)
+# EXCEPTION — the /goal ARM question is a MACHINE question, never a phone ping
+# (gk incident 2026-07-20): the api-watchdog auto-arm types the printed /goal
+# itself within a minute, so pinging the user is pure noise — and a Discord
+# reply cannot arm anything anyway (only external keystrokes type /goal). Only
+# the exact arm shape is skipped: a ❓ line asking to paste a /goal.
+# NB: 'ž' via ALTERNATION, never a bracket class — grep splits a multibyte
+# char inside [] (the same class of bug as the LC_ALL=C awk octal gotcha).
+if printf '%s\n' "$MSG" | grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal'; then
+    rm -f "$PENDING" 2>/dev/null || true
+    echo "arm-question — skipped (watchdog auto-arm handles it)" >&2
+    exit 0
+fi
+
 ASKED_LINE=$(printf '%s\n' "$MSG" | grep -iE '❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:' | tail -1 || true)
 
 if [ -n "$ASKED_LINE" ]; then

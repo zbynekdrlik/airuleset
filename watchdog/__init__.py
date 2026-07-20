@@ -1613,8 +1613,10 @@ def goal_autoarm(now, run, state, dry_run=False):
         tail = cap[-1500:]
         if not _ARM_QUESTION_RX.search(tail):
             continue
-        if "◎ /goal" in cap:
-            continue                       # already armed — nothing to do
+        # NB: an armed-goal indicator (◎ /goal) does NOT block — a resolved
+        # /goal cycle re-prints the arm question while the OLD indicator is
+        # still lit, and typing /goal safely replaces the old goal (the gk
+        # re-arm incident, 2026-07-20). The tail arm question is authoritative.
         if "esc to interrupt" in tail or "Waiting for" in tail:
             continue                       # live work on screen — not at rest
         if not pane_at_idle_prompt(cap) or pane_in_mode(pid, run):
