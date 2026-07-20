@@ -156,3 +156,66 @@ class TestScrollbackNeverArms(unittest.TestCase):
             wd.goal_autoarm(time.time(), tmux, {})
             self.assertFalse(tmux.typed(),
                              "scrollback content must never arm a fresh session")
+
+
+class TestWrappedGoalUsesTranscript(unittest.TestCase):
+    """2026-07-20 gk incident: the /autopilot-master goal RENDERS hard-wrapped
+    in the pane (a code block re-flowed by the CC renderer), so the viewport
+    regex captured only the FIRST visual line — 166 of 3100 chars got armed
+    and the evaluator lost the release/window/depth conditions. The full goal
+    must come from the session TRANSCRIPT (exact bytes); the viewport fragment
+    is trusted only when it is provably unwrapped."""
+
+    FULL_GOAL = ("/goal MASTER LOOP — DONE only when ALL hold: (1) `gh issue "
+                 "list --state open` shows ZERO ... LANE 1 REVIEW ... LANE 4 "
+                 "QUESTIONS ... airuleset:release-window ... depth NEVER "
+                 "degrades ... FOREGROUND sleep-poll ... two real attempts.")
+    FRAG = "/goal MASTER LOOP — DONE only when ALL hold: (1) `gh issue"
+
+    WRAPPED_PANE = (
+        "● /autopilot-master — board vyššie.\n"
+        + FRAG + "\n"
+        "  list --state open` shows ZERO ... LANE 1 REVIEW ... continuation\n"
+        "**Otázka — projekt odoo-erp (ERP):** master je pripravený.\n"
+        "• Vlož /goal riadok vyššie (odporúčam) — loop sa rozbehne a ide sám\n"
+        "❓ NEEDS YOU: vlož /goal riadok vyššie a master loop sa rozbehne\n"
+        "❯ \n  ctx ███░  caveman\n")
+
+    def _projects(self, with_goal=True):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name) / wd.encode_project_dir("/home/x/devel/demo")
+        d.mkdir(parents=True)
+        if with_goal:
+            entry = {"type": "assistant", "message": {"content": [
+                {"type": "text",
+                 "text": "Report.\n\n```\n" + self.FULL_GOAL + "\n```\n"}]}}
+            (d / "sess.jsonl").write_text(_json.dumps(entry) + "\n")
+        return tmp.name
+
+    def test_wrapped_goal_arms_full_transcript_bytes(self):
+        tmux = FakeTmux(self.WRAPPED_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=self._projects())
+        typed = tmux.typed()
+        self.assertTrue(typed, tmux.sent)
+        self.assertEqual(typed[0], self.FULL_GOAL)
+        self.assertIn("depth NEVER degrades", typed[0])
+
+    def test_wrapped_goal_without_transcript_never_arms_truncated(self):
+        tmux = FakeTmux(self.WRAPPED_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {},
+                               projects_dir=self._projects(with_goal=False))
+        self.assertFalse(tmux.typed(),
+                         "a truncated fragment must never be armed")
+        self.assertTrue(any("wrap" in ln.lower() for ln in logs), logs)
+
+    def test_transcript_goal_preferred_even_for_unwrapped_viewport(self):
+        # exact transcript bytes always beat the rendered viewport when present
+        pane = (self.FRAG + "\n"
+                "**Otázka — projekt x:** pripravený.\n"
+                "• Vlož /goal riadok vyššie (odporúčam)\n"
+                "❓ NEEDS YOU: vlož /goal riadok vyššie\n"
+                "❯ \n  ctx ███░\n")
+        tmux = FakeTmux(pane)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=self._projects())
+        self.assertEqual(tmux.typed()[0], self.FULL_GOAL)
