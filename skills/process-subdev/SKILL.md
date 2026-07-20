@@ -12,7 +12,10 @@ disable-model-invocation: true
 see Repo parameters). No argument → print the queue state of ALL streams and stop.
 
 **Gatekeeper / full-authority only.** A sub-dev Claude must never run this (the skill is
-not even deployed to reduced-authority boxes). This is the CANONICAL process — owned by
+not even deployed to reduced-authority boxes). For the WHOLE gatekeeper pipeline — all
+streams' queues + release windows + the gatekeeper's own backlog + user questions under
+ONE armed /goal that never parks — prefer `/autopilot-master` (#22); this command stays
+the canonical single-stream BODY the master's review/release lanes execute. This is the CANONICAL process — owned by
 airuleset (#21); a repo's own `.claude/commands/process-subdev.md` is a thin pointer with
 repo parameters, never a divergent variant. The companion sub-dev side and the shared
 `## Cross-stream protocol` live in the `autopilot` skill — both sides obey it.

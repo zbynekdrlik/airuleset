@@ -83,7 +83,7 @@ FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop
 
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev"]
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master"]
 
 # --- Per-box skill scoping (user complaint 2026-07-11: "slash cmd by nemali byt
 # vsetky vsade ale len relevantne k danemu projektu") ---
@@ -102,7 +102,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 # nothing. install prunes previously-linked skills that fall outside the box's set.
 SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
                           "mutation-sweep", "windows-remote-gui", "fast-iterate"}
-SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev"}
+SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev", "autopilot-master"}
 MAINTAINER_USERS = {"newlevel"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
 # (montalu meeting recordings get analyzed IN that stream's session — the

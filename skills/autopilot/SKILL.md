@@ -24,6 +24,11 @@ disable-model-invocation: true
 **What it removes (the old pain):** no more re-running `/issue-planner`, no manual `/compact`,
 no "nothing is hands-off so I'm stopping". You answer the important questions; everything else runs.
 
+> **On a GATEKEEPER / full-authority box prefer `/autopilot-master` (#22):** it runs this
+> loop's body as ONE lane of a lane scheduler (sub-dev reviews, windowed releases, own
+> backlog, user questions) under a single armed /goal that never parks. `/autopilot` alone
+> stays the right command on sub-dev boxes and for a deliberate single-lane run.
+
 **Context gate — apply all:**
 - `autonomous-batch-issue-development.md` → **load the `batch-issue-development` skill at run start** (full policy lives there since 2026-07-09) — bundle bundle-safe issues into ONE PR/CI cycle (the gate + ceiling below)
 - `pr-merge-policy.md` — default auto-merge; `airuleset:merge=manual` marker (or the `manual` arg) = stop at green PR

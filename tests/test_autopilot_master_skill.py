@@ -112,6 +112,11 @@ class TestGoalTemplate(TestCase):
         return None
 
     def test_goal_is_one_pasteable_line(self):
+        # The goal MUST stay ONE physical line: stop-check-prose-violations.sh
+        # MSG_NOGOAL strips only `/goal `-prefixed lines — a reflowed template's
+        # continuation lines would escape the strip and re-trip the
+        # dispatch-or-hold check (the 2026-07-20 montalu hook spin). The tail
+        # assertions below run against this SAME line, so a reflow fails them.
         self.assertIsNotNone(self._goal_line())
 
     def test_done_means_everything_shipped(self):
