@@ -13,10 +13,20 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
+import statusbar
+import json as _json
+
+
+def seed_repo_cache(home, root, name):
+    d = statusbar.cache_dir(home)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (statusbar.cwd_key(root) + ".json")).write_text(_json.dumps(
+        {"open": 1, "name": name, "root": root, "ts": int(time.time())}))
 
 GOAL_LINE = ("/goal STOP CONDITIONS — the loop is DONE ... (B) SLICE DONE ... "
              "REVIEW-WATCH ... never park silently ...")
@@ -110,3 +120,39 @@ class TestGoalAutoarm(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScrollbackNeverArms(unittest.TestCase):
+    def test_stale_scrollback_goal_is_ignored(self):
+        # gk incident 2026-07-20: a FRESH claude session started in a pane
+        # whose tmux SCROLLBACK still held the dead session's arm question +
+        # /goal line — job 9 armed the stale (wrong) goal into the new session.
+        # The arm question + goal must come from the VISIBLE viewport only
+        # (capture WITHOUT -S); scrollback history never arms anything.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "demo")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "demo")
+
+            class SplitTmux(FakeTmux):
+                def __init__(self):
+                    super().__init__("")
+
+                def __call__(self, argv, timeout=8):
+                    j = " ".join(argv)
+                    self.sent.append(argv)
+                    if "list-panes" in j:
+                        return "%1\tclaude\t" + root
+                    if "capture-pane" in j:
+                        # viewport capture (no -S) = fresh boot screen;
+                        # only a -S history capture would show the old goal
+                        if "-S" in j:
+                            return ARM_PANE          # stale history
+                        return ("✻ Welcome back!\n❯ \n  ctx ░░░\n")
+                    if "display" in j:
+                        return "0"
+                    return ""
+            tmux = SplitTmux()
+            wd.goal_autoarm(time.time(), tmux, {})
+            self.assertFalse(tmux.typed(),
+                             "scrollback content must never arm a fresh session")

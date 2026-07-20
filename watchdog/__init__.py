@@ -1624,8 +1624,12 @@ def goal_autoarm(now, run, state, dry_run=False):
     for pid, cwd in list_claude_panes(run):
         if (now - ga.get(pid, 0)) < GOAL_ARM_WINDOW_S:
             continue
-        cap = run(["tmux", "capture-pane", "-p", "-J", "-t", pid,
-                   "-S", "-250"]) or ""
+        # VISIBLE VIEWPORT ONLY (no -S): after a claude restart the tmux
+        # SCROLLBACK still holds the dead session's arm question + /goal line
+        # — arming those into the fresh session typed a stale, wrong goal
+        # (gk incident 2026-07-20). CC redraws its own screen, so the viewport
+        # is always the CURRENT session's content; history never arms anything.
+        cap = run(["tmux", "capture-pane", "-p", "-J", "-t", pid]) or ""
         tail = cap[-1500:]
         if not _ARM_QUESTION_RX.search(tail):
             continue
