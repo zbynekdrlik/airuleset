@@ -1236,7 +1236,7 @@ def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
             "asked_ts": q.get("ts") or 0}
 
 
-DREPLY_TICKET_FALLBACK_S = 600      # reply blocked this long → deliver via the ticket
+DREPLY_TICKET_FALLBACK_S = 180      # reply blocked this long → deliver via the ticket
 _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
 
@@ -1395,8 +1395,22 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     done_set = set(done)
     blocked = state.get("dreply_blocked")
     blocked = dict(blocked) if isinstance(blocked, dict) else {}
+    acked = state.get("dreply_acked")
+    acked = list(acked) if isinstance(acked, list) else []
+    acked_set = set(acked)
     channels = {str(v.get("channel") or "") for v in qmap.values()}
     channels.discard("")
+
+    def _ack(r):
+        # ✅ = RECEIPT, fired the moment the reply is MATCHED (even while the
+        # delivery pends) — a green check minutes late reads as "answer lost"
+        # (3rd user report, 2026-07-20). Once per reply.
+        if r["reply_id"] in acked_set:
+            return
+        if not dry_run:
+            _react_ok(r["channel"], r["reply_id"], token)
+        acked_set.add(r["reply_id"])
+        acked.append(r["reply_id"])
 
     def _delivered(r, via_ticket=None):
         done_set.add(r["reply_id"])
@@ -1418,8 +1432,6 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 ok = True if dry_run else gh_fn(r["cwd"], m.group(1),
                                                _ticket_fallback_text(r))
                 if ok:
-                    if not dry_run:
-                        _react_ok(r["channel"], r["reply_id"], token)
                     _delivered(r, via_ticket=m.group(1))
                     return
         logs.append("reply pending (%s) %s" % (why, r["session"][:12]))
@@ -1429,6 +1441,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             r = parse_discord_reply(msg, allowed, qmap, bot_id="")
             if not r or r["reply_id"] in done_set:
                 continue
+            _ack(r)
             pane = panes_by_sid.get(r["session"])
             if not pane:
                 # the asking session isn't a live pane right now — retry next
@@ -1466,10 +1479,10 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                     logs.append("reply wedged (enter swallowed) %s"
                                 % r["session"][:12])
                     continue
-                _react_ok(r["channel"], r["reply_id"], token)
             _delivered(r)
 
     state["dreply_done"] = done[-_DREPLY_DONE_CAP:]
+    state["dreply_acked"] = acked[-_DREPLY_DONE_CAP:]
     state["dreply_blocked"] = {k: v for k, v in blocked.items()
                                if now - v < 86400}
     return logs
