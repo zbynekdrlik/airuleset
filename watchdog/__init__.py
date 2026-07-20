@@ -1734,6 +1734,51 @@ _ARM_QUESTION_RX = re.compile(
     r"(vlo\S|pastni|paste)[^\n]{0,40}/goal", re.I)
 
 
+PWEDGE_MIN_IDLE_S = 30 * 60      # transcript must be this stale before a wedge ping
+PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
+
+
+def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
+                       send_fn, dry_run=False):
+    """Job 10 (#20) — queued-prompt-wedge detection, PING-FIRST.
+
+    Text sitting in the input box (a submitted-but-stuck queued prompt, or an
+    abandoned draft) blocks every keystroke delivery (job 7 draft protection)
+    and can park a session for hours (gk+david 2026-07-20; the gk-master
+    'nechať ako je' draft). Detection: the box text is BYTE-identical across
+    >= PWEDGE_SWEEPS sweeps AND the transcript is >= PWEDGE_MIN_IDLE_S stale
+    AND the pane shows no live-work signals → ONE deduped Discord ping to the
+    pane's owner. Deliberately NO auto-Enter on foreign text (the ticket's
+    decision — a machine must never submit a half-typed user draft); job 7's
+    own-text Enter-retry already covers the watchdog's own deliveries."""
+    key = "pwedge:" + pid
+    txt = _input_line_text(captured)
+    if (not txt or "esc to interrupt" in (captured or "")
+            or "Waiting for" in (captured or "")
+            or now - tmtime < PWEDGE_MIN_IDLE_S):
+        state.pop(key, None)
+        return []
+    import hashlib
+    h = hashlib.sha1(txt.encode("utf-8")).hexdigest()[:12]
+    st = state.get(key)
+    st = dict(st) if isinstance(st, dict) else {}
+    if st.get("hash") != h:
+        state[key] = {"hash": h, "n": 1, "pinged": False}
+        return []
+    st["n"] = int(st.get("n") or 1) + 1
+    state[key] = st
+    if st["n"] < PWEDGE_SWEEPS or st.get("pinged"):
+        return []
+    st["pinged"] = True
+    send_fn("⚠️ **%s** — v okne visí NEODOSLANÝ text („%s…“) a session stojí "
+            "vyše 30 minút. Stlač v tom okne Enter (text sa odošle) alebo ho "
+            "zmaž — dovtedy sa do session nedá nič doručiť."
+            % (project, txt[:60]),
+            owner=owner or None,
+            dedup_key="pwedge:%s:%s" % (pid, h), dry_run=dry_run)
+    return ["prompt-wedge ping %s (%s)" % (pid, project)]
+
+
 _GOAL_CONT_OK = ("```", "─", "•", "**", "❓", "❯", "⎿", "●", "✻")
 
 
@@ -2283,6 +2328,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # check + job 7 reply routing).
             captured = capture_pane(pid, run)
             panes_by_sid[key] = (pid, captured)   # job 7: route a Discord reply here
+
+            # --- (10) QUEUED-PROMPT-WEDGE (#20): frozen input-box text + stale
+            # transcript → ONE deduped owner ping (ping-first, never auto-Enter).
+            logs += prompt_wedge_check(now, state, pid, captured, tmtime,
+                                       owner, project, send_fn, dry_run=dry_run)
 
             # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
             # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
