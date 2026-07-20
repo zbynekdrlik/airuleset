@@ -52,3 +52,35 @@ class TestSendHookAppendsStreamUser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPythonComposersQualifyStream(unittest.TestCase):
+    """The run-card + api-error pings compose their header in notify (Python) —
+    the third and fourth label points; the user's card still said bare
+    'odoo-erp' after the shell/watchdog fix (2026-07-20 22:18)."""
+
+    def test_run_card_header_carries_stream_user(self):
+        import notify
+        with m.patch("getpass.getuser", return_value="gatekeeper"):
+            card = notify.compose_autopilot_card(
+                repo="zbynekdrlik/odoo-erp",
+                tickets=[{"n": 1770, "goal": "x", "achieved": "y"}],
+                version="2.120.0", remaining=29)
+        self.assertIn("odoo-erp-gatekeeper", card)
+
+    def test_api_error_alert_carries_stream_user(self):
+        import notify
+        with m.patch("getpass.getuser", return_value="montalu"):
+            body = notify.compose_api_error_alert("/home/montalu/devel/odoo",
+                                                  "API Error 529")
+        self.assertIn("odoo-montalu", body)
+
+    def test_newlevel_composers_stay_plain(self):
+        import notify
+        with m.patch("getpass.getuser", return_value="newlevel"):
+            card = notify.compose_autopilot_card(
+                repo="zbynekdrlik/restreamer",
+                tickets=[{"n": 5, "goal": "x", "achieved": "y"}],
+                version="1.0.0", remaining=0)
+        self.assertIn("restreamer", card)
+        self.assertNotIn("restreamer-newlevel", card)
