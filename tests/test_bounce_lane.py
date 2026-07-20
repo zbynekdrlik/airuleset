@@ -149,3 +149,25 @@ class TestCrossStreamProtocolCanonical(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestReviewWatchHoldsForeground(TestCase):
+    """gk token burn 2026-07-20: inside an armed /goal, ScheduleWakeup does NOT
+    pause the loop — the evaluator fires the next turn immediately, so the
+    'hourly re-check' spun continuous turns. The hold must keep the turn OPEN
+    with a FOREGROUND sleep-poll; ScheduleWakeup is banned from the reduced
+    /goal templates."""
+
+    SKILL = "skills/autopilot/SKILL.md"
+
+    def goal_lines(self):
+        import re
+        lines = re.findall(r"^/goal STOP CONDITIONS.*$", read(self.SKILL),
+                           re.MULTILINE)
+        self.assertEqual(len(lines), 3)
+        return lines
+
+    def test_reduced_templates_hold_foreground(self):
+        for line in self.goal_lines()[1:]:
+            self.assertIn("FOREGROUND sleep-poll", line)
+            self.assertNotIn("ScheduleWakeup", line)
