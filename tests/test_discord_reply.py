@@ -734,3 +734,64 @@ class WedgeSelfHeal(unittest.TestCase):
         enters = [a for a in run.sent if a[-1] == "Enter"]
         self.assertGreaterEqual(len(enters), 1)
         self.assertIn("repW", state["dreply_done"])
+
+
+class ReceiptReaction(unittest.TestCase):
+    """2026-07-20 (3rd user report): the ✅ reaction fired only at DELIVERY —
+    a blocked reply meant no green check for minutes and the user assumed the
+    answer was lost. The ✅ is a RECEIPT: it fires the moment the reply is
+    MATCHED (even while delivery is pending), once per reply."""
+    OWNER = "773451844110385193"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.react = m.patch.object(wd, "_react_ok", return_value=True)
+        self.react_mock = self.react.start()
+        self.addCleanup(self.react.stop)
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question="Ticket #77 — pokračovať?")
+
+    def _reply(self):
+        return {"id": "repR", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888001"}, "content": "2"}
+
+    def test_blocked_reply_reacts_immediately_and_once(self):
+        st = {}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        for i in range(2):
+            wd.deliver_discord_replies(
+                time.time() + i * 70, run, st,
+                {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=False,
+                discord_fetch=lambda ch, t: [self._reply()],
+                gh_comment=lambda *a: True)
+        self.assertEqual(self.react_mock.call_count, 1,
+                         "receipt ✅ fires at first MATCH, exactly once")
+        # still undelivered (busy) — the receipt does not mark delivery
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_delivered_reply_reacts_exactly_once_total(self):
+        idle = "● done\n❯\xa0\n  ctx ███░  caveman\n"
+        run = ScriptedPaneRun([idle])
+        wd.deliver_discord_replies(
+            time.time(), run, {}, {"sid-abc": ("%1", idle)}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._reply()],
+            gh_comment=lambda *a: True)
+        self.assertEqual(self.react_mock.call_count, 1)
+
+
+class FallbackDeadlineIsTight(unittest.TestCase):
+    def test_fallback_within_three_minutes(self):
+        # 10 min was too long for a phone user watching for the green check —
+        # the durable ticket lane fires within 3 minutes of first blockage
+        self.assertLessEqual(wd.DREPLY_TICKET_FALLBACK_S, 180)
