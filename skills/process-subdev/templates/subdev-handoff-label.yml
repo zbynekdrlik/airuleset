@@ -1,0 +1,80 @@
+name: Sub-dev Handoff Label
+
+# TEMPLATE shipped by the airuleset `process-subdev` skill (#21) — copy into
+# the repo's .github/workflows/ and adjust the author allow-list. The canonical
+# process lives in the skill; this file is the repo-side label automation.
+
+# Sub-dev streams signal a finished hand-off by COMMENTING on the upstream issue
+# ("Ready for gatekeeper cross-fork review" / READY-FOR-REVIEW) — david cannot add
+# labels (read-only collaborator), montalu comments via a scoped PAT under the
+# zbynekdrlik account. Nothing used to watch those comments, so hand-offs sat
+# invisible until the user relayed them by hand.
+# This workflow turns the comment into the durable queue signal: it adds the
+# `ready-for-review` label, and the gatekeeper's queue is simply
+#   gh issue list --label ready-for-review --state open
+# The label is removed when the gatekeeper merges/closes the ticket.
+#
+# NOTE: the readiness condition lives at STEP level, not job level — the repo's
+# "No Skip Validation" CI gate forbids job-level `if:` in every workflow file.
+#
+# #1500: the step `if:` is only a COARSE pre-filter (GitHub expressions have no
+# anchoring/regex — a bare contains() falsely labeled on a gatekeeper comment
+# that merely MENTIONED the marker mid-sentence, live incident 2026-07-14 on
+# #1489). The precise decision is scripts/subdev-handoff-match.sh: label ONLY a
+# line-start READY-FOR-REVIEW marker or the full cross-fork-review phrase.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  # contents: read is LOAD-BEARING — a restrictive permissions block zeroes
+  # every unlisted scope, and actions/checkout on this PRIVATE repo fails
+  # without it; a failed checkout skips the label step (implicit success()),
+  # silently disabling the whole queue signal.
+  contents: read
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (matcher script)
+        # Same coarse pre-filter as the label step — skip the checkout for the
+        # overwhelming majority of comments that can never label.
+        if: >-
+          !github.event.issue.pull_request &&
+          contains(fromJSON('["kvaskodev", "zbynekdrlik"]'), github.event.comment.user.login) &&
+          (contains(github.event.comment.body, 'READY-FOR-REVIEW') ||
+           contains(github.event.comment.body, 'Ready for gatekeeper'))
+        uses: actions/checkout@v4
+      - name: Add ready-for-review label
+        # Only real issues (not PR comments), only sub-dev authors, only readiness phrasing.
+        if: >-
+          !github.event.issue.pull_request &&
+          contains(fromJSON('["kvaskodev", "zbynekdrlik"]'), github.event.comment.user.login) &&
+          (contains(github.event.comment.body, 'READY-FOR-REVIEW') ||
+           contains(github.event.comment.body, 'Ready for gatekeeper'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUM: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          # Body via env, never shell-interpolated — comment text is untrusted input.
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$BODY" | bash scripts/subdev-handoff-match.sh; then
+            echo "Marker mentioned but not a readiness hand-off (#1500) — leaving labels unchanged."
+            exit 0
+          fi
+          gh label create ready-for-review \
+            --repo "$REPO" --color 0e8a16 \
+            --description "Sub-dev hand-off complete — waiting on gatekeeper cross-fork review" \
+            2>/dev/null || true
+          gh issue edit "$NUM" --repo "$REPO" --add-label ready-for-review
+          # Re-ready after a bounce = the bounce is resolved. A read-role
+          # sub-dev CANNOT remove labels, so the repo automation clears the
+          # lane here (airuleset #21; the 2026-07-19 stale-label incident).
+          gh issue edit "$NUM" --repo "$REPO" --remove-label prio:bounce 2>/dev/null || true
+      - name: No-op marker (job never skips)
+        run: echo "handoff-label evaluated"
