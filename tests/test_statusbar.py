@@ -499,3 +499,58 @@ class AutopilotProgressFeed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedAccountSliceScoping(unittest.TestCase):
+    """Montalu incident 2026-07-20: the montalu box's gh login is the SHARED
+    zbynekdrlik account (scoped PAT), so author:@me matched every user-authored
+    ticket and the footer showed foreign streams' numbers (open=20/skipped=26
+    while his real slice is label:stream:montalu only). When the gh login is
+    the maintainer account, the reduced slice = the stream LABEL alone; a
+    stream with its OWN account (david/kvaskodev) keeps the @me union."""
+
+    def _refresh(self, home, repo, bindir, login):
+        fake_gh = Path(bindir) / "gh"
+        fake_gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"api user"*) echo "%s";;\n'
+            '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+            '  *"label:autopilot-skip label:stream:"*) echo \'[{"number":9}]\';;\n'
+            '  *"label:stream:"*) echo \'[{"number":1},{"number":2}]\';;\n'
+            '  *assignee:@me*) echo \'[{"number":1},{"number":50},{"number":51}]\';;\n'
+            '  *author:@me*)   echo \'[{"number":60},{"number":61},{"number":62}]\';;\n'
+            '  *) echo 99;;\n'
+            'esac\n' % login)
+        fake_gh.chmod(0o755)
+        r = subprocess.run(
+            [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+             "tickets-status", "--refresh", "--cwd", repo],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": home,
+                 "PATH": f"{bindir}:{os.environ['PATH']}"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads((statusbar.cache_dir(home) /
+                           (statusbar.cwd_key(repo) + ".json")).read_text())
+
+    def test_shared_login_counts_stream_label_only(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=branch-merge -->\n")
+            cache = self._refresh(home, repo, bindir, "zbynekdrlik")
+            self.assertEqual(cache["open"], 2)        # {1,2} — stream label only
+            self.assertEqual(cache["skipped"], 1)     # {9}
+            # the @me piles ({50,51},{60..62}) must NOT leak in
+            self.assertNotEqual(cache["open"], 6)
+
+    def test_own_account_login_keeps_me_union(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            cache = self._refresh(home, repo, bindir, "kvaskodev")
+            # union {1,2} ∪ {1,50,51} ∪ {60,61,62} = 8
+            self.assertEqual(cache["open"], 8)
