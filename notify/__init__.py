@@ -174,6 +174,20 @@ def _plural_done(n):
     return "%d tickety dokončené" % n
 
 
+
+def stream_qualified(name):
+    """Append the box's unix user to a ping label for STREAM users
+    (gatekeeper/montalu/david/marek) so the phone can tell which stream
+    speaks; personal boxes (newlevel/root) keep the plain label. The shell
+    hook + watchdog project_label carry the same rule (2026-07-20)."""
+    import getpass
+    try:
+        u = getpass.getuser()
+    except Exception:
+        return name
+    return name if u in ("newlevel", "root", "") else "%s-%s" % (name, u)
+
+
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
                            review_ok=True, done=None, remaining=None, urls=None,
                            handoff=False):
@@ -196,7 +210,7 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     # Show only the repo NAME (last path segment), not "owner/name": the @mention
     # send() prepends already names the person, so an "owner/" prefix repeats it
     # (e.g. "@Zbynek Drlik … zbynekdrlik/bakerion-ai" said "zbynek" twice).
-    repo_name = (_clean(repo) or "?").rstrip("/").split("/")[-1] or "?"
+    repo_name = stream_qualified((_clean(repo) or "?").rstrip("/").split("/")[-1] or "?")
     n_tk = len(tickets) or 1
     header = ("%d ticket odovzdaný na review" % n_tk if handoff
               else _plural_done(n_tk))
@@ -313,7 +327,7 @@ def is_api_error(text):
 def compose_api_error_alert(project, text):
     """Build the API-error ping (Slovak, Discord markdown) from the ACTUAL error
     text Claude Code surfaced. No @mention here — send() prepends it."""
-    proj = (_clean(project) or "?").rstrip("/").split("/")[-1] or "?"
+    proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
     err = _clean(text)[:300] or "neznáma API chyba"
     return ("🛑 **%s** — API chyba, práca sa zastavila\n> %s\n"
             "> Agent sa zasekol na API chybe — pozri sa naň / skús znova."
