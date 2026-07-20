@@ -1708,9 +1708,12 @@ def cmd_tickets_status(args):
             # a ticket carrying `ready-for-review` (auto-labeled by the repo's
             # subdev-handoff-label workflow at the hand-off comment) is waiting on
             # the gatekeeper — the statusline shows both ("Issues 1 · gk 5").
+            # SHARED-ACCOUNT boxes (montalu's PAT logs in as the MAINTAINER
+            # account) must NOT use @me — author:@me matched every user-authored
+            # ticket and the footer showed foreign streams' numbers (2026-07-20);
+            # there the slice is the stream LABEL alone.
             handed, mine, failed = {}, set(), False
-            for qual in ("assignee:@me", "author:@me",
-                         "label:stream:" + _current_user()):
+            for qual in _slice_quals(_current_user(), root):
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "-label:autopilot-skip " + qual, "-L", "200",
                             "--json", "number,labels"], root)
@@ -1729,8 +1732,7 @@ def cmd_tickets_status(args):
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             skipped, sfailed = set(), False
-            for qual in ("assignee:@me", "author:@me",
-                         "label:stream:" + _current_user()):
+            for qual in _slice_quals(_current_user(), root):
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "label:autopilot-skip " + qual, "-L", "200",
                             "--json", "number"], root)
@@ -1791,8 +1793,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # tickets-status; gh error → None, never a wrong number.
         if resolve_authority() != "full":
             nums, failed = set(), False
-            for qual in ("assignee:@me", "author:@me",
-                         "label:stream:" + _current_user()):
+            for qual in _slice_quals(_current_user()):
                 raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
                               "--search", "-label:autopilot-skip " + qual,
                               "-L", "200", "--json", "number")
@@ -2056,11 +2057,38 @@ AUTHORITY_BY_USER = {
 
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 
+# The maintainer's GitHub account. Some sub-dev boxes authenticate gh with a
+# scoped PAT of THIS account (montalu), so @me search quals there match every
+# maintainer-authored ticket — foreign streams leaked into the montalu footer
+# (2026-07-20). A shared-account box scopes its slice by the stream LABEL only.
+MAINTAINER_GH_LOGIN = "zbynekdrlik"
+
 
 def _current_user() -> str:
     import getpass
 
     return getpass.getuser()
+
+
+def _gh_login(cwd=None) -> str:
+    """The active gh login for this box, '' on any error. Cheap single call."""
+    import subprocess
+    try:
+        r = subprocess.run(["gh", "api", "user", "-q", ".login"], cwd=cwd,
+                           capture_output=True, text=True, timeout=15)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _slice_quals(user, cwd=None):
+    """gh search quals for a reduced-authority stream's OWN ticket slice.
+    Own-account streams (david/kvaskodev): assigned ∪ authored ∪ stream label.
+    Shared-account boxes (gh login == the maintainer account): the stream
+    LABEL alone — @me there matches the whole maintainer-authored backlog."""
+    if _gh_login(cwd) == MAINTAINER_GH_LOGIN:
+        return ["label:stream:" + user]
+    return ["assignee:@me", "author:@me", "label:stream:" + user]
 
 
 def _authority_marker(cwd=None):

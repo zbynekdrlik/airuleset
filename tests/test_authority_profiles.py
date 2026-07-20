@@ -327,10 +327,12 @@ class TestRunCardRemainingScopedToStream(TestCase):
         with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
             with mk.patch.object(airuleset, "resolve_authority",
                                  return_value="fork-no-merge"):
-                with mk.patch("notify.send",
-                              side_effect=lambda body, **k:
-                              captured.setdefault("b", body) or "sent"):
-                    airuleset.cmd_notify(self._args())
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="kvaskodev"):
+                    with mk.patch("notify.send",
+                                  side_effect=lambda body, **k:
+                                  captured.setdefault("b", body) or "sent"):
+                        airuleset.cmd_notify(self._args())
         import re
         m = re.search(r"ostáva (\d+)", captured["b"])
         self.assertIsNotNone(m, captured["b"])

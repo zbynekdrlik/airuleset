@@ -516,7 +516,7 @@ class SharedAccountSliceScoping(unittest.TestCase):
             'case "$*" in\n'
             '  *"api user"*) echo "%s";;\n'
             '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-            '  *"label:autopilot-skip label:stream:"*) echo \'[{"number":9}]\';;\n'
+            '  *"search label:autopilot-skip"*) echo \'[{"number":9}]\';;\n'
             '  *"label:stream:"*) echo \'[{"number":1},{"number":2}]\';;\n'
             '  *assignee:@me*) echo \'[{"number":1},{"number":50},{"number":51}]\';;\n'
             '  *author:@me*)   echo \'[{"number":60},{"number":61},{"number":62}]\';;\n'
@@ -552,5 +552,5 @@ class SharedAccountSliceScoping(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             cache = self._refresh(home, repo, bindir, "kvaskodev")
-            # union {1,2} ∪ {1,50,51} ∪ {60,61,62} = 8
-            self.assertEqual(cache["open"], 8)
+            # union {1,2} ∪ {1,50,51} ∪ {60,61,62} = 7
+            self.assertEqual(cache["open"], 7)
