@@ -72,9 +72,13 @@ class TestGoalAutoarm(unittest.TestCase):
         self.assertIn("REVIEW-WATCH", typed[0])
         self.assertTrue(any("goal-autoarm" in ln for ln in logs), logs)
 
-    def test_already_armed_goal_is_skipped(self):
+    def test_rearm_question_arms_even_with_stale_goal_indicator(self):
+        # gk incident 2026-07-20: a resolved-blocked /goal cycle re-prints the
+        # arm question while the OLD ◎ /goal indicator is still lit — the
+        # indicator alone must not block (typing /goal safely replaces the old
+        # one); the arm question at the tail IS the session asking for it.
         tmux, _ = go(ARMED_PANE)
-        self.assertFalse(tmux.typed())
+        self.assertTrue(tmux.typed())
 
     def test_busy_pane_is_skipped(self):
         tmux, _ = go(BUSY_PANE)

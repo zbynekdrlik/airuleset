@@ -5645,3 +5645,37 @@ class TestProseHookIgnoresGoalTemplateLines(TestCase):
         r = self._run("Plan committed. Dispatch the subagents now, "
                       "or hold for your review of the plan first?")
         self.assertIn("pre-implementation pause", r.stdout)
+
+
+class TestArmQuestionNeverPingsDiscord(TestCase):
+    """gk incident 2026-07-20: the '❓ NEEDS YOU: vlož /goal' arm question
+    pinged the user's phone although the watchdog auto-arm answers it within a
+    minute — and the user's Discord reply ('1') typed into the session could
+    not arm anything (only external keystrokes can type /goal). Arm questions
+    are MACHINE questions now: the pending hook must not send them."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
+
+    def _run(self, msg):
+        sid = f"test-armq-{uuid.uuid4().hex[:12]}"
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid,
+                              "cwd": "/tmp"})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True, env=env)
+
+    def test_goal_arm_question_is_not_sent(self):
+        msg = ("/goal STOP CONDITIONS — the loop is DONE ...\n"
+               "**Otázka — projekt odoo-erp (Money→Odoo):** autopilot pripravený.\n"
+               "• Vlož /goal riadok vyššie (odporúčam) — rozbehne sa sám\n"
+               "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne")
+        r = self._run(msg)
+        self.assertIn("arm-question", r.stdout + r.stderr)
+
+    def test_ordinary_question_still_pings(self):
+        msg = ("**Otázka — projekt demo (nahrávky):** disk je plný.\n"
+               "• Zmazať staré (odporúčam)\n"
+               "❓ NEEDS YOU: zmazať nahrávky staršie ako 3 dni?")
+        r = self._run(msg)
+        self.assertNotIn("arm-question", r.stdout + r.stderr)
