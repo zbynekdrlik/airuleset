@@ -208,8 +208,21 @@ def scan_line(text):
 
 violations = []
 
+# Lockfile integrity hashes ("integrity": "sha512-...") are NOT secrets — the
+# entropy gate false-flagged package-lock.json (issue #19, bkshading e2e).
+# Known lockfile basenames skip the content scan entirely; the same blob in
+# any OTHER file still blocks.
+LOCKFILES = {
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lock", "bun.lockb", "cargo.lock", "poetry.lock", "uv.lock",
+    "pipfile.lock", "composer.lock", "gemfile.lock", "go.sum", "flake.lock",
+    "packages.lock.json", "pubspec.lock",
+}
+
 
 def check_lines(path, lines):
+    if path.rsplit("/", 1)[-1].lower() in LOCKFILES:
+        return
     for line in lines:
         v = scan_line(line)
         if v:
