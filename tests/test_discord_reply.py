@@ -795,3 +795,70 @@ class FallbackDeadlineIsTight(unittest.TestCase):
         # 10 min was too long for a phone user watching for the green check —
         # the durable ticket lane fires within 3 minutes of first blockage
         self.assertLessEqual(wd.DREPLY_TICKET_FALLBACK_S, 180)
+
+
+class TicketFallbackPointer(unittest.TestCase):
+    """The ticket-fallback delivers DURABLY but INVISIBLY — the user watching
+    the terminal sees no prompt and assumes the answer vanished (4th report,
+    2026-07-20 evening). After a ticket-fallback delivery job 7 records a
+    POINTER; the moment the asking session's pane is typable it types a short
+    visible prompt ('answer on ticket #N — read the comment'), exactly once."""
+    OWNER = "773451844110385193"
+    IDLE = "● done\n❯\xa0\n  ctx ███░  caveman\n"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        r = m.patch.object(wd, "_react_ok", return_value=True)
+        r.start()
+        self.addCleanup(r.stop)
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question="Ticket #1770 — náklady?")
+
+    def _reply(self):
+        return {"id": "repP", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888001"}, "content": "3"}
+
+    def _fallback_deliver(self, state):
+        now = time.time()
+        state.setdefault("dreply_blocked",
+                         {"repP": now - wd.DREPLY_TICKET_FALLBACK_S - 5})
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._reply()],
+            gh_comment=lambda *a: True)
+        return state
+
+    def test_fallback_records_pointer_then_types_it_when_typable(self):
+        state = self._fallback_deliver({})
+        self.assertIn("sid-abc", state.get("dreply_pointer", {}))
+        run = ScriptedPaneRun([self.IDLE, self.IDLE])
+        wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+            dry_run=False, discord_fetch=lambda ch, t: [],
+            gh_comment=lambda *a: True)
+        typed = [a[-1] for a in run.sent if "-l" in a]
+        self.assertTrue(any("#1770" in t and "tickete" in t for t in typed),
+                        typed)
+        self.assertNotIn("sid-abc", state.get("dreply_pointer", {}))
+
+    def test_pointer_not_typed_into_untypable_pane(self):
+        state = self._fallback_deliver({})
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", RUNNING_DRAFT)},
+            dry_run=False, discord_fetch=lambda ch, t: [],
+            gh_comment=lambda *a: True)
+        self.assertFalse([a for a in run.sent if "-l" in a])
+        self.assertIn("sid-abc", state.get("dreply_pointer", {}))
