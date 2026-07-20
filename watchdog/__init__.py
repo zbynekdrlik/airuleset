@@ -1381,7 +1381,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
-    if not qmap:
+    if not qmap and not state.get("dreply_pointer"):
         return logs
     token = bot_token(env)
     allowed = known_owner_ids(env)
@@ -1432,6 +1432,10 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 ok = True if dry_run else gh_fn(r["cwd"], m.group(1),
                                                _ticket_fallback_text(r))
                 if ok:
+                    ptr = state.get("dreply_pointer")
+                    ptr = dict(ptr) if isinstance(ptr, dict) else {}
+                    ptr[r["session"]] = {"num": m.group(1), "ts": now}
+                    state["dreply_pointer"] = ptr
                     _delivered(r, via_ticket=m.group(1))
                     return
         logs.append("reply pending (%s) %s" % (why, r["session"][:12]))
@@ -1480,6 +1484,32 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 % r["session"][:12])
                     continue
             _delivered(r)
+
+    # A ticket-fallback delivery is durable but INVISIBLE in the terminal —
+    # the user watching the window assumes the answer vanished (2026-07-20).
+    # Type a short visible pointer into the asking pane as soon as it is
+    # typable; once per fallback, expired after a day.
+    ptr = state.get("dreply_pointer")
+    ptr = dict(ptr) if isinstance(ptr, dict) else {}
+    for sid in list(ptr):
+        ent = ptr[sid] if isinstance(ptr[sid], dict) else {}
+        if now - (ent.get("ts") or 0) > 86400:
+            ptr.pop(sid)
+            continue
+        pane = panes_by_sid.get(sid)
+        if not pane:
+            continue
+        pid, captured = pane
+        if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run):
+            continue
+        if not dry_run:
+            send_continue(pid, "Odpoveď užívateľa na tvoju otázku je na "
+                               "tickete #%s (komentár ODPOVEĎ UŽÍVATEĽA Z "
+                               "DISCORDU) — prečítaj ho a zariaď sa podľa "
+                               "neho." % ent.get("num"), run)
+        ptr.pop(sid)
+        logs.append("reply pointer→#%s [%s]" % (ent.get("num"), sid[:12]))
+    state["dreply_pointer"] = ptr
 
     state["dreply_done"] = done[-_DREPLY_DONE_CAP:]
     state["dreply_acked"] = acked[-_DREPLY_DONE_CAP:]
