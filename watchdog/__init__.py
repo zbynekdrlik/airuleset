@@ -1734,11 +1734,53 @@ _ARM_QUESTION_RX = re.compile(
     r"(vlo\S|pastni|paste)[^\n]{0,40}/goal", re.I)
 
 
-def goal_autoarm(now, run, state, dry_run=False):
+_GOAL_CONT_OK = ("```", "─", "•", "**", "❓", "❯", "⎿", "●", "✻")
+
+
+def _transcript_goal_line(path, max_lines=400):
+    """The NEWEST `/goal …` line printed by the ASSISTANT in the transcript
+    tail — the EXACT template bytes. The pane RENDERING hard-wraps a long goal
+    (a code block re-flowed by CC), so the viewport fragment is truncated (the
+    166-of-3100-char gk arm, 2026-07-20); the transcript is never wrapped."""
+    best = None
+    try:
+        for entry in _iter_jsonl_tail(path, max_lines):
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                continue
+            for ln in _entry_text(entry).splitlines():
+                ln = ln.strip()
+                if ln.startswith("/goal "):
+                    best = ln
+    except Exception:
+        return None
+    return best
+
+
+def _viewport_goal_wrapped(cap, frag):
+    """True if the viewport `/goal` line is a hard-wrapped FRAGMENT — the next
+    non-empty rendered line continues its prose instead of being structure
+    (fence / border / bullet / arm question / prompt / chrome)."""
+    lines = cap.splitlines()
+    idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == frag:
+            idx = i
+    if idx is None:
+        return False
+    for ln in lines[idx + 1:]:
+        s = ln.strip()
+        if not s:
+            continue
+        return not s.startswith(_GOAL_CONT_OK)
+    return False
+
+
+def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
     """Job 9 — see the section comment. Mutates state['goalarm']; returns log
     lines. Best-effort (never raises)."""
     ga = state.get("goalarm") or {}
     logs = []
+    projects_dir = projects_dir or PROJECTS_DIR
     for pid, cwd in list_claude_panes(run):
         if (now - ga.get(pid, 0)) < GOAL_ARM_WINDOW_S:
             continue
@@ -1762,10 +1804,23 @@ def goal_autoarm(now, run, state, dry_run=False):
         goals = re.findall(r"^\s*(/goal \S.*)$", cap, re.M)
         if not goals:
             continue
+        frag = goals[-1].strip()
+        # The rendered viewport hard-wraps long goals — arm the TRANSCRIPT's
+        # exact bytes when available; the fragment only when provably whole.
+        full = None
+        tr = find_active_transcript(projects_dir, cwd)
+        if tr:
+            full = _transcript_goal_line(tr[0])
+        if full is None:
+            if _viewport_goal_wrapped(cap, frag):
+                logs.append("goal wrapped + no transcript — not arming %s (%s)"
+                            % (pid, os.path.basename(cwd.rstrip("/"))))
+                continue
+            full = frag
         ga[pid] = int(now)
         state["goalarm"] = ga          # key exists only once something armed
         if not dry_run:
-            send_continue(pid, goals[-1].strip(), run)
+            send_continue(pid, full, run)
         logs.append("goal-autoarm %s (%s)" % (pid,
                                               os.path.basename(cwd.rstrip("/"))))
     return logs
