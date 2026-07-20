@@ -345,11 +345,19 @@ def transcript_last_marker(path):
     owns those). Used by job 4 to spot a `⏳ WORKING` turn that has gone idle; a
     `✅`/`❓`/none last marker is NOT a working-stall (done / waiting-on-user / plain
     end), so it never triggers the job-4 ping."""
+    return transcript_last_marker_line(path)[0]
+
+
+def transcript_last_marker_line(path):
+    """(marker, full marker LINE) of the session's last real assistant message,
+    or ('', ''). Same walk/semantics as transcript_last_marker — the LINE feeds
+    declared_wait_until (a ⏳ that names a future clock time is a healthy wait,
+    not a stall; the 2026-07-20 drilling incident)."""
     for entry in reversed(_iter_jsonl_tail(path)):
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         if entry.get("isApiErrorMessage") is True:
-            return ""               # api-error → job 1's domain, not a marker
+            return "", ""           # api-error → job 1's domain, not a marker
         text = (_entry_text(entry) or "").strip()
         if text in _SENTINELS:
             continue                # synthetic / tool-only — keep scanning back
@@ -357,9 +365,9 @@ def transcript_last_marker(path):
         for ln in reversed(nonblank[-3:]):     # marker line, tolerating ≤2 trailing lines
             m = _MARKER_RX.match(ln)
             if m:
-                return m.group(1)
-        return ""                   # a real reply, but with no status marker
-    return ""
+                return m.group(1), ln
+        return "", ""               # a real reply, but with no status marker
+    return "", ""
 
 
 def subagent_active(transcript_path, now, window):
@@ -898,8 +906,46 @@ def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
     return "nudge", e2
 
 
+# --- Stuck-check sensitivity (2026-07-20, codex-bridge drilling incident) ----
+# A session honestly waiting on a SCHEDULED event ("čakám na 14:15 auto-sync")
+# got nudged every cycle until pressured into premature work. Two valves:
+# declared_wait_until() (respect an explicit future clock in the ⏳ marker) and
+# the responded-backoff in decide_working (answered nudges space out
+# exponentially and never escalate — escalation is for a DEAD process only).
+DECLARED_WAIT_GRACE_S = 20 * 60      # nudge only this long AFTER the declared time
+DECLARED_WAIT_MAX_S = 12 * 3600      # a "future" time further than this is noise
+NUDGE_BACKOFF_CAP_S = 4 * 3600       # answered-nudge spacing cap
+_CLOCK_RX = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
+
+
+def declared_wait_until(marker_line, now, tz="Europe/Bratislava"):
+    """Epoch until which the ⏳ marker line's DECLARED future clock time
+    suppresses the stuck-check (latest declared time + grace), or 0 when the
+    line names no usable future time. A time already past resolves to its next
+    occurrence; anything further than DECLARED_WAIT_MAX_S away is ignored
+    (a mentioned historical time, not a wait declaration)."""
+    from datetime import datetime, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        local = datetime.fromtimestamp(now, ZoneInfo(tz))
+    except Exception:
+        local = datetime.fromtimestamp(now)
+    best = 0.0
+    for m in _CLOCK_RX.finditer(str(marker_line or "")):
+        h, mi = int(m.group(1)), int(m.group(2))
+        cand = local.replace(hour=h, minute=mi, second=0, microsecond=0)
+        if cand.timestamp() <= now:
+            cand += timedelta(days=1)
+        delta = cand.timestamp() - now
+        if 0 < delta <= DECLARED_WAIT_MAX_S:
+            best = max(best, cand.timestamp())
+    return best + DECLARED_WAIT_GRACE_S if best else 0
+
+
 def decide_working(state, wkey, now, idle, interval=WORKING_RETRY_INTERVAL_SECONDS,
-                   max_nudges=MAX_WORKING_NUDGES):
+                   max_nudges=MAX_WORKING_NUDGES, responded=False,
+                   backoff_base=STALL_WORKING_SECONDS,
+                   backoff_cap=NUDGE_BACKOFF_CAP_S):
     """Pure decision for ONE `⏳ WORKING`-stalled session (job 4). Returns
     (action, entry) where action is 'nudge' | 'wait' | 'escalate' | 'noop'; the
     caller persists state[wkey] = entry. Called ONLY after the caller has already
@@ -923,11 +969,27 @@ def decide_working(state, wkey, now, idle, interval=WORKING_RETRY_INTERVAL_SECON
     if not nudges:                         # first sighting past the threshold → nudge now
         e["nudges"] = [int(now)]
         return "nudge", e
-    if len(nudges) >= max_nudges:          # MAX no-response nudges → give up, ping once
+    if responded:
+        # The session ANSWERED the previous nudge — it is ALIVE, just waiting.
+        # Space repeats out exponentially (30m→1h→2h→…, capped) and never let
+        # answered checks count toward the 'wedged' escalation (the drilling
+        # incident: 3 answered nudges fired a false wedged ping and the
+        # session got pressured into premature work).
+        answered = int(e.get("answered", 0)) + 1
+        e["answered"] = answered
+        e["noresp"] = 0
+        gap_needed = min(backoff_base * (2 ** answered), backoff_cap)
+        if (now - nudges[-1]) < gap_needed:
+            return "wait", e
+        e["nudges"] = nudges + [int(now)]
+        return "nudge", e
+    noresp = int(e.get("noresp", len(nudges)))
+    if noresp >= max_nudges:               # MAX no-response nudges → give up, ping once
         e["escalated"] = True
         return "escalate", e
     if (now - nudges[-1]) >= interval:     # still wedged `interval` later → re-nudge
         e["nudges"] = nudges + [int(now)]
+        e["noresp"] = noresp + 1
         return "nudge", e
     return "wait", e                       # within the retry interval → hold
 
@@ -2306,8 +2368,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # retries) escalates to ONE ping. Gates: advancing-subagent (skips the common
             # healthy long wait), high threshold (skips CI ≤25 min / mutation ≤20 min),
             # copy-mode skip (never type into a scrolled pane).
-            if (transcript_last_marker(tpath) == "⏳" and idle >= stall_working
+            mk4, mk4_line = transcript_last_marker_line(tpath)
+            if (mk4 == "⏳" and idle >= stall_working
                     and not subagent_active(tpath, now, stall_working)):
+                # DECLARED WAIT — the marker names a future clock time ("čakám
+                # na 14:15 auto-sync", "deploy okno 22:00"): a scheduled
+                # external event, not a stall. No nudge until it passes
+                # (+grace) — the codex-bridge drilling incident, 2026-07-20.
+                dwu = declared_wait_until(mk4_line, now)
+                if dwu > now:
+                    logs.append("declared-wait %s [%s] +%dm — no nudge"
+                                % (project, key, int((dwu - now) // 60)))
+                    continue
                 # user scrolling / a menu open → keys would be swallowed or corrupt the
                 # selection. Skip WITHOUT advancing state (no retry burned) — same gate as
                 # job 1's api-error nudge. (Adversarial-review finding #3: we deliberately do
@@ -2353,9 +2425,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         logs.append("skip busy-pane (working-stall) %s" % (project or pid))
                     continue
                 wkey = "working:" + key
+                # responded = the transcript advanced AFTER the last nudge (the
+                # session answered the check and is merely waiting again) —
+                # answered checks back off exponentially and never escalate.
+                _prev_n = (state.get(wkey) or {}).get("nudges") or []
+                responded = bool(_prev_n) and (now - idle) > (_prev_n[-1] + 30)
                 action, entry = decide_working(state, wkey, now, idle,
                                                interval=working_interval,
-                                               max_nudges=max_working_nudges)
+                                               max_nudges=max_working_nudges,
+                                               responded=responded)
                 state[wkey] = entry
                 fs = int(entry.get("first_seen", now))
                 if action == "nudge":
