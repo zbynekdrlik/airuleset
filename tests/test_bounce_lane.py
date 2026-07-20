@@ -100,6 +100,15 @@ class TestReviewWatchLifecycle(TestCase):
         self.assertIn("REVIEW-WATCH", fk)
         self.assertIn("CLOSED by the maintainer", fk)
 
+    def test_fork_holds_until_released_too(self):
+        # 2026-07-20 morning incident: david's loop ended when the maintainer
+        # closed his tickets at the develop merge — but nothing was RELEASED
+        # and the user found prod empty ("ping pong moze skoncit az ked je
+        # vsetko deploynute do produ a nie skor"). The fork loop holds until
+        # the merged work is contained in origin/main, same as branch-merge.
+        _, fk = self.reduced_goal_lines()
+        self.assertIn("contained in origin/main", fk)
+
     def test_review_watch_cadence_is_hourly_and_working(self):
         for line in self.reduced_goal_lines():
             self.assertIn("hourly", line)
