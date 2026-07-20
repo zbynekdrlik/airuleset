@@ -1043,20 +1043,92 @@ def _default_run(argv, timeout=8):
         return ""
 
 
+def _proc_read(path):
+    try:
+        with open(path) as h:
+            return h.read()
+    except OSError:
+        return ""                # process exited mid-walk — expected race
+
+
+def _pane_hosted_claude_pid(pane_pid):
+    """PID of a `claude` process inside the pane's process TREE, or None — a
+    sudo-hosted stream session (`sudo su - montalu` → bash → claude) reports
+    pane_current_command='sudo', which hid the montalu pane from every
+    watchdog job (2026-07-20: /goal auto-arm structurally impossible there).
+    Pure /proc walk, fail-safe None."""
+    try:
+        children = {}
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            stat = _proc_read("/proc/%s/stat" % p)
+            if not stat:
+                continue
+            ppid = stat.rsplit(") ", 1)[-1].split()[1]
+            children.setdefault(ppid, []).append(p)
+        frontier = [str(int(pane_pid))]
+        while frontier:
+            cur = frontier.pop()
+            for ch in children.get(cur, []):
+                if "claude" in _proc_read("/proc/%s/comm" % ch):
+                    return ch
+                frontier.append(ch)
+    except Exception:
+        return None              # fail-safe: an unreadable /proc = not hosted
+    return None
+
+
+def _hosted_claude_cwd(claude_pid, pane_cwd):
+    """The hosted claude process's REAL cwd — tmux reports the SUDO root's cwd
+    (where the human ran `sudo su`, e.g. /home/newlevel/devel/odoo), which
+    mis-binds every cwd-keyed lookup. Direct readlink works only same-user;
+    a foreign process needs `sudo -n -u <owner>`. Falls back to the pane cwd."""
+    import subprocess
+    link = "/proc/%s/cwd" % claude_pid
+    try:
+        return os.readlink(link)
+    except OSError:
+        status = _proc_read("/proc/%s/status" % claude_pid)
+        m2 = re.search(r"^Uid:\s+(\d+)", status, re.M)
+        if m2:
+            try:
+                import pwd
+                user = pwd.getpwuid(int(m2.group(1))).pw_name
+                p = subprocess.run(["sudo", "-n", "-u", user, "readlink", link],
+                                   capture_output=True, text=True, timeout=5)
+                out = (p.stdout or "").strip()
+                if p.returncode == 0 and out.startswith("/"):
+                    return out
+            except Exception:
+                return pane_cwd  # no passwordless sudo → best effort
+    return pane_cwd
+
+
 def list_claude_panes(run=None):
-    """[(pane_id, cwd)] for every tmux pane running `claude`, deduped by pane_id
-    (grouped sessions share the same pane_id)."""
+    """[(pane_id, cwd)] for every tmux pane running `claude` — directly, or
+    hosted under sudo/su (the montalu-in-newlevel-tmux stream shape) — deduped
+    by pane_id (grouped sessions share the same pane_id)."""
     run = run or _default_run
     out = run(["tmux", "list-panes", "-a", "-F",
-               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"])
+               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
+               "\t#{pane_pid}"])
     seen, res = set(), []
     for line in (out or "").splitlines():
         parts = line.split("\t")
-        if len(parts) != 3:
+        if len(parts) < 3:
             continue
         pid, cmd, cwd = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if cmd != "claude" or not pid or pid in seen:
+        ppid = parts[3].strip() if len(parts) > 3 else ""
+        if not pid or pid in seen:
             continue
+        if cmd != "claude":
+            if cmd not in ("sudo", "su") or not ppid:
+                continue
+            cpid = _pane_hosted_claude_pid(ppid)
+            if not cpid:
+                continue
+            cwd = _hosted_claude_cwd(cpid, cwd)
         seen.add(pid)
         res.append((pid, cwd))
     return res
@@ -1860,6 +1932,51 @@ def _transcript_goal_line(path, max_lines=400):
     return best
 
 
+def _foreign_transcript_goal(cwd):
+    """Full `/goal ` line from ANOTHER user's newest transcript for `cwd` —
+    the sudo-hosted stream case (montalu claude in newlevel's tmux): the pane
+    is visible here but the transcript lives under the foreign HOME. Uses
+    `sudo -n -u <user>` (passwordless on the boxes where this shape exists);
+    every failure returns None (the caller then refuses to arm a fragment)."""
+    import getpass
+    import subprocess
+    m2 = re.match(r"/home/([a-z0-9_-]+)/", str(cwd) + "/")
+    if not m2:
+        return None
+    user = m2.group(1)
+    try:
+        if user == getpass.getuser():
+            return None
+    except Exception:
+        return None
+    script = (
+        "import glob,json,os,sys\n"
+        "d=os.path.expanduser('~/.claude/projects/'+"
+        "''.join('-' if c in '/._' else c for c in %r))\n"
+        "fs=sorted(glob.glob(d+'/*.jsonl'),key=os.path.getmtime)\n"
+        "best=None\n"
+        "for line in open(fs[-1]) if fs else []:\n"
+        "    try: e=json.loads(line)\n"
+        "    except Exception: continue\n"
+        "    if e.get('type')!='assistant': continue\n"
+        "    c=e.get('message',{}).get('content')\n"
+        "    ts=[c] if isinstance(c,str) else ["
+        "b.get('text','') for b in c or [] "
+        "if isinstance(b,dict) and b.get('type')=='text']\n"
+        "    for t in ts:\n"
+        "        for ln in t.splitlines():\n"
+        "            ln=ln.strip()\n"
+        "            if ln.startswith('/goal '): best=ln\n"
+        "print(best or '')\n" % str(cwd))
+    try:
+        p = subprocess.run(["sudo", "-n", "-u", user, "python3", "-c", script],
+                           capture_output=True, text=True, timeout=15)
+        line = (p.stdout or "").strip()
+        return line if p.returncode == 0 and line.startswith("/goal ") else None
+    except Exception:
+        return None
+
+
 def _viewport_goal_wrapped(cap, frag):
     """True if the viewport `/goal` line is a hard-wrapped FRAGMENT — the next
     non-empty rendered line continues its prose instead of being structure
@@ -1915,6 +2032,10 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         tr = find_active_transcript(projects_dir, cwd)
         if tr:
             full = _transcript_goal_line(tr[0])
+        if full is None:
+            # sudo-hosted stream pane: the transcript lives under the FOREIGN
+            # user's HOME — read it via sudo -n (best-effort).
+            full = _foreign_transcript_goal(cwd)
         if full is None:
             if _viewport_goal_wrapped(cap, frag):
                 logs.append("goal wrapped + no transcript — not arming %s (%s)"

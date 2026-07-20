@@ -43,16 +43,21 @@ class FakeTmux:
 
 
 class TestSudoPaneVisibility(unittest.TestCase):
-    SUDO_LINE = "%7\tsudo\t/home/montalu/devel/odoo\t8901"
+    SUDO_LINE = "%7\tsudo\t/home/newlevel/devel/odoo\t8901"
     CLAUDE_LINE = "%1\tclaude\t/home/x/devel/demo\t4321"
 
-    def test_sudo_pane_hosting_claude_is_listed(self):
-        with m.patch.object(wd, "_pane_tree_has_claude", return_value=True):
+    def test_sudo_pane_hosting_claude_is_listed_with_real_cwd(self):
+        # tmux reports the SUDO root's cwd (/home/newlevel/...) — the entry
+        # must carry the hosted claude's REAL cwd instead
+        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value="999"), \
+             m.patch.object(wd, "_hosted_claude_cwd",
+                            return_value="/home/montalu/devel/odoo") as hc:
             res = wd.list_claude_panes(FakeTmux(self.SUDO_LINE))
         self.assertEqual(res, [("%7", "/home/montalu/devel/odoo")])
+        hc.assert_called_once_with("999", "/home/newlevel/devel/odoo")
 
     def test_sudo_pane_without_claude_is_skipped(self):
-        with m.patch.object(wd, "_pane_tree_has_claude", return_value=False):
+        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value=None):
             res = wd.list_claude_panes(FakeTmux(self.SUDO_LINE))
         self.assertEqual(res, [])
 
@@ -75,9 +80,11 @@ class TestForeignTranscriptGoal(unittest.TestCase):
         "❯ \n  ctx ███░  caveman\n")
 
     def test_wrapped_goal_on_foreign_cwd_arms_from_sudo_transcript(self):
-        tmux = FakeTmux("%7\tsudo\t/home/montalu/devel/odoo\t8901",
+        tmux = FakeTmux("%7\tsudo\t/home/newlevel/devel/odoo\t8901",
                         self.WRAPPED_PANE)
-        with m.patch.object(wd, "_pane_tree_has_claude", return_value=True), \
+        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value="999"), \
+             m.patch.object(wd, "_hosted_claude_cwd",
+                            return_value="/home/montalu/devel/odoo"), \
              m.patch.object(wd, "_foreign_transcript_goal",
                             return_value=self.FULL_GOAL) as fg:
             wd.goal_autoarm(time.time(), tmux, {},
@@ -86,9 +93,11 @@ class TestForeignTranscriptGoal(unittest.TestCase):
         fg.assert_called_once_with("/home/montalu/devel/odoo")
 
     def test_wrapped_goal_foreign_lookup_fails_never_arms_fragment(self):
-        tmux = FakeTmux("%7\tsudo\t/home/montalu/devel/odoo\t8901",
+        tmux = FakeTmux("%7\tsudo\t/home/newlevel/devel/odoo\t8901",
                         self.WRAPPED_PANE)
-        with m.patch.object(wd, "_pane_tree_has_claude", return_value=True), \
+        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value="999"), \
+             m.patch.object(wd, "_hosted_claude_cwd",
+                            return_value="/home/montalu/devel/odoo"), \
              m.patch.object(wd, "_foreign_transcript_goal", return_value=None):
             logs = wd.goal_autoarm(time.time(), tmux, {},
                                    projects_dir="/nonexistent-projects")
