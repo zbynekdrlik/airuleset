@@ -5679,3 +5679,30 @@ class TestArmQuestionNeverPingsDiscord(TestCase):
                "❓ NEEDS YOU: zmazať nahrávky staršie ako 3 dni?")
         r = self._run(msg)
         self.assertNotIn("arm-question", r.stdout + r.stderr)
+
+
+class TestQualityGateExemptsArmQuestions(TestCase):
+    """gk hook-error loop 2026-07-20: the /goal ARM question is a MACHINE
+    question (the watchdog auto-arm answers it; Discord never pings it) — the
+    away-user Slovak template gate must not block it; a blocked arm question
+    loops the Stop hook and killed the gk session."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-question-quality.sh"
+
+    def _run(self, msg):
+        sid = f"test-qgarm-{uuid.uuid4().hex[:12]}"
+        self.addCleanup(lambda: Path(
+            f"/tmp/airuleset-question-quality-block-{sid}").unlink(missing_ok=True))
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_bare_arm_question_is_not_blocked(self):
+        msg = ("/goal STOP CONDITIONS — ...\n\n"
+               "❓ NEEDS YOU: pastni /goal linku vyššie, nech front beží ďalej")
+        r = self._run(msg)
+        self.assertNotIn('"block"', r.stdout, r.stdout)
+
+    def test_ordinary_bare_question_still_blocked(self):
+        r = self._run("❓ NEEDS YOU: schváliš merge PR #5?")
+        self.assertIn('"block"', r.stdout)

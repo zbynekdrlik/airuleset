@@ -37,6 +37,15 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 [ -z "$MSG" ] && exit 0
 
+# The /goal ARM question is a MACHINE question — the api-watchdog auto-arm
+# types the printed /goal itself and the Discord ping is suppressed for it, so
+# the away-user Slovak template has no audience here. Enforcing it looped the
+# Stop hook and killed the gk session (2026-07-20). 'ž' via ALTERNATION, never
+# a bracket class (grep splits multibyte chars inside []).
+if printf '%s\n' "$MSG" | grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal'; then
+    exit 0
+fi
+
 RETRY_FILE="/tmp/airuleset-question-quality-block-${SID}"
 RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
 MAX_RETRIES=3
