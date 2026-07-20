@@ -1336,15 +1336,36 @@ def _gh_env(home=None, base=None):
     env = dict(os.environ if base is None else base)
     if env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
         return env
+    homedir = home or os.path.expanduser("~")
     try:
-        rc = Path(os.path.join(home or os.path.expanduser("~"), ".bashrc")
+        rc = Path(os.path.join(homedir, ".bashrc")
                   ).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return env                      # no .bashrc → gh runs with what it has
-    m = re.search(r'^\s*export\s+(GH_TOKEN|GITHUB_TOKEN)=["\x27]?'
-                  r'([^\s"\x27]+)', rc, re.M)
-    if m:
-        env[m.group(1)] = m.group(2)
+    m = re.search(r'^\s*export\s+(GH_TOKEN|GITHUB_TOKEN)=["\x27]?(.+)$',
+                  rc, re.M)
+    if not m:
+        return env
+    key, val = m.group(1), m.group(2).strip().strip('"\x27')
+    # `export GH_TOKEN=$(cat ~/.config/gh-token 2>/dev/null)` — david's real
+    # form (2026-07-20 401 root cause: the literal regex captured '$(cat').
+    # Resolve the one safe substitution shape by reading the file ourselves;
+    # any OTHER substitution is unresolvable → leave the env untouched
+    # (a garbage literal would turn every gh call into a silent 401).
+    cat = re.match(r"\$\(\s*cat\s+([^\s)]+)", val)
+    if cat:
+        p = cat.group(1)
+        p = os.path.join(homedir, p[2:]) if p.startswith("~/") else p
+        try:
+            val = Path(p).read_text(encoding="utf-8").strip()
+        except OSError:
+            return env
+    elif val.startswith("$("):
+        return env
+    else:
+        val = val.split()[0] if val.split() else ""
+    if val:
+        env[key] = val
     return env
 
 

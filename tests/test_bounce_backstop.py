@@ -331,3 +331,25 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
         parked_with_input = DONE_PARKED.replace(
             "❯ \n", "❯ chekni ci nemas nieco nove\n")
         self.assertFalse(self._go(parked_with_input).typed())
+
+
+class TestGhEnvCatSubstitution(unittest.TestCase):
+    def test_cat_command_substitution_is_resolved(self):
+        # david's real .bashrc (found 2026-07-20, the 401 root cause):
+        #   export GH_TOKEN=$(cat ~/.config/gh-token 2>/dev/null)
+        # A literal-value regex captured the string '$(cat' and gh got 401 —
+        # the backstop silently found nothing while #1801 rotted for 3 hours.
+        with TemporaryDirectory() as home:
+            Path(home, ".config").mkdir()
+            Path(home, ".config", "gh-token").write_text("ghp_realtoken42\n")
+            Path(home, ".bashrc").write_text(
+                "export GH_TOKEN=$(cat ~/.config/gh-token 2>/dev/null)\n")
+            env = wd._gh_env(home, base={"PATH": "/usr/bin"})
+            self.assertEqual(env.get("GH_TOKEN"), "ghp_realtoken42")
+
+    def test_unresolvable_substitution_is_failsafe(self):
+        with TemporaryDirectory() as home:
+            Path(home, ".bashrc").write_text(
+                "export GH_TOKEN=$(some-helper --fetch)\n")
+            env = wd._gh_env(home, base={"PATH": "/usr/bin"})
+            self.assertNotIn("GH_TOKEN", env)   # never a garbage literal
