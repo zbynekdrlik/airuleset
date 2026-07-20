@@ -1229,16 +1229,24 @@ def compose_reply_prompt(r):
     One line only: send_continue types the text literally then presses Enter, a
     newline would submit early. A legacy map entry without stored question text
     falls back to the raw reply (the pre-2026-07-17 behavior)."""
+    # The re-arm tail closes the ping-pong: a /goal loop correctly ENDS on a
+    # blocked ❓ (stop condition A) — after the answer resolves the ticket the
+    # session must re-print the continuation /goal + arm question so the
+    # watchdog auto-arm re-starts the loop (montalu break, 2026-07-20: the
+    # answer landed, nothing re-armed, bounce tickets rotted).
+    rearm = (" Ak predtým bežal /goal loop (ukončil sa touto otázkou), po "
+             "vyriešení vytlač continuation /goal + arm otázku s prázdnym "
+             "inputom — auto-arm ho nalepí sám.")
     q = str(r.get("question") or "").strip()
     if not q:
-        return r["text"]
+        return r["text"] + rearm
     ts = r.get("asked_ts") or 0
     when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts
             else "nedávno")
     return ("Odpoveď z Discordu: %s ti bola cez Discord položená táto otázka: "
             "«%s» Užívateľ na ňu teraz odpovedal: «%s» — zariaď sa podľa tejto "
-            "odpovede (číslo = poradie ponúknutej možnosti)."
-            % (when, q, " ".join(str(r.get("text") or "").split())))
+            "odpovede (číslo = poradie ponúknutej možnosti).%s"
+            % (when, q, " ".join(str(r.get("text") or "").split()), rearm))
 
 
 def _discord_get(url, token, timeout=6):

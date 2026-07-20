@@ -229,7 +229,7 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg(content="najprv 0.28.0")]))
         # send_continue types the literal text then Enter
         literal = [a for a in self.sent if "-l" in a]
-        self.assertTrue(any("najprv 0.28.0" in a for a in literal),
+        self.assertTrue(any("najprv 0.28.0" in a[-1] for a in literal),
                         "answer text must be typed into the pane: %r" % self.sent)
         self.assertTrue(any(a[-1] == "Enter" for a in self.sent))
 
@@ -471,7 +471,7 @@ class ReplyPromptCarriesQuestion(unittest.TestCase):
                  "message_reference": {"message_id": "888001"},
                  "content": "najprv 0.28.0"}])
         typed = [a for a in self.sent if "-l" in a]
-        self.assertEqual(typed[0][-1], "najprv 0.28.0")
+        self.assertIn("najprv 0.28.0", typed[0][-1])   # + re-arm tail rides along
 
     def test_record_question_cli_reads_question_from_stdin(self):
         # The send hook pipes the posted ❓ CONTENT via stdin — arbitrary quotes/
@@ -517,3 +517,23 @@ class TestRecordQuestionNeverBlocksOnStdin(unittest.TestCase):
         finally:
             os.close(r)
             os.close(w)
+
+
+class TestReplyPromptRemindsGoalRearm(unittest.TestCase):
+    def test_wrapped_prompt_carries_rearm_reminder(self):
+        # Montalu ping-pong break 2026-07-20: the /goal loop correctly ENDS on
+        # a blocked ❓ (stop condition A), the user answers via Discord — and
+        # nothing re-arms the loop, so bounce tickets rot and the gatekeeper
+        # waits. The delivered reply prompt itself now carries the re-arm
+        # instruction (print the continuation /goal + arm question; auto-arm
+        # types it).
+        r = {"question": "nechať marže skryté?", "asked_ts": 1234, "text": "1"}
+        p = wd.compose_reply_prompt(r)
+        self.assertIn("continuation /goal", p)
+        self.assertIn("auto-arm", p)
+        self.assertNotIn("\n", p)
+
+    def test_legacy_raw_reply_also_carries_reminder(self):
+        r = {"question": "", "asked_ts": 0, "text": "nechaj tak"}
+        p = wd.compose_reply_prompt(r)
+        self.assertIn("continuation /goal", p)
