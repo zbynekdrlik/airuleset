@@ -1521,6 +1521,55 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# /goal auto-arm (job 9, 2026-07-20) — the printed template pastes itself.
+# /autopilot and /process-subdev end by PRINTING the /goal template and asking
+# the user to paste it — the one manual step left in every stream ("dost mi
+# vadi ze musim pracne vsade chodit a zadavat goal — malo by sa to samo").
+# The watchdog performs the paste: an IDLE pane whose tail asks to paste a
+# /goal and carries the printed line gets it typed + submitted — the exact
+# keystrokes the user would make. Safety: bare empty prompt only (never over
+# user text), never when a goal is already armed (◎ /goal), never into a busy
+# pane, one arm per pane per window.
+# --------------------------------------------------------------------------- #
+
+GOAL_ARM_WINDOW_S = 10 * 60          # one auto-arm per pane per this window
+_ARM_QUESTION_RX = re.compile(
+    r"❓[^\n]*NEEDS YOU[^\n]*/goal|"          # vlož /goal riadok / pastni /goal
+    r"(vlo\S|pastni|paste)[^\n]{0,40}/goal", re.I)
+
+
+def goal_autoarm(now, run, state, dry_run=False):
+    """Job 9 — see the section comment. Mutates state['goalarm']; returns log
+    lines. Best-effort (never raises)."""
+    ga = state.get("goalarm") or {}
+    logs = []
+    for pid, cwd in list_claude_panes(run):
+        if (now - ga.get(pid, 0)) < GOAL_ARM_WINDOW_S:
+            continue
+        cap = run(["tmux", "capture-pane", "-p", "-J", "-t", pid,
+                   "-S", "-250"]) or ""
+        tail = cap[-1500:]
+        if not _ARM_QUESTION_RX.search(tail):
+            continue
+        if "◎ /goal" in cap:
+            continue                       # already armed — nothing to do
+        if "esc to interrupt" in tail or "Waiting for" in tail:
+            continue                       # live work on screen — not at rest
+        if not pane_at_idle_prompt(cap) or pane_in_mode(pid, run):
+            continue                       # busy, or user text in the box
+        goals = re.findall(r"^\s*(/goal \S.*)$", cap, re.M)
+        if not goals:
+            continue
+        ga[pid] = int(now)
+        state["goalarm"] = ga          # key exists only once something armed
+        if not dry_run:
+            send_continue(pid, goals[-1].strip(), run)
+        logs.append("goal-autoarm %s (%s)" % (pid,
+                                              os.path.basename(cwd.rstrip("/"))))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -1925,7 +1974,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (gatekeeper-returned) tickets for a repo this box touches → nudge the
           repo's IDLE claude pane (busy pane = the label alone queues them; never
           interrupt mid-work), or ONE deduped Discord ping when no session runs
-          (bounce_backstop, ~30 min cadence).
+          (bounce_backstop, ~30 min cadence);
+      (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
+          gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
+          never over user text, never when a goal is already armed).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -2413,6 +2465,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
+
+    # Job 9 — /goal auto-arm (the printed template pastes itself; pure tmux,
+    # no network). Best-effort.
+    try:
+        logs += goal_autoarm(now, run, state, dry_run=dry_run)
+    except Exception as e:
+        logs.append("goal-autoarm error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
