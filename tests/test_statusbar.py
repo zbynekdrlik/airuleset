@@ -373,7 +373,7 @@ class SkippedBucket(unittest.TestCase):
             _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
             _seed_progress(home, "demo", done=1, remaining=3)
             seg = self._seg(home, cwd)
-            self.assertIn("Issues 1/4", seg)
+            self.assertIn("Issues 1/10", seg)   # remaining = LIVE open (9)
             self.assertIn("skipped 2", seg)
 
     def test_refresh_counts_skipped_for_full_authority(self):
@@ -554,3 +554,35 @@ class SharedAccountSliceScoping(unittest.TestCase):
             cache = self._refresh(home, repo, bindir, "kvaskodev")
             # union {1,2} ∪ {1,50,51} ∪ {60,61,62} = 7
             self.assertEqual(cache["open"], 7)
+
+
+class RunModeTracksLiveOpenCount(unittest.TestCase):
+    """codex-bridge incident 2026-07-20: the session finished the whole backlog
+    (0 open) but the footer kept 'Issues 1/2' for up to 6 h — the progress
+    file's `remaining` freezes at card time. Run-mode now takes remaining from
+    the LIVE open count (tickets cache, TTL 120 s) whenever it is known."""
+
+    def test_finished_backlog_shows_done_done_green(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=0, name="demo")
+            _seed_progress(home, "demo", done=1, remaining=1)   # stale card
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 1/1", seg)
+            self.assertIn("38;5;40m", seg)                      # green
+
+    def test_new_tickets_mid_run_grow_the_total(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=5, name="demo")
+            _seed_progress(home, "demo", done=2, remaining=1)   # stale low
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 2/7", seg)
+
+    def test_unknown_open_falls_back_to_card_remaining(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=None, name="demo")    # gh error
+            _seed_progress(home, "demo", done=3, remaining=14)
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 3/17", seg)

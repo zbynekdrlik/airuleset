@@ -109,6 +109,13 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         if prog and now - (prog.get("ts") or 0) <= AUTOPILOT_RUN_WINDOW_S:
             done, remaining = prog.get("done"), prog.get("remaining")
             if isinstance(done, int) and isinstance(remaining, int):
+                # The card's `remaining` freezes at card time and can sit stale
+                # for the whole 6 h run window ('Issues 1/2' shown after the
+                # backlog emptied — 2026-07-20). The tickets cache's open count
+                # (TTL 120 s) is the LIVE truth — prefer it when known, in both
+                # directions (closed outside cards / new tickets filed mid-run).
+                if isinstance(cache.get("open"), int):
+                    remaining = cache["open"]
                 color = 40 if remaining == 0 else 75    # green when backlog empty
                 return "\033[38;5;%dmIssues %d/%d\033[0m%s" % (
                     color, done, done + remaining, skip_sfx)
