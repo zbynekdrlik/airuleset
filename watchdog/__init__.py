@@ -1554,7 +1554,31 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                     blocked.setdefault(r["reply_id"], now)
                     logs.append("reply wedged (enter swallowed) %s"
                                 % r["session"][:12])
+                    # An ACTIVE session with a DEAD input box (the 4th #20
+                    # recurrence) is invisible to job 10 — count our own
+                    # verify failures; >= 3 cycles → ONE deduped ping (the
+                    # armed /goal survives a kill + resume, so the restart
+                    # is safe to ask for).
+                    idead = state.get("inputdead")
+                    idead = dict(idead) if isinstance(idead, dict) else {}
+                    idead[r["session"]] = int(idead.get(r["session"]) or 0) + 1
+                    state["inputdead"] = idead
+                    if idead[r["session"]] == 3:   # exactly once per episode
+                        from notify import send as _send
+                        _send("⚠️ **%s** — session BEŽÍ, ale jej VSTUP je "
+                              "mŕtvy (Enter sa opakovane nechytá — wedge). "
+                              "Nedá sa jej nič doručiť. Reštart: v okne kill "
+                              "claude procesu + `claude` (resume) — armovaný "
+                              "/goal reštart prežije."
+                              % project_label(r["cwd"]),
+                              env=env,
+                              dedup_key="inputdead:%s" % r["session"][:12],
+                              dry_run=dry_run)
                     continue
+            idead = state.get("inputdead")
+            if isinstance(idead, dict):
+                idead.pop(r["session"], None)
+                state["inputdead"] = idead
             _delivered(r)
 
     # A ticket-fallback delivery is durable but INVISIBLE in the terminal —
