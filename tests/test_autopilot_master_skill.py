@@ -149,3 +149,17 @@ class TestGoalTemplate(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestMissedWindowNeverSilent(TestCase):
+    def test_blocked_window_raises_notice(self):
+        # 2026-07-21 morning: the 22:00-06:00 window passed with the release
+        # blocked by two bounced regressions — CORRECT hold, but the user got
+        # NO message all night and woke up expecting a deploy
+        t = read(SKILL)
+        self.assertIn("ONE deduped notice per window", t)
+        g = None
+        for line in t.splitlines():
+            if line.startswith("/goal "):
+                g = line
+        self.assertIn("never a silent missed window", g)
