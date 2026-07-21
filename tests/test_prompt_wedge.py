@@ -93,3 +93,57 @@ class TestPromptWedge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MACHINE_PANE = ("✻ Waiting for 1 background agent to finish\n"
+                "──── ultracode ─\n"
+                "❯\xa0Priorita: prio:bounce #1896 - posledny blocker release\n"
+                "────\n"
+                "  ctx ██░░  caveman\n")
+
+
+class TestMachineNudgeAutoSubmit(unittest.TestCase):
+    """Recurring wedge (3× in 24 h): the gatekeeper's cross-stream nudge into
+    the montalu pane loses its Enter and sits unsubmitted for hours. The text
+    is MACHINE-authored with a canonical prefix (`Priorita: prio:bounce`) —
+    submitting it is always the intent, so job 10 auto-Enters a frozen draft
+    matching the prefix (>= 2 identical sweeps), even while the turn runs and
+    the transcript is fresh. User text NEVER matches the prefix and keeps the
+    ping-first handling."""
+
+    def _run_recorder(self):
+        calls = []
+
+        def run(argv, timeout=8):
+            calls.append(argv)
+            if "pane_in_mode" in " ".join(argv):
+                return "0"
+            return ""
+        run.calls = calls
+        return run
+
+    def test_frozen_machine_nudge_gets_entered(self):
+        st, s = {}, FakeSend()
+        now = time.time()
+        run = self._run_recorder()
+        wd.prompt_wedge_check(now, st, "%1", MACHINE_PANE, now, "zbynek",
+                              "odoo", s, run=run)
+        logs = wd.prompt_wedge_check(now + 70, st, "%1", MACHINE_PANE, now,
+                                     "zbynek", "odoo", s, run=run)
+        enters = [a for a in run.calls if a[-1] == "Enter"]
+        self.assertEqual(len(enters), 1, run.calls)
+        self.assertTrue(any("machine-nudge" in ln for ln in logs), logs)
+        self.assertFalse(s.calls, "machine nudge submits, never pings")
+
+    def test_single_sweep_machine_nudge_waits(self):
+        st, s = {}, FakeSend()
+        run = self._run_recorder()
+        wd.prompt_wedge_check(time.time(), st, "%1", MACHINE_PANE,
+                              time.time(), "zbynek", "odoo", s, run=run)
+        self.assertFalse([a for a in run.calls if a[-1] == "Enter"])
+
+    def test_protocol_declares_canonical_prefix(self):
+        skill = (Path(__file__).resolve().parent.parent / "skills" /
+                 "autopilot" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Priorita: prio:bounce", skill)
+        self.assertIn("auto-submits", skill)
