@@ -250,6 +250,15 @@ PENDING_PREFIX = "/tmp/claude-discord-pending-"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 STATE_PATH = Path.home() / ".claude" / "api-watchdog-state.json"
 
+# Api-error episode keys in the state file are BARE SESSION IDS (transcript
+# stems — UUIDs). The cleanup pass may delete ONLY these; every other bare key
+# is a NAMED, job-owned store (dreply_*, inputdead, goalarm, …) with its own
+# pruning — deleting those each cycle reset job 7's ticket-fallback clock
+# forever (the starved montalu #1638 answer, 2026-07-21).
+_SESSION_KEY_RX = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
 # Synthetic assistant entries Claude Code appends that are NOT a real reply — when
 # scanning back for "the last real assistant message" these are skipped so a
 # trailing sentinel does not mask an api-error entry just before it.
@@ -2963,7 +2972,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # this branch never fires before all 3 nudges + the give-up ping land.)
             if int(now) - state[k].get("last_seen", 0) > wait_clear:
                 del state[k]
-        elif k not in stalled:
+        elif _SESSION_KEY_RX.fullmatch(k) and k not in stalled:
+            # bare UUID = an api-error episode key; drop it the moment the
+            # session recovered. Anything else bare is a NAMED job store
+            # (dreply_*, inputdead, goalarm, …) — NEVER cleanup's to delete
+            # (doing so starved the ticket-fallback, 2026-07-21).
             del state[k]
 
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
