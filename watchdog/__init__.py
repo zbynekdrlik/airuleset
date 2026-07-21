@@ -1318,6 +1318,12 @@ def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
 
 
 DREPLY_TICKET_FALLBACK_S = 180      # reply blocked this long → deliver via the ticket
+# A box with NO pane for the asking session may not be the pane's HOST — a
+# hosted stream's session (montalu claude inside newlevel's tmux) is delivered
+# by the HOST watchdog's keystrokes. The no-pane fallback therefore waits
+# longer, so the host wins the race and a double gh comment cannot happen; for
+# a genuinely dead session it still fires (later), never silently.
+DREPLY_NOPANE_FALLBACK_S = 900
 _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
 
@@ -1352,15 +1358,100 @@ def _ticket_fallback_text(r):
             % (" ".join(str(r.get("text") or "").split()), q))
 
 
-def _gh_comment(cwd, num, text):
+def _gh_comment(cwd, num, text, user=None):
     """Post `text` as a comment on issue #num of the repo at `cwd` (the DURABLE
-    delivery lane of the ticket-fallback). Best-effort: False on any failure —
-    the reply then stays pending on the keystroke path."""
+    delivery lane of the ticket-fallback). `user`: a FOREIGN question's repo —
+    run via `sudo -n -u <user>` with THEIR gh auth and a login-shell cd (their
+    HOME isn't even cd-able for this process). Best-effort: False on any
+    failure — the reply then stays pending on the keystroke path."""
+    import shlex
     import subprocess
     try:
-        p = subprocess.run(["gh", "issue", "comment", str(num), "-F", "-"],
-                           cwd=cwd or None, env=_gh_env(), input=text,
-                           capture_output=True, text=True, timeout=25)
+        if user:
+            p = subprocess.run(
+                ["sudo", "-n", "-u", user, "bash", "-lc",
+                 "cd %s && exec gh issue comment %d -F -"
+                 % (shlex.quote(str(cwd)), int(num))],
+                input=text, capture_output=True, text=True, timeout=30)
+        else:
+            p = subprocess.run(["gh", "issue", "comment", str(num), "-F", "-"],
+                               cwd=cwd or None, env=_gh_env(), input=text,
+                               capture_output=True, text=True, timeout=25)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
+def _foreign_user(cwd):
+    """Unix user owning `cwd` when it lives under ANOTHER user's /home — the
+    sudo-hosted stream shape (montalu claude inside newlevel's tmux). None for
+    the current user's own paths and non-home paths."""
+    import getpass
+    m = re.match(r"/home/([a-z0-9_-]+)/", str(cwd) + "/")
+    if not m:
+        return None
+    user = m.group(1)
+    try:
+        return None if user == getpass.getuser() else user
+    except Exception:
+        return None
+
+
+def _foreign_session_info(user, cwd):
+    """(session_id, transcript_mtime) of the FOREIGN user's newest transcript
+    for `cwd` (`sudo -n`) — binds a sudo-hosted pane to its session for jobs
+    7 + 10. None on any failure (no passwordless sudo / no transcript)."""
+    import subprocess
+    script = (
+        "import glob,os\n"
+        "d=os.path.expanduser('~/.claude/projects/'+"
+        "''.join('-' if c in '/._' else c for c in %r))\n"
+        "fs=sorted(glob.glob(d+'/*.jsonl'),key=os.path.getmtime)\n"
+        "if fs: print(os.path.basename(fs[-1])[:-6], os.path.getmtime(fs[-1]))\n"
+        % str(cwd))
+    try:
+        p = subprocess.run(["sudo", "-n", "-u", user, "python3", "-c", script],
+                           capture_output=True, text=True, timeout=10)
+        parts = (p.stdout or "").split()
+        if p.returncode == 0 and len(parts) == 2:
+            return parts[0], float(parts[1])
+        return None
+    except Exception:
+        return None            # fail-safe: no passwordless sudo / no transcript
+
+
+def _foreign_questions(user):
+    """The FOREIGN user's outstanding-❓ map (`sudo -n` read), {} on any
+    failure — a hosted stream records its questions under ITS home, invisible
+    to this box's notify.load_questions."""
+    import subprocess
+    try:
+        p = subprocess.run(
+            ["sudo", "-n", "-u", user, "cat",
+             os.path.join("/home", user, ".claude", "discord-questions.json")],
+            capture_output=True, text=True, timeout=10)
+        if p.returncode != 0 or not (p.stdout or "").strip():
+            return {}
+        d = json.loads(p.stdout)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}              # fail-safe: an unreadable foreign map = none
+
+
+def _foreign_drop_question(user, qid):
+    """Drop a delivered question from the FOREIGN user's map (`sudo -n`) so
+    their own watchdog never re-handles / double-fallbacks the same reply."""
+    import subprocess
+    script = ("import json,os\n"
+              "p=os.path.expanduser('~/.claude/discord-questions.json')\n"
+              "d=json.load(open(p))\n"
+              "d.pop(%r,None)\n"
+              "tmp=p+'.tmp'\n"
+              "json.dump(d,open(tmp,'w'))\n"
+              "os.replace(tmp,p)\n" % str(qid))
+    try:
+        p = subprocess.run(["sudo", "-n", "-u", user, "python3", "-c", script],
+                           capture_output=True, text=True, timeout=10)
         return p.returncode == 0
     except Exception:
         return False
@@ -1436,7 +1527,9 @@ def _react_ok(channel, message_id, token):
 
 
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
-                            discord_fetch=None, env=None, gh_comment=None):
+                            discord_fetch=None, env=None, gh_comment=None,
+                            hosted_users=None, foreign_questions=None,
+                            foreign_drop=None):
     """Route owner Discord replies into the sessions that asked (job 7).
 
     `panes_by_sid`: {session_id: (pane_id, captured_pane)} for the live `claude`
@@ -1462,6 +1555,19 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
+    # Merge HOSTED users' question maps (2026-07-21: montalu's claude runs in
+    # THIS tmux, but its ❓ map lives under /home/montalu — the session was
+    # invisible to both watchdogs). `q_owner` remembers which foreign user owns
+    # a merged question so delivery drops it from THEIR map.
+    hosted_users = hosted_users or {}
+    f_load = foreign_questions or _foreign_questions
+    f_drop = foreign_drop or _foreign_drop_question
+    q_owner = {}                        # question id -> foreign unix user
+    for fu in sorted(set(hosted_users.values())):
+        for qid, rec in (f_load(fu) or {}).items():
+            if qid not in qmap and isinstance(rec, dict):
+                qmap[qid] = rec
+                q_owner[qid] = fu
     if not qmap and not state.get("dreply_pointer"):
         return logs
     token = bot_token(env)
@@ -1496,7 +1602,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     def _delivered(r, via_ticket=None):
         done_set.add(r["reply_id"])
         done.append(r["reply_id"])
-        drop_question(r["referenced"])
+        # dry-run simulates delivery — it must NEVER mutate the real on-disk
+        # map (a dropped live question loses the answer). A FOREIGN question
+        # is dropped from its owner's map so their watchdog never re-handles.
+        if not dry_run:
+            fu = q_owner.get(r["referenced"])
+            if fu:
+                f_drop(fu, r["referenced"])
+            else:
+                drop_question(r["referenced"])
         qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
         blocked.pop(r["reply_id"], None)
         if via_ticket:
@@ -1506,12 +1620,24 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
 
     def _pending(r, why):
         blocked.setdefault(r["reply_id"], now)
-        # the durable lane once the keystroke path has been blocked long enough
-        if now - blocked[r["reply_id"]] >= DREPLY_TICKET_FALLBACK_S:
+        # The durable lane once the keystroke path has been blocked long
+        # enough. NO pane = we may not be the pane's HOST (a hosted stream's
+        # session lives in another user's tmux) — defer longer so the host
+        # delivers by keystroke first; a busy/wedged pane WE own keeps the
+        # tight deadline.
+        deadline = (DREPLY_NOPANE_FALLBACK_S if why == "no pane"
+                    else DREPLY_TICKET_FALLBACK_S)
+        if now - blocked[r["reply_id"]] >= deadline:
             m = _TICKET_NUM_RX.search(r.get("question") or "")
             if m:
-                ok = True if dry_run else gh_fn(r["cwd"], m.group(1),
-                                               _ticket_fallback_text(r))
+                fu = q_owner.get(r["referenced"])
+                if dry_run:
+                    ok = True
+                elif fu:
+                    ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r),
+                               user=fu)
+                else:
+                    ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r))
                 if ok:
                     ptr = state.get("dreply_pointer")
                     ptr = dict(ptr) if isinstance(ptr, dict) else {}
@@ -2531,9 +2657,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # wrong (possibly healthy) pane. Mis-targeted keystroke injection is worse than
     # a missed auto-resume (the user still gets pinged on the stall via the flag).
     by_transcript = {}
+    hosted_panes = []                   # sudo-hosted stream panes (foreign HOME)
     for pid, cwd in list_claude_panes(run):
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
+            fu = _foreign_user(cwd)
+            if fu:
+                hosted_panes.append((pid, cwd, fu))
             continue
         tpath, tmtime = tinfo
         by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
@@ -2948,6 +3078,33 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs.append("skip error %s: %r" % (err_key, e))
             continue
 
+    # Sudo-hosted stream panes (montalu claude in THIS tmux): the transcript
+    # lives under the FOREIGN home, so the pane fell out of the loop above —
+    # yet it is reachable ONLY from here (the hosted user's own watchdog has
+    # no tmux server at all; 2026-07-21: the montalu Discord answer starved
+    # invisible to both sides). Bind each to its foreign session id so job 7
+    # delivers replies into it and job 10 catches wedged prompts.
+    hosted_users = {}                   # session id -> foreign unix user
+    for pid, cwd, fu in hosted_panes:
+        try:
+            info = _foreign_session_info(fu, cwd)
+            if not info:
+                continue
+            sid, f_mtime = info
+            if sid in panes_by_sid:
+                continue
+            captured = capture_pane(pid, run)
+            panes_by_sid[sid] = (pid, captured)
+            hosted_users[sid] = fu
+            owner = pane_owner(pid, run)
+            if owner:
+                owner_by_sid.setdefault(sid, owner)
+            logs += prompt_wedge_check(now, state, pid, captured, f_mtime,
+                                       owner, project_label(cwd) + "-" + fu,
+                                       send_fn, dry_run=dry_run, run=run)
+        except Exception as e:
+            logs.append("skip hosted pane %s: %r" % (pid, e))
+
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
     # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
     # (the episode is genuinely over / the prompt was answered) — tolerating a
@@ -3006,9 +3163,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     if discord_fetch is not None:
         try:
             logs += deliver_discord_replies(now, run, state, panes_by_sid,
-                                            dry_run=dry_run, discord_fetch=discord_fetch)
-        except Exception:
-            pass
+                                            dry_run=dry_run, discord_fetch=discord_fetch,
+                                            hosted_users=hosted_users)
+        except Exception as e:
+            logs.append("discord-reply error: %r" % (e,))
 
     # Job 8 — bounce backstop (gatekeeper-returned prio:bounce tickets must
     # never rot after a loop ends). Only when a fetch is wired (cmd_watchdog
