@@ -536,6 +536,12 @@ re-review and no pickup).
    idle claude pane in a repo with open `prio:bounce` gets a nudge (the nudge-ack above handles
    it, loop or no loop); a repo with NO live session pings the owner's Discord once. The
    gatekeeper's own ssh/tmux nudge is best-effort delivery, never the guarantee.
+6. **Nudge text shape (canonical, MANDATORY):** an injected cross-stream nudge MUST start with the
+   exact prefix `Priorita: prio:bounce` — the api-watchdog auto-submits a frozen input-box draft
+   matching this prefix (a swallowed Enter left gk→montalu nudges sitting unsubmitted for hours,
+   3× on 2026-07-20/21), so never reword the prefix and NEVER use it for human-authored text.
+   After `send-keys`, capture-pane VERIFY the input box emptied; if the text stuck, leave it (the
+   watchdog submits it within ~2 min) — the `prio:bounce` label remains the delivery guarantee.
 
 ## Watching & steering
 

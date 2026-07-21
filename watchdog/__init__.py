@@ -1891,10 +1891,15 @@ _ARM_QUESTION_RX = re.compile(
 
 PWEDGE_MIN_IDLE_S = 30 * 60      # transcript must be this stale before a wedge ping
 PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
+# Canonical CROSS-STREAM machine-nudge prefix (autopilot skill protocol) — a
+# frozen draft starting with it is MACHINE text whose submission is always the
+# intent, so job 10 auto-Enters it instead of pinging (the gk→montalu nudge
+# kept losing its Enter and sat unsubmitted for hours, 3× in 24 h).
+MACHINE_NUDGE_PREFIX = "Priorita: prio:bounce"
 
 
 def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
-                       send_fn, dry_run=False):
+                       send_fn, dry_run=False, run=None):
     """Job 10 (#20) — queued-prompt-wedge detection, PING-FIRST.
 
     Text sitting in the input box (a submitted-but-stuck queued prompt, or an
@@ -1908,9 +1913,15 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     own-text Enter-retry already covers the watchdog's own deliveries."""
     key = "pwedge:" + pid
     txt = _input_line_text(captured)
-    if (not txt or "esc to interrupt" in (captured or "")
-            or "Waiting for" in (captured or "")
-            or now - tmtime < PWEDGE_MIN_IDLE_S):
+    if not txt:
+        state.pop(key, None)
+        return []
+    machine = txt.startswith(MACHINE_NUDGE_PREFIX)
+    if not machine and ("esc to interrupt" in (captured or "")
+                        or "Waiting for" in (captured or "")
+                        or now - tmtime < PWEDGE_MIN_IDLE_S):
+        # a USER draft gets the conservative ping-first handling only once the
+        # session is provably at rest; a MACHINE nudge is submit-anytime.
         state.pop(key, None)
         return []
     import hashlib
@@ -1924,6 +1935,11 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     state[key] = st
     if st["n"] < PWEDGE_SWEEPS or st.get("pinged"):
         return []
+    if machine:
+        if not dry_run and run and not pane_in_mode(pid, run):
+            run(["tmux", "send-keys", "-t", pid, "Enter"])
+        state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
+        return ["machine-nudge submit %s (%s)" % (pid, project)]
     st["pinged"] = True
     send_fn("⚠️ **%s** — v okne visí NEODOSLANÝ text („%s…“) a session stojí "
             "vyše 30 minút. Stlač v tom okne Enter (text sa odošle) alebo ho "
@@ -2536,7 +2552,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # --- (10) QUEUED-PROMPT-WEDGE (#20): frozen input-box text + stale
             # transcript → ONE deduped owner ping (ping-first, never auto-Enter).
             logs += prompt_wedge_check(now, state, pid, captured, tmtime,
-                                       owner, project, send_fn, dry_run=dry_run)
+                                       owner, project, send_fn,
+                                       dry_run=dry_run, run=run)
 
             # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
             # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
