@@ -217,8 +217,10 @@ class DeliverDiscordReplies(unittest.TestCase):
             time.time(), self._run, state, panes, dry_run=True,
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
-        # question dropped on delivery; reply id deduped
-        self.assertNotIn("888001", notify.load_questions(self.qpath))
+        # dry-run: delivery is SIMULATED — the real on-disk map must be kept
+        # (a dry-run diagnostic dropping the live question loses the answer);
+        # the reply id is still deduped in (unsaved) state
+        self.assertIn("888001", notify.load_questions(self.qpath))
         self.assertIn("rep1", state["dreply_done"])
 
     def test_types_the_answer_when_not_dry_run(self):
@@ -654,11 +656,14 @@ class TicketFallbackDelivery(unittest.TestCase):
         self.assertIn("888001", notify.load_questions(self.qpath))
 
     def test_absent_pane_also_reaches_ticket_fallback(self):
-        # the asking session died — the keystroke path can never deliver; the
-        # ticket fallback is the only route left
+        # NO pane here does not mean no pane anywhere — a hosted stream's pane
+        # lives in ANOTHER user's tmux (montalu, 2026-07-21), so the no-pane
+        # fallback waits the LONGER DREPLY_NOPANE_FALLBACK_S to let the host
+        # watchdog deliver by keystroke first; for a genuinely dead session it
+        # still fires (later), never silently
         self._record()
         now = time.time()
-        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_NOPANE_FALLBACK_S - 5}}
         run = ScriptedPaneRun([""])
         wd.deliver_discord_replies(
             now, run, state, {}, dry_run=False,
