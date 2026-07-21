@@ -862,3 +862,66 @@ class TicketFallbackPointer(unittest.TestCase):
             gh_comment=lambda *a: True)
         self.assertFalse([a for a in run.sent if "-l" in a])
         self.assertIn("sid-abc", state.get("dreply_pointer", {}))
+
+
+class InputDeadPing(unittest.TestCase):
+    """4th wedge recurrence (2026-07-21): an ACTIVE session (transcript
+    advancing) with a DEAD input box is invisible to job 10 (needs a stale
+    transcript). Job 7 counts its own delivery verify-failures per session;
+    >= 3 wedged cycles → ONE deduped Discord ping telling the user the input
+    is dead and a restart is needed (the armed /goal survives resume)."""
+    OWNER = "773451844110385193"
+    IDLE = "● done\n❯\xa0\n  ctx ███░  caveman\n"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        m2 = m.patch.object(wd, "_react_ok", return_value=True)
+        m2.start()
+        self.addCleanup(m2.stop)
+        self.pings = []
+        m3 = m.patch.object(notify, "send",
+                            side_effect=lambda body, **kw:
+                            self.pings.append((body, kw)) or "sent")
+        m3.start()
+        self.addCleanup(m3.stop)
+        notify.record_question("888001", "777001", "sid-abc", "/repo/x",
+                               now=time.time(), path=self.qpath,
+                               question="Ticket #55 — pokračovať?")
+
+    def _reply(self):
+        return {"id": "repD", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888001"}, "content": "1"}
+
+    def _wedged_cycle(self, state):
+        stuck = ("──── ultracode ─\n❯\xa0auto-arm ho nalepí sám.\n────\n"
+                 "  ctx ██░░  caveman\n")
+        run = ScriptedPaneRun([stuck, stuck, stuck])
+        wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+            dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
+            gh_comment=lambda *a: False)
+
+    def test_three_wedged_cycles_ping_once(self):
+        state = {}
+        for _ in range(4):
+            self._wedged_cycle(state)
+        dead = [p for p in self.pings if "vstup" in p[0].lower()
+                or "input" in p[0].lower()]
+        self.assertEqual(len(dead), 1, self.pings)
+        self.assertIn("dedup_key", dead[0][1])
+
+    def test_single_wedge_does_not_ping(self):
+        state = {}
+        self._wedged_cycle(state)
+        self.assertFalse([p for p in self.pings
+                          if "vstup" in p[0].lower()])
