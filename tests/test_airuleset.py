@@ -3766,6 +3766,10 @@ class TestApiWatchdog(TestCase):
         self.pings.append((body, dedup_key, owner))
         return "sent"
 
+    # real CC session ids are UUIDs (transcript stems) — the state cleanup
+    # keys on that shape, so the fixture must match the real contract
+    _SID = "5e55abc0-51d0-4a5e-9f1e-00000000abcd"
+
     _ERR = {"type": "assistant", "isApiErrorMessage": True,
             "message": {"role": "assistant",
                         "content": [{"type": "text", "text": "API Error: 529 Overloaded"}]}}
@@ -3778,7 +3782,7 @@ class TestApiWatchdog(TestCase):
     def _transcript(self, cwd, entries, age_s, now):
         d = self.projects / self.w.encode_project_dir(cwd)
         d.mkdir(parents=True, exist_ok=True)
-        p = d / "sess-abc.jsonl"
+        p = d / (self._SID + ".jsonl")
         p.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
         os.utime(p, (now - age_s, now - age_s))
         return p
@@ -3950,8 +3954,8 @@ class TestApiWatchdog(TestCase):
                                   "text": "Vysvetlenie: marker ⏳ znamená že niečo beží."}]}}
 
     def _subagent_transcript(self, cwd, age_s, now):
-        # write a subagent transcript at <enc>/sess-abc/subagents/agent-x.jsonl
-        d = self.projects / self.w.encode_project_dir(cwd) / "sess-abc" / "subagents"
+        # write a subagent transcript at <enc>/<SID>/subagents/agent-x.jsonl
+        d = self.projects / self.w.encode_project_dir(cwd) / self._SID / "subagents"
         d.mkdir(parents=True, exist_ok=True)
         p = d / "agent-x.jsonl"
         p.write_text('{"type":"assistant"}\n')
@@ -4442,14 +4446,14 @@ class TestApiWatchdog(TestCase):
         kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
                   state_path=self.state, grace=300, wait_grace=120, wait_clear=90)
         self.w.run_once(now=now, **kw)
-        self.assertIn("wait:sess-abc", self.w.load_state(self.state))
+        self.assertIn("wait:" + self._SID, self.w.load_state(self.state))
         # answered: prompt footer gone. The key persists briefly (tolerance) then is
         # dropped once the footer has been absent > wait_clear.
         fake.captures["%5"] = "● Committed abc1234\n  done"
         self.w.run_once(now=now + 60, **kw)        # within tolerance → still present
-        self.assertIn("wait:sess-abc", self.w.load_state(self.state))
+        self.assertIn("wait:" + self._SID, self.w.load_state(self.state))
         self.w.run_once(now=now + 200, **kw)       # absent > wait_clear → dropped
-        self.assertNotIn("wait:sess-abc", self.w.load_state(self.state))
+        self.assertNotIn("wait:" + self._SID, self.w.load_state(self.state))
 
     def test_run_once_waiting_no_reping_on_transcript_jitter(self):
         # THE REPORTED BUG: a multi-question dialog / re-ask loop touches the
