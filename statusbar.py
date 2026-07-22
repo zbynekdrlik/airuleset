@@ -136,24 +136,41 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     return ""
 
 
-def questions_segment(now=None, home=None):
-    """'otazky N' — unanswered ❓ pings still awaiting the user's reply (user
-    request 2026-07-22: "aby som videl kolko je na mna nezodpovedanych otazok").
+def questions_segment(cwd, now=None, home=None):
+    """Unanswered-❓ badge, SCOPED to the session's project (user complaint
+    2026-07-22: the airuleset footer showed the machine-global 14 — "custe
+    hluposti"; every map entry carries the asking session's cwd, so the badge
+    must attribute questions to their stream):
 
-    Source: the machine-local outstanding-question map
-    ~/.claude/discord-questions.json — notify.record_question adds an entry on
-    every delivered ❓ ping and the watchdog's reply routing (job 7) drops it
-    the moment the user's answer lands in the asking session (keystroke or
-    ticket-fallback), so a live entry == a question waiting on the user.
-    Cwd-INDEPENDENT (a user-global badge, unlike the repo-scoped Issues
-    segment) and hidden at 0 (badge semantics, like `skipped`). Entries past
+      - 'otazky N'          — pending ❓ asked from THIS cwd (orange)
+      - 'otazky N · inde M' — plus M pending in OTHER projects (grey)
+      - 'otazky inde M'     — none here, M elsewhere (all grey)
+      - ''                  — none anywhere (badge semantics, like `skipped`)
+
+    Source: ~/.claude/discord-questions.json — notify.record_question adds an
+    entry per ❓ ping; the watchdog drops it when the user's reply is routed
+    into the asking session (job 7) or when the session got a later HUMAN
+    prompt (answered at the terminal — prune_answered_questions). Entries past
     QUESTIONS_TTL_S are ignored to match the map's own prune TTL."""
     now = time.time() if now is None else now
     d = _load(_claude_dir(home) / "discord-questions.json")
     if not d:
         return ""
-    n = sum(1 for v in d.values()
-            if isinstance(v, dict) and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S)
-    if not n:
-        return ""
-    return "\033[38;5;214motazky %d\033[0m" % n
+    here = str(cwd or "").rstrip("/")
+    local = other = 0
+    for v in d.values():
+        if not (isinstance(v, dict)
+                and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S):
+            continue
+        if here and str(v.get("cwd") or "").rstrip("/") == here:
+            local += 1
+        else:
+            other += 1
+    if local and other:
+        return ("\033[38;5;214motazky %d\033[0m \033[38;5;245m· inde %d\033[0m"
+                % (local, other))
+    if local:
+        return "\033[38;5;214motazky %d\033[0m" % local
+    if other:
+        return "\033[38;5;245motazky inde %d\033[0m" % other
+    return ""

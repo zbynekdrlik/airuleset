@@ -281,7 +281,7 @@ try:
     seg = statusbar.tickets_segment(cwd)
     if seg:
         segs.append(seg)
-    q = statusbar.questions_segment()   # user-global unanswered-❓ badge
+    q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project · inde)
     if q:
         segs.append(q)
 except Exception:

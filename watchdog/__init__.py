@@ -1457,6 +1457,95 @@ def _foreign_drop_question(user, qid):
         return False
 
 
+# Prompts TYPED BY MACHINERY into a session (watchdog nudges/deliveries,
+# auto-armed /goal, harness task-notifications, slash-command echoes) must
+# never count as "the user answered the pending ❓ at the terminal".
+_MACHINE_PROMPT_EXACT = ("continue",)
+_MACHINE_PROMPT_PREFIXES = (
+    "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:", "/goal ",
+    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
+    "<task-notification>", "<local-command", "<command-", "<system-reminder")
+
+
+def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
+    """Epoch of the NEWEST human-typed prompt in the transcript tail, or None.
+    Machine-typed prompts (the list above), tool_result user entries and meta
+    entries don't count — only something the USER actually wrote."""
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return None
+    best = None
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
+            continue
+        c = (e.get("message") or {}).get("content")
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in c):
+                continue
+            text = " ".join(b.get("text", "") for b in c
+                            if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            continue
+        t = text.strip()
+        if (not t or t in _MACHINE_PROMPT_EXACT
+                or any(t.startswith(p) for p in _MACHINE_PROMPT_PREFIXES)):
+            continue
+        try:
+            ep = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ep > best:
+            best = ep
+    return best
+
+
+def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
+    """Drop question-map entries whose asking session received a HUMAN prompt
+    AFTER the ❓ was pinged — the question was answered at the terminal, so
+    the entry would otherwise linger until the 24h TTL and inflate the
+    statusline 'otazky' badge (user complaint 2026-07-22: 14 stale questions
+    shown in a project with zero). Safe by design: if the question is somehow
+    still pending after a human prompt, the loop re-asks (the prompt cleared
+    the ping dedup) and re-records a fresh entry."""
+    from notify import load_questions, drop_question
+    logs = []
+    try:
+        qmap = load_questions()
+    except Exception:
+        return logs
+    for qid, rec in list(qmap.items()):
+        if not isinstance(rec, dict):
+            continue
+        sid = str(rec.get("session") or "")
+        cwd = str(rec.get("cwd") or "")
+        qts = rec.get("ts") or 0
+        if not sid or not cwd:
+            continue
+        tpath = Path(projects_dir) / encode_project_dir(cwd) / (sid + ".jsonl")
+        hts = _last_human_prompt_ts(tpath)
+        if hts and hts > qts + 30:       # grace: never race the ping's own turn
+            if not dry_run:
+                drop_question(qid)
+            logs.append("question answered in-session — pruned %s [%s]"
+                        % (str(qid)[-6:], project_label(cwd)))
+    return logs
+
+
 def compose_reply_prompt(r):
     """The ONE-LINE prompt typed into the asking session for a Discord reply.
 
@@ -3167,6 +3256,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             hosted_users=hosted_users)
         except Exception as e:
             logs.append("discord-reply error: %r" % (e,))
+
+    # Terminal-answered ❓ cleanup — a question answered by a HUMAN prompt in
+    # the asking session leaves the map NOW, not at the 24h TTL (it feeds the
+    # statusline 'otazky' badge, which must be trustworthy per stream).
+    try:
+        logs += prune_answered_questions(now, projects_dir=projects_dir,
+                                         dry_run=dry_run)
+    except Exception as e:
+        logs.append("question-prune error: %r" % (e,))
 
     # Job 8 — bounce backstop (gatekeeper-returned prio:bounce tickets must
     # never rot after a loop ends). Only when a fetch is wired (cmd_watchdog

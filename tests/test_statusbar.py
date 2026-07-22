@@ -589,9 +589,12 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
 
 
 class QuestionsSegment(unittest.TestCase):
-    """'otazky N' badge — unanswered ❓ pings from the machine-local question
-    map (user request 2026-07-22). User-global, hidden at 0, TTL-matched to
-    the map's own prune window."""
+    """'otazky N (· inde M)' badge — unanswered ❓ pings SCOPED to the
+    session's project (2026-07-22 complaint: a machine-global count showed 14
+    questions in a project that had zero). Hidden at 0, TTL-matched to the
+    map's own prune window."""
+
+    CWD = "/home/x/devel/demo"
 
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -603,31 +606,48 @@ class QuestionsSegment(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "discord-questions.json").write_text(json.dumps(entries))
 
-    def test_counts_fresh_unanswered_questions(self):
+    def _seg(self, cwd=None, now=None):
+        return statusbar.questions_segment(self.CWD if cwd is None else cwd,
+                                           now=now, home=self.home)
+
+    def test_counts_only_this_projects_questions(self):
         now = time.time()
-        self._seed({"1": {"session": "a", "ts": now - 60},
-                    "2": {"session": "b", "ts": now - 3600}})
-        seg = statusbar.questions_segment(now=now, home=self.home)
+        self._seed({"1": {"cwd": self.CWD, "ts": now - 60},
+                    "2": {"cwd": self.CWD, "ts": now - 3600},
+                    "3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
+        seg = self._seg(now=now)
         self.assertIn("otazky 2", seg)
-        self.assertIn("38;5;214m", seg)               # orange — needs the user
+        self.assertIn("inde 1", seg)
+        self.assertIn("38;5;214m", seg)               # local count = orange
+
+    def test_only_foreign_questions_render_grey_inde(self):
+        now = time.time()
+        self._seed({"3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
+        seg = self._seg(now=now)
+        self.assertIn("otazky inde 1", seg)
+        self.assertNotIn("38;5;214m", seg)            # nothing local → no orange
+
+    def test_trailing_slash_cwd_still_matches(self):
+        now = time.time()
+        self._seed({"1": {"cwd": self.CWD + "/", "ts": now - 60}})
+        self.assertIn("otazky 1", self._seg(cwd=self.CWD + "/", now=now))
 
     def test_stale_entries_past_ttl_not_counted(self):
         now = time.time()
-        self._seed({"1": {"session": "a", "ts": now - statusbar.QUESTIONS_TTL_S - 5},
-                    "2": {"session": "b", "ts": now - 60}})
-        self.assertIn("otazky 1",
-                      statusbar.questions_segment(now=now, home=self.home))
+        self._seed({"1": {"cwd": self.CWD,
+                          "ts": now - statusbar.QUESTIONS_TTL_S - 5},
+                    "2": {"cwd": self.CWD, "ts": now - 60}})
+        self.assertIn("otazky 1", self._seg(now=now))
 
     def test_hidden_at_zero_and_when_map_missing(self):
-        self.assertEqual(statusbar.questions_segment(home=self.home), "")
+        self.assertEqual(self._seg(), "")
         self._seed({})
-        self.assertEqual(statusbar.questions_segment(home=self.home), "")
+        self.assertEqual(self._seg(), "")
 
     def test_garbage_entries_are_safe(self):
         now = time.time()
-        self._seed({"1": "not-a-dict", "2": {"session": "b", "ts": now}})
-        self.assertIn("otazky 1",
-                      statusbar.questions_segment(now=now, home=self.home))
+        self._seed({"1": "not-a-dict", "2": {"cwd": self.CWD, "ts": now}})
+        self.assertIn("otazky 1", self._seg(now=now))
 
     def test_ttl_mirrors_notify_prune_ttl(self):
         # the badge must age out exactly when the map itself prunes
