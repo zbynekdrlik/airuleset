@@ -657,3 +657,18 @@ class QuestionsSegment(unittest.TestCase):
     def test_shim_renders_the_badge(self):
         import airuleset
         self.assertIn("questions_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_subdir_question_counts_as_local_for_parent_session(self):
+        # montalu 2026-07-22: the session runs at .../odoo (launch dir) while
+        # its ❓ hook records .../odoo/odoo-slovnormal — same project tree,
+        # must count as LOCAL (either-direction containment), never 'inde'
+        now = time.time()
+        self._seed({"1": {"cwd": self.CWD + "/subrepo", "ts": now - 60}})
+        self.assertIn("otazky 1", self._seg(now=now))
+        self.assertNotIn("inde", self._seg(now=now))
+        # and the reverse: session in the subdir, question recorded at parent
+        self._seed({"1": {"cwd": self.CWD, "ts": now - 60}})
+        seg = statusbar.questions_segment(self.CWD + "/subrepo", now=now,
+                                          home=self.home)
+        self.assertIn("otazky 1", seg)
+        self.assertNotIn("inde", seg)

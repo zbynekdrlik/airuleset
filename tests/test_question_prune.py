@@ -106,3 +106,37 @@ class PruneAnsweredQuestions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TranscriptFoundBySessionId(unittest.TestCase):
+    """2026-07-22 montalu: the ❓ hook records the session's CURRENT dir
+    (…/odoo/odoo-slovnormal) but CC keys the transcript by the LAUNCH dir
+    (…/odoo) — prune looked in the cwd-encoded dir, found no transcript and
+    kept 6 already-answered questions alive. The session id is unique across
+    the projects tree, so the transcript must be found by SID GLOB when the
+    cwd-encoded path misses."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+        self.projects = Path(self.tmp.name) / "projects"
+        self.now = time.time()
+        self.qts = self.now - 3600
+
+    def test_prunes_when_transcript_lives_under_the_launch_dir(self):
+        sub = "/home/m/devel/odoo/odoo-slovnormal"      # recorded by the hook
+        launch = "/home/m/devel/odoo"                    # CC transcript key
+        notify.record_question("888001", "777001", SID, sub, now=self.qts,
+                               path=self.qpath, question="Ticket #7 — ?")
+        d = self.projects / wd.encode_project_dir(launch)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (SID + ".jsonl")).write_text(
+            json.dumps(_user(self.qts + 600, "nejake otazky na mna?")) + "\n")
+        logs = wd.prune_answered_questions(self.now,
+                                           projects_dir=str(self.projects))
+        self.assertTrue(any("pruned" in ln for ln in logs), logs)
+        self.assertNotIn("888001", notify.load_questions(self.qpath))
