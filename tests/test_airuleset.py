@@ -4634,41 +4634,58 @@ class TestTier0BuildBlock(TestCase):
 
 class TestRemoteHosts(TestCase):
     """Deploy-target invariants. The gatekeeper box migrated hosts twice
-    (168.119.99.160 → HostKey → Hetzner cx23); a PARTIAL repoint — one
-    gatekeeper-user entry moved, another left on the old IP — would silently
-    deploy to a dead/stale box. Lock: all gatekeeper entries share ONE host +
-    the key-based identity, and every managed user is present exactly once."""
+    (168.119.99.160 → HostKey → Hetzner cx23), and 2026-07-21/22 the marek +
+    david sub-dev streams migrated OFF it onto the dedicated subdev VPS
+    (tailscale 100.118.174.27; airuleset #23 + odoo-erp #1895 — the old
+    david/marek gk accounts are BLOCKED via ForceCommand). A PARTIAL repoint —
+    one sub-dev entry moved, another left on the old box — would silently
+    deploy to a blocked/stale account. Locks: sub-dev entries share ONE subdev
+    host + the key identity, NOTHING but the gatekeeper user targets the gk
+    box, and every managed user is present exactly once."""
 
-    GK_USERS = {"gatekeeper", "marek", "david"}
+    GK_HOST = "100.90.94.41"
+    SUBDEV_USERS = {"marek", "david"}
 
-    def _gk_entries(self):
-        return [r for r in airuleset.REMOTE_HOSTS if r["user"] in self.GK_USERS]
+    def _subdev_entries(self):
+        return [r for r in airuleset.REMOTE_HOSTS
+                if r["user"] in self.SUBDEV_USERS]
 
     def test_all_expected_targets_present_once(self):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu@dev1",
-                         "marek@gatekeeper", "david@gatekeeper"):
+                         "marek@subdev", "david@subdev"):
             self.assertIn(expected, names)
 
-    def test_gatekeeper_users_share_one_host_and_identity(self):
-        entries = self._gk_entries()
-        self.assertEqual({e["user"] for e in entries}, self.GK_USERS)
+    def test_subdev_users_share_one_host_and_identity(self):
+        entries = self._subdev_entries()
+        self.assertEqual({e["user"] for e in entries}, self.SUBDEV_USERS)
         hosts = {e["host"] for e in entries}
         self.assertEqual(len(hosts), 1,
-                         f"gatekeeper entries diverge across hosts: {hosts} "
+                         f"subdev entries diverge across hosts: {hosts} "
                          "— partial migration repoint")
+        self.assertNotIn(self.GK_HOST, hosts,
+                         "marek/david on the gk box are BLOCKED accounts")
         for e in entries:
             self.assertEqual(e.get("identity"),
                              "~/.secrets/gatekeeper_access_ed25519",
                              f"{e['name']} must use the key, never sshpass")
 
-    def test_gatekeeper_host_is_tailscale_ip(self):
-        # always the tailscale IP — MagicDNS name + retired IPs are banned
-        for e in self._gk_entries():
+    def test_gatekeeper_user_alone_on_the_gk_box(self):
+        gk = [r for r in airuleset.REMOTE_HOSTS if r["host"] == self.GK_HOST]
+        self.assertEqual([r["user"] for r in gk], ["gatekeeper"])
+        self.assertEqual(gk[0].get("identity"),
+                         "~/.secrets/gatekeeper_access_ed25519")
+
+    def test_key_targets_use_tailscale_ips(self):
+        # always the tailscale IP — MagicDNS names, public IPs and retired
+        # boxes are banned in targets (machine-identities addressing rule)
+        for e in self._subdev_entries() + [
+                r for r in airuleset.REMOTE_HOSTS if r["host"] == self.GK_HOST]:
             self.assertRegex(e["host"], r"^100\.")
             self.assertNotIn(e["host"], ("100.77.52.43", "168.119.99.160",
-                                         "202.148.55.31"))
+                                         "202.148.55.31", "116.203.108.177",
+                                         "88.99.170.148"))
 
 
 class TestCmdPushRuffGate(TestCase):

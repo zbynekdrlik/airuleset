@@ -1883,24 +1883,28 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
     },
     {
-        # Marek's isolated user on the gatekeeper VPS (his Claude dev env).
-        # Same access key as the gatekeeper entry (its pubkey is authorized
-        # in marek's authorized_keys). Same Hetzner-cx23 host as the
-        # gatekeeper entry above (tailscale IP — never the stale MagicDNS name).
-        "name": "marek@gatekeeper",
-        "host": "100.90.94.41",
+        # Marek's isolated user — MIGRATED 2026-07-21/22 from the gatekeeper
+        # VPS to the dedicated subdev VPS (Hetzner cx33/nbg1 "subdev", project
+        # odoo-subdev, id 153587360): tailscale 100.118.174.27 / MagicDNS
+        # "subdev", public 116.203.108.177 = subdev.newlevel.media (fallback
+        # only — address by tailscale per machine-identities). Old marek@gk
+        # account is BLOCKED (ForceCommand notice). Same gatekeeper_access key
+        # (authorized_keys byte-copied in the migration). Evidence: airuleset
+        # #23 + odoo-erp #1895 hand-over comments.
+        "name": "marek@subdev",
+        "host": "100.118.174.27",
         "user": "marek",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # David's isolated external-dev user on the gatekeeper VPS (slovnormal
-        # odoo dev stream, parallel to montalu: no sudo, no prod keys, can't
-        # read other homes). Same access key as the gatekeeper entry (its
-        # pubkey is authorized in david's authorized_keys). Same Hetzner-cx23
-        # host (tailscale IP — never the stale MagicDNS name).
-        "name": "david@gatekeeper",
-        "host": "100.90.94.41",
+        # David's isolated external-dev user (slovnormal odoo dev stream: no
+        # sudo, no prod keys, can't read other homes) — MIGRATED 2026-07-22
+        # from the gatekeeper VPS to the same subdev VPS as marek (see the
+        # marek@subdev entry above for the box facts). Old david@gk account is
+        # BLOCKED (ForceCommand notice). Same gatekeeper_access key.
+        "name": "david@subdev",
+        "host": "100.118.174.27",
         "user": "david",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
