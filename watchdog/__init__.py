@@ -1514,6 +1514,27 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
     return best
 
 
+def _transcript_for_session(projects_dir, sid, cwd):
+    """Path of the session's transcript, or None. The cwd-encoded dir is only
+    a HINT: the ❓ hook records the session's CURRENT dir while CC keys the
+    transcript dir by the LAUNCH dir (montalu ran at …/odoo but asked from
+    …/odoo/odoo-slovnormal, 2026-07-22) — the session id is unique across the
+    projects tree, so a miss falls back to a SID glob."""
+    p = Path(projects_dir) / encode_project_dir(cwd) / (sid + ".jsonl")
+    if p.is_file():
+        return p
+    try:
+        hits = list(Path(projects_dir).glob("*/" + sid + ".jsonl"))
+    except OSError:
+        return None
+    if not hits:
+        return None
+    try:
+        return max(hits, key=lambda h: h.stat().st_mtime)
+    except OSError:
+        return hits[0]
+
+
 def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
     """Drop question-map entries whose asking session received a HUMAN prompt
     AFTER the ❓ was pinged — the question was answered at the terminal, so
@@ -1536,7 +1557,9 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
         qts = rec.get("ts") or 0
         if not sid or not cwd:
             continue
-        tpath = Path(projects_dir) / encode_project_dir(cwd) / (sid + ".jsonl")
+        tpath = _transcript_for_session(projects_dir, sid, cwd)
+        if tpath is None:
+            continue
         hts = _last_human_prompt_ts(tpath)
         if hts and hts > qts + 30:       # grace: never race the ping's own turn
             if not dry_run:

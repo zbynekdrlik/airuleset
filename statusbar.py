@@ -157,12 +157,21 @@ def questions_segment(cwd, now=None, home=None):
     if not d:
         return ""
     here = str(cwd or "").rstrip("/")
+
+    def _same_project(q):
+        # either-direction containment: the session may run at the LAUNCH dir
+        # (…/odoo) while its ❓ hook recorded a subdir (…/odoo/odoo-slovnormal)
+        # — same project tree = LOCAL, never 'inde' (montalu, 2026-07-22)
+        q = str(q or "").rstrip("/")
+        return bool(here and q) and (
+            q == here or q.startswith(here + "/") or here.startswith(q + "/"))
+
     local = other = 0
     for v in d.values():
         if not (isinstance(v, dict)
                 and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S):
             continue
-        if here and str(v.get("cwd") or "").rstrip("/") == here:
+        if _same_project(v.get("cwd")):
             local += 1
         else:
             other += 1
