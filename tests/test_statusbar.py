@@ -586,3 +586,54 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_progress(home, "demo", done=3, remaining=14)
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
             self.assertIn("Issues 3/17", seg)
+
+
+class QuestionsSegment(unittest.TestCase):
+    """'otazky N' badge — unanswered ❓ pings from the machine-local question
+    map (user request 2026-07-22). User-global, hidden at 0, TTL-matched to
+    the map's own prune window."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+
+    def _seed(self, entries):
+        d = statusbar._claude_dir(self.home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "discord-questions.json").write_text(json.dumps(entries))
+
+    def test_counts_fresh_unanswered_questions(self):
+        now = time.time()
+        self._seed({"1": {"session": "a", "ts": now - 60},
+                    "2": {"session": "b", "ts": now - 3600}})
+        seg = statusbar.questions_segment(now=now, home=self.home)
+        self.assertIn("otazky 2", seg)
+        self.assertIn("38;5;214m", seg)               # orange — needs the user
+
+    def test_stale_entries_past_ttl_not_counted(self):
+        now = time.time()
+        self._seed({"1": {"session": "a", "ts": now - statusbar.QUESTIONS_TTL_S - 5},
+                    "2": {"session": "b", "ts": now - 60}})
+        self.assertIn("otazky 1",
+                      statusbar.questions_segment(now=now, home=self.home))
+
+    def test_hidden_at_zero_and_when_map_missing(self):
+        self.assertEqual(statusbar.questions_segment(home=self.home), "")
+        self._seed({})
+        self.assertEqual(statusbar.questions_segment(home=self.home), "")
+
+    def test_garbage_entries_are_safe(self):
+        now = time.time()
+        self._seed({"1": "not-a-dict", "2": {"session": "b", "ts": now}})
+        self.assertIn("otazky 1",
+                      statusbar.questions_segment(now=now, home=self.home))
+
+    def test_ttl_mirrors_notify_prune_ttl(self):
+        # the badge must age out exactly when the map itself prunes
+        import notify
+        self.assertEqual(statusbar.QUESTIONS_TTL_S, notify._QUESTIONS_TTL_S)
+
+    def test_shim_renders_the_badge(self):
+        import airuleset
+        self.assertIn("questions_segment", airuleset.CAVEMAN_SHIM_CONTENT)

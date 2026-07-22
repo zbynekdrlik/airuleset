@@ -25,6 +25,7 @@ from pathlib import Path
 TICKETS_TTL_S = 120                 # refresh the open-issues count at most this often
 SPAWN_GUARD_S = 30                  # min seconds between background refresh spawns
 AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
+QUESTIONS_TTL_S = 24 * 3600         # mirror notify._QUESTIONS_TTL_S (map prune TTL)
 
 
 def _claude_dir(home=None):
@@ -133,3 +134,26 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
                     % (open_n, gk, skip_sfx))
         return "\033[38;5;75mIssues %d\033[0m%s" % (open_n, skip_sfx)
     return ""
+
+
+def questions_segment(now=None, home=None):
+    """'otazky N' — unanswered ❓ pings still awaiting the user's reply (user
+    request 2026-07-22: "aby som videl kolko je na mna nezodpovedanych otazok").
+
+    Source: the machine-local outstanding-question map
+    ~/.claude/discord-questions.json — notify.record_question adds an entry on
+    every delivered ❓ ping and the watchdog's reply routing (job 7) drops it
+    the moment the user's answer lands in the asking session (keystroke or
+    ticket-fallback), so a live entry == a question waiting on the user.
+    Cwd-INDEPENDENT (a user-global badge, unlike the repo-scoped Issues
+    segment) and hidden at 0 (badge semantics, like `skipped`). Entries past
+    QUESTIONS_TTL_S are ignored to match the map's own prune TTL."""
+    now = time.time() if now is None else now
+    d = _load(_claude_dir(home) / "discord-questions.json")
+    if not d:
+        return ""
+    n = sum(1 for v in d.values()
+            if isinstance(v, dict) and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S)
+    if not n:
+        return ""
+    return "\033[38;5;214motazky %d\033[0m" % n
