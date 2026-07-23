@@ -2074,8 +2074,23 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     for pid, cwd in panes:
         targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
     pane_cwds = [c for _p, c in panes]
+
+    def _covered_by_pane(root):
+        """A cached root is covered when a live pane sits INSIDE it — or when
+        the root is a WORKTREE under the repo a pane sits in (the false
+        'nebeží žiadna session' ping, 2026-07-23: David's claude ran in the
+        MAIN checkout while the cached bounce root was the repo's
+        .claude/worktrees/<agent> path; bounce tickets are per-REPO, so a
+        session anywhere in the repo tree handles them)."""
+        for c in pane_cwds:
+            if c == root or c.startswith(root + "/"):
+                return True
+            if root.startswith(c + "/.claude/worktrees/"):
+                return True
+        return False
+
     for root, name in _cache_repo_roots(home).items():
-        if not any(c == root or c.startswith(root + "/") for c in pane_cwds):
+        if not _covered_by_pane(root):
             targets.setdefault(root, (name, None))
 
     for root, (name, pid) in sorted(targets.items()):

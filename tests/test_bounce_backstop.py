@@ -104,6 +104,19 @@ class TestBounceBackstop(unittest.TestCase):
         self._go(state, [1705, 1434], panes=[])
         self.assertEqual(len(self.pings), 1)
 
+    def test_worktree_root_covered_by_main_checkout_pane(self):
+        # 2026-07-23 false ping: David's claude ran in the MAIN checkout while
+        # the cached bounce root was the repo's .claude/worktrees/<agent> path
+        # — bounce tickets are per-repo, so that pane COVERS the worktree root
+        # and no "nebeží žiadna Claude session" Discord ping may fire.
+        wt_root = str(Path(self.root) / ".claude" / "worktrees" / "agent-x")
+        Path(wt_root).mkdir(parents=True)
+        seed_repo_cache(self.home, wt_root, "demo-wt")
+        # pane sits at the MAIN checkout; it is BUSY so the nudge branch stays
+        # quiet too — the assertion is purely "no Discord ping for wt_root".
+        self._go({}, [1705], panes=[("%1", self.root)], captured=BUSY)
+        self.assertFalse(self.pings, self.pings)
+
     def test_changed_ticket_set_renudges(self):
         state = {}
         _, t1 = self._go(state, [1705])
