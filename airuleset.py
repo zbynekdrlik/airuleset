@@ -766,10 +766,34 @@ def cmd_diff(args):
             print(f"  {skill}: ADD (new symlink -> {target})")
 
 
+# Binaries the deployed surface depends on at RUNTIME: jq + curl (every
+# notify/stop hook parses its stdin payload with jq and sends via curl), git +
+# gh (tickets-status, autopilot, bounce), tmux (watchdog pane jobs). A box
+# missing one degrades SILENTLY at hook time — subdev 2026-07-23: provisioned
+# without jq, so david's ❓ never pinged Discord, never entered the question
+# map and the statusline badge stayed empty. The check is warning-only but
+# LOUD in every install/push output (per-machine gaps are invisible to
+# git-deploy — the gatekeeper .env lesson).
+RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux")
+
+
+def check_runtime_deps(deps=RUNTIME_DEPS):
+    """Print a LOUD warning per missing runtime binary; returns the missing
+    list (never fatal — install still proceeds, the gap just stays visible)."""
+    import shutil
+    missing = [d for d in deps if not shutil.which(d)]
+    for d in missing:
+        print("  ⚠ MISSING RUNTIME DEP: '%s' is not installed on this box — "
+              "hooks/notify/watchdog will degrade SILENTLY. Install it "
+              "(apt-get install %s)." % (d, d))
+    return missing
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
     print("=" * 50)
+    check_runtime_deps()
 
     # Ensure ~/.claude/ exists
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)

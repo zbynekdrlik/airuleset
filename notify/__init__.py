@@ -185,7 +185,14 @@ def stream_qualified(name):
         u = getpass.getuser()
     except Exception:
         return name
-    return name if u in ("newlevel", "root", "") else "%s-%s" % (name, u)
+    if u in ("newlevel", "root", ""):
+        return name
+    if str(name).endswith("-" + u):
+        # already stream-qualified upstream (watchdog project_label appends
+        # the same suffix on stream boxes) — never double it ("odoo-erp-
+        # david-david" api-error alert, 2026-07-22)
+        return name
+    return "%s-%s" % (name, u)
 
 
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,

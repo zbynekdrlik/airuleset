@@ -84,3 +84,15 @@ class TestPythonComposersQualifyStream(unittest.TestCase):
                 version="1.0.0", remaining=0)
         self.assertIn("restreamer", card)
         self.assertNotIn("restreamer-newlevel", card)
+
+
+class NoDoubleSuffix(unittest.TestCase):
+    def test_already_qualified_name_is_not_doubled(self):
+        # 2026-07-22 live alert: "odoo-erp-david-david" — project_label on a
+        # stream box already appends the user; stream_qualified must not re-add
+        import notify
+        with m.patch("getpass.getuser", return_value="david"):
+            self.assertEqual(notify.stream_qualified("odoo-erp-david"),
+                             "odoo-erp-david")
+            self.assertEqual(notify.stream_qualified("odoo-erp"),
+                             "odoo-erp-david")
