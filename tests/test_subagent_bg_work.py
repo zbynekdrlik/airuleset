@@ -113,6 +113,11 @@ def task_stop(task_id):
 
 
 class SubagentStopHookBase(unittest.TestCase):
+    def setUp(self):
+        import glob
+        self.addCleanup(lambda: [os.remove(f) for f in glob.glob(
+            "/tmp/airuleset-subagent-bgwork-block-t-*")])
+
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
              sid=None, background_tasks=None, parent_lines=None):
         sid = sid or ("t-" + uuid.uuid4().hex[:10])

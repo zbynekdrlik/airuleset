@@ -22,7 +22,9 @@ BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null 
 [ "$BG" = "true" ] || exit 0
 
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
-echo "$CMD" | grep -qE 'gh[[:space:]]+run[[:space:]]+(view|watch|list)|gh[[:space:]]+pr[[:space:]]+checks' || exit 0
+# tr flattens newlines so a signature split across continuation lines
+# ("gh run \\\n view") still matches — grep is line-scoped otherwise
+echo "$CMD" | tr '\n' ' ' | grep -qE 'gh[[:space:]]+run[[:space:]]+(view|watch|list)|gh[[:space:]]+pr[[:space:]]+checks' || exit 0
 
 cat >&2 <<'MSG'
 BLOCKED: you are a SUBAGENT launching a BACKGROUND CI poll. A subagent that

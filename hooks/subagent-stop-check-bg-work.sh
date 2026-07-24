@@ -47,6 +47,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
 
 BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SESSION_ID}-${AGENT_ID}"
+# an unreadable/corrupt counter reads as 0 — deliberate fail-open direction
 BLOCKS=$(cat "$BLOCK_FILE" 2>/dev/null || echo 0)
 MAX_BLOCKS=3
 if [ "$BLOCKS" -ge "$MAX_BLOCKS" ] 2>/dev/null; then
@@ -111,7 +112,7 @@ try:
 except OSError:
     sys.exit(0)
 
-for line in fh:
+def scan(line):
     # terminal completions / kills — raw-text scan (the notification XML sits
     # inside a JSON string; '<' is never escaped by json.dumps)
     if "<task-id>" in line:
@@ -132,11 +133,11 @@ for line in fh:
     # background launches — the toolUseResult sidecar (main-session shape)
     # OR the tool_result content string (subagent shape, no sidecar)
     if not any(p in line for p in PREFILTER):
-        continue
+        return
     try:
         e = json.loads(line)
     except Exception:
-        continue
+        return
     tur = e.get("toolUseResult")
     if isinstance(tur, dict):
         tid = tur.get("backgroundTaskId") or tur.get("taskId")
@@ -152,6 +153,11 @@ for line in fh:
             m = AGENT_ID_SIG.search(txt)
             if m:
                 note_launch(m.group(1))
+
+
+with fh:
+    for line in fh:
+        scan(line)
 
 live = [t for t in launched if t not in terminal]
 if len(live) > 6:      # a fire-and-forget worker can pile up dozens (85 in

@@ -250,6 +250,21 @@ class TestAgentStripNeverBlocks(unittest.TestCase):
                         "strip bulk must not push the arm question out of the "
                         "detection window")
 
+    def test_over_40_row_strip_skips_safely(self):
+        # the chrome peel caps at 40 lines (mirrors _has_free_prompt): a
+        # taller strip means the input box is never located — the pane is
+        # SKIPPED this sweep (missed arm = safe direction), never armed off
+        # a misread region and never crashed
+        huge = ARM_PANE.replace(
+            "❯ \n  ctx ███░  caveman\n",
+            "❯ \n  ctx ███░  caveman\n" + "".join(
+                "  ◯ autopilot-worker  Polling job %02d"
+                "                                1m 10s · ↓ 1.0k tokens\n" % i
+                for i in range(45)))
+        tmux, _ = go(huge)
+        self.assertFalse(tmux.typed(),
+                         "an unpeelable >40-row strip must skip, not misarm")
+
 
 class TestWrappedGoalUsesTranscript(unittest.TestCase):
     """2026-07-20 gk incident: the /autopilot-master goal RENDERS hard-wrapped

@@ -2234,7 +2234,11 @@ def _above_input_box(cap):
     deploy-prod.yml jobs` false-matched the busy guard (gk incident
     2026-07-24) — and the strip grows one row per worker, crowding the arm
     question out of a fixed tail window taken from the raw capture. Nothing
-    below the input box is ever TURN state; job 9 scans only this region."""
+    below the input box is ever TURN state; job 9 scans only this region.
+    The peel caps at 40 chrome lines (mirroring `_has_free_prompt`) — a
+    taller-than-40-row strip leaves chrome in the region and the pane is
+    simply skipped that sweep (missed arm = the safe direction, never a
+    keystroke into a misread pane)."""
     lines = cap.splitlines()
     i = len(lines)
     n = 0
