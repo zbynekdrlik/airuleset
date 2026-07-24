@@ -322,6 +322,27 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertTrue(edits, calls)
         self.assertIn("GATEKEEPER-ACTION: Stary titulok", json.dumps(edits))
 
+    def test_issue_mode_already_prefixed_title_not_retitled(self):
+        # boundary (review 2026-07-24): a title already carrying the marker
+        # must not be double-prefixed
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "view" in argv:
+                return m.Mock(returncode=0,
+                              stdout="GATEKEEPER-ACTION: uz oznacene\n",
+                              stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            airuleset.cmd_gk_request(self._args(issue=8, comment="akcia"))
+        edits = [argv for argv in calls
+                 if "edit" in argv and "--title" in argv]
+        self.assertFalse(edits, "already-prefixed title must not be retitled")
+
     def test_registered_in_cli(self):
         src = Path(airuleset.__file__).read_text()
         self.assertIn('"gk-request"', src)

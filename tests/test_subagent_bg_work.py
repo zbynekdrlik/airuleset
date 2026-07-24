@@ -382,6 +382,26 @@ class TestLedgerOwnership(SubagentStopHookBase):
                              "status": "running", "command": "sleep 300"}])
         self.assertNotIn("block", out.stdout)
 
+    def test_stop_gate_sanitizes_ids_consistently_with_recorder(self):
+        # the stop gate must sanitize session_id/agent_id the SAME way as the
+        # recorder, or the ledger written at launch is never found at stop
+        safe = Path("/tmp/airuleset-bgtasks-t-led-evil-aX2")
+        safe.write_text("bown1\n")
+        self.addCleanup(lambda: safe.unlink(missing_ok=True))
+        payload = {"session_id": "../t-led-evil", "agent_id": "a/../X2",
+                   "hook_event_name": "SubagentStop",
+                   "transcript_path": "/nonexistent/x.jsonl",
+                   "agent_transcript_path": "/nonexistent/x.jsonl",
+                   "background_tasks": [
+                       {"id": "bown1", "type": "shell", "status": "running"}]}
+        out = subprocess.run(["bash", str(STOP_HOOK)],
+                             input=json.dumps(payload),
+                             capture_output=True, text=True)
+        self.assertIn("block", out.stdout,
+                      "the sanitized ledger path must be found → block")
+        Path("/tmp/airuleset-subagent-bgwork-block-t-led-evil-aX2"
+             ).unlink(missing_ok=True)
+
     def test_ledger_removed_when_stop_passes(self):
         sid = self._sid()
         path = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, self.AID))
@@ -451,6 +471,26 @@ class TestPostToolUseRecorder(unittest.TestCase):
         r, ledger = self._run({"stdout": "ok", "stderr": "",
                                "interrupted": False})
         self.assertFalse(ledger.exists())
+
+    def test_path_traversal_ids_are_sanitized(self):
+        # review finding 2026-07-24: session_id/agent_id come from the hook
+        # payload and land in a /tmp file path — '../'-style values must be
+        # stripped to [A-Za-z0-9_-] before path construction. Sanitized:
+        # '../t-rec-evil' → 't-rec-evil', 'a/../X1' → 'aX1'.
+        safe = Path("/tmp/airuleset-bgtasks-t-rec-evil-aX1")
+        self.addCleanup(lambda: safe.unlink(missing_ok=True))
+        payload = {"session_id": "../t-rec-evil", "agent_id": "a/../X1",
+                   "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": "x"},
+                   "tool_response": {"backgroundTaskId": "btrav1"}}
+        r = subprocess.run(["bash", str(RECORD_HOOK)],
+                           input=json.dumps(payload),
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(safe.exists(),
+                        "ledger must land at the SANITIZED path")
+        self.assertIn("btrav1", safe.read_text())
+        self.assertFalse(Path("/tmp/t-rec-evil-aX1").exists())
 
 
 class TestSubagentStopFailsOpen(SubagentStopHookBase):
