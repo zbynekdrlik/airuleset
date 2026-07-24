@@ -36,5 +36,12 @@ TID=$(echo "$INPUT" | jq -r '
 [ -n "$TID" ] || exit 0
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+# ids land in a /tmp path — strip to [A-Za-z0-9_-] (defensive: '../' shapes
+# must never escape the airuleset-bgtasks-* namespace); MUST match the stop
+# gate's sanitization or the ledger is never found
+SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
+AGENT_ID=$(printf '%s' "$AGENT_ID" | tr -cd 'A-Za-z0-9_-')
+[ -n "$SESSION_ID" ] || SESSION_ID="unknown"
+[ -n "$AGENT_ID" ] || exit 0
 echo "$TID" >> "/tmp/airuleset-bgtasks-${SESSION_ID}-${AGENT_ID}"
 exit 0

@@ -56,9 +56,17 @@ command -v jq &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
+# ids land in /tmp paths — strip to [A-Za-z0-9_-] (defensive; MUST match the
+# recorder's sanitization or the launch ledger is never found at stop). NB:
+# the RAW agent_id stays what the payload's background_tasks self-entry
+# carries — sanitize only the PATH copies.
+SAFE_SESSION=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
+SAFE_AGENT=$(printf '%s' "$AGENT_ID" | tr -cd 'A-Za-z0-9_-')
+[ -n "$SAFE_SESSION" ] || SAFE_SESSION="unknown"
+[ -n "$SAFE_AGENT" ] || SAFE_AGENT="unknown"
 
-BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SESSION_ID}-${AGENT_ID}"
-LEDGER_FILE="/tmp/airuleset-bgtasks-${SESSION_ID}-${AGENT_ID}"
+BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SAFE_SESSION}-${SAFE_AGENT}"
+LEDGER_FILE="/tmp/airuleset-bgtasks-${SAFE_SESSION}-${SAFE_AGENT}"
 # an unreadable/corrupt counter reads as 0 — deliberate fail-open direction
 BLOCKS=$(cat "$BLOCK_FILE" 2>/dev/null || echo 0)
 MAX_BLOCKS=3
