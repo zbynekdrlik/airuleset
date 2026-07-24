@@ -54,13 +54,19 @@
       is never told "done" for work that kept going. PING ONLY; claim-then-send.
   (6) 5-HOUR SESSION-LIMIT AUTO-RESUME: the session hit Claude Code's 5-hour
       session limit ("You've hit your session limit · resets <time>"), shown in the
-      PANE (not reliably a transcript api-error). This is TIME-BASED — `continue`
-      BEFORE the reset is a no-op that just re-hits the limit (the user's incident:
-      repeated `continue` → "You've hit your session limit"). So the watchdog PINGS
-      ONCE with the reset time, waits for the reset clock, then sends ONE `continue`
-      AFTER it to resume — never before. State (`sesslimit:<sid>`) carries the parsed
-      reset epoch + pinged/continued flags across polls; a genuinely new limit window
-      (5h → weekly) re-arms both.
+      PANE (not reliably a transcript api-error), detected only in the last 10
+      lines above the input box (a stale echo of the banner scrolled higher in
+      the transcript output does not count — gk incident 2026-07-24). This is
+      TIME-BASED — `continue` BEFORE the reset is a no-op that just re-hits the
+      limit (the user's incident: repeated `continue` → "You've hit your session
+      limit"). So the watchdog PINGS ONCE with the reset time, waits for the
+      reset clock (read in the banner's own tz, incl. a bare "UTC"/"GMT"), then
+      RETRIES an auto-resume AFTER it — every SESSLIMIT_RETRY_S, up to
+      SESSLIMIT_MAX_TRIES, submitting the user's own stable draft instead of
+      typing over it when one is present, giving up with ONE ping if the resume
+      never lands. State (`sesslimit:<sid>`) carries the parsed reset epoch,
+      pinged/attempts/last_try/draft_hash/gave_up across polls; a genuinely new
+      limit window (5h → weekly) re-arms it.
   (7) DISCORD REPLY → THE ASKING SESSION: when a ❓ ping is delivered, the send path
       records the ping's Discord message id → the asking session
       (notify.record_question). The user ANSWERS by REPLYING to that ping in Discord;
@@ -827,21 +833,51 @@ _SESSION_LIMIT_RX = re.compile(
 # "resets 6:10pm" / "resets 6pm" / "resets at 18:10" — capture the clock.
 _RESET_TIME_RX = re.compile(
     r"reset(?:s|ting)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
-# The tz the banner names, e.g. "(Europe/Prague)"; default Bratislava (same offset).
-_RESET_TZ_RX = re.compile(r"\(([A-Za-z]+/[A-Za-z_]+)\)")
+# The tz the banner names — "(Europe/Prague)" OR a bare zone word like
+# "(UTC)"/"(GMT)". Broadened from Area/City-only after the gk incident
+# (2026-07-24): the gk box runs UTC, its banner reads "resets 4:40pm (UTC)",
+# and the narrower Area/City-only regex never matched it — silently falling
+# through to the Europe/Bratislava default and computing a reset epoch 2h
+# EARLY (a nonsense past reset time on the Discord ping).
+_RESET_TZ_RX = re.compile(r"\(([A-Za-z]+(?:/[A-Za-z_]+)?)\)")
+# Job 6's bounded post-reset resume retry (FIX C, gk incident 2026-07-24) —
+# see the `elif ra and now >= ra:` branch in run_once for the full story.
+SESSLIMIT_RETRY_S = 5 * 60
+SESSLIMIT_MAX_TRIES = 4
 
 
 def pane_session_limited(captured):
-    """True if the pane shows Claude Code's 5-hour session-limit banner."""
-    return bool(captured) and bool(_SESSION_LIMIT_RX.search(captured))
+    """True if the pane's BOTTOM shows Claude Code's 5-hour session-limit
+    banner — scoped to the last 10 lines of the region ABOVE the input box
+    (falling back to the raw capture's last 10 lines when no input box is
+    located at all, e.g. a busy/spinner pane with no `❯` boundary).
+
+    A dead BACKGROUND WORKER can leave a `⎿ You've hit your session limit …`
+    ECHO line sitting HIGH in the transcript output, with many later
+    `● pokracujem v praci`-style lines scrolling underneath it for hours — a
+    whole-capture search kept the episode "limited" long after a real resume
+    already happened (gk incident 2026-07-24). Bottom-scoping means only a
+    banner that is still the FRESHEST thing on screen counts."""
+    if not captured:
+        return False
+    region = _above_input_box(captured)
+    lines = [ln for ln in region.splitlines() if ln.strip()]
+    if not lines:
+        lines = [ln for ln in captured.splitlines() if ln.strip()]
+    return bool(_SESSION_LIMIT_RX.search("\n".join(lines[-10:])))
 
 
 def parse_reset_epoch(captured, now):
     """Parse 'resets <clock>' from the banner into an epoch >= now, or None.
-    The clock is read in the tz the banner names (Europe/Prague) — default
-    Europe/Bratislava (same offset) — and rolled to tomorrow if already past.
-    Fail-safe: any parse/tz error returns None (job 6 then pings but cannot
-    auto-resume — the user handles it)."""
+    The clock is read in the tz the banner names: "UTC"/"GMT" literally, an
+    "Area/City" name via ZoneInfo, any other bare parenthesized word (e.g. a
+    stray "(debug)" elsewhere in the pane) falls back to the Europe/
+    Bratislava default (same offset as Prague) — and rolled to tomorrow if
+    already past. The tz is searched ONLY in the ~80 chars starting at the
+    TIME match, never the whole capture: a global search would hijack on
+    ANY parenthesized word anywhere in the pane, however far from the clock
+    (gk incident 2026-07-24). Fail-safe: any parse/tz error returns None
+    (job 6 then pings but cannot auto-resume — the user handles it)."""
     try:
         m = _RESET_TIME_RX.search(captured or "")
         if not m:
@@ -859,8 +895,18 @@ def parse_reset_epoch(captured, now):
         tz = None
         try:
             from zoneinfo import ZoneInfo
-            tzm = _RESET_TZ_RX.search(captured or "")
-            tz = ZoneInfo(tzm.group(1)) if tzm else ZoneInfo("Europe/Bratislava")
+            seg = (captured or "")[m.start():m.start() + 80]
+            tzm = _RESET_TZ_RX.search(seg)
+            if tzm:
+                name = tzm.group(1)
+                if name in ("UTC", "GMT"):
+                    tz = ZoneInfo("UTC")
+                elif "/" in name:
+                    tz = ZoneInfo(name)
+                else:
+                    tz = ZoneInfo("Europe/Bratislava")
+            else:
+                tz = ZoneInfo("Europe/Bratislava")
         except Exception:
             tz = None
         base = datetime.fromtimestamp(now, tz)
@@ -2964,8 +3010,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           pending ✅ device ping the unreliable idle_prompt event failed to send
           (only while the session is STILL ✅ — a re-fired one is cleared silently);
       (6) a session showing the 5-HOUR SESSION-LIMIT banner in its pane → PING ONCE
-          with the reset time, then send ONE `continue` AFTER the reset clock passes
-          (never before — `continue` pre-reset just re-hits the limit);
+          with the reset time, then RETRY an auto-resume AFTER the reset clock
+          passes — bounded, submitting a stable user draft instead of typing over
+          it (never before the reset — `continue` pre-reset just re-hits the limit);
       (7) (only when `discord_fetch` is given) a session's ❓ ping was ANSWERED by
           the owner REPLYING in Discord → type the answer into that exact session's
           idle pane (deliver_discord_replies), react ✅ on success;
@@ -3041,12 +3088,28 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                        owner, project, send_fn,
                                        dry_run=dry_run, run=run)
 
-            # --- (6) 5-HOUR SESSION LIMIT → ping once, then `continue` AFTER the reset --
-            # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the user's
-            # incident), so we ping ONCE with the reset time, do NOTHING until the reset
-            # clock, then send ONE `continue` AFTER it — never before. Read from the PANE
-            # (the banner is on screen, not reliably a transcript api-error). While a
-            # session is limited job 6 owns it (skips the api-error / nudge paths).
+            # --- (6) 5-HOUR SESSION LIMIT → ping once, then RETRY a resume AFTER --
+            # the reset, bounded, with a stable-draft submit path -------------------
+            # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the
+            # user's incident), so we ping ONCE with the reset time, do NOTHING
+            # until the reset clock, then attempt an auto-resume AFTER it — never
+            # before. Read from the PANE (the banner is on screen, not reliably a
+            # transcript api-error). While a session is limited job 6 owns it
+            # (skips the api-error / nudge paths).
+            #
+            # A single one-shot attempt was NOT enough (gk incident 2026-07-24):
+            # the first post-reset poll can land mid-race — still busy, or with
+            # the user's OWN hand-typed draft sitting unsubmitted in the input box
+            # (it was typed INTO a limit-parked session that could go nowhere) —
+            # and `pane_at_idle_prompt`'s bare-❯ gate never matches a box holding
+            # text. A one-shot attempt then deadlocks forever with no retry and no
+            # further ping. So job 6 now RETRIES every SESSLIMIT_RETRY_S up to
+            # SESSLIMIT_MAX_TRIES, pings ONCE if it gives up, and — when a draft is
+            # present and STABLE across sweeps — submits THAT draft instead of
+            # typing "continue" over it. A bounced attempt (the limit somehow still
+            # active) just retries; a REAL resume makes the banner leave the bottom
+            # region so `pane_session_limited` goes False and this branch stops
+            # firing on its own (FIX B, above).
             if pane_session_limited(captured):
                 skey = "sesslimit:" + key
                 s = state.get(skey)
@@ -3055,7 +3118,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     # the whole episode — re-parsing after the reset would roll the same
                     # "6:10pm" forward to tomorrow and wrongly re-ping instead of resuming.
                     s = {"resets_at": parse_reset_epoch(captured, now),
-                         "pinged": False, "continued": False, "first_seen": int(now)}
+                         "pinged": False, "continued": False, "first_seen": int(now),
+                         "attempts": 0, "gave_up": False}
                     state[skey] = s
                 elif s.get("resets_at") is None:
                     # an earlier poll couldn't read the clock — try again to refine it.
@@ -3071,27 +3135,84 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             % (project, when),
                             owner=owner, dedup_key="sesslimit:%s:%s" % (key, ra or s["first_seen"]),
                             dry_run=dry_run)
-                elif ra and now >= ra and not s.get("continued"):
-                    if pane_in_mode(pid, run):          # never type into a scrolled pane
+                elif ra and now >= ra:
+                    attempts = s.get("attempts", 0)
+                    if attempts >= SESSLIMIT_MAX_TRIES:
+                        # Bounded — never retry forever. One give-up ping, then silence.
+                        if not s.get("gave_up"):
+                            s["gave_up"] = True
+                            logs.append("session-limit %s — gave up after %d attempts"
+                                        % (project, SESSLIMIT_MAX_TRIES))
+                            send_fn("❌ **%s** — limit sa mal resetnúť, ale session sa "
+                                    "nepodarilo obnoviť ani po %d pokusoch — obnov ju "
+                                    "prosím ručne." % (project, SESSLIMIT_MAX_TRIES),
+                                    owner=owner,
+                                    dedup_key="sesslimit-giveup:%s:%s" % (key, ra),
+                                    dry_run=dry_run)
+                        else:
+                            logs.append("skip gave-up (session-limit resume) %s" % (project or pid))
+                    elif s.get("last_try") is not None and (now - s["last_try"]) < SESSLIMIT_RETRY_S:
+                        logs.append("skip retry-wait (session-limit resume) %s" % (project or pid))
+                    elif pane_in_mode(pid, run):        # never type into a scrolled pane
                         logs.append("skip in-mode (session-limit resume) %s" % (project or pid))
-                        continue
-                    # Race guard: the user may have manually resumed inside the window and the
-                    # session is now running a FOREGROUND agent while the "session limit" banner
-                    # is still within the captured pane. Typing `continue` there would INTERRUPT
-                    # the live work (the #233 harm class). Only resume into a free `❯` idle
-                    # prompt; skip WITHOUT setting `continued` (a later poll retries, and if it
-                    # already resumed the banner scrolls out and job 6 exits on its own).
-                    if not pane_at_idle_prompt(captured):
-                        logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
-                        continue
-                    s["continued"] = True
-                    logs.append("session-limit %s — reset passed → continue" % project)
-                    if not dry_run:
-                        send_continue(pid, NUDGE_TEXT, run)
-                    send_fn("✅ **%s** — 5h limit sa resetol, poslal som `continue` — "
-                            "pokračujem." % project,
-                            owner=owner, dedup_key="sesslimit-resume:%s:%s" % (key, ra),
-                            dry_run=dry_run)
+                    else:
+                        draft = _input_line_text(captured)
+                        if draft:
+                            # A draft sitting in the input box of a limit-parked session
+                            # could go nowhere while limited — it is the user's OWN
+                            # intended prompt, typed here, not stray input. Never type
+                            # over it blind. Track its hash first; only once it is
+                            # BYTE-STABLE across at least one more sweep do we submit it
+                            # (Escape first — CC's agent-strip selector can hold focus
+                            # and swallow a bare Enter, observed live — then Enter).
+                            # Leaving a stable draft untouched forever is the exact
+                            # deadlock this incident hit. This path is deliberately
+                            # NARROW to the post-reset resume race; job 10's ping-first
+                            # rule for an ORDINARY wedged draft elsewhere is untouched.
+                            draft_hash = hashlib.sha1(draft.encode()).hexdigest()[:12]
+                            if s.get("draft_hash") == draft_hash:
+                                if not dry_run:
+                                    run(["tmux", "send-keys", "-t", pid, "Escape"])
+                                    run(["tmux", "send-keys", "-t", pid, "Enter"])
+                                attempts += 1
+                                s["attempts"] = attempts
+                                s["last_try"] = now
+                                s["continued"] = True
+                                logs.append("session-limit %s — reset passed → submit "
+                                            "user draft" % project)
+                                if attempts == 1:
+                                    send_fn("✅ **%s** — 5h limit sa resetol, odosielam "
+                                            "tvoj rozpísaný prompt — pokračujem." % project,
+                                            owner=owner,
+                                            dedup_key="sesslimit-resume:%s:%s" % (key, ra),
+                                            dry_run=dry_run)
+                            else:
+                                s["draft_hash"] = draft_hash
+                                logs.append("session-limit %s — draft tracked" % project)
+                        elif not pane_at_idle_prompt(captured):
+                            # Race guard: the user may have manually resumed inside the
+                            # window and the session is now running a FOREGROUND agent
+                            # while the "session limit" banner is still within the
+                            # captured pane. Typing `continue` there would INTERRUPT the
+                            # live work (the #233 harm class). Skip WITHOUT burning an
+                            # attempt — a later poll retries every sweep (no rate limit
+                            # on a busy-pane skip), and if it already resumed the banner
+                            # leaves the bottom region and job 6 exits on its own.
+                            logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
+                        else:
+                            if not dry_run:
+                                send_continue(pid, NUDGE_TEXT, run)
+                            attempts += 1
+                            s["attempts"] = attempts
+                            s["last_try"] = now
+                            s["continued"] = True
+                            logs.append("session-limit %s — reset passed → continue" % project)
+                            if attempts == 1:
+                                send_fn("✅ **%s** — 5h limit sa resetol, poslal som "
+                                        "`continue` — pokračujem." % project,
+                                        owner=owner,
+                                        dedup_key="sesslimit-resume:%s:%s" % (key, ra),
+                                        dry_run=dry_run)
                 continue                                # job 6 owns this session this poll
 
             # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
