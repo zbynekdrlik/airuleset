@@ -158,6 +158,43 @@ class TestScrollbackNeverArms(unittest.TestCase):
                              "scrollback content must never arm a fresh session")
 
 
+class TestBackgroundAgentWaitDoesNotBlock(unittest.TestCase):
+    """2026-07-24 restreamer incident: the session printed the /goal template +
+    arm question and ended `⏳ WORKING` while an autopilot-worker ran in the
+    BACKGROUND — CC renders the persistent ambient status line `✻ Waiting for
+    1 background agent to finish` even though the turn has ENDED and the main
+    prompt is a free bare `❯` (typing /goal there is exactly what the user
+    would do by hand; `pane_at_idle_prompt` passes by design). Job 9's busy
+    guard (`"Waiting for" in tail`) false-matched that ambient line, so the
+    goal was NEVER auto-armed while any background worker ran ('cakam uz
+    minuty a nic'). The background-agents status line alone must not block;
+    every OTHER `Waiting for` (and `esc to interrupt`) still does."""
+
+    BG_WAIT_PANE = ARM_PANE.replace(
+        "❯ \n", "✻ Waiting for 1 background agent to finish\n❯ \n")
+    BG_WAIT_PLURAL = ARM_PANE.replace(
+        "❯ \n", "✻ Waiting for 3 background agents to finish\n❯ \n")
+    OTHER_WAIT_PANE = ARM_PANE.replace(
+        "❯ \n", "✻ Waiting for permission approval\n❯ \n")
+
+    def test_bg_agent_wait_still_arms(self):
+        tmux, logs = go(self.BG_WAIT_PANE)
+        typed = tmux.typed()
+        self.assertTrue(typed, "background-agent wait must not block the arm")
+        self.assertTrue(typed[0].startswith("/goal STOP CONDITIONS"), typed[0])
+        self.assertTrue(any("goal-autoarm" in ln for ln in logs), logs)
+
+    def test_bg_agents_plural_still_arms(self):
+        tmux, _ = go(self.BG_WAIT_PLURAL)
+        self.assertTrue(tmux.typed(),
+                        "plural background-agents wait must not block the arm")
+
+    def test_other_waiting_for_still_blocks(self):
+        tmux, _ = go(self.OTHER_WAIT_PANE)
+        self.assertFalse(tmux.typed(),
+                         "a non-background-agents Waiting-for must still block")
+
+
 class TestWrappedGoalUsesTranscript(unittest.TestCase):
     """2026-07-20 gk incident: the /autopilot-master goal RENDERS hard-wrapped
     in the pane (a code block re-flowed by the CC renderer), so the viewport
