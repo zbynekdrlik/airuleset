@@ -131,6 +131,31 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/post-push-ci-cleanup.sh",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-record-subagent-bg-launch.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-record-subagent-bg-launch.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-record-subagent-bg-launch.sh",
+            "timeout": 5
           }
         ]
       }

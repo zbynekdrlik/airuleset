@@ -17,10 +17,14 @@ set -euo pipefail
 # TaskStop (not the owner) — counting them deadlocked healthy workers in
 # every parallel multi-worker setup (odoo-erp review subagent blocked over
 # 5 sibling tasks, 2026-07-24).
-# OWNERSHIP = the subagent's OWN transcript (`agent_transcript_path`;
-# `transcript_path` is the PARENT session's file — parsing it missed every
-# subagent launch): a task counts only if ITS LAUNCH record is in the
-# stopping subagent's transcript —
+# OWNERSHIP = the PostToolUse ledger ∪ the subagent's OWN transcript. The
+# ledger (/tmp/airuleset-bgtasks-<session>-<agent>, written SYNCHRONOUSLY by
+# post-record-subagent-bg-launch.sh at launch time) is the primary source —
+# the transcript is written ASYNC and a launch seconds before the stop is
+# often not flushed yet (live E2E let an abandoning worker through). The
+# transcript (`agent_transcript_path`; `transcript_path` is the PARENT
+# session's file — parsing it missed every subagent launch) remains the
+# secondary source (covers a session whose recorder was added mid-flight):
 #   launched  = toolUseResult.backgroundTaskId (Bash run_in_background)
 #             | toolUseResult.taskId           (Monitor — always async)
 #             | toolUseResult.agentId if isAsync (background child Agent)
@@ -54,6 +58,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
 
 BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SESSION_ID}-${AGENT_ID}"
+LEDGER_FILE="/tmp/airuleset-bgtasks-${SESSION_ID}-${AGENT_ID}"
 # an unreadable/corrupt counter reads as 0 — deliberate fail-open direction
 BLOCKS=$(cat "$BLOCK_FILE" 2>/dev/null || echo 0)
 MAX_BLOCKS=3
@@ -74,16 +79,20 @@ if [ "$HAS_BG" = "true" ]; then
         '[.background_tasks[]? | select(.status == "running") | .id
           | strings | select(. != $a and . != "")] | unique | join(" ")' \
         2>/dev/null || echo "")
-    [ -z "$CANDIDATES" ] && { rm -f "$BLOCK_FILE"; exit 0; }
+    [ -z "$CANDIDATES" ] && { rm -f "$BLOCK_FILE" "$LEDGER_FILE"; exit 0; }
     MODE="intersect"
 fi
 
-# both modes need the OWN transcript (ownership / fallback scan)
 command -v python3 &>/dev/null || exit 0
-[ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
+if [ "$MODE" = "scan" ]; then
+    # the fallback has no other source — an unreadable transcript fails open
+    [ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
+fi
+# intersect mode proceeds regardless: the ledger alone can prove ownership
+# (the transcript is async and may lag the launch — the live-E2E slip)
 
 # shellcheck disable=SC2086
-LIVE=$(python3 - "$TRANSCRIPT" "$MODE" $CANDIDATES <<'PYEOF' 2>/dev/null || echo ""
+LIVE=$(python3 - "$TRANSCRIPT" "$MODE" "$LEDGER_FILE" $CANDIDATES <<'PYEOF' 2>/dev/null || echo ""
 import json
 import re
 import sys
@@ -166,19 +175,29 @@ def scan(line):
                 note_launch(m.group(1))
 
 
-try:
-    fh = open(sys.argv[1], encoding="utf-8", errors="replace")
-except OSError:
-    sys.exit(0)
-
-with fh:
-    for line in fh:
-        scan(line)
-
 mode = sys.argv[2] if len(sys.argv) > 2 else "scan"
+
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            scan(line)
+except OSError:
+    if mode != "intersect":
+        sys.exit(0)      # fallback has no other ownership source
+    # intersect: the synchronous ledger below can still prove ownership
+
+# the PostToolUse ledger — synchronous launch records; the transcript is
+# async and may lag a launch made seconds before the stop (#29 follow-up)
+try:
+    with open(sys.argv[3], encoding="utf-8", errors="replace") as lf:
+        for ln in lf:
+            note_launch(ln.strip())
+except (OSError, IndexError):
+    pass
+
 if mode == "intersect":
     # payload liveness ∩ own launches — sibling tasks (#29) never block
-    live = [c for c in sys.argv[3:] if c in launched]
+    live = [c for c in sys.argv[4:] if c in launched]
 else:
     live = [t for t in launched if t not in terminal]
 if len(live) > 6:      # a fire-and-forget worker can pile up dozens (85 in
@@ -188,7 +207,7 @@ PYEOF
 )
 LIVE=$(echo "$LIVE" | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//')
 
-[ -z "$LIVE" ] && { rm -f "$BLOCK_FILE"; exit 0; }
+[ -z "$LIVE" ] && { rm -f "$BLOCK_FILE" "$LEDGER_FILE"; exit 0; }
 
 echo $((BLOCKS + 1)) > "$BLOCK_FILE"
 
