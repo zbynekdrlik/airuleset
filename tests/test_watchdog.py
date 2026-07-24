@@ -8,6 +8,7 @@ NOT fire on a meta-conversation that merely discusses `<invoke>` markup — like
 very repo) and the run_once wiring.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -661,6 +662,52 @@ class SessionLimitDetector(unittest.TestCase):
     def test_parse_missing_time_returns_none(self):
         self.assertIsNone(wd.parse_reset_epoch("You've hit your session limit", 0))
 
+    # --- FIX A: gk incident 2026-07-24 — a UTC-hosted box's banner reads
+    # "resets 4:40pm (UTC)". The old `_RESET_TZ_RX` only matched "Area/City"
+    # (e.g. "Europe/Prague"), so a bare "(UTC)" fell through to the
+    # Europe/Bratislava default and computed a reset epoch 2h EARLY — the
+    # Discord ping showed a nonsense past reset time ("16:40" while the real
+    # reset was "18:40" local).
+    def test_utc_banner_parses_in_utc(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 7, 24, 15, 20, tzinfo=timezone.utc).timestamp()
+        epoch = wd.parse_reset_epoch(
+            "You've hit your session limit · resets 4:40pm (UTC)\n", now)
+        self.assertIsNotNone(epoch)
+        got = datetime.fromtimestamp(epoch, timezone.utc).strftime("%H:%M")
+        self.assertEqual(got, "16:40")
+
+    def test_tz_read_near_the_clock_not_anywhere(self):
+        # An earlier, unrelated parenthetical ("(debug)") must NOT hijack the
+        # tz lookup — only the ~80 chars starting at the TIME match are
+        # searched, so the real "(UTC)" right after the clock still wins.
+        from datetime import datetime, timezone
+        now = datetime(2026, 7, 24, 15, 20, tzinfo=timezone.utc).timestamp()
+        cap = ("● verbose mode (debug) enabled\n"
+               "You've hit your session limit · resets 4:40pm (UTC)\n")
+        epoch = wd.parse_reset_epoch(cap, now)
+        self.assertIsNotNone(epoch)
+        got = datetime.fromtimestamp(epoch, timezone.utc).strftime("%H:%M")
+        self.assertEqual(got, "16:40")
+
+    # --- FIX B: a dead BACKGROUND WORKER can leave a `⎿ You've hit your
+    # session limit …` ECHO line sitting HIGH in the transcript output, with
+    # many later "● pokracujem v praci"-style lines scrolling underneath it
+    # for hours — a whole-capture search kept the episode "limited" long
+    # after a real resume already happened (gk incident 2026-07-24).
+    # Detection is now scoped to the last 10 lines above the input box.
+    def test_stale_echo_lines_high_in_viewport_do_not_detect(self):
+        stale = (
+            '● Agent "x" failed: You\'ve hit your session limit · '
+            'resets 4:40pm (UTC)\n'
+            "  ⎿  You've hit your session limit · resets 4:40pm (UTC)\n"
+            "     /usage-credits to finish what you're working on.\n"
+            + ("● pokracujem v praci\n" * 12)
+            + "❯ \n  ctx ██  caveman\n")
+        self.assertFalse(wd.pane_session_limited(stale))
+        # the real, bottom-scoped banner must still detect.
+        self.assertTrue(wd.pane_session_limited(SESSION_LIMIT_BANNER))
+
 
 class SessionLimitWiring(unittest.TestCase):
     """run_once job 6: ping once on the banner, NO `continue` before the reset,
@@ -738,16 +785,57 @@ class SessionLimitWiring(unittest.TestCase):
         self.assertTrue(any("resetol" in b for b in sent),
                         "expected the resume Discord ping: %r" % sent)
 
-    def test_no_double_continue_when_already_resumed(self):
+    # (FIX C) A single one-shot `continue` deadlocked forever when the first
+    # post-reset poll landed inside the SESSLIMIT_RETRY_S window of a prior
+    # attempt — job 6 now retries, bounded, so a recent attempt must WAIT
+    # rather than double-fire.
+    def test_recent_attempt_waits_out_the_retry_interval(self):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         tz = ZoneInfo("Europe/Bratislava")
         now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
         seed = {"sesslimit:" + self.SID: {
-            "resets_at": now - 300, "pinged": True, "continued": True,   # already resumed
+            "resets_at": now - 300, "pinged": True, "continued": True,
+            "attempts": 1, "last_try": now - 60,
             "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
         logs, sent, keys, _ = self._harness(now, seed_state=seed)
-        self.assertEqual(keys, [], "must not re-send `continue` once resumed: %r" % keys)
+        self.assertEqual(keys, [], "must wait out the retry interval: %r" % keys)
+
+    def test_bounced_attempt_retries_after_interval(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": True,
+            "attempts": 1, "last_try": now - 400,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, _ = self._harness(now, seed_state=seed,
+                                            capture=SESSION_LIMIT_BANNER)
+        self.assertTrue(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys),
+            "expected a SECOND `continue` retry keystroke: %r" % keys)
+
+    def test_gives_up_after_max_tries_with_one_ping(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": True,
+            "attempts": 4, "last_try": now - 400,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, _ = self._harness(now, seed_state=seed)
+        self.assertEqual(keys, [], "must not keep retrying past max tries: %r" % keys)
+        self.assertTrue(any("ručne" in b for b in sent),
+                        "expected the one give-up ping: %r" % sent)
+
+        # A second poll, already given up → no second ping.
+        seed2 = {"sesslimit:" + self.SID: dict(
+            seed["sesslimit:" + self.SID], gave_up=True)}
+        logs2, sent2, keys2, _ = self._harness(now, seed_state=seed2)
+        self.assertEqual(keys2, [])
+        self.assertEqual(sent2, [], "must not re-ping once already given up: %r" % sent2)
 
     # a session-limit banner still on screen, but the user manually resumed and the pane
     # is now running a FOREGROUND agent (spinner, no bare `❯`). Typing `continue` would
@@ -774,6 +862,50 @@ class SessionLimitWiring(unittest.TestCase):
         # continued must remain False so a later poll (at a genuine idle prompt) can resume
         st = json.loads(Path(sp).read_text())
         self.assertFalse(st["sesslimit:" + self.SID]["continued"])
+
+    # (FIX C) The gk incident: the user's OWN hand-typed draft sat in the input
+    # box of a limit-parked session, unsubmitted — it could go nowhere while
+    # limited, and a `pane_at_idle_prompt` bare-❯ gate never matched a box
+    # holding text, so the resume deadlocked. A draft must be TRACKED first
+    # (never typed over blind), then SUBMITTED once it is byte-stable across
+    # at least one more sweep.
+    DRAFT_CAPTURE = (
+        "❯ continue\n"
+        "  ⎿  You've hit your session limit · resets 6:10pm (Europe/Prague)\n"
+        "     /usage-credits to finish what you're working on.\n\n"
+        "❯ ako to ide, stihne sa deploy?")
+    DRAFT_TEXT = "ako to ide, stihne sa deploy?"
+
+    def test_draft_first_sight_tracked_not_typed(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, sp = self._harness(now, seed_state=seed,
+                                             capture=self.DRAFT_CAPTURE)
+        self.assertEqual(keys, [], "must not type over a freshly-seen draft: %r" % keys)
+        st = json.loads(Path(sp).read_text())
+        self.assertIn("draft_hash", st["sesslimit:" + self.SID])
+
+    def test_stable_draft_submitted_with_escape_enter(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        draft_hash = hashlib.sha1(self.DRAFT_TEXT.encode()).hexdigest()[:12]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": False,
+            "attempts": 0, "draft_hash": draft_hash,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        logs, sent, keys, _ = self._harness(now, seed_state=seed,
+                                            capture=self.DRAFT_CAPTURE)
+        flat = [a for call in keys for a in call]
+        self.assertIn("Escape", flat)
+        self.assertIn("Enter", flat)
+        self.assertNotIn("-l", flat, "must never type text over the user's draft: %r" % keys)
 
 
 class RunOnceLoopIsolation(unittest.TestCase):
