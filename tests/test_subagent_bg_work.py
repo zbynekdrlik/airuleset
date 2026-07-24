@@ -47,16 +47,22 @@ def _jl(**kw):
     return json.dumps(kw)
 
 
-def bash_bg_launch(task_id):
-    # real shape: camera-box 90bc51f3… / restreamer agent-a4cd262f… specimens
-    return _jl(type="user", isSidechain=True,
-               message={"role": "user", "content": [
-                   {"type": "tool_result", "tool_use_id": "toolu_01X",
-                    "content": "Command running in background with ID: %s. "
-                               "Output is being written to: /tmp/x/tasks/"
-                               "%s.output." % (task_id, task_id)}]},
-               toolUseResult={"stdout": "", "stderr": "", "interrupted": False,
-                              "backgroundTaskId": task_id})
+def bash_bg_launch(task_id, sidecar=True):
+    # MAIN-session-style entry carries a toolUseResult sidecar; the SUBAGENT
+    # transcript (restreamer agent-a4cd262f… specimen, verified 2026-07-24)
+    # has ONLY the tool_result content string — no sidecar. Both must detect.
+    kw = dict(type="user", isSidechain=True,
+              message={"role": "user", "content": [
+                  {"type": "tool_result", "tool_use_id": "toolu_01X",
+                   "is_error": False,
+                   "content": "Command running in background with ID: %s. "
+                              "Output is being written to: /tmp/x/tasks/"
+                              "%s.output" % (task_id, task_id)}]})
+    if sidecar:
+        kw["toolUseResult"] = {"stdout": "", "stderr": "",
+                               "interrupted": False,
+                               "backgroundTaskId": task_id}
+    return _jl(**kw)
 
 
 def monitor_launch(task_id):
@@ -172,6 +178,31 @@ class TestSubagentStopBlocksLiveBgWork(SubagentStopHookBase):
                                  {"type": "text", "text": "done"}]})])
         self.assertNotIn("block", out.stdout)
         self.assertEqual(out.returncode, 0)
+
+    def test_subagent_shape_without_sidecar_blocks(self):
+        # THE real failure shape (restreamer agent-a4cd262f…): the subagent
+        # transcript's launch entry has NO toolUseResult — only the
+        # tool_result content string. Caught live 2026-07-24: the deployed
+        # hook passed the actual specimen while synthetic fixtures blocked.
+        out = self._run([bash_bg_launch("b2w33fmts", sidecar=False)])
+        self.assertIn("block", out.stdout)
+        self.assertIn("b2w33fmts", out.stdout)
+
+    def test_sidecarless_launch_with_completion_passes(self):
+        out = self._run([bash_bg_launch("b2w33fmts", sidecar=False),
+                         terminal_notification("b2w33fmts")])
+        self.assertNotIn("block", out.stdout)
+
+    def test_assistant_quoting_launch_text_is_not_a_launch(self):
+        # an assistant TEXT block merely quoting the harness wording (a
+        # research digest, this very repo's tests) must not count
+        out = self._run([_jl(type="assistant", isSidechain=True,
+                             message={"role": "assistant", "content": [
+                                 {"type": "text",
+                                  "text": "the result said 'Command running "
+                                          "in background with ID: bquoted1' "
+                                          "and Monitor started (task bq2)"}]})])
+        self.assertNotIn("block", out.stdout)
 
 
 class TestSubagentStopFailsOpen(SubagentStopHookBase):
