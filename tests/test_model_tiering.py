@@ -139,3 +139,31 @@ class TestFableAdvisorShape(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestSubdevReviewIsFableGated(TestCase):
+    """User directive 2026-07-24: the gatekeeper's deep review of sub-dev
+    submitted PRs/tickets/implementations is where MAXIMUM scrutiny belongs —
+    the review/verdict stages run FABLE through the budget gate (CLOSED →
+    Opus, never lower), grounding stays on cheap stages, and the tier never
+    degrades across re-review iterations. Before this, /process-subdev named
+    NO model at all — reviews silently ran on whatever the session/agent
+    defaulted to."""
+
+    def test_process_subdev_pins_the_review_tier(self):
+        txt = (ROOT / "skills" / "process-subdev" / "SKILL.md").read_text()
+        self.assertIn("fable-gate", txt)
+        self.assertIn("model: fable", txt)
+        self.assertIn("xhigh", txt)
+        self.assertIn("never degrades", txt)
+        # gate CLOSED → opus, never a cheaper tier for the verdict
+        self.assertRegex(txt, r"CLOSED[^\n]*opus")
+
+    def test_model_awareness_names_the_criterion(self):
+        txt = (ROOT / "modules" / "core" / "model-awareness.md").read_text()
+        self.assertIn("sub-dev", txt)
+        self.assertRegex(txt, r"(?i)sub-dev[^\n]*(hand-off|review|submission)")
+
+    def test_cross_stream_protocol_carries_the_tier(self):
+        txt = (ROOT / "skills" / "autopilot" / "SKILL.md").read_text()
+        self.assertRegex(txt, r"(?i)review[^\n]*fable[^\n]*gate|fable[^\n]*gate[^\n]*review")
