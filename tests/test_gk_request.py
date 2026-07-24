@@ -112,14 +112,34 @@ class TestGkRequestBackstop(unittest.TestCase):
                                gh_fetch=lambda root: [7], user="gatekeeper")
         self.assertEqual(len(self.pings), 1)
 
+    def test_stale_cache_root_never_pings(self):
+        # LIVE false positive (2026-07-24): the no-pane Discord fallback fired
+        # for a checkout untouched for 16 DAYS whose supervisor session lives
+        # on ANOTHER box. Only a root with a FRESH cache entry (a session ran
+        # here recently and is now gone) justifies the "session missing" ping.
+        with TemporaryDirectory() as home2:
+            root = str(Path(home2) / "devel" / "olddemo")
+            Path(root).mkdir(parents=True)
+            d = statusbar.cache_dir(home2)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / (statusbar.cwd_key(root) + ".json")).write_text(json.dumps(
+                {"open": 1, "name": "olddemo", "root": root,
+                 "ts": int(time.time()) - 16 * 24 * 3600}))
+            wd.gk_request_backstop(
+                time.time(), FakeTmux([]), {}, self._send, home=home2,
+                gh_fetch=lambda r: [7], user="gatekeeper")
+        self.assertFalse(self.pings,
+                         "a 16-day-stale root must never Discord-ping")
+
     def test_reduced_stream_home_never_nudged(self):
         # the requester must not be nudged about its own request — only a
-        # supervisor session works gk-requests
-        root = "/home/david/devel/odoo-erp"
-        tmux = FakeTmux([("%9", root)])
-        logs = wd.gk_request_backstop(
-            time.time(), tmux, {}, self._send, home=self.home,
-            gh_fetch=lambda r: [5], user="david")
+        # supervisor session works gk-requests (fresh home: no cached roots)
+        with TemporaryDirectory() as home2:
+            root = "/home/david/devel/odoo-erp"
+            tmux = FakeTmux([("%9", root)])
+            logs = wd.gk_request_backstop(
+                time.time(), tmux, {}, self._send, home=home2,
+                gh_fetch=lambda r: [5], user="david")
         self.assertFalse(tmux.typed(), logs)
         self.assertFalse(self.pings)
 
@@ -140,7 +160,9 @@ class TestGkreqFetch(unittest.TestCase):
 
         def run(argv, **kw):
             calls.append(argv)
-            out = [{"number": 5}] if "--label" in argv else [{"number": 9}]
+            out = ([{"number": 5}] if "--label" in argv
+                   else [{"number": 9,
+                          "title": "GATEKEEPER-ACTION: obnov docker sock"}])
             return m.Mock(returncode=0, stdout=json.dumps(out))
 
         with m.patch("subprocess.run", side_effect=run):
@@ -149,6 +171,23 @@ class TestGkreqFetch(unittest.TestCase):
         flat = json.dumps(calls)
         self.assertIn("needs-gatekeeper", flat)
         self.assertIn("GATEKEEPER-ACTION", flat)
+
+    def test_tokenized_search_match_is_filtered_client_side(self):
+        # LIVE false positive (2026-07-24, first minutes of the job): GitHub
+        # search TOKENIZES — '"GATEKEEPER-ACTION:" in:title' matched odoo-erp
+        # #1768 "P1 hardening: … gatekeeper GitHub Actions runner" (tokens
+        # gatekeeper + actions) and pinged the user's Discord about a
+        # non-request. Only a title carrying the LITERAL marker counts.
+        def run(argv, **kw):
+            out = ([] if "--label" in argv
+                   else [{"number": 1768,
+                          "title": "P1 hardening: dedicated non-sudo OS "
+                                   "identity for the gatekeeper GitHub "
+                                   "Actions runner"}])
+            return m.Mock(returncode=0, stdout=json.dumps(out))
+
+        with m.patch("subprocess.run", side_effect=run):
+            self.assertEqual(wd._fetch_gkreq_tickets("/tmp/x"), [])
 
     def test_any_query_error_returns_none(self):
         with m.patch("subprocess.run",
@@ -265,6 +304,9 @@ class TestCmdGkRequest(unittest.TestCase):
             calls.append(argv)
             if "--add-label" in argv:
                 return m.Mock(returncode=1, stdout="", stderr="403")
+            if "view" in argv:
+                return m.Mock(returncode=0, stdout="Stary titulok\n",
+                              stderr="")
             return m.Mock(returncode=0, stdout="", stderr="")
 
         with m.patch("subprocess.run", side_effect=run):
@@ -272,6 +314,13 @@ class TestCmdGkRequest(unittest.TestCase):
         comments = [argv for argv in calls if "comment" in argv]
         self.assertTrue(comments)
         self.assertIn("GATEKEEPER-ACTION:", json.dumps(comments))
+        # a comment-only marker is INVISIBLE to job 11's queries (label +
+        # in:title only) — the fallback must ALSO best-effort retitle the
+        # issue so the request stays machine-discoverable
+        edits = [argv for argv in calls
+                 if "edit" in argv and "--title" in argv]
+        self.assertTrue(edits, calls)
+        self.assertIn("GATEKEEPER-ACTION: Stary titulok", json.dumps(edits))
 
     def test_registered_in_cli(self):
         src = Path(airuleset.__file__).read_text()
