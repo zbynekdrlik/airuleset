@@ -15,6 +15,13 @@ set -euo pipefail
 #   launched  = toolUseResult.backgroundTaskId (Bash run_in_background)
 #             | toolUseResult.taskId           (Monitor — always async)
 #             | toolUseResult.agentId if isAsync (background child Agent)
+#             | the tool_result CONTENT string ("Command running in
+#               background with ID: X" / "Monitor started (task X" /
+#               "Async agent launched … agentId: X") — a SUBAGENT
+#               transcript's launch entry carries NO toolUseResult sidecar
+#               (the restreamer specimen; caught live 2026-07-24). Only
+#               tool_result blocks are scanned — assistant text merely
+#               QUOTING the harness wording never counts as a launch.
 #   terminal  = a task-notification line carrying BOTH <task-id>ID</task-id>
 #               AND a <status> tag (a Monitor MID-STREAM <event> has no
 #               <status> — the task is still live), or a TaskStop/KillShell
@@ -48,6 +55,36 @@ import sys
 launched = []          # ordered, deduped
 terminal = set()
 NOTIF_ID = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+LAUNCH_SIGS = (
+    re.compile(r"Command running in background with ID: ([A-Za-z0-9_-]+)"),
+    re.compile(r"Monitor started \(task ([A-Za-z0-9_-]+)"),
+)
+AGENT_ID_SIG = re.compile(r"agentId: ([A-Za-z0-9_-]+)")
+PREFILTER = ("running in background with ID:", "Monitor started (task",
+             "Async agent launched", '"toolUseResult"')
+
+
+def result_texts(e):
+    """Content strings of tool_result blocks ONLY — a subagent transcript's
+    launch entry has no toolUseResult sidecar, so the harness wording in the
+    tool_result content IS the launch record; assistant TEXT quoting the same
+    wording must never count."""
+    for blk in ((e.get("message") or {}).get("content") or []) \
+            if isinstance((e.get("message") or {}).get("content"), list) else []:
+        if not (isinstance(blk, dict) and blk.get("type") == "tool_result"):
+            continue
+        c = blk.get("content")
+        if isinstance(c, str):
+            yield c
+        elif isinstance(c, list):
+            for b2 in c:
+                if isinstance(b2, dict) and isinstance(b2.get("text"), str):
+                    yield b2["text"]
+
+
+def note_launch(tid):
+    if isinstance(tid, str) and tid and tid not in launched:
+        launched.append(tid)
 
 try:
     fh = open(sys.argv[1], encoding="utf-8", errors="replace")
@@ -72,23 +109,33 @@ for line in fh:
                             terminal.add(v)
         except Exception:
             pass
-    # background launches — the toolUseResult sidecar on the tool_result entry
-    if '"toolUseResult"' not in line:
+    # background launches — the toolUseResult sidecar (main-session shape)
+    # OR the tool_result content string (subagent shape, no sidecar)
+    if not any(p in line for p in PREFILTER):
         continue
     try:
         e = json.loads(line)
     except Exception:
         continue
     tur = e.get("toolUseResult")
-    if not isinstance(tur, dict):
-        continue
-    tid = tur.get("backgroundTaskId") or tur.get("taskId")
-    if not tid and tur.get("isAsync"):
-        tid = tur.get("agentId")
-    if isinstance(tid, str) and tid and tid not in launched:
-        launched.append(tid)
+    if isinstance(tur, dict):
+        tid = tur.get("backgroundTaskId") or tur.get("taskId")
+        if not tid and tur.get("isAsync"):
+            tid = tur.get("agentId")
+        note_launch(tid)
+    for txt in result_texts(e):
+        for sig in LAUNCH_SIGS:
+            m = sig.search(txt)
+            if m:
+                note_launch(m.group(1))
+        if "Async agent launched" in txt:
+            m = AGENT_ID_SIG.search(txt)
+            if m:
+                note_launch(m.group(1))
 
 live = [t for t in launched if t not in terminal]
+if len(live) > 6:      # a fire-and-forget worker can pile up dozens (85 in
+    live = live[:6] + ["(+%d more)" % (len(live) - 6)]   # the real specimen)
 print(" ".join(live))
 PYEOF
 )
@@ -101,13 +148,16 @@ echo $((BLOCKS + 1)) > "$BLOCK_FILE"
 REASON="You still have IN-FLIGHT background work: task(s) ${LIVE}. You are a \
 SUBAGENT — if you end your turn now you TERMINATE and the completion \
 notification fires to your PARENT, not to you (ci-monitoring.md; this killed \
-~40% of autopilot workers). Do ONE of these NOW, then finish: (1) wait \
-FOREGROUND — a bounded poll loop of plain foreground Bash calls (e.g. \
-'sleep 300 && gh run view <id> --json status,conclusion', repeated until \
-terminal), NEVER run_in_background; (2) fetch the finished result with \
-TaskOutput(task_id); (3) if your dispatch contract hands the wait to the \
-supervisor, TaskStop the task(s) first and report the run-id/state in your \
-final message. A detached background task must never outlive your turn."
+~40% of autopilot workers). Finish the work FIRST, then clean up, then end: \
+(1) wait FOREGROUND until the underlying work is done — a bounded poll loop \
+of plain foreground Bash calls (e.g. 'sleep 300 && gh run view <id> --json \
+status,conclusion', repeated until terminal), NEVER run_in_background; \
+(2) then TaskStop EVERY task listed above that has not itself finished \
+(fetch any output you need via TaskOutput first) — a TaskStop'd task no \
+longer blocks you; (3) only if your dispatch contract hands the wait to the \
+supervisor: TaskStop the task(s) and report the run-id + current state in \
+your final message instead of waiting. A detached background task must \
+never outlive your turn."
 
 jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
 exit 0
