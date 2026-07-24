@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: SubagentStop (airuleset #28)
+# Hook: SubagentStop (airuleset #28, ownership filter #29)
 # A SUBAGENT that ends its turn with in-flight background work TERMINATES —
 # the detached task's completion fires to the PARENT, never to the now-gone
 # subagent (ci-monitoring.md; ~40% of autopilot-worker failures; odoo-erp
 # worker #2061/PR #2063 died mid-CI-monitor 2026-07-24). The rule exists in
 # prose and workers violate it anyway — this hook is the mechanism: it BLOCKS
-# the stop while background work is live, telling the worker to wait
-# FOREGROUND and TaskStop every stray task before returning.
+# the stop while the subagent's OWN background work is live, telling the
+# worker to wait FOREGROUND and TaskStop every stray task before returning.
 #
-# PRIMARY detection (live-fired E2E 2026-07-24, CC 2.1.x): the payload's
-# `background_tasks` array — the harness's OWN live-task list (shells /
-# monitors / child subagents) with current statuses. Authoritative and
-# lag-free. live = entries with status "running" MINUS the stopping
-# subagent's SELF entry (id == agent_id — always present and "running" at
-# its own stop). When the key exists, the transcript is never consulted.
-#
-# FALLBACK (CC versions without the field): parse the subagent's OWN
-# transcript — `agent_transcript_path`; `transcript_path` is the PARENT
-# session's file (verified live — parsing it missed every subagent launch):
+# LIVENESS = the payload (live-fired E2E 2026-07-24, CC 2.1.x): the
+# `background_tasks` array is the harness's live-task list with current
+# statuses — authoritative and lag-free. But it is SESSION-WIDE (#29): it
+# lists SIBLING workers' tasks too, which the stopping subagent cannot
+# TaskStop (not the owner) — counting them deadlocked healthy workers in
+# every parallel multi-worker setup (odoo-erp review subagent blocked over
+# 5 sibling tasks, 2026-07-24).
+# OWNERSHIP = the subagent's OWN transcript (`agent_transcript_path`;
+# `transcript_path` is the PARENT session's file — parsing it missed every
+# subagent launch): a task counts only if ITS LAUNCH record is in the
+# stopping subagent's transcript —
 #   launched  = toolUseResult.backgroundTaskId (Bash run_in_background)
 #             | toolUseResult.taskId           (Monitor — always async)
 #             | toolUseResult.agentId if isAsync (background child Agent)
@@ -27,18 +28,24 @@ set -euo pipefail
 #               background with ID: X" / "Monitor started (task X" /
 #               "Async agent launched … agentId: X") — a SUBAGENT
 #               transcript's launch entry carries NO toolUseResult sidecar
-#               (the restreamer specimen; caught live 2026-07-24). Only
-#               tool_result blocks are scanned — assistant text merely
-#               QUOTING the harness wording never counts as a launch.
-#   terminal  = a task-notification line carrying BOTH <task-id>ID</task-id>
-#               AND a <status> tag (a Monitor MID-STREAM <event> has no
-#               <status> — the task is still live), or a TaskStop/KillShell
-#               tool_use naming the id.
-# Fail-open everywhere: no jq/python, missing/unreadable transcript, parse
-# errors, and after MAX_BLOCKS blocks per (session, agent) — the fallback
-# transcript is written asynchronously and may lag a completion (observed
-# live: a lagged launch missed on run 1, an over-block after cleanup on
-# run 2 — the payload path has neither problem).
+#               (the restreamer specimen). Only tool_result blocks are
+#               scanned — assistant text merely QUOTING the harness wording
+#               never counts as a launch.
+# BLOCK = live ∩ owned. A blocked worker can therefore ALWAYS get out:
+# TaskStop works on a task it owns.
+#
+# FALLBACK (CC versions without `background_tasks`): the transcript alone —
+# launched minus terminal, where terminal = a task-notification line
+# carrying BOTH <task-id>ID</task-id> AND a <status> tag (a Monitor
+# MID-STREAM <event> has no <status> — still live), or a TaskStop/KillShell
+# tool_use naming the id. Inherently ownership-scoped (own transcript).
+#
+# Fail-open everywhere: no jq/python, missing/unreadable transcript
+# (ownership unprovable → nothing blocks), parse errors, and after
+# MAX_BLOCKS blocks per (session, agent) — the transcript is written
+# asynchronously and may lag (observed live: a lagged launch missed on one
+# run, an over-block after cleanup on another — the payload liveness path
+# has neither problem).
 
 command -v jq &>/dev/null || exit 0
 
@@ -55,20 +62,28 @@ if [ "$BLOCKS" -ge "$MAX_BLOCKS" ] 2>/dev/null; then
 fi
 
 HAS_BG=$(echo "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo "false")
+TRANSCRIPT=$(echo "$INPUT" | jq -r \
+    '.agent_transcript_path // .transcript_path // empty' \
+    2>/dev/null || echo "")
+
+MODE="scan"
+CANDIDATES=""
 if [ "$HAS_BG" = "true" ]; then
-    # PRIMARY: the harness's live list; exclude the subagent's own entry.
-    LIVE=$(echo "$INPUT" | jq -r --arg a "$AGENT_ID" \
+    # liveness from the harness's list; exclude the subagent's own entry
+    CANDIDATES=$(echo "$INPUT" | jq -r --arg a "$AGENT_ID" \
         '[.background_tasks[]? | select(.status == "running") | .id
           | strings | select(. != $a and . != "")] | unique | join(" ")' \
         2>/dev/null || echo "")
-else
-    # FALLBACK: parse the subagent's OWN transcript (never the parent's).
-    command -v python3 &>/dev/null || exit 0
-    TRANSCRIPT=$(echo "$INPUT" | jq -r \
-        '.agent_transcript_path // .transcript_path // empty' \
-        2>/dev/null || echo "")
-    [ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
-    LIVE=$(python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null || echo ""
+    [ -z "$CANDIDATES" ] && { rm -f "$BLOCK_FILE"; exit 0; }
+    MODE="intersect"
+fi
+
+# both modes need the OWN transcript (ownership / fallback scan)
+command -v python3 &>/dev/null || exit 0
+[ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
+
+# shellcheck disable=SC2086
+LIVE=$(python3 - "$TRANSCRIPT" "$MODE" $CANDIDATES <<'PYEOF' 2>/dev/null || echo ""
 import json
 import re
 import sys
@@ -107,10 +122,6 @@ def note_launch(tid):
     if isinstance(tid, str) and tid and tid not in launched:
         launched.append(tid)
 
-try:
-    fh = open(sys.argv[1], encoding="utf-8", errors="replace")
-except OSError:
-    sys.exit(0)
 
 def scan(line):
     # terminal completions / kills — raw-text scan (the notification XML sits
@@ -155,36 +166,46 @@ def scan(line):
                 note_launch(m.group(1))
 
 
+try:
+    fh = open(sys.argv[1], encoding="utf-8", errors="replace")
+except OSError:
+    sys.exit(0)
+
 with fh:
     for line in fh:
         scan(line)
 
-live = [t for t in launched if t not in terminal]
+mode = sys.argv[2] if len(sys.argv) > 2 else "scan"
+if mode == "intersect":
+    # payload liveness ∩ own launches — sibling tasks (#29) never block
+    live = [c for c in sys.argv[3:] if c in launched]
+else:
+    live = [t for t in launched if t not in terminal]
 if len(live) > 6:      # a fire-and-forget worker can pile up dozens (85 in
     live = live[:6] + ["(+%d more)" % (len(live) - 6)]   # the real specimen)
 print(" ".join(live))
 PYEOF
 )
-fi
 LIVE=$(echo "$LIVE" | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//')
 
 [ -z "$LIVE" ] && { rm -f "$BLOCK_FILE"; exit 0; }
 
 echo $((BLOCKS + 1)) > "$BLOCK_FILE"
 
-REASON="You still have IN-FLIGHT background work: task(s) ${LIVE}. You are a \
-SUBAGENT — if you end your turn now you TERMINATE and the completion \
-notification fires to your PARENT, not to you (ci-monitoring.md; this killed \
-~40% of autopilot workers). Finish the work FIRST, then clean up, then end: \
-(1) wait FOREGROUND until the underlying work is done — a bounded poll loop \
-of plain foreground Bash calls (e.g. 'sleep 300 && gh run view <id> --json \
-status,conclusion', repeated until terminal), NEVER run_in_background; \
-(2) then TaskStop EVERY task listed above that has not itself finished \
-(fetch any output you need via TaskOutput first) — a TaskStop'd task no \
-longer blocks you; (3) only if your dispatch contract hands the wait to the \
-supervisor: TaskStop the task(s) and report the run-id + current state in \
-your final message instead of waiting. A detached background task must \
-never outlive your turn."
+REASON="You still have IN-FLIGHT background work YOU launched: task(s) \
+${LIVE}. You are a SUBAGENT — if you end your turn now you TERMINATE and the \
+completion notification fires to your PARENT, not to you (ci-monitoring.md; \
+this killed ~40% of autopilot workers). Finish the work FIRST, then clean \
+up, then end: (1) wait FOREGROUND until the underlying work is done — a \
+bounded poll loop of plain foreground Bash calls (e.g. 'sleep 300 && gh run \
+view <id> --json status,conclusion', repeated until terminal), NEVER \
+run_in_background; (2) then TaskStop EVERY task listed above that has not \
+itself finished (fetch any output you need via TaskOutput first) — you own \
+these tasks, TaskStop works, and a TaskStop'd task no longer blocks you; \
+(3) only if your dispatch contract hands the wait to the supervisor: \
+TaskStop the task(s) and report the run-id + current state in your final \
+message instead of waiting. A detached background task must never outlive \
+your turn."
 
 jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
 exit 0
