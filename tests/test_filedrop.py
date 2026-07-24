@@ -447,6 +447,36 @@ class TestChooseFiledropPort(unittest.TestCase):
                         "migrated port must be persisted for the share CLI")
         self.assertEqual(int(self.port_file.read_text().strip()), chosen)
 
+    def test_migrated_persisted_port_held_by_foreign_user_repicks(self):
+        # a ~/.claude migrated from another box carries THAT box's port — here
+        # it can be a DIFFERENT user's live file-drop (montalu@subdev inherited
+        # dev1's 8789 == marek's subdev port; #33 migration, 2026-07-24).
+        # Foreign holder + our service inactive → re-pick + replace the file.
+        import socket
+        hog = socket.socket()
+        hog.bind(("127.0.0.1", 0))
+        taken = hog.getsockname()[1]
+        self.addCleanup(hog.close)
+        self.port_file.write_text("%d\n" % taken)
+        with self.m.patch.object(self.ar, "filedrop_persisted_port",
+                                 lambda: taken), \
+                self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", taken):
+            got = self.ar._choose_filedrop_port("127.0.0.1")
+        self.assertNotEqual(got, taken,
+                            "a foreign-held persisted port must be re-picked")
+        self.assertEqual(self.port_file.read_text().strip(), str(got),
+                         "the stale persisted file must be replaced")
+
+    def test_persisted_port_kept_when_our_service_is_active(self):
+        # our own live instance actively serves the persisted port — a bind
+        # test there would always fail (the port is legitimately in use by
+        # US), so it must NOT be treated as foreign and re-picked.
+        with self.m.patch.object(self.ar, "filedrop_persisted_port",
+                                 lambda: 8791), \
+                self.m.patch.object(self.ar, "_run_systemctl",
+                                    lambda a: (0, "active\n", "")):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
+
 
 class TestBindIps(unittest.TestCase):
     """bind_ips() / advertise_urls() — the multi-interface URL fix (2026-07-10).
