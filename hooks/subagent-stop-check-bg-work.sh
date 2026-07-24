@@ -6,12 +6,20 @@ set -euo pipefail
 # the detached task's completion fires to the PARENT, never to the now-gone
 # subagent (ci-monitoring.md; ~40% of autopilot-worker failures; odoo-erp
 # worker #2061/PR #2063 died mid-CI-monitor 2026-07-24). The rule exists in
-# prose and workers violate it anyway — this hook is the mechanism: it parses
-# the subagent's OWN transcript for background launches without a terminal
-# completion and BLOCKS the stop, telling the worker to wait FOREGROUND,
-# fetch the result (TaskOutput), or TaskStop the task before returning.
+# prose and workers violate it anyway — this hook is the mechanism: it BLOCKS
+# the stop while background work is live, telling the worker to wait
+# FOREGROUND and TaskStop every stray task before returning.
 #
-# Detection (shapes verified on real transcripts, 2026-07-24):
+# PRIMARY detection (live-fired E2E 2026-07-24, CC 2.1.x): the payload's
+# `background_tasks` array — the harness's OWN live-task list (shells /
+# monitors / child subagents) with current statuses. Authoritative and
+# lag-free. live = entries with status "running" MINUS the stopping
+# subagent's SELF entry (id == agent_id — always present and "running" at
+# its own stop). When the key exists, the transcript is never consulted.
+#
+# FALLBACK (CC versions without the field): parse the subagent's OWN
+# transcript — `agent_transcript_path`; `transcript_path` is the PARENT
+# session's file (verified live — parsing it missed every subagent launch):
 #   launched  = toolUseResult.backgroundTaskId (Bash run_in_background)
 #             | toolUseResult.taskId           (Monitor — always async)
 #             | toolUseResult.agentId if isAsync (background child Agent)
@@ -27,27 +35,39 @@ set -euo pipefail
 #               <status> — the task is still live), or a TaskStop/KillShell
 #               tool_use naming the id.
 # Fail-open everywhere: no jq/python, missing/unreadable transcript, parse
-# errors, and after MAX_BLOCKS blocks per (session, agent) — the transcript
-# is written asynchronously and may lag a completion that already happened.
+# errors, and after MAX_BLOCKS blocks per (session, agent) — the fallback
+# transcript is written asynchronously and may lag a completion (observed
+# live: a lagged launch missed on run 1, an over-block after cleanup on
+# run 2 — the payload path has neither problem).
 
 command -v jq &>/dev/null || exit 0
-command -v python3 &>/dev/null || exit 0
 
 INPUT=$(cat 2>/dev/null || echo "")
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
-
-[ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
 
 BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SESSION_ID}-${AGENT_ID}"
 BLOCKS=$(cat "$BLOCK_FILE" 2>/dev/null || echo 0)
 MAX_BLOCKS=3
 if [ "$BLOCKS" -ge "$MAX_BLOCKS" ] 2>/dev/null; then
-    exit 0     # fail open — the async transcript may lag a real completion
+    exit 0     # fail open — never wedge a subagent in an endless block loop
 fi
 
-LIVE=$(python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null || echo ""
+HAS_BG=$(echo "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo "false")
+if [ "$HAS_BG" = "true" ]; then
+    # PRIMARY: the harness's live list; exclude the subagent's own entry.
+    LIVE=$(echo "$INPUT" | jq -r --arg a "$AGENT_ID" \
+        '[.background_tasks[]? | select(.status == "running") | .id
+          | strings | select(. != $a and . != "")] | unique | join(" ")' \
+        2>/dev/null || echo "")
+else
+    # FALLBACK: parse the subagent's OWN transcript (never the parent's).
+    command -v python3 &>/dev/null || exit 0
+    TRANSCRIPT=$(echo "$INPUT" | jq -r \
+        '.agent_transcript_path // .transcript_path // empty' \
+        2>/dev/null || echo "")
+    [ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
+    LIVE=$(python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null || echo ""
 import json
 import re
 import sys
@@ -139,6 +159,7 @@ if len(live) > 6:      # a fire-and-forget worker can pile up dozens (85 in
 print(" ".join(live))
 PYEOF
 )
+fi
 LIVE=$(echo "$LIVE" | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//')
 
 [ -z "$LIVE" ] && { rm -f "$BLOCK_FILE"; exit 0; }
