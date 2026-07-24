@@ -74,6 +74,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-fork-no-merge-issue-close.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-subagent-bg-ci-poll.sh",
+            "timeout": 5
           }
         ]
       },
@@ -207,6 +212,18 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/clear-question-dedup.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/subagent-stop-check-bg-work.sh",
+            "timeout": 15
           }
         ]
       }
