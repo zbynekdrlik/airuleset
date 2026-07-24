@@ -41,6 +41,7 @@ import airuleset
 REPO = Path(airuleset.__file__).resolve().parent
 STOP_HOOK = REPO / "hooks" / "subagent-stop-check-bg-work.sh"
 PRE_HOOK = REPO / "hooks" / "block-subagent-bg-ci-poll.sh"
+RECORD_HOOK = REPO / "hooks" / "post-record-subagent-bg-launch.sh"
 
 
 def _jl(**kw):
@@ -116,11 +117,16 @@ class SubagentStopHookBase(unittest.TestCase):
     def setUp(self):
         import glob
         self.addCleanup(lambda: [os.remove(f) for f in glob.glob(
-            "/tmp/airuleset-subagent-bgwork-block-t-*")])
+            "/tmp/airuleset-subagent-bgwork-block-t-*")
+            + glob.glob("/tmp/airuleset-bgtasks-t-*")])
 
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
-             sid=None, background_tasks=None, parent_lines=None):
+             sid=None, background_tasks=None, parent_lines=None,
+             ledger=None):
         sid = sid or ("t-" + uuid.uuid4().hex[:10])
+        if ledger is not None:
+            Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, agent_id)).write_text(
+                "\n".join(ledger) + "\n")
         with TemporaryDirectory() as d:
             tr = transcript_path
             if tr is None:
@@ -342,6 +348,111 @@ class TestFallbackTranscriptSelection(SubagentStopHookBase):
         self.assertIn("bfall1", out.stdout)
 
 
+class TestLedgerOwnership(SubagentStopHookBase):
+    """The live-lag fix (#29 follow-through): the agent transcript is written
+    ASYNC, so a launch seconds before the stop is often NOT in the file yet —
+    live E2E showed the ownership-by-transcript gate letting an abandoning
+    subagent through. A PostToolUse recorder writes each background launch to
+    a per-(session, agent) ledger SYNCHRONOUSLY at launch time; SubagentStop
+    unions ledger + transcript for ownership. The ledger is removed when the
+    stop passes."""
+
+    AID = "a72ef9d62dcb0beb8"
+
+    def _sid(self):
+        return "t-led-" + uuid.uuid4().hex[:8]
+
+    def test_ledger_owned_task_blocks_despite_lagged_transcript(self):
+        sid = self._sid()
+        out = self._run([], agent_id=self.AID, sid=sid,
+                        ledger=["be5t8pqaa"],
+                        background_tasks=[
+                            self_task(self.AID),
+                            {"id": "be5t8pqaa", "type": "shell",
+                             "status": "running", "command": "sleep 45"}])
+        self.assertIn("block", out.stdout)
+        self.assertIn("be5t8pqaa", out.stdout)
+
+    def test_sibling_ids_not_in_ledger_still_pass(self):
+        out = self._run([], agent_id=self.AID, sid=self._sid(),
+                        ledger=["bmine9"],
+                        background_tasks=[
+                            self_task(self.AID),
+                            {"id": "bsibling9", "type": "shell",
+                             "status": "running", "command": "sleep 300"}])
+        self.assertNotIn("block", out.stdout)
+
+    def test_ledger_removed_when_stop_passes(self):
+        sid = self._sid()
+        path = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, self.AID))
+        out = self._run([], agent_id=self.AID, sid=sid,
+                        ledger=["bolddone1"],
+                        background_tasks=[self_task(self.AID)])
+        self.assertNotIn("block", out.stdout)
+        self.assertFalse(path.exists(),
+                         "a passing stop must clean up the agent's ledger")
+
+
+class TestPostToolUseRecorder(unittest.TestCase):
+    """post-record-subagent-bg-launch.sh — the synchronous ownership ledger.
+    Live PostToolUse payload (captured 2026-07-24): subagent context carries
+    agent_id; tool_response is the structured sidecar (backgroundTaskId for
+    Bash, taskId for Monitor, isAsync+agentId for a background Agent)."""
+
+    def setUp(self):
+        import glob
+        self.addCleanup(lambda: [os.remove(f) for f in glob.glob(
+            "/tmp/airuleset-bgtasks-t-rec-*")])
+
+    def _run(self, tool_response, agent_id="aREC1", sid=None,
+             tool_name="Bash"):
+        sid = sid or ("t-rec-" + uuid.uuid4().hex[:8])
+        payload = {"session_id": sid, "hook_event_name": "PostToolUse",
+                   "tool_name": tool_name,
+                   "tool_input": {"command": "x"},
+                   "tool_response": tool_response}
+        if agent_id:
+            payload["agent_id"] = agent_id
+            payload["agent_type"] = "general-purpose"
+        r = subprocess.run(["bash", str(RECORD_HOOK)],
+                           input=json.dumps(payload),
+                           capture_output=True, text=True)
+        return r, Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, agent_id))
+
+    def test_bash_background_launch_recorded(self):
+        r, ledger = self._run({"stdout": "", "stderr": "",
+                               "backgroundTaskId": "be5t8pqaa"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("be5t8pqaa", ledger.read_text())
+
+    def test_monitor_launch_recorded(self):
+        r, ledger = self._run({"taskId": "buub5aih3", "timeoutMs": 360000,
+                               "persistent": False}, tool_name="Monitor")
+        self.assertIn("buub5aih3", ledger.read_text())
+
+    def test_background_agent_dispatch_recorded(self):
+        r, ledger = self._run({"isAsync": True, "status": "async_launched",
+                               "agentId": "a38306d0f8a10da9d"},
+                              tool_name="Agent")
+        self.assertIn("a38306d0f8a10da9d", ledger.read_text())
+
+    def test_foreground_agent_not_recorded(self):
+        r, ledger = self._run({"status": "completed",
+                               "agentId": "afgabc123"}, tool_name="Agent")
+        self.assertFalse(ledger.exists())
+
+    def test_main_session_never_recorded(self):
+        r, ledger = self._run({"backgroundTaskId": "bmainx1"}, agent_id="")
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(
+            Path("/tmp/airuleset-bgtasks-%s-" % "t-rec-none").exists())
+
+    def test_foreground_bash_not_recorded(self):
+        r, ledger = self._run({"stdout": "ok", "stderr": "",
+                               "interrupted": False})
+        self.assertFalse(ledger.exists())
+
+
 class TestSubagentStopFailsOpen(SubagentStopHookBase):
     def test_missing_transcript_passes(self):
         out = self._run([], transcript_path="/nonexistent/agent-x.jsonl")
@@ -412,7 +523,7 @@ class TestPreToolUseBgCiPollGuard(unittest.TestCase):
 
 class TestWiring(unittest.TestCase):
     def test_scripts_exist_and_executable(self):
-        for p in (STOP_HOOK, PRE_HOOK):
+        for p in (STOP_HOOK, PRE_HOOK, RECORD_HOOK):
             self.assertTrue(p.exists(), "missing hook: %s" % p)
             self.assertTrue(os.access(p, os.X_OK), "not executable: %s" % p)
 
@@ -424,6 +535,14 @@ class TestWiring(unittest.TestCase):
         pre = json.dumps([m for m in hooks["PreToolUse"]
                           if m.get("matcher") == "Bash"])
         self.assertIn("block-subagent-bg-ci-poll.sh", pre)
+
+    def test_recorder_wired_for_bash_monitor_agent(self):
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        for tool in ("Bash", "Monitor", "Agent"):
+            ms = json.dumps([m for m in cfg["hooks"]["PostToolUse"]
+                             if m.get("matcher") == tool])
+            self.assertIn("post-record-subagent-bg-launch.sh", ms,
+                          "recorder missing for PostToolUse(%s)" % tool)
 
     def test_ci_monitoring_module_points_at_the_hook(self):
         txt = (REPO / "modules" / "core" / "ci-monitoring.md").read_text()
