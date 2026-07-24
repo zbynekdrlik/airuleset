@@ -70,6 +70,18 @@ queue is empty).
 1. **Cold read:** review the full diff BEFORE reading tickets/readiness comments. Form
    your own conclusion, module by module. For a multi-PR slice, fan the cold review out
    (Workflow) and adversarially verify findings.
+1b. **Model tiering — the review VERDICT is a named HARD judgment (user directive
+   2026-07-24: maximum scrutiny on sub-dev submissions before anything approaches
+   prod).** Run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE per processing
+   run: OPEN → the cold-review/verdict stages dispatch `model: fable` at `effort:
+   xhigh`; CLOSED → `opus` — never a cheaper tier for the judgment. ADVISOR shape
+   adapted for review: cheap `sonnet` stages GROUND (collect the pinned diff, ticket
+   claims, CI evidence into digests); the Fable stage receives the digest + THE DIFF
+   ITSELF (the diff is the review object — reading it is not self-grounding) and
+   returns findings/verdict; workers execute any follow-up, never Fable. Finding
+   VERIFIERS may run `opus`; the final clean-verdict pass is the gated top-tier call.
+   The tier never degrades across iterations — a re-handoff's re-review runs the SAME
+   tier as the first pass (mirror of the depth rule).
 2. **Mandatory frame** (repo CLAUDE.md adds instance specifics):
    - **Native-first gate** — proper framework idioms, no quirky custom constructs where
      a native mechanism exists (repo names its framework rules).
