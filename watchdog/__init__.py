@@ -2226,6 +2226,26 @@ _BG_AGENTS_WAIT_RX = re.compile(
     r"Waiting for \d+ background agents? to finish")
 
 
+def _above_input_box(cap):
+    """The conversation region ABOVE the input box: trailing chrome peeled
+    (statusline / mode hint / borders / the AGENT STRIP — `_is_bottom_chrome`),
+    then the `❯` input-box line itself dropped. A strip row's activity label is
+    ARBITRARY model-generated text — `◯ autopilot-worker  Waiting for
+    deploy-prod.yml jobs` false-matched the busy guard (gk incident
+    2026-07-24) — and the strip grows one row per worker, crowding the arm
+    question out of a fixed tail window taken from the raw capture. Nothing
+    below the input box is ever TURN state; job 9 scans only this region."""
+    lines = cap.splitlines()
+    i = len(lines)
+    n = 0
+    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
+        i -= 1
+        n += 1
+    if i > 0 and lines[i - 1].strip().startswith("❯"):
+        i -= 1
+    return "\n".join(lines[:i])
+
+
 def _transcript_goal_line(path, max_lines=400):
     """The NEWEST `/goal …` line printed by the ASSISTANT in the transcript
     tail — the EXACT template bytes. The pane RENDERING hard-wraps a long goal
@@ -2324,7 +2344,10 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         # (gk incident 2026-07-20). CC redraws its own screen, so the viewport
         # is always the CURRENT session's content; history never arms anything.
         cap = run(["tmux", "capture-pane", "-p", "-J", "-t", pid]) or ""
-        tail = cap[-1500:]
+        # Arm-question + busy detection run on the CONVERSATION only — the
+        # chrome below the input box (agent strip, statusline) is never turn
+        # state and its arbitrary labels/bulk broke both checks (gk 2026-07-24).
+        tail = _above_input_box(cap)[-1500:]
         if not _ARM_QUESTION_RX.search(tail):
             continue
         # NB: an armed-goal indicator (◎ /goal) does NOT block — a resolved
