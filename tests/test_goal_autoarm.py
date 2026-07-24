@@ -195,6 +195,62 @@ class TestBackgroundAgentWaitDoesNotBlock(unittest.TestCase):
                          "a non-background-agents Waiting-for must still block")
 
 
+class TestAgentStripNeverBlocks(unittest.TestCase):
+    """2026-07-24 gatekeeper incident (the SAME goal-never-arms class, third
+    variant in two days): the pane showed the arm question + a free bare `❯`,
+    but the AGENT STRIP below the prompt listed the running background workers
+    with their model-generated activity labels — one read `◯ autopilot-worker
+    Waiting for deploy-prod.yml jobs`, which false-matched the busy guard's
+    `"Waiting for" in tail`. A strip label is ARBITRARY text (any phrase can
+    appear); the strip also grows one ~160-char row PER worker, so a big strip
+    crowds the arm question out of a fixed tail window taken from the RAW
+    capture. Everything below the input box is CHROME (statusline / mode hint
+    / borders / agent strip — `_is_bottom_chrome`), never turn state: job 9
+    must scan ONLY the conversation above the input box."""
+
+    CHROME = (
+        "✻ Waiting for 3 background agents to finish\n"
+        "──────────────────────────────────────────────────────"
+        "────────────────────────────────────────── ultracode ─\n"
+        "❯ \n"
+        "──────────────────────────────────────────────────────"
+        "──────────────────────────────────────────────────────\n"
+        "  ctx █████░░░░░  5h 59% (41m)  wk 6% (7d)  Issues 30 · skipped 8  caveman\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        "  ● main\n"
+        "  ◯ autopilot-worker  Locating Deploy to DEV run"
+        "                                     33m 21s · ↓ 340.0k tokens\n"
+        "  ◯ autopilot-worker  Polling PR #2078 CI status"
+        "                                     16m 5s · ↓ 293.6k tokens\n"
+        "  ◯ autopilot-worker  Waiting for deploy-prod.yml jobs"
+        "                                     10m 18s · ↓ 191.5k tokens\n")
+
+    GK_PANE = ARM_PANE.replace("❯ \n  ctx ███░  caveman\n", CHROME)
+
+    # 15 workers ≈ 2400 chars of strip rows — with a raw-capture tail window the
+    # arm question falls entirely OUT of it; above-input-box scoping is immune.
+    BIG_STRIP = ARM_PANE.replace(
+        "❯ \n  ctx ███░  caveman\n",
+        "❯ \n  ctx ███░  caveman\n" + "".join(
+            "  ◯ autopilot-worker  Polling job %02d of the deploy pipeline"
+            "                                %2dm 10s · ↓ 100.0k tokens\n" % (i, i)
+            for i in range(15)))
+
+    def test_strip_waiting_label_still_arms(self):
+        tmux, logs = go(self.GK_PANE)
+        typed = tmux.typed()
+        self.assertTrue(typed,
+                        "an agent-strip 'Waiting for …' label must not block")
+        self.assertTrue(typed[0].startswith("/goal STOP CONDITIONS"), typed[0])
+        self.assertTrue(any("goal-autoarm" in ln for ln in logs), logs)
+
+    def test_big_strip_never_crowds_question_out(self):
+        tmux, _ = go(self.BIG_STRIP)
+        self.assertTrue(tmux.typed(),
+                        "strip bulk must not push the arm question out of the "
+                        "detection window")
+
+
 class TestWrappedGoalUsesTranscript(unittest.TestCase):
     """2026-07-20 gk incident: the /autopilot-master goal RENDERS hard-wrapped
     in the pane (a code block re-flowed by the CC renderer), so the viewport
