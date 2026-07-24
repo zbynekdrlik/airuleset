@@ -771,22 +771,43 @@ def cmd_diff(args):
 # gh (tickets-status, autopilot, bounce), tmux (watchdog pane jobs). A box
 # missing one degrades SILENTLY at hook time — subdev 2026-07-23: provisioned
 # without jq, so david's ❓ never pinged Discord, never entered the question
-# map and the statusline badge stayed empty. The check is warning-only but
-# LOUD in every install/push output (per-machine gaps are invisible to
-# git-deploy — the gatekeeper .env lesson).
+# map and the statusline badge stayed empty. The check AUTO-INSTALLS the gap
+# (user directive 2026-07-24: 'ak ti nieco chyba mas to doinstalovat') and
+# re-verifies; only a box where the install itself fails (no sudo — the
+# isolated sub-dev users) keeps the LOUD warning in every install/push output
+# (per-machine gaps are invisible to git-deploy — the gatekeeper .env lesson).
+# Push runs install on EVERY target, so every deploy verifies + heals the
+# whole fleet's toolset.
 RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux")
 
 
 def check_runtime_deps(deps=RUNTIME_DEPS):
-    """Print a LOUD warning per missing runtime binary; returns the missing
-    list (never fatal — install still proceeds, the gap just stays visible)."""
+    """Auto-install each missing runtime binary (sudo -n apt-get, non-
+    interactive) and re-verify; a failed install (no sudo) prints the LOUD
+    warning instead. Returns the still-missing list (never fatal — install
+    proceeds, the gap stays visible)."""
     import shutil
-    missing = [d for d in deps if not shutil.which(d)]
-    for d in missing:
-        print("  ⚠ MISSING RUNTIME DEP: '%s' is not installed on this box — "
-              "hooks/notify/watchdog will degrade SILENTLY. Install it "
-              "(apt-get install %s)." % (d, d))
-    return missing
+    import subprocess
+    still = []
+    for d in deps:
+        if shutil.which(d):
+            continue
+        try:
+            r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y", d],
+                               capture_output=True, text=True, timeout=300)
+            ok = r.returncode == 0 and shutil.which(d)
+        except Exception:
+            ok = False
+        if ok:
+            print("  ✓ runtime dep '%s' was missing — auto-installed "
+                  "(apt-get) and verified." % d)
+        else:
+            still.append(d)
+            print("  ⚠ MISSING RUNTIME DEP: '%s' is not installed on this box "
+                  "and auto-install failed (no sudo?) — hooks/notify/watchdog "
+                  "will degrade SILENTLY. Install it as root: apt-get install "
+                  "%s." % (d, d))
+    return still
 
 
 def cmd_install(args):

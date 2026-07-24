@@ -75,6 +75,17 @@ All mean "user, you are my tester now" and are FORBIDDEN — shifting verificati
 
 The hook is a backstop, not the whole rule — these semantic variants it does NOT reliably catch are equally banned and must be self-policed: "Try it and tell me what happens", "Run it and confirm", "Test it in your browser / on your machine", a bare "On your end" / "in your environment" (when about testing). The intent — not the exact wording — is banned; applies to all rewordings and semantic equivalents.
 
+#### A missing UTILITY is YOURS to INSTALL — immediately, never worked around
+
+When work hits a missing locally-installable dependency — `command not found`, `ModuleNotFoundError` / `ImportError`, a tool erroring because its library is absent — the FIRST reflex is: **INSTALL it NOW** (`sudo -n apt-get install -y <pkg>`, `pip install`, `npm i -g`, whatever the box uses), then re-run the original command. The user's standing directive (2026-07-24, after repeated incidents): *"ak ti niečo chýba, máš to doinštalovať — mína hrozne veľa času a energie, keď sa stále rieši, že niečo nefunguje, lebo chýba nejaká utilita."*
+
+- **BANNED: switching to a degraded workaround instead of installing** — a different runner because a test plugin lacks its library (dev1 jinja2/pytest-html, 2026-07-24), hand-parsing instead of the proper tool, skipping the step. Install the missing piece; the workaround costs more than the install every time.
+- **BANNED: burning turns diagnosing "broken" behavior that is just an uninstalled utility.** A not-found error is not a mystery to investigate — it is an `apt-get`/`pip` away from gone (subdev's silently dead notify chain was one missing `jq`, 2026-07-22).
+- **No sudo on a restricted box** (david/marek/montalu) → your `sudo -n` attempt fails fast; THEN escalate with the exact root command needed ("ask for the TOOL" below) — never before trying, and never as a workaround.
+- **A NEW runtime dependency your change introduces on managed boxes goes into `RUNTIME_DEPS`** in airuleset.py — install/push auto-installs and verifies the whole list on EVERY target at every deploy, so a provisioning gap can never silently rot a box again.
+
+Applies to all rewordings and semantic equivalents — any "X doesn't work here because Y isn't installed, so I'll do Z instead" is this violation.
+
 #### Before giving up — ASK FOR THE TOOL, not the test
 
 The handoff banned above is "user, run this and tell me if it works". The **opposite** of that is also mandatory: **when you genuinely lack a tool, ask the user to give you that tool — do NOT silently give up and write `UNVERIFIED:`**.
