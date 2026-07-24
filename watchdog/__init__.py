@@ -2214,6 +2214,17 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
 
 _GOAL_CONT_OK = ("```", "─", "•", "**", "❓", "❯", "⎿", "●", "✻")
 
+# CC's AMBIENT status while background subagents run ("✻ Waiting for N
+# background agents to finish") stays on screen although the turn has ENDED
+# and the prompt is a free bare `❯` — the exact autopilot shape (main idle,
+# worker in background; `pane_at_idle_prompt` passes by design). Job 9 must
+# not read it as live work: the arm question at the tail IS the session
+# asking for the paste, and typing /goal there is what the user would do by
+# hand (restreamer incident 2026-07-24 — the goal never armed while any
+# background worker ran). Every OTHER `Waiting for` still blocks.
+_BG_AGENTS_WAIT_RX = re.compile(
+    r"Waiting for \d+ background agents? to finish")
+
 
 def _transcript_goal_line(path, max_lines=400):
     """The NEWEST `/goal …` line printed by the ASSISTANT in the transcript
@@ -2320,7 +2331,8 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         # /goal cycle re-prints the arm question while the OLD indicator is
         # still lit, and typing /goal safely replaces the old goal (the gk
         # re-arm incident, 2026-07-20). The tail arm question is authoritative.
-        if "esc to interrupt" in tail or "Waiting for" in tail:
+        busy_tail = _BG_AGENTS_WAIT_RX.sub("", tail)
+        if "esc to interrupt" in busy_tail or "Waiting for" in busy_tail:
             continue                       # live work on screen — not at rest
         if not pane_at_idle_prompt(cap) or pane_in_mode(pid, run):
             continue                       # busy, or user text in the box
