@@ -109,6 +109,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-write-script-check.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-fable-main-implementation.sh",
+            "timeout": 5
           }
         ]
       },
@@ -118,6 +123,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-write-script-check.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-fable-main-implementation.sh",
             "timeout": 5
           }
         ]
