@@ -114,19 +114,25 @@ def task_stop(task_id):
 
 class SubagentStopHookBase(unittest.TestCase):
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
-             sid=None):
+             sid=None, background_tasks=None, parent_lines=None):
         sid = sid or ("t-" + uuid.uuid4().hex[:10])
         with TemporaryDirectory() as d:
             tr = transcript_path
             if tr is None:
                 tr = str(Path(d) / ("agent-%s.jsonl" % agent_id))
                 Path(tr).write_text("\n".join(lines) + "\n")
-            payload = json.dumps({
+            parent = str(Path(d) / "session.jsonl")
+            Path(parent).write_text("\n".join(parent_lines or []) + "\n")
+            payload = {
                 "session_id": sid, "hook_event_name": "SubagentStop",
                 "agent_id": agent_id, "agent_type": "autopilot-worker",
                 "last_assistant_message": "⏳ monitoring CI run",
-                "transcript_path": tr})
-            return subprocess.run(["bash", str(STOP_HOOK)], input=payload,
+                "transcript_path": parent,
+                "agent_transcript_path": tr}
+            if background_tasks is not None:
+                payload["background_tasks"] = background_tasks
+            return subprocess.run(["bash", str(STOP_HOOK)],
+                                  input=json.dumps(payload),
                                   capture_output=True, text=True)
 
 
@@ -203,6 +209,80 @@ class TestSubagentStopBlocksLiveBgWork(SubagentStopHookBase):
                                           "in background with ID: bquoted1' "
                                           "and Monitor started (task bq2)"}]})])
         self.assertNotIn("block", out.stdout)
+
+
+def self_task(agent_id, status="running"):
+    return {"id": agent_id, "type": "subagent", "status": status,
+            "description": "Launch background sleep task",
+            "agent_type": "general-purpose"}
+
+
+class TestPayloadBackgroundTasks(SubagentStopHookBase):
+    """Live-fired 2026-07-24 (headless E2E, CC 2.1.x): the REAL SubagentStop
+    payload carries `background_tasks` — the harness's OWN live-task list
+    (shells, monitors, child subagents) with current statuses, INCLUDING an
+    entry for the stopping subagent itself (id == agent_id). That list is
+    authoritative and lag-free; the async-written transcript missed a launch
+    on the first live run (no block) and over-blocked after cleanup on the
+    second (counter=2). When the key is present the hook must trust it alone;
+    the transcript parse stays only as the fallback for CC versions without
+    the field."""
+
+    AID = "acf0601a75908549f"
+
+    def test_payload_running_shell_blocks_even_with_empty_transcript(self):
+        out = self._run([], agent_id=self.AID,
+                        background_tasks=[
+                            self_task(self.AID),
+                            {"id": "b26esxqc2", "type": "shell",
+                             "status": "running", "command": "sleep 90"}])
+        self.assertIn("block", out.stdout)
+        self.assertIn("b26esxqc2", out.stdout)
+
+    def test_payload_self_entry_only_passes_despite_stale_transcript(self):
+        # after TaskStop the payload lists only the subagent's own entry —
+        # the stale transcript still shows the launch; payload must win
+        out = self._run([bash_bg_launch("b26esxqc2", sidecar=False)],
+                        agent_id=self.AID,
+                        background_tasks=[self_task(self.AID)])
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_payload_completed_shell_passes(self):
+        out = self._run([], agent_id=self.AID,
+                        background_tasks=[
+                            self_task(self.AID),
+                            {"id": "bdone1", "type": "shell",
+                             "status": "completed", "command": "make"}])
+        self.assertNotIn("block", out.stdout)
+
+    def test_payload_running_child_subagent_blocks(self):
+        out = self._run([], agent_id=self.AID,
+                        background_tasks=[
+                            self_task(self.AID),
+                            {"id": "a38306d0f8a10da9d", "type": "subagent",
+                             "status": "running",
+                             "agent_type": "general-purpose"}])
+        self.assertIn("block", out.stdout)
+        self.assertIn("a38306d0f8a10da9d", out.stdout)
+
+    def test_empty_payload_list_passes_without_touching_transcript(self):
+        out = self._run([bash_bg_launch("bstale1", sidecar=False)],
+                        agent_id=self.AID, background_tasks=[])
+        self.assertNotIn("block", out.stdout)
+
+
+class TestFallbackTranscriptSelection(SubagentStopHookBase):
+    def test_fallback_reads_agent_transcript_not_parent(self):
+        # no background_tasks key → fallback parses agent_transcript_path
+        # (the subagent's own file); transcript_path is the PARENT session
+        # (live payload 2026-07-24) and contains no subagent launches
+        out = self._run([bash_bg_launch("bfall1", sidecar=False)],
+                        parent_lines=[_jl(type="assistant",
+                                          message={"role": "assistant",
+                                                   "content": []})])
+        self.assertIn("block", out.stdout)
+        self.assertIn("bfall1", out.stdout)
 
 
 class TestSubagentStopFailsOpen(SubagentStopHookBase):
