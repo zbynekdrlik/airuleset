@@ -1920,9 +1920,11 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
 # repo with NO live pane (known from the tickets-status cache) gets ONE deduped
 # Discord ping. A BUSY pane gets NOTHING — a running loop re-queries the
 # backlog each turn, so the label alone is the insertion (never interrupt
-# mid-work — the user's standing rule). NB: montalu's claude runs inside
-# NEWLEVEL's tmux (a `sudo su - montalu` window) — pane-driven detection is
-# what reaches it; a montalu-side watchdog sees no tmux at all.
+# mid-work — the user's standing rule). NB (historical — until the
+# 2026-07-24 subdev migration, airuleset#33 + odoo-erp#1895): montalu's claude
+# used to run inside NEWLEVEL's tmux (a `sudo su - montalu` window) on dev1 —
+# pane-driven detection was what reached it, since a montalu-side watchdog saw
+# no tmux at all. montalu now has its own tmux session on subdev.
 # --------------------------------------------------------------------------- #
 
 BOUNCE_INTERVAL = 30 * 60            # min seconds between bounce sweeps
@@ -1938,9 +1940,11 @@ BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
 
 def _bounce_quals(cwd):
     """gh search quals scoping the bounce query to the PANE's stream, derived
-    from its /home/<user>/ prefix (montalu's claude runs under newlevel's tmux,
-    so the WATCHDOG user is meaningless; and gh identity is the same account
-    everywhere, so @me cannot scope). Reduced streams → their stream label (the
+    from its /home/<user>/ prefix — historically because montalu's claude ran
+    under newlevel's tmux (until the 2026-07-24 subdev migration), making the
+    WATCHDOG user meaningless there; the prefix derivation stays regardless,
+    since gh identity is the same account everywhere, so @me cannot scope.
+    Reduced streams → their stream label (the
     #1599 convention: findings tickets carry stream:<name>); a full-authority
     box takes the CORE slice — sub-dev streams EXCLUDED (live dry-run finding
     2026-07-19: an unscoped dev1 query picked up david's bounces and would
@@ -2088,12 +2092,16 @@ def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     return True
 
 
-# Users whose claude sessions live in ANOTHER user's tmux (montalu runs inside
-# newlevel's tmux via `sudo su`) — their own watchdog can never see the pane,
-# so its job 8 would ALWAYS conclude "no session runs" and fire a false Discord
-# ping (live incident 2026-07-20, #1727/#1732/#1827). The machine's primary
-# watchdog owns the pane-driven nudge there; these users skip job 8 entirely.
-_FOREIGN_TMUX_USERS = ("montalu",)
+# Users whose claude sessions live in ANOTHER user's tmux — their own watchdog
+# can never see the pane, so its job 8 would ALWAYS conclude "no session runs"
+# and fire a false Discord ping (live incident 2026-07-20, #1727/#1732/#1827).
+# The machine's primary watchdog owns the pane-driven nudge there; these users
+# skip job 8 entirely. montalu (the ONLY user this ever applied to) ran inside
+# NEWLEVEL's tmux via `sudo su` — historical, until the 2026-07-24 subdev
+# migration (airuleset#33 + odoo-erp#1895): it now has its OWN tmux session on
+# subdev, so no user needs the skip anymore. The tuple stays EMPTY (not
+# deleted) so a future shared-tmux stream can be added back here.
+_FOREIGN_TMUX_USERS = ()
 
 
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,

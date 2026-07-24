@@ -2010,12 +2010,17 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # Isolated montalu odoo dev stream — dedicated Linux user on dev1
-        # (odoo-erp #1322: no sudo, no prod keys, scoped PAT). Reached over
-        # tailscale so the entry works even if push ever runs off-dev1;
-        # newlevel@dev1's default key is authorized for this user.
-        "name": "montalu@dev1",
-        "host": "100.104.8.125",
+        # Isolated montalu odoo dev stream — MIGRATED 2026-07-24 from dev1 to
+        # the subdev VPS (airuleset#33 + odoo-erp#1895; same box as marek and
+        # david: tailscale 100.118.174.27 / MagicDNS "subdev", public
+        # subdev.newlevel.media = fallback only — address by tailscale per
+        # machine-identities). The old dev1 account (uid 1001) is LOCKED with
+        # a ForceCommand redirect notice; /home/montalu on dev1 stays
+        # untouched as the rollback backup per the #1895 contract. Unlike
+        # marek/david, montalu authorizes the DEFAULT newlevel key (no
+        # gatekeeper_access identity — live-verified at the swap).
+        "name": "montalu@subdev",
+        "host": "100.118.174.27",
         "user": "montalu",
         "repo_path": "~/devel/airuleset",
     },
