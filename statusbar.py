@@ -103,6 +103,13 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     skip_sfx = (" \033[38;5;245m· skipped %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
+    # gk-req badge (airuleset #30): open needs-gatekeeper stream→supervisor
+    # action requests (full-authority boxes collect the count). Orange —
+    # a stream is BLOCKED waiting on this box's supervisor; hidden at 0.
+    gk_req = cache.get("gk_req")
+    if isinstance(gk_req, int) and gk_req > 0:
+        skip_sfx += " \033[38;5;208m· gk-req %d\033[0m" % gk_req
+
     # Active autopilot run for this repo → done/total from the last run-card.
     name = cache.get("name") or ""
     if name:

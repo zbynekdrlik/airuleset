@@ -542,6 +542,22 @@ re-review and no pickup).
    3× on 2026-07-20/21), so never reword the prefix and NEVER use it for human-authored text.
    After `send-keys`, capture-pane VERIFY the input box emptied; if the text stuck, leave it (the
    watchdog submits it within ~2 min) — the `prio:bounce` label remains the delivery guarantee.
+7. **Stream→supervisor ACTION requests — `needs-gatekeeper` (airuleset #30, the MIRROR direction).**
+   A stream needing an action only the gatekeeper/supervisor can perform (box access, workflow
+   re-dispatch, infra) files it as a TICKET — **never through the user, never by ssh to a foreign
+   box**: run `python3 ~/devel/airuleset/airuleset.py gk-request --title "..." [--body-file f]`
+   (or `--issue N --comment "..."` for an existing ticket). The helper labels it
+   `needs-gatekeeper`; a stream whose PAT cannot label degrades AUTOMATICALLY to the
+   `GATEKEEPER-ACTION:` title/comment prefix (the read-only-fork path) — both forms are matched.
+   **Delivery is the api-watchdog (job 11, mirror of job 8, ~30 min):** an IDLE supervisor pane
+   gets the `gk-request backstop:` machine nudge; a BUSY supervisor loop needs nothing (the label
+   alone queues it — the master loop's lane scheduler picks it next turn); no live supervisor
+   session → ONE deduped Discord ping. The `gk-req N` statusline badge shows the open-request
+   count on full-authority boxes. **Supervisor pickup protocol:** ACK-comment the ticket (add the
+   label if only the GATEKEEPER-ACTION: title carries it), perform the action, comment the
+   result, remove the label or close, then nudge the requesting stream's pane (rule 6 mechanics)
+   so it resumes without polling. Session-local pollers for this lane are FORBIDDEN — the
+   watchdog owns the cadence (the odoo-erp master-loop interim poller is superseded).
 
 ## Watching & steering
 

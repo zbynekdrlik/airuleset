@@ -1812,12 +1812,101 @@ def cmd_tickets_status(args):
                 entry["skipped"] = int(s)
             except (TypeError, ValueError):
                 entry["skipped"] = None
+            # gk-req badge (#30): open needs-gatekeeper stream→supervisor
+            # action requests — the WHOLE repo (requests carry stream labels;
+            # the supervisor must see them all), full-authority boxes only.
+            g = _out(["gh", "issue", "list", "--state", "open", "--label",
+                      "needs-gatekeeper", "-L", "200",
+                      "--json", "number", "-q", "length"], root)
+            try:
+                entry["gk_req"] = int(g)
+            except (TypeError, ValueError):
+                entry["gk_req"] = None
     cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(cache) + ".tmp"
     Path(tmp).write_text(json.dumps(entry))
     os.replace(tmp, cache)
     print("refreshed open=%s name=%s" % (entry["open"], entry["name"] or "-"))
+
+
+def cmd_gk_request(args):
+    """Stream→supervisor action request (#30): file (or mark) the ticket that
+    asks the gatekeeper/supervisor for an action the stream cannot perform
+    itself (box access, workflow re-dispatch, infra). Canonical form = label
+    `needs-gatekeeper` in the upstream repo; a stream whose PAT cannot label
+    degrades AUTOMATICALLY to the `GATEKEEPER-ACTION:` title/comment prefix,
+    which the watchdog's job-11 query also matches (the supervisor adds the
+    label on pickup). Delivery to the supervisor is the watchdog's job — the
+    stream files and keeps working; no user middleman, no ssh to foreign
+    boxes."""
+    import subprocess
+
+    def _gh(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=30)
+        except Exception as e:
+            return subprocess.CompletedProcess(argv, 1, "", str(e))
+
+    repo = getattr(args, "repo", None)
+    R = ["-R", repo] if repo else []
+    issue = getattr(args, "issue", None)
+    if issue:
+        labeled = _gh(["gh", "issue", "edit", str(issue), "--add-label",
+                       "needs-gatekeeper"] + R).returncode == 0
+        text = getattr(args, "comment", None) or (
+            "Žiadosť o akciu supervízora — detail v tickete.")
+        if not labeled and not text.startswith("GATEKEEPER-ACTION:"):
+            text = "GATEKEEPER-ACTION: " + text
+        c = _gh(["gh", "issue", "comment", str(issue), "--body", text] + R)
+        if c.returncode != 0:
+            print("gk-request FAILED: could not comment #%s: %s"
+                  % (issue, c.stderr.strip()))
+            return 1
+        retitled = False
+        if not labeled:
+            # a comment-only marker is INVISIBLE to job 11's queries (label +
+            # in:title) — best-effort retitle so the request stays
+            # machine-discoverable (works when the issue is the stream's own)
+            v = _gh(["gh", "issue", "view", str(issue),
+                     "--json", "title", "-q", ".title"] + R)
+            old = (v.stdout or "").strip()
+            if v.returncode == 0 and old \
+                    and not old.startswith("GATEKEEPER-ACTION:"):
+                retitled = _gh(["gh", "issue", "edit", str(issue), "--title",
+                                "GATEKEEPER-ACTION: " + old] + R
+                               ).returncode == 0
+        print("gk-request: #%s commented (label %s)"
+              % (issue, "added" if labeled
+                 else ("DENIED — retitled with GATEKEEPER-ACTION" if retitled
+                       else "DENIED and retitle failed — auto-delivery NOT "
+                            "guaranteed; prefer a NEW ticket via gk-request "
+                            "--title")))
+        return 0
+
+    title = getattr(args, "title", None)
+    if not title:
+        print("gk-request: --title (new ticket) or --issue N required")
+        return 1
+    body_file = getattr(args, "body_file", None)
+    B = (["--body-file", body_file] if body_file
+         else ["--body", getattr(args, "body", None) or title])
+    r = _gh(["gh", "issue", "create", "--title", title,
+             "--label", "needs-gatekeeper"] + B + R)
+    if r.returncode == 0:
+        print("gk-request filed: %s" % r.stdout.strip())
+        return 0
+    ft = (title if title.startswith("GATEKEEPER-ACTION:")
+          else "GATEKEEPER-ACTION: " + title)
+    r2 = _gh(["gh", "issue", "create", "--title", ft] + B + R)
+    if r2.returncode == 0:
+        print("gk-request filed (label denied — GATEKEEPER-ACTION title "
+              "fallback): %s" % r2.stdout.strip())
+        return 0
+    print("gk-request FAILED: %s / %s"
+          % (r.stderr.strip(), r2.stderr.strip()))
+    return 1
 
 
 def _notify_run_card(args, compose_autopilot_card, send):
@@ -2070,6 +2159,12 @@ def _watchdog_bounce_fetch(root):
     return _fetch_bounce_tickets(root)
 
 
+def _watchdog_gkreq_fetch(root):
+    """Job 11's real gh fetch (#30) — same network-free-tests wiring as job 8."""
+    from watchdog import _fetch_gkreq_tickets
+    return _fetch_gkreq_tickets(root)
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -2080,7 +2175,8 @@ def cmd_watchdog(args):
     from watchdog import run_once, fetch_usage, fetch_channel_messages
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
-                    bounce_fetch=_watchdog_bounce_fetch)
+                    bounce_fetch=_watchdog_bounce_fetch,
+                    gkreq_fetch=_watchdog_gkreq_fetch)
     if getattr(args, "verbose", False):
         for line in logs:
             print(line)
@@ -2655,6 +2751,21 @@ def main():
                            help="Slow path: refresh the per-repo cache via git+gh "
                                 "(run detached by the statusline, never inline)")
 
+    p_gkr = sub.add_parser(
+        "gk-request",
+        help="Stream→supervisor action request (#30): file/mark a "
+             "needs-gatekeeper ticket the watchdog delivers to the supervisor "
+             "(no user middleman)")
+    p_gkr.add_argument("--repo", help="owner/name (default: current repo)")
+    p_gkr.add_argument("--issue", type=int,
+                       help="Mark an EXISTING issue instead of creating one")
+    p_gkr.add_argument("--title", help="New ticket title (create mode)")
+    p_gkr.add_argument("--body", help="New ticket body text")
+    p_gkr.add_argument("--body-file", dest="body_file",
+                       help="New ticket body from a file (backtick-safe)")
+    p_gkr.add_argument("--comment",
+                       help="Request text for --issue mode (Slovak, plain)")
+
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for automatic Fable escalation — exit 0 "
                            "(OPEN, dispatch fable) / 1 (CLOSED, dispatch opus)")
@@ -2716,6 +2827,7 @@ SUBCOMMANDS = {
     "authority": cmd_authority,
     "upload": cmd_upload,
     "tickets-status": cmd_tickets_status,
+    "gk-request": cmd_gk_request,
     "autopilot-lock": cmd_autopilot_lock,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.

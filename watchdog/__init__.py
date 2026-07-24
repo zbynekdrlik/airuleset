@@ -1462,7 +1462,8 @@ def _foreign_drop_question(user, qid):
 # never count as "the user answered the pending ❓ at the terminal".
 _MACHINE_PROMPT_EXACT = ("continue",)
 _MACHINE_PROMPT_PREFIXES = (
-    "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:", "/goal ",
+    "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:",
+    "gk-request backstop:", "/goal ",
     "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
     "<task-notification>", "<local-command", "<command-", "<system-reminder")
 
@@ -1973,10 +1974,15 @@ def _fetch_bounce_tickets(root, home=None):
     return sorted(nums)
 
 
-def _cache_repo_roots(home=None):
+def _cache_repo_roots(home=None, max_age_s=None):
     """{root: name} from the tickets-status cache — the repos this box recently
-    worked (the Discord-fallback candidate set for panes that no longer exist)."""
+    worked (the Discord-fallback candidate set for panes that no longer exist).
+    `max_age_s` keeps only entries whose cache ts is that fresh — job 11's
+    no-pane ping fired for a 16-DAY-stale checkout supervised from another box
+    (live false ping 2026-07-24); 'a session was here recently and is now
+    gone' is the only state that justifies a session-missing ping."""
     import statusbar
+    import time as _time
     roots = {}
     try:
         files = list(statusbar.cache_dir(home).glob("*.json"))
@@ -1988,8 +1994,15 @@ def _cache_repo_roots(home=None):
         except (OSError, ValueError):
             continue                    # one corrupt cache entry never kills the sweep
         root, name = str(d.get("root") or ""), str(d.get("name") or "")
-        if root and name:
-            roots[root] = name
+        if not (root and name):
+            continue
+        if max_age_s is not None:
+            try:
+                if (_time.time() - float(d.get("ts") or 0)) > max_age_s:
+                    continue            # stale root — no session here lately
+            except (TypeError, ValueError):
+                continue
+        roots[root] = name
     return roots
 
 
@@ -2134,6 +2147,168 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# gk-request backstop (job 11, airuleset #30, 2026-07-24) — the MIRROR of the
+# bounce backstop: sub-dev streams need SUPERVISOR actions (box access,
+# workflow re-dispatch, infra) and the only path used to be the USER as a
+# middleman (3× in one day — explicitly rejected). The canonical channel is a
+# ticket labeled `needs-gatekeeper` (filed via `airuleset.py gk-request`;
+# no-label-permission streams degrade to the `GATEKEEPER-ACTION:` title
+# prefix). This job delivers it to the supervisor WITHOUT the user: every
+# ~30 min, repos this box touches are checked for open requests; a live IDLE
+# supervisor pane gets a typed nudge (machine-prefixed — job 10 auto-Enters a
+# lost submit), a BUSY pane gets NOTHING (the label alone is the queue
+# insertion — the master loop's lane scheduler picks it up next turn), a repo
+# with NO live pane gets ONE deduped Discord ping. Reduced-stream homes
+# (david/marek/montalu) are never nudged — the requester must not be told
+# about its own request; only a full-authority session works these.
+# --------------------------------------------------------------------------- #
+
+GKREQ_INTERVAL = 30 * 60             # min seconds between gk-request sweeps
+GKREQ_RENUDGE_SECONDS = 6 * 3600     # same ticket set re-nudged at most this often
+GKREQ_CACHE_MAX_AGE_S = 48 * 3600    # no-pane ping only for this-fresh roots
+
+GKREQ_NUDGE = ("gk-request backstop: open needs-gatekeeper tickets %s in %s — "
+               "a sub-dev stream is waiting on a SUPERVISOR action it cannot "
+               "perform itself. Per the autopilot skill's cross-stream "
+               "protocol: ACK on the ticket NOW (add the label if only the "
+               "GATEKEEPER-ACTION: title carries it), perform the action, "
+               "comment the result, remove the label or close, then nudge the "
+               "stream's pane so it resumes without polling.")
+
+
+def _gkreq_supervisor_root(cwd):
+    """Only a FULL-authority session works gk-requests. A root under a reduced
+    stream's HOME is skipped — nudging the REQUESTER about its own request is
+    backwards (the inverse of `_bounce_quals`' gatekeeper skip)."""
+    c = str(cwd or "")
+    return not any(c.startswith("/home/%s/" % u)
+                   for u in _REDUCED_STREAM_USERS)
+
+
+def _fetch_gkreq_tickets(root, home=None):
+    """Open stream→supervisor request ticket numbers for the repo at `root`:
+    the `needs-gatekeeper` label query UNION the no-label-permission fallback
+    (`GATEKEEPER-ACTION:` in the title — `airuleset.py gk-request`'s
+    degradation for read-only-fork streams). None on any error (fail-safe —
+    an auth/network hiccup must never look like 'no requests')."""
+    import subprocess
+    nums, env = set(), _gh_env(home)
+    # NB: GitHub search TOKENIZES — the in:title query ALSO returns titles
+    # merely containing the words gatekeeper+action ("… gatekeeper GitHub
+    # Actions runner", the live #1768 false ping, 2026-07-24) — so the
+    # fallback fetches titles and keeps only the LITERAL marker client-side.
+    queries = (
+        (["gh", "issue", "list", "--state", "open", "--label",
+          "needs-gatekeeper", "--search", "-label:autopilot-skip",
+          "-L", "100", "--json", "number"], None),
+        (["gh", "issue", "list", "--state", "open", "--search",
+          '"GATEKEEPER-ACTION:" in:title -label:autopilot-skip',
+          "-L", "100", "--json", "number,title"],
+         lambda x: str(x.get("title", "")).startswith("GATEKEEPER-ACTION:")),
+    )
+    for argv, keep in queries:
+        try:
+            r = subprocess.run(argv, cwd=root, env=env, capture_output=True,
+                               text=True, timeout=8)
+            if r.returncode != 0:
+                return None
+            nums.update(x["number"] for x in json.loads(r.stdout)
+                        if keep is None or keep(x))
+        except Exception:
+            return None
+    return sorted(nums)
+
+
+def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
+                        gh_fetch=None, interval=GKREQ_INTERVAL,
+                        renudge=GKREQ_RENUDGE_SECONDS, persist=None,
+                        projects_dir=None, user=None):
+    """Job 11 — see the section comment. Mutates state['gkreq']; `persist` is
+    invoked BEFORE any keystroke/ping leaves the process (the job-8 lesson:
+    a TimeoutStartSec kill after the nudge but before save left dedup with no
+    memory). Returns log lines. Best-effort (never raises)."""
+    if user is None:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = ""
+    if user in _FOREIGN_TMUX_USERS:
+        return []                          # pane lives in another user's tmux
+    g = state.get("gkreq") or {}
+    if (now - g.get("last_check", 0)) < interval:
+        return []
+    g["last_check"] = int(now)
+    seen = dict(g.get("seen") or {})
+    g["seen"] = seen
+    state["gkreq"] = g
+    fetch = gh_fetch or (lambda root: _fetch_gkreq_tickets(root, home))
+    persist = persist or (lambda: None)
+    projects_dir = projects_dir or PROJECTS_DIR
+    persist()                                  # cadence stamp survives a kill
+    logs = []
+
+    panes = list_claude_panes(run)
+    targets = {}                               # root -> (name, pane_id | None)
+    for pid, cwd in panes:
+        targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
+    pane_cwds = [c for _p, c in panes]
+
+    def _covered_by_pane(root):
+        for c in pane_cwds:
+            if c == root or c.startswith(root + "/"):
+                return True
+            if root.startswith(c + "/.claude/worktrees/"):
+                return True
+        return False
+
+    for root, name in _cache_repo_roots(
+            home, max_age_s=GKREQ_CACHE_MAX_AGE_S).items():
+        if not _covered_by_pane(root):
+            targets.setdefault(root, (name, None))
+
+    for root, (name, pid) in sorted(targets.items()):
+        if not _gkreq_supervisor_root(root):
+            continue                           # requester homes never nudged
+        tickets = fetch(root)
+        if tickets is None:
+            continue                           # gh error → keep prior state
+        if not tickets:
+            seen.pop(name, None)               # clean → forget the set
+            continue
+        prev = seen.get(name) or {}
+        same = prev.get("tickets") == tickets
+        fresh = (now - prev.get("ts", 0)) < renudge
+        if same and fresh:
+            continue                           # already nudged/pinged this set
+        tick_str = " ".join("#%d" % n for n in tickets)
+        if pid:
+            captured = capture_pane(pid, run)
+            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run) \
+                    or not _safe_to_bounce_nudge(captured, root, projects_dir):
+                # working / armed-loop pane gets NOTHING — the label alone is
+                # the queue insertion (never interrupt mid-work).
+                continue
+            seen[name] = {"tickets": tickets, "ts": int(now)}
+            persist()                          # dedup memory BEFORE the keystroke
+            if not dry_run:
+                send_continue(pid, GKREQ_NUDGE % (tick_str, name), run)
+            logs.append("gkreq-nudge %s %s" % (name, tick_str))
+        else:
+            body = ("⚠️ **%s: %d needs-gatekeeper žiadostí čaká**\n> Sub-dev "
+                    "stream žiada akciu supervízora (%s), ale nebeží žiadna "
+                    "supervízorská Claude session. Spusti session v `%s` — "
+                    "master loop si žiadosti zoberie."
+                    % (name, len(tickets), tick_str, root))
+            seen[name] = {"tickets": tickets, "ts": int(now)}
+            persist()                          # dedup memory BEFORE the ping
+            send_fn(body, dedup_key="gkreq:%s:%s" % (name, tick_str),
+                    dry_run=dry_run)
+            logs.append("gkreq-ping %s %s" % (name, tick_str))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # /goal auto-arm (job 9, 2026-07-20) — the printed template pastes itself.
 # /autopilot and /process-subdev end by PRINTING the /goal template and asking
 # the user to paste it — the one manual step left in every stream ("dost mi
@@ -2157,7 +2332,8 @@ PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
 # frozen draft starting with it is MACHINE text whose submission is always the
 # intent, so job 10 auto-Enters it instead of pinging (the gk→montalu nudge
 # kept losing its Enter and sat unsubmitted for hours, 3× in 24 h).
-MACHINE_NUDGE_PREFIX = "Priorita: prio:bounce"
+MACHINE_NUDGE_PREFIX = ("Priorita: prio:bounce", "bounce-backstop:",
+                        "gk-request backstop:")
 
 
 def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
@@ -2771,7 +2947,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              working_interval=WORKING_RETRY_INTERVAL_SECONDS,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
-             discord_fetch=None, bounce_fetch=None):
+             discord_fetch=None, bounce_fetch=None, gkreq_fetch=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -2798,6 +2974,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           repo's IDLE claude pane (busy pane = the label alone queues them; never
           interrupt mid-work), or ONE deduped Discord ping when no session runs
           (bounce_backstop, ~30 min cadence);
+      (11) (only when `gkreq_fetch` is given) GK-REQUEST BACKSTOP (#30) — open
+          `needs-gatekeeper` (stream→supervisor action request) tickets → nudge
+          the repo's IDLE supervisor pane / deduped Discord ping when no session
+          runs; reduced-stream homes never nudged (gk_request_backstop, mirror
+          of job 8, ~30 min cadence);
       (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
           gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
           never over user text, never when a goal is already armed).
@@ -3355,6 +3536,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
+
+    # Job 11 — gk-request backstop (#30): the stream→supervisor mirror of
+    # job 8. Same gating: only when a fetch is wired; cadence-gated
+    # internally; best-effort.
+    if gkreq_fetch is not None:
+        try:
+            logs += gk_request_backstop(
+                now, run, state, send_fn, dry_run=dry_run,
+                gh_fetch=gkreq_fetch, projects_dir=projects_dir,
+                persist=lambda: save_state(state_path, state))
+        except Exception as e:
+            logs.append("gkreq-backstop error: %r" % (e,))
 
     # Job 9 — /goal auto-arm (the printed template pastes itself; pure tmux,
     # no network). Best-effort.
