@@ -369,12 +369,16 @@ class TestGhEnvCatSubstitution(unittest.TestCase):
 
 
 class TestForeignTmuxUserNeverPings(unittest.TestCase):
-    def test_montalu_user_watchdog_is_a_noop(self):
-        # False Discord ping 2026-07-20 ("nebeží žiadna Claude session" while
-        # the montalu session ran in NEWLEVEL's tmux): the montalu user has no
-        # own tmux server BY DESIGN, so its watchdog can never see the pane —
-        # its job 8 must not run at all (newlevel's watchdog on the same
-        # machine owns the pane-driven nudge).
+    def test_montalu_user_watchdog_no_longer_skips_job_8(self):
+        # Historical: a false Discord ping 2026-07-20 ("nebeží žiadna Claude
+        # session" while the montalu session actually ran INSIDE NEWLEVEL's
+        # tmux on dev1) — montalu had no tmux server of its own BY DESIGN, so
+        # its watchdog could never see the pane and job 8 had to no-op.
+        # Since the subdev migration (airuleset#33 + odoo-erp#1895,
+        # 2026-07-24) montalu runs in its OWN tmux session on subdev, so job
+        # 8 must now run NORMALLY for it — the empty _FOREIGN_TMUX_USERS
+        # mechanism stays wired for a future shared-tmux stream, but
+        # currently skips nobody.
         with TemporaryDirectory() as home:
             root = str(Path(home) / "devel" / "demo")
             Path(root).mkdir(parents=True)
@@ -384,5 +388,6 @@ class TestForeignTmuxUserNeverPings(unittest.TestCase):
                 time.time(), FakeTmux([]), {},
                 lambda b, **k: pings.append(b), home=home,
                 gh_fetch=lambda r: [1727], user="montalu")
-            self.assertFalse(pings)
-            self.assertFalse(logs)
+            self.assertTrue(pings, "montalu is no longer foreign-tmux — "
+                            "job 8 must run normally, not no-op")
+            self.assertTrue(any("bounce-ping" in ln for ln in logs), logs)

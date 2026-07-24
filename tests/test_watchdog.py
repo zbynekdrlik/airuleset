@@ -1305,6 +1305,19 @@ class RunOnceSubagentVisibility(unittest.TestCase):
         self.assertFalse(any("subagent-apierr" in ln for ln in logs), logs)
 
 
+class ForeignTmuxUsersNowEmpty(unittest.TestCase):
+    """montalu was the ONLY foreign-tmux user (its claude session ran inside
+    NEWLEVEL's tmux on dev1, so its own watchdog could never see the pane —
+    job 8 would always conclude "no session runs" and false-ping, #1727/
+    #1732/#1827). Since the subdev migration (airuleset#33 + odoo-erp#1895,
+    2026-07-24) montalu runs in its OWN tmux session on subdev, so no user's
+    watchdog should skip pane-driven jobs anymore. The mechanism itself stays
+    wired (empty tuple, not deleted) for a future shared-tmux stream."""
+
+    def test_no_users_are_foreign_tmux_anymore(self):
+        self.assertEqual(wd._FOREIGN_TMUX_USERS, ())
+
+
 def tempfile_mkdtemp_cleanup(testcase):
     tmp = TemporaryDirectory()
     testcase.addCleanup(tmp.cleanup)

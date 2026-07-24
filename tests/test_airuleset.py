@@ -4653,9 +4653,30 @@ class TestRemoteHosts(TestCase):
     def test_all_expected_targets_present_once(self):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
-        for expected in ("dev2", "gatekeeper", "montalu@dev1",
+        for expected in ("dev2", "gatekeeper", "montalu@subdev",
                          "marek@subdev", "david@subdev"):
             self.assertIn(expected, names)
+        self.assertNotIn("montalu@dev1", names,
+                         "montalu migrated to subdev (airuleset#33, "
+                         "odoo-erp#1895) — the dev1 account is "
+                         "ForceCommand-blocked, pushing there would fail")
+
+    def test_montalu_subdev_target_shape(self):
+        # montalu MIGRATED off dev1 to the subdev VPS (airuleset#33 +
+        # odoo-erp#1895, live-verified 2026-07-24): uid 1002, tailscale
+        # 100.118.174.27, reachable with the DEFAULT newlevel key — unlike
+        # marek/david, the gatekeeper_access identity is NOT authorized for
+        # montalu on this box.
+        entries = [r for r in airuleset.REMOTE_HOSTS
+                   if r["name"] == "montalu@subdev"]
+        self.assertEqual(len(entries), 1, "montalu@subdev target missing")
+        m = entries[0]
+        self.assertEqual(m["host"], "100.118.174.27")
+        self.assertEqual(m["user"], "montalu")
+        self.assertNotIn("identity", m,
+                         "montalu authorizes the DEFAULT newlevel key, not "
+                         "gatekeeper_access (unlike marek/david) — "
+                         "live-verified at the swap")
 
     def test_subdev_users_share_one_host_and_identity(self):
         entries = self._subdev_entries()
