@@ -24,9 +24,39 @@ class RuntimeDepsCheck(unittest.TestCase):
         for d in ("jq", "curl", "git", "gh", "tmux"):
             self.assertIn(d, airuleset.RUNTIME_DEPS, d)
 
-    def test_missing_dep_prints_loud_warning(self):
+    def test_missing_dep_auto_installs_and_verifies(self):
+        # user directive 2026-07-24 ('ak ti nieco chyba mas to doinstalovat'):
+        # a missing dep is INSTALLED by the check itself (sudo -n apt-get),
+        # then re-verified — sync/push thus self-heals every target that has
+        # sudo instead of only warning about the gap.
+        installed = set()
+
+        def which(d):
+            if d == "jq" and "jq" not in installed:
+                return None
+            return "/usr/bin/" + d
+
+        def run(argv, **kw):
+            self.assertEqual(argv[:3], ["sudo", "-n", "apt-get"])
+            self.assertIn("jq", argv)
+            installed.add("jq")
+            return m.Mock(returncode=0)
+
+        with m.patch("shutil.which", side_effect=which), \
+                m.patch("subprocess.run", side_effect=run):
+            out = StringIO()
+            with m.patch("sys.stdout", out):
+                missing = airuleset.check_runtime_deps()
+        self.assertEqual(missing, [])
+        self.assertIn("auto-install", out.getvalue())
+        self.assertNotIn("MISSING RUNTIME DEP", out.getvalue())
+
+    def test_missing_dep_prints_loud_warning_when_install_fails(self):
+        # no-sudo box (david/marek/montalu): the sudo -n attempt fails →
+        # the LOUD warning stays (the gap must be visible in push output).
         with m.patch("shutil.which",
-                     side_effect=lambda d: None if d == "jq" else "/usr/bin/" + d):
+                     side_effect=lambda d: None if d == "jq" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=1)):
             out = StringIO()
             with m.patch("sys.stdout", out):
                 missing = airuleset.check_runtime_deps()
