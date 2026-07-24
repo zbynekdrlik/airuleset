@@ -1116,8 +1116,11 @@ def _choose_filedrop_port(bind_ip):
     the default :8788 — the second user's service restart-loops on Errno 98
     (observed on montalu@dev1, 2026-07-04). Precedence:
       1. FILEDROP_PORT env — explicit override, never second-guessed.
-      2. A previously PERSISTED choice (~/.claude/filedrop.port) — stable across
-         installs so the URL never silently moves.
+      2. A previously PERSISTED choice (~/.claude/filedrop.port) — kept when our
+         own service actively serves it OR it still bind-tests free on this
+         host; a port carried over by a ~/.claude migration that a DIFFERENT
+         user's file-drop holds here is dropped and re-picked (montalu@subdev
+         inherited dev1's 8789 == marek's subdev port, #33, 2026-07-24).
       3. The default, when OUR OWN service is already actively serving it.
       4. Probe bind on the actual bind IP: default free → default; taken by a
          FOREIGN instance → first free port in 8789-8798, persisted so the serve
@@ -1128,10 +1131,29 @@ def _choose_filedrop_port(bind_ip):
     if env:
         return int(env)
     persisted = filedrop_persisted_port()
-    if persisted:
-        return persisted
     rc, out, _err = _run_systemctl(["is-active", "filedrop.service"])
-    if rc == 0 and out.strip() == "active":
+    our_active = rc == 0 and out.strip() == "active"
+    if persisted:
+        if our_active:
+            return persisted        # our own live instance serves it
+        import socket as _socket
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            s.bind((bind_ip, persisted))
+        except OSError:
+            # a ~/.claude migrated from another box carries THAT box's port —
+            # here it can be a DIFFERENT user's live file-drop (montalu@subdev
+            # inherited dev1's 8789 == marek's subdev port; #33, 2026-07-24).
+            # Stale → drop the file and fall through to the probe re-pick.
+            print(f"  persisted file-drop port {persisted} is held by another "
+                  f"instance on this host (not ours) — dropping "
+                  f"{FILEDROP_PORT_FILE} and re-picking")
+            FILEDROP_PORT_FILE.unlink(missing_ok=True)
+        else:
+            return persisted        # still free on THIS host
+        finally:
+            s.close()
+    if our_active:
         return FILEDROP_DEFAULT_PORT     # our own live instance owns the default
     import socket as _socket
     for cand in range(FILEDROP_DEFAULT_PORT, FILEDROP_DEFAULT_PORT + 11):
