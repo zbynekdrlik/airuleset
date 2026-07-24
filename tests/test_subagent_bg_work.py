@@ -235,8 +235,11 @@ class TestPayloadBackgroundTasks(SubagentStopHookBase):
 
     AID = "acf0601a75908549f"
 
-    def test_payload_running_shell_blocks_even_with_empty_transcript(self):
-        out = self._run([], agent_id=self.AID,
+    def test_payload_running_owned_shell_blocks(self):
+        # liveness from the payload + ownership from the OWN transcript
+        # (the launch record) — both hold → block
+        out = self._run([bash_bg_launch("b26esxqc2", sidecar=False)],
+                        agent_id=self.AID,
                         background_tasks=[
                             self_task(self.AID),
                             {"id": "b26esxqc2", "type": "shell",
@@ -261,8 +264,9 @@ class TestPayloadBackgroundTasks(SubagentStopHookBase):
                              "status": "completed", "command": "make"}])
         self.assertNotIn("block", out.stdout)
 
-    def test_payload_running_child_subagent_blocks(self):
-        out = self._run([], agent_id=self.AID,
+    def test_payload_running_owned_child_subagent_blocks(self):
+        out = self._run([agent_bg_launch("a38306d0f8a10da9d")],
+                        agent_id=self.AID,
                         background_tasks=[
                             self_task(self.AID),
                             {"id": "a38306d0f8a10da9d", "type": "subagent",
@@ -270,6 +274,54 @@ class TestPayloadBackgroundTasks(SubagentStopHookBase):
                              "agent_type": "general-purpose"}])
         self.assertIn("block", out.stdout)
         self.assertIn("a38306d0f8a10da9d", out.stdout)
+
+
+class TestSiblingTasksNeverBlock(SubagentStopHookBase):
+    """airuleset #29 (odoo-erp, 2026-07-24): `background_tasks` is
+    SESSION-wide — a healthy review subagent that launched NOTHING in the
+    background was blocked over 5 in-flight tasks ALL belonging to sibling
+    workers dispatched by the supervisor. It could not TaskStop them (not
+    the owner), so it had no legitimate way to satisfy the hook. Ownership
+    filter: a payload task blocks ONLY when its LAUNCH record exists in the
+    stopping subagent's OWN transcript; liveness stays payload-driven."""
+
+    AID = "a067c0000000000ff"
+    SIBLINGS = [{"id": "bsib%d" % i, "type": "shell", "status": "running",
+                 "command": "sleep 300 && gh run view %d" % i}
+                for i in range(5)]
+
+    def test_sibling_only_tasks_pass(self):
+        # own transcript = foreground work only, no launches
+        out = self._run(
+            [_jl(type="assistant", isSidechain=True,
+                 message={"role": "assistant", "content": [
+                     {"type": "text", "text": "review done, all foreground"}]})],
+            agent_id=self.AID,
+            background_tasks=[self_task(self.AID)] + list(self.SIBLINGS))
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_owned_task_still_blocks_among_siblings(self):
+        # the one task THIS subagent launched blocks; the siblings never do
+        out = self._run(
+            [bash_bg_launch("bmine1", sidecar=False)],
+            agent_id=self.AID,
+            background_tasks=[self_task(self.AID),
+                              {"id": "bmine1", "type": "shell",
+                               "status": "running", "command": "sleep 600"}]
+            + list(self.SIBLINGS))
+        self.assertIn("block", out.stdout)
+        self.assertIn("bmine1", out.stdout)
+        self.assertNotIn("bsib", out.stdout,
+                         "sibling ids must never appear in the reason")
+
+    def test_unreadable_transcript_means_no_ownership_no_block(self):
+        out = self._run([], transcript_path="/nonexistent/agent-z.jsonl",
+                        agent_id=self.AID,
+                        background_tasks=[self_task(self.AID)]
+                        + list(self.SIBLINGS))
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
 
     def test_empty_payload_list_passes_without_touching_transcript(self):
         out = self._run([bash_bg_launch("bstale1", sidecar=False)],
