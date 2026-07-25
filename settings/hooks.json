@@ -117,7 +117,7 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-fable-main-implementation.sh",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
           }
         ]
@@ -132,7 +132,7 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-fable-main-implementation.sh",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
           }
         ]

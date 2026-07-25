@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PreToolUse (Edit | Write) — airuleset #32
+# Hook: PreToolUse (Edit | Write) — airuleset #32 (renamed from
+# block-fable-main-implementation.sh ahead of the #54 generalization)
 # A MAIN session running on Fable re-reads the FULL conversation at Fable
 # prices every turn — an implementation loop there (write code, run test,
 # fix, repeat) is the single biggest burn the user has (3 Max subscriptions
