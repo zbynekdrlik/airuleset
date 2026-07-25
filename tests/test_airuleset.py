@@ -348,8 +348,13 @@ class TestDiscordNotifyHooks(TestCase):
         if os.path.exists(sf):
             os.remove(sf)
         self._send_file = sf
+        # TMUX_PANE="" keeps goal_armed() deterministic here (never shells out
+        # to the REAL tmux pane this test suite happens to run inside) — see
+        # TestGoalArmedSuppressesIdlePing for the dedicated ND_FAKE_PANE_CAPTURE
+        # coverage of that check.
         env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": sf,
-               "AIRULESET_NOTIFY_OWNER": owner, "ND_BLOCK_SETTLE": "0"}
+               "AIRULESET_NOTIFY_OWNER": owner, "ND_BLOCK_SETTLE": "0",
+               "TMUX_PANE": ""}
         if home:
             env["HOME"] = home
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
@@ -963,6 +968,70 @@ class TestDiscordNotifyHooks(TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
         self.assertNotIn("block", r.stdout)
+
+
+class TestGoalArmedSuppressesIdlePing(TestCase):
+    """Per-ticket ✅ DONE inside an autopilot loop must NOT queue a SECOND
+    idle Discord ping while the `/goal` loop stays ARMED — the sanctioned
+    per-ticket run-card already gives phone visibility for that ticket, and a
+    second idle ping per ticket is exactly the per-phase noise the user
+    removed (milestone-notifications.md, 2026-07-25 revision). Detected via
+    the SAME `◎ /goal` signal the watchdog's own goal jobs key on
+    (`_safe_to_bounce_nudge` / `goal_autoarm`, watchdog/__init__.py) —
+    captured from THIS session's own tmux pane (`$TMUX_PANE`), never a
+    second, invented detector. Only the ROUTINE ✅ ping is goal-guarded — a
+    genuine ❓ question is untouched and always pings."""
+
+    PENDING = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
+    _n = 0
+
+    def _sid(self):
+        TestGoalArmedSuppressesIdlePing._n += 1
+        sid = "test-ga-%d-%d" % (os.getpid(), TestGoalArmedSuppressesIdlePing._n)
+        p = f"/tmp/claude-discord-pending-{sid}"
+        self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
+        return sid, p
+
+    def _stop(self, sid, msg, pane_capture=None, cwd=""):
+        env = {**os.environ, "DISCORD_NOTIFY_DRYRUN": "1",
+               "AIRULESET_NOTIFY_OWNER": "", "TMUX_PANE": ""}
+        if pane_capture is not None:
+            env["ND_FAKE_PANE_CAPTURE"] = pane_capture
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
+                              "cwd": cwd})
+        return subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
+                              capture_output=True, env=env)
+
+    def test_armed_goal_suppresses_the_pending_ping(self):
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n✅ DONE: #42 zmergnuté -> v1.2.3",
+                   pane_capture="◎ /goal   ctx 50K\n")
+        self.assertFalse(os.path.exists(p),
+                         "a per-ticket ✅ DONE with an ARMED goal must not "
+                         "queue an idle ping — the run-card already covers it")
+
+    def test_no_armed_goal_still_queues_the_ping(self):
+        sid, p = self._sid()
+        self._stop(sid, "## ✅ Work Complete\n\n✅ DONE: #42 zmergnuté -> v1.2.3",
+                   pane_capture="ctx 50K\n")   # no goal indicator in the pane
+        self.assertTrue(os.path.exists(p))
+        self.assertIn("zmergnuté", open(p).read())
+
+    def test_missing_pane_capture_defaults_to_not_armed(self):
+        # no ND_FAKE_PANE_CAPTURE override and TMUX_PANE="" → real tmux is
+        # never invoked, and the absence of any signal must default to
+        # "not armed" (the normal single-shot / non-autopilot session case).
+        sid, p = self._sid()
+        self._stop(sid, "✅ DONE: hotovo")
+        self.assertTrue(os.path.exists(p))
+
+    def test_question_still_pings_regardless_of_an_armed_goal(self):
+        # the goal-armed guard applies ONLY to the routine ✅ idle ping — a
+        # genuine question must always ping, armed goal or not.
+        sid, _ = self._sid()
+        r = self._stop(sid, "❓ NEEDS YOU: schváliš merge PR #5?",
+                       pane_capture="◎ /goal\n")
+        self.assertEqual(r.returncode, 0)
 
 
 class TestBashHookStdinContract(TestCase):
@@ -3028,6 +3097,27 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn("--dangerously-skip-permissions", new_line)
         self.assertNotIn(" -c ", new_line)
 
+    def test_model_flag_present_in_all_launch_branches(self):
+        # THE BUG (live on gatekeeper): a RESUMED session (-c) silently kept
+        # its OLD model even though settings.json's managed `model` key said
+        # Opus 5[1m] — the launcher never passed --model, so `-c` inherited
+        # whatever the prior transcript was started with. Fix: bake
+        # `--model <MANAGED_MODEL>` into EVERY launch branch (claude()'s
+        # continue branch, claude()'s fresh branch, AND claude-new()) at
+        # RENDER time, sourced from the airuleset.py MANAGED_MODEL constant
+        # — never left to inherit whatever a prior session happened to use.
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+        block = block.split(airuleset.ULTRACODE_MARK_END)[0]
+        expected = "--model '%s'" % airuleset.MANAGED_MODEL
+        self.assertEqual(block.count(expected), 3, block)
+        # claude-plain() is the deliberate vanilla escape hatch — untouched.
+        plain_line = next(ln for ln in text.splitlines()
+                          if ln.startswith("claude-plain() {"))
+        self.assertNotIn("--model", plain_line)
+
 
 class TestClaudeLauncherContinueOrNew(TestCase):
     """The managed `claude` launcher must CONTINUE (-c) only when the cwd has a
@@ -3091,6 +3181,27 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         (self._proj_dir(home, cwd) / "s.jsonl").write_text("{}")
         out = self._run_launcher(home, cwd)
         self.assertIn(" -c", out)
+
+    def test_resumed_session_gets_model_flag_explicitly(self):
+        # THE BUG: a resumed (-c) session inherited its OLD transcript's model
+        # rather than the managed default — nothing on the launch command line
+        # forced it. Prove --model is on the ARGS bash actually executes for
+        # the CONTINUE branch (a prior conversation exists for this cwd).
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out = self._run_launcher(home, cwd)
+        self.assertIn(" -c", out)
+        self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
+
+    def test_fresh_session_also_gets_model_flag(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher(home, cwd)
+        self.assertNotIn(" -c", out)
+        self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
 
 
 class TestDiscordAutopilotNotify(TestCase):

@@ -715,6 +715,20 @@ class ContextCostSegment(unittest.TestCase):
         self.assertIn("ctx 570K", seg)
         self.assertIn("$0.57", seg)
 
+    def test_compaction_turn_prices_at_cache_read_rate_not_write_rate(self):
+        # LIVE BUG (2026-07-25, gatekeeper): right after a compaction the LAST
+        # billed call has a huge cache_creation (a full context re-write) and
+        # a tiny cache_read — pricing the ACTUAL per-call mix showed
+        # 'ctx 175K · ~$1.10/ťah' (priced mostly at Opus's cache-WRITE rate,
+        # $6.25/Mtok) when the STEADY-STATE cost of carrying 175K forward is
+        # ctx * cache-READ rate ($0.50/Mtok) = 175000*0.5/1e6 = ~$0.09. The
+        # estimate must reflect what an ORDINARY turn pays to resend this
+        # context, never what one freak compaction/cache-miss turn billed.
+        seg = statusbar.context_cost_segment(
+            self._payload("claude-opus-5", cw=170000, cr=5000, o=2000))
+        self.assertIn("ctx 175K", seg)
+        self.assertIn("$0.09", seg)
+
     def test_empty_on_missing_or_garbage_data(self):
         self.assertEqual(statusbar.context_cost_segment({}), "")
         self.assertEqual(statusbar.context_cost_segment(None), "")

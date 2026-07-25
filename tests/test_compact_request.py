@@ -1,12 +1,15 @@
 """Krok 1c — ohraničenie kontextu (#39 follow-up, 2026-07-25).
 
-Two independent pieces of the same context-diet package:
+Originally two pieces of the same context-diet package; the FIRST piece was
+REVERTED the same day by a correction batch (see
+TestManagedAutoCompactWindowReverted below) — a low auto-compact threshold
+cuts big tasks off mid-work and defeats the point of the 1M context window.
+Context is bounded at TICKET BOUNDARIES instead (piece 2, kept):
 
-  1. `MANAGED_AUTOCOMPACT_WINDOW` — a managed settings.json default that caps
-     the auto-compact threshold (same unconditional-managed-default treatment
-     as effortLevel/model/disableAgentView/tui). LIVE-VERIFIED against a real
-     `claude` session's `/context` output (see the constant's own comment in
-     airuleset.py for the exact numbers observed).
+  1. ~~`MANAGED_AUTOCOMPACT_WINDOW`~~ — REVERTED. `apply_managed_settings_defaults`
+     now actively STRIPS `autoCompactWindow` from settings.json on every
+     deploy instead of setting it, so the 6 managed boxes go back to Claude
+     Code's own default.
 
   2. Ticket-boundary /compact — a completed-ticket report is a SAFE
      compaction boundary (the ticket's durable state already lives in git /
@@ -14,7 +17,9 @@ Two independent pieces of the same context-diet package:
      request the MOMENT a turn's final message is a completed-ticket report;
      watchdog job 14 (compact_ticket_boundary) types `/compact` into that
      session's pane once it goes genuinely idle, reusing job 12's (model
-     reconcile) exact idle guards.
+     reconcile) exact idle guards. Since the 2026-07-25 correction batch, a
+     per-BATCH ✅ DONE inside an `/autopilot` loop (not just the whole
+     backlog) is a real completion report, so this fires once per batch.
 """
 
 import json
@@ -39,39 +44,37 @@ import watchdog as wd
 # 1. MANAGED_AUTOCOMPACT_WINDOW
 # --------------------------------------------------------------------------- #
 
-class TestManagedAutoCompactWindow(unittest.TestCase):
-    """apply_managed_settings_defaults also sets `autoCompactWindow =
-    MANAGED_AUTOCOMPACT_WINDOW` — the SAME unconditional-managed-default
-    treatment already applied to effortLevel/disableAgentView/tui/model."""
+class TestManagedAutoCompactWindowReverted(unittest.TestCase):
+    """MANAGED_AUTOCOMPACT_WINDOW is REVERTED (2026-07-25 correction batch): a
+    low auto-compact threshold cuts big tasks off MID-WORK, defeating the
+    point of the 1M context window. Context is bounded at TICKET BOUNDARIES
+    instead (the per-batch ✅ DONE + ticket-boundary /compact, job 14) — never
+    by an artificial window. `apply_managed_settings_defaults` must actively
+    STRIP `autoCompactWindow` from settings.json on the next deploy, not just
+    stop setting it (an already-deployed 300000 must not silently persist)."""
 
-    def test_sets_managed_autocompact_window(self):
+    def test_constant_no_longer_exists(self):
+        self.assertFalse(hasattr(airuleset, "MANAGED_AUTOCOMPACT_WINDOW"))
+
+    def test_key_absent_on_a_fresh_settings_dict(self):
         out = airuleset.apply_managed_settings_defaults({})
-        self.assertEqual(out["autoCompactWindow"],
-                         airuleset.MANAGED_AUTOCOMPACT_WINDOW)
+        self.assertNotIn("autoCompactWindow", out)
 
-    def test_value_is_the_deliberate_first_step_300k(self):
-        # 300k is a DELIBERATE conservative first step (see the constant's
-        # own comment for the measured evidence + the tighten-later plan) —
-        # not the final target (250k/200k), so this pins the CURRENT value.
-        self.assertEqual(airuleset.MANAGED_AUTOCOMPACT_WINDOW, 300000)
-
-    def test_overrides_an_existing_value(self):
+    def test_key_actively_stripped_from_an_already_deployed_settings_file(self):
+        # the exact regression this reverts: a PRIOR install already wrote
+        # autoCompactWindow=300000 — the NEXT install must remove it, not
+        # leave it sitting there because nothing "sets" it anymore.
         out = airuleset.apply_managed_settings_defaults(
-            {"autoCompactWindow": 950000})
-        self.assertEqual(out["autoCompactWindow"],
-                         airuleset.MANAGED_AUTOCOMPACT_WINDOW)
-
-    def test_idempotent(self):
-        once = airuleset.apply_managed_settings_defaults({})
-        twice = airuleset.apply_managed_settings_defaults(once)
-        self.assertEqual(once["autoCompactWindow"], twice["autoCompactWindow"])
+            {"autoCompactWindow": 300000})
+        self.assertNotIn("autoCompactWindow", out)
 
     def test_preserves_other_keys(self):
         out = airuleset.apply_managed_settings_defaults(
-            {"hooks": {"Stop": []}, "model": "claude-opus-5[1m]"})
+            {"hooks": {"Stop": []}, "model": "claude-opus-5[1m]",
+             "autoCompactWindow": 155000})
         self.assertEqual(out["hooks"], {"Stop": []})
         self.assertEqual(out["model"], "claude-opus-5[1m]")
-        self.assertIn("autoCompactWindow", out)
+        self.assertNotIn("autoCompactWindow", out)
 
 
 # --------------------------------------------------------------------------- #

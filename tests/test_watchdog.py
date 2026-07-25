@@ -1590,6 +1590,60 @@ class TestModelReconcile(unittest.TestCase):
         self.assertEqual(tmux.capture_calls_after_confirm_enter,
                          wd.MODEL_SWITCH_APPLY_MAX_POLLS)
 
+    def test_attempts_counter_increments_on_each_failure(self):
+        state = {}
+        self._go("claude-fable-5", MR_IDLE_CAP, confirm_captured=MR_CONFIRM_FAIL,
+                 state=state)
+        self.assertEqual(state["modelswitch_attempts"]["sess-abc"], 1)
+
+    def test_successful_switch_clears_any_prior_attempts_counter(self):
+        state = {"modelswitch_attempts": {"sess-abc": 2}}
+        self._go("claude-fable-5", MR_IDLE_CAP, confirm_captured=MR_CONFIRM_OK,
+                 state=state)
+        self.assertNotIn("sess-abc", state.get("modelswitch_attempts", {}))
+
+    def test_repeated_failures_stop_retrying_after_max_attempts(self):
+        # LIVE INCIDENT (gk, 2026-07-25): the same pane FAILed on every single
+        # ~60s sweep forever ("FAIL (model-reconcile) ... no confirmation
+        # seen" repeated indefinitely) — every FAIL released the dedup claim
+        # so the NEXT sweep retried, burning a full context re-read (prompt
+        # cache invalidation) on every successful switch attempt. Cap
+        # attempts per session; once the cap is hit, GIVE UP for good (never
+        # retry that session again) and say so in the log.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
+        tmux = ModelReconcileFakeTmux([(self.PANE, "claude", self.CWD)],
+                                      MR_IDLE_CAP, MR_CONFIRM_FAIL)
+        state = {}
+        logs = []
+        for _ in range(wd.MODEL_RECONCILE_MAX_ATTEMPTS):
+            tmux.sent = []
+            tmux._enters = 0
+            tmux.capture_calls_after_confirm_enter = 0
+            logs = wd.model_reconcile(time.time(), tmux, state, MR_TARGET,
+                                      dry_run=False, projects_dir=proj,
+                                      sleep_fn=lambda s: None)
+        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertEqual(state["modelswitch_attempts"]["sess-abc"],
+                         wd.MODEL_RECONCILE_MAX_ATTEMPTS)
+        self.assertTrue(state["modelswitch"]["sess-abc"])  # never retried again
+
+        # one more sweep must not type ANYTHING at all — the session gave up
+        tmux.sent = []
+        wd.model_reconcile(time.time(), tmux, state, MR_TARGET, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+
+    def test_below_cap_failures_still_release_the_claim_for_retry(self):
+        # a single failure (attempts=1, below MODEL_RECONCILE_MAX_ATTEMPTS)
+        # must behave exactly as before the cap existed — released for retry.
+        state = {}
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_FAIL, state=state)
+        self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+
 
 # --------------------------------------------------------------------------- #
 # #37 follow-up — Job 13: HOURLY BURN SNAPSHOT. Once per hour, append this
