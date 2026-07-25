@@ -248,5 +248,252 @@ class TestCmdBurnEndToEnd(unittest.TestCase):
         self.assertIn("claude-sonnet-5", data["by_model"])
 
 
+# --------------------------------------------------------------------------- #
+# #37 follow-up: hourly burn snapshots + `burn --compare` — the AUTOMATIC
+# before/after feedback loop the user asked for ("meraj hodinovo a povedz mi
+# ci sa to zlepsilo alebo zhorsilo, sam"). scan() gains an HOUR-granularity
+# bucket (reusing its existing per-line parser — no second parser),
+# hourly_snapshot() picks one hour's row out of it, and compare_changes()/
+# render_compare() are the arithmetic + Slovak report behind --compare.
+# --------------------------------------------------------------------------- #
+
+
+class TestScanHourlyBuckets(unittest.TestCase):
+    def test_by_hour_and_by_hour_model_buckets(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            hour_start = now.astimezone().replace(minute=0, second=0, microsecond=0)
+            _write(tmp, "proj-h", "s1", [
+                _line("claude-opus-5", cr=1000000, ts=hour_start.isoformat()),
+            ])
+            report = burn.scan(tmp, days=1, now=now)
+            hour_key = hour_start.strftime("%Y-%m-%dT%H:00")
+            self.assertIn(hour_key, report["by_hour"])
+            self.assertEqual(report["by_hour"][hour_key]["usd"], 0.5)
+            self.assertIn(hour_key + "|claude-opus-5", report["by_hour_model"])
+            self.assertEqual(
+                report["by_hour_model"][hour_key + "|claude-opus-5"]["usd"], 0.5)
+
+    def test_separate_hours_do_not_bleed_into_each_other(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            h1 = now.astimezone().replace(minute=0, second=0, microsecond=0)
+            h0 = h1 - datetime.timedelta(hours=1)
+            _write(tmp, "proj-h2", "s1", [
+                _line("claude-opus-5", cr=1000000, ts=h0.isoformat()),
+                _line("claude-opus-5", cr=2000000, ts=h1.isoformat()),
+            ])
+            report = burn.scan(tmp, days=1, now=now)
+            k0 = h0.strftime("%Y-%m-%dT%H:00")
+            k1 = h1.strftime("%Y-%m-%dT%H:00")
+            self.assertEqual(report["by_hour"][k0]["usd"], 0.5)
+            self.assertEqual(report["by_hour"][k1]["usd"], 1.0)
+
+
+class TestHourlySnapshot(unittest.TestCase):
+    def test_covers_previous_full_hour_only(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 25, 14, 5, 0, tzinfo=datetime.timezone.utc)
+            prev_hour_start = (now - datetime.timedelta(hours=1)).astimezone().replace(
+                minute=0, second=0, microsecond=0)
+            cur_hour_start = now.astimezone().replace(minute=0, second=0, microsecond=0)
+            _write(tmp, "proj-s", "s1", [
+                _line("claude-opus-5", cr=1000000, ts=prev_hour_start.isoformat()),
+                _line("claude-sonnet-5", cr=1000000, ts=cur_hour_start.isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="zbynek")
+            self.assertEqual(row["host"], "dev1")
+            self.assertEqual(row["user"], "zbynek")
+            self.assertEqual(row["window_h"], 1)
+            self.assertEqual(row["usd"], 0.5)
+            self.assertEqual(row["msgs"], 1)
+            self.assertIn("claude-opus-5", row["by_model"])
+            self.assertNotIn("claude-sonnet-5", row["by_model"])
+
+    def test_avg_ctx_is_cache_tokens_per_message(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 25, 10, 0, 0, tzinfo=datetime.timezone.utc)
+            prev_hour_start = (now - datetime.timedelta(hours=1)).astimezone().replace(
+                minute=0, second=0, microsecond=0)
+            _write(tmp, "proj-s2", "s1", [
+                _line("claude-opus-5", cw=200000, cr=300000,
+                      ts=prev_hour_start.isoformat()),
+                _line("claude-opus-5", cw=0, cr=500000,
+                      ts=(prev_hour_start + datetime.timedelta(minutes=5)).isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z")
+            self.assertEqual(row["msgs"], 2)
+            self.assertEqual(row["avg_ctx"], 500000)
+
+    def test_empty_hour_yields_zeroed_row(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z")
+            self.assertEqual(row["usd"], 0.0)
+            self.assertEqual(row["msgs"], 0)
+            self.assertEqual(row["avg_ctx"], 0)
+            self.assertEqual(row["by_model"], {})
+
+
+class TestChangesAndSnapshotsIO(unittest.TestCase):
+    def test_mark_change_appends_json_line(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "changes.jsonl"
+            burn.mark_change(
+                "krok 1: test", path=path, host="dev1",
+                now=datetime.datetime(2026, 7, 25, 10, 0, tzinfo=datetime.timezone.utc))
+            rows = burn.load_changes(path=path)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["text"], "krok 1: test")
+            self.assertEqual(rows[0]["host"], "dev1")
+            self.assertEqual(rows[0]["ts"], "2026-07-25T10:00:00+00:00")
+
+    def test_mark_change_appends_not_overwrites(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "changes.jsonl"
+            burn.mark_change("a", path=path)
+            burn.mark_change("b", path=path)
+            rows = burn.load_changes(path=path)
+            self.assertEqual([r["text"] for r in rows], ["a", "b"])
+
+    def test_load_snapshots_skips_malformed_lines(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snapshots.jsonl"
+            path.write_text('{"ts": "x"}\nNOT JSON\n{"ts": "y"}\n')
+            rows = burn.load_snapshots(path=path)
+            self.assertEqual(len(rows), 2)
+
+    def test_load_missing_file_returns_empty(self):
+        self.assertEqual(burn.load_snapshots(path="/nonexistent/path.jsonl"), [])
+        self.assertEqual(burn.load_changes(path="/nonexistent/path.jsonl"), [])
+
+
+class TestCompareChanges(unittest.TestCase):
+    def _snap(self, ts, usd, avg_ctx, msgs):
+        return {"ts": ts, "host": "dev1", "user": "z", "window_h": 1,
+                "usd": usd, "msgs": msgs, "avg_ctx": avg_ctx, "by_model": {}}
+
+    def test_computes_before_after_means_and_deltas(self):
+        change_ts = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc)
+        snaps = [
+            self._snap("2026-07-25T10:00:00+00:00", 1.0, 200000, 10),
+            self._snap("2026-07-25T11:00:00+00:00", 1.0, 200000, 10),
+            self._snap("2026-07-25T12:00:00+00:00", 0.5, 100000, 12),
+            self._snap("2026-07-25T13:00:00+00:00", 0.5, 100000, 12),
+        ]
+        changes = [{"ts": change_ts.isoformat(), "host": "dev1", "text": "krok 1"}]
+        results = burn.compare_changes(snaps, changes, window_hours=2)
+        self.assertEqual(len(results), 1)
+        r = results[0]
+        self.assertEqual(r["before"]["n"], 2)
+        self.assertEqual(r["before"]["usd_h"], 1.0)
+        self.assertEqual(r["after"]["n"], 2)
+        self.assertEqual(r["after"]["usd_h"], 0.5)
+        self.assertEqual(r["after"]["avg_ctx"], 100000)
+
+    def test_no_data_in_window_reports_zero_n(self):
+        change_ts = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc)
+        changes = [{"ts": change_ts.isoformat(), "host": "dev1", "text": "krok X"}]
+        results = burn.compare_changes([], changes, window_hours=6)
+        self.assertEqual(results[0]["before"]["n"], 0)
+        self.assertEqual(results[0]["after"]["n"], 0)
+
+    def test_changes_sorted_chronologically(self):
+        c1 = {"ts": "2026-07-25T12:00:00+00:00", "host": "dev1", "text": "second"}
+        c2 = {"ts": "2026-07-25T08:00:00+00:00", "host": "dev1", "text": "first"}
+        results = burn.compare_changes([], [c1, c2], window_hours=1)
+        self.assertEqual([r["text"] for r in results], ["first", "second"])
+
+    def test_bad_ts_change_is_skipped_not_crashed(self):
+        results = burn.compare_changes([], [{"ts": "not-a-date", "text": "bad"}],
+                                       window_hours=1)
+        self.assertEqual(results, [])
+
+
+class TestRenderCompare(unittest.TestCase):
+    def test_no_changes_renders_hint(self):
+        out = burn.render_compare([], window_hours=6)
+        self.assertIn("--mark", out)
+
+    def test_includes_change_text_and_direction(self):
+        results = [{
+            "ts": "2026-07-25T12:00:00+00:00", "host": "dev1",
+            "text": "krok 1: opus default",
+            "before": {"n": 3, "usd_h": 1.0, "avg_ctx": 200000, "msgs_h": 10},
+            "after": {"n": 3, "usd_h": 0.4, "avg_ctx": 90000, "msgs_h": 11},
+        }]
+        out = burn.render_compare(results, window_hours=6)
+        self.assertIn("krok 1: opus default", out)
+        self.assertIn("lepšie", out)
+
+    def test_worse_direction_is_labeled(self):
+        results = [{
+            "ts": "2026-07-25T12:00:00+00:00", "host": "dev1", "text": "krok X",
+            "before": {"n": 1, "usd_h": 0.4, "avg_ctx": 90000, "msgs_h": 11},
+            "after": {"n": 1, "usd_h": 1.0, "avg_ctx": 200000, "msgs_h": 10},
+        }]
+        out = burn.render_compare(results, window_hours=6)
+        self.assertIn("horšie", out)
+
+    def test_missing_window_data_does_not_crash(self):
+        results = [{
+            "ts": "2026-07-25T12:00:00+00:00", "host": "dev1", "text": "krok Y",
+            "before": {"n": 0, "usd_h": None, "avg_ctx": None, "msgs_h": None},
+            "after": {"n": 0, "usd_h": None, "avg_ctx": None, "msgs_h": None},
+        }]
+        out = burn.render_compare(results, window_hours=6)
+        self.assertIn("krok Y", out)
+
+
+class TestCmdBurnMarkAndCompare(unittest.TestCase):
+    def _with_home(self, fn):
+        with TemporaryDirectory() as home:
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                return fn()
+            finally:
+                if old_home is not None:
+                    os.environ["HOME"] = old_home
+
+    def test_mark_writes_to_changes_jsonl_under_home(self):
+        def run():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark="krok 1 test",
+                    compare=False, window=None, mark_ts=None))
+            path = Path(os.environ["HOME"]) / ".claude" / "burn-history" / "changes.jsonl"
+            rows = burn.load_changes(path=path)
+            return buf.getvalue(), rows
+        out, rows = self._with_home(run)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["text"], "krok 1 test")
+        self.assertIn("krok 1 test", out)
+
+    def test_mark_ts_backdates_the_change(self):
+        def run():
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark="krok 1b",
+                    compare=False, window=None,
+                    mark_ts="2026-07-25T13:15:14+02:00"))
+            path = Path(os.environ["HOME"]) / ".claude" / "burn-history" / "changes.jsonl"
+            return burn.load_changes(path=path)
+        rows = self._with_home(run)
+        self.assertEqual(rows[0]["ts"], "2026-07-25T13:15:14+02:00")
+
+    def test_compare_with_no_data_prints_hint(self):
+        def run():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark=None, compare=True,
+                    window=6, mark_ts=None))
+            return buf.getvalue()
+        out = self._with_home(run)
+        self.assertIn("--mark", out)
+
+
 if __name__ == "__main__":
     unittest.main()

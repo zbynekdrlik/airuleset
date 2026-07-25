@@ -1324,5 +1324,373 @@ def tempfile_mkdtemp_cleanup(testcase):
     return tmp.name
 
 
+# --------------------------------------------------------------------------- #
+# #37 follow-up — Job 12: MODEL RECONCILE. The managed default (MANAGED_MODEL
+# in airuleset.py) only binds a NEW Claude Code session; several long-lived
+# sessions were still parked on Fable/Opus-4 — the single biggest cost line.
+# Ported from a proven-live reference (`/tmp/switch.py`): find a live
+# claude/node/bun pane whose newest transcript's last model is fable/opus-4,
+# and — only when genuinely at rest — `/model <target>` + Enter, confirm
+# CC's "Switch model?" dialog with one more Enter, verify the confirmation
+# text lands. Never touches a busy pane, an open dialog, or an unsent draft;
+# never sends two consecutive Escapes; dedups per session id.
+# --------------------------------------------------------------------------- #
+
+MR_IDLE_CAP = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+MR_BUSY_CAP = ("● Baking…\n✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
+              "  ctx ███░  caveman:lite\n")
+MR_DIALOG_CAP = ("● Claude asked:\n  · Ktorá možnosť?\n     1. A\n     2. B\n"
+                 "  Tab/Arrow keys to navigate · Enter to select\n")
+MR_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
+MR_TARGET = "claude-opus-5[1m]"
+MR_CONFIRM_OK = "Set model to %s\n❯ \n  ctx ███░\n" % MR_TARGET
+MR_CONFIRM_FAIL = "● nič sa nezmenilo\n❯ \n  ctx ███░\n"
+
+
+def _seed_transcript(projects_dir, cwd, sid, model):
+    d = Path(projects_dir) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    _write_jsonl(p, [
+        {"type": "assistant", "message": {"model": model,
+                                          "content": [{"type": "text", "text": "hi"}]}},
+    ])
+    return p
+
+
+class ModelReconcileFakeTmux:
+    """Fake `run` for a single candidate pane. Tracks every send-keys call
+    and flips `capture-pane`'s reply to `confirm_captured` the moment the
+    SECOND Enter (the confirmation keystroke) has been sent — mirroring the
+    real sequence: type `/model X`, Enter, [dialog], Enter, [applied]."""
+
+    def __init__(self, panes, captured, confirm_captured=None, in_mode=False):
+        self.panes = panes                 # [(pane_id, cmd, cwd)]
+        self.captured = captured
+        self.confirm_captured = captured if confirm_captured is None else confirm_captured
+        self.in_mode = in_mode
+        self.sent = []
+        self._enters = 0
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "\n".join("%s\t%s\t%s" % t for t in self.panes)
+        if "display-message" in j:
+            if argv[-1] == "#{pane_in_mode}":
+                return "1" if self.in_mode else "0"
+            return "sess:0.0"
+        if "send-keys" in j:
+            self.sent.append(argv)
+            if argv[-1] == "Enter":
+                self._enters += 1
+            return ""
+        if "capture-pane" in j:
+            return self.confirm_captured if self._enters >= 2 else self.captured
+        return ""
+
+    def typed_texts(self):
+        return [a[-1] for a in self.sent if "-l" in a]
+
+    def keys(self):
+        return [a[-1] for a in self.sent]
+
+    def no_consecutive_escapes(self):
+        ks = self.keys()
+        return not any(ks[i] == "Escape" and ks[i + 1] == "Escape"
+                       for i in range(len(ks) - 1))
+
+
+class TestTranscriptLastModel(unittest.TestCase):
+    def test_returns_last_assistant_model(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant",
+             "message": {"model": "claude-fable-5",
+                        "content": [{"type": "text", "text": "hi"}]}},
+            {"type": "assistant",
+             "message": {"model": "claude-opus-5[1m]",
+                        "content": [{"type": "text", "text": "bye"}]}},
+        ])
+        self.assertEqual(wd.transcript_last_model(p), "claude-opus-5[1m]")
+
+    def test_missing_model_field_returns_empty(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [{"type": "user", "message": {"content": "hi"}}])
+        self.assertEqual(wd.transcript_last_model(p), "")
+
+    def test_nonexistent_file_returns_empty(self):
+        self.assertEqual(wd.transcript_last_model(Path("/nonexistent/x.jsonl")), "")
+
+
+class TestReconcileCandidatePanes(unittest.TestCase):
+    def test_filters_to_claude_node_bun(self):
+        def fake_run(argv, timeout=8):
+            return "\n".join([
+                "%1\tclaude\t/home/x/proj-a",
+                "%2\tnode\t/home/x/proj-b",
+                "%3\tbun\t/home/x/proj-c",
+                "%4\tbash\t/home/x/proj-d",
+            ])
+        panes = wd._reconcile_candidate_panes(fake_run)
+        cwds = {cwd for pid, cwd, cmd in panes}
+        self.assertIn("/home/x/proj-a", cwds)
+        self.assertIn("/home/x/proj-b", cwds)
+        self.assertIn("/home/x/proj-c", cwds)
+        self.assertNotIn("/home/x/proj-d", cwds)
+
+
+class TestModelReconcile(unittest.TestCase):
+    CWD = "/home/newlevel/devel/demo"
+    PANE = "%9"
+
+    def _go(self, model, captured, confirm_captured=None, state=None,
+           target_model=MR_TARGET, dry_run=False, in_mode=False):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", model)
+        tmux = ModelReconcileFakeTmux([(self.PANE, "claude", self.CWD)],
+                                      captured, confirm_captured, in_mode=in_mode)
+        state = {} if state is None else state
+        logs = wd.model_reconcile(time.time(), tmux, state, target_model,
+                                  dry_run=dry_run, projects_dir=proj,
+                                  sleep_fn=lambda s: None)
+        return tmux, logs, state
+
+    def test_fable_session_gets_switched(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_OK)
+        self.assertIn("/model %s" % MR_TARGET, tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(state["modelswitch"]["sess-abc"])
+
+    def test_opus4_session_gets_switched(self):
+        tmux, logs, state = self._go("claude-opus-4-8", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_OK)
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+    def test_already_on_target_model_is_skipped(self):
+        tmux, logs, state = self._go(MR_TARGET, MR_IDLE_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("modelswitch", {}), {})
+
+    def test_sonnet_session_is_skipped(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP)
+        self.assertEqual(tmux.sent, [])
+
+    def test_already_reconciled_session_is_never_retried(self):
+        state = {"modelswitch": {"sess-abc": True}}
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, state=state)
+        self.assertEqual(tmux.sent, [])
+
+    def test_busy_pane_is_skipped(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_BUSY_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+
+    def test_draft_pane_is_never_typed_over(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_DRAFT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+
+    def test_open_dialog_is_skipped(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_DIALOG_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("dialog" in ln for ln in logs), logs)
+
+    def test_in_mode_pane_is_skipped(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, in_mode=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+
+    def test_dry_run_never_sends_keys(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY") for ln in logs), logs)
+        self.assertEqual(state.get("modelswitch", {}), {})
+
+    def test_no_target_model_disables_the_job_entirely(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, target_model=None)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(logs, [])
+
+    def test_failed_confirmation_releases_the_claim_for_retry(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_FAIL)
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+
+    def test_exact_keystroke_sequence_types_then_two_enters(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_OK)
+        self.assertEqual(tmux.keys(), ["/model %s" % MR_TARGET, "Enter", "Enter"])
+
+    def test_no_two_consecutive_escapes_ever_sent(self):
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_OK)
+        self.assertTrue(tmux.no_consecutive_escapes())
+        # and on every OTHER decision path too — busy/draft/dialog never type
+        for cap in (MR_BUSY_CAP, MR_DRAFT_CAP, MR_DIALOG_CAP):
+            t2, _, _ = self._go("claude-fable-5", cap)
+            self.assertTrue(t2.no_consecutive_escapes())
+
+
+# --------------------------------------------------------------------------- #
+# #37 follow-up — Job 13: HOURLY BURN SNAPSHOT. Once per hour, append this
+# host's $/msgs/avg-context/by-model row (the PREVIOUS full hour) to
+# `snapshots.jsonl` — the feed `airuleset.py burn --compare` reads.
+# --------------------------------------------------------------------------- #
+
+
+class TestBurnSnapshotJob(unittest.TestCase):
+    def test_writes_once_and_updates_state_guard(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "snapshots.jsonl"
+        state = {}
+        now = time.time()
+        logs = wd.burn_snapshot_job(now, state, snapshot_path=snap_path,
+                                    transcripts_root=str(transcripts),
+                                    host="dev1", user="z")
+        self.assertTrue(snap_path.exists())
+        lines = snap_path.read_text().strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        row = json.loads(lines[0])
+        self.assertEqual(row["host"], "dev1")
+        self.assertEqual(row["window_h"], 1)
+        self.assertIn("burn_snapshot_hour", state)
+        self.assertTrue(any("burn-snapshot" in ln for ln in logs), logs)
+
+    def test_second_call_within_same_hour_is_a_noop(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "snapshots.jsonl"
+        state = {}
+        now = time.time()
+        wd.burn_snapshot_job(now, state, snapshot_path=snap_path,
+                             transcripts_root=str(transcripts), host="dev1")
+        logs2 = wd.burn_snapshot_job(now + 30, state, snapshot_path=snap_path,
+                                     transcripts_root=str(transcripts), host="dev1")
+        self.assertEqual(logs2, [])
+        lines = snap_path.read_text().strip().splitlines()
+        self.assertEqual(len(lines), 1, "must write at most once per hour")
+
+    def test_next_hour_writes_a_second_row(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "snapshots.jsonl"
+        state = {}
+        now = time.time()
+        wd.burn_snapshot_job(now, state, snapshot_path=snap_path,
+                             transcripts_root=str(transcripts), host="dev1")
+        wd.burn_snapshot_job(now + 3600, state, snapshot_path=snap_path,
+                             transcripts_root=str(transcripts), host="dev1")
+        lines = snap_path.read_text().strip().splitlines()
+        self.assertEqual(len(lines), 2)
+
+    def test_dry_run_never_writes_or_claims(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "snapshots.jsonl"
+        state = {}
+        logs = wd.burn_snapshot_job(time.time(), state, snapshot_path=snap_path,
+                                    transcripts_root=str(transcripts),
+                                    host="dev1", dry_run=True)
+        self.assertFalse(snap_path.exists())
+        self.assertEqual(state, {})
+        self.assertTrue(any("dry-run" in ln for ln in logs), logs)
+
+    def test_creates_parent_directory(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "nested" / "dir" / "snapshots.jsonl"
+        state = {}
+        wd.burn_snapshot_job(time.time(), state, snapshot_path=snap_path,
+                             transcripts_root=str(transcripts), host="dev1")
+        self.assertTrue(snap_path.exists())
+
+    def test_failure_never_raises(self):
+        # a totally unwritable snapshot path must not blow up the job — the
+        # caller (run_once) wraps it in try/except too, but the job itself
+        # should behave (log, don't raise) whenever it can.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        bad_path = Path(tmp) / "not-a-dir" / "x" / "y.jsonl"
+        os.makedirs(Path(tmp) / "not-a-dir")
+        os.chmod(Path(tmp) / "not-a-dir", 0o400)   # read-only — mkdir(parents) fails
+        try:
+            with self.assertRaises(Exception):
+                wd.burn_snapshot_job(time.time(), {}, snapshot_path=bad_path,
+                                     transcripts_root=str(transcripts), host="dev1")
+        finally:
+            os.chmod(Path(tmp) / "not-a-dir", 0o700)
+
+
+class RunOnceNewJobsWiring(unittest.TestCase):
+    """run_once must actually invoke both new jobs, best-effort, and must NOT
+    change behavior for any EXISTING caller that doesn't pass the new params
+    (target_model default None keeps model-reconcile fully off)."""
+
+    def test_no_target_model_never_attempts_a_model_switch(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertFalse(any("model-reconcile" in ln for ln in logs), logs)
+
+    def test_writes_a_burn_snapshot_every_call(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        snap_path = Path(tmp) / "snap.jsonl"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           burn_snapshot_path=snap_path)
+        self.assertTrue(snap_path.exists())
+        self.assertTrue(any("burn-snapshot" in ln for ln in logs), logs)
+
+    def test_target_model_wires_into_model_reconcile(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        # cmd="node" so run_once's OWN per-pane job loop (list_claude_panes
+        # only matches "claude") skips it — isolating this to job 12's wiring.
+        _seed_transcript(proj, "/home/newlevel/devel/demo", "sess-x",
+                        "claude-fable-5")
+        state_path = Path(tmp) / "state.json"
+        tmux = ModelReconcileFakeTmux(
+            [("%1", "node", "/home/newlevel/devel/demo")], MR_IDLE_CAP)
+        logs = wd.run_once(now=time.time(), dry_run=True, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           target_model=MR_TARGET,
+                           burn_snapshot_path=Path(tmp) / "snap.jsonl")
+        self.assertTrue(any(ln.startswith("READY (model-reconcile)") for ln in logs),
+                        logs)
+
+
 if __name__ == "__main__":
     unittest.main()
