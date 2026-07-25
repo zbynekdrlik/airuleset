@@ -331,6 +331,113 @@ class TestCompactTicketBoundary(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2b-2. Job 14 — COMPACT_BOUNDARY_MIN_CONTEXT gate (#48, 2026-07-25)
+#
+# Job 14 used to fire `/compact` after EVERY completed-ticket report, even a
+# trivial one that barely grew the context. Below this floor a /compact buys
+# ~nothing (static floor ~93K token). The gate lives on the CONSUME side
+# (compact_ticket_boundary itself), read fresh right before the send, via the
+# SAME transcript_current_context() helper job 15 already uses.
+# --------------------------------------------------------------------------- #
+
+def _write_ctx_transcript(base, cwd, sid, ctx_tokens):
+    """Write a minimal real transcript at <base>/<encoded-cwd>/<sid>.jsonl
+    with a single assistant usage entry summing to ctx_tokens — job 14's
+    #48 threshold gate needs a REAL file for transcript_current_context to
+    read (cache_read carries the whole amount, cache_creation stays 0)."""
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    entry = {"type": "assistant", "message": {"id": "msg_1", "usage": {
+        "cache_read_input_tokens": ctx_tokens, "cache_creation_input_tokens": 0}}}
+    p.write_text(json.dumps(entry) + "\n")
+    return p
+
+
+class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
+    SID = "sess-ctx-1"
+    CWD = "/home/x/ctxproj"
+    PANE = "%7"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, ctx_tokens, dry_run=False, min_context=None,
+           write_transcript=True):
+        base = self._dir()
+        proj = base / "projects"
+        reqpath = base / "compact-requests.json"
+        if write_transcript:
+            _write_ctx_transcript(proj, self.CWD, self.SID, ctx_tokens)
+        else:
+            proj.mkdir()
+        wd.record_compact_request(self.SID, self.CWD, path=reqpath)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, panes_by_sid, dry_run=dry_run,
+            path=reqpath, projects_dir=proj, min_context=min_context)
+        return tmux, logs, reqpath
+
+    def test_constant_value(self):
+        self.assertEqual(wd.COMPACT_BOUNDARY_MIN_CONTEXT, 200_000)
+
+    def test_small_context_is_never_sent_and_request_is_cleared(self):
+        tmux, logs, reqpath = self._go(120_000)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip small-context" in ln and "ctx=120000" in ln
+                            for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(reqpath))
+
+    def test_large_context_sends_as_today(self):
+        tmux, logs, reqpath = self._go(300_000)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(reqpath))
+
+    def test_context_equal_to_threshold_sends_not_skips(self):
+        # only STRICTLY below the floor skips
+        tmux, logs, reqpath = self._go(200_000)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_env_override_lowers_the_threshold(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT": "100000"}):
+            tmux, logs, reqpath = self._go(150_000)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+    def test_env_override_raises_the_threshold(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT": "500000"}):
+            tmux, logs, reqpath = self._go(300_000)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip small-context" in ln for ln in logs), logs)
+
+    def test_explicit_min_context_param_overrides_env(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT": "500000"}):
+            tmux, logs, reqpath = self._go(300_000, min_context=50_000)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_dry_run_never_consumes_the_request_even_when_small(self):
+        tmux, logs, reqpath = self._go(50_000, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertIn(self.SID, wd.load_compact_requests(reqpath))
+        self.assertTrue(any("skip small-context" in ln for ln in logs), logs)
+
+    def test_no_transcript_found_falls_back_to_current_behavior(self):
+        # a session id with no matching transcript anywhere is unmeasurable
+        # -> must not block the send (matches every pre-#48 job-14 test,
+        # none of which ever created a real transcript file).
+        tmux, logs, reqpath = self._go(0, write_transcript=False)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
 # 2c. run_once wiring — job 14 fires ONLY when compact_requests_path is given
 # --------------------------------------------------------------------------- #
 
