@@ -119,7 +119,7 @@ FILEDROP_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "filedrop
 
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
                # Ruleset trim wave 2 (#37, 2026-07-25) — situational always-on
                # modules moved VERBATIM to hidden (user-invocable: false)
                # on-demand skills. See test_ruleset_conversion_wave2.py.

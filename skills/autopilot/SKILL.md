@@ -1,7 +1,7 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is an in-session BACKGROUND autopilot-worker subagent (run_in_background — your main session stays FREE + thin, the worker stays visible in the agent strip) that can still ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). Start-of-run it reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks). You can also close any issue anytime via 'close #N (reason)'."
-argument-hint: "[status] [manual]"
+description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is an in-session BACKGROUND autopilot-worker subagent (run_in_background — your main session stays FREE + thin, the worker stays visible in the agent strip) that can still ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
+argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -16,10 +16,15 @@ disable-model-invocation: true
 > issues and **NEVER** refuses to start. The goal is to finish everything; your only job is to
 > answer the important per-issue questions when a worker raises one.
 
-> **Usage:** `/autopilot [status] [manual]`
-> • *(no arg)* — run the loop over the whole backlog
+> **Usage:** `/autopilot [status] [manual] [dialog]`
+> • *(no arg)* — **default: ZERO questions at start.** Preflight → banner → print the `/goal`
+>   line → stop. Existing `autopilot-skip` labels are respected silently (nothing un-skipped,
+>   nothing added, nothing closed) — the run just goes straight to work.
 > • `status` — print the backlog + currently-skipped issues, run nothing
 > • `manual` — stop every PR at green for your "merge it" this run (else default auto-merge)
+> • `dialog` — run TODAY's full interactive start-of-run flow first: the skip-review +
+>   add-skip picker (Step 1b) and the close-obsolete picker (Step 1c), THEN the `/goal` line.
+>   Same flow as the thin `/autopilot-dialog` alias skill.
 
 **What it removes (the old pain):** no more re-running `/issue-planner`, no manual `/compact`,
 no "nothing is hands-off so I'm stopping". You answer the important questions; everything else runs.
@@ -61,11 +66,14 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
   session never degrades; it returns only a short evidence block to the main agent.
 - **Main session stays thin** — it holds only "dispatched #N → verified merged" summaries, so
   there is no `/compact` churn across a long backlog.
-- **`/autopilot` itself does ONLY Steps 1–2** — preflight, optional skip-picker, then it PRINTS
-  the `/goal` line and **STOPS**. It must **NOT** start dispatching workers on its own. The
-  per-issue loop (Step 3) runs **only after YOU paste the `/goal` line** — only the user can type
-  `/goal`, and without it nothing re-fires across turns (a directly-dispatched worker would do one
-  issue and stop). So `/autopilot` always ends by handing you the `/goal` line to paste.
+- **`/autopilot` itself does ONLY Step 1, then Step 2** — preflight, then, by **DEFAULT**, straight
+  to printing the `/goal` line and **STOPPING** — **zero start-of-run questions**; existing
+  `autopilot-skip` labels are respected silently. Only `/autopilot dialog` (or the
+  `/autopilot-dialog` alias) inserts the interactive Step 1b/1c pickers between Step 1 and Step 2.
+  It must **NOT** start dispatching workers on its own. The per-issue loop (Step 3) runs **only
+  after YOU paste the `/goal` line** — only the user can type `/goal`, and without it nothing
+  re-fires across turns (a directly-dispatched worker would do one issue and stop). So
+  `/autopilot` always ends by handing you the `/goal` line to paste.
 
 ## Step 1 — Preflight
 
@@ -106,7 +114,21 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
-### Step 1b — Skip review + picker (start-of-run; the skip set is RE-WEIGHED, not frozen)
+**Branch here on the invocation argument (#52, 2026-07-25):**
+- **`dialog` arg present** (`/autopilot dialog`, or invoked via the `/autopilot-dialog` alias
+  skill) → continue to Step 1b, then Step 1c, then Step 2.
+- **No `dialog` arg (the DEFAULT)** → **skip Step 1b and Step 1c ENTIRELY** and go straight to
+  Step 2. Existing `autopilot-skip` labels are respected exactly as-is — nothing is un-skipped,
+  nothing is newly excluded, and **nothing is closed or asked about**. The user's directive: *"chcel
+  by som aby by default autopilot rovno pracoval a daval goal a nepytal sa co skipnut co uzavriet
+  etc … chcem vzdy smerovat k nula ticketov"* — the default run's only interaction is the ONE
+  `/goal` paste in Step 2. (The end-of-run reconciliation sweep, Step 4a, is UNCONDITIONAL — it
+  still runs when the backlog empties regardless of `dialog` or not.)
+
+### Step 1b — Skip review + picker (DIALOG ONLY — `/autopilot dialog`; the skip set is RE-WEIGHED, not frozen)
+
+**Runs ONLY when invoked with the `dialog` argument.** In the DEFAULT run (no `dialog`) this
+step is skipped entirely per the branch above — go straight to Step 2.
 
 Run BOTH halves every start so a skipped task is reconsidered each run. Ensure the label exists once:
 `gh label create autopilot-skip --color ededed --description "Excluded from autopilot runs" 2>/dev/null || true`.
@@ -127,7 +149,10 @@ backs that. Apply to each chosen issue: `gh issue edit <N> --add-label autopilot
 `skipping #A #B … · working N issues`. **Selecting none = work all (the normal case).** NEW issues filed
 by workers never carry this label → always worked.
 
-### Step 1c — Close obsolete issues (interactive, start-of-run)
+### Step 1c — Close obsolete issues (DIALOG ONLY — `/autopilot dialog`, interactive)
+
+**Runs ONLY when invoked with the `dialog` argument.** In the DEFAULT run (no `dialog`) this
+step is skipped entirely per the branch above — go straight to Step 2; no issue is closed here.
 
 You often already know a task no longer makes sense but it lingers with no easy way to close it — this
 is that way. From the working backlog (open issues minus `autopilot-skip`), PRINT the full list
