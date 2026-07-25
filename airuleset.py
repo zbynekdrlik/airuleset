@@ -2281,8 +2281,10 @@ def cmd_watchdog(args):
     (rate-limited) alert when the weekly token limit nears its cap, route an
     owner's Discord REPLY back into the session that asked the ❓, and backstop
     gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping),
-    reconciles any long-lived session still parked on Fable/Opus-4 onto the
-    managed default model (#37 job 12), writes an hourly burn snapshot
+    RESTARTS any long-lived session still parked on Fable/Opus-4 so it picks
+    up the managed default model by construction — never `/model`, which a
+    running session's fixed-at-start model list can never accept (#42
+    rework of job 12), writes an hourly burn snapshot
     (#37 job 13, the automatic --compare feedback loop), and types `/compact`
     into a session whose Stop hook just recorded a completed-ticket report,
     once its pane goes genuinely idle (#39 krok 1c job 14). Driven by the

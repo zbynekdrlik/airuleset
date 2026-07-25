@@ -158,9 +158,10 @@ CB_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:li
 
 class CompactFakeTmux:
     """Fake `run` for a single pane. Tracks every send-keys call — same shape
-    as ModelReconcileFakeTmux (test_watchdog.py) but without the list-panes /
-    transcript machinery job 14 doesn't need (it's fed panes_by_sid directly,
-    same injection pattern as deliver_discord_replies)."""
+    as job 12's RestartFakeTmux (test_watchdog.py) but without the
+    list-panes / transcript machinery job 14 doesn't need (it's fed
+    panes_by_sid directly, same injection pattern as
+    deliver_discord_replies)."""
 
     def __init__(self, captured, in_mode=False):
         self.captured = captured
