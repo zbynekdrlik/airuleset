@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -807,6 +808,100 @@ class TestCmdBurnFleet(unittest.TestCase):
             return buf.getvalue()
         out = self._with_home(run)
         self.assertIn("Sada (cela monitorovana sada):", out)
+
+
+# --------------------------------------------------------------------------- #
+# #55 — the fleet job's REMOTE collector (watchdog job 16's `fleet_fetch`):
+# tails each REMOTE_HOSTS box's OWN already-written snapshots.jsonl over ssh
+# (never re-scans transcripts remotely — cheap, hourly-safe). Mirrors
+# _burn_remote_cmd/_burn_remote's own identity/sshpass split + fail-safe
+# contract exactly (never invent a new ssh shape).
+# --------------------------------------------------------------------------- #
+
+class TestFleetRemoteCmd(unittest.TestCase):
+    def test_uses_identity_when_present(self):
+        remote = {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper",
+                  "repo_path": "~/devel/airuleset",
+                  "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        self.assertIn("-i", cmd)
+        self.assertNotIn("sshpass", cmd)
+        self.assertIn("gatekeeper@1.2.3.4", cmd)
+        self.assertIn("tail -n 1 ~/.claude/burn-history/snapshots.jsonl", " ".join(cmd))
+
+    def test_uses_sshpass_without_identity(self):
+        remote = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
+                  "repo_path": "~/devel/airuleset"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        self.assertIn("sshpass", cmd)
+        self.assertIn("newlevel@5.6.7.8", cmd)
+
+
+class TestFleetRemoteRow(unittest.TestCase):
+    REMOTE = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
+              "repo_path": "~/devel/airuleset"}
+
+    def test_parses_the_tailed_line(self):
+        row = {"ts": "2026-07-25T17:00:00+00:00", "host": "dev2", "usd": 1.5,
+              "msgs": 3, "avg_ctx": 2000, "by_model": {}}
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertEqual(got["usd"], 1.5)
+
+    def test_nonzero_exit_becomes_error(self):
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=255, stdout="", stderr="Connection refused")):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertIn("error", got)
+        self.assertIn("Connection refused", got["error"])
+
+    def test_timeout_becomes_error_not_raise(self):
+        import subprocess as sp
+
+        def raise_timeout(*a, **k):
+            raise sp.TimeoutExpired(cmd="ssh", timeout=15)
+        with m.patch("subprocess.run", side_effect=raise_timeout):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertIn("error", got)
+
+    def test_empty_output_becomes_error(self):
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout="", stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertIn("error", got)
+
+    def test_invalid_json_becomes_error(self):
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout="NOT JSON\n", stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertIn("error", got)
+
+
+class TestWatchdogFleetFetch(unittest.TestCase):
+    def test_one_row_per_host_a_bad_host_never_drops_the_rest(self):
+        hosts = [
+            {"name": "dev2", "host": "5.6.7.8", "user": "newlevel", "repo_path": "~"},
+            {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper", "repo_path": "~"},
+        ]
+
+        def fake_run(cmd, **kwargs):
+            if "5.6.7.8" in " ".join(cmd):
+                return m.Mock(returncode=0,
+                             stdout=json.dumps({"usd": 1.0, "msgs": 1, "avg_ctx": 100}) + "\n",
+                             stderr="")
+            return m.Mock(returncode=255, stdout="", stderr="Connection refused")
+        with m.patch("subprocess.run", side_effect=fake_run):
+            got = airuleset._watchdog_fleet_fetch(hosts)
+        self.assertEqual(got["dev2"]["usd"], 1.0)
+        self.assertIn("error", got["gatekeeper"])
+
+    def test_defaults_to_remote_hosts(self):
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=255, stdout="", stderr="down")):
+            got = airuleset._watchdog_fleet_fetch()
+        self.assertEqual(set(got.keys()), {h["name"] for h in airuleset.REMOTE_HOSTS})
 
 
 if __name__ == "__main__":
