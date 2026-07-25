@@ -194,15 +194,27 @@ def _tail_usage_from_transcript(path, max_bytes=200_000):
 
 
 def context_cost_segment(payload):
-    """'ctx <size> · ~$<cost>/ťah' — the CURRENT turn's context size + its
-    real dollar cost (2026-07-25 cost-fix package, #37). Source: the
-    statusline stdin payload's `context_window.current_usage` (the exact
-    token breakdown of the last billed API call) + `model.id`; falls back to
-    the transcript tail (see _tail_usage_from_transcript) when that's
-    missing. Priced via the SAME per-Mtok table `burn` uses. `ctx` is
-    cache_read + cache_creation tokens only (the dominant, resent-every-turn
+    """'ctx <size> · ~$<cost>/ťah' — the CURRENT context size + its
+    STEADY-STATE per-turn dollar cost (2026-07-25 cost-fix package, #37;
+    pricing fixed same day). Source: the statusline stdin payload's
+    `context_window.current_usage` (the exact token breakdown of the last
+    billed API call) + `model.id`; falls back to the transcript tail (see
+    _tail_usage_from_transcript) when that's missing. `ctx` is
+    cache_read + cache_creation tokens (the dominant, resent-every-turn
     cost) — colour-escalates on that RAW count: green <150K
-    (CTX_GREEN_MAX), yellow 150-400K, red >400K (CTX_YELLOW_MAX). Cheap and
+    (CTX_GREEN_MAX), yellow 150-400K, red >400K (CTX_YELLOW_MAX).
+
+    The cost estimate is deliberately `ctx * the model's cache-READ rate`,
+    NOT `i*price0 + cw*price1 + cr*price2 + o*price3` (what this exact API
+    call literally billed) — pricing the literal mix skews wildly right
+    after a compaction or any cache-miss turn: cache_creation there is huge
+    (a full context re-write) and cache_read tiny, so the real-cost formula
+    priced a compaction turn at the cache-WRITE rate ($6.25/Mtok on Opus)
+    instead of the cache-READ rate ($0.50/Mtok) that every ORDINARY turn
+    actually pays to resend an already-cached context. Live-observed bug: gk
+    showed 'ctx 175K · ~$1.10/ťah' right after a compaction; steady-state for
+    175K on Opus is 175000 * 0.5 / 1e6 = ~$0.09. A one-off compaction /
+    cache-miss turn must never skew the displayed estimate. Cheap and
     non-blocking by construction: no network, no `gh` — the payload is
     already in hand, and the fallback is one bounded local file read."""
     if not isinstance(payload, dict):
@@ -222,12 +234,10 @@ def context_cost_segment(payload):
     price = burn.PRICE.get(tr)
     if price is None:
         return ""
-    i = int(cu.get("input_tokens") or 0)
     cw = int(cu.get("cache_creation_input_tokens") or 0)
     cr = int(cu.get("cache_read_input_tokens") or 0)
-    o = int(cu.get("output_tokens") or 0)
     ctx = cr + cw
-    usd = (i * price[0] + cw * price[1] + cr * price[2] + o * price[3]) / 1e6
+    usd = ctx * price[2] / 1e6
     if ctx < CTX_GREEN_MAX:
         color = 40
     elif ctx < CTX_YELLOW_MAX:

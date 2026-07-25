@@ -341,8 +341,7 @@ Each loop turn:
    > `notify --run-card` gathers the remaining backlog from gh, takes `--achieved` as ✅ Dosiahnuté,
    > @mentions the tmux owner (zbynek/marek), and posts ONE Slovak card — deduped on repo-name#issue
    > (one card per ticket, re-dispatches never double-post). So the supervisor does NOT call `notify`;
-   > just confirm the worker carded each merged member. The short `❓`/`✅` idle ping stays suppressed
-   > (this loop turn ends `⏳ WORKING`).
+   > just confirm the worker carded each merged member.
    > **Release the cross-session lock now that verification is done:** `python3
    > ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees the repo
    > for another `/autopilot` session's `acquire` to succeed. Release even when the batch was
@@ -351,8 +350,28 @@ Each loop turn:
    > all (crashed mid-run), do NOT hand-release from a DIFFERENT campaign — the NEXT `acquire` attempt
    > (this session or another) auto-steals a dead holder's lock (logged to
    > `audits/autopilot-lock-steals.log`), so a stuck lock self-heals without manual intervention.
-5. **Immediately assemble the next batch** — including right after a merge. Do NOT stop to report
-   between batches, do NOT re-run `/issue-planner`, do NOT `/compact`.
+5. **Report the batch as a REAL completion, then STOP the turn — the ARMED GOAL, not `⏳`, continues
+   the loop (2026-07-25 revision).** Once verification + the per-member run-cards are done and the
+   lock is released, end THIS turn with the FULL `## ✅ Work Complete` template
+   (`completion-report.md`) for the batch: audits — `✅ CI: green`, `✅ /plan-check: <N>/<N> fulfilled`
+   (the validated batch scope from Step 1b), `✅ /review: clean — 0 🔴 0 🟡 0 🔵` and
+   `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what the worker already
+   confirmed before merging (its own PR gate, `agents/autopilot-worker.md`), never re-running the
+   skills yourself), `✅ Deploy: <version>`
+   — then Goal/What changed in plain language, the 🌐 URL(s) from the worker's `--url`, and the PR
+   title/link/merge SHA — terminating in `✅ DONE: <plain outcome, e.g. "#41+#43 merged -> v1.2.3, CI
+   green">`. This is a GENUINELY full completion of the batch (the worker already returned, nothing is
+   in flight at that instant) — not a lie, and NOT the general "something will wake me up" case
+   (`message-status-marker.md`): the signal that MORE work follows is the **ARMED GOAL** Claude Code
+   shows in its footer (`◎ /goal`), never a `⏳ WORKING` tail bolted onto an already-finished batch.
+   This is also what lets the ticket-boundary `/compact` (job 14, `notify-compact-request.sh`) fire
+   PER BATCH instead of once for the whole backlog — a completed batch's durable state already lives
+   in git/GitHub, so it is a safe compaction boundary every time. The idle Discord ping is separately
+   guarded while the goal stays armed (`milestone-notifications.md`) — the run-card already gave phone
+   visibility for this batch, so nothing double-pings.
+   **The `/goal` loop's NEXT fire re-enters Step 1 for the next batch** — do NOT chain into Step 1
+   within this same turn anymore. Do NOT re-run `/issue-planner`; do NOT hand-type `/compact` yourself
+   (the watchdog handles the timing once the pane goes idle).
 
 ### Bounce nudge-ack — an injected prompt while the loop runs (ACK it; never work it inline)
 

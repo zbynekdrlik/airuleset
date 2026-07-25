@@ -101,7 +101,10 @@ flowing. The loop **NEVER idles while ANY lane has work**.
   repo currently running? Assemble the next batch per the `autopilot` skill Step 3
   (ticket-validator gate per member, bundling gate, ONE background `autopilot-worker`
   dispatch — **serial per repo**, never a second worker while one runs; a running
-  worker does NOT block lanes 1/2/4, only re-dispatch on this lane).
+  worker does NOT block lanes 1/2/4, only re-dispatch on this lane). A completed batch
+  in this lane ends with a FULL completion report + `✅ DONE` (never `⏳` — 2026-07-25
+  revision, `autopilot` skill Step 3 item 5); the MASTER `/goal` still re-fires the next
+  turn regardless, so the scheduler simply re-evaluates all lanes fresh.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via

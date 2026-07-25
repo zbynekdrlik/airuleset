@@ -2939,6 +2939,13 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
 MODEL_SWITCH_DIALOG_WAIT_S = 2       # let the "Switch model?" confirm dialog render
 MODEL_SWITCH_APPLY_POLL_S = 1        # poll interval while waiting for the confirmation text
 MODEL_SWITCH_APPLY_MAX_POLLS = 8     # ~8s total budget — see the note on why it's a POLL below
+MODEL_RECONCILE_MAX_ATTEMPTS = 3     # cap retries per session — a live incident (gk,
+                                     # 2026-07-25) showed the SAME pane FAIL every ~60s
+                                     # sweep forever ("no confirmation seen" repeated
+                                     # indefinitely) — each FAIL released the dedup
+                                     # claim, so every sweep retried, burning a full
+                                     # context re-read (prompt-cache invalidation) on
+                                     # every attempt. Bounded, then GIVE UP for good.
 
 
 def _reconcile_candidate_panes(run):
@@ -2987,9 +2994,15 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
 
     Dedup: `state['modelswitch'][<session id>]` is CLAIMED right before the
     keystrokes are sent and is only ever DELETED again on a FAILED
-    confirmation — so a real success is never retried, and a failed attempt
-    (dialog didn't render in time, pane went busy mid-sequence, …) is
-    retried on a later sweep instead of being stuck forever either way.
+    confirmation BELOW the attempt cap — so a real success is never
+    retried, and a failed attempt (dialog didn't render in time, pane went
+    busy mid-sequence, …) is retried on a later sweep instead of being stuck
+    forever either way. `state['modelswitch_attempts'][<session id>]`
+    counts failures; once it reaches `MODEL_RECONCILE_MAX_ATTEMPTS` the
+    session GIVES UP for good (the claim is kept, never released again) —
+    a live incident (gk, 2026-07-25) showed a FAILing pane retried on
+    EVERY ~60s sweep forever, each attempt burning a full context re-read
+    (prompt-cache invalidation) for nothing.
 
     Never types into a pane that is in copy-mode, showing an open dialog,
     mid-turn/busy, or holding an unsent draft — `_input_line_text` alone
@@ -3004,6 +3017,7 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
     sleep_fn = sleep_fn or time.sleep
     projects_dir = projects_dir or PROJECTS_DIR
     reconciled = state.get("modelswitch") or {}
+    attempts_map = state.get("modelswitch_attempts") or {}
     logs = []
     for pid, cwd, cmd in _reconcile_candidate_panes(run):
         tinfo = find_active_transcript(projects_dir, cwd)
@@ -3064,11 +3078,26 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
                 break
         if target_txt in conf:
             logs.append("OK (model-reconcile) %s %s -> %s" % (loc, model, target_model))
+            attempts_map.pop(sid, None)
+            state["modelswitch_attempts"] = attempts_map
         else:
-            del reconciled[sid]
-            state["modelswitch"] = reconciled
-            logs.append("FAIL (model-reconcile) %s %s -> %s (no confirmation seen)"
-                        % (loc, model, target_model))
+            attempts = attempts_map.get(sid, 0) + 1
+            attempts_map[sid] = attempts
+            state["modelswitch_attempts"] = attempts_map
+            if attempts >= MODEL_RECONCILE_MAX_ATTEMPTS:
+                # Bounded — never retry this session again. Keep `reconciled[sid]`
+                # claimed (same as a real OK) so the dedup check at the top of the
+                # loop skips it forever, instead of releasing it for yet another
+                # doomed retry.
+                logs.append("GAVE UP (model-reconcile) %s %s -> %s after %d attempts "
+                            "(no confirmation seen)"
+                            % (loc, model, target_model, attempts))
+            else:
+                del reconciled[sid]
+                state["modelswitch"] = reconciled
+                logs.append("FAIL (model-reconcile) %s %s -> %s (no confirmation seen, "
+                            "attempt %d/%d)"
+                            % (loc, model, target_model, attempts, MODEL_RECONCILE_MAX_ATTEMPTS))
     return logs
 
 

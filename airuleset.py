@@ -65,31 +65,18 @@ MANAGED_EFFORT_LEVEL = "xhigh"
 # is a SEPARATE decision for a later step, not bundled into this one.
 MANAGED_MODEL = "claude-opus-5[1m]"
 
-# Managed default auto-compact window ("krok 1c — ohraničenie kontextu",
-# 2026-07-25, #39 follow-up): measured token spend showed 92% of ALL cost is
-# INPUT context, average context per assistant message ~457K tokens (the
-# biggest sessions average ~570K, peaks near 1M), while measured CONTEXT
-# GROWTH per turn is only ~350-1,300 tokens across 500-800 turns between
-# compactions — so compaction cost amortises to near-nothing and a LOWER
-# auto-compact threshold is almost pure win. Modelled average context by
-# threshold (same transcript data): 950K -> ~550K, 500K -> ~327K,
-# 300K -> ~227K, 200K -> ~180K; the floor is ~150K (static system prompt +
-# summary). 300000 is a DELIBERATE FIRST step — conservative enough that
-# compaction rarely lands mid-task, while already cutting average context
-# ~2.4x vs the unmanaged ~950K-ish default. Tighten toward 250K/200K only
-# AFTER the hourly burn snapshot (watchdog job 13, `airuleset.py burn
-# --compare`) shows this step did not regress cost or outcome.
-#
-# Settable in settings.json as `autoCompactWindow` (env override
-# CLAUDE_CODE_AUTO_COMPACT_WINDOW) — the key sits in the SAME settings
-# struct as effortLevel/ultracode/fastMode in the CC 2.1.220 binary.
-# LIVE-VERIFIED (2026-07-25): a scratch `claude` session with
-# `{"autoCompactWindow": 155000}` in `.claude/settings.json` showed
-# `/context`'s "Auto-compact window: 155k tokens" line and its usage-bar
-# denominator changed from the model's own default to EXACTLY 155k
-# (126k/155k = 81%, vs 126k/300k = 42% for the identical actual usage with
-# a 300k value) — proof the setting is genuinely read, not a silent no-op.
-MANAGED_AUTOCOMPACT_WINDOW = 300000
+# REVERTED (2026-07-25 correction batch, same day it was added): a managed
+# `MANAGED_AUTOCOMPACT_WINDOW = 300000` ("krok 1c") briefly capped the
+# auto-compact threshold. The user's call, which overrides that decision:
+# a LOW auto-compact threshold cuts big tasks off MID-WORK and defeats the
+# entire point of the 1M context window — compaction should never fire on
+# an artificial token budget. Context is bounded at TICKET BOUNDARIES
+# instead (the per-ticket `✅ DONE` completion report + the ticket-boundary
+# `/compact`, watchdog job 14 — see `notify-compact-request.sh` and
+# `milestone-notifications.md`), never by a blanket window. No replacement
+# constant: `apply_managed_settings_defaults` now actively STRIPS
+# `autoCompactWindow` from settings.json on every deploy so the 6 managed
+# boxes go back to Claude Code's own default.
 
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
@@ -534,6 +521,15 @@ ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
+#   --model '<MANAGED_MODEL>'       : baked in at RENDER time (2026-07-25 fix) so
+#       EVERY launch — including a RESUMED (-c) session — explicitly requests the
+#       managed model. Proven live on gatekeeper: settings.json said
+#       `claude-opus-5[1m]`, but a resumed session's transcript kept showing
+#       `claude-opus-4-8` on every turn — `-c` alone just continues whatever
+#       model the prior transcript was started with; only an explicit --model on
+#       the launch command line forces it. Applies to claude() (both branches)
+#       and claude-new(); claude-plain() is the deliberate vanilla escape hatch
+#       and stays untouched.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
@@ -553,14 +549,14 @@ ULTRACODE_BASHRC_BLOCK = (
     '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
     '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
     "    command claude --dangerously-skip-permissions -c "
-    "--settings '{\"ultracode\":true}' \"$@\"\n"
+    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
     "  else\n"
     "    command claude --dangerously-skip-permissions "
-    "--settings '{\"ultracode\":true}' \"$@\"\n"
+    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
     "  fi\n"
     "}\n"
     "claude-new() { command claude --dangerously-skip-permissions "
-    "--settings '{\"ultracode\":true}' \"$@\"; }\n"
+    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"; }}\n"
     "claude-plain() { command claude \"$@\"; }\n"
     f"{ULTRACODE_MARK_END}"
 )
@@ -617,10 +613,13 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       treatment as effortLevel/disableAgentView/tui; the user can still switch
       per session with `/model`.
 
-    - `autoCompactWindow = MANAGED_AUTOCOMPACT_WINDOW` ("krok 1c", 2026-07-25,
-      #39 follow-up) caps the auto-compact threshold in tokens — see that
-      constant's own comment for the measured evidence + live verification.
-      Same unconditional-managed-default treatment as the keys above.
+    - `autoCompactWindow` is ACTIVELY STRIPPED (2026-07-25 correction batch —
+      reverts the SAME-DAY "krok 1c" addition). A low auto-compact threshold
+      cuts big tasks off mid-work and defeats the 1M context window; context
+      is bounded at ticket boundaries instead (the per-ticket `/compact`,
+      watchdog job 14). This must POP the key, not merely stop setting it —
+      an already-deployed settings.json from the reverted feature would
+      otherwise keep carrying it forward untouched on every future install.
 
     Idempotent; preserves all other keys."""
     result = dict(settings)
@@ -628,7 +627,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result["disableAgentView"] = True
     result["tui"] = "default"
     result["model"] = MANAGED_MODEL
-    result["autoCompactWindow"] = MANAGED_AUTOCOMPACT_WINDOW
+    result.pop("autoCompactWindow", None)
     return result
 
 

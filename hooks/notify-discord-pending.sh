@@ -58,6 +58,37 @@ strip_md() {
         | sed -E 's/^[[:space:]]+//'
 }
 
+goal_armed() {
+    # Is a /goal loop ARMED for THIS session (2026-07-25 revision)? A
+    # per-ticket/per-batch ✅ DONE inside an armed autopilot loop must NOT
+    # queue a SECOND idle Discord ping — the sanctioned per-ticket run-card
+    # already gives phone visibility, and a second ping per ticket is
+    # exactly the per-phase noise the user removed
+    # (milestone-notifications.md).
+    #
+    # Reuses the EXACT SAME signal the watchdog's own goal jobs key on
+    # (`"◎ /goal" in captured` — _safe_to_bounce_nudge / goal_autoarm,
+    # watchdog/__init__.py) — never a second, invented detector. This hook
+    # runs as a child of the live Claude Code process; when that session
+    # runs inside tmux (the standing setup on every managed box) it
+    # inherits tmux's own $TMUX_PANE env var, so THIS pane can be captured
+    # directly — no cross-session pane search needed.
+    #
+    # ND_FAKE_PANE_CAPTURE lets tests inject a fixed capture instead of
+    # shelling out to a real tmux (and keeps every OTHER test in this file
+    # deterministic without depending on whatever pane this suite happens
+    # to run inside).
+    local cap
+    if [ -n "${ND_FAKE_PANE_CAPTURE+x}" ]; then
+        cap="$ND_FAKE_PANE_CAPTURE"
+    elif [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+        cap=$(tmux capture-pane -p -t "$TMUX_PANE" 2>/dev/null || echo "")
+    else
+        cap=""
+    fi
+    printf '%s' "$cap" | grep -qF "◎ /goal"
+}
+
 emit() {
     # $1 = emoji, $2 = raw content; clean + truncate to keep the device line
     # short. ✅ stays ONE short line (only the ❓ question carries a full block);
@@ -334,17 +365,28 @@ elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*⏳';
     # line-START anchoring as the ❓ branch — a ⏳ mid-sentence is prose.
     rm -f "$PENDING" 2>/dev/null || true
 elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'; then
-    # Fully-done state. Prefer an explicit "✅ DONE: <outcome>" line; else the
-    # report's "What changed" / "Goal" one-liner; else a generic Slovak fallback.
-    DLINE=$(printf '%s\n' "$MSG" | grep -iE '✅[[:space:]]*DONE:' | tail -1 || true)
-    if [ -n "$DLINE" ]; then
-        C=$(printf '%s' "$DLINE" | sed -E 's/.*✅[[:space:]]*DONE:[[:space:]]*//I')
+    # Fully-done state. A per-ticket/per-batch ✅ DONE inside a STILL-ARMED
+    # /goal loop (2026-07-25 revision — message-status-marker.md,
+    # milestone-notifications.md) must NOT queue a SECOND idle ping here —
+    # the sanctioned per-ticket run-card already gave phone visibility for
+    # THIS ticket, and this is exactly the per-phase noise the user
+    # removed. Only a ✅ DONE with NO goal armed (a normal non-loop session,
+    # or the true end of a run once /goal has resolved) queues the ping.
+    if goal_armed; then
+        rm -f "$PENDING" 2>/dev/null || true
     else
-        C=$(printf '%s\n' "$MSG" | grep -iE '^\*\*(What changed|Goal)\b' | head -1 \
-            | sed -E 's/^\*\*(What changed|Goal):?\*\*:?[[:space:]]*//I' || true)
-        [ -z "$C" ] && C="práca dokončená"
+        # Prefer an explicit "✅ DONE: <outcome>" line; else the report's
+        # "What changed" / "Goal" one-liner; else a generic Slovak fallback.
+        DLINE=$(printf '%s\n' "$MSG" | grep -iE '✅[[:space:]]*DONE:' | tail -1 || true)
+        if [ -n "$DLINE" ]; then
+            C=$(printf '%s' "$DLINE" | sed -E 's/.*✅[[:space:]]*DONE:[[:space:]]*//I')
+        else
+            C=$(printf '%s\n' "$MSG" | grep -iE '^\*\*(What changed|Goal)\b' | head -1 \
+                | sed -E 's/^\*\*(What changed|Goal):?\*\*:?[[:space:]]*//I' || true)
+            [ -z "$C" ] && C="práca dokončená"
+        fi
+        emit "✅" "$C"
     fi
-    emit "✅" "$C"
 else
     # No marker → nothing to notify. Clear any stale pending.
     rm -f "$PENDING" 2>/dev/null || true
