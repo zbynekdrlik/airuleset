@@ -1467,6 +1467,97 @@ class TestTranscriptLastModel(unittest.TestCase):
         self.assertEqual(wd.transcript_last_model(Path("/nonexistent/x.jsonl")), "")
 
 
+class TestTranscriptCurrentContext(unittest.TestCase):
+    """Job 15 (#39/#43 follow-up) needs the session's CURRENT context size —
+    cache_read_input_tokens + cache_creation_input_tokens off the newest
+    assistant usage entry. A single API call can render as several
+    transcript LINES (thinking / text / tool_use), each carrying an
+    IDENTICAL usage snapshot under the SAME `message.id` (verified live
+    against a real forestshop-parovanie-produktov transcript, 2026-07-25) —
+    grouping by id and taking MAX (never SUM) is what keeps one turn from
+    being triple-counted."""
+
+    def test_sums_cache_read_and_cache_creation(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant", "message": {
+                "id": "msg_1",
+                "usage": {"cache_read_input_tokens": 400000,
+                         "cache_creation_input_tokens": 5000}}},
+        ])
+        self.assertEqual(wd.transcript_current_context(p), 405000)
+
+    def test_groups_by_message_id_never_sums_across_records(self):
+        # ONE API call rendered as thinking + text + tool_use — three
+        # transcript lines, the SAME message.id, IDENTICAL usage. Must
+        # count as ONE turn, never 3x.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        u = {"cache_read_input_tokens": 634095, "cache_creation_input_tokens": 5943}
+        _write_jsonl(p, [
+            {"type": "assistant", "message": {"id": "msg_A", "usage": u,
+                                              "content": [{"type": "thinking", "thinking": "..."}]}},
+            {"type": "assistant", "message": {"id": "msg_A", "usage": u,
+                                              "content": [{"type": "text", "text": "hi"}]}},
+            {"type": "assistant", "message": {"id": "msg_A", "usage": u,
+                                              "content": [{"type": "tool_use", "name": "Read"}]}},
+        ])
+        self.assertEqual(wd.transcript_current_context(p), 634095 + 5943)
+
+    def test_only_the_newest_message_id_group_counts(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant", "message": {
+                "id": "msg_OLD",
+                "usage": {"cache_read_input_tokens": 100000,
+                         "cache_creation_input_tokens": 0}}},
+            {"type": "assistant", "message": {
+                "id": "msg_NEW",
+                "usage": {"cache_read_input_tokens": 450000,
+                         "cache_creation_input_tokens": 1000}}},
+        ])
+        self.assertEqual(wd.transcript_current_context(p), 451000)
+
+    def test_takes_max_not_sum_within_a_group(self):
+        # defensive — shouldn't happen live (same API call = same usage
+        # snapshot) but grouping must never ADD two records sharing an id.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant", "message": {
+                "id": "msg_A",
+                "usage": {"cache_read_input_tokens": 300000,
+                         "cache_creation_input_tokens": 0}}},
+            {"type": "assistant", "message": {
+                "id": "msg_A",
+                "usage": {"cache_read_input_tokens": 305000,
+                         "cache_creation_input_tokens": 0}}},
+        ])
+        self.assertEqual(wd.transcript_current_context(p), 305000)
+
+    def test_missing_message_id_returns_that_entrys_context_standalone(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant", "message": {
+                "usage": {"cache_read_input_tokens": 100000,
+                         "cache_creation_input_tokens": 0}}},
+        ])
+        self.assertEqual(wd.transcript_current_context(p), 100000)
+
+    def test_no_usage_entries_returns_zero(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [{"type": "assistant",
+                         "message": {"content": [{"type": "text", "text": "hi"}]}}])
+        self.assertEqual(wd.transcript_current_context(p), 0)
+
+    def test_nonexistent_file_returns_zero(self):
+        self.assertEqual(wd.transcript_current_context(Path("/nonexistent/x.jsonl")), 0)
+
+
 class TestReconcileCandidatePanes(unittest.TestCase):
     def test_filters_to_claude_node_bun(self):
         def fake_run(argv, timeout=8):
@@ -1750,6 +1841,224 @@ class TestModelReconcile(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #39/#43 follow-up — Job 15: COMPACT OVERGROWN IDLE SESSIONS. Job 14 only
+# compacts at a completed-ticket boundary; a long-lived session that is NOT
+# an autopilot loop (no ticket boundary ever fires) can sit on a huge,
+# still-growing context forever with no mechanism to shrink it. This job
+# closes that gap: /compact a session whose current context exceeds
+# COMPACT_CONTEXT_THRESHOLD, but ONLY once its pane has been genuinely idle
+# for COMPACT_MIN_IDLE_S (no draft, no dialog, not busy, not in copy-mode,
+# no in-flight background agent) — deliberately NOT Claude Code's own
+# autoCompactWindow (which fires regardless of what the session is doing
+# and cuts a long task off mid-work; airuleset STRIPS that setting).
+# --------------------------------------------------------------------------- #
+
+
+def _seed_context_transcript(projects_dir, cwd, sid, ctx_tokens, idle_s=0,
+                             now=None, mid="msg_1"):
+    """Write one assistant usage entry whose cache_read + cache_creation sums
+    to `ctx_tokens`, and set the transcript FILE's mtime `idle_s` seconds
+    into the past relative to `now` — the SAME clock job 15's idle gate
+    reads via `find_active_transcript`."""
+    now = time.time() if now is None else now
+    d = Path(projects_dir) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    cache_read = ctx_tokens // 2
+    cache_creation = ctx_tokens - cache_read
+    _write_jsonl(p, [
+        {"type": "assistant", "message": {
+            "id": mid, "model": "claude-opus-5[1m]",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"cache_read_input_tokens": cache_read,
+                     "cache_creation_input_tokens": cache_creation}}},
+    ])
+    mtime = now - idle_s
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+class TestCompactStaleContext(unittest.TestCase):
+    CWD = "/home/newlevel/devel/demo"
+    PANE = "%9"
+
+    def _go(self, ctx_tokens, idle_s, initial_captured=MR_IDLE_CAP, cap_seq=(),
+           state=None, dry_run=False, in_mode=False, now=None, sid="sess-abc"):
+        now = time.time() if now is None else now
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_context_transcript(proj, self.CWD, sid, ctx_tokens, idle_s=idle_s, now=now)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               initial_captured, cap_seq=cap_seq, in_mode=in_mode)
+        state = {} if state is None else state
+        logs = wd.compact_stale_context(now, tmux, state, dry_run=dry_run,
+                                        projects_dir=proj, sleep_fn=lambda s: None)
+        return tmux, logs, state
+
+    def test_below_threshold_context_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD - 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10)
+        self.assertEqual(tmux.sent, [])
+
+    def test_idle_under_twenty_minutes_is_skipped_even_with_huge_context(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 100000,
+                                     wd.COMPACT_MIN_IDLE_S - 10)
+        self.assertEqual(tmux.sent, [])
+
+    def test_qualifying_session_gets_compacted(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(state["compact_stale"]["sess-abc"])
+
+    def test_bg_agent_strip_row_is_never_compacted(self):
+        # issue #36/#42-style guard: a `◯ <agent>` row means a background
+        # worker is in flight — /compact must never touch that pane.
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_BG_AGENT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
+
+    def test_bg_agent_ambient_wait_text_is_never_compacted(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_BG_WAIT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
+
+    def test_busy_pane_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_BUSY_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
+
+    def test_draft_pane_is_never_typed_over(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_DRAFT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+
+    def test_open_dialog_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_DIALOG_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("dialog" in ln for ln in logs), logs)
+
+    def test_in_mode_pane_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10, in_mode=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+
+    def test_dry_run_never_sends_keys(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY") for ln in logs), logs)
+        self.assertEqual(state.get("compact_stale", {}), {})
+
+    def test_already_compacted_session_is_never_retried(self):
+        # the dedup THIS job needs (unlike job 14's fire-and-forget): right
+        # after /compact is sent, the transcript's LAST usage record still
+        # reads the PRE-compaction (huge) context until the session's next
+        # real turn — without a permanent dedup, an idle post-compaction
+        # session that never gets a new turn would have /compact re-sent on
+        # EVERY ~60s sweep forever.
+        state = {"compact_stale": {"sess-abc": True}}
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10, state=state)
+        self.assertEqual(tmux.sent, [])
+
+    def test_exact_keystroke_sequence(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
+        self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+
+    def test_strip_selected_gets_one_escape_first(self):
+        tmux, logs, state = self._go(
+            wd.COMPACT_CONTEXT_THRESHOLD + 1, wd.COMPACT_MIN_IDLE_S + 10,
+            initial_captured=MR_STRIP_SELECTED_IDLE_CAP,
+            cap_seq=[MR_STRIP_SELECTED_IDLE_CAP, MR_IDLE_CAP])
+        self.assertEqual(tmux.keys(), ["Escape", "/compact", "Enter"])
+        self.assertTrue(tmux.no_consecutive_escapes())
+
+    def test_no_two_consecutive_escapes_ever_sent(self):
+        # issue #35: a rapid double-Escape into a pane holding a draft
+        # PERMANENTLY DELETES it — never sent anywhere in this job, on ANY
+        # decision path (compact, no-compact, or the one-Escape case).
+        scenarios = [
+            (MR_IDLE_CAP, [MR_BUSY_CAP, MR_IDLE_CAP]),
+            (MR_STRIP_SELECTED_IDLE_CAP, [MR_STRIP_SELECTED_IDLE_CAP, MR_IDLE_CAP]),
+            (MR_BUSY_CAP, ()),
+            (MR_DRAFT_CAP, ()),
+            (MR_DIALOG_CAP, ()),
+            (MR_BG_AGENT_CAP, ()),
+            (MR_IDLE_CAP, [MR_BUSY_CAP]),   # /compact never returns idle
+        ]
+        for cap, seq in scenarios:
+            tmux, _logs, _state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                          wd.COMPACT_MIN_IDLE_S + 10,
+                                          initial_captured=cap, cap_seq=seq)
+            self.assertTrue(tmux.no_consecutive_escapes(), cap)
+
+    def test_verify_never_returns_idle_fails_bounded(self):
+        # the poll must be BOUNDED (no-timeout-band-aids.md) — /compact has
+        # no reliable confirmation TEXT (job 14's own docstring notes this),
+        # so "the pane came back to a free idle prompt" is the only
+        # observable success signal available.
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     cap_seq=[MR_BUSY_CAP])
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("compact_stale", {}))
+        self.assertEqual(state["compact_stale_attempts"]["sess-abc"], 1)
+
+    def test_below_cap_failure_releases_the_claim_for_retry(self):
+        state = {}
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     cap_seq=[MR_BUSY_CAP], state=state)
+        self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("compact_stale", {}))
+
+    def test_repeated_failures_stop_retrying_after_max_attempts(self):
+        # mirrors job 12's live incident (gk, 2026-07-25): a session that
+        # FAILs verification every sweep must eventually GIVE UP for good
+        # instead of burning a context re-read on every single ~60s sweep
+        # forever.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, "sess-abc",
+                                 wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        state = {}
+        logs = []
+        for _ in range(wd.COMPACT_STALE_MAX_ATTEMPTS):
+            tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                   MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP])
+            logs = wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                            projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertEqual(state["compact_stale_attempts"]["sess-abc"],
+                         wd.COMPACT_STALE_MAX_ATTEMPTS)
+        self.assertTrue(state["compact_stale"]["sess-abc"])
+
+        # one more sweep must not type anything at all — gave up for good
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+
+
+# --------------------------------------------------------------------------- #
 # #37 follow-up — Job 13: HOURLY BURN SNAPSHOT. Once per hour, append this
 # host's $/msgs/avg-context/by-model row (the PREVIOUS full hour) to
 # `snapshots.jsonl` — the feed `airuleset.py burn --compare` reads.
@@ -1901,6 +2210,44 @@ class RunOnceNewJobsWiring(unittest.TestCase):
                            burn_snapshot_path=Path(tmp) / "snap.jsonl")
         self.assertTrue(any(ln.startswith("READY (model-reconcile)") for ln in logs),
                         logs)
+
+
+class RunOnceCompactStaleWiring(unittest.TestCase):
+    """Job 15 is ALWAYS wired (no gating param, same shape as job 9's
+    goal_autoarm) — run_once must invoke it every sweep, best-effort."""
+
+    def test_qualifying_session_fires_through_run_once(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        now = time.time()
+        cwd = "/home/newlevel/devel/demo"
+        _seed_context_transcript(proj, cwd, "sess-x", wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        # cmd="node" so run_once's OWN per-pane job loop (list_claude_panes
+        # only matches "claude") skips it — isolating this to job 15's
+        # wiring, same pattern as test_target_model_wires_into_model_reconcile.
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_IDLE_CAP)
+        logs = wd.run_once(now=now, dry_run=True, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertTrue(any(ln.startswith("READY (compact-stale)") for ln in logs), logs)
+
+    def test_no_qualifying_session_produces_no_compact_stale_logs(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertFalse(any("compact-stale" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
