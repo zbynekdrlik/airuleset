@@ -649,15 +649,13 @@ def observed_pct_per_day(rows):
     2 such samples exist yet, their timestamps don't parse, or they collapse
     to the same instant."""
     samples = [(r.get("ts"), r.get("weekly_pct")) for r in rows
-              if r.get("weekly_pct") is not None]
+              if r.get("weekly_pct") is not None and _parse_ts(r.get("ts")) is not None]
     if len(samples) < 2:
         return None
-    samples.sort(key=lambda s: (_parse_ts(s[0]) or datetime.datetime.min))
+    samples.sort(key=lambda s: _parse_ts(s[0]))
     t0, p0 = samples[0]
     t1, p1 = samples[-1]
     d0, d1 = _parse_ts(t0), _parse_ts(t1)
-    if d0 is None or d1 is None:
-        return None
     hours = (d1 - d0).total_seconds() / 3600.0
     if hours <= 0:
         return None
