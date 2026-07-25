@@ -1721,6 +1721,138 @@ def _react_ok(channel, message_id, token):
         return False
 
 
+# --------------------------------------------------------------------------- #
+# Stash-around delivery (issue #35) — CC's native prompt STASH (Ctrl+S) lets
+# the watchdog deliver its own text into a pane that is idle but holds a
+# FOREIGN draft, without losing that draft: park it, type + submit ours, and
+# CC auto-restores the parked draft the instant the delivered turn completes
+# (empirically verified against CC 2.1.220 — NOT a second Ctrl+S press, which
+# the docs wrongly imply). The stash is SINGLE-SLOT with a SILENT overwrite,
+# so every step is verified against a fresh capture and any surprise aborts
+# to the caller's pre-#35 fallback (pending / ticket-fallback / skip) —
+# never a guess, never data loss.
+# --------------------------------------------------------------------------- #
+
+STASH_MARKER = "› stashed"          # "› stashed" — CC's stash-slot indicator
+
+
+def deliver_with_stash(pid, text, run, captured=None, logs=None):
+    """Deliver `text` into a pane that is IDLE but holds a foreign draft.
+
+    Protocol (every step verified, any surprise aborts to the SAFEST state):
+      1. Abort if a stash slot is already occupied (`› stashed` anywhere in
+         the capture) — stashing over it would SILENTLY destroy whatever is
+         already parked there.
+      2. Require idle-with-a-draft: a free `❯` prompt with non-empty text and
+         no live-turn signal ('esc to interrupt'). Anything else aborts —
+         this helper handles exactly one shape, never a guess.
+      3. If the agent-strip selector holds focus (`_strip_selected`, #36),
+         ONE Escape first — never two (a rapid double-Escape PERMANENTLY
+         DELETES a draft, empirically confirmed).
+      4. Ctrl+S stashes the draft. Re-capture and verify the box is now bare
+         AND the `› stashed` indicator is lit — else abort (the draft is
+         presumably untouched; nothing lost, nothing typed).
+      5. Type `text` literally, re-capture, verify the boundary line is `❯` +
+         a TAIL of `text` (a wrapped input renders its tail at the
+         boundary). Verify failure → ABORT-RESTORE: Ctrl+S pops the stashed
+         draft back, and we return False regardless of that restore's own
+         outcome (best-effort; the alternative is discarding state).
+      6. Enter submits. If the text is STILL at the boundary (a swallowed
+         Enter — the agent-strip-selector class of bug, #36), ONE corrective
+         Escape+Enter (never a second bare Enter, never two Escapes).
+      7. Success = the box no longer shows our text. The stashed draft
+         auto-restores itself once the delivered turn completes.
+
+    `logs`, if a list, gets one reason string appended on every abort/success
+    path — callers that want visibility (or tests) pass one in; the default
+    (None) is silent, matching every other keystroke helper in this file."""
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
+    run = run or _default_run
+    cap = captured if captured is not None else capture_pane(pid, run, lines=30)
+    if cap and STASH_MARKER in cap:
+        _log("stash-abort: slot occupied")
+        return False
+    if not (_has_free_prompt(cap, bare_only=False) and _input_line_text(cap)):
+        _log("stash-abort: not idle-with-draft")
+        return False
+    if "esc to interrupt" in (cap or ""):
+        _log("stash-abort: live turn")
+        return False
+    if _strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pid, "Escape"])
+    run(["tmux", "send-keys", "-t", pid, "C-s"])
+    cap = capture_pane(pid, run, lines=30)
+    if _input_line_text(cap) != "" or STASH_MARKER not in (cap or ""):
+        _log("stash-abort: verify-bare-failed")
+        return False
+    run(["tmux", "send-keys", "-t", pid, "-l", text])
+    cap = capture_pane(pid, run, lines=30)
+    itext = _input_line_text(cap)
+    if not (itext and text.endswith(itext)):
+        _log("stash-abort: type-verify-failed")
+        run(["tmux", "send-keys", "-t", pid, "C-s"])      # restore the draft
+        capture_pane(pid, run, lines=30)
+        return False
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    cap = capture_pane(pid, run, lines=30)
+    itext2 = _input_line_text(cap)
+    if itext2 and text.endswith(itext2):
+        # swallowed submit (#36 class) — ONE corrective Escape+Enter, never a
+        # second Escape.
+        run(["tmux", "send-keys", "-t", pid, "Escape"])
+        run(["tmux", "send-keys", "-t", pid, "Enter"])
+        cap = capture_pane(pid, run, lines=30)
+        itext3 = _input_line_text(cap)
+        if itext3 and text.endswith(itext3):
+            _log("stash-abort: swallowed-submit-not-recovered")
+            return False
+    _log("stash-delivered")
+    return True
+
+
+def _pane_location(pid, run):
+    """Best-effort 'session:window.pane' for a pane — a job-10 wedge ping
+    that named no window was a live complaint ('nevidim nikde ziaden
+    neodoslany text', issue #35). Blank on any failure; never blocks a ping."""
+    try:
+        out = run(["tmux", "display-message", "-p", "-t", pid,
+                   "#{session_name}:#{window_index}.#{pane_index}"])
+        return (out or "").strip()
+    except Exception:
+        return ""
+
+
+_DREPLY_TYPED_TTL_S = 48 * 3600
+
+
+def _record_dreply_typed(state, pid, prompt, now):
+    """Remember the TAIL of text job 7 just typed into `pid`, so job 10 can
+    recognize the SAME text sitting stuck as MACHINE (issue #35) instead of
+    pinging the user about their own delivery's swallowed submit. Pruned to
+    the last 48h so a dead pane's entry doesn't linger forever."""
+    typed = state.get("dreply_typed")
+    typed = ({k: v for k, v in typed.items()
+             if isinstance(v, dict) and now - (v.get("ts") or 0) < _DREPLY_TYPED_TTL_S}
+            if isinstance(typed, dict) else {})
+    typed[pid] = {"tail": prompt[-160:], "ts": now}
+    state["dreply_typed"] = typed
+
+
+def _is_dreply_machine_text(state, pid, txt):
+    """True if `txt` (the pane's current input-box text) is a SUFFIX of — or
+    contained in — the tail job 7 recorded for `pid` via
+    `_record_dreply_typed`. A wrapped input renders its TAIL at the
+    boundary, hence the endswith/contains check rather than equality."""
+    rec = (state.get("dreply_typed") or {}).get(pid)
+    if not isinstance(rec, dict):
+        return False
+    tail = str(rec.get("tail") or "")
+    return bool(tail) and (tail.endswith(txt) or txt in tail)
+
+
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             discord_fetch=None, env=None, gh_comment=None,
                             hosted_users=None, foreign_questions=None,
@@ -1861,8 +1993,22 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             # (endswith: a wrapped input renders its TAIL as the boundary line)
             own_stuck = bool(itext) and prompt.endswith(itext)
             if not (pane_at_idle_prompt(captured) or own_stuck):
-                # busy mid-turn with no input box, a dialog, or a FOREIGN draft
-                # we must never type over (#233) — retry / fallback clock.
+                # A genuinely busy mid-turn pane / open dialog we must never
+                # type over (#233) has no free `❯` at all — but an IDLE pane
+                # holding a FOREIGN draft (also lands here, since its box
+                # isn't bare) is no longer a dead end (issue #35): stash the
+                # draft, deliver, let CC auto-restore it. Any ambiguity
+                # (busy pane, copy-mode, a verify failure) falls straight
+                # through to the pre-#35 pending/fallback path, unchanged.
+                if not dry_run and not pane_in_mode(pid, run):
+                    _record_dreply_typed(state, pid, prompt, now)
+                    if deliver_with_stash(pid, prompt, run, captured=captured):
+                        idead = state.get("inputdead")
+                        if isinstance(idead, dict):
+                            idead.pop(r["session"], None)
+                            state["inputdead"] = idead
+                        _delivered(r)
+                        continue
                 _pending(r, "busy")
                 continue
             if pane_in_mode(pid, run):
@@ -1871,6 +2017,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 if own_stuck:
                     run(["tmux", "send-keys", "-t", pid, "Enter"])
                 else:
+                    _record_dreply_typed(state, pid, prompt, now)
                     send_continue(pid, prompt, run)
                 # verify the input box emptied — a swallowed Enter (#20) leaves
                 # the text at `❯`; up to 2 corrective Escape+Enter retries, then
@@ -2097,6 +2244,17 @@ def _cache_repo_roots(home=None, max_age_s=None):
     return roots
 
 
+def _try_stash_nudge(pid, captured, text, run, dry_run):
+    """Shared bounce/gk-request helper (issue #35): attempt a stash-around
+    delivery of `text` for a pane that already passed the live-work / armed
+    -loop / already-nudged guards but isn't bare-idle — i.e. it holds a
+    draft, not a running turn. dry_run never attempts it (keeps the
+    diagnostic simulation identical to the pre-#35 behavior)."""
+    if dry_run:
+        return False
+    return deliver_with_stash(pid, text, run, captured=captured)
+
+
 def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     """Is the pane a session at TRUE REST — safe to type the bounce nudge?
 
@@ -2218,10 +2376,23 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
         tick_str = " ".join("#%d" % n for n in tickets)
         if pid:
             captured = capture_pane(pid, run)
-            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run) \
+            if pane_in_mode(pid, run) \
                     or not _safe_to_bounce_nudge(captured, root, projects_dir):
                 # working / armed-loop / already-nudged pane gets NOTHING —
                 # the label alone is the insertion (never interrupt mid-work).
+                continue
+            if not pane_at_idle_prompt(captured):
+                # not bare-idle but past every live-work guard above — an
+                # idle-with-a-FOREIGN-draft pane, not a running turn. Stash
+                # it, deliver the nudge, let CC restore it (issue #35). Any
+                # verify failure falls straight through to the pre-#35
+                # silent skip.
+                if not _try_stash_nudge(pid, captured, BOUNCE_NUDGE % (tick_str, name),
+                                        run, dry_run):
+                    continue
+                seen[name] = {"tickets": tickets, "ts": int(now)}
+                persist()
+                logs.append("bounce-nudge %s %s" % (name, tick_str))
                 continue
             seen[name] = {"tickets": tickets, "ts": int(now)}
             persist()                          # dedup memory BEFORE the keystroke
@@ -2379,10 +2550,21 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
         tick_str = " ".join("#%d" % n for n in tickets)
         if pid:
             captured = capture_pane(pid, run)
-            if not pane_at_idle_prompt(captured) or pane_in_mode(pid, run) \
+            if pane_in_mode(pid, run) \
                     or not _safe_to_bounce_nudge(captured, root, projects_dir):
                 # working / armed-loop pane gets NOTHING — the label alone is
                 # the queue insertion (never interrupt mid-work).
+                continue
+            if not pane_at_idle_prompt(captured):
+                # idle-with-a-FOREIGN-draft, not a running turn — stash it,
+                # deliver, let CC restore it (issue #35). Any verify failure
+                # falls straight through to the pre-#35 silent skip.
+                if not _try_stash_nudge(pid, captured, GKREQ_NUDGE % (tick_str, name),
+                                        run, dry_run):
+                    continue
+                seen[name] = {"tickets": tickets, "ts": int(now)}
+                persist()
+                logs.append("gkreq-nudge %s %s" % (name, tick_str))
                 continue
             seen[name] = {"tickets": tickets, "ts": int(now)}
             persist()                          # dedup memory BEFORE the keystroke
@@ -2423,6 +2605,11 @@ _ARM_QUESTION_RX = re.compile(
 
 PWEDGE_MIN_IDLE_S = 30 * 60      # transcript must be this stale before a wedge ping
 PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
+# Per-pane ping cooldown (issue #35) — a re-WRAPPED draft changes its hash,
+# which used to read as a brand-new episode and re-ping the same pane
+# ("často mi chodí" spam). The cooldown is keyed on the PANE, independent of
+# the hash-tracking dict, so it survives a hash change.
+PWEDGE_PING_COOLDOWN_S = 24 * 3600
 # Canonical CROSS-STREAM machine-nudge prefix (autopilot skill protocol) — a
 # frozen draft starting with it is MACHINE text whose submission is always the
 # intent, so job 10 auto-Enters it instead of pinging (the gk→montalu nudge
@@ -2431,25 +2618,54 @@ MACHINE_NUDGE_PREFIX = ("Priorita: prio:bounce", "bounce-backstop:",
                         "gk-request backstop:")
 
 
+def _session_is_waiting(tpath, max_lines=50):
+    """True iff the session's LAST assistant transcript entry's text
+    contains 'NEEDS YOU' — i.e. it ended on a ❓ block, genuinely blocked on
+    the user. Feeds job 10's `waiting` gate (issue #35): a parked draft only
+    pings while the session is ACTUALLY waiting on it."""
+    for entry in reversed(_iter_jsonl_tail(tpath, max_lines)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        return "NEEDS YOU" in (_entry_text(entry) or "")
+    return False
+
+
 def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
-                       send_fn, dry_run=False, run=None):
-    """Job 10 (#20) — queued-prompt-wedge detection, PING-FIRST.
+                       send_fn, dry_run=False, run=None, waiting=True):
+    """Job 10 (#20, reworked #35) — queued-prompt-wedge detection, PING-FIRST.
 
     Text sitting in the input box (a submitted-but-stuck queued prompt, or an
     abandoned draft) blocks every keystroke delivery (job 7 draft protection)
     and can park a session for hours (gk+david 2026-07-20; the gk-master
     'nechať ako je' draft). Detection: the box text is BYTE-identical across
     >= PWEDGE_SWEEPS sweeps AND the transcript is >= PWEDGE_MIN_IDLE_S stale
-    AND the pane shows no live-work signals → ONE deduped Discord ping to the
-    pane's owner. Deliberately NO auto-Enter on foreign text (the ticket's
-    decision — a machine must never submit a half-typed user draft); job 7's
-    own-text Enter-retry already covers the watchdog's own deliveries."""
+    AND the pane shows no live-work signals.
+
+    Three refinements from issue #35 on top of the original ping-first
+    design:
+      - MACHINE recognition now covers BOTH the static cross-stream prefixes
+        AND job 7's own compose-reply text (`state['dreply_typed']`, set by
+        `_record_dreply_typed`) — a swallowed delivery of OUR OWN text is
+        auto-submitted (Escape+Enter — #36), never pinged as if it were a
+        foreign draft.
+      - `waiting` (default True — callers that can't cheaply determine it,
+        e.g. a sudo-hosted foreign transcript, keep the old always-eligible
+        behavior): a genuine USER draft pings NOTHING while the session is
+        NOT waiting on the user (stash-around delivery, #35, means a parked
+        draft no longer blocks anything urgently) — but state keeps
+        tracking, so a later flip to `waiting=True` on the SAME stable draft
+        still pings.
+      - A per-pane cooldown (`PWEDGE_PING_COOLDOWN_S`) suppresses a re-ping
+        for `pid` regardless of the draft's hash changing (a re-wrap).
+
+    Deliberately NO auto-Enter on a genuine foreign draft (the ticket's
+    decision — a machine must never submit a half-typed user draft)."""
     key = "pwedge:" + pid
     txt = _input_line_text(captured)
     if not txt:
         state.pop(key, None)
         return []
-    machine = txt.startswith(MACHINE_NUDGE_PREFIX)
+    machine = txt.startswith(MACHINE_NUDGE_PREFIX) or _is_dreply_machine_text(state, pid, txt)
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")
                         or now - tmtime < PWEDGE_MIN_IDLE_S):
@@ -2478,11 +2694,26 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             run(["tmux", "send-keys", "-t", pid, "Enter"])
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)" % (pid, project)]
+    if not waiting:
+        # tracked but nothing urgent — the session isn't blocked on the
+        # user, and a stash-around delivery (#35) can still reach it. A
+        # later poll where `waiting` flips True (same stable draft) pings.
+        return ["pwedge-parked (not waiting) %s (%s)" % (pid, project)]
+    ping_key = "pwedge-ping:" + pid
+    last_ping = state.get(ping_key)
+    if last_ping and now - last_ping < PWEDGE_PING_COOLDOWN_S:
+        st["pinged"] = True
+        return ["pwedge-suppressed (cooldown) %s (%s)" % (pid, project)]
     st["pinged"] = True
-    send_fn("⚠️ **%s** — v okne visí NEODOSLANÝ text („%s…“) a session stojí "
-            "vyše 30 minút. Stlač v tom okne Enter (text sa odošle) alebo ho "
-            "zmaž — dovtedy sa do session nedá nič doručiť."
-            % (project, txt[:60]),
+    state[ping_key] = now
+    where = _pane_location(pid, run) if run else ""
+    loc = " (%s)" % where if where else ""
+    send_fn("⚠️ **%s**%s — v okne visí NEODOSLANÝ text („%s…“) a session stojí "
+            "vyše 30 minút. Môže ísť aj o odložený (Ctrl+S stash) príkaz, "
+            "ktorý sa po skončení bežiaceho ťahu vráti sám. Stlač v tom okne "
+            "Enter (text sa odošle) alebo ho zmaž — dovtedy sa doň nedá nič "
+            "doručiť."
+            % (project, loc, txt[:60]),
             owner=owner or None,
             dedup_key="pwedge:%s:%s" % (pid, h), dry_run=dry_run)
     return ["prompt-wedge ping %s (%s)" % (pid, project)]
@@ -3138,9 +3369,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
 
             # --- (10) QUEUED-PROMPT-WEDGE (#20): frozen input-box text + stale
             # transcript → ONE deduped owner ping (ping-first, never auto-Enter).
+            # waiting: the LOCAL transcript is directly readable here, so the
+            # gate is computed precisely (issue #35) — a parked draft only
+            # pings while the session actually asks ❓ NEEDS YOU.
             logs += prompt_wedge_check(now, state, pid, captured, tmtime,
                                        owner, project, send_fn,
-                                       dry_run=dry_run, run=run)
+                                       dry_run=dry_run, run=run,
+                                       waiting=_session_is_waiting(tpath))
 
             # --- (6) 5-HOUR SESSION LIMIT → ping once, then RETRY a resume AFTER --
             # the reset, bounded, with a stable-draft submit path -------------------
@@ -3621,9 +3856,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             owner = pane_owner(pid, run)
             if owner:
                 owner_by_sid.setdefault(sid, owner)
+            # waiting=True: the FOREIGN transcript isn't cheaply readable from
+            # here (a different HOME) — stay eligible-by-default rather than
+            # silently going quiet for every hosted pane (issue #35).
             logs += prompt_wedge_check(now, state, pid, captured, f_mtime,
                                        owner, project_label(cwd) + "-" + fu,
-                                       send_fn, dry_run=dry_run, run=run)
+                                       send_fn, dry_run=dry_run, run=run,
+                                       waiting=True)
         except Exception as e:
             logs.append("skip hosted pane %s: %r" % (pid, e))
 
