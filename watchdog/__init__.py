@@ -733,42 +733,104 @@ def _is_bottom_chrome(s):
     return False
 
 
-def _has_free_prompt(captured, bare_only=False):
-    """True if the pane shows a FREE `❯` input prompt at the bottom — the session is IDLE
-    at the prompt, NOT running a foreground turn (which replaces the input box with a
-    spinner / "esc to interrupt" and shows NO input `❯`).
+# Box-drawing glyphs a Claude Code input box renders as its own top/bottom
+# border. Shares its vocabulary with `_is_border_rule` (which ALSO accepts a
+# LABELLED rule for bounding a dialog's question) but `_is_separator_line`
+# below is strict: every non-space char must be one of these, so a line of
+# prose is never mistaken for the box's own edge.
+_SEP_CHARS = set("─—━═╌╍┄┅┈┉╭╮╰╯┌┐└┘│┃")
 
-    The input box is the FIRST non-chrome line up from the bottom. We locate it by peeling
-    the VARIABLE-height trailing chrome (agent strip — `● main` + one `◯ <agent>` row PER
-    concurrent subagent — plus the statusline / mode hint / border rules; see
-    `_is_bottom_chrome`) and then testing ONLY that one boundary line. Chrome-stripping
-    already absorbs the whole agent strip, so a genuinely idle `⏳ WORKING` session with N
-    background workers still lands its `❯` exactly at the boundary regardless of N.
 
-    We must NOT scan a multi-line window above the boundary: during a running foreground
-    turn the boundary line IS the spinner, and the transcript output just above it can
-    contain a lone `❯` (shell-prompt help, tool output, a session editing THIS very code).
-    A window that reached up into that transcript would match the stray `❯`, call a BUSY
-    pane idle, and INTERRUPT the running turn — the exact #233 scar this gate prevents. For
-    a keystroke gate the safe failure is a MISSED nudge (an unrecognized chrome line below
-    the box hides it → we simply don't type), NEVER a false "idle" that types into a turn.
-    So: the `❯` must be the boundary line itself. The real prompt renders as `❯` + U+00A0,
-    which `str.strip()` reduces to a bare `❯`.
-
-    bare_only=True (the TYPING gate, `pane_at_idle_prompt`): require a BARE `❯` (empty input
-    box). If the user has typed text (`❯ blah`) we must NOT type over it. bare_only=False
-    (the inverse used by `pane_waiting_on_user`): `❯ <typed text>` still counts as "at a
-    prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog)."""
-    if not captured:
+def _is_separator_line(s):
+    """A pure box-border row (`──────────`) — the input box's own top/bottom
+    edge in the `separator / ❯ <draft> / separator` structure `_find_boundary_line`
+    searches for (issue #46). `s` is already stripped. A narrow `capture-pane`
+    can truncate the row to fewer repeated characters — still accepted (a
+    length threshold, not a fixed rule width)."""
+    if not s:
         return False
+    core = s.replace(" ", "")
+    return len(core) >= 3 and all(c in _SEP_CHARS for c in core)
+
+
+def _find_boundary_line(captured):
+    """Locate the pane's INPUT-BOX boundary line — the row `_has_free_prompt`
+    and `_input_line_text` both test. Two strategies, issue #46:
+
+    1. STRUCTURAL (tried first). The input box always renders as
+       `separator / ❯ <draft> / separator`. Find the LAST pair of separator
+       lines in the capture and take the line immediately above the second
+       (bottom) one. This is immune to whatever Claude Code renders BELOW
+       the box — the agent strip, the statusline, or any UI element never
+       seen before (the live `⧉  <project>` row that made job 12/14/15 and
+       Discord-reply delivery mislabel a drafting pane "busy", 2026-07-25,
+       dev2 marek-1:5.0 — the second occurrence of this class after #36). A
+       multi-row WRAPPED draft still resolves correctly: the last content
+       row directly above the bottom separator is its TAIL, the same
+       convention the pre-#46 peel already used (callers match with
+       `endswith()` for exactly this reason).
+
+    2. GLYPH-BASED FALLBACK (pre-#46 behavior, unchanged). When no separator
+       pair is found — many real captures, and most of this file's older
+       fixtures, render the box borderless — peel the VARIABLE-height
+       trailing chrome via `_is_bottom_chrome` (agent strip + statusline +
+       mode hint + border rules) and take the first non-chrome line up from
+       the bottom. An UNRECOGNIZED chrome shape below the box still stops
+       this scan early; that known limitation is exactly why strategy 1 is
+       tried first, and this fallback exists only so nothing regresses for
+       captures that never had a border to find.
+
+    We must NOT scan a multi-line window above the boundary in EITHER
+    strategy: during a running foreground turn the boundary line IS the
+    spinner, and the transcript above it can contain a lone `❯` (the #233
+    scar) — a window reaching up into that transcript would call a BUSY pane
+    idle and INTERRUPT it. So the boundary is always exactly one line.
+
+    Returns the raw (stripped) boundary line, or None if NEITHER strategy
+    locates one at all (e.g. the whole capture is chrome, or it's empty)."""
+    if not captured:
+        return None
     lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    seps = [i for i, ln in enumerate(lines) if _is_separator_line(ln)]
+    if len(seps) >= 2:
+        idx_b = seps[-1]
+        earlier = [i for i in seps if i < idx_b]
+        if earlier:
+            content = lines[earlier[-1] + 1:idx_b]
+            if content:
+                return content[-1]
+
     i, n = len(lines), 0
     while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
         i -= 1
         n += 1
     if i <= 0:
+        return None
+    return lines[i - 1]
+
+
+def _has_free_prompt(captured, bare_only=False):
+    """True if the pane shows a FREE `❯` input prompt at the bottom — the session is IDLE
+    at the prompt, NOT running a foreground turn (which replaces the input box with a
+    spinner / "esc to interrupt" and shows NO input `❯`).
+
+    The boundary line is located by `_find_boundary_line` (structural
+    separator-pair search first, glyph-based chrome peel as fallback — see
+    its docstring, issue #46). Chrome-stripping already absorbs the whole
+    agent strip, so a genuinely idle `⏳ WORKING` session with N background
+    workers still lands its `❯` exactly at the boundary regardless of N, and
+    an unrecognized row below a bordered box no longer hides it at all.
+
+    bare_only=True (the TYPING gate, `pane_at_idle_prompt`): require a BARE `❯` (empty input
+    box). If the user has typed text (`❯ blah`) we must NOT type over it. bare_only=False
+    (the inverse used by `pane_waiting_on_user`): `❯ <typed text>` still counts as "at a
+    prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog)."""
+    s = _find_boundary_line(captured)
+    if s is None:
         return False
-    s = lines[i - 1]                         # ONLY the boundary line — never the transcript above it
     if s == "❯":
         return True
     if not bare_only and s.startswith("❯ ") and not _MENU_POINTER_RX.match(s):
@@ -1477,24 +1539,47 @@ _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
 def _input_line_text(captured):
     """Text sitting in the pane's INPUT BOX: '' = bare prompt, None = no input
-    box at the chrome boundary (running-turn spinner / dialog / no pane). Same
-    boundary-line discipline as _has_free_prompt — never scans the transcript
-    above the box. For a long WRAPPED input, capture-pane (no -J) renders it as
-    multiple lines and the boundary is the LAST one — i.e. the TAIL of the
-    typed text — which is why callers match with endswith()."""
-    if not captured:
+    box at the chrome boundary (running-turn spinner / dialog / no pane / no
+    boundary locatable at all). Same boundary-line discipline as
+    `_has_free_prompt` — resolved via `_find_boundary_line` (structural
+    separator-pair search first, glyph-based chrome peel as fallback, issue
+    #46) — never scans the transcript above the box. For a long WRAPPED
+    input, capture-pane (no -J) renders it as multiple lines and the
+    boundary is the LAST one — i.e. the TAIL of the typed text — which is
+    why callers match with endswith()."""
+    s = _find_boundary_line(captured)
+    if s is None:
         return None
-    lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
-    i, n = len(lines), 0
-    while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
-        i -= 1
-        n += 1
-    if i <= 0:
-        return None
-    s = lines[i - 1]
     if not s.startswith("❯"):
         return None
     return s[1:].strip()
+
+
+def _classify_boundary(captured):
+    """Classify the pane's input-box boundary for the keystroke-sending jobs
+    (12/14/15) — splits `_input_line_text`'s collapsed-to-None result into
+    its two genuinely different causes (issue #46): a session that is truly
+    BUSY (a foreground spinner / dialog occupies the boundary, and it just
+    isn't `❯`-shaped) versus one where NO boundary could be located at all
+    (`_find_boundary_line` returns None — structural AND glyph fallback both
+    failed, e.g. the whole capture is chrome). Collapsing both into one
+    "busy" bucket is exactly what mislabeled the #46 incident: an
+    unrecognized chrome row below the box made the OLD glyph peel stop on
+    that row and report "busy", when the pane was neither busy nor missing
+    an input line at all — it just held a draft the peel could no longer
+    reach.
+
+    Returns (kind, text):
+      ("input", <draft text, "" if bare>) -- a real boundary, safe to inspect
+      ("busy", None)                      -- a real boundary, not `❯`-shaped
+      ("no-input-line", None)             -- no boundary found under either strategy
+    """
+    s = _find_boundary_line(captured)
+    if s is None:
+        return ("no-input-line", None)
+    if s.startswith("❯"):
+        return ("input", s[1:].strip())
+    return ("busy", None)
 
 
 def _ticket_fallback_text(r):
@@ -3225,13 +3310,13 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
 
     Never restarts a pane that is in copy-mode, showing an open dialog,
     mid-turn/busy, holding an unsent draft, or running a background agent
-    (a restart would KILL it) — `_input_line_text` alone distinguishes
-    busy/dialog-at-boundary (None: no input box at the chrome boundary at
-    all) vs draft (non-empty) vs safe-to-type (empty bare `❯`), the same
-    boundary-line discipline every other keystroke-sending job here relies
-    on; `_pane_has_bg_agent` is the NEW guard this rework adds. Best-effort:
-    exceptions are the caller's (run_once's) responsibility to catch, same
-    as every other job."""
+    (a restart would KILL it) — `_classify_boundary` distinguishes
+    busy (a real boundary, not `❯`-shaped) vs no-input-line (no boundary
+    locatable at all, issue #46) vs draft (non-empty) vs safe-to-type (empty
+    bare `❯`), the same boundary-line discipline every other keystroke-sending
+    job here relies on; `_pane_has_bg_agent` is the NEW guard this rework
+    adds. Best-effort: exceptions are the caller's (run_once's)
+    responsibility to catch, same as every other job."""
     if not target_model:
         return []
     run = run or _default_run
@@ -3262,8 +3347,12 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
             logs.append("skip dialog-open (model-reconcile) %s %s" % (loc, model))
             _mark_modelswitch_pending(state, sid, loc, model, "dialog-open", now)
             continue
-        draft = _input_line_text(captured)
-        if draft is None:
+        kind, draft = _classify_boundary(captured)
+        if kind == "no-input-line":
+            logs.append("skip no-input-line (model-reconcile) %s %s" % (loc, model))
+            _mark_modelswitch_pending(state, sid, loc, model, "no-input-line", now)
+            continue
+        if kind == "busy":
             logs.append("skip busy (model-reconcile) %s %s" % (loc, model))
             _mark_modelswitch_pending(state, sid, loc, model, "busy", now)
             continue
@@ -3489,8 +3578,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if pane_waiting_on_user(captured):
             logs.append("skip dialog-open (compact-request) %s" % loc)
             continue
-        draft = _input_line_text(captured)
-        if draft is None:
+        kind, draft = _classify_boundary(captured)
+        if kind == "no-input-line":
+            logs.append("skip no-input-line (compact-request) %s" % loc)
+            continue
+        if kind == "busy":
             logs.append("skip busy (compact-request) %s" % loc)
             continue
         if draft:
@@ -3644,8 +3736,11 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
         if pane_waiting_on_user(captured):
             logs.append("skip dialog-open (compact-stale) %s %d" % (loc, ctx))
             continue
-        draft = _input_line_text(captured)
-        if draft is None:
+        kind, draft = _classify_boundary(captured)
+        if kind == "no-input-line":
+            logs.append("skip no-input-line (compact-stale) %s %d" % (loc, ctx))
+            continue
+        if kind == "busy":
             logs.append("skip busy (compact-stale) %s %d" % (loc, ctx))
             continue
         if draft:
