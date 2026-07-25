@@ -3011,7 +3011,10 @@ class TestManagedModelDefault(TestCase):
 
 class TestUltracodeLauncher(TestCase):
     """apply_ultracode_launcher manages the ~/.bashrc block that launches claude
-    in ultracode every shell — idempotent, append-or-replace, never clobbers."""
+    — idempotent, append-or-replace, never clobbers. Ultracode is OPT-IN (#53,
+    2026-07-25): default `claude`/`claude-new` carry NO ultracode settings —
+    only the dedicated `claude-ultracode` escape hatch does (today's OLD
+    default behavior, kept verbatim for deliberate opt-in)."""
 
     def _tmp(self, content=None):
         from pathlib import Path
@@ -3028,7 +3031,7 @@ class TestUltracodeLauncher(TestCase):
         text = p.read_text()
         self.assertIn("export PATH=$PATH:/x", text)           # preserved
         self.assertIn("alias ll='ls -la'", text)              # preserved
-        self.assertIn("--settings '{\"ultracode\":true}'", text)
+        self.assertIn("claude-ultracode()", text)
         self.assertIn(airuleset.ULTRACODE_MARK_START, text)
         self.assertIn(airuleset.ULTRACODE_MARK_END, text)
 
@@ -3055,13 +3058,13 @@ class TestUltracodeLauncher(TestCase):
         p = self._tmp("# rc\n")
         airuleset.apply_ultracode_launcher(p)
         # tamper inside the block, re-run -> block restored, exactly ONE block
-        text = p.read_text().replace('--settings \'{"ultracode":true}\'', "BROKEN")
+        text = p.read_text().replace("claude-ultracode()", "BROKEN")
         p.write_text(text)
         airuleset.apply_ultracode_launcher(p)
         out = p.read_text()
         self.assertEqual(out.count(airuleset.ULTRACODE_MARK_START), 1)
         self.assertNotIn("BROKEN", out)
-        self.assertIn("--settings '{\"ultracode\":true}'", out)
+        self.assertIn("claude-ultracode()", out)
 
     def test_creates_bashrc_when_absent(self):
         from pathlib import Path
@@ -3077,25 +3080,58 @@ class TestUltracodeLauncher(TestCase):
         self.assertNotIn("alias claude=", text)            # continue-or-new), not alias
         self.assertIn("command claude --dangerously-skip-permissions", text)
         self.assertIn("claude-new()", text)                # fresh-session escape hatch
+        self.assertIn("claude-ultracode() {", text)        # opt-in ultracode escape hatch
         self.assertIn("claude-plain()", text)              # vanilla escape hatch
 
     def test_default_launcher_has_skip_perms_and_continue(self):
         p = self._tmp()
         airuleset.apply_ultracode_launcher(p)
         # the `claude()` default is continue-or-new: BOTH branches carry
-        # auto-approve + ultracode; -c only on the continue branch
+        # auto-approve; -c only on the continue branch. claude-ultracode()
+        # mirrors the same continue-or-new shape for its own opt-in branch.
         text = p.read_text()
         block = text.split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
-        self.assertEqual(block.count("--dangerously-skip-permissions -c "), 1)
-        self.assertEqual(block.count("--dangerously-skip-permissions"), 3)  # claude x2 + claude-new
-        self.assertEqual(block.count("--settings '{\"ultracode\":true}'"), 3)
+        # claude()'s continue branch + claude-ultracode()'s continue branch
+        self.assertEqual(block.count("--dangerously-skip-permissions -c "), 2)
+        # claude x2 + claude-new x1 + claude-ultracode x2
+        self.assertEqual(block.count("--dangerously-skip-permissions"), 5)
         self.assertIn("compgen -G", block)             # conversation-exists probe
-        # claude-new is ultracode + skip-perms but NOT -c (fresh session)
+        # claude-new is skip-perms but NOT ultracode and NOT -c (fresh session)
         new_line = next(ln for ln in p.read_text().splitlines()
                         if ln.startswith("claude-new() {"))
         self.assertIn("--dangerously-skip-permissions", new_line)
         self.assertNotIn(" -c ", new_line)
+
+    def test_default_launchers_have_no_ultracode_settings(self):
+        # #53: ultracode used to be baked into EVERY default launch — it kept
+        # silently coming back on every session restart even after the user
+        # turned it off for that session (found repeatedly on restreamer).
+        # Ultracode must now be strictly opt-in: default claude()/claude-new()
+        # carry no ultracode settings at all.
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        claude_body = text.split("claude() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("ultracode", claude_body)
+        new_line = next(ln for ln in text.splitlines()
+                        if ln.startswith("claude-new() {"))
+        self.assertNotIn("ultracode", new_line)
+
+    def test_claude_ultracode_carries_todays_old_default_behavior(self):
+        # claude-ultracode() is the deliberate opt-in escape hatch: exactly
+        # what claude() used to do by default — continue-or-new (-c branch),
+        # skip-perms, ultracode settings, and the model pin, in BOTH branches.
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        body = text.split("claude-ultracode() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(body.count("--settings '{\"ultracode\":true}'"), 2)
+        self.assertEqual(body.count("--dangerously-skip-permissions"), 2)
+        self.assertEqual(body.count("--dangerously-skip-permissions -c "), 1)
+        self.assertIn("compgen -G", body)
+        expected_model = "--model '%s'" % airuleset.MANAGED_MODEL
+        self.assertEqual(body.count(expected_model), 2)
 
     def test_model_flag_present_in_all_launch_branches(self):
         # THE BUG (live on gatekeeper): a RESUMED session (-c) silently kept
@@ -3103,16 +3139,17 @@ class TestUltracodeLauncher(TestCase):
         # Opus 5[1m] — the launcher never passed --model, so `-c` inherited
         # whatever the prior transcript was started with. Fix: bake
         # `--model <MANAGED_MODEL>` into EVERY launch branch (claude()'s
-        # continue branch, claude()'s fresh branch, AND claude-new()) at
-        # RENDER time, sourced from the airuleset.py MANAGED_MODEL constant
-        # — never left to inherit whatever a prior session happened to use.
+        # continue branch, claude()'s fresh branch, claude-new(), AND both
+        # branches of claude-ultracode()) at RENDER time, sourced from the
+        # airuleset.py MANAGED_MODEL constant — never left to inherit
+        # whatever a prior session happened to use.
         p = self._tmp()
         airuleset.apply_ultracode_launcher(p)
         text = p.read_text()
         block = text.split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
         expected = "--model '%s'" % airuleset.MANAGED_MODEL
-        self.assertEqual(block.count(expected), 3, block)
+        self.assertEqual(block.count(expected), 5, block)
         # claude-plain() is the deliberate vanilla escape hatch — untouched.
         plain_line = next(ln for ln in text.splitlines()
                           if ln.startswith("claude-plain() {"))
