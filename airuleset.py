@@ -39,13 +39,20 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 # its guidance block here — preserve it so a `push` doesn't silently delete it.
 EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")]
 
-# Managed default effort: `xhigh` (deep adaptive reasoning) is the persistent
-# default the user wants in EVERY managed project so they never have to remember
-# to raise it. `xhigh` is the highest level settings.json accepts and persists
-# across sessions; `max`/`ultracode` are session-only (not valid here) — ultracode
-# adds auto-workflow orchestration on top of xhigh and stays a per-session
-# `/effort ultracode`. The user can still raise/lower per session with `/effort`.
-MANAGED_EFFORT_LEVEL = "xhigh"
+# Managed default effort: `high` is the persistent default the user wants in
+# EVERY managed project so they never have to remember to set it (#56,
+# 2026-07-25). Official Anthropic docs for the Claude 5 family (Opus 5, Fable
+# 5) both say "start with `high`, the default" and explicitly warn against
+# reusing an effort setting carried over from an earlier model — this was
+# previously `xhigh`, set in the Opus 4.7/4.8 era ("start with xhigh for
+# coding and agentic use cases"), exactly the carried-over case the docs now
+# flag. `xhigh` stays reserved for demanding coding/agentic work (dispatched
+# via `effort:` on a specific agent/task, e.g. the autopilot-worker, or a
+# gated HARD-task escalation) — never this blanket MAIN-session default.
+# `max`/`ultracode` are session-only (not valid here) — ultracode adds
+# auto-workflow orchestration on top and stays a per-session `/effort
+# ultracode`. The user can still raise/lower per session with `/effort`.
+MANAGED_EFFORT_LEVEL = "high"
 
 # Managed default MAIN-session model (2026-07-25 cost-fix package, #37):
 # **Opus 5** is now the default main + judgment tier (model-awareness.md) —
