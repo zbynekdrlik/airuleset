@@ -29,6 +29,11 @@ CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 SETTINGS_JSON = CLAUDE_DIR / "settings.json"
 SKILLS_DIR = CLAUDE_DIR / "skills"
 AGENTS_DIR = CLAUDE_DIR / "agents"
+# Claude Code's native "User"-scope path-scoped-rules directory (#40):
+# confirmed against the installed CC binary that the User rules dir is
+# join(<user config base>, "rules") -- the same base as the well-known User
+# CLAUDE.md (join(<user config base>, "CLAUDE.md") == ~/.claude/CLAUDE.md).
+RULES_DIR = CLAUDE_DIR / "rules"
 
 MANAGED_HEADER = "# Managed by airuleset"
 MANAGED_MARKER = "<!-- airuleset-managed -->"
@@ -415,6 +420,67 @@ def categorize_entries(entries: list[str]) -> tuple[list[str], list[str]]:
         else:
             modules.append(e)
     return modules, rules
+
+
+def symlink_global_rules(rule_entries: list[str], claude_dir: Path,
+                          repo_dir: Path) -> list[str]:
+    """Symlink each `rules/<name>.md` profile entry into
+    `claude_dir/rules/<name>.md` -- Claude Code's native "User"-scope
+    path-scoped-rules directory (#40; see RULES_DIR). Mirrors the
+    skill-symlink pattern in cmd_install: idempotent, backs up a pre-existing
+    real file before replacing it with a symlink, and prunes an
+    airuleset-owned rule symlink that is no longer referenced (never touches
+    a foreign symlink pointing anywhere else). Takes explicit params (not the
+    module-level CLAUDE_DIR/REPO_DIR globals) so it's directly unit-testable
+    with a tempdir. Returns human-readable log lines for the caller to print.
+    """
+    lines = []
+    rules_dir = claude_dir / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+
+    wanted_names = set()
+    for entry in rule_entries:
+        name = Path(entry).name
+        wanted_names.add(name)
+        source = repo_dir / entry
+        link = rules_dir / name
+
+        if not source.exists():
+            lines.append(f"  SKIP rule (source missing): {source}")
+            continue
+
+        if link.is_symlink():
+            current = Path(os.readlink(link))
+            if current == source:
+                lines.append(f"  OK rule:   {name}")
+                continue
+            link.unlink()
+        elif link.exists():
+            backup = link.with_suffix(".md.bak")
+            shutil.move(str(link), str(backup))
+            lines.append(f"  Backed up: {link} -> {backup}")
+
+        link.symlink_to(source)
+        lines.append(f"  Linked:    {link} -> {source}")
+
+    # Prune airuleset-owned rule symlinks no longer referenced by the profile
+    # (same ownership check as the skill-pruning step: only unlink a symlink
+    # that points into OUR repo's rules/ dir -- a foreign/hand-made rule file
+    # is never touched).
+    for link in rules_dir.glob("*.md"):
+        if link.name in wanted_names:
+            continue
+        if not link.is_symlink():
+            continue
+        try:
+            target = Path(os.readlink(link))
+        except OSError:
+            continue
+        if str(target).startswith(str(repo_dir / "rules")):
+            link.unlink()
+            lines.append(f"  Pruned:    {link.name} (not in universal profile)")
+
+    return lines
 
 
 def generate_claude_md(modules: list[str]) -> str:
@@ -834,7 +900,7 @@ def cmd_validate(args):
 
 def cmd_diff(args):
     """Show what install would change (unified diff)."""
-    modules, _rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
+    modules, global_rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
     new_claude_md = generate_claude_md(modules)
     old_claude_md = read_file_safe(CLAUDE_MD)
 
@@ -877,6 +943,23 @@ def cmd_diff(args):
             print(f"  {skill}: REPLACE (existing dir/file -> symlink to {target})")
         else:
             print(f"  {skill}: ADD (new symlink -> {target})")
+
+    # Rules diff (global path-scoped rules symlinked into ~/.claude/rules/)
+    print("\n=== ~/.claude/rules/ (symlinks) ===")
+    for entry in global_rules:
+        name = Path(entry).name
+        target = REPO_DIR / entry
+        link = RULES_DIR / name
+        if link.is_symlink():
+            current_target = Path(os.readlink(link))
+            if current_target == target:
+                print(f"  {name}: OK (already linked)")
+            else:
+                print(f"  {name}: CHANGE ({current_target} -> {target})")
+        elif link.exists():
+            print(f"  {name}: REPLACE (existing file -> symlink to {target})")
+        else:
+            print(f"  {name}: ADD (new symlink -> {target})")
 
 
 # Binaries the deployed surface depends on at RUNTIME: jq + curl (every
@@ -934,7 +1017,7 @@ def cmd_install(args):
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
     # --- 1. Generate ~/.claude/CLAUDE.md ---
-    modules, _rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
+    modules, global_rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
     new_claude_md = generate_claude_md(modules)
 
     if CLAUDE_MD.exists():
@@ -1024,6 +1107,13 @@ def cmd_install(args):
 
         link.symlink_to(source)
         print(f"  Linked:    {link} -> {source}")
+
+    # --- 2c. Symlink global path-scoped rules (rules/*.md referenced by the
+    # universal profile) into ~/.claude/rules/ -- Claude Code's native
+    # User-scope path-scoped-rules directory. #40: these were parsed by
+    # categorize_entries() but previously discarded, never installed anywhere.
+    for line in symlink_global_rules(global_rules, CLAUDE_DIR, REPO_DIR):
+        print(line)
 
     # --- 3. Merge hooks into settings.json ---
     hooks_config = load_hooks_json()
