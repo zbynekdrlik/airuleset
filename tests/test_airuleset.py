@@ -2892,8 +2892,7 @@ class TestManagedSettingsDefaults(TestCase):
 
     def test_preserves_other_keys(self):
         out = airuleset.apply_managed_settings_defaults(
-            {"model": "opus", "hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
-        self.assertEqual(out["model"], "opus")
+            {"hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
         self.assertEqual(out["hooks"], {"Stop": []})
         self.assertEqual(out["enabledPlugins"], {"x": True})
         self.assertEqual(out["effortLevel"], "xhigh")
@@ -2905,9 +2904,40 @@ class TestManagedSettingsDefaults(TestCase):
         self.assertEqual(twice["effortLevel"], "xhigh")  # raises a lower default
 
     def test_does_not_mutate_input(self):
-        src = {"model": "opus"}
+        src = {"hooks": {}}
         airuleset.apply_managed_settings_defaults(src)
         self.assertNotIn("effortLevel", src)  # input untouched
+
+
+class TestManagedModelDefault(TestCase):
+    """apply_managed_settings_defaults also sets `model = MANAGED_MODEL`
+    (2026-07-25 cost-fix package, #37): Opus 5 is the default main + judgment
+    tier (model-awareness.md); this is the SAME unconditional-managed-default
+    treatment already applied to effortLevel/disableAgentView/tui, so every
+    managed user on every box gets it on the next install."""
+
+    def test_sets_managed_model(self):
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
+
+    def test_managed_model_is_opus_5_with_1m_suffix(self):
+        # the `[1m]` suffix is a DELIBERATE part of the managed id — it keeps
+        # the 1M context window (verified against real `lastModelUsage`
+        # entries in ~/.claude.json, which key the 1M variant as a distinct
+        # `<model>[1m]` id, e.g. `claude-opus-4-8[1m]`) so this change never
+        # also shrinks context and re-triggers context-loss regressions.
+        self.assertEqual(airuleset.MANAGED_MODEL, "claude-opus-5[1m]")
+
+    def test_overrides_an_existing_model_choice(self):
+        # unconditional, like effortLevel/disableAgentView/tui — a managed
+        # box always gets the managed default on the next install.
+        out = airuleset.apply_managed_settings_defaults({"model": "claude-fable-5"})
+        self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
+
+    def test_idempotent(self):
+        once = airuleset.apply_managed_settings_defaults({})
+        twice = airuleset.apply_managed_settings_defaults(once)
+        self.assertEqual(once["model"], twice["model"])
 
 
 class TestUltracodeLauncher(TestCase):
