@@ -517,13 +517,21 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
 BASHRC = Path.home() / ".bashrc"
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
-# The managed `claude` launcher (user's explicit default): ultracode + auto-approve
-# permissions + CONTINUE-OR-NEW (2026-07-09): -c only when the cwd actually has a
-# prior conversation; otherwise start fresh — unconditional -c died with
+# The managed `claude` launcher (user's default): auto-approve permissions +
+# CONTINUE-OR-NEW (2026-07-09): -c only when the cwd actually has a prior
+# conversation; otherwise start fresh — unconditional -c died with
 # "No conversation found to continue" in every new directory (david@gk).
+# Ultracode is OPT-IN (#53, 2026-07-25): `--settings '{"ultracode":true}'` used
+# to be baked into EVERY default launch, so ultracode mode silently came back
+# on every session restart even after the user had turned it off for that
+# session (found repeatedly on restreamer). Default `claude()`/`claude-new()`
+# no longer pass it — the dedicated `claude-ultracode()` function (below) is
+# the explicit opt-in escape hatch that carries EXACTLY today's old default
+# behavior (continue-or-new + ultracode + skip-perms + model pin).
 #   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
 #       accepted in settings.json — GH #64817); --settings is the only doc-blessed
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
+#       Only `claude-ultracode()` passes this now.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
 #   --model '<MANAGED_MODEL>'       : baked in at RENDER time (2026-07-25 fix) so
@@ -532,16 +540,18 @@ ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 #       `claude-opus-5[1m]`, but a resumed session's transcript kept showing
 #       `claude-opus-4-8` on every turn — `-c` alone just continues whatever
 #       model the prior transcript was started with; only an explicit --model on
-#       the launch command line forces it. Applies to claude() (both branches)
-#       and claude-new(); claude-plain() is the deliberate vanilla escape hatch
-#       and stays untouched.
+#       the launch command line forces it. Applies to EVERY launch branch
+#       (claude(), claude-new(), claude-ultracode()); claude-plain() is the
+#       deliberate vanilla escape hatch and stays untouched.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
 # A bash FUNCTION (not alias) forwards all args; `command` avoids recursing.
-# Escape hatches: `claude-new` (ultracode + skip-perms, FRESH session — no -c, force
-# a clean start) and `claude-plain` (vanilla `claude`, no flags).
+# Escape hatches: `claude-new` (skip-perms, FRESH session — no -c, no ultracode,
+# force a clean start), `claude-ultracode` (deliberate opt-in: today's old
+# default — ultracode + skip-perms + continue-or-new), and `claude-plain`
+# (vanilla `claude`, no flags).
 ULTRACODE_BASHRC_BLOCK = (
     f"{ULTRACODE_MARK_START}\n"
     # claude installs to ~/.local/bin, which NON-LOGIN interactive shells (su
@@ -554,23 +564,34 @@ ULTRACODE_BASHRC_BLOCK = (
     '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
     '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
     "    command claude --dangerously-skip-permissions -c "
+    f"--model '{MANAGED_MODEL}' \"$@\"\n"
+    "  else\n"
+    "    command claude --dangerously-skip-permissions "
+    f"--model '{MANAGED_MODEL}' \"$@\"\n"
+    "  fi\n"
+    "}\n"
+    "claude-new() { command claude --dangerously-skip-permissions "
+    f"--model '{MANAGED_MODEL}' \"$@\"; }}\n"
+    "claude-ultracode() {\n"
+    '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
+    '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
+    "    command claude --dangerously-skip-permissions -c "
     f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
     "  else\n"
     "    command claude --dangerously-skip-permissions "
     f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
     "  fi\n"
     "}\n"
-    "claude-new() { command claude --dangerously-skip-permissions "
-    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"; }}\n"
     "claude-plain() { command claude \"$@\"; }\n"
     f"{ULTRACODE_MARK_END}"
 )
 
 
 def apply_ultracode_launcher(bashrc_path: Path = None) -> bool:
-    """Install/refresh the managed ~/.bashrc block that launches `claude` in
-    ultracode on every shell. Idempotent: replaces the marked block if present,
-    else appends it. Returns True iff the file changed."""
+    """Install/refresh the managed ~/.bashrc block: `claude`/`claude-new` launch
+    with auto-approve + the managed model (NO ultracode — opt-in only via the
+    `claude-ultracode` escape hatch, #53). Idempotent: replaces the marked
+    block if present, else appends it. Returns True iff the file changed."""
     import re
     path = bashrc_path or BASHRC
     existing = path.read_text() if path.exists() else ""
@@ -1016,10 +1037,13 @@ def cmd_install(args):
         else:
             print(f"  No change: {SETTINGS_JSON}")
 
-    # --- 3b. ultracode launcher: managed ~/.bashrc block (every host) ---
-    # ultracode can't live in settings.json (session-only, GH #64817), so wrap
-    # `claude` to pass it via --settings on every launch. effortLevel=xhigh above
-    # is the persistent fallback for the reasoning depth if the wrapper is bypassed.
+    # --- 3b. launcher block: managed ~/.bashrc functions (every host) ---
+    # Installs claude()/claude-new()/claude-ultracode()/claude-plain(). Ultracode
+    # can't live in settings.json (session-only, GH #64817) — claude-ultracode()
+    # wraps `claude` to pass it via --settings, but only when the user explicitly
+    # opts in by calling that function (#53 — it is NOT the default anymore).
+    # effortLevel=xhigh above is the persistent fallback for reasoning depth
+    # regardless of which launcher function is used.
     try:
         if apply_ultracode_launcher():
             print(f"  Updated:   {BASHRC} (ultracode launcher — `source ~/.bashrc`)")
