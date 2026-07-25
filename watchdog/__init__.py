@@ -3540,13 +3540,40 @@ def clear_compact_request(session, path=None):
 
 COMPACT_TEXT = "/compact"
 
+# #48 (2026-07-25 user report): job 14 fired `/compact` after EVERY completed-
+# ticket report, even a trivial one that barely grew the context — "mať
+# nonstop volaný compact za každou blbosťou je dosť nízka inteligencia". A
+# wasted /compact has a real cost (a summary turn + a cache-write + losing
+# working context) for ~zero benefit below this floor: the static context
+# floor is ~93K tokens, and the typical gain from compacting under ~200K is
+# small. Gated on the CONSUME side (here, right before send_continue), not on
+# the record side (notify-compact-request.sh) — between record and consume
+# the context can still grow, so reading it fresh here is the most accurate
+# and the recording hook stays dumb/fast. Env override lets a box tune the
+# floor without a code change.
+COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
+
 
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
-                            path=None):
+                            path=None, projects_dir=None, min_context=None):
     """Job 14 — see the section comment. `state` is accepted (and unused) for
     the SAME call-shape every other job here has — run_once wires it
     uniformly even though this job's own dedup lives entirely in the
     requests file, not in api-watchdog-state.json.
+
+    #48 context-threshold gate: right before actually sending `/compact` for
+    an otherwise-ready request, the session's CURRENT context is measured via
+    `transcript_current_context()` — the SAME helper job 15 uses, resolved
+    for this specific sid+cwd via `_transcript_for_session` (falls back to a
+    sid-only glob across the whole projects tree, same as the ❓-reply-prune
+    path). Below `min_context` (default `COMPACT_BOUNDARY_MIN_CONTEXT`, env
+    `AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT`) the request is DROPPED (cleared
+    from the requests file, never left to fire on the next done) — no
+    `/compact` is sent. When no transcript can be resolved at all (unknown
+    session — every pre-#48 test fixture here has no real transcript), the
+    context is unmeasurable and this gate does not block the send: it only
+    ever skips on a POSITIVELY confirmed small context, never on "we don't
+    know".
 
     A request is REMOVED from the requests file (dedup — never retried) the
     MOMENT `/compact` is actually typed into an idle pane — sending the
@@ -3563,6 +3590,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     if not reqs:
         return []
     run = run or _default_run
+    if min_context is None:
+        try:
+            min_context = int(os.environ.get(
+                "AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT",
+                COMPACT_BOUNDARY_MIN_CONTEXT))
+        except ValueError:
+            min_context = COMPACT_BOUNDARY_MIN_CONTEXT
+    pdir = projects_dir or PROJECTS_DIR
     logs = []
     changed = False
     for sid in list(reqs.keys()):
@@ -3591,6 +3626,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if not pane_at_idle_prompt(captured):
             logs.append("skip not-idle (compact-request) %s" % loc)
             continue
+        # #48 — read the FRESHEST context right before the send (it may have
+        # grown since the Stop hook recorded the request); a session with no
+        # resolvable transcript is unmeasurable, so it does NOT block the
+        # send (see the docstring above).
+        cwd = (reqs.get(sid) or {}).get("cwd", "")
+        tpath = _transcript_for_session(pdir, sid, cwd)
+        if tpath is not None:
+            ctx = transcript_current_context(tpath)
+            if ctx < min_context:
+                logs.append("skip small-context (compact-request) %s ctx=%d"
+                            % (loc, ctx))
+                if not dry_run:
+                    reqs.pop(sid, None)
+                    changed = True
+                continue
         if dry_run:
             logs.append("READY (compact-request) %s" % loc)
             continue
@@ -4970,7 +5020,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         try:
             logs += compact_ticket_boundary(now, run, state, panes_by_sid,
                                             dry_run=dry_run,
-                                            path=compact_requests_path)
+                                            path=compact_requests_path,
+                                            projects_dir=projects_dir)
         except Exception as e:
             logs.append("compact-request error: %r" % (e,))
 
