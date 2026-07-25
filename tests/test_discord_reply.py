@@ -700,9 +700,12 @@ class WedgeSelfHeal(unittest.TestCase):
 
     def test_swallowed_enter_gets_corrective_enter_then_delivers(self):
         # after typing, verify-capture still shows OUR text at ❯ (Enter was
-        # swallowed) → ONE corrective Enter; second verify shows bare → delivered
+        # swallowed) → ONE corrective Escape+Enter; second verify shows bare
+        # → delivered. First item is send_continue's OWN pre-type capture
+        # (issue #36 — it now checks the agent-strip selector before typing);
+        # an ordinary IDLE pane there needs no escape.
         composed_tail = "auto-arm ho nalepí sám."
-        run = ScriptedPaneRun([self._wedged_pane(composed_tail), self.IDLE, self.IDLE])
+        run = ScriptedPaneRun([self.IDLE, self._wedged_pane(composed_tail), self.IDLE])
         state = {}
         wd.deliver_discord_replies(
             time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,

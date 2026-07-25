@@ -2198,15 +2198,21 @@ def cmd_watchdog(args):
     (rate-limited) alert when the weekly token limit nears its cap, route an
     owner's Discord REPLY back into the session that asked the ❓, and backstop
     gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping).
-    Driven by the systemd timer."""
+    Driven by the systemd timer.
+
+    Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
+    `watchdog --once` with NO `--verbose`, so gating the print behind that
+    flag meant every job's arm/skip/ping decision was silently lost in
+    production; the journal showed only systemd boilerplate, and the
+    strip-selection keystroke bug (#36 itself) was undebuggable from it.
+    `--verbose` is kept for any additional debug output a caller wants later."""
     from watchdog import run_once, fetch_usage, fetch_channel_messages
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch)
-    if getattr(args, "verbose", False):
-        for line in logs:
-            print(line)
+    for line in logs:
+        print(line)
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a

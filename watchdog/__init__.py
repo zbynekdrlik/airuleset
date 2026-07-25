@@ -644,7 +644,9 @@ def _is_border_rule(s):
 
 def _is_bottom_chrome(s):
     """A trailing 'chrome' line rendered BELOW the input box: the agent strip (`● main`
-    + one `◯ <agent>` row PER concurrent subagent), the mode hint (`⏵⏵ …`), the `ctx …`
+    + one `◯ <agent>` row PER concurrent subagent — including a SELECTED row, which
+    renders `❯ ● main` / `❯ ◯ <agent>` instead, per issue #36), the strip's selector
+    hint (`↑/↓ to select · Enter to view`), the mode hint (`⏵⏵ …`), the `ctx …`
     footer statusline, or a horizontal border rule. Their count is VARIABLE — the agent
     strip grows one row per running subagent — so these MUST be stripped from the bottom
     before locating the `❯` prompt. `s` is already stripped."""
@@ -652,6 +654,10 @@ def _is_bottom_chrome(s):
         return True
     if s[0] in "●◯":                                    # agent-strip rows
         return True
+    if s.startswith("❯ ●") or s.startswith("❯ ◯"):       # a SELECTED strip row
+        return True
+    if s.startswith("↑/↓") or ("to select" in s and "Enter to view" in s):
+        return True                                     # the strip's selector hint
     if s.startswith("⏵⏵"):                              # bypass / mode hint
         return True
     if s.startswith("ctx "):                            # footer statusline
@@ -1222,9 +1228,39 @@ def pane_owner(pane_id, run=None):
     return ""
 
 
+def _strip_selected(captured):
+    """True if the agent-strip SELECTOR holds focus — any line renders as a
+    selected strip row (`❯ ● main` / `❯ ◯ <agent>`, issue #36). While
+    selected, Enter navigates ("view agent") instead of submitting the input
+    box — a bare Enter typed there is silently swallowed. Scans every line
+    (not just the boundary) since the selection can sit below other chrome.
+    Fail-safe direction: a false positive costs one harmless extra Escape,
+    never a lost draft."""
+    if not captured:
+        return False
+    for ln in captured.splitlines():
+        s = ln.strip()
+        if s.startswith("❯ ●") or s.startswith("❯ ◯"):
+            return True
+    return False
+
+
 def send_continue(pane_id, text=NUDGE_TEXT, run=None):
-    """Type `text` literally into the pane, then press Enter to submit it."""
+    """Type `text` literally into the pane, then press Enter to submit it.
+
+    Captures the pane FIRST (issue #36): if the agent-strip selector holds
+    focus (`_strip_selected`), send ONE Escape before typing — otherwise the
+    submit Enter can be swallowed as "view agent" instead of submitting our
+    text. Best-effort only: we do NOT re-verify the Escape actually cleared
+    the selection — proceed with the type + Enter regardless (today's
+    behavior), since the retry paths (job 7's verify loop, job 10's machine
+    submit) already Escape-and-retry on a swallowed submit. NEVER send a
+    second Escape here — a rapid double-Escape into a pane holding a draft
+    PERMANENTLY DELETES it (empirically confirmed, issue #35)."""
     run = run or _default_run
+    captured = capture_pane(pane_id, run, lines=10)
+    if _strip_selected(captured):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
     run(["tmux", "send-keys", "-t", pane_id, "-l", text])
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
 
@@ -1837,10 +1873,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 else:
                     send_continue(pid, prompt, run)
                 # verify the input box emptied — a swallowed Enter (#20) leaves
-                # the text at `❯`; up to 2 corrective Enters, then give up.
+                # the text at `❯`; up to 2 corrective Escape+Enter retries, then
+                # give up. Escape FIRST (issue #36) — a swallow while the
+                # agent-strip selector holds focus makes a bare Enter navigate
+                # ("view agent") instead of submitting; ONE Escape clears that.
+                # Never two Escapes in a row — that permanently deletes a draft.
                 t2 = _input_line_text(capture_pane(pid, run, lines=30))
                 tries = 0
                 while t2 and tries < 2:
+                    run(["tmux", "send-keys", "-t", pid, "Escape"])
                     run(["tmux", "send-keys", "-t", pid, "Enter"])
                     t2 = _input_line_text(capture_pane(pid, run, lines=30))
                     tries += 1
@@ -2429,6 +2470,11 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
         return []
     if machine:
         if not dry_run and run and not pane_in_mode(pid, run):
+            # Escape first (issue #36) — a swallowed submit while the
+            # agent-strip selector holds focus makes a bare Enter navigate
+            # instead of submit; never a SECOND Escape (issue #35: deletes a
+            # draft permanently).
+            run(["tmux", "send-keys", "-t", pid, "Escape"])
             run(["tmux", "send-keys", "-t", pid, "Enter"])
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)" % (pid, project)]
