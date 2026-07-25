@@ -2934,12 +2934,20 @@ class TestSendMessageNarrationHook(TestCase):
 
 
 class TestManagedSettingsDefaults(TestCase):
-    """apply_managed_settings_defaults sets the persistent effortLevel=xhigh default
-    in every managed project, preserving all other settings keys, idempotently."""
+    """apply_managed_settings_defaults sets the persistent effortLevel=high default
+    in every managed project, preserving all other settings keys, idempotently.
 
-    def test_sets_effort_xhigh(self):
+    #56 (2026-07-25): the official Opus 5 / Fable 5 effort docs changed the
+    recommendation from the 4.7/4.8-era 'start with xhigh for coding and
+    agentic use cases' to 'start with high, the default' — and explicitly
+    warn against carrying an effort setting over from an earlier model
+    without re-sweeping. `MANAGED_EFFORT_LEVEL` moves xhigh -> high to match;
+    xhigh stays reserved for demanding coding/agentic work (the
+    autopilot-worker, HARD escalations), never a blanket MAIN-session default."""
+
+    def test_sets_effort_high(self):
         out = airuleset.apply_managed_settings_defaults({})
-        self.assertEqual(out["effortLevel"], "xhigh")
+        self.assertEqual(out["effortLevel"], "high")
 
     def test_disables_agent_view(self):
         # Hard-disables the `claude agents` / fleet / `claude --bg` background daemon
@@ -2964,13 +2972,13 @@ class TestManagedSettingsDefaults(TestCase):
             {"hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
         self.assertEqual(out["hooks"], {"Stop": []})
         self.assertEqual(out["enabledPlugins"], {"x": True})
-        self.assertEqual(out["effortLevel"], "xhigh")
+        self.assertEqual(out["effortLevel"], "high")
 
     def test_idempotent_and_overrides_lower(self):
-        once = airuleset.apply_managed_settings_defaults({"effortLevel": "high"})
+        once = airuleset.apply_managed_settings_defaults({"effortLevel": "medium"})
         twice = airuleset.apply_managed_settings_defaults(once)
         self.assertEqual(once, twice)
-        self.assertEqual(twice["effortLevel"], "xhigh")  # raises a lower default
+        self.assertEqual(twice["effortLevel"], "high")  # raises a lower default
 
     def test_does_not_mutate_input(self):
         src = {"hooks": {}}
