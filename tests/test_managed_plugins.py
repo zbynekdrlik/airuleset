@@ -51,6 +51,46 @@ class TestReconcileManagedPlugins(TestCase):
         self.assertEqual(settings["enabledPlugins"], {})
 
 
+class TestManagedDisabledPlugins(TestCase):
+    """#39 item 3 (2026-07-25 /doctor findings, dev2): rust-analyzer-lsp +
+    claude-md-management had 0 lifetime uses and were disabled directly in
+    dev2's settings.json by `/doctor`. airuleset's plugin reconcile only
+    ever ENABLES MANAGED_PLUGINS and otherwise merges enabledPlugins
+    untouched, so these disables already survive a normal push — this list
+    makes the intent EXPLICIT and durable so a future push can never
+    silently resurrect them."""
+
+    def test_disables_every_listed_plugin(self):
+        out = airuleset.reconcile_managed_plugins({})
+        for key in airuleset.MANAGED_DISABLED_PLUGINS:
+            self.assertFalse(out["enabledPlugins"][key])
+
+    def test_rust_analyzer_and_claude_md_management_are_listed(self):
+        self.assertIn("rust-analyzer-lsp@claude-plugins-official",
+                      airuleset.MANAGED_DISABLED_PLUGINS)
+        self.assertIn("claude-md-management@claude-plugins-official",
+                      airuleset.MANAGED_DISABLED_PLUGINS)
+
+    def test_overrides_an_existing_true_value(self):
+        settings = {"enabledPlugins":
+                   {"rust-analyzer-lsp@claude-plugins-official": True}}
+        out = airuleset.reconcile_managed_plugins(settings)
+        self.assertFalse(out["enabledPlugins"]["rust-analyzer-lsp@claude-plugins-official"])
+
+    def test_does_not_disable_the_managed_baseline(self):
+        # sanity: the disabled list and MANAGED_PLUGINS never overlap — a
+        # baseline plugin must never end up force-disabled.
+        self.assertEqual(set(airuleset.MANAGED_DISABLED_PLUGINS)
+                         & set(airuleset.MANAGED_PLUGINS), set())
+
+    def test_unrelated_plugins_untouched(self):
+        settings = {"enabledPlugins": {"caveman@caveman": True,
+                                       "discord@claude-plugins-official": True}}
+        out = airuleset.reconcile_managed_plugins(settings)
+        self.assertTrue(out["enabledPlugins"]["caveman@caveman"])
+        self.assertTrue(out["enabledPlugins"]["discord@claude-plugins-official"])
+
+
 class TestManagedPluginBuilt(TestCase):
     def _claude_dir_with(self, rel):
         d = tempfile.mkdtemp()
