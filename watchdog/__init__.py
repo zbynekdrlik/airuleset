@@ -3645,15 +3645,40 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
 # (current context) does NOT reliably clear right after `/compact` is sent —
 # the transcript's last usage record still reads the PRE-compaction (huge)
 # number until the session's NEXT real turn, which may never come for an
-# idle session with nobody prompting it. Without a permanent per-session
-# dedup, an idle post-compaction session would get `/compact` re-sent on
-# EVERY ~60s sweep forever. So `state['compact_stale'][sid]` is claimed on
-# a REAL success (and permanently kept — mirrors job 12's "a real success
-# is never retried") and on GIVE-UP after `COMPACT_STALE_MAX_ATTEMPTS`
-# failed verifications (mirrors job 12's bounded-attempts fix for the live
-# gk incident, 2026-07-25, where a FAILing pane retried every single sweep
-# forever). A below-cap failure releases the claim so the NEXT sweep
-# retries, same as job 12.
+# idle session with nobody prompting it. A NAIVE immediate re-check would
+# re-send `/compact` on EVERY ~60s sweep forever.
+#
+# STATE MACHINE for `state['compact_stale'][sid]` (issue #46 part 2 — the
+# original design claimed PERMANENTLY on every outcome, so a session that
+# lives for days got compacted exactly ONCE, ever, even after its context
+# regrew past the threshold well past compaction):
+#
+#   absent                          -- never touched by this job; eligible.
+#   True                             -- GAVE UP after COMPACT_STALE_MAX_ATTEMPTS
+#                                       failed verifications (mirrors job 12's
+#                                       bounded-attempts fix for the live gk
+#                                       incident, 2026-07-25, where a FAILing
+#                                       pane retried every sweep forever).
+#                                       PERMANENT — never reconsidered, no
+#                                       matter what the context does later.
+#   COMPACT_STALE_PENDING_CONFIRM    -- a REAL `/compact` success is recorded
+#                                       but not yet CONFIRMED to have landed.
+#                                       Every sweep re-reads the CURRENT
+#                                       context for a pending sid (cheap,
+#                                       local, no tmux round-trip): while it
+#                                       is STILL >= threshold, do nothing (no
+#                                       resend, no log — the stale-reading
+#                                       race the original design worried
+#                                       about); the moment it is observed
+#                                       BELOW threshold — proof the session
+#                                       had a real turn and the compaction's
+#                                       effect reached the transcript — the
+#                                       claim is CLEARED back to absent, so a
+#                                       future re-growth past the threshold
+#                                       is eligible again.
+#
+# A below-cap verify FAILURE still releases the claim entirely (absent) so
+# the next sweep retries, same as before this rework.
 # --------------------------------------------------------------------------- #
 
 COMPACT_CONTEXT_THRESHOLD = 400_000   # tokens (cache_read + cache_creation) —
@@ -3667,6 +3692,11 @@ COMPACT_STALE_MAX_ATTEMPTS = 3        # cap verify-failure retries per session,
                                       # same rationale as MODEL_RECONCILE_MAX_ATTEMPTS
 COMPACT_STALE_VERIFY_POLL_S = 1
 COMPACT_STALE_VERIFY_MAX_POLLS = 10   # bounded (no-timeout-band-aids.md)
+# Marker for "compacted, awaiting confirmation the context actually dropped"
+# — see the STATE MACHINE comment above. Deliberately a non-True truthy value
+# so `claim is True` (give-up) and `claim == COMPACT_STALE_PENDING_CONFIRM`
+# (awaiting confirmation) are never confused with each other.
+COMPACT_STALE_PENDING_CONFIRM = "pending-confirm"
 
 
 def _wait_for_compact_return(pid, run, sleep_fn):
@@ -3701,7 +3731,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
     Never touches a pane that is in copy-mode, showing an open dialog,
     mid-turn/busy, holding an unsent draft, or running a background agent —
     identical guards to job 12's model_reconcile, reusing the very same
-    helpers (`pane_in_mode`, `pane_waiting_on_user`, `_input_line_text`,
+    helpers (`pane_in_mode`, `pane_waiting_on_user`, `_classify_boundary`,
     `pane_at_idle_prompt`, `_pane_has_bg_agent`, `_pane_location`) rather
     than a parallel chrome-detector. `send_continue` already handles the
     "Escape the agent-strip selector ONLY if it holds focus, then type +
@@ -3720,8 +3750,21 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
             continue
         tpath, tmtime = tinfo
         sid = tpath.stem
-        if compacted.get(sid):
-            continue                          # already compacted / gave up — never retry
+        claim = compacted.get(sid)
+        if claim is True:
+            continue                          # gave up for good — never retry, ever
+        if claim == COMPACT_STALE_PENDING_CONFIRM:
+            # Awaiting confirmation the earlier /compact success landed (the
+            # STATE MACHINE comment above). Cheap, local, no tmux round-trip
+            # for the common (still-high) case — only a genuine CLEAR is
+            # worth logging + a pane-location lookup.
+            if transcript_current_context(tpath) < COMPACT_CONTEXT_THRESHOLD:
+                compacted.pop(sid, None)
+                state["compact_stale"] = compacted
+                loc = _pane_location(pid, run) or pid
+                logs.append("CLEARED (compact-stale) %s -> context confirmed "
+                            "below threshold, eligible again" % loc)
+            continue                          # still high, or just cleared — never resend THIS sweep
         idle = now - tmtime
         if idle < COMPACT_MIN_IDLE_S:
             continue                          # too fresh to touch — no log (the common case)
@@ -3759,7 +3802,12 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
         send_continue(pid, COMPACT_TEXT, run)
         ok = _wait_for_compact_return(pid, run, sleep_fn)
         if ok:
-            compacted[sid] = True
+            # PENDING, not permanently True — the claim clears once the
+            # observed context confirms the compaction actually landed (the
+            # STATE MACHINE comment above), so a later re-growth past the
+            # threshold is eligible again instead of this session being
+            # compacted exactly once for its entire lifetime.
+            compacted[sid] = COMPACT_STALE_PENDING_CONFIRM
             state["compact_stale"] = compacted
             attempts_map.pop(sid, None)
             state["compact_stale_attempts"] = attempts_map
