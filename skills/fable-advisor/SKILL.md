@@ -11,7 +11,8 @@ ONE-SHOT advisor for the genuinely hard call, and a Sonnet worker executes
 the decision. Never run the implementation loop on Fable — a Fable main
 re-reads the whole conversation every turn (the 2026-07-01 burn; the
 presenter incident 2026-07-24; hook-enforced by
-`block-main-implementation.sh`).
+`block-main-implementation.sh`, which also blocks a MAIN session with an
+ARMED `/goal` from implementing on ANY model, #54).
 
 ## When to consult (the HARD bar — model-awareness.md)
 
