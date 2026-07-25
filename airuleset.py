@@ -70,13 +70,18 @@ MANAGED_MODEL = "claude-opus-5[1m]"
 # auto-compact threshold. The user's call, which overrides that decision:
 # a LOW auto-compact threshold cuts big tasks off MID-WORK and defeats the
 # entire point of the 1M context window — compaction should never fire on
-# an artificial token budget. Context is bounded at TICKET BOUNDARIES
-# instead (the per-ticket `✅ DONE` completion report + the ticket-boundary
-# `/compact`, watchdog job 14 — see `notify-compact-request.sh` and
-# `milestone-notifications.md`), never by a blanket window. No replacement
-# constant: `apply_managed_settings_defaults` now actively STRIPS
-# `autoCompactWindow` from settings.json on every deploy so the 6 managed
-# boxes go back to Claude Code's own default.
+# an artificial token budget. Context is bounded at SAFE BOUNDARIES instead
+# — the per-ticket `✅ DONE` completion report + the ticket-boundary
+# `/compact` (watchdog job 14 — see `notify-compact-request.sh` and
+# `milestone-notifications.md`) for autopilot-style sessions, AND, for a
+# long-lived session that never reports a ticket, an IDLE-based backstop
+# (watchdog job 15, #39/#43 follow-up: a session whose context exceeds
+# 400K tokens AND has sat genuinely idle >= 20 minutes — no draft, no
+# worker in flight — gets `/compact`'d automatically) — never by a blanket
+# token window that could fire mid-work. No replacement constant:
+# `apply_managed_settings_defaults` now actively STRIPS `autoCompactWindow`
+# from settings.json on every deploy so the 6 managed boxes go back to
+# Claude Code's own default.
 
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
@@ -2285,10 +2290,13 @@ def cmd_watchdog(args):
     up the managed default model by construction — never `/model`, which a
     running session's fixed-at-start model list can never accept (#42
     rework of job 12), writes an hourly burn snapshot
-    (#37 job 13, the automatic --compare feedback loop), and types `/compact`
-    into a session whose Stop hook just recorded a completed-ticket report,
-    once its pane goes genuinely idle (#39 krok 1c job 14). Driven by the
-    systemd timer.
+    (#37 job 13, the automatic --compare feedback loop), types `/compact`
+    into a session whose Stop hook just recorded a completed-ticket report
+    once its pane goes genuinely idle (#39 krok 1c job 14), and — for a
+    long-lived session that never reports a ticket — `/compact`'s any
+    session whose context exceeds 400K tokens once it has sat genuinely
+    idle for 20+ minutes with no worker in flight (#39/#43 job 15). Driven
+    by the systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that

@@ -366,6 +366,51 @@ def transcript_last_model(path, max_lines=200):
     return ""
 
 
+def transcript_current_context(path, max_lines=200):
+    """The session's CURRENT context size — cache_read_input_tokens +
+    cache_creation_input_tokens off the newest assistant usage entry.
+    Feeds job 15 (COMPACT OVERGROWN IDLE SESSIONS).
+
+    A SINGLE API call can render as SEVERAL transcript lines (a thinking
+    block, a text block, a tool_use block — each its own JSONL entry) that
+    all share the SAME `message.id` and carry an IDENTICAL usage snapshot
+    (verified live against a real forestshop-parovanie-produktov transcript,
+    2026-07-25). Counting every line would triple-count one turn's context,
+    so this walks backward from the newest entry, takes the newest
+    `message.id`'s group, and returns the MAX (never the SUM) across the
+    records sharing that id. An entry with no `id` at all (older/foreign
+    transcript shapes) is treated as its own standalone group — its context
+    is returned directly with no further grouping.
+
+    0 if the transcript has no usage entries / is unreadable / doesn't
+    exist (`_iter_jsonl_tail` already fails safe on a missing file)."""
+    _MISSING = object()
+    best_id = _MISSING
+    best_ctx = 0
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=max_lines)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        u = msg.get("usage") or {}
+        if not u:
+            continue
+        ctx = (int(u.get("cache_read_input_tokens") or 0)
+              + int(u.get("cache_creation_input_tokens") or 0))
+        mid = msg.get("id")
+        if best_id is _MISSING:
+            best_id = mid
+            best_ctx = ctx
+            if mid is None:
+                break               # no id to group further entries by
+            continue
+        if mid != best_id:
+            break                   # walked past the newest message.id's group
+        best_ctx = max(best_ctx, ctx)
+    return 0 if best_id is _MISSING else best_ctx
+
+
 # A status marker is the FIRST glyph of its own line (`⏳ WORKING: …`) — anchored so
 # a `⏳`/`✅`/`❓` QUOTED mid-prose (common in this very project, which documents the
 # markers) does NOT false-match. Checked over the last few non-blank lines, not only
@@ -3467,6 +3512,182 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# Job 15 — COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up, 2026-07-25).
+#
+# Job 14 only /compact's a session at a completed-ticket boundary (its Stop
+# hook fires the request). A long-lived session that is NOT an autopilot
+# loop — nothing ever reports a "ticket done" — can sit on the right model
+# with a huge, still-growing context FOREVER with no mechanism to shrink it.
+# Measured live on dev1 over 10 hours, grouped by `message.id` (never raw
+# line count — a thinking/text/tool_use burst shares one id and one usage
+# snapshot): `restreamer` (an autopilot session that got compacted) ran at
+# $0.40/turn @ 375K context vs $0.185/turn @ ~250K post-compaction — a real
+# 2.2x. `forestshop-parovanie-produktov` (untouched all day, no ticket
+# boundary) stayed at $0.38-0.40/turn while its context climbed 559K ->
+# 642K and kept climbing — exactly the gap job 14 cannot close.
+#
+# This job closes it: for every live claude/node/bun pane (SAME detection
+# job 12 uses, `_reconcile_candidate_panes` — deliberately its own
+# enumeration, not run_once's narrower `list_claude_panes`) whose newest
+# transcript turn's context (`transcript_current_context` — cache_read +
+# cache_creation, grouped by message.id, never summed) exceeds
+# COMPACT_CONTEXT_THRESHOLD, AND whose transcript has been quiet for at
+# least COMPACT_MIN_IDLE_S, AND the pane is genuinely idle at a bare prompt
+# (no draft, no open dialog, not in copy-mode, not mid-turn) AND has no
+# in-flight background agent (`_pane_has_bg_agent`, reused from job 12 — a
+# worker in flight must never be interrupted), `/compact` is typed in.
+#
+# This is DELIBERATELY NOT Claude Code's own `autoCompactWindow` (which the
+# user had airuleset actively STRIP from settings.json in the 2026-07-25
+# correction batch, reverting the SAME-DAY "krok 1c" addition — see the
+# comment above `MANAGED_MODEL` in airuleset.py). `autoCompactWindow` fires
+# at a raw token threshold regardless of what the session is doing, so it
+# cuts a long task off MID-WORK and defeats the entire point of the 1M
+# context window. This job only ever fires on a session that is
+# DEMONSTRABLY doing nothing — idle >= COMPACT_MIN_IDLE_S, no draft, no
+# worker in flight — so compaction here cannot interrupt anything, and the
+# full 1M window stays available to any task that actually needs the depth.
+#
+# Dedup: unlike job 14 (fire-and-forget — sending the keystrokes IS success,
+# no confirmation text exists to poll for), THIS job's own trigger condition
+# (current context) does NOT reliably clear right after `/compact` is sent —
+# the transcript's last usage record still reads the PRE-compaction (huge)
+# number until the session's NEXT real turn, which may never come for an
+# idle session with nobody prompting it. Without a permanent per-session
+# dedup, an idle post-compaction session would get `/compact` re-sent on
+# EVERY ~60s sweep forever. So `state['compact_stale'][sid]` is claimed on
+# a REAL success (and permanently kept — mirrors job 12's "a real success
+# is never retried") and on GIVE-UP after `COMPACT_STALE_MAX_ATTEMPTS`
+# failed verifications (mirrors job 12's bounded-attempts fix for the live
+# gk incident, 2026-07-25, where a FAILing pane retried every single sweep
+# forever). A below-cap failure releases the claim so the NEXT sweep
+# retries, same as job 12.
+# --------------------------------------------------------------------------- #
+
+COMPACT_CONTEXT_THRESHOLD = 400_000   # tokens (cache_read + cache_creation) —
+                                      # measured 2.2x cost improvement below this
+COMPACT_MIN_IDLE_S = 20 * 60          # transcript must be this stale (no new turn)
+                                      # before compaction is safe — this IS the
+                                      # guard that makes the whole job safe: a
+                                      # session doing nothing for 20 minutes with
+                                      # no worker running cannot be interrupted
+COMPACT_STALE_MAX_ATTEMPTS = 3        # cap verify-failure retries per session,
+                                      # same rationale as MODEL_RECONCILE_MAX_ATTEMPTS
+COMPACT_STALE_VERIFY_POLL_S = 1
+COMPACT_STALE_VERIFY_MAX_POLLS = 10   # bounded (no-timeout-band-aids.md)
+
+
+def _wait_for_compact_return(pid, run, sleep_fn):
+    """Poll (bounded) for the pane to land back at a free idle prompt after
+    `/compact` was typed — the only observable "it worked" signal available
+    for this command. Unlike job 12's fixed "Resume from summary" dialog
+    text, `/compact` has no reliable confirmation TEXT to match (job 14's
+    own docstring already notes this) — so "the pane returned to a bare `❯`"
+    is the verification."""
+    for _ in range(COMPACT_STALE_VERIFY_MAX_POLLS):
+        sleep_fn(COMPACT_STALE_VERIFY_POLL_S)
+        captured = capture_pane(pid, run, lines=40) or ""
+        if pane_at_idle_prompt(captured):
+            return True
+    return False
+
+
+def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
+                          sleep_fn=None):
+    """Job 15 — see the section comment. Always wired into run_once (no
+    gating param — same "always on" shape as job 9's goal_autoarm), since
+    it depends on nothing external (no fetcher, no target model).
+
+    Local, cheap checks (dedup, current context, idle duration — all read
+    off the transcript file, no tmux round-trip) run BEFORE any tmux call,
+    so the overwhelmingly common case (a session under threshold, or idle
+    under 20 minutes) costs nothing beyond a transcript read and is never
+    logged — logging would spam every sweep for every ordinary session.
+    Only a pane that already cleared BOTH gates is worth a tmux round-trip
+    and a log line.
+
+    Never touches a pane that is in copy-mode, showing an open dialog,
+    mid-turn/busy, holding an unsent draft, or running a background agent —
+    identical guards to job 12's model_reconcile, reusing the very same
+    helpers (`pane_in_mode`, `pane_waiting_on_user`, `_input_line_text`,
+    `pane_at_idle_prompt`, `_pane_has_bg_agent`, `_pane_location`) rather
+    than a parallel chrome-detector. `send_continue` already handles the
+    "Escape the agent-strip selector ONLY if it holds focus, then type +
+    Enter" sequence (issue #36) — never a second Escape anywhere (issue
+    #35). Best-effort: exceptions are the caller's (run_once's)
+    responsibility to catch, same as every other job."""
+    run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
+    projects_dir = projects_dir or PROJECTS_DIR
+    compacted = state.get("compact_stale") or {}
+    attempts_map = state.get("compact_stale_attempts") or {}
+    logs = []
+    for pid, cwd, cmd in _reconcile_candidate_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, tmtime = tinfo
+        sid = tpath.stem
+        if compacted.get(sid):
+            continue                          # already compacted / gave up — never retry
+        idle = now - tmtime
+        if idle < COMPACT_MIN_IDLE_S:
+            continue                          # too fresh to touch — no log (the common case)
+        ctx = transcript_current_context(tpath)
+        if ctx < COMPACT_CONTEXT_THRESHOLD:
+            continue                          # under threshold — no log (the common case)
+        loc = _pane_location(pid, run) or pid
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode (compact-stale) %s %d" % (loc, ctx))
+            continue
+        captured = capture_pane(pid, run, lines=40)
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (compact-stale) %s %d" % (loc, ctx))
+            continue
+        draft = _input_line_text(captured)
+        if draft is None:
+            logs.append("skip busy (compact-stale) %s %d" % (loc, ctx))
+            continue
+        if draft:
+            logs.append("skip draft (compact-stale) %s %d: %r" % (loc, ctx, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (compact-stale) %s %d" % (loc, ctx))
+            continue
+        if _pane_has_bg_agent(captured):
+            logs.append("skip bg-agent (compact-stale) %s %d" % (loc, ctx))
+            continue
+        if dry_run:
+            logs.append("READY (compact-stale) %s ctx=%d idle=%ds"
+                        % (loc, ctx, int(idle)))
+            continue
+        send_continue(pid, COMPACT_TEXT, run)
+        ok = _wait_for_compact_return(pid, run, sleep_fn)
+        if ok:
+            compacted[sid] = True
+            state["compact_stale"] = compacted
+            attempts_map.pop(sid, None)
+            state["compact_stale_attempts"] = attempts_map
+            logs.append("OK (compact-stale) %s ctx=%d -> compacted" % (loc, ctx))
+        else:
+            attempts = attempts_map.get(sid, 0) + 1
+            attempts_map[sid] = attempts
+            state["compact_stale_attempts"] = attempts_map
+            if attempts >= COMPACT_STALE_MAX_ATTEMPTS:
+                # Bounded — never retry this session again (same rationale as
+                # job 12's give-up: a failing pane must not burn a full
+                # context re-read on every single ~60s sweep forever).
+                compacted[sid] = True
+                state["compact_stale"] = compacted
+                logs.append("GAVE UP (compact-stale) %s ctx=%d after %d attempts"
+                            % (loc, ctx, attempts))
+            else:
+                logs.append("FAIL (compact-stale) %s ctx=%d (did not return idle, "
+                            "attempt %d/%d)" % (loc, ctx, attempts, COMPACT_STALE_MAX_ATTEMPTS))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -3903,6 +4124,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           it goes genuinely idle (never busy/dialog/draft/in-mode;
           compact_ticket_boundary) — a safe compaction point, since the
           ticket's durable state already lives in git/GitHub/the issue.
+      (15) COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up) — always on,
+          no gating param: a live claude/node/bun pane whose CURRENT
+          context (cache_read + cache_creation, grouped by message.id)
+          exceeds COMPACT_CONTEXT_THRESHOLD AND has been idle
+          >= COMPACT_MIN_IDLE_S gets `/compact` typed in, but only while
+          genuinely idle (no draft/dialog/busy/in-mode) and with no
+          in-flight background agent (compact_stale_context) — closes the
+          gap job 14 leaves for a long-lived session that never reports a
+          completed-ticket boundary; deliberately NOT the token-threshold
+          `autoCompactWindow` the user had this project actively strip.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -4599,6 +4830,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             path=compact_requests_path)
         except Exception as e:
             logs.append("compact-request error: %r" % (e,))
+
+    # Job 15 — COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up): ALWAYS
+    # wired (no gating param — same "always on" shape as job 9's
+    # goal_autoarm), since it depends on nothing external. Closes the gap
+    # job 14 leaves open for a long-lived session that never reports a
+    # completed-ticket boundary. Best-effort.
+    try:
+        logs += compact_stale_context(now, run, state, dry_run=dry_run,
+                                      projects_dir=projects_dir, sleep_fn=sleep_fn)
+    except Exception as e:
+        logs.append("compact-stale error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
