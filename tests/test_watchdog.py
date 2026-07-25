@@ -1325,15 +1325,21 @@ def tempfile_mkdtemp_cleanup(testcase):
 
 
 # --------------------------------------------------------------------------- #
-# #37 follow-up — Job 12: MODEL RECONCILE. The managed default (MANAGED_MODEL
-# in airuleset.py) only binds a NEW Claude Code session; several long-lived
-# sessions were still parked on Fable/Opus-4 — the single biggest cost line.
-# Ported from a proven-live reference (`/tmp/switch.py`): find a live
-# claude/node/bun pane whose newest transcript's last model is fable/opus-4,
-# and — only when genuinely at rest — `/model <target>` + Enter, confirm
-# CC's "Switch model?" dialog with one more Enter, verify the confirmation
-# text lands. Never touches a busy pane, an open dialog, or an unsent draft;
-# never sends two consecutive Escapes; dedups per session id.
+# #42 rework — Job 12: MODEL RECONCILE, restart-based. The managed default
+# (MANAGED_MODEL in airuleset.py) only binds a NEW Claude Code session;
+# several long-lived sessions were still parked on Fable/Opus-4 — the single
+# biggest cost line. The ORIGINAL #37 version typed `/model <target>` into
+# the stale session — but a live incident (gatekeeper, 2026-07-25) proved
+# that is structurally futile: a running session's available-model list is
+# fixed at its own start, so a model released after that can never be
+# selected via `/model`, no matter how many retries. This job now RESTARTS
+# the session instead: `/exit`, wait for the shell, relaunch `claude` (the
+# managed bashrc function bakes `--model` into every launch — this job never
+# passes one), accept the "Resume from summary" dialog for a large prior
+# session (or proceed directly when none appears). Never touches a busy
+# pane, an open dialog, an unsent draft, a copy-mode pane, or one running a
+# BACKGROUND AGENT (a restart would kill it); never sends two consecutive
+# Escapes; dedups per session id; bounded attempts, then gives up for good.
 # --------------------------------------------------------------------------- #
 
 MR_IDLE_CAP = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
@@ -1342,9 +1348,22 @@ MR_BUSY_CAP = ("● Baking…\n✳ Baking… (2m 30s · ↓ 4.1k tokens · esc t
 MR_DIALOG_CAP = ("● Claude asked:\n  · Ktorá možnosť?\n     1. A\n     2. B\n"
                  "  Tab/Arrow keys to navigate · Enter to select\n")
 MR_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
+# A live background agent — must NEVER be restarted (issue #42 item 2/#36).
+MR_BG_AGENT_CAP = ("● main\n◯ autopilot-worker  Waiting for deploy-prod.yml jobs\n"
+                   "❯ \n  ctx ███░  caveman:lite\n")
+MR_BG_WAIT_CAP = "✻ Waiting for 2 background agents to finish\n❯ \n  ctx ███░\n"
+# The agent-strip SELECTOR holding focus (issue #36) while otherwise idle —
+# the ONE Escape `_restart_pane` must send before typing `/exit`.
+MR_STRIP_SELECTED_IDLE_CAP = "❯ ● main\n❯ \n  ctx ███░  caveman:lite\n"
 MR_TARGET = "claude-opus-5[1m]"
-MR_CONFIRM_OK = "Set model to %s\n❯ \n  ctx ███░\n" % MR_TARGET
-MR_CONFIRM_FAIL = "● nič sa nezmenilo\n❯ \n  ctx ███░\n"
+# Claude Code's large-prior-session resume dialog (verified live, gk 2026-07-25).
+MR_RESUME_DIALOG_CAP = (
+    "This session is 1h 21m old and 701.9k tokens.\n"
+    "Resuming the full session will consume a substantial portion of your "
+    "usage limits. We recommend resuming from a summary.\n"
+    "❯ 1. Resume from summary (recommended)\n"
+    "  2. Resume full session as-is\n"
+    "  3. Don't ask me again\n")
 
 
 def _seed_transcript(projects_dir, cwd, sid, model):
@@ -1358,26 +1377,27 @@ def _seed_transcript(projects_dir, cwd, sid, model):
     return p
 
 
-class ModelReconcileFakeTmux:
-    """Fake `run` for a single candidate pane. Tracks every send-keys call
-    and flips `capture-pane`'s reply to `confirm_captured` the moment the
-    SECOND Enter (the confirmation keystroke) has been sent — mirroring the
-    real sequence: type `/model X`, Enter, [dialog], Enter, [applied]."""
+class RestartFakeTmux:
+    """Fake `run` for job 12's RESTART sequence (#42). `initial_captured` is
+    what `capture-pane` returns for the very FIRST call — the guard-check
+    frame `model_reconcile`'s main loop reads before deciding whether to
+    restart at all. Every capture-pane call AFTER that first one pulls from
+    `cap_seq` in order, clamped at the last entry once exhausted (simulates
+    "never resolves" for a timeout scenario). `shell_after`: how many
+    `#{pane_current_command}` polls before the shell prompt is reported (a
+    huge number simulates `/exit` never taking effect, for the
+    bounded-poll-fails test)."""
 
-    def __init__(self, panes, captured, confirm_captured=None, in_mode=False,
-                confirm_after_polls=1):
+    def __init__(self, panes, initial_captured, cap_seq=(), shell_after=1,
+                in_mode=False):
         self.panes = panes                 # [(pane_id, cmd, cwd)]
-        self.captured = captured
-        self.confirm_captured = captured if confirm_captured is None else confirm_captured
+        self.initial_captured = initial_captured
+        self.cap_seq = list(cap_seq)
+        self.shell_after = shell_after
         self.in_mode = in_mode
-        # how many post-2nd-Enter capture-pane polls before the confirmation
-        # text actually shows up — 1 = confirms on the FIRST poll (the old
-        # default/behavior); a higher number simulates a slow render under
-        # load (the live dev1 finding this constant fix locks in).
-        self.confirm_after_polls = confirm_after_polls
         self.sent = []
-        self.capture_calls_after_confirm_enter = 0
-        self._enters = 0
+        self._cap_calls = 0
+        self._cmd_polls = 0
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
@@ -1386,19 +1406,21 @@ class ModelReconcileFakeTmux:
         if "display-message" in j:
             if argv[-1] == "#{pane_in_mode}":
                 return "1" if self.in_mode else "0"
+            if argv[-1] == "#{pane_current_command}":
+                self._cmd_polls += 1
+                return "bash" if self._cmd_polls >= self.shell_after else "claude"
             return "sess:0.0"
         if "send-keys" in j:
             self.sent.append(argv)
-            if argv[-1] == "Enter":
-                self._enters += 1
             return ""
         if "capture-pane" in j:
-            if self._enters < 2:
-                return self.captured
-            self.capture_calls_after_confirm_enter += 1
-            if self.capture_calls_after_confirm_enter >= self.confirm_after_polls:
-                return self.confirm_captured
-            return self.captured
+            self._cap_calls += 1
+            if self._cap_calls == 1:
+                return self.initial_captured
+            if not self.cap_seq:
+                return self.initial_captured
+            idx = min(self._cap_calls - 2, len(self.cap_seq) - 1)
+            return self.cap_seq[idx]
         return ""
 
     def typed_texts(self):
@@ -1411,6 +1433,14 @@ class ModelReconcileFakeTmux:
         ks = self.keys()
         return not any(ks[i] == "Escape" and ks[i + 1] == "Escape"
                        for i in range(len(ks) - 1))
+
+    def reset_calls(self):
+        """Reuse the same fake (same config) across simulated SWEEPS — a
+        real sweep re-polls tmux from scratch every ~60s, so a multi-sweep
+        test resets the call counters (never the config) between rounds."""
+        self.sent = []
+        self._cap_calls = 0
+        self._cmd_polls = 0
 
 
 class TestTranscriptLastModel(unittest.TestCase):
@@ -1471,32 +1501,34 @@ class TestModelReconcile(unittest.TestCase):
     CWD = "/home/newlevel/devel/demo"
     PANE = "%9"
 
-    def _go(self, model, captured, confirm_captured=None, state=None,
+    def _go(self, model, initial_captured, cap_seq=(), state=None,
            target_model=MR_TARGET, dry_run=False, in_mode=False,
-           confirm_after_polls=1):
+           shell_after=1):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
         _seed_transcript(proj, self.CWD, "sess-abc", model)
-        tmux = ModelReconcileFakeTmux([(self.PANE, "claude", self.CWD)],
-                                      captured, confirm_captured, in_mode=in_mode,
-                                      confirm_after_polls=confirm_after_polls)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               initial_captured, cap_seq=cap_seq,
+                               shell_after=shell_after, in_mode=in_mode)
         state = {} if state is None else state
         logs = wd.model_reconcile(time.time(), tmux, state, target_model,
                                   dry_run=dry_run, projects_dir=proj,
                                   sleep_fn=lambda s: None)
         return tmux, logs, state
 
-    def test_fable_session_gets_switched(self):
+    def test_fable_session_restarts_no_dialog(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_OK)
-        self.assertIn("/model %s" % MR_TARGET, tmux.typed_texts())
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertIn("/exit", tmux.typed_texts())
+        self.assertIn("claude", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
         self.assertTrue(state["modelswitch"]["sess-abc"])
 
-    def test_opus4_session_gets_switched(self):
+    def test_opus4_session_restarts_with_resume_dialog(self):
         tmux, logs, state = self._go("claude-opus-4-8", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_OK)
+                                     cap_seq=[MR_RESUME_DIALOG_CAP, MR_IDLE_CAP])
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(state["modelswitch"]["sess-abc"])
 
     def test_already_on_target_model_is_skipped(self):
         tmux, logs, state = self._go(MR_TARGET, MR_IDLE_CAP)
@@ -1517,21 +1549,44 @@ class TestModelReconcile(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("busy" in ln for ln in logs), logs)
         self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"], "busy")
 
     def test_draft_pane_is_never_typed_over(self):
         tmux, logs, state = self._go("claude-fable-5", MR_DRAFT_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"], "draft")
 
     def test_open_dialog_is_skipped(self):
         tmux, logs, state = self._go("claude-fable-5", MR_DIALOG_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("dialog" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"],
+                         "dialog-open")
 
     def test_in_mode_pane_is_skipped(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, in_mode=True)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"],
+                         "in-mode")
+
+    def test_bg_agent_strip_row_blocks_restart(self):
+        # issue #42 item 2: a `◯ <agent>` agent-strip row means a background
+        # worker is in flight — a restart (`/exit`) would KILL it. Must
+        # NEVER touch this pane, even though it still shows a free `❯`.
+        tmux, logs, state = self._go("claude-fable-5", MR_BG_AGENT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"],
+                         "bg-agent")
+
+    def test_bg_agent_ambient_wait_text_blocks_restart(self):
+        # the OTHER in-flight-agent signal: CC's ambient "Waiting for N
+        # background agents to finish" line, with no strip row visible.
+        tmux, logs, state = self._go("claude-fable-5", MR_BG_WAIT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
 
     def test_dry_run_never_sends_keys(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP, dry_run=True)
@@ -1544,83 +1599,113 @@ class TestModelReconcile(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertEqual(logs, [])
 
-    def test_failed_confirmation_releases_the_claim_for_retry(self):
+    def test_exact_keystroke_sequence_no_dialog(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_FAIL)
-        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
-        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertEqual(tmux.keys(), ["/exit", "Enter", "claude", "Enter"])
 
-    def test_exact_keystroke_sequence_types_then_two_enters(self):
+    def test_exact_keystroke_sequence_with_dialog(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_OK)
-        self.assertEqual(tmux.keys(), ["/model %s" % MR_TARGET, "Enter", "Enter"])
+                                     cap_seq=[MR_RESUME_DIALOG_CAP, MR_IDLE_CAP])
+        self.assertEqual(tmux.keys(),
+                         ["/exit", "Enter", "claude", "Enter", "Enter"])
+
+    def test_strip_selected_gets_one_escape_before_exit(self):
+        # issue #36: the agent-strip SELECTOR holding focus swallows a bare
+        # Enter as navigation instead of submit — `/exit` must be preceded
+        # by ONE Escape when (and only when) the strip is selected.
+        tmux, logs, state = self._go("claude-fable-5", MR_STRIP_SELECTED_IDLE_CAP,
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertEqual(tmux.keys(),
+                         ["Escape", "/exit", "Enter", "claude", "Enter"])
+        self.assertTrue(tmux.no_consecutive_escapes())
 
     def test_no_two_consecutive_escapes_ever_sent(self):
-        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_OK)
-        self.assertTrue(tmux.no_consecutive_escapes())
-        # and on every OTHER decision path too — busy/draft/dialog never type
-        for cap in (MR_BUSY_CAP, MR_DRAFT_CAP, MR_DIALOG_CAP):
-            t2, _, _ = self._go("claude-fable-5", cap)
-            self.assertTrue(t2.no_consecutive_escapes())
+        # issue #35: a rapid double-Escape into a pane holding a draft
+        # PERMANENTLY DELETES it — never sent anywhere in this job, on
+        # ANY decision path (restart, no-restart, or the one Escape case).
+        scenarios = [
+            (MR_IDLE_CAP, [MR_IDLE_CAP], 1),
+            (MR_IDLE_CAP, [MR_RESUME_DIALOG_CAP, MR_IDLE_CAP], 1),
+            (MR_STRIP_SELECTED_IDLE_CAP, [MR_IDLE_CAP], 1),
+            (MR_BUSY_CAP, (), 1),
+            (MR_DRAFT_CAP, (), 1),
+            (MR_DIALOG_CAP, (), 1),
+            (MR_BG_AGENT_CAP, (), 1),
+            (MR_IDLE_CAP, (), 10 ** 6),   # shell never returns after /exit
+        ]
+        for cap, seq, shell_after in scenarios:
+            tmux, _logs, _state = self._go("claude-fable-5", cap, cap_seq=seq,
+                                          shell_after=shell_after)
+            self.assertTrue(tmux.no_consecutive_escapes(), cap)
 
-    def test_slow_confirmation_within_the_poll_budget_still_succeeds(self):
-        # live dev1 finding: on a heavily loaded box, the confirmation text
-        # can take several seconds to render — a single fixed-wait check
-        # false-"FAIL"ed a switch that had genuinely applied moments later,
-        # which released the dedup claim and caused a redundant (harmless
-        # but wasteful) retry on the NEXT sweep. Confirming the response
-        # lands within the poll budget (well under MAX_POLLS) must still
-        # be a real OK, not a false FAIL.
-        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_OK,
-                                     confirm_after_polls=wd.MODEL_SWITCH_APPLY_MAX_POLLS - 1)
-        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
-        self.assertTrue(state["modelswitch"]["sess-abc"])
-
-    def test_confirmation_that_never_lands_fails_after_a_bounded_number_of_polls(self):
+    def test_shell_never_returns_after_exit_fails_bounded(self):
         # the poll must be BOUNDED — never an infinite/unbounded wait
-        # (no-timeout-band-aids.md) — and must still release the dedup
-        # claim for retry on a later sweep, same as the old single-shot FAIL.
+        # (no-timeout-band-aids.md). `claude` must NEVER be typed if the
+        # shell never came back — retyping a command over a dead `/exit`
+        # would land inside whatever the pane is ACTUALLY still showing.
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_FAIL,
-                                     confirm_after_polls=10 ** 6)
+                                     shell_after=10 ** 6)
         self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertTrue(any("shell did not return" in ln for ln in logs), logs)
+        self.assertNotIn("claude", tmux.typed_texts())
         self.assertNotIn("sess-abc", state.get("modelswitch", {}))
-        self.assertEqual(tmux.capture_calls_after_confirm_enter,
-                         wd.MODEL_SWITCH_APPLY_MAX_POLLS)
+        self.assertEqual(state["modelswitch_attempts"]["sess-abc"], 1)
+        # never polled capture-pane past the initial guard-check frame —
+        # the shell-return wait uses ONLY display-message polls.
+        self.assertEqual(tmux._cap_calls, 1)
+
+    def test_relaunch_never_renders_fails_bounded(self):
+        # shell comes back fine, but the relaunched `claude` never shows
+        # EITHER the resume dialog or a bare idle prompt — bounded, not
+        # an infinite wait.
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     cap_seq=[MR_BUSY_CAP])
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertTrue(any("relaunch did not render" in ln for ln in logs), logs)
+        self.assertIn("claude", tmux.typed_texts())
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+        self.assertEqual(tmux._cap_calls - 1, wd.MODEL_RESTART_LAUNCH_MAX_POLLS)
+
+    def test_dialog_that_never_settles_fails_bounded(self):
+        # the dialog IS seen and accepted (confirm Enter sent), but the
+        # session never settles at an idle prompt afterwards — bounded.
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     cap_seq=[MR_RESUME_DIALOG_CAP, MR_BUSY_CAP])
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertTrue(any("did not settle idle" in ln for ln in logs), logs)
+        self.assertEqual(tmux.keys(),
+                         ["/exit", "Enter", "claude", "Enter", "Enter"])
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
 
     def test_attempts_counter_increments_on_each_failure(self):
         state = {}
-        self._go("claude-fable-5", MR_IDLE_CAP, confirm_captured=MR_CONFIRM_FAIL,
-                 state=state)
+        self._go("claude-fable-5", MR_IDLE_CAP, shell_after=10 ** 6, state=state)
         self.assertEqual(state["modelswitch_attempts"]["sess-abc"], 1)
 
     def test_successful_switch_clears_any_prior_attempts_counter(self):
         state = {"modelswitch_attempts": {"sess-abc": 2}}
-        self._go("claude-fable-5", MR_IDLE_CAP, confirm_captured=MR_CONFIRM_OK,
-                 state=state)
+        self._go("claude-fable-5", MR_IDLE_CAP, cap_seq=[MR_IDLE_CAP], state=state)
         self.assertNotIn("sess-abc", state.get("modelswitch_attempts", {}))
 
     def test_repeated_failures_stop_retrying_after_max_attempts(self):
         # LIVE INCIDENT (gk, 2026-07-25): the same pane FAILed on every single
-        # ~60s sweep forever ("FAIL (model-reconcile) ... no confirmation
-        # seen" repeated indefinitely) — every FAIL released the dedup claim
-        # so the NEXT sweep retried, burning a full context re-read (prompt
-        # cache invalidation) on every successful switch attempt. Cap
-        # attempts per session; once the cap is hit, GIVE UP for good (never
-        # retry that session again) and say so in the log.
+        # ~60s sweep forever — every FAIL released the dedup claim so the
+        # NEXT sweep retried, burning a full context re-read (prompt cache
+        # invalidation) every time. Cap attempts per session; once the cap
+        # is hit, GIVE UP for good (never retry that session again) and say
+        # so in the log.
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
         _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
-        tmux = ModelReconcileFakeTmux([(self.PANE, "claude", self.CWD)],
-                                      MR_IDLE_CAP, MR_CONFIRM_FAIL)
         state = {}
         logs = []
         for _ in range(wd.MODEL_RECONCILE_MAX_ATTEMPTS):
-            tmux.sent = []
-            tmux._enters = 0
-            tmux.capture_calls_after_confirm_enter = 0
+            # a fresh fake per simulated sweep — a real sweep re-polls tmux
+            # from scratch every ~60s; the shell never returning is the
+            # deterministic FAIL every round.
+            tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                   MR_IDLE_CAP, shell_after=10 ** 6)
             logs = wd.model_reconcile(time.time(), tmux, state, MR_TARGET,
                                       dry_run=False, projects_dir=proj,
                                       sleep_fn=lambda s: None)
@@ -1630,7 +1715,7 @@ class TestModelReconcile(unittest.TestCase):
         self.assertTrue(state["modelswitch"]["sess-abc"])  # never retried again
 
         # one more sweep must not type ANYTHING at all — the session gave up
-        tmux.sent = []
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
         wd.model_reconcile(time.time(), tmux, state, MR_TARGET, dry_run=False,
                            projects_dir=proj, sleep_fn=lambda s: None)
         self.assertEqual(tmux.sent, [])
@@ -1640,9 +1725,28 @@ class TestModelReconcile(unittest.TestCase):
         # must behave exactly as before the cap existed — released for retry.
         state = {}
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
-                                     confirm_captured=MR_CONFIRM_FAIL, state=state)
+                                     shell_after=10 ** 6, state=state)
         self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
         self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+
+    def test_needs_restart_recorded_when_unsafe_and_cleared_once_safe(self):
+        # issue #42 item 4: a NOT-safe pane is recorded as "needs restart"
+        # in state and re-evaluated on a later sweep — never forced.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
+        state = {}
+        tmux1 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        wd.model_reconcile(time.time(), tmux1, state, MR_TARGET, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertIn("sess-abc", state.get("modelswitch_pending", {}))
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"], "busy")
+
+        tmux2 = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                MR_IDLE_CAP, cap_seq=[MR_IDLE_CAP])
+        wd.model_reconcile(time.time(), tmux2, state, MR_TARGET, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertNotIn("sess-abc", state.get("modelswitch_pending", {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -1787,7 +1891,7 @@ class RunOnceNewJobsWiring(unittest.TestCase):
         _seed_transcript(proj, "/home/newlevel/devel/demo", "sess-x",
                         "claude-fable-5")
         state_path = Path(tmp) / "state.json"
-        tmux = ModelReconcileFakeTmux(
+        tmux = RestartFakeTmux(
             [("%1", "node", "/home/newlevel/devel/demo")], MR_IDLE_CAP)
         logs = wd.run_once(now=time.time(), dry_run=True, run=tmux,
                            send_fn=lambda *a, **k: None,
