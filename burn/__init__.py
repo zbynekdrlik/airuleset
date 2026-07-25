@@ -19,6 +19,7 @@ import glob
 import json
 import os
 from collections import defaultdict
+from pathlib import Path
 
 # per-Mtok (input, cache_write, cache_read, output) — Opus-5-era pricing, the
 # SAME table `modules/core/model-awareness.md` documents. `cache_write` here
@@ -67,6 +68,8 @@ def scan(root, days=7, now=None):
     by_day = defaultdict(_empty_row)
     by_proj = defaultdict(_empty_row)
     by_day_model = defaultdict(_empty_row)
+    by_hour = defaultdict(_empty_row)
+    by_hour_model = defaultdict(_empty_row)
     side = defaultdict(_empty_row)
     files = 0
     lines = 0
@@ -112,11 +115,14 @@ def scan(root, days=7, now=None):
                 o = int(u.get("output_tokens") or 0)
                 p = PRICE.get(tr)
                 usd = (i * p[0] + cw * p[1] + cr * p[2] + o * p[3]) / 1e6 if p else 0.0
-                day = t.astimezone().strftime("%Y-%m-%d")
+                local_t = t.astimezone()
+                day = local_t.strftime("%Y-%m-%d")
+                hour = local_t.strftime("%Y-%m-%dT%H:00")
                 sc = bool(e.get("isSidechain"))
                 for d, k in (
                     (agg, model), (by_day, day), (by_proj, proj),
                     (by_day_model, day + "|" + tr),
+                    (by_hour, hour), (by_hour_model, hour + "|" + model),
                     (side, ("sidechain" if sc else "main") + "|" + tr),
                 ):
                     r = d[k]
@@ -133,6 +139,8 @@ def scan(root, days=7, now=None):
         "by_model": _dump(agg),
         "by_day": dict(sorted(_dump(by_day).items())),
         "by_day_tier": dict(sorted(_dump(by_day_model).items())),
+        "by_hour": dict(sorted(_dump(by_hour).items())),
+        "by_hour_model": dict(sorted(_dump(by_hour_model).items())),
         "by_project": _dump(by_proj, top=12),
         "main_vs_sidechain": _dump(side),
     }
@@ -229,3 +237,212 @@ def render_human(combined, days):
         lines.append("  avg context/msg: %s tokens (cache read+write / message)"
                       % _fmt_int(cache_tokens / total_msgs))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# #37 follow-up (2026-07-25) — the AUTOMATIC before/after feedback loop. The
+# managed-default-model fix only applies going forward; the user asked to
+# "change things one step at a time and measure hourly whether it got better
+# or worse, automatically — he must not have to check anything himself."
+# `airuleset.py watchdog` writes an hourly row (`hourly_snapshot`, called
+# from `watchdog.burn_snapshot_job`) to `snapshots.jsonl`; `mark_change`
+# records WHEN a change was made to `changes.jsonl`; `compare_changes` /
+# `render_compare` are the arithmetic + report behind `burn --compare`.
+# --------------------------------------------------------------------------- #
+
+def burn_history_dir():
+    """`~/.claude/burn-history/` — resolved at CALL time (never a frozen
+    module-level constant): `Path.home()` reads `$HOME` when invoked, and a
+    constant computed at import time would freeze whatever `$HOME` was at
+    first `import burn` — silently wrong for any test (or any caller) that
+    points `$HOME` elsewhere afterward. Mirrors `local_report()`'s own
+    `os.path.expanduser(...)`-inside-the-function convention."""
+    return Path.home() / ".claude" / "burn-history"
+
+
+def snapshots_path():
+    return burn_history_dir() / "snapshots.jsonl"
+
+
+def changes_path():
+    return burn_history_dir() / "changes.jsonl"
+
+
+def hourly_snapshot(now, root=None, host=None, user=None, days=2):
+    """Aggregate the PREVIOUS full hour (the hour immediately before the one
+    `now` falls in) into the single-JSON-line shape `snapshots.jsonl` wants:
+    `{"ts", "host", "user", "window_h": 1, "usd", "msgs", "avg_ctx",
+    "by_model": {<model>: <usd>, ...}}`.
+
+    Reuses `scan()`'s per-line parser (no second transcript parser) — this
+    just picks the ONE hour bucket out of its `by_hour` / `by_hour_model`
+    breakdown. `days` only bounds how many transcript FILES `scan()` even
+    opens (a small window trivially covers "the previous hour" since a
+    file's mtime cutoff check is on WALL-CLOCK age, not on the target hour);
+    it is not the reporting window itself. `now` must be a timezone-aware
+    datetime (the same convention `scan()`/`local_report()` use)."""
+    root = root or os.path.expanduser("~/.claude/projects")
+    data = scan(root, days=days, now=now)
+    end = now.astimezone().replace(minute=0, second=0, microsecond=0)
+    start = end - datetime.timedelta(hours=1)
+    hour_key = start.strftime("%Y-%m-%dT%H:00")
+    row = data["by_hour"].get(hour_key) or _blank_row()
+    prefix = hour_key + "|"
+    by_model = {k[len(prefix):]: v["usd"]
+                for k, v in data["by_hour_model"].items() if k.startswith(prefix)}
+    msgs = row["msgs"]
+    avg_ctx = int(round((row["cache_r"] + row["cache_w"]) / msgs)) if msgs else 0
+    return {
+        "ts": start.isoformat(),
+        "host": host or os.uname().nodename,
+        "user": user or os.environ.get("USER", "?"),
+        "window_h": 1,
+        "usd": round(row["usd"], 4),
+        "msgs": msgs,
+        "avg_ctx": avg_ctx,
+        "by_model": {k: round(v, 4) for k, v in by_model.items()},
+    }
+
+
+def _read_jsonl(path):
+    """Every parseable JSON object line in `path`, skipping blank/malformed
+    lines. Never raises — a corrupt/missing history file must not break
+    `burn --compare` or the hourly snapshot job."""
+    rows = []
+    try:
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return rows
+
+
+def load_snapshots(path=None):
+    return _read_jsonl(path or snapshots_path())
+
+
+def load_changes(path=None):
+    return _read_jsonl(path or changes_path())
+
+
+def mark_change(text, path=None, host=None, now=None):
+    """Append `{"ts", "host", "text"}` to `changes.jsonl` — records WHEN a
+    change was made so `--compare` can measure before vs after it. `now`
+    lets a caller back-date a mark from a known event (e.g. a git commit
+    timestamp) recorded after the fact; defaults to the current time."""
+    path = Path(path or changes_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    row = {"ts": now.isoformat(), "host": host or os.uname().nodename, "text": text}
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    return str(path)
+
+
+def _parse_ts(s):
+    try:
+        return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _window_stats(rows, start, end):
+    """Mean usd / avg_ctx / msgs across snapshot rows whose `ts` falls in
+    [start, end). `n=0` (all other fields None) when the window is empty —
+    e.g. a change made minutes ago has no "after" data yet. Never raises on
+    a malformed row (a bad `ts` is simply excluded)."""
+    sel = []
+    for r in rows:
+        t = _parse_ts(r.get("ts"))
+        if t is not None and start <= t < end:
+            sel.append(r)
+    n = len(sel)
+    if not n:
+        return {"n": 0, "usd_h": None, "avg_ctx": None, "msgs_h": None}
+    return {
+        "n": n,
+        "usd_h": sum(r.get("usd", 0.0) for r in sel) / n,
+        "avg_ctx": sum(r.get("avg_ctx", 0) for r in sel) / n,
+        "msgs_h": sum(r.get("msgs", 0) for r in sel) / n,
+    }
+
+
+def compare_changes(snapshots, changes, window_hours=6):
+    """Per recorded change (chronological), the mean $/h, avg_ctx and msgs/h
+    for `window_hours` immediately BEFORE vs AFTER it, from the hourly
+    `snapshots` rows. A change with an unparsable `ts` is skipped — never
+    raises on ragged input, this feeds a Slovak terminal report the user
+    checks casually."""
+    win = datetime.timedelta(hours=window_hours)
+    dated = sorted(
+        (c for c in changes if _parse_ts(c.get("ts")) is not None),
+        key=lambda c: _parse_ts(c["ts"]))
+    out = []
+    for c in dated:
+        t = _parse_ts(c["ts"])
+        out.append({
+            "ts": c["ts"], "host": c.get("host", "?"), "text": c.get("text", ""),
+            "before": _window_stats(snapshots, t - win, t),
+            "after": _window_stats(snapshots, t, t + win),
+        })
+    return out
+
+
+def _pct_delta(before, after):
+    if before is None or after is None or not before:
+        return None
+    return (after - before) / before * 100.0
+
+
+def _fmt_window(w):
+    if not w["n"]:
+        return "ziadne data"
+    return "$%.2f/h * ctx %s * %.1f msg/h (n=%d vzoriek)" % (
+        w["usd_h"], _fmt_int(w["avg_ctx"]), w["msgs_h"], w["n"])
+
+
+def _fmt_delta(before, after, lower_is_better=True):
+    pct = _pct_delta(before, after)
+    if pct is None:
+        return ""
+    arrow = "lepšie" if (pct < 0) == lower_is_better else "horšie"
+    if pct == 0:
+        arrow = "bez zmeny"
+    return "%+.1f%% (%s)" % (pct, arrow)
+
+
+def render_compare(results, window_hours=6):
+    """Slovak, terminal-readable before/after report — the user's automatic
+    feedback loop: for every recorded change, mean $/h, avg context and
+    msgs/h in the `window_hours` immediately before vs after it, with the
+    delta and a lepšie/horšie direction on cost + context (lower is
+    better; msgs/h is shown without a verdict — more messages isn't
+    inherently good or bad)."""
+    if not results:
+        return ("airuleset burn --compare -- zatial nie su zaznamenane ziadne "
+                "zmeny. Pouzi `airuleset.py burn --mark \"<text>\"` po kazdej "
+                "zmene, ktoru chces takto sledovat.")
+    lines = ["airuleset burn --compare -- pred/po pre kazdu zaznamenanu zmenu "
+             "(okno %dh)" % window_hours, ""]
+    for r in results:
+        lines.append("Zmena: %s" % r["text"])
+        lines.append("  Kedy: %s (host %s)" % (r["ts"], r["host"]))
+        b, a = r["before"], r["after"]
+        lines.append("  Pred: %s" % _fmt_window(b))
+        lines.append("  Po:   %s" % _fmt_window(a))
+        if b["n"] and a["n"]:
+            usd_d = _fmt_delta(b["usd_h"], a["usd_h"])
+            ctx_d = _fmt_delta(b["avg_ctx"], a["avg_ctx"])
+            msgs_pct = _pct_delta(b["msgs_h"], a["msgs_h"])
+            msgs_d = ("%+.1f%%" % msgs_pct) if msgs_pct is not None else "?"
+            lines.append("  Zmena: $/h %s | ctx %s | msg/h %s"
+                         % (usd_d, ctx_d, msgs_d))
+        lines.append("")
+    return "\n".join(lines).rstrip()

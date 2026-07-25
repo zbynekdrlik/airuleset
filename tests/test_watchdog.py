@@ -1441,6 +1441,19 @@ class TestReconcileCandidatePanes(unittest.TestCase):
         self.assertIn("/home/x/proj-c", cwds)
         self.assertNotIn("/home/x/proj-d", cwds)
 
+    def test_dedups_the_same_pane_id_listed_under_multiple_grouped_sessions(self):
+        # live dev1 finding: a tmux GROUPED session (e.g. marek-10/marek-25
+        # sharing linked windows) makes `tmux list-panes -a` list the SAME
+        # underlying pane_id once per session name it's linked under.
+        def fake_run(argv, timeout=8):
+            return "\n".join([
+                "%9\tclaude\t/home/x/proj-a",   # session 1
+                "%9\tclaude\t/home/x/proj-a",   # session 2 (same grouped pane)
+                "%9\tclaude\t/home/x/proj-a",   # session 3 (same grouped pane)
+            ])
+        panes = wd._reconcile_candidate_panes(fake_run)
+        self.assertEqual(len(panes), 1, panes)
+
 
 class TestModelReconcile(unittest.TestCase):
     CWD = "/home/newlevel/devel/demo"

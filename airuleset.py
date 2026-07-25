@@ -2226,8 +2226,11 @@ def cmd_watchdog(args):
     on an API error, ping on stall + give-up + on a session waiting on the user,
     (rate-limited) alert when the weekly token limit nears its cap, route an
     owner's Discord REPLY back into the session that asked the ❓, and backstop
-    gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping).
-    Driven by the systemd timer.
+    gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping),
+    reconciles any long-lived session still parked on Fable/Opus-4 onto the
+    managed default model (#37 job 12), and writes an hourly burn snapshot
+    (#37 job 13, the automatic --compare feedback loop). Driven by the
+    systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that
@@ -2235,11 +2238,14 @@ def cmd_watchdog(args):
     production; the journal showed only systemd boilerplate, and the
     strip-selection keystroke bug (#36 itself) was undebuggable from it.
     `--verbose` is kept for any additional debug output a caller wants later."""
+    import burn
     from watchdog import run_once, fetch_usage, fetch_channel_messages
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
-                    gkreq_fetch=_watchdog_gkreq_fetch)
+                    gkreq_fetch=_watchdog_gkreq_fetch,
+                    target_model=MANAGED_MODEL,
+                    burn_snapshot_path=burn.snapshots_path())
     for line in logs:
         print(line)
 
@@ -2481,8 +2487,32 @@ def cmd_burn(args):
     of that in input context. The local box is always included; `--host
     <name>` (or `--host all`) also collects a remote box over ssh by
     invoking ITS OWN deployed `airuleset.py burn --json` — never scp (the
-    clean-tree hook would block it anyway)."""
+    clean-tree hook would block it anyway).
+
+    `--mark "<text>"` / `--compare` are the follow-up AUTOMATIC feedback
+    loop (#37): `--mark` records that a change was made NOW (or at
+    `--mark-ts <iso>` for backdating from a known event, e.g. a git commit
+    timestamp) to `~/.claude/burn-history/changes.jsonl`; `--compare` reads
+    that alongside the watchdog's hourly `snapshots.jsonl` and prints, per
+    change, the mean $/h, avg context and msgs/h in `--window` hours (default
+    6) before vs after it — so the user never has to check anything himself,
+    the report just tells him whether a change made things better or worse."""
     import burn
+    if getattr(args, "mark", None):
+        ts = None
+        mark_ts = getattr(args, "mark_ts", None)
+        if mark_ts:
+            import datetime
+            ts = datetime.datetime.fromisoformat(mark_ts)
+        path = burn.mark_change(args.mark, now=ts)
+        print("Marked: %s -> %s" % (args.mark, path))
+        return
+    if getattr(args, "compare", False):
+        window = getattr(args, "window", None) or 6
+        results = burn.compare_changes(burn.load_snapshots(), burn.load_changes(),
+                                       window_hours=window)
+        print(burn.render_compare(results, window_hours=window))
+        return
     days = getattr(args, "days", None) or 7
     reports = [burn.local_report(days=days)]
     host_arg = getattr(args, "host", None)
@@ -2919,6 +2949,17 @@ def main():
     p_burn.add_argument("--host", default=None,
                         help="Also collect a remote box by REMOTE_HOSTS name, "
                              "or 'all' for every managed remote (over ssh)")
+    p_burn.add_argument("--mark", default=None,
+                        help="Record a change NOW to burn-history/changes.jsonl "
+                             "(the automatic --compare feedback loop, #37)")
+    p_burn.add_argument("--mark-ts", dest="mark_ts", default=None,
+                        help="Backdate --mark to this ISO8601 timestamp "
+                             "(e.g. a git commit's --format=%%cI)")
+    p_burn.add_argument("--compare", action="store_true",
+                        help="Print mean $/h, avg context, msgs/h before vs "
+                             "after each --mark'd change (--window hours each side)")
+    p_burn.add_argument("--window", type=int, default=None,
+                        help="--compare lookback/lookahead window in hours (default 6)")
 
     p_up = sub.add_parser(
         "upload",

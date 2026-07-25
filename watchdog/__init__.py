@@ -134,6 +134,7 @@ This module is PURE logic + thin tmux shims. The I/O (`run` = tmux exec, `send_f
 no network.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -342,6 +343,26 @@ def transcript_last_error(path):
         if (_entry_text(entry) or "").strip() in _SENTINELS:
             continue            # synthetic — keep scanning back
         return ""               # a real normal reply → not stalled
+    return ""
+
+
+def transcript_last_model(path, max_lines=200):
+    """`message.model` of the session's most recent assistant entry that
+    carries one (e.g. `claude-fable-5`, `claude-opus-5[1m]`), or '' if none /
+    unreadable. Feeds job 12 (MODEL RECONCILE) — a long-lived session keeps
+    whatever model it started on; this is how that job tells which sessions
+    are still parked on an expensive tier. Widens the tail window past
+    `_iter_jsonl_tail`'s default 60 (a `model` field sits only on assistant
+    entries — a run of tool-result/system entries after the last real reply
+    can push it further back than 60 lines)."""
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=max_lines)):
+        if not isinstance(entry, dict):
+            continue
+        msg = entry.get("message")
+        if isinstance(msg, dict):
+            model = msg.get("model")
+            if model:
+                return model
     return ""
 
 
@@ -2900,6 +2921,180 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
 
 
 # --------------------------------------------------------------------------- #
+# Job 12 — MODEL RECONCILE (#37 follow-up, 2026-07-25). The managed default
+# (`MANAGED_MODEL` in airuleset.py) only binds a NEW Claude Code session — a
+# long-lived session keeps whatever model it started on, and several were
+# still parked on Fable/Opus-4, the single biggest line in the measured
+# ~$13,600/8-day burn. Finds every live claude/node/bun pane whose newest
+# transcript's last model is still fable/opus-4 and, ONLY when the pane is
+# genuinely at rest, switches it: `/model <target>` + Enter, confirm CC's
+# "Switch model?" dialog with one more Enter (option 1 is pre-selected),
+# verify the `Set model to <target>` text lands. Ported from a proven-live
+# reference script (`/tmp/switch.py`), reusing the SAME pane helpers every
+# other keystroke-sending job here already uses (`pane_in_mode`,
+# `pane_waiting_on_user`, `_input_line_text`, `pane_at_idle_prompt`,
+# `_pane_location`) rather than a parallel chrome-detector.
+# --------------------------------------------------------------------------- #
+
+MODEL_SWITCH_DIALOG_WAIT_S = 2      # let the "Switch model?" confirm dialog render
+MODEL_SWITCH_APPLY_WAIT_S = 5       # let the switch apply before checking confirmation
+
+
+def _reconcile_candidate_panes(run):
+    """[(pane_id, cwd, cmd)] for every tmux pane whose foreground command is
+    claude/node/bun — the reference implementation's exact filter (some CC
+    installs surface the wrapper's process name, e.g. 'node', as
+    pane_current_command, not 'claude'). Deliberately its OWN enumeration,
+    NOT `list_claude_panes` (which also resolves sudo-hosted stream panes
+    and is relied on by every OTHER keystroke-sending job in this file) —
+    widening THAT filter to node/bun would make an unrelated node/bun pane
+    look like a live Claude session to every job, not just this one.
+
+    Deduped by pane_id (same discipline as `list_claude_panes`): a GROUPED
+    tmux session shares its underlying pane with every session name it is
+    linked under, so `tmux list-panes -a` lists the SAME pane_id once per
+    session name — confirmed live on dev1 (marek's grouped sessions each
+    re-list every shared window). Without the dedup, a single live pane
+    would be visited twice per sweep (harmless — the second visit's dedup
+    check on `state['modelswitch']` always sees the first visit's claim —
+    but wasteful and noisy in the logs)."""
+    run = run or _default_run
+    out = run(["tmux", "list-panes", "-a", "-F",
+               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"])
+    seen = set()
+    res = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        pid, cmd, cwd = parts
+        if not pid or pid in seen:
+            continue
+        if cmd not in ("claude", "node", "bun"):
+            continue
+        seen.add(pid)
+        res.append((pid, cwd, cmd))
+    return res
+
+
+def model_reconcile(now, run, state, target_model, dry_run=False,
+                    projects_dir=None, sleep_fn=None):
+    """Job 12 — see the section comment. `target_model` MUST be passed in —
+    cmd_watchdog passes `MANAGED_MODEL`; this module never hardcodes a model
+    literal. A falsy `target_model` disables the job entirely (mirrors the
+    other optional-fetch-gated jobs: usage_fetch=None skips job 3, etc.).
+
+    Dedup: `state['modelswitch'][<session id>]` is CLAIMED right before the
+    keystrokes are sent and is only ever DELETED again on a FAILED
+    confirmation — so a real success is never retried, and a failed attempt
+    (dialog didn't render in time, pane went busy mid-sequence, …) is
+    retried on a later sweep instead of being stuck forever either way.
+
+    Never types into a pane that is in copy-mode, showing an open dialog,
+    mid-turn/busy, or holding an unsent draft — `_input_line_text` alone
+    distinguishes all three of busy/dialog-at-boundary (None: no input box
+    at the chrome boundary at all) vs draft (non-empty) vs safe-to-type
+    (empty bare `❯`), the same boundary-line discipline every other
+    keystroke-sending job here relies on. Best-effort: exceptions are the
+    caller's (run_once's) responsibility to catch, same as every other job."""
+    if not target_model:
+        return []
+    run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
+    projects_dir = projects_dir or PROJECTS_DIR
+    reconciled = state.get("modelswitch") or {}
+    logs = []
+    for pid, cwd, cmd in _reconcile_candidate_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        sid = tpath.stem
+        model = transcript_last_model(tpath)
+        ml = model.lower()
+        if not model or ("fable" not in ml and "opus-4" not in ml):
+            continue                      # already-on-target / not a tracked tier
+        if reconciled.get(sid):
+            continue                      # already switched this session — never retry
+        loc = _pane_location(pid, run) or pid
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode (model-reconcile) %s %s" % (loc, model))
+            continue
+        captured = capture_pane(pid, run, lines=30)
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (model-reconcile) %s %s" % (loc, model))
+            continue
+        draft = _input_line_text(captured)
+        if draft is None:
+            logs.append("skip busy (model-reconcile) %s %s" % (loc, model))
+            continue
+        if draft:
+            logs.append("skip draft (model-reconcile) %s %s: %r"
+                        % (loc, model, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (model-reconcile) %s %s" % (loc, model))
+            continue
+        if dry_run:
+            logs.append("READY (model-reconcile) %s %s -> %s" % (loc, model, target_model))
+            continue
+        reconciled[sid] = True
+        state["modelswitch"] = reconciled
+        run(["tmux", "send-keys", "-t", pid, "-l", "/model %s" % target_model])
+        run(["tmux", "send-keys", "-t", pid, "Enter"])
+        sleep_fn(MODEL_SWITCH_DIALOG_WAIT_S)
+        run(["tmux", "send-keys", "-t", pid, "Enter"])          # confirm — option 1 preselected
+        sleep_fn(MODEL_SWITCH_APPLY_WAIT_S)
+        conf = capture_pane(pid, run, lines=14) or ""
+        if ("Set model to %s" % target_model) in conf:
+            logs.append("OK (model-reconcile) %s %s -> %s" % (loc, model, target_model))
+        else:
+            del reconciled[sid]
+            state["modelswitch"] = reconciled
+            logs.append("FAIL (model-reconcile) %s %s -> %s (no confirmation seen)"
+                        % (loc, model, target_model))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Job 13 — HOURLY BURN SNAPSHOT (#37 follow-up, 2026-07-25). The user's
+# standing directive: change things one step at a time and measure hourly
+# whether it got better or worse, AUTOMATICALLY — he must not have to check
+# anything himself. Once per hour, append this host's $/msgs/avg-context/
+# by-model row for the PREVIOUS full hour to `burn-history/snapshots.jsonl`
+# — the raw feed `airuleset.py burn --compare` reads. Reuses
+# `burn.hourly_snapshot()` (itself built on `burn.scan()`'s existing
+# per-line parser) — no duplicate transcript parsing anywhere in this path.
+# --------------------------------------------------------------------------- #
+
+
+def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
+                      host=None, user=None, dry_run=False):
+    """Job 13 — see the section comment. Guarded by `state['burn_snapshot_hour']`
+    so the 60s sweep cadence writes AT MOST once per UTC-epoch hour, no matter
+    how many times this fires inside that hour. `dry_run`: compute + log, but
+    never write the file or claim the hour (so a later real sweep still
+    writes it). Best-effort: exceptions are the caller's (run_once's)
+    responsibility to catch, same as every other job."""
+    import burn as burn_mod
+    hour_bucket = int(now // 3600)
+    if state.get("burn_snapshot_hour") == hour_bucket:
+        return []
+    now_dt = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
+    row = burn_mod.hourly_snapshot(now_dt, root=transcripts_root, host=host, user=user)
+    if dry_run:
+        return ["[dry-run] burn-snapshot %s $%.2f %d msgs avg_ctx=%d (not written)"
+               % (row["host"], row["usd"], row["msgs"], row["avg_ctx"])]
+    path = Path(snapshot_path or burn_mod.snapshots_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    state["burn_snapshot_hour"] = hour_bucket
+    return ["burn-snapshot %s $%.2f %d msgs avg_ctx=%d -> %s"
+           % (row["host"], row["usd"], row["msgs"], row["avg_ctx"], path)]
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -3278,7 +3473,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              working_interval=WORKING_RETRY_INTERVAL_SECONDS,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
-             discord_fetch=None, bounce_fetch=None, gkreq_fetch=None):
+             discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
+             target_model=None, sleep_fn=None, burn_snapshot_path=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -3313,7 +3509,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           of job 8, ~30 min cadence);
       (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
           gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
-          never over user text, never when a goal is already armed).
+          never over user text, never when a goal is already armed);
+      (12) (only when `target_model` is given) MODEL RECONCILE (#37) — a live
+          claude/node/bun pane whose newest transcript's last model is still
+          fable/opus-4 gets it switched to `target_model` (never busy/dialog/
+          draft/in-mode; model_reconcile);
+      (13) HOURLY BURN SNAPSHOT (#37) — once per hour, append this host's
+          $/msgs/avg-context row for the PREVIOUS full hour to
+          `burn-history/snapshots.jsonl` (burn_snapshot_job) — the feed
+          `airuleset.py burn --compare` reads, so a change's cost impact is
+          measured automatically, with nothing for the user to check.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -3969,6 +4174,33 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         logs += goal_autoarm(now, run, state, dry_run=dry_run)
     except Exception as e:
         logs.append("goal-autoarm error: %r" % (e,))
+
+    # Job 12 — MODEL RECONCILE (#37): only when `target_model` is given
+    # (cmd_watchdog passes MANAGED_MODEL — this module never hardcodes a
+    # model literal). Best-effort.
+    if target_model:
+        try:
+            logs += model_reconcile(now, run, state, target_model,
+                                    dry_run=dry_run, projects_dir=projects_dir,
+                                    sleep_fn=sleep_fn)
+        except Exception as e:
+            logs.append("model-reconcile error: %r" % (e,))
+
+    # Job 13 — HOURLY BURN SNAPSHOT (#37): the automatic before/after
+    # feedback loop — nothing for the user to remember to check. Only when
+    # `burn_snapshot_path` is given (cmd_watchdog passes the real
+    # `burn.snapshots_path()`) — same "wired = on" convention as jobs 3/7/
+    # 8/11, so an existing caller of run_once() that knows nothing about
+    # this job sees NO behavior change (no write to the real
+    # ~/.claude/burn-history/ during a test, no surprise state key).
+    # Best-effort; internally also cadence-gated to at most once per hour.
+    if burn_snapshot_path:
+        try:
+            logs += burn_snapshot_job(now, state, snapshot_path=burn_snapshot_path,
+                                      transcripts_root=str(projects_dir),
+                                      dry_run=dry_run)
+        except Exception as e:
+            logs.append("burn-snapshot error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
