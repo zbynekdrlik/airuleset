@@ -65,6 +65,32 @@ MANAGED_EFFORT_LEVEL = "xhigh"
 # is a SEPARATE decision for a later step, not bundled into this one.
 MANAGED_MODEL = "claude-opus-5[1m]"
 
+# Managed default auto-compact window ("krok 1c — ohraničenie kontextu",
+# 2026-07-25, #39 follow-up): measured token spend showed 92% of ALL cost is
+# INPUT context, average context per assistant message ~457K tokens (the
+# biggest sessions average ~570K, peaks near 1M), while measured CONTEXT
+# GROWTH per turn is only ~350-1,300 tokens across 500-800 turns between
+# compactions — so compaction cost amortises to near-nothing and a LOWER
+# auto-compact threshold is almost pure win. Modelled average context by
+# threshold (same transcript data): 950K -> ~550K, 500K -> ~327K,
+# 300K -> ~227K, 200K -> ~180K; the floor is ~150K (static system prompt +
+# summary). 300000 is a DELIBERATE FIRST step — conservative enough that
+# compaction rarely lands mid-task, while already cutting average context
+# ~2.4x vs the unmanaged ~950K-ish default. Tighten toward 250K/200K only
+# AFTER the hourly burn snapshot (watchdog job 13, `airuleset.py burn
+# --compare`) shows this step did not regress cost or outcome.
+#
+# Settable in settings.json as `autoCompactWindow` (env override
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW) — the key sits in the SAME settings
+# struct as effortLevel/ultracode/fastMode in the CC 2.1.220 binary.
+# LIVE-VERIFIED (2026-07-25): a scratch `claude` session with
+# `{"autoCompactWindow": 155000}` in `.claude/settings.json` showed
+# `/context`'s "Auto-compact window: 155k tokens" line and its usage-bar
+# denominator changed from the model's own default to EXACTLY 155k
+# (126k/155k = 81%, vs 126k/300k = 42% for the identical actual usage with
+# a 300k value) — proof the setting is genuinely read, not a silent no-op.
+MANAGED_AUTOCOMPACT_WINDOW = 300000
+
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # ---------------------------------------------------------------------------
@@ -181,6 +207,19 @@ CAVEMAN_CACHE_GLOBS = (
 # nonexistent skills (david@gk, 2026-07-09). All from the built-in
 # claude-plugins-official marketplace — no extraKnownMarketplaces entry needed.
 MANAGED_PLUGINS = ("superpowers@claude-plugins-official",)
+# Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
+# /doctor findings): rust-analyzer-lsp + claude-md-management had 0 lifetime
+# uses on dev2 and `/doctor` disabled them directly in settings.json
+# (backup: settings.json.bak-doctor). The plugin reconcile below only ever
+# ENABLES MANAGED_PLUGINS and otherwise merges the existing enabledPlugins
+# dict untouched, so these disables already survive a normal push — this
+# list makes the intent EXPLICIT and durable (and applies it on every box,
+# not just dev2) so a future change to the reconcile logic can never
+# silently resurrect them.
+MANAGED_DISABLED_PLUGINS = (
+    "rust-analyzer-lsp@claude-plugins-official",
+    "claude-md-management@claude-plugins-official",
+)
 MANAGED_PLUGIN_CACHE_GLOBS = {
     "superpowers@claude-plugins-official":
         "plugins/cache/claude-plugins-official/superpowers/*/skills",
@@ -571,12 +610,18 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       treatment as effortLevel/disableAgentView/tui; the user can still switch
       per session with `/model`.
 
+    - `autoCompactWindow = MANAGED_AUTOCOMPACT_WINDOW` ("krok 1c", 2026-07-25,
+      #39 follow-up) caps the auto-compact threshold in tokens — see that
+      constant's own comment for the measured evidence + live verification.
+      Same unconditional-managed-default treatment as the keys above.
+
     Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
     result["tui"] = "default"
     result["model"] = MANAGED_MODEL
+    result["autoCompactWindow"] = MANAGED_AUTOCOMPACT_WINDOW
     return result
 
 
@@ -1468,11 +1513,14 @@ def _claude_cli_env() -> dict:
 
 def reconcile_managed_plugins(settings: dict) -> dict:
     """Pure: return a new settings dict with every managed baseline plugin
-    enabled. Every other key preserved untouched; idempotent."""
+    enabled, and every MANAGED_DISABLED_PLUGINS key forced off (#39 item 3).
+    Every other key preserved untouched; idempotent."""
     result = dict(settings)
     enabled = dict(result.get("enabledPlugins", {}))
     for key in MANAGED_PLUGINS:
         enabled[key] = True
+    for key in MANAGED_DISABLED_PLUGINS:
+        enabled[key] = False
     result["enabledPlugins"] = enabled
     return result
 
@@ -2228,8 +2276,10 @@ def cmd_watchdog(args):
     owner's Discord REPLY back into the session that asked the ❓, and backstop
     gatekeeper-returned prio:bounce tickets (nudge idle pane / Discord ping),
     reconciles any long-lived session still parked on Fable/Opus-4 onto the
-    managed default model (#37 job 12), and writes an hourly burn snapshot
-    (#37 job 13, the automatic --compare feedback loop). Driven by the
+    managed default model (#37 job 12), writes an hourly burn snapshot
+    (#37 job 13, the automatic --compare feedback loop), and types `/compact`
+    into a session whose Stop hook just recorded a completed-ticket report,
+    once its pane goes genuinely idle (#39 krok 1c job 14). Driven by the
     systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
@@ -2239,15 +2289,39 @@ def cmd_watchdog(args):
     strip-selection keystroke bug (#36 itself) was undebuggable from it.
     `--verbose` is kept for any additional debug output a caller wants later."""
     import burn
-    from watchdog import run_once, fetch_usage, fetch_channel_messages
+    from watchdog import (run_once, fetch_usage, fetch_channel_messages,
+                          compact_requests_path)
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
                     target_model=MANAGED_MODEL,
-                    burn_snapshot_path=burn.snapshots_path())
+                    burn_snapshot_path=burn.snapshots_path(),
+                    compact_requests_path=compact_requests_path())
     for line in logs:
         print(line)
+
+
+def cmd_compact_request(args):
+    """Record a `/compact` request for a session at a safe ticket boundary
+    ("krok 1c — ohraničenie kontextu", #39 follow-up). Called by the Stop
+    hook `notify-compact-request.sh` the MOMENT a turn's final message is a
+    completed-ticket report — never from inside the session's own turn (a
+    hook must never type into its own live pane mid-turn). The state lives
+    in its own file (~/.claude/compact-requests.json,
+    watchdog.record_compact_request) — never in the watchdog's own sweep
+    state; see the section comment above `compact_requests_path()` in
+    watchdog/__init__.py for why that would race the sweep's own
+    end-of-cycle save. Watchdog job 14 (compact_ticket_boundary) consumes
+    the request later, only once the pane is genuinely idle."""
+    from watchdog import record_compact_request
+    if getattr(args, "record", False):
+        ok = record_compact_request(args.session, args.cwd)
+        sys.stdout.write("recorded" if ok else "skip")
+        return
+    print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
+          file=sys.stderr)
+    sys.exit(1)
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a
@@ -2909,6 +2983,15 @@ def main():
     p_watchdog.add_argument("--verbose", action="store_true",
                             help="Print the actions taken this cycle")
 
+    p_creq = sub.add_parser(
+        "compact-request",
+        help="Record a /compact request for a session at a safe ticket "
+             "boundary (#39 krok 1c) — consumed by watchdog job 14")
+    p_creq.add_argument("--record", action="store_true",
+                        help="Record the request (called by the Stop hook)")
+    p_creq.add_argument("--session", default="", help="Session id (transcript stem)")
+    p_creq.add_argument("--cwd", default="", help="Session cwd")
+
     p_tickets = sub.add_parser(
         "tickets-status",
         help="Statusline github-tickets segment — autopilot done/total or open issues")
@@ -3012,6 +3095,7 @@ SUBCOMMANDS = {
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
+    "compact-request": cmd_compact_request,
     "fable-gate": cmd_fable_gate,
     "burn": cmd_burn,
     "authority": cmd_authority,

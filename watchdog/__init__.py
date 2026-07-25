@@ -3111,6 +3111,166 @@ def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
 
 
 # --------------------------------------------------------------------------- #
+# Compact-request state ("krok 1c — ohraničenie kontextu", #39 follow-up,
+# 2026-07-25). A completed-ticket report is a SAFE compaction boundary — the
+# ticket's durable state already lives in git/GitHub/the issue, so whatever
+# `/compact` discards there is genuinely disposable — unlike MANAGED_
+# AUTOCOMPACT_WINDOW firing mid-task, which risks losing working context
+# nothing durable has captured yet. A Stop hook (notify-compact-request.sh)
+# records the request the MOMENT a turn's final message is a completed-
+# ticket report (`## Work Complete` heading / terminal `✅ DONE:` marker,
+# never when the last line is `❓`/`⏳` — the same precedence
+# notify-discord-pending.sh already uses for its own ✅/❓/⏳ detection).
+#
+# This is its OWN file (~/.claude/compact-requests.json), NEVER folded into
+# the watchdog's own api-watchdog-state.json: the hook writes it from the
+# INTERACTIVE session's process, not from the watchdog sweep — writing into
+# the sweep's in-memory `state` dict would race the sweep's own end-of-cycle
+# save_state() and get silently clobbered. This is the identical reason
+# notify/discord-questions.json is its own file rather than a `state` key
+# (see record_question there) — `compact_requests_path()` mirrors
+# `burn.snapshots_path()`'s own documented reasoning: Path.home() must be
+# read at CALL time, never frozen into a module-level constant.
+# --------------------------------------------------------------------------- #
+
+
+def compact_requests_path():
+    """`~/.claude/compact-requests.json`, resolved at CALL time (see the
+    section comment above — never a frozen module-level constant)."""
+    return Path.home() / ".claude" / "compact-requests.json"
+
+
+def load_compact_requests(path=None):
+    """{session_id: {"cwd":..., "ts":...}} — the pending /compact requests.
+    {} on any error or missing file; never raises."""
+    path = path or compact_requests_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_compact_requests(d, path=None):
+    path = path or compact_requests_path()
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def record_compact_request(session, cwd, now=None, path=None):
+    """Record that `session` (transcript stem = CC session id) just reported
+    a completed ticket — a /compact request for job 14 to action once the
+    pane goes genuinely idle. Overwrites any earlier pending request for the
+    SAME session (only the LATEST ticket boundary matters — a session that
+    completes a second ticket before the watchdog picks up the first request
+    should compact at the newer boundary, not lose the request). Fail-safe
+    (never raises). Returns True on success."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    now = time.time() if now is None else now
+    d = load_compact_requests(path)
+    d[session] = {"cwd": str(cwd or ""), "ts": int(now)}
+    return _save_compact_requests(d, path)
+
+
+def clear_compact_request(session, path=None):
+    """Remove one handled/stale request. Fail-safe. Returns True iff a
+    request for `session` existed and was removed."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    d = load_compact_requests(path)
+    if session in d:
+        d.pop(session, None)
+        return _save_compact_requests(d, path)
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c, 2026-07-25). See the
+# section comment above. Reuses the EXACT idle guards job 12 (MODEL
+# RECONCILE) already uses: never busy, never mid-dialog, never with a draft
+# present, never in copy-mode — plus the SAME strip-select discipline as
+# every other keystroke-sending job here (send_continue: escape the
+# agent-strip selector ONLY when it holds focus, never a second Escape into
+# a live pane — issue #35). A pane is matched to a request by SESSION ID
+# (`panes_by_sid`, built once per sweep in run_once — the SAME map job 7's
+# reply-routing uses), never by cwd alone (a cwd can be revisited by a
+# LATER, unrelated session).
+# --------------------------------------------------------------------------- #
+
+COMPACT_TEXT = "/compact"
+
+
+def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
+                            path=None):
+    """Job 14 — see the section comment. `state` is accepted (and unused) for
+    the SAME call-shape every other job here has — run_once wires it
+    uniformly even though this job's own dedup lives entirely in the
+    requests file, not in api-watchdog-state.json.
+
+    A request is REMOVED from the requests file (dedup — never retried) the
+    MOMENT `/compact` is actually typed into an idle pane — sending the
+    keystrokes IS the observable success here, the same fire-and-forget
+    shape job 9's goal_autoarm uses (unlike job 12, `/compact` has no
+    reliable confirmation text to poll for). A request is LEFT IN PLACE
+    (retried next sweep) whenever the pane is busy / mid-dialog / holding a
+    draft / in copy-mode, or when no live pane maps to that session yet —
+    "release the claim on failure so it retries" per the spec: there is no
+    separate claim step to release, because nothing is ever claimed until
+    the keystrokes are actually sent. Best-effort: exceptions are the
+    caller's (run_once's) responsibility to catch, same as every other job."""
+    reqs = load_compact_requests(path)
+    if not reqs:
+        return []
+    run = run or _default_run
+    logs = []
+    changed = False
+    for sid in list(reqs.keys()):
+        pane = panes_by_sid.get(sid)
+        if not pane:
+            logs.append("skip no-pane (compact-request) %s" % sid)
+            continue
+        pid, captured = pane
+        loc = _pane_location(pid, run) or pid
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode (compact-request) %s" % loc)
+            continue
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (compact-request) %s" % loc)
+            continue
+        draft = _input_line_text(captured)
+        if draft is None:
+            logs.append("skip busy (compact-request) %s" % loc)
+            continue
+        if draft:
+            logs.append("skip draft (compact-request) %s: %r" % (loc, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (compact-request) %s" % loc)
+            continue
+        if dry_run:
+            logs.append("READY (compact-request) %s" % loc)
+            continue
+        send_continue(pid, COMPACT_TEXT, run)
+        reqs.pop(sid, None)
+        changed = True
+        logs.append("OK (compact-request) %s" % loc)
+    if changed:
+        _save_compact_requests(reqs, path)
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -3490,7 +3650,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
-             target_model=None, sleep_fn=None, burn_snapshot_path=None):
+             target_model=None, sleep_fn=None, burn_snapshot_path=None,
+             compact_requests_path=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -3535,6 +3696,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `burn-history/snapshots.jsonl` (burn_snapshot_job) — the feed
           `airuleset.py burn --compare` reads, so a change's cost impact is
           measured automatically, with nothing for the user to check.
+      (14) (only when `compact_requests_path` is given) /COMPACT AT TICKET
+          BOUNDARIES (#39 krok 1c) — a session whose Stop hook just recorded
+          a completed-ticket report gets `/compact` typed into its pane once
+          it goes genuinely idle (never busy/dialog/draft/in-mode;
+          compact_ticket_boundary) — a safe compaction point, since the
+          ticket's durable state already lives in git/GitHub/the issue.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -4217,6 +4384,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                       dry_run=dry_run)
         except Exception as e:
             logs.append("burn-snapshot error: %r" % (e,))
+
+    # Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c): only when
+    # `compact_requests_path` is given (cmd_watchdog passes
+    # watchdog.compact_requests_path()) — same "wired = on" convention as
+    # jobs 3/7/8/11/13, so an existing caller of run_once() that knows
+    # nothing about this job sees NO behavior change. Uses the SAME
+    # `panes_by_sid` map built above for job 7. Best-effort.
+    if compact_requests_path:
+        try:
+            logs += compact_ticket_boundary(now, run, state, panes_by_sid,
+                                            dry_run=dry_run,
+                                            path=compact_requests_path)
+        except Exception as e:
+            logs.append("compact-request error: %r" % (e,))
 
     save_state(state_path, state)
     return logs

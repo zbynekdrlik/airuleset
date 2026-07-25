@@ -221,6 +221,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/notify-compact-request.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/notify-api-error.sh",
             "timeout": 8
           }
