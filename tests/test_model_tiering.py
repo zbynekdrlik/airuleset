@@ -172,24 +172,31 @@ class TestSubdevReviewIsFableGated(TestCase):
 class TestOpus5EraLineup(TestCase):
     """Locks the 2026-07-25 cost-fix rewrite: Opus 5 is the new default main +
     judgment tier (measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF
-    the price — https://www.anthropic.com/news/claude-opus-5), and Fable 5 is
-    now BANNED as the recommended MAIN-session model — closing the exact hole
-    ("the user's own manual `/model` Fable is not gated — that's their call")
-    that produced 76% of a measured $13,600 8-day burn across all 6 managed
-    boxes. History (2026-07-01/02/03, the Opus-4.8-circling valve, the
-    2026-07-08 SHAPE refinement, the 2026-07-24 sub-dev review tier) must
-    survive verbatim — this class only locks the NEW content."""
+    the price — https://www.anthropic.com/news/claude-opus-5). Fable 5 is NOT
+    banned as a matter of principle: Fable-as-main was a deliberate WORKAROUND
+    for the Opus 4.8 regression + Sonnet 5's coordinator gap, and Opus 5's
+    arrival retires that workaround — closing the exact 76%-of-$13,600 burn
+    the Fable-as-main workaround caused, without forbidding the user's own
+    manual `/model` choice ("that's their call", unchanged). History
+    (2026-07-01/02/03, the Opus-4.8-circling valve, the 2026-07-08 SHAPE
+    refinement, the 2026-07-24 sub-dev review tier) must survive verbatim —
+    this class only locks the NEW content. Ultracode stays ON by default
+    (never made opt-in) — no assertion here touches it."""
 
-    def test_main_session_still_the_users_choice_but_fable_is_flagged(self):
+    def test_main_session_default_recommendation_is_opus_5_not_a_fable_ban(self):
         t = read("modules/core/model-awareness.md")
         # the pre-existing anchor phrase must survive byte-for-byte
         self.assertIn("MAIN interactive session runs whatever the user set via `/model`", t)
-        self.assertIn("Fable 5 is BANNED as its recommended default", t)
         self.assertIn("say so plainly ONCE per session", t)
         self.assertIn("recommend Opus 5", t)
-        self.assertIn("76% of a measured $13,600 8-day burn", t)
-        # the closed hole is cited verbatim so the fix is traceable
-        self.assertIn("the user's own manual `/model` Fable is not gated", t)
+        self.assertIn("Opus 5 retires that workaround", t)
+        self.assertIn("Sonnet 5 could not reliably carry the coordinator role", t)
+        # explicitly NOT a ban — the corrected 2026-07-25 principle
+        self.assertIn("This is NOT a ban on Fable as main", t)
+        self.assertNotIn("Fable 5 is BANNED", t)
+        self.assertNotIn("Fable is forbidden", t)
+        # the manual-choice clause must survive verbatim (never gated)
+        self.assertIn("user's own manual `/model` Fable is not gated", t)
 
     def test_opus_5_is_the_default_tier_with_cursorbench_citation(self):
         t = read("modules/core/model-awareness.md")
@@ -215,11 +222,6 @@ class TestOpus5EraLineup(TestCase):
         self.assertIn("Sonnet 5 $2/$10", t)
         self.assertIn("Haiku 4.5 $1/$5", t)
 
-    def test_ultracode_is_now_opt_in(self):
-        t = read("modules/core/model-awareness.md")
-        self.assertIn("Ultracode is opt-in, not automatic", t)
-        self.assertIn("claude-ultra", t)
-
     def test_historical_incident_sections_survive_unchanged(self):
         # July-2026 community reports about Opus 4.8 degradation are a dated
         # historical record, NOT a stale current-tier reference — must stay.
@@ -233,9 +235,11 @@ class TestOpus5EraLineup(TestCase):
         # the existing SHAPE anchors must survive
         self.assertIn("SHAPE — Fable escalation = ADVISOR, never worker", t)
         self.assertIn("re-reads the full conversation context every turn", t)
-        # the new measured-evidence sentence closing the loop
-        self.assertIn("Fable running as MAIN (not advisor) was 76% of an $13,600 8-day burn", t)
-        self.assertIn("session-context-cost.md", t)
+        # the new measured-evidence sentence closing the loop (the deferred
+        # session-context-cost.md module is OUT of scope — no reference here)
+        self.assertIn(
+            "Fable running as MAIN (not advisor) accounted for 76% of a ~$13,600 token spend", t)
+        self.assertNotIn("session-context-cost.md", t)
 
     def test_header_says_opus_5(self):
         t = read("modules/core/model-awareness.md")
