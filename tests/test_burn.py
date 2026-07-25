@@ -535,6 +535,12 @@ class TestFleetMerge(unittest.TestCase):
         self.assertEqual(row["total_msgs"], 0)
         self.assertEqual(row["weighted_avg_ctx"], 0)
 
+    def test_non_dict_row_is_treated_as_a_malformed_error_not_a_crash(self):
+        row = burn.merge_fleet_row("t", {"weird": 42, "also-weird": ["x"]})
+        self.assertEqual(row["per_host"]["weird"], {"error": "malformed row"})
+        self.assertEqual(row["per_host"]["also-weird"], {"error": "malformed row"})
+        self.assertEqual(row["total_usd"], 0.0)
+
     def test_carries_weekly_pct_and_resets_at_when_given(self):
         row = burn.merge_fleet_row("t", {}, weekly_pct=42, resets_at="2026-08-01T00:00:00+00:00")
         self.assertEqual(row["weekly_pct"], 42)
@@ -875,6 +881,12 @@ class TestFleetRemoteRow(unittest.TestCase):
     def test_invalid_json_becomes_error(self):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=0, stdout="NOT JSON\n", stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE)
+        self.assertIn("error", got)
+
+    def test_non_dict_json_becomes_error(self):
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout="42\n", stderr="")):
             got = airuleset._fleet_remote_row(self.REMOTE)
         self.assertIn("error", got)
 
