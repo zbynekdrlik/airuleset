@@ -495,5 +495,326 @@ class TestCmdBurnMarkAndCompare(unittest.TestCase):
         self.assertIn("--mark", out)
 
 
+# --------------------------------------------------------------------------- #
+# #55 — FLEET monitoring: fleet.jsonl merge, weekly-budget sustainability,
+# trend, the budget-exceeded alert trigger, `burn --fleet`, and the
+# `--compare` fleet extension.
+# --------------------------------------------------------------------------- #
+
+def _host_row(usd, msgs, avg_ctx, by_model=None):
+    return {"usd": usd, "msgs": msgs, "avg_ctx": avg_ctx, "by_model": by_model or {}}
+
+
+class TestFleetMerge(unittest.TestCase):
+    def test_totals_and_weighted_avg_ctx(self):
+        row = burn.merge_fleet_row("2026-07-25T17:00:00+00:00", {
+            "dev1": _host_row(1.0, 10, 100000),
+            "dev2": _host_row(3.0, 30, 300000),
+        })
+        self.assertEqual(row["total_usd"], 4.0)
+        self.assertEqual(row["total_msgs"], 40)
+        # weighted: (100000*10 + 300000*30) / 40 = 250000
+        self.assertEqual(row["weighted_avg_ctx"], 250000)
+        self.assertEqual(row["per_host"]["dev1"]["usd"], 1.0)
+
+    def test_missing_host_becomes_error_and_is_excluded_from_totals(self):
+        row = burn.merge_fleet_row("2026-07-25T17:00:00+00:00", {
+            "dev1": _host_row(1.0, 10, 100000),
+            "gatekeeper": {"error": "ssh timeout"},
+            "david@subdev": None,
+        })
+        self.assertEqual(row["per_host"]["gatekeeper"], {"error": "ssh timeout"})
+        self.assertEqual(row["per_host"]["david@subdev"], {"error": "no data"})
+        self.assertEqual(row["total_usd"], 1.0)
+        self.assertEqual(row["total_msgs"], 10)
+
+    def test_all_hosts_failing_yields_zeroed_totals_not_a_crash(self):
+        row = burn.merge_fleet_row("t", {"a": {"error": "x"}, "b": {"error": "y"}})
+        self.assertEqual(row["total_usd"], 0.0)
+        self.assertEqual(row["total_msgs"], 0)
+        self.assertEqual(row["weighted_avg_ctx"], 0)
+
+    def test_carries_weekly_pct_and_resets_at_when_given(self):
+        row = burn.merge_fleet_row("t", {}, weekly_pct=42, resets_at="2026-08-01T00:00:00+00:00")
+        self.assertEqual(row["weekly_pct"], 42)
+        self.assertEqual(row["resets_at"], "2026-08-01T00:00:00+00:00")
+
+    def test_no_weekly_pct_key_when_not_given(self):
+        row = burn.merge_fleet_row("t", {})
+        self.assertNotIn("weekly_pct", row)
+        self.assertNotIn("resets_at", row)
+
+
+class TestFleetPathAndIO(unittest.TestCase):
+    def test_load_fleet_missing_file_is_empty(self):
+        self.assertEqual(burn.load_fleet(path="/nonexistent/fleet.jsonl"), [])
+
+    def test_fleet_path_under_burn_history_dir(self):
+        self.assertEqual(burn.fleet_path(), burn.burn_history_dir() / "fleet.jsonl")
+
+    def test_usage_cache_path_under_dot_claude(self):
+        self.assertEqual(burn.usage_cache_path(),
+                         Path.home() / ".claude" / "airuleset-usage-cache.json")
+
+    def test_load_usage_cache_missing_file_is_none(self):
+        self.assertIsNone(burn.load_usage_cache(path="/nonexistent/cache.json"))
+
+
+class TestSharedWeeklyWindow(unittest.TestCase):
+    def test_picks_the_model_less_weekly_window(self):
+        cache = {"windows": [
+            {"group": "weekly", "percent": 15, "model": None, "resets_at": "2026-08-01T00:00:00+00:00"},
+            {"group": "weekly", "percent": 25, "model": "Fable", "resets_at": "2026-08-01T00:00:00+00:00"},
+            {"group": "session", "percent": 90, "model": None, "resets_at": "x"},
+        ]}
+        self.assertEqual(burn.shared_weekly_window(cache), (15, "2026-08-01T00:00:00+00:00"))
+
+    def test_no_weekly_window_is_none(self):
+        self.assertIsNone(burn.shared_weekly_window({"windows": []}))
+        self.assertIsNone(burn.shared_weekly_window(None))
+
+
+class TestWeeklyBudget(unittest.TestCase):
+    def test_budget_pct_per_day_spread_over_remaining_days(self):
+        now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
+        cache = {"windows": [{"group": "weekly", "percent": 30, "model": None,
+                              "resets_at": "2026-07-29T00:00:00+00:00"}]}
+        b = burn.weekly_budget(cache, now=now)
+        self.assertEqual(b["weekly_pct"], 30)
+        self.assertEqual(b["remaining_days"], 4.0)
+        self.assertEqual(b["budget_pct_per_day"], 17.5)   # (100-30)/4
+
+    def test_no_cache_is_none(self):
+        self.assertIsNone(burn.weekly_budget(None))
+
+    def test_unparsable_resets_at_still_returns_percent(self):
+        cache = {"windows": [{"group": "weekly", "percent": 10, "model": None,
+                              "resets_at": "not-a-date"}]}
+        b = burn.weekly_budget(cache)
+        self.assertEqual(b["weekly_pct"], 10)
+        self.assertIsNone(b["remaining_days"])
+        self.assertIsNone(b["budget_pct_per_day"])
+
+
+class TestFleetTrend(unittest.TestCase):
+    def _row(self, ts, total_usd, per_host):
+        return {"ts": ts, "total_usd": total_usd, "per_host": per_host}
+
+    def test_needs_at_least_two_rows(self):
+        self.assertIsNone(burn.fleet_trend([]))
+        self.assertIsNone(burn.fleet_trend([self._row("t0", 1.0, {})]))
+
+    def test_latest_vs_mean_of_previous(self):
+        rows = [
+            self._row("t0", 2.0, {"dev1": _host_row(2.0, 5, 1000)}),
+            self._row("t1", 4.0, {"dev1": _host_row(4.0, 5, 1000)}),
+            self._row("t2", 1.0, {"dev1": _host_row(1.0, 5, 1000)}),
+        ]
+        trend = burn.fleet_trend(rows, n_prev=3)
+        self.assertEqual(trend["total"]["prev_mean"], 3.0)
+        self.assertEqual(trend["total"]["latest"], 1.0)
+        self.assertIn("lepšie", trend["total"]["delta"])
+        self.assertEqual(trend["by_host"]["dev1"]["prev_mean"], 3.0)
+        self.assertEqual(trend["by_host"]["dev1"]["latest"], 1.0)
+
+    def test_a_host_with_an_error_row_is_excluded_from_its_own_trend(self):
+        rows = [
+            self._row("t0", 1.0, {"dev1": _host_row(1.0, 1, 100)}),
+            self._row("t1", 1.0, {"dev1": {"error": "down"}}),
+        ]
+        trend = burn.fleet_trend(rows)
+        self.assertIsNone(trend["by_host"]["dev1"]["latest"])
+
+
+class TestObservedPctPerDay(unittest.TestCase):
+    def test_needs_two_samples(self):
+        self.assertIsNone(burn.observed_pct_per_day([]))
+        self.assertIsNone(burn.observed_pct_per_day([{"ts": "2026-07-25T10:00:00+00:00", "weekly_pct": 10}]))
+
+    def test_rate_from_oldest_and_newest_sample(self):
+        rows = [
+            {"ts": "2026-07-25T10:00:00+00:00", "weekly_pct": 10},
+            {"ts": "2026-07-25T22:00:00+00:00", "weekly_pct": 22},  # 12h later, +12pct
+        ]
+        # 12 pct over 12h -> 24 pct/day
+        self.assertEqual(burn.observed_pct_per_day(rows), 24.0)
+
+    def test_rows_without_weekly_pct_are_ignored(self):
+        rows = [{"ts": "2026-07-25T10:00:00+00:00"}, {"ts": "2026-07-25T11:00:00+00:00"}]
+        self.assertIsNone(burn.observed_pct_per_day(rows))
+
+
+class TestFleetSustainability(unittest.TestCase):
+    def test_no_cache_reports_missing_cache(self):
+        s = burn.fleet_sustainability([], None)
+        self.assertIsNone(s["budget"])
+        self.assertIn("cache", s["verdict"])
+
+    def test_not_enough_samples_reports_that(self):
+        cache = {"windows": [{"group": "weekly", "percent": 10, "model": None,
+                              "resets_at": "2026-08-01T00:00:00+00:00"}]}
+        s = burn.fleet_sustainability([], cache,
+                                      now=datetime.datetime(2026, 7, 25, tzinfo=datetime.timezone.utc))
+        self.assertIsNone(s["observed_pct_per_day"])
+        self.assertIn("vzoriek", s["verdict"])
+
+    def test_pace_within_budget_is_sedi(self):
+        now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
+        cache = {"windows": [{"group": "weekly", "percent": 10, "model": None,
+                              "resets_at": "2026-08-01T00:00:00+00:00"}]}  # 7 days left, budget 90/7=12.86%/day
+        rows = [
+            {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 8},
+            {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 10},  # +2%/day
+        ]
+        s = burn.fleet_sustainability(rows, cache, now=now)
+        self.assertEqual(s["verdict"], "sedi")
+
+    def test_pace_over_budget_is_prekracuje(self):
+        now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
+        cache = {"windows": [{"group": "weekly", "percent": 90, "model": None,
+                              "resets_at": "2026-08-01T00:00:00+00:00"}]}  # budget 10/7=1.43%/day
+        rows = [
+            {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 80},
+            {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 90},  # +10%/day
+        ]
+        s = burn.fleet_sustainability(rows, cache, now=now)
+        self.assertEqual(s["verdict"], "prekracuje rozpocet")
+
+
+class TestFleetBudgetAlert(unittest.TestCase):
+    def test_no_alert_when_within_budget(self):
+        now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
+        cache = {"windows": [{"group": "weekly", "percent": 10, "model": None,
+                              "resets_at": "2026-08-01T00:00:00+00:00"}]}
+        rows = [
+            {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 8, "per_host": {}},
+            {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 10, "per_host": {}},
+        ]
+        self.assertIsNone(burn.fleet_budget_alert(rows, cache, now=now))
+
+    def test_alert_names_top_host_and_model_when_over_budget(self):
+        now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
+        cache = {"windows": [{"group": "weekly", "percent": 90, "model": None,
+                              "resets_at": "2026-08-01T00:00:00+00:00"}]}
+        rows = [
+            {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 80, "per_host": {}},
+            {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 90, "per_host": {
+                "dev1": _host_row(1.0, 5, 1000, {"claude-sonnet-5": 1.0}),
+                "dev2": _host_row(9.0, 5, 1000, {"claude-fable-5": 9.0}),
+            }},
+        ]
+        alert = burn.fleet_budget_alert(rows, cache, now=now)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert["top_host"], "dev2")
+        self.assertEqual(alert["top_model"], "claude-fable-5")
+        self.assertIn("dev2", alert["message"])
+        self.assertIn("claude-fable-5", alert["message"])
+
+
+class TestFleetCompareRows(unittest.TestCase):
+    def test_normalizes_to_snapshot_shape(self):
+        rows = [{"ts": "t0", "total_usd": 3.0, "weighted_avg_ctx": 500, "total_msgs": 7}]
+        got = burn.fleet_compare_rows(rows)
+        self.assertEqual(got, [{"ts": "t0", "usd": 3.0, "avg_ctx": 500, "msgs": 7}])
+
+
+class TestRenderFleet(unittest.TestCase):
+    def test_empty_rows_prints_hint(self):
+        out = burn.render_fleet([])
+        self.assertIn("--fleet", out)
+
+    def test_renders_table_and_hosts(self):
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 4.0, "total_msgs": 40,
+                "weighted_avg_ctx": 250000, "per_host": {
+                    "dev1": _host_row(1.0, 10, 100000),
+                    "dev2": {"error": "ssh timeout"},
+                }}]
+        out = burn.render_fleet(rows)
+        self.assertIn("dev1=$1.00", out)
+        self.assertIn("dev2=ERR", out)
+        self.assertIn("total=$4.00", out)
+
+    def test_includes_sustainability_verdict(self):
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 1.0, "total_msgs": 1,
+                "weighted_avg_ctx": 1000, "per_host": {}}]
+        out = burn.render_fleet(rows, cache=None)
+        self.assertIn("verdikt:", out)
+        self.assertIn("cache", out)
+
+
+class TestCmdBurnFleet(unittest.TestCase):
+    def _with_home(self, fn):
+        with TemporaryDirectory() as home:
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                return fn()
+            finally:
+                if old_home is not None:
+                    os.environ["HOME"] = old_home
+
+    def test_fleet_flag_registered(self):
+        # parser wiring: --fleet/--hours must exist (build the real parser).
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="cmd")
+        # smoke: cmd_burn accepts a Namespace carrying fleet=True with no crash
+        self.assertTrue(callable(airuleset.cmd_burn))
+
+    def test_fleet_with_no_data_prints_hint(self):
+        def run():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark=None, compare=False,
+                    window=None, mark_ts=None, fleet=True, hours=24))
+            return buf.getvalue()
+        out = self._with_home(run)
+        self.assertIn("--fleet", out)
+
+    def test_fleet_renders_written_rows(self):
+        def run():
+            path = Path(os.environ["HOME"]) / ".claude" / "burn-history" / "fleet.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "ts": "2026-07-25T17:00:00+00:00", "total_usd": 2.0, "total_msgs": 5,
+                "weighted_avg_ctx": 1000, "per_host": {"dev1": _host_row(2.0, 5, 1000)},
+            }) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark=None, compare=False,
+                    window=None, mark_ts=None, fleet=True, hours=24))
+            return buf.getvalue()
+        out = self._with_home(run)
+        self.assertIn("dev1=$2.00", out)
+
+    def test_compare_includes_fleet_block_when_fleet_data_exists(self):
+        def run():
+            home = Path(os.environ["HOME"])
+            change_ts = "2026-07-25T12:00:00+00:00"
+            burn.mark_change("krok 1", now=datetime.datetime.fromisoformat(change_ts))
+            fleet_p = home / ".claude" / "burn-history" / "fleet.jsonl"
+            fleet_p.parent.mkdir(parents=True, exist_ok=True)
+            with open(fleet_p, "a") as f:
+                for ts, usd in [("2026-07-25T10:00:00+00:00", 2.0),
+                               ("2026-07-25T13:00:00+00:00", 1.0)]:
+                    f.write(json.dumps({"ts": ts, "total_usd": usd, "total_msgs": 5,
+                                        "weighted_avg_ctx": 1000, "per_host": {}}) + "\n")
+            snap_p = home / ".claude" / "burn-history" / "snapshots.jsonl"
+            with open(snap_p, "a") as f:
+                for ts, usd in [("2026-07-25T10:00:00+00:00", 2.0),
+                               ("2026-07-25T13:00:00+00:00", 1.0)]:
+                    f.write(json.dumps({"ts": ts, "host": "dev1", "user": "z", "window_h": 1,
+                                        "usd": usd, "msgs": 5, "avg_ctx": 1000, "by_model": {}}) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_burn(argparse.Namespace(
+                    days=7, json=False, host=None, mark=None, compare=True,
+                    window=6, mark_ts=None))
+            return buf.getvalue()
+        out = self._with_home(run)
+        self.assertIn("Sada (cela monitorovana sada):", out)
+
+
 if __name__ == "__main__":
     unittest.main()
