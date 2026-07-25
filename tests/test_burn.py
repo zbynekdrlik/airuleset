@@ -646,6 +646,14 @@ class TestObservedPctPerDay(unittest.TestCase):
         # 12 pct over 12h -> 24 pct/day
         self.assertEqual(burn.observed_pct_per_day(rows), 24.0)
 
+    def test_a_sample_with_unparsable_ts_is_skipped_not_a_crash(self):
+        rows = [
+            {"ts": "not-a-date", "weekly_pct": 5},
+            {"ts": "2026-07-25T10:00:00+00:00", "weekly_pct": 10},
+            {"ts": "2026-07-25T22:00:00+00:00", "weekly_pct": 22},
+        ]
+        self.assertEqual(burn.observed_pct_per_day(rows), 24.0)
+
     def test_rows_without_weekly_pct_are_ignored(self):
         rows = [{"ts": "2026-07-25T10:00:00+00:00"}, {"ts": "2026-07-25T11:00:00+00:00"}]
         self.assertIsNone(burn.observed_pct_per_day(rows))
