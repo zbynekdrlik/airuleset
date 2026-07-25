@@ -3454,31 +3454,50 @@ def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
 # When the observed weekly-%/day pace exceeds the budget implied by the
 # watchdog's own usage cache (`burn.fleet_budget_alert`), fires ONE deduped
 # Discord ping — never spam, at most once per hour_bucket.
+#
+# #60 follow-up (2026-07-25): the fetch is now HOUR-MATCHED — `fetch(hosts,
+# hour_bucket)` passes the SAME epoch-hour bucket this job itself uses for
+# its own once-per-hour guard, so `_fleet_remote_row` can reject a remote's
+# stale tail line instead of silently counting it twice. And the job now
+# WAITS until `FLEET_BURN_DELAY_MINUTES` past the hour boundary before doing
+# any collection at all — at HH:00 a remote's OWN job 13 may simply not have
+# written this hour's row YET, which would otherwise make "missing sample"
+# the NORMAL state on every collection.
 # --------------------------------------------------------------------------- #
+
+FLEET_BURN_DELAY_MINUTES = 5
+
 
 def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=None,
                    fleet_path=None, usage_cache=None, owner=None, dry_run=False):
     """Job 16 — see the section comment. Guarded by `state['fleet_burn_hour']`,
-    the SAME at-most-once-per-UTC-hour convention job 13 uses. `fetch(hosts)`
-    is the INJECTED remote collector (real impl:
-    `airuleset._watchdog_fleet_fetch`) — a failing host must come back as
-    `{"error": ...}` in its own slot, never raise; a fetch that DOES raise is
-    caught here too so one broken collector never drops the whole row (still
-    writes local-only data). `dry_run`: compute + log, but never write the
-    file, claim the hour, or send the budget alert — mirrors
+    the SAME at-most-once-per-UTC-hour convention job 13 uses, PLUS a wait
+    until `FLEET_BURN_DELAY_MINUTES` past the hour boundary (#60 point 4) —
+    before that, this cycle no-ops WITHOUT claiming the hour, so the next
+    sweep (60s later) retries until a remote box's own job 13 has had time to
+    write. `fetch(hosts, hour_bucket)` is the INJECTED remote collector (real
+    impl: `airuleset._watchdog_fleet_fetch`) — hour-matched against THIS
+    job's own `hour_bucket` (#60), so a failing OR stale host must come back
+    as `{"error": ...}` in its own slot, never raise; a fetch that DOES raise
+    is caught here too so one broken collector never drops the whole row
+    (still writes local-only data). `dry_run`: compute + log, but never write
+    the file, claim the hour, or send the budget alert — mirrors
     `burn_snapshot_job`'s dry-run contract exactly."""
     import burn as burn_mod
     hour_bucket = int(now // 3600)
     if state.get("fleet_burn_hour") == hour_bucket:
+        return []
+    now_utc = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
+    if now_utc.minute < FLEET_BURN_DELAY_MINUTES:
         return []
     host_rows = {}
     local_rows = burn_mod.load_snapshots(local_snapshot_path)
     if local_rows:
         last = local_rows[-1]
         host_rows[last.get("host") or "dev1"] = last
-    fetch = fetch or (lambda hs: {})
+    fetch = fetch or (lambda hs, hb: {})
     try:
-        remote_rows = fetch(hosts) or {}
+        remote_rows = fetch(hosts, hour_bucket) or {}
     except Exception as e:
         remote_rows = {h.get("name", "?"): {"error": "fetch raised: %r" % (e,)}
                        for h in (hosts or [])}

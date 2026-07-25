@@ -2636,11 +2636,41 @@ def _fleet_remote_cmd(remote):
             f"{remote['user']}@{remote['host']}", remote_cmd]
 
 
-def _fleet_remote_row(remote, timeout=15):
-    """One remote host's latest hourly burn-snapshot row, or `{"error": ...}`
-    on ANY failure (ssh, timeout, empty file, bad JSON) — a single
-    unreachable box (e.g. a subdev host under a fail2ban ban) must never
-    crash the fleet job or the rest of the watchdog sweep. Never raises."""
+def _hour_bucket_of_ts(ts_str):
+    """Epoch-hour bucket (`int(epoch_seconds // 3600)`) of an ISO-8601
+    timestamp STRING, converted to UTC first — comparing raw hour-of-day
+    digits (or the raw string) across differing UTC offsets is exactly the
+    #60 bug (gk writes `+00:00`, dev1 `+02:00` — the SAME instant renders
+    with different hour digits in each). None when `ts_str` is missing,
+    None, or unparsable — the caller (`_fleet_remote_row`) treats that as
+    "can't verify freshness" and errors rather than trusting it."""
+    import burn as burn_mod
+    dt = burn_mod._parse_ts(ts_str)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        import datetime
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp() // 3600)
+
+
+def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
+    """One remote host's latest hourly burn-snapshot row FOR THE SPECIFIC
+    `want_hour_bucket` (an epoch-hour index — see `_hour_bucket_of_ts`), or
+    `{"error": ...}` on ANY failure: ssh, timeout, empty file, bad JSON, OR
+    a STALE/mismatched-hour row (#60). The remote's tail line existing does
+    NOT mean it is fresh for the hour being collected — the remote may not
+    have written this hour's row yet (job 16 now waits until HH:05 to give
+    the remote's own job 13 time to write it), or the remote's clock/offset
+    may differ from ours (`_hour_bucket_of_ts` always converts to UTC
+    before comparing — never the raw string/local hour-of-day). A
+    stale/mismatched row is returned as `{"error": ..., "stale": True}` so
+    callers (`merge_fleet_row`/`render_fleet`) can render it distinctly
+    from a hard collection failure (`—` vs `ERR`) — this IS the #60 fix:
+    silently reusing an old row produced a false fleet trend/total (5/6
+    hosts double-counting the same stale sample read as "-39.8%
+    (lepšie)"). A single unreachable/stale box must never crash the fleet
+    job or the rest of the watchdog sweep. Never raises."""
     import subprocess
     cmd = _fleet_remote_cmd(remote)
     try:
@@ -2658,15 +2688,28 @@ def _fleet_remote_row(remote, timeout=15):
         return {"error": "invalid JSON from remote"}
     if not isinstance(row, dict):
         return {"error": "unexpected JSON shape from remote"}
+    row_hour = _hour_bucket_of_ts(row.get("ts"))
+    if row_hour != want_hour_bucket:
+        return {"error": "no sample for hour %s (latest %s)" % (want_hour_bucket, row.get("ts")),
+               "stale": True}
     return row
 
 
-def _watchdog_fleet_fetch(hosts=None):
+def _watchdog_fleet_fetch(hosts=None, want_hour_bucket=None):
     """Real remote collector used by cmd_watchdog's job 16 wiring — one row
-    per REMOTE_HOSTS entry. Never raises; a single bad host degrades to
-    `{"error": ...}` in its own slot rather than dropping the whole fleet."""
+    per REMOTE_HOSTS entry, hour-matched against `want_hour_bucket` (#60).
+    Defaults to the CURRENT UTC epoch-hour when not given — the plain
+    top-level/manual-invocation case; `fleet_burn_job` always passes its own
+    `now`-derived bucket explicitly (this repo's convention of threading
+    `now` through every job for determinism/testability — see
+    `_fleet_remote_row`). Never raises; a single bad or stale host degrades
+    to `{"error": ...}` in its own slot rather than dropping the whole
+    fleet."""
     hosts = hosts if hosts is not None else REMOTE_HOSTS
-    return {h["name"]: _fleet_remote_row(h) for h in hosts}
+    if want_hour_bucket is None:
+        import datetime
+        want_hour_bucket = int(datetime.datetime.now(datetime.timezone.utc).timestamp() // 3600)
+    return {h["name"]: _fleet_remote_row(h, want_hour_bucket) for h in hosts}
 
 
 def cmd_burn(args):

@@ -534,7 +534,15 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     `per_host` as `{"error": <msg>}` — one bad host (ssh timeout, fail2ban
     ban, corrupt JSON) never drops the rest of the fleet. A row that isn't
     even a dict (a remote line that parsed to a bare number/list/string) is
-    reported as `"malformed row"` rather than crashing — never raises."""
+    reported as `"malformed row"` rather than crashing — never raises.
+
+    A `"stale": True` marker on an input row (set by
+    `airuleset._fleet_remote_row` when the remote's latest line is for the
+    WRONG hour — #60) is carried through into `per_host` unchanged, so
+    `render_fleet` can render it distinctly (a dash, "no sample for this
+    hour yet") from a hard collection failure (`ERR`, "couldn't reach the
+    host at all") — both are excluded from the totals the same way, but
+    they mean different things to the reader."""
     per_host = {}
     total_usd = 0.0
     total_msgs = 0
@@ -547,7 +555,10 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
             per_host[name] = {"error": "malformed row"}
             continue
         if row.get("error"):
-            per_host[name] = {"error": row.get("error")}
+            entry = {"error": row.get("error")}
+            if row.get("stale"):
+                entry["stale"] = True
+            per_host[name] = entry
             continue
         usd = float(row.get("usd", 0.0) or 0.0)
         msgs = int(row.get("msgs", 0) or 0)
@@ -595,10 +606,30 @@ def weekly_budget(cache, now=None):
             "budget_pct_per_day": round(budget, 2) if budget is not None else None}
 
 
+def _valid_host_set(row):
+    """The set of hosts in `row['per_host']` that carry a REAL (non-error,
+    non-stale) sample — the "which hosts actually contributed to this hour's
+    total" set #60 needs to decide whether two hours are even comparable."""
+    return frozenset(h for h, v in (row.get("per_host") or {}).items()
+                     if not (v or {}).get("error"))
+
+
 def fleet_trend(rows, n_prev=3):
     """Latest fleet row vs the mean of the up-to-`n_prev` rows immediately
     before it — total AND per-host $ (lower is better, `_fmt_delta`'s
-    default). None when fewer than 2 rows exist (nothing to compare yet)."""
+    default). None when fewer than 2 rows exist (nothing to compare yet).
+
+    The TOTAL comparison (#60) is restricted to previous hours whose set of
+    HOSTS-WITH-A-REAL-SAMPLE exactly matches the latest hour's — comparing
+    totals across hours where a different subset of hosts responded produces
+    a meaningless delta (the live incident: 5/6 hosts double-counted a stale
+    row, and the total's coincidental stability read as "-39.8% (lepšie)").
+    When NO previous hour in the window has a matching host set, `total`
+    reports `"comparable": False` with a Slovak `"reason"` instead of a
+    percent. The by-host comparison is UNAFFECTED — each host's own trend
+    already tolerates a missing/error sample on either side (a host that
+    goes stale for one hour still gets its own before/after compared on the
+    hours where it DID have data)."""
     if len(rows) < 2:
         return None
     latest = rows[-1]
@@ -610,16 +641,24 @@ def fleet_trend(rows, n_prev=3):
         vals = [v for v in vals if v is not None]
         return sum(vals) / len(vals) if vals else None
 
-    total_prev_mean = _mean(r.get("total_usd") for r in prev)
+    latest_hosts = _valid_host_set(latest)
+    comparable_prev = [r for r in prev if _valid_host_set(r) == latest_hosts]
     total_latest = latest.get("total_usd")
-    out = {
-        "total": {
+    if comparable_prev:
+        total_prev_mean = _mean(r.get("total_usd") for r in comparable_prev)
+        total_out = {
             "latest": total_latest, "prev_mean": total_prev_mean,
             "delta": _fmt_delta(total_prev_mean, total_latest)
                     if total_prev_mean is not None else "",
-        },
-        "by_host": {},
-    }
+            "comparable": True,
+        }
+    else:
+        total_out = {
+            "latest": total_latest, "prev_mean": None, "delta": "",
+            "comparable": False,
+            "reason": "neporovnatelne (ina mnozina hostov malo vzorku)",
+        }
+    out = {"total": total_out, "by_host": {}}
     hosts = set()
     for r in [latest] + prev:
         hosts.update((r.get("per_host") or {}).keys())
@@ -731,9 +770,18 @@ def fleet_compare_rows(fleet_rows):
 
 def render_fleet(rows, hours=24, cache=None, now=None):
     """Slovak, terminal-readable fleet report (`airuleset.py burn --fleet`):
-    the last `hours` hourly rows (per host $ + total), the trend (latest vs
-    mean of the previous 3), and the sustainability verdict against the
-    weekly usage-cache budget."""
+    the last `hours` hourly rows (per host $ + total, plus how many of the
+    monitored hosts actually have a sample for that hour — #60), the trend
+    (latest vs mean of the previous 3 — refuses to show a percent when the
+    host set differs, #60), and the sustainability verdict against the
+    weekly usage-cache budget.
+
+    A host's per_host entry renders as `—` (dash) when it is STALE (#60:
+    no sample yet for this hour — `"stale": True`, set by
+    `airuleset._fleet_remote_row`'s hour-match check) — distinct from both
+    `ERR` (a hard collection failure: ssh unreachable, bad JSON) and
+    `$0.00` (a real, verified zero-usage sample); conflating "no data yet"
+    with "spent nothing" was the false -39.8% trend the ticket reported."""
     if not rows:
         return ("airuleset burn --fleet -- zatial nie su zaznamenane ziadne "
                 "fleet snapshoty. Bezi len na koordinatorovi (dev1) — pockaj "
@@ -743,18 +791,32 @@ def render_fleet(rows, hours=24, cache=None, now=None):
              "hodinovych vzoriek" % len(shown), ""]
     for r in shown:
         parts = []
-        for h, v in sorted((r.get("per_host") or {}).items()):
-            parts.append("%s=ERR" % h if "error" in v else "%s=$%.2f" % (h, v.get("usd", 0.0)))
-        lines.append("  %s  total=$%.2f  msgs=%d  ctx=%s  [%s]"
+        per_host = r.get("per_host") or {}
+        valid_n = 0
+        for h, v in sorted(per_host.items()):
+            if v.get("stale"):
+                parts.append("%s=—" % h)
+            elif "error" in v:
+                parts.append("%s=ERR" % h)
+            else:
+                parts.append("%s=$%.2f" % (h, v.get("usd", 0.0)))
+                valid_n += 1
+        note = ("  (%d/%d hostov ma vzorku pre tuto hodinu)" % (valid_n, len(per_host))
+                if per_host else "")
+        lines.append("  %s  total=$%.2f  msgs=%d  ctx=%s  [%s]%s"
                      % (r.get("ts", "?"), r.get("total_usd", 0.0), r.get("total_msgs", 0),
-                        _fmt_int(r.get("weighted_avg_ctx", 0)), ", ".join(parts)))
+                        _fmt_int(r.get("weighted_avg_ctx", 0)), ", ".join(parts), note))
     trend = fleet_trend(rows)
     if trend:
         lines.append("")
         lines.append("  trend (posledna hodina vs priemer predoslych 3):")
         t = trend["total"]
-        lines.append("    total: $%.2f (priemer $%.2f)  %s"
-                     % (t["latest"] or 0.0, t["prev_mean"] or 0.0, t["delta"]))
+        if t.get("comparable", True):
+            lines.append("    total: $%.2f (priemer $%.2f)  %s"
+                         % (t["latest"] or 0.0, t["prev_mean"] or 0.0, t["delta"]))
+        else:
+            lines.append("    total: $%.2f  %s"
+                         % (t["latest"] or 0.0, t.get("reason", "neporovnatelne")))
         for h, v in sorted(trend["by_host"].items()):
             if v["latest"] is None:
                 continue
