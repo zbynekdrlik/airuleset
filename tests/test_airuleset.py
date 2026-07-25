@@ -2979,24 +2979,55 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn("command claude --dangerously-skip-permissions", text)
         self.assertIn("claude-new()", text)                # fresh-session escape hatch
         self.assertIn("claude-plain()", text)              # vanilla escape hatch
+        self.assertIn("claude-ultra()", text)              # deliberate-fan-out escape hatch
 
-    def test_default_launcher_has_skip_perms_and_continue(self):
+    def test_default_launcher_has_skip_perms_and_continue_no_ultracode(self):
+        # 2026-07-25 cost-fix package: ultracode became OPT-IN (`claude-ultra`)
+        # — the default `claude()` (still continue-or-new: BOTH branches carry
+        # auto-approve, -c only on the continue branch) and `claude-new()` no
+        # longer carry `--settings '{"ultracode":true}'` at all. Only
+        # `claude-ultra()` (tested separately) keeps the old shape.
         p = self._tmp()
         airuleset.apply_ultracode_launcher(p)
-        # the `claude()` default is continue-or-new: BOTH branches carry
-        # auto-approve + ultracode; -c only on the continue branch
         text = p.read_text()
         block = text.split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
-        self.assertEqual(block.count("--dangerously-skip-permissions -c "), 1)
-        self.assertEqual(block.count("--dangerously-skip-permissions"), 3)  # claude x2 + claude-new
-        self.assertEqual(block.count("--settings '{\"ultracode\":true}'"), 3)
         self.assertIn("compgen -G", block)             # conversation-exists probe
-        # claude-new is ultracode + skip-perms but NOT -c (fresh session)
+        default_and_new = block.split("claude-ultra() {")[0]
+        self.assertEqual(default_and_new.count("--dangerously-skip-permissions -c "), 1)
+        self.assertEqual(default_and_new.count("--dangerously-skip-permissions"), 3)  # claude x2 + claude-new
+        self.assertNotIn("--settings '{\"ultracode\":true}'", default_and_new)
+        # claude-new is skip-perms but NOT -c (fresh session), and no ultracode
         new_line = next(ln for ln in p.read_text().splitlines()
                         if ln.startswith("claude-new() {"))
         self.assertIn("--dangerously-skip-permissions", new_line)
         self.assertNotIn(" -c ", new_line)
+        self.assertNotIn("ultracode", new_line)
+
+    def test_claude_ultra_keeps_the_old_ultracode_shape(self):
+        # claude-ultra() is the deliberate-fan-out escape hatch: SAME shape
+        # the default `claude()` used to have — continue-or-new + skip-perms
+        # + ultracode on BOTH branches.
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+        block = block.split(airuleset.ULTRACODE_MARK_END)[0]
+        self.assertIn("claude-ultra() {", block)
+        ultra = block.split("claude-ultra() {", 1)[1]
+        self.assertEqual(ultra.count("--settings '{\"ultracode\":true}'"), 2)
+        self.assertEqual(ultra.count("--dangerously-skip-permissions"), 2)
+        self.assertEqual(ultra.count("--dangerously-skip-permissions -c "), 1)
+        self.assertIn("compgen -G", ultra)
+
+    def test_block_comment_explains_ultracode_is_opt_in(self):
+        p = self._tmp()
+        airuleset.apply_ultracode_launcher(p)
+        text = p.read_text()
+        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+        block = block.split(airuleset.ULTRACODE_MARK_END)[0]
+        self.assertIn("opt-in", block.lower())
+        self.assertIn("claude-ultra", block)
 
 
 class TestClaudeLauncherContinueOrNew(TestCase):
@@ -3005,7 +3036,7 @@ class TestClaudeLauncherContinueOrNew(TestCase):
     died with "No conversation found to continue" in every new directory
     (david@gk, 2026-07-09), forcing users to know about claude-new."""
 
-    def _run_launcher(self, home, cwd):
+    def _run_launcher(self, home, cwd, cmd="claude"):
         bashrc = Path(home) / ".bashrc"
         airuleset.apply_ultracode_launcher(bashrc)
         stub_dir = Path(home) / "bin"
@@ -3016,7 +3047,7 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         env = {**os.environ, "HOME": str(home),
                "PATH": f"{stub_dir}:{os.environ['PATH']}"}
         r = subprocess.run(
-            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; claude"],
+            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; {cmd}"],
             capture_output=True, text=True, env=env)
         return r.stdout
 
@@ -3061,6 +3092,19 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         (self._proj_dir(home, cwd) / "s.jsonl").write_text("{}")
         out = self._run_launcher(home, cwd)
         self.assertIn(" -c", out)
+
+    def test_claude_ultra_is_continue_or_new_and_carries_ultracode(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher(home, cwd, cmd="claude-ultra")
+        self.assertIn("ARGS:", out)
+        self.assertIn("--dangerously-skip-permissions", out)
+        self.assertIn("ultracode", out)
+        self.assertNotIn(" -c", out)                    # fresh dir -> no -c
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out2 = self._run_launcher(home, cwd, cmd="claude-ultra")
+        self.assertIn(" -c", out2)                       # prior convo -> -c
 
 
 class TestDiscordAutopilotNotify(TestCase):

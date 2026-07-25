@@ -672,3 +672,84 @@ class QuestionsSegment(unittest.TestCase):
                                           home=self.home)
         self.assertIn("otazky 1", seg)
         self.assertNotIn("inde", seg)
+
+
+class ContextCostSegment(unittest.TestCase):
+    """'ctx <size> · ~$<cost>/ťah' — the CURRENT turn's context size + its
+    real dollar cost (2026-07-25 cost-fix package). Source: the statusline
+    stdin payload's `context_window.current_usage` (the exact token
+    breakdown of the LAST billed API call) + `model.id`, priced via the
+    SAME per-Mtok table `burn` uses. Colour-escalates on RAW token count:
+    green <150K, yellow 150-400K, red >400K."""
+
+    def _payload(self, model_id, i=0, cw=0, cr=0, o=0, transcript_path=None):
+        d = {"model": {"id": model_id}}
+        if i or cw or cr or o:
+            d["context_window"] = {"current_usage": {
+                "input_tokens": i, "cache_creation_input_tokens": cw,
+                "cache_read_input_tokens": cr, "output_tokens": o}}
+        if transcript_path is not None:
+            d["transcript_path"] = transcript_path
+        return d
+
+    def test_green_below_150k(self):
+        seg = statusbar.context_cost_segment(self._payload("claude-opus-5", cr=50000))
+        self.assertIn("\033[38;5;40m", seg)
+        self.assertIn("ctx 50K", seg)
+
+    def test_yellow_150k_to_400k(self):
+        seg = statusbar.context_cost_segment(self._payload("claude-opus-5", cr=200000))
+        self.assertIn("\033[38;5;220m", seg)
+        self.assertIn("ctx 200K", seg)
+
+    def test_red_above_400k(self):
+        seg = statusbar.context_cost_segment(self._payload("claude-opus-5", cr=500000))
+        self.assertIn("\033[38;5;196m", seg)
+        self.assertIn("ctx 500K", seg)
+
+    def test_cost_uses_the_burn_price_table(self):
+        # fable cache_read $1.0/Mtok * 570,000 = $0.57 exactly — the example
+        # in the cost-fix package's own spec.
+        seg = statusbar.context_cost_segment(
+            self._payload("claude-fable-5[1m]", cr=570000))
+        self.assertIn("ctx 570K", seg)
+        self.assertIn("$0.57", seg)
+
+    def test_empty_on_missing_or_garbage_data(self):
+        self.assertEqual(statusbar.context_cost_segment({}), "")
+        self.assertEqual(statusbar.context_cost_segment(None), "")
+        self.assertEqual(statusbar.context_cost_segment("garbage"), "")
+
+    def test_empty_on_unknown_model_tier(self):
+        seg = statusbar.context_cost_segment(
+            self._payload("some-other-vendor-model", cr=50000))
+        self.assertEqual(seg, "")
+
+    def test_falls_back_to_transcript_tail_when_context_window_missing(self):
+        with TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.jsonl")
+            with open(path, "w") as fh:
+                fh.write(json.dumps({"type": "system"}) + "\n")
+                fh.write(json.dumps({"message": {
+                    "model": "claude-sonnet-5",
+                    "usage": {"input_tokens": 1, "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 100000,
+                              "output_tokens": 500}}}) + "\n")
+                fh.write(json.dumps({"type": "other-no-usage"}) + "\n")
+            seg = statusbar.context_cost_segment({"transcript_path": path})
+            self.assertIn("ctx 100K", seg)
+
+    def test_shim_renders_the_context_cost_segment(self):
+        self.assertIn("context_cost_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+
+class FmtTokens(unittest.TestCase):
+    def test_formats_thousands_and_millions(self):
+        self.assertEqual(statusbar._fmt_tokens(999), "999")
+        self.assertEqual(statusbar._fmt_tokens(1000), "1K")
+        self.assertEqual(statusbar._fmt_tokens(570000), "570K")
+        self.assertEqual(statusbar._fmt_tokens(1500000), "1.5M")
+
+
+if __name__ == "__main__":
+    unittest.main()

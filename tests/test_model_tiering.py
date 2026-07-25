@@ -167,3 +167,77 @@ class TestSubdevReviewIsFableGated(TestCase):
     def test_cross_stream_protocol_carries_the_tier(self):
         txt = (ROOT / "skills" / "autopilot" / "SKILL.md").read_text()
         self.assertRegex(txt, r"(?i)review[^\n]*fable[^\n]*gate|fable[^\n]*gate[^\n]*review")
+
+
+class TestOpus5EraLineup(TestCase):
+    """Locks the 2026-07-25 cost-fix rewrite: Opus 5 is the new default main +
+    judgment tier (measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF
+    the price — https://www.anthropic.com/news/claude-opus-5), and Fable 5 is
+    now BANNED as the recommended MAIN-session model — closing the exact hole
+    ("the user's own manual `/model` Fable is not gated — that's their call")
+    that produced 76% of a measured $13,600 8-day burn across all 6 managed
+    boxes. History (2026-07-01/02/03, the Opus-4.8-circling valve, the
+    2026-07-08 SHAPE refinement, the 2026-07-24 sub-dev review tier) must
+    survive verbatim — this class only locks the NEW content."""
+
+    def test_main_session_still_the_users_choice_but_fable_is_flagged(self):
+        t = read("modules/core/model-awareness.md")
+        # the pre-existing anchor phrase must survive byte-for-byte
+        self.assertIn("MAIN interactive session runs whatever the user set via `/model`", t)
+        self.assertIn("Fable 5 is BANNED as its recommended default", t)
+        self.assertIn("say so plainly ONCE per session", t)
+        self.assertIn("recommend Opus 5", t)
+        self.assertIn("76% of a measured $13,600 8-day burn", t)
+        # the closed hole is cited verbatim so the fix is traceable
+        self.assertIn("the user's own manual `/model` Fable is not gated", t)
+
+    def test_opus_5_is_the_default_tier_with_cursorbench_citation(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("**Opus 5**", t)
+        self.assertIn("`claude-opus-5`", t)
+        self.assertNotIn("claude-opus-4-8", t)
+        self.assertIn("within 0.5% of Fable 5 on CursorBench 3.2", t)
+        self.assertIn("HALF the price", t)
+        self.assertIn("https://www.anthropic.com/news/claude-opus-5", t)
+
+    def test_thinking_defaults_and_fable_cannot_disable_it(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("Opus 5 ships thinking ON by default", t)
+        self.assertIn("a change from 4.8, where it was opt-in", t)
+        self.assertIn("Fable 5 cannot disable thinking at all", t)
+        self.assertIn("structurally higher than Opus", t)
+
+    def test_pricing_is_current(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("Fable 5 $10/$50", t)
+        self.assertIn("Opus 5 $5/$25", t)
+        self.assertIn("cache read $0.50, cache write $6.25 5-min / $10 1-hour", t)
+        self.assertIn("Sonnet 5 $2/$10", t)
+        self.assertIn("Haiku 4.5 $1/$5", t)
+
+    def test_ultracode_is_now_opt_in(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("Ultracode is opt-in, not automatic", t)
+        self.assertIn("claude-ultra", t)
+
+    def test_historical_incident_sections_survive_unchanged(self):
+        # July-2026 community reports about Opus 4.8 degradation are a dated
+        # historical record, NOT a stale current-tier reference — must stay.
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("community reports of Opus 4.8 degradation", t)
+        self.assertIn("no 4.8 model regression so far", t)
+        self.assertIn("2026-07-01 Fable-everywhere mode burned tokens brutally", t)
+
+    def test_shape_paragraph_cites_the_measured_burn(self):
+        t = read("modules/core/model-awareness.md")
+        # the existing SHAPE anchors must survive
+        self.assertIn("SHAPE — Fable escalation = ADVISOR, never worker", t)
+        self.assertIn("re-reads the full conversation context every turn", t)
+        # the new measured-evidence sentence closing the loop
+        self.assertIn("Fable running as MAIN (not advisor) was 76% of an $13,600 8-day burn", t)
+        self.assertIn("session-context-cost.md", t)
+
+    def test_header_says_opus_5(self):
+        t = read("modules/core/model-awareness.md")
+        self.assertIn("Model tiering — Opus 5 + Sonnet 5 default", t)
+        self.assertIn("Opus 5 / Fable 5 behavior (primary + escalation)", t)
