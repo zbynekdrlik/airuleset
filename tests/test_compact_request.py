@@ -154,6 +154,23 @@ CB_BUSY_CAP = ("● Baking…\n✳ Baking… (2m 30s · ↓ 4.1k tokens · esc t
 CB_DIALOG_CAP = ("● Claude asked:\n  · Ktorá možnosť?\n     1. A\n     2. B\n"
                  "  Tab/Arrow keys to navigate · Enter to select\n")
 CB_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
+# Issue #46 live incident: a separator-bounded box holding a draft, with a
+# never-seen-before chrome row (`⧉  <project>`) rendered below it. The old
+# glyph-enumeration peel stopped at that unrecognized row and mislabeled the
+# pane "busy"; structural detection (last pair of separator lines) resolves
+# the actual draft regardless of what renders below the box.
+CB_UNKNOWN_CHROME_DRAFT_CAP = (
+    "● Predošlá práca hotová.\n"
+    "──────────\n"
+    "❯ rozpisany draft text\n"
+    "──────────\n"
+    "⧉  upomienky-prehlad\n"
+    "  ctx ███░  caveman:lite\n")
+# The whole capture IS chrome — no boundary line exists under EITHER
+# strategy. Distinct from "busy" (a real boundary found, just not `❯`-shaped).
+CB_ALL_CHROME_NO_BOX_CAP = ("  ctx ███░  caveman:lite\n"
+                            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+                            "● main\n")
 
 
 class CompactFakeTmux:
@@ -232,6 +249,21 @@ class TestCompactTicketBoundary(unittest.TestCase):
         tmux, logs, path = self._go(CB_DRAFT_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_unknown_chrome_below_box_is_reported_as_draft_not_busy(self):
+        # #46 live incident (job 14 is one of the jobs the ticket names).
+        tmux, logs, path = self._go(CB_UNKNOWN_CHROME_DRAFT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_no_boundary_at_all_is_logged_as_no_input_line_not_busy(self):
+        tmux, logs, path = self._go(CB_ALL_CHROME_NO_BOX_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip no-input-line" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_open_dialog_is_skipped(self):

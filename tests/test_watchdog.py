@@ -417,6 +417,114 @@ class PaneAtIdlePrompt(unittest.TestCase):
         self.assertFalse(wd.pane_at_idle_prompt(None))
 
 
+class StructuralInputLineDetection(unittest.TestCase):
+    """Issue #46: the input box is found STRUCTURALLY (the last pair of
+    separator lines, with the box content between them) rather than by
+    enumerating known chrome glyphs below it. Enumeration is a dead end — any
+    UNRECOGNIZED line rendered below the box (a brand-new Claude Code UI
+    element) stops the old bottom-up scan early and the pane vanishes from
+    every keystroke job. Live incident (2026-07-25, dev2 marek-1:5.0, project
+    upomienky-prehlad): a `⧉  upomienky-prehlad` row rendered below the box
+    and job 12 logged `skip busy` forever, even though the session merely
+    held a draft. The glyph-based peel is kept as a FALLBACK for captures
+    that render the box borderless (most of this file's older fixtures)."""
+
+    # The live incident, reproduced: a real separator-bounded box holding a
+    # DRAFT, with the never-seen-before `⧉  <project>` chrome row below it.
+    UNKNOWN_CHROME_DRAFT_CAP = (
+        "● Predošlá práca hotová.\n"
+        "──────────\n"
+        "❯ rozpisany draft text\n"
+        "──────────\n"
+        "⧉  upomienky-prehlad\n"
+        "  ctx ███░  caveman:lite\n"
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+
+    # Same unknown chrome row, but the box is BARE (empty prompt) — must
+    # still resolve to a genuinely idle, empty input line.
+    UNKNOWN_CHROME_IDLE_CAP = (
+        "● Predošlá práca hotová.\n"
+        "──────────\n"
+        "❯  \n"
+        "──────────\n"
+        "⧉  upomienky-prehlad\n"
+        "  ctx ███░  caveman:lite\n")
+
+    # #36-style: a selected agent-strip row + its selector hint, but with NO
+    # separators at all — must still resolve via the glyph-based FALLBACK.
+    ISSUE36_STYLE_CAP = (
+        "❯ ● main\n"
+        "❯ \n"
+        "  ↑/↓ to select · Enter to view\n"
+        "  ctx ███░  caveman:lite\n")
+
+    # A line that matches NO known chrome shape today, and never will be
+    # enumerated — the whole point of structural detection: it must resolve
+    # correctly regardless of what Claude Code renders below the box.
+    NEVER_SEEN_CHROME_CAP = (
+        "● Predošlá práca hotová.\n"
+        "──────────\n"
+        "❯ \n"
+        "──────────\n"
+        "▶ brand-new-widget: nikdy predtym nevidena vec\n"
+        "  ctx ███░  caveman:lite\n")
+
+    # No separators anywhere — exercises the glyph-based fallback path
+    # directly (the pre-#46 behavior, unchanged).
+    NO_SEPARATOR_CAP = ("● Hotovo.\n❯ niečo napísané\n"
+                        "  ctx ███  caveman:lite\n  ⏵⏵ bypass permissions on\n")
+
+    # The whole capture IS chrome — no boundary line exists at all, under
+    # EITHER strategy. Distinct from "busy" (a real incident case: #46 part 1
+    # requires the callers to tell these apart).
+    ALL_CHROME_NO_BOX_CAP = ("  ctx ███░  caveman:lite\n"
+                             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+                             "● main\n")
+
+    def test_unknown_chrome_below_box_still_finds_the_draft(self):
+        self.assertEqual(wd._input_line_text(self.UNKNOWN_CHROME_DRAFT_CAP),
+                         "rozpisany draft text")
+        self.assertFalse(wd.pane_at_idle_prompt(self.UNKNOWN_CHROME_DRAFT_CAP))
+
+    def test_unknown_chrome_below_box_still_finds_bare_idle_prompt(self):
+        self.assertEqual(wd._input_line_text(self.UNKNOWN_CHROME_IDLE_CAP), "")
+        self.assertTrue(wd.pane_at_idle_prompt(self.UNKNOWN_CHROME_IDLE_CAP))
+
+    def test_issue36_style_with_no_separators_uses_fallback(self):
+        self.assertEqual(wd._input_line_text(self.ISSUE36_STYLE_CAP), "")
+        self.assertTrue(wd.pane_at_idle_prompt(self.ISSUE36_STYLE_CAP))
+
+    def test_never_before_seen_chrome_shape_still_resolves(self):
+        # THE point of structural detection: a chrome row that matches no
+        # enumerated pattern today (and never will be added to one) must
+        # still resolve correctly, because it never has to be recognized —
+        # it just has to be BELOW the box's own closing separator.
+        self.assertEqual(wd._input_line_text(self.NEVER_SEEN_CHROME_CAP), "")
+        self.assertTrue(wd.pane_at_idle_prompt(self.NEVER_SEEN_CHROME_CAP))
+
+    def test_no_separators_at_all_exercises_the_fallback(self):
+        self.assertEqual(wd._input_line_text(self.NO_SEPARATOR_CAP), "niečo napísané")
+        self.assertFalse(wd.pane_at_idle_prompt(self.NO_SEPARATOR_CAP))
+
+    def test_no_boundary_at_all_is_distinct_from_busy(self):
+        # Neither strategy finds a boundary line — genuinely different from
+        # a busy pane (where a boundary IS found, it's just not `❯`-shaped).
+        self.assertIsNone(wd._find_boundary_line(self.ALL_CHROME_NO_BOX_CAP))
+        self.assertIsNone(wd._input_line_text(self.ALL_CHROME_NO_BOX_CAP))
+        self.assertFalse(wd.pane_at_idle_prompt(self.ALL_CHROME_NO_BOX_CAP))
+
+    def test_classify_boundary_distinguishes_busy_from_no_input_line(self):
+        # `_classify_boundary` is what jobs 12/14/15 use to split their
+        # "skip busy" logging into the two genuinely different causes.
+        self.assertEqual(wd._classify_boundary(self.ALL_CHROME_NO_BOX_CAP),
+                         ("no-input-line", None))
+        self.assertEqual(wd._classify_boundary(
+            "● Baking…\n✳ Baking… (2m 30s · esc to interrupt)\n  ctx ███░\n"),
+            ("busy", None))
+        self.assertEqual(wd._classify_boundary(self.UNKNOWN_CHROME_DRAFT_CAP),
+                         ("input", "rozpisany draft text"))
+
+
 class PaneQuestionExcerpt(unittest.TestCase):
     """The job-2 "čaká na teba" ping must CARRY the question + options extracted from
     the pane — the user's explicit complaint (2026-07-04) was pings saying only that
@@ -1648,6 +1756,30 @@ class TestModelReconcile(unittest.TestCase):
         self.assertTrue(any("draft" in ln for ln in logs), logs)
         self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"], "draft")
 
+    def test_unknown_chrome_below_box_is_reported_as_draft_not_busy(self):
+        # THE #46 live incident: an unrecognized chrome row (`⧉  <project>`)
+        # below a separator-bounded box holding a draft must be classified
+        # by its ACTUAL content — "skip draft", never "skip busy" (which
+        # made the pane invisible to every keystroke job, mislabeled).
+        cap = StructuralInputLineDetection.UNKNOWN_CHROME_DRAFT_CAP
+        tmux, logs, state = self._go("claude-fable-5", cap)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"], "draft")
+
+    def test_no_boundary_at_all_is_logged_as_no_input_line_not_busy(self):
+        # A capture where NEITHER strategy can locate a boundary at all is a
+        # genuinely different situation from a busy pane — split logging so
+        # the real cause is visible instead of collapsing into "busy".
+        cap = StructuralInputLineDetection.ALL_CHROME_NO_BOX_CAP
+        tmux, logs, state = self._go("claude-fable-5", cap)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip no-input-line" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
+        self.assertEqual(state["modelswitch_pending"]["sess-abc"]["reason"],
+                         "no-input-line")
+
     def test_open_dialog_is_skipped(self):
         tmux, logs, state = self._go("claude-fable-5", MR_DIALOG_CAP)
         self.assertEqual(tmux.sent, [])
@@ -1942,6 +2074,25 @@ class TestCompactStaleContext(unittest.TestCase):
                                      initial_captured=MR_DRAFT_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("draft" in ln for ln in logs), logs)
+
+    def test_unknown_chrome_below_box_is_reported_as_draft_not_busy(self):
+        # #46 live incident, same class as job 12's.
+        cap = StructuralInputLineDetection.UNKNOWN_CHROME_DRAFT_CAP
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=cap)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
+
+    def test_no_boundary_at_all_is_logged_as_no_input_line_not_busy(self):
+        cap = StructuralInputLineDetection.ALL_CHROME_NO_BOX_CAP
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=cap)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip no-input-line" in ln for ln in logs), logs)
+        self.assertFalse(any("skip busy" in ln for ln in logs), logs)
 
     def test_open_dialog_is_skipped(self):
         tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
