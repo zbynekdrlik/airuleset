@@ -532,14 +532,22 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     with no separate history file). A host whose row is missing/None or
     carries an `"error"` key is excluded from the totals but still appears in
     `per_host` as `{"error": <msg>}` — one bad host (ssh timeout, fail2ban
-    ban, corrupt JSON) never drops the rest of the fleet."""
+    ban, corrupt JSON) never drops the rest of the fleet. A row that isn't
+    even a dict (a remote line that parsed to a bare number/list/string) is
+    reported as `"malformed row"` rather than crashing — never raises."""
     per_host = {}
     total_usd = 0.0
     total_msgs = 0
     weighted_ctx_sum = 0.0
     for name, row in (host_rows or {}).items():
-        if not row or row.get("error"):
-            per_host[name] = {"error": (row or {}).get("error") or "no data"}
+        if row is None or row == {}:
+            per_host[name] = {"error": "no data"}
+            continue
+        if not isinstance(row, dict):
+            per_host[name] = {"error": "malformed row"}
+            continue
+        if row.get("error"):
+            per_host[name] = {"error": row.get("error")}
             continue
         usd = float(row.get("usd", 0.0) or 0.0)
         msgs = int(row.get("msgs", 0) or 0)

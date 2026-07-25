@@ -2646,9 +2646,12 @@ def _fleet_remote_row(remote, timeout=15):
     if not lines:
         return {"error": "no snapshot data yet"}
     try:
-        return json.loads(lines[-1])
+        row = json.loads(lines[-1])
     except ValueError:
         return {"error": "invalid JSON from remote"}
+    if not isinstance(row, dict):
+        return {"error": "unexpected JSON shape from remote"}
+    return row
 
 
 def _watchdog_fleet_fetch(hosts=None):
