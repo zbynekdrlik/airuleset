@@ -551,6 +551,26 @@ class TestFleetMerge(unittest.TestCase):
         self.assertNotIn("weekly_pct", row)
         self.assertNotIn("resets_at", row)
 
+    def test_stale_flag_survives_the_merge_into_per_host(self):
+        # #60 — a host whose _fleet_remote_row detected a wrong-hour tail
+        # line comes in as {"error": ..., "stale": True}; merge must NOT
+        # drop the "stale" marker (it's how render_fleet tells "no sample
+        # yet" apart from a hard ssh/JSON failure).
+        row = burn.merge_fleet_row("t", {
+            "dev1": _host_row(1.0, 10, 100000),
+            "gk": {"error": "no sample for hour 123 (latest 2026-07-25T16:00:00+00:00)",
+                  "stale": True},
+        })
+        self.assertEqual(row["per_host"]["gk"],
+                         {"error": "no sample for hour 123 (latest 2026-07-25T16:00:00+00:00)",
+                          "stale": True})
+        self.assertEqual(row["total_usd"], 1.0)
+
+    def test_non_stale_error_does_not_gain_a_stale_key(self):
+        row = burn.merge_fleet_row("t", {"gk": {"error": "ssh timeout"}})
+        self.assertEqual(row["per_host"]["gk"], {"error": "ssh timeout"})
+        self.assertNotIn("stale", row["per_host"]["gk"])
+
 
 class TestFleetPathAndIO(unittest.TestCase):
     def test_load_fleet_missing_file_is_empty(self):
@@ -631,6 +651,39 @@ class TestFleetTrend(unittest.TestCase):
         ]
         trend = burn.fleet_trend(rows)
         self.assertIsNone(trend["by_host"]["dev1"]["latest"])
+        # #60 — the host set changed (dev1 valid -> dev1 error), so the
+        # TOTAL must refuse to compare, even though by_host still degrades
+        # gracefully per-host.
+        self.assertFalse(trend["total"]["comparable"])
+
+    def test_total_comparable_when_host_set_matches_across_hours(self):
+        rows = [
+            self._row("t0", 5.0, {"dev1": _host_row(2.0, 5, 1000), "dev2": _host_row(3.0, 5, 1000)}),
+            self._row("t1", 4.0, {"dev1": _host_row(1.0, 5, 1000), "dev2": _host_row(3.0, 5, 1000)}),
+        ]
+        trend = burn.fleet_trend(rows)
+        self.assertTrue(trend["total"]["comparable"])
+        self.assertEqual(trend["total"]["prev_mean"], 5.0)
+        self.assertEqual(trend["total"]["latest"], 4.0)
+
+    def test_total_not_comparable_when_latest_host_set_differs_from_all_prev(self):
+        # #60 core regression scenario: 2 prior hours both had dev1+dev2
+        # valid; the latest hour has dev2 gone stale -- the total must NOT
+        # be compared against those 2 hours (that produced the live false
+        # "-39.8% (lepšie)" trend).
+        rows = [
+            self._row("t0", 5.0, {"dev1": _host_row(2.0, 5, 1000), "dev2": _host_row(3.0, 5, 1000)}),
+            self._row("t1", 5.0, {"dev1": _host_row(2.0, 5, 1000), "dev2": _host_row(3.0, 5, 1000)}),
+            self._row("t2", 2.0, {"dev1": _host_row(2.0, 5, 1000),
+                                  "dev2": {"error": "no sample for hour X", "stale": True}}),
+        ]
+        trend = burn.fleet_trend(rows, n_prev=3)
+        self.assertFalse(trend["total"]["comparable"])
+        self.assertIn("neporovnat", trend["total"]["reason"])
+        self.assertIsNone(trend["total"]["prev_mean"])
+        # by_host for dev1 (present + valid every hour) still works normally
+        self.assertEqual(trend["by_host"]["dev1"]["latest"], 2.0)
+        self.assertEqual(trend["by_host"]["dev1"]["prev_mean"], 2.0)
 
 
 class TestObservedPctPerDay(unittest.TestCase):
@@ -756,6 +809,41 @@ class TestRenderFleet(unittest.TestCase):
         self.assertIn("verdikt:", out)
         self.assertIn("cache", out)
 
+    def test_stale_host_renders_as_dash_not_err_or_dollar(self):
+        # #60 — a stale (wrong-hour) host must render distinctly from BOTH a
+        # hard collection error (ERR) and a genuine $0.00 sample.
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 1.0, "total_msgs": 10,
+                "weighted_avg_ctx": 100000, "per_host": {
+                    "dev1": _host_row(1.0, 10, 100000),
+                    "gk": {"error": "no sample for hour 123 (latest ...)", "stale": True},
+                }}]
+        out = burn.render_fleet(rows)
+        self.assertIn("gk=—", out)
+        self.assertNotIn("gk=ERR", out)
+        self.assertNotIn("gk=$0.00", out)
+
+    def test_row_note_shows_how_many_hosts_have_a_sample(self):
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 1.0, "total_msgs": 10,
+                "weighted_avg_ctx": 100000, "per_host": {
+                    "dev1": _host_row(1.0, 10, 100000),
+                    "gk": {"error": "no sample for hour 123", "stale": True},
+                    "montalu": {"error": "ssh timeout"},
+                }}]
+        out = burn.render_fleet(rows)
+        self.assertIn("1/3", out)
+        self.assertIn("hostov ma vzorku", out)
+
+    def test_trend_not_comparable_prints_reason_not_percent(self):
+        rows = [
+            {"ts": "t0", "total_usd": 5.0, "total_msgs": 10, "weighted_avg_ctx": 1000,
+             "per_host": {"dev1": _host_row(2.0, 5, 1000), "dev2": _host_row(3.0, 5, 1000)}},
+            {"ts": "t1", "total_usd": 2.0, "total_msgs": 5, "weighted_avg_ctx": 1000,
+             "per_host": {"dev1": _host_row(2.0, 5, 1000),
+                          "dev2": {"error": "stale", "stale": True}}},
+        ]
+        out = burn.render_fleet(rows)
+        self.assertIn("neporovnat", out)
+
 
 class TestCmdBurnFleet(unittest.TestCase):
     def _with_home(self, fn):
@@ -851,25 +939,99 @@ class TestFleetRemoteCmd(unittest.TestCase):
         self.assertIn("newlevel@5.6.7.8", cmd)
 
 
+class TestHourBucketOfTs(unittest.TestCase):
+    def test_same_utc_instant_different_offsets_bucket_equal(self):
+        # #60 — gk writes +00:00, dev1 +02:00; 18:00+02:00 IS 16:00 UTC.
+        a = airuleset._hour_bucket_of_ts("2026-07-25T16:00:00+00:00")
+        b = airuleset._hour_bucket_of_ts("2026-07-25T18:00:00+02:00")
+        self.assertEqual(a, b)
+
+    def test_same_hour_digits_different_offset_is_a_different_bucket(self):
+        # same raw "17:00" digits, but +00:00 vs +02:00 are different UTC
+        # instants -- a naive string compare would wrongly treat these equal.
+        a = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+00:00")
+        b = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+02:00")
+        self.assertNotEqual(a, b)
+
+    def test_unparsable_or_missing_is_none(self):
+        self.assertIsNone(airuleset._hour_bucket_of_ts("not-a-date"))
+        self.assertIsNone(airuleset._hour_bucket_of_ts(None))
+
+
 class TestFleetRemoteRow(unittest.TestCase):
     REMOTE = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
               "repo_path": "~/devel/airuleset"}
 
-    def test_parses_the_tailed_line(self):
-        row = {"ts": "2026-07-25T17:00:00+00:00", "host": "dev2", "usd": 1.5,
+    def test_parses_the_tailed_line_when_hour_matches(self):
+        ts = "2026-07-25T17:00:00+00:00"
+        row = {"ts": ts, "host": "dev2", "usd": 1.5,
               "msgs": 3, "avg_ctx": 2000, "by_model": {}}
+        want = airuleset._hour_bucket_of_ts(ts)
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
                                         stderr="")):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
         self.assertEqual(got["usd"], 1.5)
+        self.assertNotIn("error", got)
+
+    def test_mismatched_hour_becomes_stale_error_not_silent_fallback(self):
+        # #60 core regression: the remote's LAST line is real JSON, but from
+        # an EARLIER hour (its own job 13 hasn't written this hour's row
+        # yet) -- must error, NEVER silently return the stale row's data.
+        row = {"ts": "2026-07-25T16:00:00+00:00", "host": "dev2", "usd": 999.0,
+              "msgs": 1, "avg_ctx": 1, "by_model": {}}
+        want = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+00:00")
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertIn("error", got)
+        self.assertTrue(got.get("stale"))
+        self.assertNotIn("usd", got)
+
+    def test_timezone_offset_is_converted_to_utc_before_comparing(self):
+        # gk writes +00:00, dev1 +02:00 (live #60 evidence) -- 18:00+02:00 IS
+        # 16:00 UTC, so it must MATCH an hour bucket requested for 16:00 UTC
+        # even though the raw hour-of-day digits ("18" vs "16") differ.
+        row = {"ts": "2026-07-25T18:00:00+02:00", "host": "dev1", "usd": 2.0,
+              "msgs": 1, "avg_ctx": 1, "by_model": {}}
+        want = airuleset._hour_bucket_of_ts("2026-07-25T16:00:00+00:00")
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["usd"], 2.0)
+        self.assertNotIn("error", got)
+
+    def test_timezone_offset_that_lands_in_different_utc_hour_still_errors(self):
+        # same raw hour-of-day digits ("17") but a DIFFERENT offset -> a
+        # DIFFERENT UTC instant -- must NOT match.
+        row = {"ts": "2026-07-25T17:00:00+02:00", "host": "dev1", "usd": 3.0,
+              "msgs": 1, "avg_ctx": 1, "by_model": {}}
+        want = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+00:00")
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertIn("error", got)
+        self.assertTrue(got.get("stale"))
+
+    def test_missing_ts_becomes_stale_error(self):
+        row = {"host": "dev2", "usd": 1.0, "msgs": 1, "avg_ctx": 1}
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, 123456)
+        self.assertIn("error", got)
+        self.assertTrue(got.get("stale"))
 
     def test_nonzero_exit_becomes_error(self):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=255, stdout="", stderr="Connection refused")):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
         self.assertIn("Connection refused", got["error"])
+        self.assertNotIn("stale", got)
 
     def test_timeout_becomes_error_not_raise(self):
         import subprocess as sp
@@ -877,25 +1039,25 @@ class TestFleetRemoteRow(unittest.TestCase):
         def raise_timeout(*a, **k):
             raise sp.TimeoutExpired(cmd="ssh", timeout=15)
         with m.patch("subprocess.run", side_effect=raise_timeout):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
 
     def test_empty_output_becomes_error(self):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=0, stdout="", stderr="")):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
 
     def test_invalid_json_becomes_error(self):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=0, stdout="NOT JSON\n", stderr="")):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
 
     def test_non_dict_json_becomes_error(self):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=0, stdout="42\n", stderr="")):
-            got = airuleset._fleet_remote_row(self.REMOTE)
+            got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
 
 
@@ -905,15 +1067,17 @@ class TestWatchdogFleetFetch(unittest.TestCase):
             {"name": "dev2", "host": "5.6.7.8", "user": "newlevel", "repo_path": "~"},
             {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper", "repo_path": "~"},
         ]
+        want = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+00:00")
 
         def fake_run(cmd, **kwargs):
             if "5.6.7.8" in " ".join(cmd):
                 return m.Mock(returncode=0,
-                             stdout=json.dumps({"usd": 1.0, "msgs": 1, "avg_ctx": 100}) + "\n",
+                             stdout=json.dumps({"ts": "2026-07-25T17:00:00+00:00",
+                                               "usd": 1.0, "msgs": 1, "avg_ctx": 100}) + "\n",
                              stderr="")
             return m.Mock(returncode=255, stdout="", stderr="Connection refused")
         with m.patch("subprocess.run", side_effect=fake_run):
-            got = airuleset._watchdog_fleet_fetch(hosts)
+            got = airuleset._watchdog_fleet_fetch(hosts, want)
         self.assertEqual(got["dev2"]["usd"], 1.0)
         self.assertIn("error", got["gatekeeper"])
 
@@ -922,6 +1086,18 @@ class TestWatchdogFleetFetch(unittest.TestCase):
                     return_value=m.Mock(returncode=255, stdout="", stderr="down")):
             got = airuleset._watchdog_fleet_fetch()
         self.assertEqual(set(got.keys()), {h["name"] for h in airuleset.REMOTE_HOSTS})
+
+    def test_want_hour_bucket_defaults_to_current_utc_hour_when_not_given(self):
+        # exercise the "no want_hour_bucket given" default path directly:
+        # a row stamped at exactly "now" must round-trip as fresh, proving
+        # the default is a real, current UTC hour bucket (not e.g. always 0).
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        row = {"ts": now_iso, "usd": 1.0, "msgs": 1, "avg_ctx": 1}
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n", stderr="")):
+            got = airuleset._watchdog_fleet_fetch(
+                [{"name": "dev2", "host": "x", "user": "y"}])
+        self.assertNotIn("error", got["dev2"])
 
 
 if __name__ == "__main__":

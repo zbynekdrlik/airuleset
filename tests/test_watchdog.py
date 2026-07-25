@@ -2346,7 +2346,12 @@ class TestBurnSnapshotJob(unittest.TestCase):
         transcripts.mkdir()
         snap_path = Path(tmp) / "snapshots.jsonl"
         state = {}
-        now = time.time()
+        # #59 -- FIXED timestamp, not time.time(): a real wall-clock `now`
+        # within the last 30s of an hour makes `now + 30` land in the NEXT
+        # hour bucket, spuriously failing this "same hour = noop" assertion
+        # whenever a test run happens to straddle the boundary.
+        now = datetime.datetime(2026, 7, 25, 19, 30, 0,
+                                tzinfo=datetime.timezone.utc).timestamp()
         wd.burn_snapshot_job(now, state, snapshot_path=snap_path,
                              transcripts_root=str(transcripts), host="dev1")
         logs2 = wd.burn_snapshot_job(now + 30, state, snapshot_path=snap_path,
@@ -2518,6 +2523,16 @@ def _snap_row(ts, host, usd, msgs, avg_ctx):
            "usd": usd, "msgs": msgs, "avg_ctx": avg_ctx, "by_model": {}}
 
 
+def _fleet_now(hour=20, minute=30):
+    """FIXED (never wall-clock) timestamp for fleet-burn-job tests, safely
+    past the `FLEET_BURN_DELAY_MINUTES` (5) HH:05 gate (#60 point 4) and far
+    from any hour boundary — #59: a real `time.time()` here straddles both
+    the hour-boundary noop tests AND (since #60) the delay gate depending on
+    the wall-clock minute when CI happens to run."""
+    return datetime.datetime(2026, 7, 25, hour, minute, 0,
+                             tzinfo=datetime.timezone.utc).timestamp()
+
+
 class TestFleetBurnJob(unittest.TestCase):
     def test_writes_once_and_updates_state_guard(self):
         tmp = tempfile_mkdtemp_cleanup(self)
@@ -2526,10 +2541,10 @@ class TestFleetBurnJob(unittest.TestCase):
         with open(local_snap, "w") as f:
             f.write(json.dumps(_snap_row("2026-07-25T16:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
         state = {}
-        now = time.time()
+        now = _fleet_now()
         hosts = [{"name": "dev2", "host": "5.6.7.8", "user": "newlevel"}]
 
-        def fetch(hs):
+        def fetch(hs, hb):
             return {"dev2": {"usd": 2.0, "msgs": 3, "avg_ctx": 500, "by_model": {}}}
         logs = wd.fleet_burn_job(now, state, hosts, lambda *a, **k: None,
                                  fetch=fetch, local_snapshot_path=local_snap,
@@ -2548,11 +2563,11 @@ class TestFleetBurnJob(unittest.TestCase):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         state = {}
-        now = time.time()
+        now = _fleet_now()
         wd.fleet_burn_job(now, state, [], lambda *a, **k: None,
-                          fetch=lambda hs: {}, fleet_path=fleet_path)
+                          fetch=lambda hs, hb: {}, fleet_path=fleet_path)
         logs2 = wd.fleet_burn_job(now + 30, state, [], lambda *a, **k: None,
-                                  fetch=lambda hs: {}, fleet_path=fleet_path)
+                                  fetch=lambda hs, hb: {}, fleet_path=fleet_path)
         self.assertEqual(logs2, [])
         lines = fleet_path.read_text().strip().splitlines()
         self.assertEqual(len(lines), 1, "must write at most once per hour")
@@ -2561,11 +2576,11 @@ class TestFleetBurnJob(unittest.TestCase):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         state = {}
-        now = time.time()
+        now = _fleet_now()
         wd.fleet_burn_job(now, state, [], lambda *a, **k: None,
-                          fetch=lambda hs: {}, fleet_path=fleet_path)
+                          fetch=lambda hs, hb: {}, fleet_path=fleet_path)
         wd.fleet_burn_job(now + 3600, state, [], lambda *a, **k: None,
-                          fetch=lambda hs: {}, fleet_path=fleet_path)
+                          fetch=lambda hs, hb: {}, fleet_path=fleet_path)
         lines = fleet_path.read_text().strip().splitlines()
         self.assertEqual(len(lines), 2)
 
@@ -2573,8 +2588,8 @@ class TestFleetBurnJob(unittest.TestCase):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         state = {}
-        logs = wd.fleet_burn_job(time.time(), state, [], lambda *a, **k: None,
-                                 fetch=lambda hs: {}, fleet_path=fleet_path, dry_run=True)
+        logs = wd.fleet_burn_job(_fleet_now(), state, [], lambda *a, **k: None,
+                                 fetch=lambda hs, hb: {}, fleet_path=fleet_path, dry_run=True)
         self.assertFalse(fleet_path.exists())
         self.assertEqual(state, {})
         self.assertTrue(any("dry-run" in ln for ln in logs), logs)
@@ -2586,9 +2601,9 @@ class TestFleetBurnJob(unittest.TestCase):
         with open(local_snap, "w") as f:
             f.write(json.dumps(_snap_row("2026-07-25T16:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
 
-        def raising_fetch(hs):
+        def raising_fetch(hs, hb):
             raise RuntimeError("boom")
-        logs = wd.fleet_burn_job(time.time(), {}, [{"name": "dev2"}], lambda *a, **k: None,
+        logs = wd.fleet_burn_job(_fleet_now(), {}, [{"name": "dev2"}], lambda *a, **k: None,
                                  fetch=raising_fetch, local_snapshot_path=local_snap,
                                  fleet_path=fleet_path)
         self.assertTrue(fleet_path.exists())
@@ -2601,8 +2616,8 @@ class TestFleetBurnJob(unittest.TestCase):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         missing_local = Path(tmp) / "no-such-snapshots.jsonl"
-        wd.fleet_burn_job(time.time(), {}, [{"name": "dev2"}], lambda *a, **k: None,
-                          fetch=lambda hs: {"dev2": {"usd": 1.0, "msgs": 1, "avg_ctx": 1}},
+        wd.fleet_burn_job(_fleet_now(), {}, [{"name": "dev2"}], lambda *a, **k: None,
+                          fetch=lambda hs, hb: {"dev2": {"usd": 1.0, "msgs": 1, "avg_ctx": 1}},
                           local_snapshot_path=missing_local, fleet_path=fleet_path)
         row = json.loads(fleet_path.read_text().strip().splitlines()[0])
         self.assertEqual(row["total_usd"], 1.0)
@@ -2611,7 +2626,7 @@ class TestFleetBurnJob(unittest.TestCase):
     def test_budget_alert_fires_once_deduped_per_hour(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
-        now = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc).timestamp()
+        now = datetime.datetime(2026, 7, 25, 12, 30, tzinfo=datetime.timezone.utc).timestamp()
         # seed a fleet.jsonl row 24h earlier so observed_pct_per_day has 2 samples
         with open(fleet_path, "w") as f:
             f.write(json.dumps({
@@ -2625,7 +2640,7 @@ class TestFleetBurnJob(unittest.TestCase):
                               "resets_at": "2026-08-01T00:00:00+00:00"}]}
         sent = []
         wd.fleet_burn_job(now, {}, [], lambda body, **k: sent.append((body, k)) or "sent",
-                          fetch=lambda hs: {}, fleet_path=fleet_path, usage_cache=cache)
+                          fetch=lambda hs, hb: {}, fleet_path=fleet_path, usage_cache=cache)
         self.assertEqual(len(sent), 1, sent)
         self.assertIn("prekracuje", sent[0][0])
         self.assertTrue(sent[0][1]["dedup_key"].startswith("fleet-burn-budget:"))
@@ -2633,7 +2648,7 @@ class TestFleetBurnJob(unittest.TestCase):
     def test_no_alert_when_within_budget(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
-        now = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc).timestamp()
+        now = datetime.datetime(2026, 7, 25, 12, 30, tzinfo=datetime.timezone.utc).timestamp()
         with open(fleet_path, "w") as f:
             f.write(json.dumps({
                 "ts": "2026-07-24T12:00:00+00:00", "per_host": {}, "total_usd": 0.0,
@@ -2644,8 +2659,53 @@ class TestFleetBurnJob(unittest.TestCase):
                               "resets_at": "2026-08-01T00:00:00+00:00"}]}
         sent = []
         wd.fleet_burn_job(now, {}, [], lambda body, **k: sent.append((body, k)) or "sent",
-                          fetch=lambda hs: {}, fleet_path=fleet_path, usage_cache=cache)
+                          fetch=lambda hs, hb: {}, fleet_path=fleet_path, usage_cache=cache)
         self.assertEqual(sent, [])
+
+    def test_too_early_in_hour_is_a_noop_and_does_not_claim(self):
+        # #60 point 4 -- at HH:02 (before FLEET_BURN_DELAY_MINUTES=5) the job
+        # must not collect/write/claim the hour at all, so the NEXT sweep
+        # (60s later, still within the delay window or past it) can retry.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        state = {}
+        now = datetime.datetime(2026, 7, 25, 20, 2, 0,
+                                tzinfo=datetime.timezone.utc).timestamp()
+        logs = wd.fleet_burn_job(now, state, [], lambda *a, **k: None,
+                                 fetch=lambda hs, hb: {}, fleet_path=fleet_path)
+        self.assertEqual(logs, [])
+        self.assertFalse(fleet_path.exists())
+        self.assertNotIn("fleet_burn_hour", state)
+
+    def test_at_delay_boundary_minute_proceeds_normally(self):
+        # exactly HH:05 -- the gate is `< FLEET_BURN_DELAY_MINUTES`, so this
+        # minute must NOT be held back.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        state = {}
+        now = datetime.datetime(2026, 7, 25, 20, 5, 0,
+                                tzinfo=datetime.timezone.utc).timestamp()
+        logs = wd.fleet_burn_job(now, state, [], lambda *a, **k: None,
+                                 fetch=lambda hs, hb: {}, fleet_path=fleet_path)
+        self.assertTrue(fleet_path.exists())
+        self.assertIn("fleet_burn_hour", state)
+        self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
+
+    def test_fetch_receives_the_same_hour_bucket_the_job_uses_for_its_own_guard(self):
+        # #60 -- the injected fetch must be hour-matched against THIS job's
+        # own epoch-hour bucket, not called blind, so _fleet_remote_row can
+        # reject a stale remote row for the SAME hour this job is collecting.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        now = _fleet_now()
+        received = []
+
+        def fetch(hs, hb):
+            received.append(hb)
+            return {}
+        wd.fleet_burn_job(now, {}, [], lambda *a, **k: None,
+                          fetch=fetch, fleet_path=fleet_path)
+        self.assertEqual(received, [int(now // 3600)])
 
 
 class RunOnceFleetWiring(unittest.TestCase):
@@ -2676,11 +2736,11 @@ class RunOnceFleetWiring(unittest.TestCase):
 
         def fake_run(argv, timeout=8):
             return ""
-        logs = wd.run_once(now=time.time(), dry_run=False, run=fake_run,
+        logs = wd.run_once(now=_fleet_now(), dry_run=False, run=fake_run,
                            send_fn=lambda *a, **k: None,
                            projects_dir=proj, state_path=state_path,
                            pending_prefix=str(Path(tmp) / "pending-"),
-                           fleet_fetch=lambda hs: {}, fleet_hosts=[],
+                           fleet_fetch=lambda hs, hb: {}, fleet_hosts=[],
                            fleet_path=fleet_path)
         self.assertTrue(fleet_path.exists())
         self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
@@ -2692,12 +2752,12 @@ class RunOnceFleetWiring(unittest.TestCase):
         state_path = Path(tmp) / "state.json"
         fleet_path = Path(tmp) / "fleet.jsonl"
 
-        def raising_fetch(hs):
+        def raising_fetch(hs, hb):
             raise RuntimeError("ssh exploded")
 
         def fake_run(argv, timeout=8):
             return ""
-        logs = wd.run_once(now=time.time(), dry_run=False, run=fake_run,
+        logs = wd.run_once(now=_fleet_now(), dry_run=False, run=fake_run,
                            send_fn=lambda *a, **k: None,
                            projects_dir=proj, state_path=state_path,
                            pending_prefix=str(Path(tmp) / "pending-"),
