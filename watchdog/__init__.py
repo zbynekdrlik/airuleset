@@ -2936,8 +2936,9 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
 # `_pane_location`) rather than a parallel chrome-detector.
 # --------------------------------------------------------------------------- #
 
-MODEL_SWITCH_DIALOG_WAIT_S = 2      # let the "Switch model?" confirm dialog render
-MODEL_SWITCH_APPLY_WAIT_S = 5       # let the switch apply before checking confirmation
+MODEL_SWITCH_DIALOG_WAIT_S = 2       # let the "Switch model?" confirm dialog render
+MODEL_SWITCH_APPLY_POLL_S = 1        # poll interval while waiting for the confirmation text
+MODEL_SWITCH_APPLY_MAX_POLLS = 8     # ~8s total budget — see the note on why it's a POLL below
 
 
 def _reconcile_candidate_panes(run):
@@ -3044,9 +3045,24 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
         run(["tmux", "send-keys", "-t", pid, "Enter"])
         sleep_fn(MODEL_SWITCH_DIALOG_WAIT_S)
         run(["tmux", "send-keys", "-t", pid, "Enter"])          # confirm — option 1 preselected
-        sleep_fn(MODEL_SWITCH_APPLY_WAIT_S)
-        conf = capture_pane(pid, run, lines=14) or ""
-        if ("Set model to %s" % target_model) in conf:
+        # POLL for the confirmation text rather than a single fixed sleep+check —
+        # live evidence on dev1 (a heavily loaded box running many concurrent
+        # sessions): a fixed 5s single-shot check false-"FAIL"ed even though the
+        # switch had genuinely applied a few seconds later, which released the
+        # dedup claim and caused a harmless-but-wasteful retry on the NEXT sweep
+        # (confirmed by the pane transcript showing `/model claude-opus-5[1m]`
+        # sent twice, ~60s apart, both eventually confirming). Polling breaks out
+        # the instant the text appears (fast on the common case) and tolerates a
+        # genuinely slow render under load (never a blind bigger timeout — see
+        # `no-timeout-band-aids.md`: this is a measured, evidence-based bound).
+        conf = ""
+        target_txt = "Set model to %s" % target_model
+        for _ in range(MODEL_SWITCH_APPLY_MAX_POLLS):
+            sleep_fn(MODEL_SWITCH_APPLY_POLL_S)
+            conf = capture_pane(pid, run, lines=14) or ""
+            if target_txt in conf:
+                break
+        if target_txt in conf:
             logs.append("OK (model-reconcile) %s %s -> %s" % (loc, model, target_model))
         else:
             del reconciled[sid]

@@ -1364,12 +1364,19 @@ class ModelReconcileFakeTmux:
     SECOND Enter (the confirmation keystroke) has been sent — mirroring the
     real sequence: type `/model X`, Enter, [dialog], Enter, [applied]."""
 
-    def __init__(self, panes, captured, confirm_captured=None, in_mode=False):
+    def __init__(self, panes, captured, confirm_captured=None, in_mode=False,
+                confirm_after_polls=1):
         self.panes = panes                 # [(pane_id, cmd, cwd)]
         self.captured = captured
         self.confirm_captured = captured if confirm_captured is None else confirm_captured
         self.in_mode = in_mode
+        # how many post-2nd-Enter capture-pane polls before the confirmation
+        # text actually shows up — 1 = confirms on the FIRST poll (the old
+        # default/behavior); a higher number simulates a slow render under
+        # load (the live dev1 finding this constant fix locks in).
+        self.confirm_after_polls = confirm_after_polls
         self.sent = []
+        self.capture_calls_after_confirm_enter = 0
         self._enters = 0
 
     def __call__(self, argv, timeout=8):
@@ -1386,7 +1393,12 @@ class ModelReconcileFakeTmux:
                 self._enters += 1
             return ""
         if "capture-pane" in j:
-            return self.confirm_captured if self._enters >= 2 else self.captured
+            if self._enters < 2:
+                return self.captured
+            self.capture_calls_after_confirm_enter += 1
+            if self.capture_calls_after_confirm_enter >= self.confirm_after_polls:
+                return self.confirm_captured
+            return self.captured
         return ""
 
     def typed_texts(self):
@@ -1460,12 +1472,14 @@ class TestModelReconcile(unittest.TestCase):
     PANE = "%9"
 
     def _go(self, model, captured, confirm_captured=None, state=None,
-           target_model=MR_TARGET, dry_run=False, in_mode=False):
+           target_model=MR_TARGET, dry_run=False, in_mode=False,
+           confirm_after_polls=1):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
         _seed_transcript(proj, self.CWD, "sess-abc", model)
         tmux = ModelReconcileFakeTmux([(self.PANE, "claude", self.CWD)],
-                                      captured, confirm_captured, in_mode=in_mode)
+                                      captured, confirm_captured, in_mode=in_mode,
+                                      confirm_after_polls=confirm_after_polls)
         state = {} if state is None else state
         logs = wd.model_reconcile(time.time(), tmux, state, target_model,
                                   dry_run=dry_run, projects_dir=proj,
@@ -1549,6 +1563,32 @@ class TestModelReconcile(unittest.TestCase):
         for cap in (MR_BUSY_CAP, MR_DRAFT_CAP, MR_DIALOG_CAP):
             t2, _, _ = self._go("claude-fable-5", cap)
             self.assertTrue(t2.no_consecutive_escapes())
+
+    def test_slow_confirmation_within_the_poll_budget_still_succeeds(self):
+        # live dev1 finding: on a heavily loaded box, the confirmation text
+        # can take several seconds to render — a single fixed-wait check
+        # false-"FAIL"ed a switch that had genuinely applied moments later,
+        # which released the dedup claim and caused a redundant (harmless
+        # but wasteful) retry on the NEXT sweep. Confirming the response
+        # lands within the poll budget (well under MAX_POLLS) must still
+        # be a real OK, not a false FAIL.
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_OK,
+                                     confirm_after_polls=wd.MODEL_SWITCH_APPLY_MAX_POLLS - 1)
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(state["modelswitch"]["sess-abc"])
+
+    def test_confirmation_that_never_lands_fails_after_a_bounded_number_of_polls(self):
+        # the poll must be BOUNDED — never an infinite/unbounded wait
+        # (no-timeout-band-aids.md) — and must still release the dedup
+        # claim for retry on a later sweep, same as the old single-shot FAIL.
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     confirm_captured=MR_CONFIRM_FAIL,
+                                     confirm_after_polls=10 ** 6)
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("modelswitch", {}))
+        self.assertEqual(tmux.capture_calls_after_confirm_enter,
+                         wd.MODEL_SWITCH_APPLY_MAX_POLLS)
 
 
 # --------------------------------------------------------------------------- #
