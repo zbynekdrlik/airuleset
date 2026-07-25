@@ -22,10 +22,14 @@ import sys
 import time
 from pathlib import Path
 
+import burn
+
 TICKETS_TTL_S = 120                 # refresh the open-issues count at most this often
 SPAWN_GUARD_S = 30                  # min seconds between background refresh spawns
 AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
 QUESTIONS_TTL_S = 24 * 3600         # mirror notify._QUESTIONS_TTL_S (map prune TTL)
+CTX_GREEN_MAX = 150_000             # context-cost segment colour thresholds
+CTX_YELLOW_MAX = 400_000            # (raw token count, not %)
 
 
 def _claude_dir(home=None):
@@ -141,6 +145,96 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
                     % (open_n, gk, skip_sfx))
         return "\033[38;5;75mIssues %d\033[0m%s" % (open_n, skip_sfx)
     return ""
+
+
+def _fmt_tokens(n):
+    """570000 -> '570K', 1500000 -> '1.5M', 999 -> '999'."""
+    n = int(n)
+    if n >= 1_000_000:
+        v = n / 1_000_000.0
+        s = ("%.1f" % v).rstrip("0").rstrip(".")
+        return s + "M"
+    if n >= 1000:
+        return "%dK" % round(n / 1000.0)
+    return str(n)
+
+
+def _tail_usage_from_transcript(path, max_bytes=200_000):
+    """Fallback source for context_cost_segment() when the statusline stdin
+    payload carries no `context_window.current_usage` (older Claude Code, or
+    a payload shape that dropped it): scan the LAST `max_bytes` of the
+    session transcript for the final `message.usage` entry and return its
+    (model, usage) pair. Bounded read so a huge transcript never blocks the
+    prompt. Returns (None, None) on any failure or if no usage line is
+    found."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()  # drop a partial line at the seek point
+            data = fh.read()
+    except OSError:
+        return None, None
+    model = usage = None
+    for line in data.decode("utf-8", "replace").splitlines():
+        if '"usage"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        msg = e.get("message") if isinstance(e, dict) else None
+        u = (msg or {}).get("usage") if isinstance(msg, dict) else None
+        if not u:
+            continue
+        model = (msg or {}).get("model")
+        usage = u
+    return model, usage
+
+
+def context_cost_segment(payload):
+    """'ctx <size> · ~$<cost>/ťah' — the CURRENT turn's context size + its
+    real dollar cost (2026-07-25 cost-fix package, #37). Source: the
+    statusline stdin payload's `context_window.current_usage` (the exact
+    token breakdown of the last billed API call) + `model.id`; falls back to
+    the transcript tail (see _tail_usage_from_transcript) when that's
+    missing. Priced via the SAME per-Mtok table `burn` uses. `ctx` is
+    cache_read + cache_creation tokens only (the dominant, resent-every-turn
+    cost) — colour-escalates on that RAW count: green <150K
+    (CTX_GREEN_MAX), yellow 150-400K, red >400K (CTX_YELLOW_MAX). Cheap and
+    non-blocking by construction: no network, no `gh` — the payload is
+    already in hand, and the fallback is one bounded local file read."""
+    if not isinstance(payload, dict):
+        return ""
+    model_id = ((payload.get("model") or {}).get("id")) or ""
+    cu = ((payload.get("context_window") or {}).get("current_usage")) or {}
+    if not cu:
+        tp = payload.get("transcript_path")
+        if not tp:
+            return ""
+        t_model, t_usage = _tail_usage_from_transcript(tp)
+        if not t_usage:
+            return ""
+        model_id = t_model or model_id
+        cu = t_usage
+    tr = burn.tier(model_id)
+    price = burn.PRICE.get(tr)
+    if price is None:
+        return ""
+    i = int(cu.get("input_tokens") or 0)
+    cw = int(cu.get("cache_creation_input_tokens") or 0)
+    cr = int(cu.get("cache_read_input_tokens") or 0)
+    o = int(cu.get("output_tokens") or 0)
+    ctx = cr + cw
+    usd = (i * price[0] + cw * price[1] + cr * price[2] + o * price[3]) / 1e6
+    if ctx < CTX_GREEN_MAX:
+        color = 40
+    elif ctx < CTX_YELLOW_MAX:
+        color = 220
+    else:
+        color = 196
+    return "\033[38;5;%dmctx %s · ~$%.2f/ťah\033[0m" % (color, _fmt_tokens(ctx), usd)
 
 
 def questions_segment(cwd, now=None, home=None):

@@ -47,6 +47,24 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # `/effort ultracode`. The user can still raise/lower per session with `/effort`.
 MANAGED_EFFORT_LEVEL = "xhigh"
 
+# Managed default MAIN-session model (2026-07-25 cost-fix package, #37):
+# **Opus 5** is now the default main + judgment tier (model-awareness.md) —
+# Opus 4.8's regression + Sonnet 5's coordinator gap that made Fable-as-main
+# a deliberate WORKAROUND are both gone now that Opus 5 shipped, so managed
+# boxes should default MAIN to Opus 5 instead of whatever a prior session
+# left in settings.json. Measured over 8 days across the 6 managed boxes:
+# Fable 5 accounted for 76% of all token spend ($10,350 of ~$13,600) —
+# gatekeeper $2,115, dev2 $2,027, montalu $1,392 — largely automated streams
+# still defaulting to Fable as MAIN rather than the gated advisor shape.
+# The `[1m]` suffix is a DELIBERATE part of the id, not a typo: it is how
+# Claude Code's own usage tracking keys the 1M-context variant (verified —
+# `lastModelUsage` entries in ~/.claude.json store ids exactly like
+# `claude-opus-4-8[1m]`, distinct from the bare `claude-opus-4-8` key) — kept
+# so this change does NOT also shrink the context window. The user relies on
+# the 1M window to avoid context-loss regressions; whether to reconsider that
+# is a SEPARATE decision for a later step, not bundled into this one.
+MANAGED_MODEL = "claude-opus-5[1m]"
+
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
 
 # ---------------------------------------------------------------------------
@@ -284,6 +302,10 @@ try:
     q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project · inde)
     if q:
         segs.append(q)
+    # --- session context/cost: 'ctx 570K · ~$0.57/tah' (2026-07-25, #37) ---
+    cc = statusbar.context_cost_segment(d)
+    if cc:
+        segs.append(cc)
 except Exception:
     pass
 if not segs:
@@ -543,11 +565,18 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       OVERRIDES an existing "fullscreen" value: the user wants keyboard scrollback
       on every managed box, always. Takes effect on the NEXT `claude` launch.
 
+    - `model = MANAGED_MODEL` (Opus 5[1m]) is the default MAIN-session model on
+      every managed box (2026-07-25 cost-fix package, #37) — see MANAGED_MODEL's
+      own comment for the measured evidence. Same unconditional-managed-default
+      treatment as effortLevel/disableAgentView/tui; the user can still switch
+      per session with `/model`.
+
     Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
     result["tui"] = "default"
+    result["model"] = MANAGED_MODEL
     return result
 
 
@@ -2405,6 +2434,80 @@ def cmd_fable_gate(args):
     sys.exit(0 if ok else 1)
 
 
+def _burn_remote_cmd(remote, days):
+    """Pure ssh-command builder for a remote `burn` collection — invokes that
+    box's OWN already-deployed `airuleset.py burn --json` (the box gets this
+    module from the ordinary `push` deploy; never scp'd separately, per
+    `deploy-from-clean-tree.md`). Split out from `_burn_remote` so the
+    command shape is unit-testable without a real network call."""
+    remote_cmd = f"cd {remote['repo_path']} && python3 airuleset.py burn --json --days {days}"
+    identity = remote.get("identity")
+    if identity:
+        return ["ssh", "-i", os.path.expanduser(identity),
+                "-o", "StrictHostKeyChecking=no",
+                f"{remote['user']}@{remote['host']}", remote_cmd]
+    return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
+            f"{remote['user']}@{remote['host']}", remote_cmd]
+
+
+def _burn_remote(remote, days):
+    """Collect one remote box's burn report over ssh. Fail-safe: any ssh
+    error, non-zero exit, or unparsable stdout prints a WARN to stderr and
+    returns None — one unreachable box never aborts the whole report."""
+    import subprocess
+    cmd = _burn_remote_cmd(remote, days)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        print(f"  WARN: burn collection failed for {remote['name']}: {e}", file=sys.stderr)
+        return None
+    if result.returncode != 0:
+        print(f"  WARN: burn collection failed for {remote['name']}: "
+              f"{result.stderr.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        print(f"  WARN: burn collection returned invalid JSON for {remote['name']}",
+              file=sys.stderr)
+        return None
+
+
+def cmd_burn(args):
+    """Token-spend report from local transcripts — the measurement behind the
+    2026-07-25 cost-fix package (Opus-5-default MANAGED_MODEL, this
+    diagnostic, the statusline context/cost segment): ~$13,600 across all 6
+    managed boxes over 8 days, 76% Fable 5 running as MAIN (not advisor), 92%
+    of that in input context. The local box is always included; `--host
+    <name>` (or `--host all`) also collects a remote box over ssh by
+    invoking ITS OWN deployed `airuleset.py burn --json` — never scp (the
+    clean-tree hook would block it anyway)."""
+    import burn
+    days = getattr(args, "days", None) or 7
+    reports = [burn.local_report(days=days)]
+    host_arg = getattr(args, "host", None)
+    if host_arg:
+        if host_arg == "all":
+            targets = REMOTE_HOSTS
+        else:
+            targets = [h for h in REMOTE_HOSTS if h["name"] == host_arg]
+            if not targets:
+                names = ", ".join(h["name"] for h in REMOTE_HOSTS)
+                print(f"ERROR: unknown --host '{host_arg}' — choices: {names}, all",
+                      file=sys.stderr)
+                sys.exit(1)
+        for remote in targets:
+            print(f"Collecting burn from {remote['name']}...", file=sys.stderr)
+            rep = _burn_remote(remote, days)
+            if rep:
+                reports.append(rep)
+    combined = burn.merge_reports(reports)
+    if getattr(args, "json", False):
+        print(json.dumps(combined, indent=1))
+    else:
+        print(burn.render_human(combined, days))
+
+
 # ---------------------------------------------------------------------------
 # autopilot-lock — cross-session serial-per-repo dispatch lock (issue #8)
 # ---------------------------------------------------------------------------
@@ -2805,6 +2908,18 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_burn = sub.add_parser(
+        "burn",
+        help="Token-spend report from local Claude Code transcripts — "
+             "by model / day / project")
+    p_burn.add_argument("--days", type=int, default=7,
+                        help="Lookback window in days (default 7)")
+    p_burn.add_argument("--json", action="store_true",
+                        help="Print the raw aggregated JSON instead of a table")
+    p_burn.add_argument("--host", default=None,
+                        help="Also collect a remote box by REMOTE_HOSTS name, "
+                             "or 'all' for every managed remote (over ssh)")
+
     p_up = sub.add_parser(
         "upload",
         help="Web upload URL for receiving a file FROM the user (never ask for scp)")
@@ -2857,6 +2972,7 @@ SUBCOMMANDS = {
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
     "fable-gate": cmd_fable_gate,
+    "burn": cmd_burn,
     "authority": cmd_authority,
     "upload": cmd_upload,
     "tickets-status": cmd_tickets_status,
