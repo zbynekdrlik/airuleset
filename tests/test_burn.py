@@ -753,13 +753,6 @@ class TestCmdBurnFleet(unittest.TestCase):
                 if old_home is not None:
                     os.environ["HOME"] = old_home
 
-    def test_fleet_flag_registered(self):
-        # parser wiring: --fleet/--hours must exist (build the real parser).
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="cmd")
-        # smoke: cmd_burn accepts a Namespace carrying fleet=True with no crash
-        self.assertTrue(callable(airuleset.cmd_burn))
-
     def test_fleet_with_no_data_prints_hint(self):
         def run():
             buf = io.StringIO()

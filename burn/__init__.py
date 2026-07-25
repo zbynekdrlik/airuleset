@@ -418,19 +418,28 @@ def _fmt_delta(before, after, lower_is_better=True):
     return "%+.1f%% (%s)" % (pct, arrow)
 
 
-def render_compare(results, window_hours=6):
+def render_compare(results, window_hours=6, fleet_results=None):
     """Slovak, terminal-readable before/after report — the user's automatic
     feedback loop: for every recorded change, mean $/h, avg context and
     msgs/h in the `window_hours` immediately before vs after it, with the
     delta and a lepšie/horšie direction on cost + context (lower is
     better; msgs/h is shown without a verdict — more messages isn't
-    inherently good or bad)."""
+    inherently good or bad).
+
+    `fleet_results` (optional, #55 point D) is the SAME `compare_changes()`
+    shape computed over the whole monitored fleet instead of just this host
+    (via `fleet_compare_rows()` + `compare_changes()` — no separate
+    before/after arithmetic). Matched to `results` by the change's `ts` (both
+    lists were built from the identical `changes` argument, so they carry the
+    same set of timestamps) — when found, an extra "Sada" block is printed
+    under that change's own before/after."""
     if not results:
         return ("airuleset burn --compare -- zatial nie su zaznamenane ziadne "
                 "zmeny. Pouzi `airuleset.py burn --mark \"<text>\"` po kazdej "
                 "zmene, ktoru chces takto sledovat.")
     lines = ["airuleset burn --compare -- pred/po pre kazdu zaznamenanu zmenu "
              "(okno %dh)" % window_hours, ""]
+    fleet_by_ts = {r["ts"]: r for r in (fleet_results or [])}
     for r in results:
         lines.append("Zmena: %s" % r["text"])
         lines.append("  Kedy: %s (host %s)" % (r["ts"], r["host"]))
@@ -444,5 +453,317 @@ def render_compare(results, window_hours=6):
             msgs_d = ("%+.1f%%" % msgs_pct) if msgs_pct is not None else "?"
             lines.append("  Zmena: $/h %s | ctx %s | msg/h %s"
                          % (usd_d, ctx_d, msgs_d))
+        fr = fleet_by_ts.get(r["ts"])
+        if fr:
+            fb, fa = fr["before"], fr["after"]
+            lines.append("  Sada (cela monitorovana sada):")
+            lines.append("    Pred: %s" % _fmt_window(fb))
+            lines.append("    Po:   %s" % _fmt_window(fa))
+            if fb["n"] and fa["n"]:
+                lines.append("    Zmena: $/h %s" % _fmt_delta(fb["usd_h"], fa["usd_h"]))
         lines.append("")
     return "\n".join(lines).rstrip()
+
+
+# --------------------------------------------------------------------------- #
+# #55 follow-up (2026-07-25) — FLEET monitoring. Job 13 above only ever
+# measured THIS box. The user's ask: "zacat aj v hodinovych intervaloch
+# vyhodnocovat stav spotreby tokenov cez monitorovanu sadu claude targetov" —
+# i.e. dev1, dev2, gatekeeper, and montalu/marek/david@subdev, merged into ONE
+# hourly view, with an automatic sustainability read against the weekly
+# token-usage cache and a budget-exceeded ping. The network/ssh collection
+# lives in airuleset.py (`_watchdog_fleet_fetch`, mirroring `_burn_remote`) —
+# everything HERE stays a pure function over already-collected data, per the
+# ticket's own testing note ("burn/ je cista funkcia nad datami").
+# --------------------------------------------------------------------------- #
+
+def fleet_path():
+    return burn_history_dir() / "fleet.jsonl"
+
+
+def load_fleet(path=None):
+    return _read_jsonl(path or fleet_path())
+
+
+def usage_cache_path():
+    """`~/.claude/airuleset-usage-cache.json` — the SAME file
+    `watchdog.write_usage_cache()` maintains (path string duplicated
+    deliberately: `burn` must never import `watchdog`, which already imports
+    `burn` — see `hourly_snapshot()`'s call from `watchdog.burn_snapshot_job`
+    — so importing the constant back would be circular). Resolved at CALL
+    time like every other path helper in this module."""
+    return Path.home() / ".claude" / "airuleset-usage-cache.json"
+
+
+def load_usage_cache(path=None):
+    """Best-effort read of the watchdog's usage cache; None on any
+    missing/corrupt file. Never raises."""
+    path = path or usage_cache_path()
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def shared_weekly_window(cache):
+    """(percent, resets_at) for the ACCOUNT-WIDE weekly window (model is
+    falsy — the per-model weekly windows, e.g. Fable's, are a DIFFERENT
+    number) — or None when no such window is present. Across multiple
+    matching entries takes the MAX percent, mirroring
+    `watchdog.fable_gate`'s own shared-window selection."""
+    best = None
+    for w in (cache or {}).get("windows") or []:
+        if w.get("group") != "weekly" or w.get("model"):
+            continue
+        pct = w.get("percent")
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            continue
+        if best is None or pct > best[0]:
+            best = (pct, w.get("resets_at"))
+    return best
+
+
+def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
+    """Pure merge of one collection cycle's per-host rows into the single
+    fleet.jsonl row shape: `{ts, per_host, total_usd, total_msgs,
+    weighted_avg_ctx}` (+ `weekly_pct`/`resets_at` when given — carried
+    forward hourly so `observed_pct_per_day()` gets a genuine time series
+    with no separate history file). A host whose row is missing/None or
+    carries an `"error"` key is excluded from the totals but still appears in
+    `per_host` as `{"error": <msg>}` — one bad host (ssh timeout, fail2ban
+    ban, corrupt JSON) never drops the rest of the fleet."""
+    per_host = {}
+    total_usd = 0.0
+    total_msgs = 0
+    weighted_ctx_sum = 0.0
+    for name, row in (host_rows or {}).items():
+        if not row or row.get("error"):
+            per_host[name] = {"error": (row or {}).get("error") or "no data"}
+            continue
+        usd = float(row.get("usd", 0.0) or 0.0)
+        msgs = int(row.get("msgs", 0) or 0)
+        avg_ctx = int(row.get("avg_ctx", 0) or 0)
+        per_host[name] = {"usd": round(usd, 4), "msgs": msgs, "avg_ctx": avg_ctx,
+                          "by_model": row.get("by_model") or {}}
+        total_usd += usd
+        total_msgs += msgs
+        weighted_ctx_sum += avg_ctx * msgs
+    out = {
+        "ts": ts,
+        "per_host": per_host,
+        "total_usd": round(total_usd, 4),
+        "total_msgs": total_msgs,
+        "weighted_avg_ctx": int(round(weighted_ctx_sum / total_msgs)) if total_msgs else 0,
+    }
+    if weekly_pct is not None:
+        out["weekly_pct"] = weekly_pct
+    if resets_at is not None:
+        out["resets_at"] = resets_at
+    return out
+
+
+def weekly_budget(cache, now=None):
+    """{'weekly_pct', 'resets_at', 'remaining_days', 'budget_pct_per_day'}
+    from the usage cache's shared weekly window — `budget_pct_per_day` is the
+    remaining allowance spread evenly over the remaining days (the rate that
+    would land at exactly 100% right at reset). None when no weekly window is
+    cached at all (fresh box, cache not yet written)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    wk = shared_weekly_window(cache)
+    if not wk:
+        return None
+    pct, resets_at = wk
+    reset_dt = _parse_ts(resets_at)
+    if reset_dt is None:
+        return {"weekly_pct": pct, "resets_at": resets_at,
+                "remaining_days": None, "budget_pct_per_day": None}
+    if reset_dt.tzinfo is None:
+        reset_dt = reset_dt.replace(tzinfo=datetime.timezone.utc)
+    remaining_days = max((reset_dt - now).total_seconds() / 86400.0, 0.0)
+    budget = ((100.0 - pct) / remaining_days) if remaining_days > 0 else None
+    return {"weekly_pct": pct, "resets_at": resets_at,
+            "remaining_days": round(remaining_days, 2),
+            "budget_pct_per_day": round(budget, 2) if budget is not None else None}
+
+
+def fleet_trend(rows, n_prev=3):
+    """Latest fleet row vs the mean of the up-to-`n_prev` rows immediately
+    before it — total AND per-host $ (lower is better, `_fmt_delta`'s
+    default). None when fewer than 2 rows exist (nothing to compare yet)."""
+    if len(rows) < 2:
+        return None
+    latest = rows[-1]
+    prev = rows[max(0, len(rows) - 1 - n_prev):-1]
+    if not prev:
+        return None
+
+    def _mean(vals):
+        vals = [v for v in vals if v is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    total_prev_mean = _mean(r.get("total_usd") for r in prev)
+    total_latest = latest.get("total_usd")
+    out = {
+        "total": {
+            "latest": total_latest, "prev_mean": total_prev_mean,
+            "delta": _fmt_delta(total_prev_mean, total_latest)
+                    if total_prev_mean is not None else "",
+        },
+        "by_host": {},
+    }
+    hosts = set()
+    for r in [latest] + prev:
+        hosts.update((r.get("per_host") or {}).keys())
+
+    def _usd_of(row, host):
+        ph = (row.get("per_host") or {}).get(host)
+        if not ph or "error" in ph:
+            return None
+        return ph.get("usd")
+
+    for h in hosts:
+        prev_mean = _mean(_usd_of(r, h) for r in prev)
+        latest_val = _usd_of(latest, h)
+        out["by_host"][h] = {
+            "latest": latest_val, "prev_mean": prev_mean,
+            "delta": _fmt_delta(prev_mean, latest_val)
+                    if (prev_mean is not None and latest_val is not None) else "",
+        }
+    return out
+
+
+def observed_pct_per_day(rows):
+    """Observed weekly-% consumption rate (%/day), from the OLDEST and NEWEST
+    fleet rows that carry a `weekly_pct` sample (each hourly collection
+    stamps the CURRENT usage-cache percent onto its own row — a genuine
+    hourly time series with no separate history file). None when fewer than
+    2 such samples exist yet, their timestamps don't parse, or they collapse
+    to the same instant."""
+    samples = [(r.get("ts"), r.get("weekly_pct")) for r in rows
+              if r.get("weekly_pct") is not None]
+    if len(samples) < 2:
+        return None
+    samples.sort(key=lambda s: (_parse_ts(s[0]) or datetime.datetime.min))
+    t0, p0 = samples[0]
+    t1, p1 = samples[-1]
+    d0, d1 = _parse_ts(t0), _parse_ts(t1)
+    if d0 is None or d1 is None:
+        return None
+    hours = (d1 - d0).total_seconds() / 3600.0
+    if hours <= 0:
+        return None
+    return (p1 - p0) / hours * 24.0
+
+
+def fleet_sustainability(rows, cache, now=None):
+    """Combine `weekly_budget()` + `observed_pct_per_day()` into one verdict:
+    'sedi' (observed pace <= budget), 'prekracuje rozpocet' (observed pace >
+    budget), or a Slovak explanation of why no verdict is possible yet
+    (no cache / not enough hourly samples)."""
+    budget = weekly_budget(cache, now=now)
+    if not budget:
+        return {"budget": None, "observed_pct_per_day": None,
+                "verdict": "chyba usage cache (este nie je zapisana)"}
+    observed = observed_pct_per_day(rows)
+    if observed is None:
+        return {"budget": budget, "observed_pct_per_day": None,
+                "verdict": "zatial nedostatok hodinovych vzoriek na odhad tempa"}
+    bpd = budget.get("budget_pct_per_day")
+    if bpd is None:
+        verdict = "neznamy rozpocet (chyba cas resetu)"
+    elif observed <= bpd:
+        verdict = "sedi"
+    else:
+        verdict = "prekracuje rozpocet"
+    return {"budget": budget, "observed_pct_per_day": round(observed, 2), "verdict": verdict}
+
+
+def fleet_budget_alert(rows, cache, now=None):
+    """None, or `{'message', 'top_host', 'top_model'}` when the observed
+    %/day pace exceeds the sustainable budget — the trigger for job 16's ONE
+    hourly deduped Discord ping (#55 point C: "tempo, ktore by vycerpalo
+    weekly pred resetom"). `top_host`/`top_model` are the latest row's
+    biggest $ contributors, named in the ping so the user knows where to
+    look."""
+    s = fleet_sustainability(rows, cache, now=now)
+    budget = s.get("budget")
+    observed = s.get("observed_pct_per_day")
+    if not budget or observed is None or budget.get("budget_pct_per_day") is None:
+        return None
+    if observed <= budget["budget_pct_per_day"]:
+        return None
+    latest = rows[-1] if rows else {}
+    per_host = latest.get("per_host") or {}
+    top_host, top_host_usd = None, -1.0
+    top_model, top_model_usd = None, -1.0
+    for h, v in per_host.items():
+        if "error" in v:
+            continue
+        if v.get("usd", 0.0) > top_host_usd:
+            top_host_usd, top_host = v.get("usd", 0.0), h
+        for model, usd in (v.get("by_model") or {}).items():
+            if usd > top_model_usd:
+                top_model_usd, top_model = usd, model
+    msg = ("⚠️ **Sada tokenov — tempo %.2f%%/den prekracuje rozpocet %.2f%%/den** "
+          "(tyzdenny limit %.0f%%, reset za %.1f dna). Najviac minul: %s%s."
+          % (observed, budget["budget_pct_per_day"], budget["weekly_pct"],
+             budget.get("remaining_days") or 0.0, top_host or "?",
+             (" (%s)" % top_model) if top_model else ""))
+    return {"message": msg, "top_host": top_host, "top_model": top_model}
+
+
+def fleet_compare_rows(fleet_rows):
+    """Normalize fleet.jsonl rows into the snapshot-shaped `{ts, usd,
+    avg_ctx, msgs}` `compare_changes()`/`_window_stats()` already understand
+    — reuses the SAME before/after windowing arithmetic for the whole-fleet
+    view (#55 point D), no duplicate logic."""
+    return [{"ts": r.get("ts"), "usd": r.get("total_usd", 0.0),
+             "avg_ctx": r.get("weighted_avg_ctx", 0), "msgs": r.get("total_msgs", 0)}
+            for r in fleet_rows]
+
+
+def render_fleet(rows, hours=24, cache=None, now=None):
+    """Slovak, terminal-readable fleet report (`airuleset.py burn --fleet`):
+    the last `hours` hourly rows (per host $ + total), the trend (latest vs
+    mean of the previous 3), and the sustainability verdict against the
+    weekly usage-cache budget."""
+    if not rows:
+        return ("airuleset burn --fleet -- zatial nie su zaznamenane ziadne "
+                "fleet snapshoty. Bezi len na koordinatorovi (dev1) — pockaj "
+                "aspon jednu hodinu po nasadeni #55.")
+    shown = rows[-hours:] if hours else rows
+    lines = ["airuleset burn --fleet -- monitorovana sada, poslednych %d "
+             "hodinovych vzoriek" % len(shown), ""]
+    for r in shown:
+        parts = []
+        for h, v in sorted((r.get("per_host") or {}).items()):
+            parts.append("%s=ERR" % h if "error" in v else "%s=$%.2f" % (h, v.get("usd", 0.0)))
+        lines.append("  %s  total=$%.2f  msgs=%d  ctx=%s  [%s]"
+                     % (r.get("ts", "?"), r.get("total_usd", 0.0), r.get("total_msgs", 0),
+                        _fmt_int(r.get("weighted_avg_ctx", 0)), ", ".join(parts)))
+    trend = fleet_trend(rows)
+    if trend:
+        lines.append("")
+        lines.append("  trend (posledna hodina vs priemer predoslych 3):")
+        t = trend["total"]
+        lines.append("    total: $%.2f (priemer $%.2f)  %s"
+                     % (t["latest"] or 0.0, t["prev_mean"] or 0.0, t["delta"]))
+        for h, v in sorted(trend["by_host"].items()):
+            if v["latest"] is None:
+                continue
+            lines.append("    %-16s $%.2f (priemer $%.2f)  %s"
+                         % (h, v["latest"], v["prev_mean"] or 0.0, v["delta"]))
+    sus = fleet_sustainability(rows, cache, now=now)
+    lines.append("")
+    lines.append("  udrzatelnost:")
+    b = sus.get("budget")
+    if b:
+        lines.append("    tyzdenny limit: %.0f%%  (reset za %.2f dna)"
+                     % (b["weekly_pct"], b["remaining_days"] or 0.0))
+        if b.get("budget_pct_per_day") is not None:
+            lines.append("    rozpocet: %.2f %%/den" % b["budget_pct_per_day"])
+    if sus.get("observed_pct_per_day") is not None:
+        lines.append("    aktualne tempo: %.2f %%/den" % sus["observed_pct_per_day"])
+    lines.append("    verdikt: %s" % sus.get("verdict", "?"))
+    return "\n".join(lines)

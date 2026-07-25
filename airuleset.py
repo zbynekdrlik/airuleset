@@ -2607,10 +2607,17 @@ def cmd_burn(args):
     loop (#37): `--mark` records that a change was made NOW (or at
     `--mark-ts <iso>` for backdating from a known event, e.g. a git commit
     timestamp) to `~/.claude/burn-history/changes.jsonl`; `--compare` reads
-    that alongside the watchdog's hourly `snapshots.jsonl` and prints, per
+    that alongside the watchdog's hourly `snapshots.jsonl` (AND, when
+    present, the fleet-wide `fleet.jsonl` — #55 point D) and prints, per
     change, the mean $/h, avg context and msgs/h in `--window` hours (default
     6) before vs after it — so the user never has to check anything himself,
-    the report just tells him whether a change made things better or worse."""
+    the report just tells him whether a change made things better or worse.
+
+    `--fleet [--hours N]` (#55) prints the monitored-fleet hourly report:
+    per-host + total $ for the last N hours (default 24), the trend (latest
+    hour vs mean of the previous 3), and a sustainability verdict against the
+    watchdog's weekly usage-cache budget. The fleet.jsonl feed is written by
+    watchdog job 16 (`fleet_burn_job`), coordinator-only (dev1)."""
     import burn
     if getattr(args, "mark", None):
         ts = None
@@ -2623,9 +2630,18 @@ def cmd_burn(args):
         return
     if getattr(args, "compare", False):
         window = getattr(args, "window", None) or 6
-        results = burn.compare_changes(burn.load_snapshots(), burn.load_changes(),
-                                       window_hours=window)
-        print(burn.render_compare(results, window_hours=window))
+        changes = burn.load_changes()
+        results = burn.compare_changes(burn.load_snapshots(), changes, window_hours=window)
+        fleet_rows = burn.load_fleet()
+        fleet_results = None
+        if fleet_rows:
+            fleet_results = burn.compare_changes(burn.fleet_compare_rows(fleet_rows),
+                                                 changes, window_hours=window)
+        print(burn.render_compare(results, window_hours=window, fleet_results=fleet_results))
+        return
+    if getattr(args, "fleet", False):
+        hours = getattr(args, "hours", None) or 24
+        print(burn.render_fleet(burn.load_fleet(), hours=hours, cache=burn.load_usage_cache()))
         return
     days = getattr(args, "days", None) or 7
     reports = [burn.local_report(days=days)]
@@ -3083,6 +3099,11 @@ def main():
                              "after each --mark'd change (--window hours each side)")
     p_burn.add_argument("--window", type=int, default=None,
                         help="--compare lookback/lookahead window in hours (default 6)")
+    p_burn.add_argument("--fleet", action="store_true",
+                        help="Print the monitored-fleet hourly report (#55) — "
+                             "per-host + total $, trend, sustainability verdict")
+    p_burn.add_argument("--hours", type=int, default=None,
+                        help="--fleet lookback window in hours (default 24)")
 
     p_up = sub.add_parser(
         "upload",
