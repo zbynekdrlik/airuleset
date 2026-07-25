@@ -5490,6 +5490,173 @@ class TestBlockDestructiveRemoteHook(TestCase):
         self.assertTrue(any("block-destructive-remote.sh" in c for c in cmds))
 
 
+class TestBlockSubdevSshMisuseHook(TestCase):
+    """hooks/block-subdev-ssh-misuse.sh (issue #51) — the subdev VPS was
+    fail2ban-banned TWICE in one day (2026-07-25) by ad-hoc ssh probes with
+    guessed identities (default key as newlevel@/root@, a bare `ssh subdev`
+    implying the shell user). The prose dev-rule did not stop a SECOND
+    occurrence the same day — this is the mechanical backstop. ALLOW-list
+    mirrors airuleset.py's REMOTE_HOSTS exactly: montalu@subdev (no identity
+    requirement), marek/david@subdev ONLY with the gatekeeper_access_ed25519
+    identity. Everything else — wrong/missing user, marek/david without the
+    key — is blocked. A non-subdev target (dev2, gatekeeper) is untouched."""
+
+    HOOK = "block-subdev-ssh-misuse.sh"
+
+    def _run(self, command, cwd=None, env_extra=None):
+        import shutil
+        d = cwd or tempfile.mkdtemp()
+        if cwd is None:
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=d, timeout=30, env=env)
+
+    # --- blocked shapes ------------------------------------------------
+
+    def test_blocks_newlevel_at_subdev(self):
+        r = self._run('ssh newlevel@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("newlevel", r.stderr)
+
+    def test_blocks_root_at_subdev_ip(self):
+        r = self._run('ssh root@100.118.174.27 "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("root", r.stderr)
+
+    def test_blocks_bare_subdev_no_user(self):
+        r = self._run('ssh subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("NO user specified", r.stderr)
+
+    def test_blocks_gatekeeper_user_at_subdev(self):
+        # gatekeeper's own user is legitimate on ITS box, not on subdev.
+        r = self._run('ssh gatekeeper@subdev.newlevel.media "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_marek_without_identity(self):
+        r = self._run('ssh marek@subdev.newlevel.media "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("marek", r.stderr)
+
+    def test_blocks_david_without_identity(self):
+        r = self._run('ssh david@116.203.108.177 "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("david", r.stderr)
+
+    def test_blocks_marek_with_wrong_identity(self):
+        r = self._run('ssh -i ~/.ssh/id_rsa marek@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_scp_wrong_user(self):
+        r = self._run("scp file.txt newlevel@subdev:/tmp/")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_rsync_wrong_user(self):
+        r = self._run("rsync -avz ./local/ newlevel@subdev:/remote/")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_sftp_wrong_user(self):
+        r = self._run("sftp newlevel@subdev")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    # --- allowed shapes --------------------------------------------------
+
+    def test_allows_montalu_default_key(self):
+        r = self._run('ssh montalu@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_montalu_via_sshpass(self):
+        r = self._run(
+            'sshpass -p newlevel ssh -o StrictHostKeyChecking=no montalu@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_marek_with_gatekeeper_identity(self):
+        r = self._run(
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 marek@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_david_with_gatekeeper_identity(self):
+        r = self._run(
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 david@subdev.newlevel.media "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_fused_identity_flag(self):
+        r = self._run('ssh -i~/.secrets/gatekeeper_access_ed25519 david@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_scp_montalu(self):
+        r = self._run("scp file.txt montalu@subdev:/tmp/")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_rsync_marek_with_identity(self):
+        r = self._run(
+            "rsync -avz -e 'ssh -i ~/.secrets/gatekeeper_access_ed25519' "
+            "./local/ marek@subdev:/remote/")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- non-subdev traffic is completely untouched ----------------------
+
+    def test_non_subdev_dev2_untouched(self):
+        r = self._run('ssh newlevel@100.82.64.27 "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_non_subdev_gatekeeper_untouched(self):
+        r = self._run(
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 gatekeeper@100.90.94.41 "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_unrelated_command_untouched(self):
+        r = self._run("git push origin main")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- bypass -----------------------------------------------------------
+
+    def test_bypass_inline_marker_allows_and_logs(self):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = self._run(
+            'ssh root@subdev "ls"  # airuleset:subdev-ssh-ok tested, user approved',
+            env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        log = os.path.join(home, "devel", "airuleset", "audits", "subdev-ssh-bypasses.log")
+        self.assertTrue(os.path.exists(log), "bypass must be logged")
+        self.assertIn("user approved", open(log).read())
+
+    def test_marker_mentioned_inside_unrelated_quotes_does_not_bypass_real_violation(self):
+        # the marker text merely being MENTIONED inside an unrelated quoted
+        # string (documentation, an echo, a commit message body) must NOT
+        # bypass a genuinely dangerous UNRELATED command elsewhere on the
+        # same line — same class of fix as block-destructive-remote.sh /
+        # block-sensitive-staging.sh (test_block_staged_content_values.py).
+        cmd = ('echo "we use the marker like # airuleset:subdev-ssh-ok '
+               'explaining it" ; ssh root@subdev "ls"')
+        r = self._run(cmd)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("root", r.stderr)
+
+    # --- fail-closed on internal error -------------------------------------
+
+    def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
+        tmpbin = _path_without_python3()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmpbin, ignore_errors=True))
+        r = self._run('ssh newlevel@subdev "ls"', env_extra={"PATH": tmpbin})
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("internal error", r.stderr.lower())
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("block-subdev-ssh-misuse.sh" in c for c in cmds))
+
+
 class TestPreWriteScriptCheckHook(TestCase):
     """hooks/pre-write-script-check.sh (issue #13 sub-item 2,
     script-failure-policy.md) — PreToolUse(Write|Edit): new .sh files need
