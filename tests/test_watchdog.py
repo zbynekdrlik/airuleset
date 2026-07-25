@@ -2126,6 +2126,109 @@ class TestCompactStaleContext(unittest.TestCase):
                                      wd.COMPACT_MIN_IDLE_S + 10, state=state)
         self.assertEqual(tmux.sent, [])
 
+    # ----------------------------------------------------------------- #
+    # Resettable dedup (issue #46 part 2): a REAL success must not claim
+    # the session PERMANENTLY — only until the observed context confirms
+    # the compaction landed, so a session that lives for days can be
+    # compacted again after it re-grows past the threshold. The give-up
+    # (attempt-cap) claim stays permanent, unchanged.
+    # ----------------------------------------------------------------- #
+
+    def test_pending_confirm_with_context_still_high_does_not_resend(self):
+        # Right after a real success the transcript's last usage record
+        # still reads the PRE-compaction (huge) context until the session's
+        # next real turn (job 15's own docstring) — must NOT resend /compact
+        # while that stale high reading persists.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, "sess-abc",
+                                 wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        state = {"compact_stale": {"sess-abc": wd.COMPACT_STALE_PENDING_CONFIRM}}
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state["compact_stale"]["sess-abc"],
+                         wd.COMPACT_STALE_PENDING_CONFIRM)
+
+    def test_pending_confirm_with_context_confirmed_low_clears_the_claim(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, "sess-abc",
+                                 wd.COMPACT_CONTEXT_THRESHOLD - 1,
+                                 idle_s=5, now=now)
+        state = {"compact_stale": {"sess-abc": wd.COMPACT_STALE_PENDING_CONFIRM}}
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        logs = wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                        projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+        self.assertNotIn("sess-abc", state.get("compact_stale", {}))
+        self.assertTrue(any("CLEARED" in ln for ln in logs), logs)
+
+    def test_after_clearing_a_later_regrowth_triggers_again(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        sid = "sess-abc"
+
+        # sweep 1: qualifies + succeeds — claim set to PENDING-CONFIRM, not True
+        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        state = {}
+        tmux1 = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
+        logs1 = wd.compact_stale_context(now, tmux1, state, dry_run=False,
+                                         projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertIn("/compact", tmux1.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs1), logs1)
+        self.assertEqual(state["compact_stale"][sid], wd.COMPACT_STALE_PENDING_CONFIRM)
+
+        # sweep 2: transcript still reads the stale high context — no resend
+        tmux2 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux2, state, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux2.sent, [])
+        self.assertEqual(state["compact_stale"][sid], wd.COMPACT_STALE_PENDING_CONFIRM)
+
+        # sweep 3: a real new turn landed — context confirmed dropped -> clears
+        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD - 1,
+                                 idle_s=5, now=now)
+        tmux3 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux3, state, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux3.sent, [])
+        self.assertNotIn(sid, state.get("compact_stale", {}))
+
+        # sweep 4: a real RE-GROWTH past the threshold — eligible again
+        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        tmux4 = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
+        logs4 = wd.compact_stale_context(now, tmux4, state, dry_run=False,
+                                         projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertIn("/compact", tmux4.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs4), logs4)
+        self.assertEqual(state["compact_stale"][sid], wd.COMPACT_STALE_PENDING_CONFIRM)
+
+    def test_permanent_gaveup_claim_is_never_cleared_by_low_context(self):
+        # The give-up (attempt-cap) state is DIFFERENT from pending-confirm
+        # and must stay permanent regardless of context — never reconsidered.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, "sess-abc",
+                                 wd.COMPACT_CONTEXT_THRESHOLD - 1,
+                                 idle_s=5, now=now)
+        state = {"compact_stale": {"sess-abc": True}}
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        self.assertEqual(tmux.sent, [])
+        self.assertIs(state["compact_stale"]["sess-abc"], True)
+
     def test_exact_keystroke_sequence(self):
         tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
                                      wd.COMPACT_MIN_IDLE_S + 10,
