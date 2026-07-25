@@ -2319,8 +2319,11 @@ def cmd_watchdog(args):
     once its pane goes genuinely idle (#39 krok 1c job 14), and — for a
     long-lived session that never reports a ticket — `/compact`'s any
     session whose context exceeds 400K tokens once it has sat genuinely
-    idle for 20+ minutes with no worker in flight (#39/#43 job 15). Driven
-    by the systemd timer.
+    idle for 20+ minutes with no worker in flight (#39/#43 job 15), and — ONLY
+    on the coordinator box (dev1) — merges every managed box's own hourly
+    burn-snapshot row into one combined fleet.jsonl row, pinging when the
+    observed weekly-%/day pace exceeds budget (#55 job 16). Driven by the
+    systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that
@@ -2331,13 +2334,22 @@ def cmd_watchdog(args):
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
                           compact_requests_path)
+    # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
+    # its own local hourly row via job 13, so only dev1 fans out over ssh to
+    # merge them. `os.uname().nodename` is the same "which host am I" check
+    # `burn.local_report()`/`hourly_snapshot()` already use as their own
+    # host tag — the machine hostnames ARE the tailscale/MagicDNS names now
+    # (machine-identities.md), so this is a plain string compare, no ssh probe.
+    fleet_fetch = _watchdog_fleet_fetch if os.uname().nodename == "dev1" else None
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
                     target_model=MANAGED_MODEL,
                     burn_snapshot_path=burn.snapshots_path(),
-                    compact_requests_path=compact_requests_path())
+                    compact_requests_path=compact_requests_path(),
+                    fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
+                    fleet_path=burn.fleet_path())
     for line in logs:
         print(line)
 
@@ -2591,6 +2603,60 @@ def _burn_remote(remote, days):
         print(f"  WARN: burn collection returned invalid JSON for {remote['name']}",
               file=sys.stderr)
         return None
+
+
+# --------------------------------------------------------------------------- #
+# #55 follow-up — fleet-wide hourly collection for the watchdog's job 16
+# (fleet_burn_job). Unlike `_burn_remote` above (which re-runs a full
+# `airuleset.py burn --json --days N` scan remotely — heavy, and NOT what an
+# hourly poll needs), this just TAILS the box's own job-13 output
+# (`~/.claude/burn-history/snapshots.jsonl`, already written locally every
+# hour by every managed box) — cheap, no remote transcript scanning. Reuses
+# the EXACT same identity/sshpass selection as `_burn_remote_cmd` — never
+# invent a new ssh shape (hooks/block-subdev-ssh-misuse.sh guards this).
+# --------------------------------------------------------------------------- #
+
+def _fleet_remote_cmd(remote):
+    """Pure ssh-command builder — split out for unit-testability, mirroring
+    `_burn_remote_cmd`'s own split."""
+    remote_cmd = "tail -n 1 ~/.claude/burn-history/snapshots.jsonl"
+    identity = remote.get("identity")
+    if identity:
+        return ["ssh", "-i", os.path.expanduser(identity),
+                "-o", "StrictHostKeyChecking=no",
+                f"{remote['user']}@{remote['host']}", remote_cmd]
+    return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
+            f"{remote['user']}@{remote['host']}", remote_cmd]
+
+
+def _fleet_remote_row(remote, timeout=15):
+    """One remote host's latest hourly burn-snapshot row, or `{"error": ...}`
+    on ANY failure (ssh, timeout, empty file, bad JSON) — a single
+    unreachable box (e.g. a subdev host under a fail2ban ban) must never
+    crash the fleet job or the rest of the watchdog sweep. Never raises."""
+    import subprocess
+    cmd = _fleet_remote_cmd(remote)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+    if result.returncode != 0:
+        return {"error": (result.stderr or "").strip()[:200] or "ssh failed"}
+    lines = (result.stdout or "").strip().splitlines()
+    if not lines:
+        return {"error": "no snapshot data yet"}
+    try:
+        return json.loads(lines[-1])
+    except ValueError:
+        return {"error": "invalid JSON from remote"}
+
+
+def _watchdog_fleet_fetch(hosts=None):
+    """Real remote collector used by cmd_watchdog's job 16 wiring — one row
+    per REMOTE_HOSTS entry. Never raises; a single bad host degrades to
+    `{"error": ...}` in its own slot rather than dropping the whole fleet."""
+    hosts = hosts if hosts is not None else REMOTE_HOSTS
+    return {h["name"]: _fleet_remote_row(h) for h in hosts}
 
 
 def cmd_burn(args):

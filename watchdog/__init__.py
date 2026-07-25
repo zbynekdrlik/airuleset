@@ -3441,6 +3441,76 @@ def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 16 — HOURLY FLEET BURN (#55, 2026-07-25 follow-up to job 13). The
+# user's ask: "zacat aj v hodinovych intervaloch vyhodnocovat stav spotreby
+# tokenov cez monitorovanu sadu claude targetov" — job 13 above only ever
+# measures THIS box. This job runs ONLY on the coordinator (cmd_watchdog
+# wires `fleet_fetch` ONLY when `os.uname().nodename == "dev1"` — every OTHER
+# managed box already writes ITS OWN hourly row via job 13, so this job just
+# TAILS each box's already-written `snapshots.jsonl` over ssh
+# (`airuleset._watchdog_fleet_fetch`, injected as `fleet_fetch` — never
+# re-scans transcripts remotely) and merges them into ONE combined
+# `~/.claude/burn-history/fleet.jsonl` row per hour (`burn.merge_fleet_row`).
+# When the observed weekly-%/day pace exceeds the budget implied by the
+# watchdog's own usage cache (`burn.fleet_budget_alert`), fires ONE deduped
+# Discord ping — never spam, at most once per hour_bucket.
+# --------------------------------------------------------------------------- #
+
+def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=None,
+                   fleet_path=None, usage_cache=None, owner=None, dry_run=False):
+    """Job 16 — see the section comment. Guarded by `state['fleet_burn_hour']`,
+    the SAME at-most-once-per-UTC-hour convention job 13 uses. `fetch(hosts)`
+    is the INJECTED remote collector (real impl:
+    `airuleset._watchdog_fleet_fetch`) — a failing host must come back as
+    `{"error": ...}` in its own slot, never raise; a fetch that DOES raise is
+    caught here too so one broken collector never drops the whole row (still
+    writes local-only data). `dry_run`: compute + log, but never write the
+    file, claim the hour, or send the budget alert — mirrors
+    `burn_snapshot_job`'s dry-run contract exactly."""
+    import burn as burn_mod
+    hour_bucket = int(now // 3600)
+    if state.get("fleet_burn_hour") == hour_bucket:
+        return []
+    host_rows = {}
+    local_rows = burn_mod.load_snapshots(local_snapshot_path)
+    if local_rows:
+        last = local_rows[-1]
+        host_rows[last.get("host") or "dev1"] = last
+    fetch = fetch or (lambda hs: {})
+    try:
+        remote_rows = fetch(hosts) or {}
+    except Exception as e:
+        remote_rows = {h.get("name", "?"): {"error": "fetch raised: %r" % (e,)}
+                       for h in (hosts or [])}
+    host_rows.update(remote_rows)
+    now_local = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).astimezone()
+    ts = now_local.replace(minute=0, second=0, microsecond=0).isoformat()
+    cache = usage_cache if usage_cache is not None else burn_mod.load_usage_cache()
+    wk = burn_mod.shared_weekly_window(cache) if cache else None
+    weekly_pct, resets_at = wk if wk else (None, None)
+    row = burn_mod.merge_fleet_row(ts, host_rows, weekly_pct=weekly_pct, resets_at=resets_at)
+    if dry_run:
+        return ["[dry-run] fleet-burn ts=%s total=$%.2f hosts=%d (not written)"
+               % (ts, row["total_usd"], len(host_rows))]
+    path = Path(fleet_path or burn_mod.fleet_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    state["fleet_burn_hour"] = hour_bucket
+    logs = ["fleet-burn ts=%s total=$%.2f hosts=%d -> %s"
+           % (ts, row["total_usd"], len(host_rows), path)]
+    all_rows = burn_mod.load_fleet(path)
+    alert = burn_mod.fleet_budget_alert(
+        all_rows, cache,
+        now=datetime.datetime.fromtimestamp(now, datetime.timezone.utc))
+    if alert:
+        status = send_fn(alert["message"], owner=owner,
+                         dedup_key="fleet-burn-budget:%d" % hour_bucket, dry_run=dry_run)
+        logs.append("fleet-budget-alert -> %s" % status)
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Compact-request state ("krok 1c — ohraničenie kontextu", #39 follow-up,
 # 2026-07-25). A completed-ticket report is a SAFE compaction boundary — the
 # ticket's durable state already lives in git/GitHub/the issue, so whatever
@@ -4261,7 +4331,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
-             compact_requests_path=None):
+             compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
+             fleet_path=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -4327,6 +4398,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           gap job 14 leaves for a long-lived session that never reports a
           completed-ticket boundary; deliberately NOT the token-threshold
           `autoCompactWindow` the user had this project actively strip.
+      (16) (only when `fleet_fetch` is given) HOURLY FLEET BURN (#55) —
+          coordinator-only (cmd_watchdog wires this ONLY on dev1): merges
+          every managed box's own hourly burn-snapshot row (job 13's output,
+          tailed over ssh via `fleet_fetch`) into ONE combined
+          `~/.claude/burn-history/fleet.jsonl` row per hour
+          (fleet_burn_job), plus a deduped Discord ping when the observed
+          weekly-%/day pace exceeds the budget implied by the usage cache.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -5035,6 +5113,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                       projects_dir=projects_dir, sleep_fn=sleep_fn)
     except Exception as e:
         logs.append("compact-stale error: %r" % (e,))
+
+    # Job 16 — HOURLY FLEET BURN (#55): only when `fleet_fetch` is given
+    # (cmd_watchdog wires this ONLY on the coordinator, dev1 — every other
+    # managed box already writes its own local hourly row via job 13, so
+    # this job just merges them). Same "wired = on" convention as jobs
+    # 3/7/8/11/13/14. Best-effort; internally also cadence-gated to at most
+    # once per hour.
+    if fleet_fetch is not None:
+        try:
+            logs += fleet_burn_job(now, state, fleet_hosts or [], send_fn,
+                                   fetch=fleet_fetch, fleet_path=fleet_path,
+                                   owner=account_owner or None, dry_run=dry_run)
+        except Exception as e:
+            logs.append("fleet-burn error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
