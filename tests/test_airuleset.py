@@ -3126,9 +3126,11 @@ class TestUltracodeLauncher(TestCase):
         # ultracode JSON literal must appear ONLY inside the script's own
         # `ultracode)` case branch, never in the default/new/plain branches.
         content = airuleset.render_claude_launch_script()
-        ultracode_branch = content.split("ultracode)", 1)[1].split(";;", 1)[0]
+        start = content.index("ultracode)")
+        end = content.index(";;", start)
+        ultracode_branch = content[start:end]
         self.assertIn('"ultracode":true', ultracode_branch)
-        rest = content.split("ultracode)", 1)[0] + content.split(";;", 1)[-1]
+        rest = content[:start] + content[end + len(";;"):]
         self.assertNotIn('"ultracode":true', rest)
 
     def test_model_flag_present_in_every_mode_except_plain(self):

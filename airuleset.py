@@ -590,84 +590,145 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
 BASHRC = Path.home() / ".bashrc"
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
-# The managed `claude` launcher (user's default): auto-approve permissions +
-# CONTINUE-OR-NEW (2026-07-09): -c only when the cwd actually has a prior
-# conversation; otherwise start fresh — unconditional -c died with
-# "No conversation found to continue" in every new directory (david@gk).
+# The managed claude launcher (#77, 2026-07-26): a shell FUNCTION in ~/.bashrc
+# is parsed ONCE at shell startup and then stays frozen in that shell's memory
+# FOREVER. Panel shells are long-lived (tmux panes running for days), so any
+# logic baked directly into the .bashrc function (flags, model pin, ultracode)
+# kept resurrecting on every relaunch of an ALREADY-RUNNING stale shell, no
+# matter how many times `push` rewrote .bashrc -- rewriting the file has zero
+# effect on a shell that already parsed the old function into memory. Measured
+# live: two sessions launched HOURS after #53 (which correctly made ultracode
+# opt-in ON DISK) still carried the pre-#53 default, because the panel shells
+# hosting them predated the fix.
+#
+# Fix: .bashrc holds ONLY thin one-line wrapper functions with NO flag
+# literals -- each just execs the managed SCRIPT (CLAUDE_LAUNCH_SCRIPT_DEST),
+# which carries ALL the actual logic (continue-or-new, --model, skip-perms,
+# ultracode only for the `ultracode` mode). A script is read fresh from disk
+# on EVERY invocation, so a `push` that rewrites the script changes behavior
+# in every already-running shell IMMEDIATELY -- no `source ~/.bashrc`, no
+# relaunch, no restart. Same shape as the caveman stable statusline shim
+# (render_caveman_shim() below) -- read that first before changing this.
+CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
+# --- the script content itself -----------------------------------------------
 # Ultracode is OPT-IN (#53, 2026-07-25): `--settings '{"ultracode":true}'` used
 # to be baked into EVERY default launch, so ultracode mode silently came back
 # on every session restart even after the user had turned it off for that
-# session (found repeatedly on restreamer). Default `claude()`/`claude-new()`
-# no longer pass it — the dedicated `claude-ultracode()` function (below) is
-# the explicit opt-in escape hatch that carries EXACTLY today's old default
-# behavior (continue-or-new + ultracode + skip-perms + model pin).
+# session (found repeatedly on restreamer). Only the `ultracode` mode carries
+# it now -- the `claude-ultracode()` bashrc function is the explicit opt-in
+# escape hatch, carrying EXACTLY today's old default behavior.
 #   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
 #       accepted in settings.json — GH #64817); --settings is the only doc-blessed
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
-#       Only `claude-ultracode()` passes this now.
+#       Only the `ultracode` mode passes this now.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
-#   --model '<MANAGED_MODEL>'       : baked in at RENDER time (2026-07-25 fix) so
-#       EVERY launch — including a RESUMED (-c) session — explicitly requests the
-#       managed model. Proven live on gatekeeper: settings.json said
-#       `claude-opus-5[1m]`, but a resumed session's transcript kept showing
-#       `claude-opus-4-8` on every turn — `-c` alone just continues whatever
-#       model the prior transcript was started with; only an explicit --model on
-#       the launch command line forces it. Applies to EVERY launch branch
-#       (claude(), claude-new(), claude-ultracode()); claude-plain() is the
-#       deliberate vanilla escape hatch and stays untouched.
+#   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
+#       `plain` — including a RESUMED (-c) session — explicitly requests the managed
+#       model. Proven live on gatekeeper: settings.json said `claude-opus-5[1m]`, but a
+#       resumed session's transcript kept showing `claude-opus-4-8` on every turn — `-c`
+#       alone just continues whatever model the prior transcript was started with; only
+#       an explicit --model on the launch command line forces it.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
-# A bash FUNCTION (not alias) forwards all args; `command` avoids recursing.
-# Escape hatches: `claude-new` (skip-perms, FRESH session — no -c, no ultracode,
-# force a clean start), `claude-ultracode` (deliberate opt-in: today's old
-# default — ultracode + skip-perms + continue-or-new), and `claude-plain`
-# (vanilla `claude`, no flags).
+# Modes: `default` (claude — continue-or-new, skip-perms, model, NO ultracode),
+# `new` (claude-new — always FRESH, skip-perms, model, NO ultracode — force a
+# clean start), `ultracode` (claude-ultracode — deliberate opt-in: continue-or-new
+# + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags).
+CLAUDE_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
+# airuleset-managed (do NOT edit) — the claude launcher (#77). Read FRESH from
+# disk on EVERY invocation (unlike a ~/.bashrc function, which is parsed once
+# at shell startup and then stays frozen in that shell's memory forever), so a
+# `push` that rewrites this file changes launch behavior immediately in every
+# already-running shell — no `source ~/.bashrc`, no relaunch, no restart.
+set -euo pipefail
+
+mode="${1:-default}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+# claude installs to ~/.local/bin, which NON-LOGIN interactive shells (su
+# without -, tmux with a default-command, IDE terminals) never get — only
+# ~/.profile adds it, and only login shells read that (montalu@dev1
+# "claude: command not found", 2026-07-04).
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+
+_has_conversation() {
+  local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"
+  compgen -G "$HOME/.claude/projects/$ccdir/*.jsonl" >/dev/null 2>&1
+}
+
+case "$mode" in
+  plain)
+    exec claude "$@"
+    ;;
+  new)
+    exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+    ;;
+  ultracode)
+    if _has_conversation; then
+      exec claude --dangerously-skip-permissions -c \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+    else
+      exec claude --dangerously-skip-permissions \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+    fi
+    ;;
+  *)
+    if _has_conversation; then
+      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+    else
+      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+    fi
+    ;;
+esac
+"""
+
+
+def render_claude_launch_script():
+    """The launch-script content with the managed model substituted in — the
+    write site MUST use this, never the raw constant (same discipline as
+    render_caveman_shim())."""
+    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}", MANAGED_MODEL)
+
+
+# .bashrc holds ONLY thin one-line functions -- no flag literal survives here,
+# so nothing flag-shaped can ever be frozen in a shell's memory again.
 ULTRACODE_BASHRC_BLOCK = (
     f"{ULTRACODE_MARK_START}\n"
-    # claude installs to ~/.local/bin, which NON-LOGIN interactive shells (su
-    # without -, tmux with a default-command, IDE terminals) never get — only
-    # ~/.profile adds it, and only login shells read that. Without this guard
-    # the function resolves to nothing there ("claude: command not found" on
-    # montalu@dev1, 2026-07-04). Idempotent: adds the dir once, never twice.
-    'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac\n'
-    "claude() {\n"
-    '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
-    '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
-    "    command claude --dangerously-skip-permissions -c "
-    f"--model '{MANAGED_MODEL}' \"$@\"\n"
-    "  else\n"
-    "    command claude --dangerously-skip-permissions "
-    f"--model '{MANAGED_MODEL}' \"$@\"\n"
-    "  fi\n"
-    "}\n"
-    "claude-new() { command claude --dangerously-skip-permissions "
-    f"--model '{MANAGED_MODEL}' \"$@\"; }}\n"
-    "claude-ultracode() {\n"
-    '  local _ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"\n'
-    '  if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then\n'
-    "    command claude --dangerously-skip-permissions -c "
-    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
-    "  else\n"
-    "    command claude --dangerously-skip-permissions "
-    f"--settings '{{\"ultracode\":true}}' --model '{MANAGED_MODEL}' \"$@\"\n"
-    "  fi\n"
-    "}\n"
-    "claude-plain() { command claude \"$@\"; }\n"
+    f'claude() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" default "$@"; }}\n'
+    f'claude-new() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" new "$@"; }}\n'
+    f'claude-ultracode() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" ultracode "$@"; }}\n'
+    f'claude-plain() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" plain "$@"; }}\n'
     f"{ULTRACODE_MARK_END}"
 )
 
 
-def apply_ultracode_launcher(bashrc_path: Path = None) -> bool:
-    """Install/refresh the managed ~/.bashrc block: `claude`/`claude-new` launch
-    with auto-approve + the managed model (NO ultracode — opt-in only via the
-    `claude-ultracode` escape hatch, #53). Idempotent: replaces the marked
-    block if present, else appends it. Returns True iff the file changed."""
+def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None) -> bool:
+    """Install/refresh the managed claude launcher (#77).
+
+    The SCRIPT (script_path, default CLAUDE_LAUNCH_SCRIPT_DEST) is written and
+    chmod +x UNCONDITIONALLY on every call — like the caveman shim, it must
+    self-heal any tampering/rollback, and a missing script after write is a
+    loud RuntimeError, never a silent loss of `claude`. It carries ALL the
+    actual logic, so a `push` changes launch behavior in every already-running
+    shell immediately, with no `source ~/.bashrc` and no restart.
+
+    The ~/.bashrc block is idempotent (replaces the marked block if present,
+    else appends it) and holds ONLY thin wrapper functions with no flag
+    literals. Returns True iff the ~/.bashrc file changed."""
     import re
-    path = bashrc_path or BASHRC
-    existing = path.read_text() if path.exists() else ""
+    bpath = bashrc_path or BASHRC
+    spath = script_path or CLAUDE_LAUNCH_SCRIPT_DEST
+
+    spath.parent.mkdir(parents=True, exist_ok=True)
+    spath.write_text(render_claude_launch_script())
+    os.chmod(str(spath), 0o755)
+    if not spath.exists():
+        raise RuntimeError(f"claude launcher script missing right after write: {spath}")
+
+    existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
         pattern = re.compile(
             re.escape(ULTRACODE_MARK_START) + r".*?" + re.escape(ULTRACODE_MARK_END),
@@ -677,7 +738,7 @@ def apply_ultracode_launcher(bashrc_path: Path = None) -> bool:
         sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
         new = f"{existing}{sep}\n{ULTRACODE_BASHRC_BLOCK}\n"
     if new != existing:
-        path.write_text(new)
+        bpath.write_text(new)
         return True
     return False
 
@@ -1134,20 +1195,25 @@ def cmd_install(args):
         else:
             print(f"  No change: {SETTINGS_JSON}")
 
-    # --- 3b. launcher block: managed ~/.bashrc functions (every host) ---
-    # Installs claude()/claude-new()/claude-ultracode()/claude-plain(). Ultracode
-    # can't live in settings.json (session-only, GH #64817) — claude-ultracode()
-    # wraps `claude` to pass it via --settings, but only when the user explicitly
-    # opts in by calling that function (#53 — it is NOT the default anymore).
-    # effortLevel=xhigh above is the persistent fallback for reasoning depth
-    # regardless of which launcher function is used.
+    # --- 3b. claude launcher: managed script + thin ~/.bashrc wrappers (#77) ---
+    # The SCRIPT (CLAUDE_LAUNCH_SCRIPT_DEST) is rewritten every install/push and
+    # takes effect in every already-running shell IMMEDIATELY -- no `source
+    # ~/.bashrc`, no relaunch, no restart (a bashrc FUNCTION, by contrast, is
+    # frozen in a shell's memory at startup forever, which is exactly how
+    # ultracode kept resurrecting after #53). Ultracode can't live in
+    # settings.json (session-only, GH #64817) — only the `ultracode` mode
+    # (claude-ultracode) passes it, deliberate opt-in only (#53). effortLevel
+    # above is the persistent fallback for reasoning depth regardless of mode.
     try:
-        if apply_ultracode_launcher():
-            print(f"  Updated:   {BASHRC} (ultracode launcher — `source ~/.bashrc`)")
+        changed = apply_ultracode_launcher()
+        print(f"  Updated:   {CLAUDE_LAUNCH_SCRIPT_DEST} (claude launcher script — "
+              f"takes effect immediately, no restart needed)")
+        if changed:
+            print(f"  Updated:   {BASHRC} (claude launcher wrappers)")
         else:
-            print(f"  No change: {BASHRC} (ultracode launcher)")
+            print(f"  No change: {BASHRC} (claude launcher wrappers)")
     except Exception as e:
-        print(f"  ultracode launcher error (non-fatal): {e}", file=sys.stderr)
+        print(f"  claude launcher error: {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
