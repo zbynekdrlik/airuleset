@@ -560,6 +560,21 @@ class TestLongPasteVerification(GoalRearmBase):
         self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
                         logs)
 
+    def test_slow_clear_after_enter_is_not_a_swallowed_submit(self):
+        """The mirror race, live 2026-07-26: the submit WORKED (the goal armed
+        for real) but the capture taken immediately after `Enter` still showed
+        `[Pasted text #1]`, so the delivery was read as a swallowed submit —
+        logged FAIL and, worse, followed by a corrective `Escape`+`Enter` into
+        a session whose turn had just STARTED. The box must be given the same
+        bounded moment to clear that it gets to fill."""
+        typed = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
+        tmux, logs = self._go(PANE_DARK,
+                              cap_seq=[PANE_DARK, typed, typed, PANE_DARK])
+        self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
+                        logs)
+        self.assertNotIn("Escape", tmux.keys(),
+                         "never Escape into a turn that just started")
+
     def test_a_type_that_never_appears_is_still_refused(self):
         tmux, logs = self._go(PANE_DARK,
                               cap_seq=[PANE_DARK] + [PANE_DARK] * 20)
