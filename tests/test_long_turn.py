@@ -300,6 +300,35 @@ class TestPaneTurnElapsed(unittest.TestCase):
         cap = "● x\n✳ Baking… (7s · esc to interrupt)\n❯\n  ctx ███░\n"
         self.assertEqual(wd.pane_turn_elapsed(cap), 7)
 
+    # CC drops the seconds component once a turn is a few minutes old — the
+    # `(2m · esc to interrupt)` form appears verbatim in this repo's own
+    # live-captured fixtures. A seconds-mandatory parser silently reports
+    # "no turn running" for exactly the turns that are getting LONG, which is
+    # the one case job 21 exists for. Found by validating the parser against
+    # every real spinner string in tests/ instead of only hand-written ones.
+    def test_minutes_only_no_seconds_component(self):
+        cap = "● x\n✳ Baking… (2m · esc to interrupt)\n❯\n  ctx ███░\n"
+        self.assertEqual(wd.pane_turn_elapsed(cap), 120)
+
+    def test_hours_and_minutes_no_seconds_component(self):
+        cap = "● x\n· Germinating… (3h 5m · ↓ 12k tokens)\n❯\n  ctx ███░\n"
+        self.assertEqual(wd.pane_turn_elapsed(cap), 3 * 3600 + 5 * 60)
+
+    def test_hours_only(self):
+        cap = "● x\n· Germinating… (2h · ↓ 12k tokens)\n❯\n  ctx ███░\n"
+        self.assertEqual(wd.pane_turn_elapsed(cap), 7200)
+
+    def test_spinner_with_no_duration_at_all_is_not_a_timed_turn(self):
+        # `✻ Herding… (esc to interrupt)` — a real fixture shape. No elapsed
+        # time is claimed, so none may be invented (0s would read as "a turn
+        # that just started" and reset the incident's identity).
+        cap = "● x\n✻ Herding… (esc to interrupt)\n❯\n  ctx ███░\n"
+        self.assertIsNone(wd.pane_turn_elapsed(cap))
+
+    def test_a_parenthesised_non_duration_is_not_an_elapsed_time(self):
+        cap = "● x\n✻ Reading… (3 messages)\n❯\n  ctx ███░\n"
+        self.assertIsNone(wd.pane_turn_elapsed(cap))
+
     def test_idle_pane_has_no_running_turn(self):
         self.assertIsNone(wd.pane_turn_elapsed(LT_IDLE_CAP))
 
