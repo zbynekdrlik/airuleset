@@ -51,17 +51,62 @@ event = payload.get("hook_event_name") or ""
 tool = payload.get("tool_name") or ""
 session = str(payload.get("session_id") or "nosession")
 
+def strip_carried_text(cmd):
+    """Drop everything the command CARRIES but does not DO.
+
+    A `gh issue comment -F body.md <<'EOF' ... EOF` whose body describes the
+    trigger table is not a merge, a push or a deploy — it is a document. Same
+    lesson as #80: classify the command, never its payload. Heredoc bodies go
+    first, then quoted spans (which also covers `git commit -m "... gh pr
+    merge ..."` and `echo 'gh pr merge 5'`).
+    """
+    out, i, n = [], 0, len(cmd)
+    heredocs = re.findall(r"<<-?\s*['\"]?(\w+)['\"]?", cmd)
+    if heredocs:
+        lines, keep, pending = cmd.split("\n"), [], None
+        for line in lines:
+            if pending is not None:
+                if line.strip() == pending:
+                    pending = None
+                continue
+            keep.append(line)
+            m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+            if m:
+                pending = m.group(1)
+        cmd = "\n".join(keep)
+        n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch in "'\"":
+            j = cmd.find(ch, i + 1)
+            if j == -1:
+                break
+            out.append(" ")
+            i = j + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 if event == "UserPromptSubmit" or (not tool and payload.get("prompt")):
     surface = "UserPromptSubmit"
     haystack = str(payload.get("prompt") or "")
     out_event = "UserPromptSubmit"
 else:
     surface = tool or "Bash"
-    try:
-        haystack = json.dumps(payload.get("tool_input") or {}, ensure_ascii=False)
-    except Exception:
-        sys.exit(0)
+    tool_input = payload.get("tool_input") or {}
     out_event = "PreToolUse"
+    if surface == "Bash":
+        # the real command only — not the document it carries
+        haystack = strip_carried_text(str(tool_input.get("command") or ""))
+        if tool_input.get("run_in_background") is True:
+            haystack += " run_in_background=true"
+    else:
+        try:
+            haystack = json.dumps(tool_input, ensure_ascii=False)
+        except Exception:
+            sys.exit(0)
 
 # A session id is attacker-irrelevant but is used as a filename: keep it tame.
 session = re.sub(r"[^A-Za-z0-9_.-]", "_", session)[:64]
@@ -70,6 +115,10 @@ marker_dir = os.path.join(
 )
 
 MAX_BODY = 24000
+# One tool call must never dump a pile of bodies into the context. Anything
+# over the budget is DEFERRED, not consumed — its marker stays unset so its
+# own action can still load it later.
+MAX_TOTAL = 14000
 
 
 def strip_frontmatter(text):
@@ -88,14 +137,17 @@ for line in open(conf_path, encoding="utf-8"):
     if not line.strip() or line.lstrip().startswith("#"):
         continue
     parts = [p for p in line.split("\t") if p != ""]
-    if len(parts) != 4:
+    if len(parts) not in (4, 5):
         continue
-    topic, tool_pat, pattern, body_rel = parts
+    topic, tool_pat, pattern, body_rel = parts[:4]
+    exclude = parts[4] if len(parts) == 5 else ""
 
     try:
         if not re.fullmatch(tool_pat, surface):
             continue
         if not re.search(pattern, haystack):
+            continue
+        if exclude and re.search(exclude, haystack):
             continue
     except re.error:
         continue
@@ -114,6 +166,9 @@ for line in open(conf_path, encoding="utf-8"):
         continue
     if len(body) > MAX_BODY:
         body = body[:MAX_BODY] + "\n\n[...truncated — read " + body_rel + " for the rest]"
+
+    if sum(len(c) for c in chunks) + len(body) > MAX_TOTAL and chunks:
+        continue  # defer: leave the marker unset so its own action still loads it
 
     try:
         os.makedirs(marker_dir, exist_ok=True)

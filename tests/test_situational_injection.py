@@ -45,8 +45,9 @@ def load_conf():
             continue
         parts = line.split("\t")
         parts = [p for p in parts if p != ""]
-        assert len(parts) == 4, f"malformed trigger row: {line!r}"
-        rows.append(tuple(parts))
+        # a 5th column (an exclude ERE that vetoes a match) is optional
+        assert len(parts) in (4, 5), f"malformed trigger row: {line!r}"
+        rows.append(tuple(parts[:4]))
     return rows
 
 
@@ -284,6 +285,36 @@ class TestFalsePositives(TestCase):
     def test_echoing_a_trigger_string_injects_nothing(self):
         r = run({"command": "echo 'gh pr merge 5 --merge'"}, tmpdir=self.tmpdir)
         self.assertEqual(r.stdout.strip(), "")
+
+    def test_editing_a_test_file_does_not_load_the_logging_rule(self):
+        """comprehensive-logging governs feature code, not the test suite."""
+        for path in [
+            "/repo/tests/test_thing.py",
+            "/repo/src/foo.test.ts",
+            "/repo/spec/bar_spec.rb",
+        ]:
+            ctx = injected(
+                run(
+                    {"file_path": path, "old_string": "a", "new_string": "b"},
+                    tool_name="Edit",
+                    session_id="t-" + path,
+                    tmpdir=self.tmpdir,
+                )
+            )
+            if ctx is not None:
+                self.assertNotIn("comprehensive-logging", ctx, path)
+
+    def test_editing_feature_code_does_load_the_logging_rule(self):
+        ctx = injected(
+            run(
+                {"file_path": "/repo/src/service.py", "old_string": "a",
+                 "new_string": "b"},
+                tool_name="Edit",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx)
+        self.assertIn("comprehensive-logging", ctx)
 
     def test_a_real_action_still_injects(self):
         ctx = injected(run({"command": "gh pr merge 5 --merge"}, tmpdir=self.tmpdir))
