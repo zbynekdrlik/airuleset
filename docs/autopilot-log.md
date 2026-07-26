@@ -54,3 +54,39 @@
 - Live: job 20's first automatic run found a real victim (parovanie_produktov) — marker
   `set`, footer dark, last turn `✅` — and re-armed it byte-identically (3152 chars,
   sha 20dd7683652a667c both sides).
+
+## 2026-07-26 — #85 (gh --json false block) + #84 (long turn / queued compact), batch
+
+**#85 — `block-gh-invalid-json-flag.sh` falsely blocked a write+read-back compound command.**
+- Validated live before touching code: `gh issue edit N --title X && gh issue view N --json state` → rc=2.
+- RED `a809e11` (8 failures: 4 false blocks + 4 `bash -c` misses) → GREEN `351de33`.
+- Root cause: `--json` was searched over the WHOLE command string and paired with any write
+  subcommand found anywhere in it. Now classified PER SEGMENT (`;`/`&&`/`||`/`|`) with
+  `block-main-implementation.sh`'s existing shlex shape — one parser shape in this repo, not a
+  second invented one. Its `bash -c` recursion also closed the INVERSE miss the old
+  quote-stripper had (a real violation inside `bash -c "..."` passed through).
+- Fails OPEN on classifier malfunction — a false block is the exact failure being fixed.
+
+**#84 — one gk turn ran 2h40m with three `/compact` queued behind it.**
+- Forensic transcript read (posted as the issue's evidence comment) DISPROVED the ticket's own
+  hypothesis: no foreground subagent dispatch was involved. All five `Agent` calls returned async
+  in ~100 ms with no `run_in_background` key at all; none was in flight during the long stretch.
+  Real cause: an unbroken chain of correctly-bounded foreground `Bash` CI polls, extended by CI
+  restarting from concurrent merges, under an armed `/goal` loop whose Stop hook kept rejecting
+  the stop. The queue drained only at the user's manual interrupt (15:44), then fired back-to-back.
+- That read also fixed the DESIGN: CC logged those 2h40m as three internal turns, so a
+  transcript-boundary detector would have missed the incident. Detection reads the PANE's spinner
+  elapsed label instead.
+- RED `816883e` (32 failures) → GREEN `9614bce`.
+- Queued-compact guard: `_pane_has_queued_compact` consulted immediately before the send in all
+  four senders (`deliver_compact_now`, jobs 14/15/17). Composes with — does not replace — the
+  shared claim (#78) and proc fingerprint (#82/#83).
+- Job 21 `long_turn_watch`: logs unconditionally every sweep, ONE ping per (session, turn),
+  detection only — it never types. `LONG_TURN_THRESHOLD_S` / `AIRULESET_LONG_TURN_S`, default 30 min.
+- Both detectors share one walk (`_above_box_scan`) whose ADJACENCY requirement is what keeps a
+  quoted panel and the agent strip's arbitrary labels (#36) out of live pane state.
+- Job-15/17 integration tests went into `tests/test_watchdog.py` (established `RestartFakeTmux` +
+  `_seed_context_transcript` harness) rather than a second fake in the new file — an ad-hoc
+  re-mock returned zero log lines because the jobs' own pre-passes bail first.
+- Tests: `tests/test_long_turn.py` (31) + 2 in `test_watchdog.py` + 8 in `test_gh_json_hook.py`;
+  suite 1929 → 1990.
