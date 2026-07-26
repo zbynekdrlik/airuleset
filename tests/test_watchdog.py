@@ -14,6 +14,7 @@ import json
 import os
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -2918,6 +2919,344 @@ class RunOnceFleetWiring(unittest.TestCase):
                            fleet_path=fleet_path)
         self.assertTrue(fleet_path.exists())
         self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
+# #69 — Job 17: HARD CONTEXT CEILING BACKSTOP. Job 14 only fires at a
+# completed-ticket boundary; job 15 only fires once a pane has been
+# genuinely idle for COMPACT_MIN_IDLE_S. A WHOLE CLASS of sessions has
+# neither trigger (a continuous review/merge master loop; a governance
+# session that ends every turn `⏳ WORKING` and is never idle 20 minutes).
+# This job closes that gap: above COMPACT_HARD_CEILING, COMPACT_MIN_IDLE_S
+# is IGNORED and a busy pane is a perfectly fine send target (a short
+# send-keys reliably queues even mid-turn — #65).
+# --------------------------------------------------------------------------- #
+
+CEIL_COMPACTING_CAP = ("✻ Compacting conversation… (12s · esc to interrupt)\n"
+                       "  ctx ███░  caveman:lite\n")
+
+
+class TestCompactHardCeiling(unittest.TestCase):
+    CWD = "/home/newlevel/devel/demo-ceiling"
+    PANE = "%9"
+    SID = "sess-ceil"
+
+    def _go(self, ctx_tokens, initial_captured=MR_IDLE_CAP, cap_seq=(),
+           state=None, dry_run=False, in_mode=False, now=None, sid=None,
+           send_fn=None, ceiling=None):
+        now = time.time() if now is None else now
+        sid = sid or self.SID
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_context_transcript(proj, self.CWD, sid, ctx_tokens, idle_s=0, now=now)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               initial_captured, cap_seq=cap_seq, in_mode=in_mode)
+        state = {} if state is None else state
+        logs = wd.compact_hard_ceiling(now, tmux, state, dry_run=dry_run,
+                                       projects_dir=proj, send_fn=send_fn,
+                                       ceiling=ceiling)
+        return tmux, logs, state
+
+    def test_below_ceiling_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("compact_ceiling", {}), {})
+
+    def test_busy_pane_gets_compacted_this_is_the_whole_point(self):
+        # #65's proven busy-pane queuing: unlike job 15, a busy pane is NOT
+        # a skip here -- it is the exact scenario this job exists to close
+        # (a continuously-busy session that never goes idle).
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID],
+                         wd.COMPACT_STALE_PENDING_CONFIRM)
+        self.assertEqual(state["compact_ceiling_attempts"][self.SID], 1)
+
+    def test_free_idle_input_also_gets_compacted(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_IDLE_CAP)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+
+    def test_exact_keystroke_sequence(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP)
+        self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+
+    def test_already_compacting_in_pane_is_deduped_no_resend(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=CEIL_COMPACTING_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("already-compacting" in ln for ln in logs), logs)
+        self.assertEqual(state.get("compact_ceiling", {}), {})
+
+    def test_draft_with_free_stash_slot_gets_stash_delivered(self):
+        tmux, logs, state = self._go(
+            wd.COMPACT_HARD_CEILING + 1, initial_captured=MR_DRAFT_CAP,
+            cap_seq=[CS_STASH_BARE_CAP, CS_STASH_TYPED_CAP, CS_STASH_SUBMITTED_CAP])
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-ceiling, stash)")
+                            for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID],
+                         wd.COMPACT_STALE_PENDING_CONFIRM)
+        self.assertNotIn(self.SID, state.get("compact_stash_skips", {}))
+
+    def test_draft_with_occupied_stash_slot_is_skipped_and_kept_for_retry(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=CS_DRAFT_STASH_OCCUPIED_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip draft (stash occupied)" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, state.get("compact_ceiling", {}))
+        self.assertEqual(state["compact_stash_skips"][self.SID], 1)
+
+    def test_dry_run_never_sends_keys(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY (compact-ceiling)") for ln in logs), logs)
+        self.assertEqual(state.get("compact_ceiling", {}), {})
+
+    def test_dry_run_never_attempts_stash_on_a_draft(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_DRAFT_CAP, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY (compact-ceiling, draft)")
+                            for ln in logs), logs)
+        self.assertEqual(state.get("compact_stash_skips", {}), {})
+
+    def test_in_mode_pane_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1, in_mode=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+
+    def test_open_dialog_is_skipped(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_DIALOG_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("dialog" in ln for ln in logs), logs)
+
+    def test_no_boundary_at_all_is_skipped(self):
+        cap = StructuralInputLineDetection.ALL_CHROME_NO_BOX_CAP
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1, initial_captured=cap)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("no-input-line" in ln for ln in logs), logs)
+
+    def test_strip_selected_gets_one_escape_first(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_STRIP_SELECTED_IDLE_CAP)
+        self.assertEqual(tmux.keys(), ["Escape", "/compact", "Enter"])
+
+    def test_no_two_consecutive_escapes_ever_sent(self):
+        scenarios = [
+            (MR_IDLE_CAP, ()),
+            (MR_BUSY_CAP, ()),
+            (MR_STRIP_SELECTED_IDLE_CAP, ()),
+            (MR_DRAFT_CAP, [CS_STASH_BARE_CAP, CS_STASH_TYPED_CAP, CS_STASH_SUBMITTED_CAP]),
+            (MR_DIALOG_CAP, ()),
+        ]
+        for cap, seq in scenarios:
+            tmux, _logs, _state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                          initial_captured=cap, cap_seq=seq)
+            self.assertTrue(tmux.no_consecutive_escapes(), cap)
+
+    def test_env_override_lowers_the_ceiling(self):
+        with unittest.mock.patch.dict(os.environ,
+                                      {"AIRULESET_COMPACT_HARD_CEILING": "500"}):
+            tmux, logs, state = self._go(1000, initial_captured=MR_BUSY_CAP)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    # ------------------------------------------------------------------- #
+    # PENDING_CONFIRM state machine: no immediate resend, a bounded retry
+    # after COMPACT_CEILING_RETRY_S, confirmation-clears-the-claim, and a
+    # permanent give-up + Discord ping after COMPACT_CEILING_MAX_ATTEMPTS.
+    # ------------------------------------------------------------------- #
+
+    def test_pending_confirm_within_retry_window_does_not_resend(self):
+        now = time.time()
+        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
+                 "compact_ceiling_attempts": {self.SID: 1},
+                 "compact_ceiling_sent_at": {self.SID: now - 10}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1, state=state, now=now)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state["compact_ceiling"][self.SID],
+                         wd.COMPACT_STALE_PENDING_CONFIRM)
+
+    def test_pending_confirm_with_context_confirmed_low_clears_the_claim(self):
+        now = time.time()
+        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
+                 "compact_ceiling_attempts": {self.SID: 1},
+                 "compact_ceiling_sent_at": {self.SID: now - 10}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
+        self.assertEqual(tmux.sent, [])
+        self.assertNotIn(self.SID, state.get("compact_ceiling", {}))
+        self.assertNotIn(self.SID, state.get("compact_ceiling_attempts", {}))
+        self.assertTrue(any("CLEARED" in ln for ln in logs), logs)
+
+    def test_pending_confirm_past_retry_window_still_high_resends(self):
+        now = time.time()
+        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
+                 "compact_ceiling_attempts": {self.SID: 1},
+                 "compact_ceiling_sent_at": {self.SID: now - wd.COMPACT_CEILING_RETRY_S - 10}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP, state=state, now=now)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertEqual(state["compact_ceiling_attempts"][self.SID], 2)
+        self.assertTrue(any(" retry" in ln for ln in logs), logs)
+
+    def test_permanent_gaveup_claim_is_never_cleared_or_retried(self):
+        now = time.time()
+        state = {"compact_ceiling": {self.SID: True}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
+        self.assertEqual(tmux.sent, [])
+        self.assertIs(state["compact_ceiling"][self.SID], True)
+
+    def test_repeated_retries_give_up_after_max_attempts_and_ping(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        sid = "sess-giveup"
+        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_HARD_CEILING + 1,
+                                 idle_s=0, now=now)
+        state = {}
+        sent = []
+
+        def fake_send(body, **kw):
+            sent.append((body, kw))
+            return "sent"
+
+        # sweep 1: first send
+        tmux1 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        wd.compact_hard_ceiling(now, tmux1, state, dry_run=False,
+                                projects_dir=proj, send_fn=fake_send)
+        self.assertIn("/compact", tmux1.typed_texts())
+        self.assertEqual(state["compact_ceiling_attempts"][sid], 1)
+
+        # sweep 2: retry window elapsed, still high -> 2nd send
+        now2 = now + wd.COMPACT_CEILING_RETRY_S + 1
+        tmux2 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        wd.compact_hard_ceiling(now2, tmux2, state, dry_run=False,
+                                projects_dir=proj, send_fn=fake_send)
+        self.assertIn("/compact", tmux2.typed_texts())
+        self.assertEqual(state["compact_ceiling_attempts"][sid], 2)
+        self.assertEqual(sent, [])   # no give-up ping yet
+
+        # sweep 3: retry window elapsed again, still high -> 3rd attempt hits
+        # COMPACT_CEILING_MAX_ATTEMPTS -> permanent give-up + ONE Discord ping
+        now3 = now2 + wd.COMPACT_CEILING_RETRY_S + 1
+        tmux3 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        logs3 = wd.compact_hard_ceiling(now3, tmux3, state, dry_run=False,
+                                        projects_dir=proj, send_fn=fake_send)
+        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs3), logs3)
+        self.assertIs(state["compact_ceiling"][sid], True)
+        self.assertEqual(len(sent), 1, sent)
+
+        # sweep 4: permanently given up -- never retried again, no matter
+        # how much time passes.
+        now4 = now3 + 10 ** 6
+        tmux4 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        wd.compact_hard_ceiling(now4, tmux4, state, dry_run=False,
+                                projects_dir=proj, send_fn=fake_send)
+        self.assertEqual(tmux4.sent, [])
+        self.assertEqual(len(sent), 1, sent)   # no second ping
+
+    # ------------------------------------------------------------------- #
+    # #69 acceptance: the `handled` set is what job 14/15 populate and job
+    # 17 consults -- unit-level lock on the exact mechanism (the run_once
+    # end-to-end version is RunOnceCompactHardCeilingWiring below).
+    # ------------------------------------------------------------------- #
+
+    def test_sid_already_in_handled_set_is_skipped_entirely(self):
+        tmux, logs, state = self._go(
+            wd.COMPACT_HARD_CEILING + 1, initial_captured=MR_IDLE_CAP)
+        # re-run against the SAME transcript/sid but pre-mark it handled --
+        # even though everything else looks perfectly eligible.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, self.SID,
+                                 wd.COMPACT_HARD_CEILING + 1, idle_s=0, now=now)
+        tmux2 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        state2 = {}
+        wd.compact_hard_ceiling(now, tmux2, state2, dry_run=False,
+                                projects_dir=proj, handled={self.SID})
+        self.assertEqual(tmux2.sent, [])
+        self.assertEqual(state2.get("compact_ceiling", {}), {})
+
+
+class RunOnceCompactHardCeilingWiring(unittest.TestCase):
+    """Job 17 is ALWAYS wired (no gating param) -- run_once must invoke it
+    every sweep, best-effort, entirely independent of job 14's request file
+    and job 15's idle-only threshold."""
+
+    def test_qualifying_busy_session_fires_through_run_once(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        now = time.time()
+        cwd = "/home/newlevel/devel/ceiling-demo"
+        _seed_context_transcript(proj, cwd, "sess-x", wd.COMPACT_HARD_CEILING + 1,
+                                 idle_s=0, now=now)
+        # cmd="node" so run_once's OWN by_transcript loop (list_claude_panes
+        # only matches "claude") skips it -- isolates this to job 17's wiring,
+        # same pattern as test_target_model_wires_into_model_reconcile.
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_BUSY_CAP)
+        logs = wd.run_once(now=now, dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertTrue(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_no_qualifying_session_produces_no_compact_ceiling_logs(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertFalse(any("compact-ceiling" in ln for ln in logs), logs)
+
+    def test_ticket_boundary_fires_first_and_ceiling_never_double_fires(self):
+        # #69 regression lock: a session that DOES report a ticket boundary
+        # (job 14's own mechanism, unchanged and primary) must be handled by
+        # job 14 -- and job 17 (the backstop) must NOT also independently
+        # fire /compact for the SAME session in the SAME sweep, even though
+        # its context sits above COMPACT_HARD_CEILING too.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        reqs_path = Path(tmp) / "compact-requests.json"
+        now = time.time()
+        cwd = "/home/newlevel/devel/ticket-boundary-demo"
+        sid = "sess-boundary"
+        # context strictly BETWEEN the hard ceiling and job 15's own idle
+        # threshold, so job 15 never even looks at this pane (isolates the
+        # assertion to job 14 vs job 17).
+        ctx = wd.COMPACT_HARD_CEILING + 1
+        self.assertLess(ctx, wd.COMPACT_CONTEXT_THRESHOLD)
+        _seed_context_transcript(proj, cwd, sid, ctx, idle_s=0, now=now)
+        reqs_path.write_text(json.dumps({sid: {"cwd": cwd, "ts": int(now)}}))
+        # cmd="claude" so job 14 (which reuses run_once's own panes_by_sid,
+        # built only for "claude" panes) actually sees this session.
+        tmux = RestartFakeTmux([("%1", "claude", cwd)], MR_IDLE_CAP)
+        logs = wd.run_once(now=now, dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           compact_requests_path=reqs_path)
+        self.assertTrue(any(ln.startswith("OK (compact-request)") for ln in logs), logs)
+        self.assertFalse(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts().count("/compact"), 1, tmux.typed_texts())
+        # the request was consumed by job 14 -- never left pending
+        self.assertEqual(wd.load_compact_requests(reqs_path), {})
 
 
 if __name__ == "__main__":
