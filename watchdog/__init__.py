@@ -1290,6 +1290,62 @@ def _pane_hosted_claude_pid(pane_pid):
     return None
 
 
+def _proc_fingerprint(pid):
+    """{"pid": str(pid), "starttime": <str>} for a LIVE process, read from
+    `/proc/<pid>/stat` — or None if that file is unreadable (the process
+    does not exist, or never did). `starttime` is field 22 of `stat` (the
+    20th token after the comm-closing ") " — the same `rsplit(") ", 1)`
+    trick `_pane_hosted_claude_pid` above already uses for `ppid`, field 4
+    / `rest[1]`), included specifically to defeat PID RE-USE (#82): the
+    kernel recycles PIDs, so "a process with this PID exists" alone is not
+    proof it is the SAME process that originally received a queued
+    command — a recycled PID would have a different `starttime`."""
+    stat = _proc_read("/proc/%s/stat" % pid)
+    if not stat:
+        return None
+    try:
+        starttime = stat.rsplit(") ", 1)[-1].split()[19]
+    except (IndexError, ValueError):
+        return None
+    return {"pid": str(pid), "starttime": starttime}
+
+
+def _proc_fingerprint_alive(fp):
+    """True/False/None for whether the stored fingerprint `fp`
+    (`{"pid", "starttime"}`, from `_proc_fingerprint`) still identifies a
+    LIVE process with the SAME starttime. None means "nothing recorded, or
+    it can't be checked" — callers must treat that as "not proven dead"
+    (never as FAILED), so a claim set before this fix existed, or one
+    whose owning pane could not be resolved at queue time, is never
+    wrongly declared failed just because it lacks a fingerprint."""
+    if not fp or not fp.get("pid"):
+        return None
+    cur = _proc_fingerprint(fp["pid"])
+    if cur is None:
+        return False
+    return cur.get("starttime") == fp.get("starttime")
+
+
+def _pane_claude_proc_fingerprint(pane_id, run=None):
+    """Fingerprint (`_proc_fingerprint`) of the `claude` process hosted by
+    tmux pane `pane_id` — resolves the pane's own pid (`#{pane_pid}`) then
+    walks its process tree via `_pane_hosted_claude_pid` (the SAME helper
+    that already handles both a direct pane and a sudo/su-hosted stream
+    session — the montalu-in-newlevel-tmux shape). None when the pane or
+    its hosted claude process cannot be resolved at all — fail-safe: a
+    claim recorded without a fingerprint simply never triggers the
+    process-death FAILED check (#82)."""
+    run = run or _default_run
+    pane_pid = (run(["tmux", "display-message", "-p", "-t", pane_id,
+                     "#{pane_pid}"]) or "").strip()
+    if not pane_pid:
+        return None
+    claude_pid = _pane_hosted_claude_pid(pane_pid)
+    if not claude_pid:
+        return None
+    return _proc_fingerprint(claude_pid)
+
+
 def _hosted_claude_cwd(claude_pid, pane_cwd):
     """The hosted claude process's REAL cwd — tmux reports the SUDO root's cwd
     (where the human ran `sudo su`, e.g. /home/newlevel/devel/odoo), which
@@ -3941,6 +3997,23 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
     if not isinstance(entry, dict):
         return False                      # never claimed — eligible
     claimed_cwd = entry.get("cwd") or cwd
+    # FAILED — the process that received the queued keystrokes is gone, or
+    # a NEW process has since reused its PID (#82): a demonstrated delivery
+    # loss, independent of session id / cwd. This is what catches a
+    # watchdog-initiated restart (jobs 12/18, `_restart_pane`) that
+    # relaunches via `claude -c` and so CONTINUES the SAME transcript —
+    # neither CONSUMED (context never dropped: the keystrokes died with the
+    # old process) nor the cwd-session-id FAILED check below (the session
+    # id does not change on a `-c` resume) can ever fire for that case.
+    # `proc` is only present on a claim recorded after this fix and whose
+    # owning pane resolved at queue time — absent/unresolvable is treated
+    # as "not proven dead" (`_proc_fingerprint_alive` returns None), never
+    # as FAILED.
+    proc = entry.get("proc")
+    if proc and _proc_fingerprint_alive(proc) is False:
+        claims.pop(sid, None)
+        _save_compact_claims(claims, path)
+        return False                      # FAILED — eligible for a fresh send
     # FAILED — the cwd's CURRENT active transcript is a DIFFERENT session
     # than the one this claim was queued under; the typed keystroke is
     # gone with the old (now-replaced) process.
@@ -3966,18 +4039,36 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
                                            # time has passed
 
 
-def compact_claim_set(sid, cwd, now=None, path=None):
+def compact_claim_set(sid, cwd, now=None, path=None, pane_id=None, run=None,
+                      proc=None):
     """Record that `/compact` was just typed into `sid`'s pane — the
     SINGLE shared claim every sender (#78) writes on every real send.
     `now` (default `time.time()`) is the send time `compact_claim_active`
-    compares transcript `compact_boundary` entries against. Fail-safe
-    (never raises). Returns True on success."""
+    compares transcript `compact_boundary` entries against.
+
+    #82: also fingerprints the PROCESS the keystrokes were actually
+    delivered to (see `_proc_fingerprint`), so a later restart of that
+    process is detectable as a demonstrated delivery loss even when
+    neither of the other two resolutions (CONSUMED / cwd-session-id
+    FAILED) can ever fire — the exact "relaunch continues the same
+    transcript via `claude -c`" case. `proc` (`{"pid", "starttime"}`) may
+    be passed directly (a caller that already resolved it, or a test);
+    otherwise, when `pane_id` is given, it is resolved via
+    `_pane_claude_proc_fingerprint`. Neither given is fine — the claim is
+    simply recorded without a fingerprint (the pre-#82 shape), and the
+    process-death check in `compact_claim_active` is then a no-op for it.
+    Fail-safe (never raises). Returns True on success."""
     sid = str(sid or "").strip()
     if not sid:
         return False
     now = time.time() if now is None else now
     claims = _load_compact_claims(path)
-    claims[sid] = {"cwd": str(cwd or ""), "ts": now}
+    entry = {"cwd": str(cwd or ""), "ts": now}
+    if proc is None and pane_id:
+        proc = _pane_claude_proc_fingerprint(pane_id, run=run)
+    if proc:
+        entry["proc"] = proc
+    claims[sid] = entry
     return _save_compact_claims(claims, path)
 
 
@@ -4267,7 +4358,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     handled.add(sid)
                 if mhash:
                     mark_compact_delivered(sid, mhash, path=delivered_path)
-                compact_claim_set(sid, cwd)
+                compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 logs.append("OK (compact-request, stash) %s" % loc)
             else:
                 logs.append("skip draft (stash occupied) %s: %r"
@@ -4286,7 +4377,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             handled.add(sid)
         if mhash:
             mark_compact_delivered(sid, mhash, path=delivered_path)
-        compact_claim_set(sid, cwd)
+        compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         logs.append("OK (compact-request) %s" % loc)
     if changed:
         _save_compact_requests(reqs, path)
@@ -4408,7 +4499,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
         _log_compact_sync("DROP small-context sid=%s cwd=%s" % (sid, cwd))
         return True   # #48 gate: nothing worth compacting — handled, drop it
     send_continue(pid, COMPACT_TEXT, run)
-    compact_claim_set(sid, cwd)
+    compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
     return True
 
@@ -4650,7 +4741,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
                 logs.append("skip draft (stash occupied) %s %d: %r"
                             % (loc, ctx, draft[:40]))
                 continue
-            compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
+            compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
             tag = "compact-stale, stash"
         else:
             if not pane_at_idle_prompt(captured):
@@ -4661,7 +4752,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
                             % (loc, ctx, int(idle)))
                 continue
             send_continue(pid, COMPACT_TEXT, run)
-            compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
+            compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
             tag = "compact-stale"
         ok = _wait_for_compact_return(pid, run, sleep_fn)
         if ok:
@@ -4851,6 +4942,13 @@ COMPACT_HARD_CEILING = 300_000     # tokens -- deliberately BETWEEN job 14's
 # job 17's state entries are now dicts carrying `cwd`, a distinct shape.
 COMPACT_CEILING_QUEUED = "queued"
 
+# #82 -- once a QUEUED entry has been observed still above the ceiling for
+# this many consecutive sweeps (~30 sweeps * the 60s cadence = ~30 minutes),
+# the job starts LOGGING it every sweep as STUCK instead of the silent
+# `continue` that let the live incident run for HOURS before an accident
+# uncovered it. Never a resend trigger -- purely a visibility fix.
+COMPACT_CEILING_STUCK_CYCLES = 30
+
 COMPACTING_MARKER = "Compacting conversation"
 
 
@@ -4864,7 +4962,8 @@ def _pane_compacting(captured):
 
 
 def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
-                         send_fn=None, ceiling=None, handled=None):
+                         send_fn=None, ceiling=None, handled=None,
+                         stuck_cycles=None):
     """Job 17 — see the section comments above (#69 for the job itself, #72
     for this state machine).
 
@@ -4899,6 +4998,23 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
     claim answers the separate, narrower "does anyone already have one in
     flight" question.
 
+    #82: both this job's OWN `compact_ceiling` entries AND the shared claim
+    now also carry a process fingerprint (`_pane_claude_proc_fingerprint`)
+    captured at send time, resolved via `pid`/`starttime` from
+    `/proc/<pid>/stat`. A watchdog-driven restart of THAT process
+    (`_restart_pane`, jobs 12/18) relaunches via `claude -c`, which
+    CONTINUES the same transcript -- so the session id never changes and
+    neither CONSUMED nor the pre-pass's session-id-replace check can ever
+    fire for it. The fingerprint closes that gap: a missing or
+    different-starttime process is a demonstrated delivery loss (FAILED),
+    independent of session id. `stuck_cycles` (default
+    `COMPACT_CEILING_STUCK_CYCLES`, env
+    `AIRULESET_COMPACT_CEILING_STUCK_CYCLES`) bounds how many consecutive
+    still-queued-and-above-ceiling sweeps pass silently before this job
+    starts logging the entry as STUCK every sweep -- never a resend
+    trigger, purely so a genuine wedge (neither CONSUMED nor FAILED ever
+    fires) is visible in journalctl instead of silently skipped for hours.
+
     Only once a session is at/above `ceiling` (default `COMPACT_HARD_CEILING`,
     env `AIRULESET_COMPACT_HARD_CEILING`) is a tmux round-trip made at all --
     `pane_in_mode` / `pane_waiting_on_user` / `_classify_boundary` guard the
@@ -4921,6 +5037,13 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                                          COMPACT_HARD_CEILING))
         except ValueError:
             ceiling = COMPACT_HARD_CEILING
+    if stuck_cycles is None:
+        try:
+            stuck_cycles = int(os.environ.get(
+                "AIRULESET_COMPACT_CEILING_STUCK_CYCLES",
+                COMPACT_CEILING_STUCK_CYCLES))
+        except ValueError:
+            stuck_cycles = COMPACT_CEILING_STUCK_CYCLES
     compacted = state.get("compact_ceiling") or {}
     logs = []
 
@@ -4941,6 +5064,22 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
             continue                          # unrecognized/legacy shape --
                                                # leave it, main loop below
                                                # treats it as fresh-eligible
+        # #82 -- a demonstrated PROCESS-death/reuse loss is checked FIRST
+        # (cheap: a /proc read, no transcript walk at all). This is what
+        # catches a watchdog-driven restart that relaunches via `claude -c`
+        # and so CONTINUES the SAME transcript -- the session-id-replace
+        # check below can never fire for that case, since the session id
+        # never changes on a `-c` resume. `proc` is absent on an
+        # entry queued before this fix (or whose pane could not be
+        # resolved at queue time) -- never treated as FAILED for that.
+        proc = entry.get("proc")
+        if proc and _proc_fingerprint_alive(proc) is False:
+            compacted.pop(stale_sid, None)
+            _save()
+            logs.append("FAILED (compact-ceiling) %s -> delivery lost "
+                        "(process gone/replaced), resending once for the "
+                        "same session" % (entry.get("cwd") or stale_sid))
+            continue
         cwd = entry.get("cwd") or ""
         tinfo = find_active_transcript(projects_dir, cwd) if cwd else None
         current_sid = tinfo[0].stem if tinfo else None
@@ -4983,6 +5122,20 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                 logs.append("CONSUMED (compact-ceiling) %s -> compact "
                             "verified (context confirmed below ceiling), "
                             "eligible again" % loc)
+            else:
+                # #82 -- a queued claim that stays above the ceiling for a
+                # long time must be VISIBLE, not silently skipped every
+                # sweep forever (exactly what let the live incident run for
+                # HOURS before an accident uncovered it). Never a resend
+                # trigger by itself -- only makes the wedge loggable.
+                cycles = entry.get("cycles", 0) + 1
+                entry["cycles"] = cycles
+                _save()
+                if cycles >= stuck_cycles:
+                    loc = _pane_location(pid, run) or pid
+                    logs.append("STUCK (compact-ceiling) %s ctx=%d queued "
+                                "%d cycles, still unresolved (no CONSUMED, "
+                                "no FAILED)" % (loc, ctx, cycles))
             continue                          # still queued+high, or just
                                                # consumed -- never send here
         ctx = transcript_current_context(tpath)
@@ -5027,8 +5180,19 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                 continue
             send_continue(pid, COMPACT_TEXT, run)
             tag = "compact-ceiling"
-        compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
-        compacted[sid] = {"status": COMPACT_CEILING_QUEUED, "cwd": cwd}
+        # #82 -- fingerprint the process the keystrokes were actually
+        # delivered to (resolved ONCE, shared between the two state
+        # machines below) so a later restart of THIS PROCESS is a
+        # detectable delivery loss even when the session id never changes
+        # (a `-c` resume). None in the common test/no-pane-info case --
+        # both call sites simply omit the "proc" key then, unchanged from
+        # before this fix.
+        proc = _pane_claude_proc_fingerprint(pid, run=run)
+        compact_claim_set(sid, cwd, proc=proc)   # #78/#82 -- keystrokes typed, claim it
+        entry_out = {"status": COMPACT_CEILING_QUEUED, "cwd": cwd}
+        if proc:
+            entry_out["proc"] = proc
+        compacted[sid] = entry_out
         _save()
         logs.append("OK (%s) %s ctx=%d -> /compact sent, awaiting consumption"
                     % (tag, loc, ctx))
