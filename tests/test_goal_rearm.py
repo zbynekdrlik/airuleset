@@ -461,5 +461,29 @@ class TestRunOnceWiring(unittest.TestCase):
         self.assertIn("(20)", wd.run_once.__doc__)
 
 
+class TestCmdWatchdogEnablesJob20(unittest.TestCase):
+    """The production caller must actually turn it on — a job wired only in
+    `run_once`'s signature never runs on any box."""
+
+    class _Args:
+        dry_run = False
+        verbose = False
+
+    def test_cmd_watchdog_passes_the_gate(self):
+        import contextlib
+        import io
+        import airuleset
+        seen = {}
+
+        def fake(*a, **kw):
+            seen.update(kw)
+            return []
+
+        with m.patch.object(wd, "run_once", side_effect=fake):
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_watchdog(self._Args())
+        self.assertTrue(seen.get("goal_rearm_enabled"), seen.keys())
+
+
 if __name__ == "__main__":
     unittest.main()
