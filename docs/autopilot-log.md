@@ -90,3 +90,36 @@
   re-mock returned zero log lines because the jobs' own pre-passes bail first.
 - Tests: `tests/test_long_turn.py` (31) + 2 in `test_watchdog.py` + 8 in `test_gh_json_hook.py`;
   suite 1929 → 1990.
+
+## 2026-07-26 — #91 (situational rule loading) + #92 (context diet tier 1, 3/5)
+
+- **#91 rules: every module->skill conversion was a silent delete** — CLOSED.
+  Settled the mechanism two ways: live isolated-profile probes (CC 2.1.220) and a
+  read of the CC bundle. Skill bodies enter context ONLY via an explicit `Skill`
+  call (the session-start `skill_listing` attachment is 25,401 B of DESCRIPTIONS
+  only); `rules/*.md` + `paths:` inject as a `nested_memory` attachment but on
+  **Read / @-mention / IDE-open only** — never Edit/Write; `PreToolUse`
+  `hookSpecificOutput.additionalContext` injects on the ACTION.
+  Re-measured on 7,941 transcripts (not 91): 342 `gh pr merge` transcripts, 1
+  loaded pr-merge-policy; 875 CI-polling transcripts, 4 loaded ci-monitor; 32 of
+  53 skills never invoked. The 9 path-scoped rules show 0 historical injections
+  because user-level symlinking only landed 2026-07-25 22:06 (25 h before) — not
+  a mechanism failure.
+  Fix: `hooks/inject-situational-rule.sh` + `hooks/situational-triggers.conf`
+  (17 topics, once-per-session, never blocks). RED `97be4d8` → GREEN `45f8e98`,
+  write-shaped coverage `9950528`. Proof: `gh pr merge` → the model quoted
+  `airuleset:autopilot=auto-merge` (exists ONLY in the skill body); same session
+  with no deploy command → deploy procedure NOT-IN-CONTEXT.
+  Production bug caught mid-ticket: a `gh issue comment` heredoc that merely
+  DESCRIBED the trigger table matched 9 topics and injected 65.3 kB. RED
+  `05bf005` → GREEN `d014fc0`: strip heredoc bodies + quoted spans, 14 k cap per
+  call (deferring, never consuming), optional 5th `exclude` column.
+- **#92 context diet tier 1** — 3 of 5 items landed, OPEN for the rest.
+  Item 1 `45430fa`: the 71 `## Development Rules` bullets moved VERBATIM to
+  `.claude/rules/airuleset-internals.md` (project-scope `paths:`); CLAUDE.md
+  80,802 → 12,053 B, `.gitignore` carve-out `!.claude/rules/`.
+  Items 3+5 `d2b684a`: notify hook internals → notification-mechanics skill;
+  four CC product-doc subsections dropped from claude-code-tooling.md.
+  Measured prefix (real `usage`, fresh session, this repo): **162,726 →
+  135,303 tokens (−27,423)**. Items 2 (model-awareness) and 4 (8 hook-covered
+  modules) still open — both rewrite deliberately test-locked rule text.
