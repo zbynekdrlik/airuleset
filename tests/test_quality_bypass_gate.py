@@ -125,7 +125,7 @@ class TestModuleClaimMatchesReality(TestCase):
         self.assertIn("stop-check-prose-violations.sh", t)
         # the split must be visible to the reader, not just to the hook
         self.assertRegex(t, r"(?i)unambiguous[^\n]*(hard|block)")
-        self.assertRegex(t, r"(?i)(warn|soft)[^\n]*(not blocked|never blocks|warns)")
+        self.assertRegex(t, r"(?i)(warn|soft)[^\n]*(never block|not blocked)")
 
 
 if __name__ == "__main__":
