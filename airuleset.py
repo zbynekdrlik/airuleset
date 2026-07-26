@@ -2477,11 +2477,30 @@ def cmd_compact_request(args):
     act on it. On any failure/exception the request stays recorded, exactly
     as before #65, for job 14's polled retry (its own draft-handling,
     #67, covers the one case this synchronous path stays conservative on:
-    a genuine unsent draft)."""
+    a genuine unsent draft).
+
+    #71 (2026-07-26 live incident): a REPEAT `--record` for a boundary
+    ALREADY delivered — live-observed as the armed goal loop's own
+    re-evaluation re-running the Stop hook chain against an UNCHANGED
+    `last_assistant_message` several times right after a compaction
+    finishes, each fire independently reaching this exact code path — must
+    be a complete no-op: no re-record, no second `deliver_compact_now`
+    attempt. `--msg-hash` (from the hook, a fingerprint of the triggering
+    message) is checked against `compact_already_delivered` BEFORE doing
+    anything; on a match, this call returns immediately. On a genuine
+    delivery, `mark_compact_delivered` records the hash so any LATER repeat
+    (from this same synchronous path, or from job 14) is recognized. A
+    blank/absent `--msg-hash` (every pre-#71 caller) never dedupes this
+    way — the check and the mark are both no-ops on a blank hash."""
     from watchdog import (record_compact_request, deliver_compact_now,
-                          clear_compact_request)
+                          clear_compact_request, compact_already_delivered,
+                          mark_compact_delivered)
     if getattr(args, "record", False):
-        ok = record_compact_request(args.session, args.cwd)
+        msg_hash = (getattr(args, "msg_hash", "") or "").strip()
+        if compact_already_delivered(args.session, msg_hash):
+            sys.stdout.write("dup")
+            return
+        ok = record_compact_request(args.session, args.cwd, msg_hash=msg_hash)
         if not ok:
             sys.stdout.write("skip")
             return
@@ -2491,6 +2510,8 @@ def cmd_compact_request(args):
             delivered = False
         if delivered:
             clear_compact_request(args.session)
+            if msg_hash:
+                mark_compact_delivered(args.session, msg_hash)
             sys.stdout.write("delivered")
         else:
             sys.stdout.write("recorded")
@@ -3281,6 +3302,11 @@ def main():
                         help="Record the request (called by the Stop hook)")
     p_creq.add_argument("--session", default="", help="Session id (transcript stem)")
     p_creq.add_argument("--cwd", default="", help="Session cwd")
+    p_creq.add_argument("--msg-hash", dest="msg_hash", default="",
+                        help="Fingerprint (e.g. sha256) of the triggering "
+                             "last_assistant_message (#71 delivered-dedup — "
+                             "a repeat with the SAME hash after a delivered "
+                             "compact is a no-op)")
 
     p_tickets = sub.add_parser(
         "tickets-status",

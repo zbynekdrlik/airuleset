@@ -3634,20 +3634,30 @@ def _save_compact_requests(d, path=None):
         return False
 
 
-def record_compact_request(session, cwd, now=None, path=None):
+def record_compact_request(session, cwd, now=None, path=None, msg_hash=None):
     """Record that `session` (transcript stem = CC session id) just reported
     a completed ticket — a /compact request for job 14 to action once the
     pane goes genuinely idle. Overwrites any earlier pending request for the
     SAME session (only the LATEST ticket boundary matters — a session that
     completes a second ticket before the watchdog picks up the first request
     should compact at the newer boundary, not lose the request). Fail-safe
-    (never raises). Returns True on success."""
+    (never raises). Returns True on success.
+
+    `msg_hash` (#71, optional): a fingerprint of the `last_assistant_message`
+    that triggered this request — stored on the entry so whichever channel
+    ends up delivering (the synchronous #65 path, or job 14's poll) can mark
+    `compact_already_delivered` for THIS exact reported completion, below.
+    Omitted by every pre-#71 caller — those requests simply carry no hash
+    and never participate in the delivered-dedup check."""
     session = str(session or "").strip()
     if not session:
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
-    d[session] = {"cwd": str(cwd or ""), "ts": int(now)}
+    entry = {"cwd": str(cwd or ""), "ts": int(now)}
+    if msg_hash:
+        entry["msg_hash"] = str(msg_hash)
+    d[session] = entry
     return _save_compact_requests(d, path)
 
 
@@ -3662,6 +3672,90 @@ def clear_compact_request(session, path=None):
         d.pop(session, None)
         return _save_compact_requests(d, path)
     return False
+
+
+# --------------------------------------------------------------------------- #
+# #71 (2026-07-26 live incident) — DELIVERED-DEDUP: one ticket boundary must
+# produce exactly ONE `/compact`. Live evidence (gatekeeper, ~07:35): a
+# SINGLE completed-ticket report produced THREE synchronous deliveries in a
+# row (one success, two "Not enough messages to compact") within ~2.5
+# minutes — with ZERO watchdog job 14/17 log lines in that window
+# (confirmed via journalctl), proving the repeats were REPEATED Stop-hook
+# fires against an UNCHANGED `last_assistant_message` (the armed goal
+# loop's own re-evaluation re-running the Stop hook chain right after the
+# first compaction finished), not a job-14 race — though the same mechanism
+# below also closes the theoretical sync-vs-job14 race the issue names.
+#
+# A fingerprint of the triggering message is tracked in its OWN small file
+# (`compact-delivered.json`), separate from `compact-requests.json`, so the
+# EXISTING "success clears the pending entry" contract there stays exactly
+# as it was (job 14's own dedup — a fresh entry per NEW boundary) — this is
+# an ADDITIONAL layer: once EITHER channel confirms a hash is handled
+# (delivered, or #48-gated as nothing-to-compact), a LATER request carrying
+# the SAME hash — from either channel — is recognized as a duplicate of an
+# ALREADY-handled boundary and produces zero keystrokes.
+# --------------------------------------------------------------------------- #
+
+
+def compact_delivered_path():
+    """`~/.claude/compact-delivered.json`, resolved at CALL time (same
+    reasoning as `compact_requests_path()` above — never a frozen
+    module-level constant)."""
+    return Path.home() / ".claude" / "compact-delivered.json"
+
+
+def _load_compact_delivered(path=None):
+    """{session_id: msg_hash} — the last message hash actually handled
+    (delivered, or confirmed nothing-to-compact) per session. {} on any
+    error or missing file; never raises."""
+    path = path or compact_delivered_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_compact_delivered(d, path=None):
+    path = path or compact_delivered_path()
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def compact_already_delivered(session, msg_hash, path=None):
+    """#71 — True iff `msg_hash` matches the LAST hash actually handled for
+    `session`. A blank `session` or `msg_hash` never matches — callers with
+    no hash (every pre-#71 caller) always get False, i.e. never deduped
+    this way, preserving the exact pre-#71 behavior for anyone who doesn't
+    opt in. Fail-safe (never raises)."""
+    session = str(session or "").strip()
+    msg_hash = str(msg_hash or "").strip()
+    if not session or not msg_hash:
+        return False
+    return _load_compact_delivered(path).get(session) == msg_hash
+
+
+def mark_compact_delivered(session, msg_hash, path=None):
+    """#71 — record that `msg_hash` was just handled for `session`, so a
+    LATER request reporting the SAME (unchanged) completion — from EITHER
+    channel — is recognized as a duplicate and skipped. A blank `session`
+    or `msg_hash` is a no-op (nothing to key the dedup on, and never even
+    touches disk). Fail-safe (never raises). Returns True on success."""
+    session = str(session or "").strip()
+    msg_hash = str(msg_hash or "").strip()
+    if not session or not msg_hash:
+        return False
+    d = _load_compact_delivered(path)
+    d[session] = msg_hash
+    return _save_compact_delivered(d, path)
 
 
 # --------------------------------------------------------------------------- #
@@ -3747,11 +3841,24 @@ def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
 
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                             path=None, projects_dir=None, min_context=None,
-                            send_fn=None, handled=None):
+                            send_fn=None, handled=None, delivered_path=None):
     """Job 14 — see the section comment. `state` is used ONLY for #67's
     stash-skip counter (`compact_stash_skips`) — this job's own request
     dedup still lives entirely in the requests file, not in
     api-watchdog-state.json.
+
+    #71: an entry whose `msg_hash` is ALREADY marked delivered (in
+    `delivered_path` — default `compact_delivered_path()`, checked via
+    `compact_already_delivered`) is dropped with ZERO tmux interaction — the
+    synchronous #65 path (or a prior pass of THIS job) already handled this
+    exact reported completion; a stale poll must never re-send `/compact`
+    for it. Every success path below (idle send, stash delivery, and the
+    #48 context-gate drop) marks the hash delivered via
+    `mark_compact_delivered`, using the entry's OWN `msg_hash` — so whoever
+    acts first closes the door for the other. A request recorded with no
+    `msg_hash` (every pre-#71 caller) never consults or writes this file at
+    all — `compact_already_delivered`/`mark_compact_delivered` are no-ops on
+    a blank hash, so existing behavior is untouched.
 
     `handled` (#69, optional): a mutable set run_once passes so job 17 (the
     hard-ceiling backstop) can see, WITHIN THE SAME SWEEP, which session ids
@@ -3806,6 +3913,17 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     logs = []
     changed = False
     for sid in list(reqs.keys()):
+        entry = reqs.get(sid) or {}
+        mhash = str(entry.get("msg_hash") or "").strip()
+        if mhash and compact_already_delivered(sid, mhash, path=delivered_path):
+            # #71 — this exact reported completion was already handled (by
+            # the synchronous path, or an earlier pass of this job): a stale
+            # poll must never re-send `/compact` for it.
+            logs.append("skip already-delivered (compact-request) %s" % sid)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+            continue
         pane = panes_by_sid.get(sid)
         if not pane:
             logs.append("skip no-pane (compact-request) %s" % sid)
@@ -3842,6 +3960,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 if not dry_run:
                     reqs.pop(sid, None)
                     changed = True
+                    if mhash:
+                        mark_compact_delivered(sid, mhash, path=delivered_path)
                 continue
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
@@ -3859,6 +3979,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 changed = True
                 if handled is not None:
                     handled.add(sid)
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
                 logs.append("OK (compact-request, stash) %s" % loc)
             else:
                 logs.append("skip draft (stash occupied) %s: %r"
@@ -3875,6 +3997,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         changed = True
         if handled is not None:
             handled.add(sid)
+        if mhash:
+            mark_compact_delivered(sid, mhash, path=delivered_path)
         logs.append("OK (compact-request) %s" % loc)
     if changed:
         _save_compact_requests(reqs, path)

@@ -28,6 +28,17 @@ set -euo pipefail
 # request survive for watchdog job 14 (compact_ticket_boundary) to retry on
 # its next poll, unchanged from the pre-#65 behavior.
 #
+# #71 (2026-07-26 live incident): a sha256 fingerprint of `$MSG` is passed
+# through as `--msg-hash` so `cmd_compact_request` can recognize a REPEAT
+# fire for the SAME (unchanged) completion report as a duplicate and skip
+# it — live evidence (gatekeeper, journalctl-confirmed) showed a SINGLE
+# ticket-boundary report producing multiple synchronous /compact deliveries
+# in a row (the armed goal loop's own re-evaluation re-running this whole
+# Stop hook chain against an unchanged last_assistant_message right after a
+# compaction finished), with watchdog job 14 never even invoked in that
+# window. See `compact_already_delivered`/`mark_compact_delivered`
+# (watchdog/__init__.py).
+#
 # Silent + non-blocking: never writes to stdout, always exits 0 — must
 # never interfere with the Stop decision pipeline (the other
 # stop-check-*.sh gates).
@@ -58,8 +69,13 @@ printf '%s' "$MSG" | grep -qiE '^#+[[:space:]]*✅[[:space:]]*work complete' && 
 printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*✅[[:space:]]*DONE:' && DONE=1
 [ "$DONE" = "1" ] || exit 0
 
+# #71 — fingerprint the message (never let a failing sha256sum kill this
+# `set -e` script: the `||` fallback keeps the assignment safe, per the
+# repo's own documented `VAR=$(failing_cmd)` + `set -e` gotcha).
+MSG_HASH=$(printf '%s' "$MSG" | sha256sum 2>/dev/null | cut -d' ' -f1) || MSG_HASH=""
+
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
 python3 "$AIRULESET_PY" compact-request --record --session "$SID" --cwd "$CWD" \
-    >/dev/null 2>&1 || true
+    --msg-hash "$MSG_HASH" >/dev/null 2>&1 || true
 
 exit 0
