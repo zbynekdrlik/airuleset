@@ -3781,6 +3781,252 @@ def mark_compact_delivered(session, msg_hash, path=None):
 
 
 # --------------------------------------------------------------------------- #
+# #78 (2026-07-26 live incident) — SHARED /compact CLAIM, generalizing #72's
+# job-17-only QUEUED/CONSUMED/FAILED state machine to EVERY sender.
+#
+# Live proof #71 did NOT fix (camera-box, session 90bc51f3, right after #71
+# shipped): a single completed-ticket report triggered the synchronous #65
+# path TWICE with two DIFFERENT msg_hashes (the Stop hook rejected the first
+# draft for missing the playbook line, so the regenerated report hashed
+# differently) — #71's dedup is keyed on msg_hash, so BOTH looked like new,
+# undelivered boundaries to it. The pane was BUSY compacting from the first
+# send; both extra sends queued behind it and fired back-to-back the instant
+# the busy pane went idle:
+#
+#   13:07:24  /compact                                    <- 1st send (queued)
+#   13:09:26  Compacted (ctrl+o to see full summary)       <- real compaction, 2 min later
+#   13:09:29  /compact -> "Not enough messages to compact."   <- 2nd send, drained
+#   13:09:29  /compact -> "Not enough messages to compact."   <- 3rd send, drained
+#
+# msg_hash dedup protects the DECISION to send. It does not protect the
+# PANEL's own type-ahead QUEUE — the window between "keystrokes typed" and
+# "compaction actually landed" is as wide as the whole busy turn, and every
+# sender (the synchronous #65 path, job 14, job 15, job 17) is blind to
+# what any OTHER sender already queued during it.
+#
+# The fix: ONE claim per session, shared by every sender, checked BEFORE
+# any of a sender's own logic (msg_hash, context threshold, ticket
+# boundary, hard ceiling) ever runs:
+#
+#   absent   -- never claimed, or a prior claim just resolved; eligible.
+#   {"cwd", "ts"}
+#            -- `/compact` was typed once and is awaiting resolution. EVERY
+#               sender must skip entirely while this is true — never a
+#               resend "just this once" for its own reason. Resolves via
+#               EXACTLY two paths, never a timer (the #72 lesson,
+#               generalized):
+#                 CONSUMED -- the claimed session's OWN transcript carries a
+#                   `compact_boundary` system entry (Claude Code's own
+#                   durable "a real compaction landed" record — verified
+#                   live against the camera-box incident transcript itself,
+#                   entry at 2026-07-26T13:09:26.880Z) NEWER than the
+#                   claim's send time. This is the #78-mandated proof —
+#                   NEVER a context-threshold read (job 15/17's OWN
+#                   internal state machines still use that for their own
+#                   re-trigger cadence, which is a SEPARATE, narrower
+#                   concern from "did anyone already queue a /compact").
+#                 FAILED -- the claim's `cwd` now resolves to a DIFFERENT,
+#                   NEWER session id than the one the claim was queued
+#                   under (the pane went through a restart — `/exit` +
+#                   relaunch always mints a fresh session id, so the old
+#                   process holding the queued keystrokes is gone). A
+#                   resend is legitimate ONLY here.
+#
+# Deliberately does NOT replace job 15's `compact_stale` / job 17's
+# `compact_ceiling` state machines — those decide WHEN THEIR OWN job should
+# next consider re-triggering (idle duration, context regrowth). This claim
+# answers a narrower, independent question — "does ANY sender already have
+# an outstanding, unconfirmed /compact for this session" — and gates every
+# sender's send point, in ADDITION to (before) each job's own logic.
+# --------------------------------------------------------------------------- #
+
+
+def compact_claims_path():
+    """`~/.claude/compact-claims.json`, resolved at CALL time (same
+    reasoning as `compact_requests_path()` above — never a frozen
+    module-level constant)."""
+    return Path.home() / ".claude" / "compact-claims.json"
+
+
+def _load_compact_claims(path=None):
+    """{session_id: {"cwd":..., "ts":...}} — the ONE outstanding /compact
+    claim per session, shared by every sender. {} on any error or missing
+    file; never raises."""
+    path = path or compact_claims_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_compact_claims(d, path=None):
+    path = path or compact_claims_path()
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def _transcript_compact_boundary_ts(path, tail_bytes=4_000_000):
+    """Epoch (float) of the NEWEST `system`/`compact_boundary` transcript
+    entry within the file's tail, or None if none found in the scanned
+    window / the file is unreadable. Bounded tail read (mirrors
+    `_last_human_prompt_ts`'s own shape) — never loads a huge transcript
+    whole. This is the #78 proof of CONSUMPTION: `compact_boundary` is
+    Claude Code's OWN durable record that a real compaction landed
+    (verified live against the camera-box #78 incident transcript itself,
+    entry `{"type": "system", "subtype": "compact_boundary", ...}` at
+    2026-07-26T13:09:26.880Z) — never an indirect proxy like a context
+    read, which can lag or race."""
+    from datetime import datetime
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return None
+    best = None
+    for ln in raw.splitlines():
+        if b"compact_boundary" not in ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if (not isinstance(e, dict) or e.get("type") != "system"
+                or e.get("subtype") != "compact_boundary"):
+            continue
+        try:
+            ep = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ep > best:
+            best = ep
+    return best
+
+
+def compact_claim_active(sid, cwd, path=None, projects_dir=None):
+    """#78 — the SINGLE shared gate every `/compact` sender (the
+    synchronous #65 path, job 14, job 15, job 17) MUST consult BEFORE
+    typing `/compact` into `sid`'s pane, and BEFORE any of the sender's OWN
+    logic (msg_hash dedup, context threshold, ticket boundary, hard
+    ceiling) runs. Returns True iff `sid` currently has an outstanding,
+    UNRESOLVED claim — a send is FORBIDDEN.
+
+    Reconciles the stored claim against reality on every call (never
+    trusts a stale entry blindly), resolving it via EXACTLY the two paths
+    the section comment above describes — CONSUMED (a `compact_boundary`
+    transcript entry newer than the send time) or FAILED (the claim's cwd
+    now belongs to a different, newer session — a demonstrated delivery
+    loss). NEVER resolves on elapsed time alone — a claim with no
+    matching transcript evidence stays queued no matter how long ago it
+    was set."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    projects_dir = projects_dir or PROJECTS_DIR
+    claims = _load_compact_claims(path)
+    entry = claims.get(sid)
+    if not isinstance(entry, dict):
+        return False                      # never claimed — eligible
+    claimed_cwd = entry.get("cwd") or cwd
+    # FAILED — the cwd's CURRENT active transcript is a DIFFERENT session
+    # than the one this claim was queued under; the typed keystroke is
+    # gone with the old (now-replaced) process.
+    tinfo = find_active_transcript(projects_dir, claimed_cwd) if claimed_cwd else None
+    current_sid = tinfo[0].stem if tinfo else None
+    if current_sid is not None and current_sid != sid:
+        claims.pop(sid, None)
+        _save_compact_claims(claims, path)
+        return False                      # FAILED — eligible for a fresh send
+    # CONSUMED — the CLAIMED session's own transcript shows a real
+    # compact_boundary newer than the send time.
+    tpath = _transcript_for_session(projects_dir, sid, claimed_cwd)
+    if tpath is not None:
+        boundary_ts = _transcript_compact_boundary_ts(tpath)
+        send_ts = entry.get("ts")
+        if (boundary_ts is not None and send_ts is not None
+                and boundary_ts > send_ts):
+            claims.pop(sid, None)
+            _save_compact_claims(claims, path)
+            return False                  # CONSUMED — eligible again
+    return True                           # still genuinely queued — NEVER
+                                           # resend here, no matter how much
+                                           # time has passed
+
+
+def compact_claim_set(sid, cwd, now=None, path=None):
+    """Record that `/compact` was just typed into `sid`'s pane — the
+    SINGLE shared claim every sender (#78) writes on every real send.
+    `now` (default `time.time()`) is the send time `compact_claim_active`
+    compares transcript `compact_boundary` entries against. Fail-safe
+    (never raises). Returns True on success."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    now = time.time() if now is None else now
+    claims = _load_compact_claims(path)
+    claims[sid] = {"cwd": str(cwd or ""), "ts": now}
+    return _save_compact_claims(claims, path)
+
+
+COMPACT_SYNC_LOG_LINES_MAX = 2000
+
+
+def compact_sync_log_path():
+    """`~/.claude/compact-sync.log`, resolved at CALL time (same reasoning
+    as `compact_requests_path()` above). #78 — the SYNCHRONOUS #65
+    delivery path (`deliver_compact_now`) runs directly inside the Stop
+    hook subprocess with its stdout thrown at /dev/null
+    (`notify-compact-request.sh`), so a plain print() there leaves NO
+    trace anywhere journalctl can see. This is the ONLY record of every
+    send/drop decision that path makes — the #78 incident itself was
+    undebuggable from journalctl for exactly this reason (confirmed: ZERO
+    job 14/17 log lines in the incident window, while THREE synchronous
+    deliveries fired in a row)."""
+    return Path.home() / ".claude" / "compact-sync.log"
+
+
+def _log_compact_sync(line, path=None):
+    """Best-effort append-only log line for the synchronous delivery path
+    (`deliver_compact_now`). Never raises — a logging failure must never
+    break delivery (returns False instead, same fail-safe shape as every
+    other `_save_*` helper in this module). Bounded: trims to the last
+    `COMPACT_SYNC_LOG_LINES_MAX` lines on every write so this can never
+    grow unbounded on a long-lived box."""
+    path = path or compact_sync_log_path()
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    existing = []
+    try:
+        existing = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        existing = []
+    existing.append("%s %s" % (ts, line))
+    existing = existing[-COMPACT_SYNC_LOG_LINES_MAX:]
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(existing) + "\n")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------- #
 # Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c, 2026-07-25). See the
 # section comment above. Reuses the EXACT idle guards job 12 (MODEL
 # RECONCILE) already uses: never busy, never mid-dialog, never with a draft
@@ -3869,6 +4115,13 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     dedup still lives entirely in the requests file, not in
     api-watchdog-state.json.
 
+    #78: the SHARED `/compact` claim (`compact_claim_active`) is checked
+    FIRST, before the #71 msg_hash dedup below — while another sender
+    already has an outstanding claim for this sid, this request is dropped
+    with ZERO tmux interaction, regardless of msg_hash/context. Every real
+    send (idle or stash) below also SETS the claim via
+    `compact_claim_set`, so job 15/17/the sync path see it too.
+
     #71: an entry whose `msg_hash` is ALREADY marked delivered (in
     `delivered_path` — default `compact_delivered_path()`, checked via
     `compact_already_delivered`) is dropped with ZERO tmux interaction — the
@@ -3936,6 +4189,18 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     changed = False
     for sid in list(reqs.keys()):
         entry = reqs.get(sid) or {}
+        cwd = entry.get("cwd", "")
+        # #78 -- the SHARED claim gate, checked FIRST and unconditionally:
+        # if ANY sender (this job, job 15, job 17, or the synchronous #65
+        # path) already has an outstanding, unresolved /compact claim for
+        # this session, drop this request with ZERO tmux interaction --
+        # regardless of msg_hash, context, or anything else below.
+        if compact_claim_active(sid, cwd, projects_dir=pdir):
+            logs.append("skip claim-queued (compact-request) %s" % sid)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+            continue
         mhash = str(entry.get("msg_hash") or "").strip()
         if mhash and compact_already_delivered(sid, mhash, path=delivered_path):
             # #71 — this exact reported completion was already handled (by
@@ -3971,7 +4236,6 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # NOT block the send (see the docstring above). Measured before the
         # draft branch (#67) so a trivial-context draft-holding session is
         # simply dropped, never stash-attempted for nothing.
-        cwd = (reqs.get(sid) or {}).get("cwd", "")
         ctx = None
         tpath = _transcript_for_session(pdir, sid, cwd)
         if tpath is not None:
@@ -4003,6 +4267,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     handled.add(sid)
                 if mhash:
                     mark_compact_delivered(sid, mhash, path=delivered_path)
+                compact_claim_set(sid, cwd)
                 logs.append("OK (compact-request, stash) %s" % loc)
             else:
                 logs.append("skip draft (stash occupied) %s: %r"
@@ -4021,6 +4286,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             handled.add(sid)
         if mhash:
             mark_compact_delivered(sid, mhash, path=delivered_path)
+        compact_claim_set(sid, cwd)
         logs.append("OK (compact-request) %s" % loc)
     if changed:
         _save_compact_requests(reqs, path)
@@ -4078,33 +4344,53 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
     the ticket-boundary request is recorded (see the section comment above).
 
     Returns True when this session is FULLY HANDLED (either `/compact` was
-    actually typed, or the #48 context-threshold gate confirms there is
-    genuinely nothing to compact) — the caller (`cmd_compact_request`) must
-    NOT leave a pending request behind in either case. Returns False when
-    the caller should fall back to `record_compact_request` for job 14's
-    polled retry: no pane resolves unambiguously, the pane is in copy-mode /
-    showing an open dialog / has no locatable boundary at all, or — the one
-    case this function deliberately stays conservative on — the pane holds
-    a genuine unsent DRAFT (job 14/15's `_compact_stash_attempt`, #67,
-    handles that on retry; a synchronous multi-round-trip stash dance at
-    Stop-hook time is unnecessary risk for what should be a rare case). A
-    pane merely BUSY (mid-turn) is NOT a reason to fall back — that is
-    exactly the case this function exists to handle, per the section
-    comment's queuing behavior."""
+    actually typed, or an existing claim / the #48 context-threshold gate
+    confirms nothing more needs to happen here) — the caller
+    (`cmd_compact_request`) must NOT leave a pending request behind in
+    either case. Returns False when the caller should fall back to
+    `record_compact_request` for job 14's polled retry: no pane resolves
+    unambiguously, the pane is in copy-mode / showing an open dialog / has
+    no locatable boundary at all, or — the one case this function
+    deliberately stays conservative on — the pane holds a genuine unsent
+    DRAFT (job 14/15's `_compact_stash_attempt`, #67, handles that on
+    retry; a synchronous multi-round-trip stash dance at Stop-hook time is
+    unnecessary risk for what should be a rare case). A pane merely BUSY
+    (mid-turn) is NOT a reason to fall back — that is exactly the case
+    this function exists to handle, per the section comment's queuing
+    behavior.
+
+    #78 — checks the SHARED `/compact` claim FIRST, before anything else
+    (no pane resolution, no tmux round-trip needed): if another sender
+    already has an outstanding, unresolved claim for `sid`, this call sends
+    NOTHING and returns True (handled — the outstanding claim is what will
+    resolve this, not a second send). Every real send below sets the claim
+    via `compact_claim_set`. Every decision this function makes (skip or
+    send) is logged via `_log_compact_sync` — this is the ONLY trace of
+    this path's behavior, since its caller (the Stop hook) throws stdout at
+    /dev/null (#78's own incident was undebuggable from journalctl for
+    exactly this reason)."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        _log_compact_sync("SKIP claim-queued sid=%s cwd=%s" % (sid, cwd))
+        return True   # another sender already has this queued — handled
     pid = _find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
+        _log_compact_sync("SKIP no-pane sid=%s cwd=%s" % (sid, cwd))
         return False
     if pane_in_mode(pid, run):
+        _log_compact_sync("SKIP in-mode sid=%s cwd=%s" % (sid, cwd))
         return False
     captured = capture_pane(pid, run, lines=40)
     if pane_waiting_on_user(captured):
+        _log_compact_sync("SKIP dialog-open sid=%s cwd=%s" % (sid, cwd))
         return False
     kind, draft = _classify_boundary(captured)
     if kind == "no-input-line":
+        _log_compact_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
         return False
     if draft:
+        _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
         return False
     # kind is "input" (bare, or the queued-messages placeholder already
     # normalized to bare) or "busy" — BOTH are safe to send into here (see
@@ -4119,8 +4405,11 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
             min_context = COMPACT_BOUNDARY_MIN_CONTEXT
     tpath = _transcript_for_session(projects_dir, sid, cwd)
     if tpath is not None and transcript_current_context(tpath) < min_context:
+        _log_compact_sync("DROP small-context sid=%s cwd=%s" % (sid, cwd))
         return True   # #48 gate: nothing worth compacting — handled, drop it
     send_continue(pid, COMPACT_TEXT, run)
+    compact_claim_set(sid, cwd)
+    _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
     return True
 
 
@@ -4245,6 +4534,18 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
     a real success here (either path) records the sid so job 17 (hard
     ceiling) never double-fires on it within the same sweep.
 
+    #78: the SHARED `/compact` claim (`compact_claim_active`) is checked
+    right before any tmux round-trip, AFTER this job's OWN `compact_stale`
+    state machine has already had its say (PENDING_CONFIRM clearing / a
+    below-threshold skip) — those decide THIS job's own re-trigger
+    cadence and are UNCHANGED. The shared claim answers the separate,
+    narrower question "does anyone else already have one in flight" and
+    takes precedence over a bare failed-verification retry: while another
+    sender's claim (or this job's own prior send) is still queued, this
+    sweep's send attempt is skipped outright — never resent on a mere
+    verification timeout (the #72 lesson, generalized). Every real send
+    (idle or stash) also SETS the claim via `compact_claim_set`.
+
     Local, cheap checks (dedup, current context, idle duration — all read
     off the transcript file, no tmux round-trip) run BEFORE any tmux call,
     so the overwhelmingly common case (a session under threshold, or idle
@@ -4304,6 +4605,18 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
         ctx = transcript_current_context(tpath)
         if ctx < COMPACT_CONTEXT_THRESHOLD:
             continue                          # under threshold — no log (the common case)
+        # #78 -- the SHARED claim gate, checked right before any tmux
+        # round-trip (cheap, local): if ANY sender (job 14, job 17, or the
+        # synchronous #65 path) already has an outstanding, unresolved
+        # /compact claim for this sid, skip THIS SWEEP's send attempt --
+        # this job's OWN `compact_stale` state (above) still governs ITS
+        # OWN re-trigger cadence (PENDING_CONFIRM clearing, give-up); the
+        # shared claim is the separate, narrower "does anyone else already
+        # have one in flight" question, and it takes precedence over a
+        # bare failed-verification retry (the #72 lesson, generalized:
+        # never resend on a mere timeout).
+        if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+            continue
         loc = _pane_location(pid, run) or pid
         if pane_in_mode(pid, run):
             logs.append("skip in-mode (compact-stale) %s %d" % (loc, ctx))
@@ -4337,6 +4650,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
                 logs.append("skip draft (stash occupied) %s %d: %r"
                             % (loc, ctx, draft[:40]))
                 continue
+            compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
             tag = "compact-stale, stash"
         else:
             if not pane_at_idle_prompt(captured):
@@ -4347,6 +4661,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
                             % (loc, ctx, int(idle)))
                 continue
             send_continue(pid, COMPACT_TEXT, run)
+            compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
             tag = "compact-stale"
         ok = _wait_for_compact_return(pid, run, sleep_fn)
         if ok:
@@ -4574,6 +4889,16 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
     any pane is even visited). See the section comment for the full
     rationale.
 
+    #78: the SHARED `/compact` claim (`compact_claim_active`) is checked
+    BEFORE this job's OWN `compact_ceiling` state machine (above) -- if
+    another sender already has an outstanding claim for this sid, this job
+    skips it entirely this sweep. Every real send (idle or stash) also SETS
+    the shared claim via `compact_claim_set`, so job 14/15/the sync path
+    see it too. This job's #72 state machine is UNCHANGED -- it still
+    decides its OWN re-trigger cadence against the ceiling; the shared
+    claim answers the separate, narrower "does anyone already have one in
+    flight" question.
+
     Only once a session is at/above `ceiling` (default `COMPACT_HARD_CEILING`,
     env `AIRULESET_COMPACT_HARD_CEILING`) is a tmux round-trip made at all --
     `pane_in_mode` / `pane_waiting_on_user` / `_classify_boundary` guard the
@@ -4636,6 +4961,14 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
         if handled is not None and sid in handled:
             continue                          # job 14/15 already compacted
                                                # this sid THIS sweep (#69)
+        # #78 -- the SHARED claim gate, checked BEFORE this job's OWN
+        # compact_ceiling state machine: if ANY sender already has an
+        # outstanding, unresolved /compact claim for this sid, skip it
+        # entirely this sweep -- this job's own state machine below still
+        # decides ITS re-trigger cadence, the shared claim decides whether
+        # anyone else already has one in flight right now.
+        if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+            continue
         entry = compacted.get(sid)
         if isinstance(entry, dict) and entry.get("status") == COMPACT_CEILING_QUEUED:
             # #72: cheap, local, no tmux round-trip for the common (still
@@ -4694,6 +5027,7 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                 continue
             send_continue(pid, COMPACT_TEXT, run)
             tag = "compact-ceiling"
+        compact_claim_set(sid, cwd)   # #78 -- keystrokes typed, claim it
         compacted[sid] = {"status": COMPACT_CEILING_QUEUED, "cwd": cwd}
         _save()
         logs.append("OK (%s) %s ctx=%d -> /compact sent, awaiting consumption"
