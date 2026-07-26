@@ -79,7 +79,9 @@ set -euo pipefail
 # the reason a running loop on one of 6 managed boxes stalls on a routine
 # gh/git call.
 #
-# Bypass (rare, logged): touch /tmp/airuleset-main-exec-ok-<session_id>
+# Bypass (rare, logged, ONE-SHOT since #80 — honoring the marker DELETES it,
+# so one marker exempts exactly one call): touch
+# /tmp/airuleset-main-exec-ok-<session_id>
 # (generalized name). The original Fable-only marker
 # /tmp/airuleset-fable-exec-ok-<session_id> is STILL honored for backward
 # compatibility (nothing outside this hook + its own tests referenced the
@@ -150,14 +152,23 @@ fi
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
 
+# #80: the marker is ONE-SHOT — honoring it CONSUMES it. "Deliberate
+# exception" means one deliberate action, not "disable the guard for the
+# rest of the session" (gk, 2026-07-26: one touch at 01:24 → 332 unguarded
+# calls). Re-touching always works, so the escape hatch never dead-ends;
+# the cost of abuse just grows with the abuse instead of being paid once.
 BYPASS_MARK=""
+BYPASS_FILE=""
 if [ -e "/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}" ]; then
     BYPASS_MARK="main-exec-ok"
+    BYPASS_FILE="/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}"
 elif [ -e "/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}" ]; then
     BYPASS_MARK="fable-exec-ok(legacy)"
+    BYPASS_FILE="/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}"
 fi
 if [ -n "$BYPASS_MARK" ]; then
-    echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK" \
+    rm -f "$BYPASS_FILE" 2>/dev/null || true
+    echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed)" \
         >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
     exit 0
 fi
