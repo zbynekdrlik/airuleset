@@ -59,6 +59,54 @@ class TestGhJsonHook(TestCase):
     def test_unrelated_command_allowed(self):
         self.assertAllowed("ls -la && echo done")
 
+    # ---- #66: heredoc BODY content must never be scanned ----
+    #
+    # Filing airuleset#66 itself hit this: `gh issue create -F body.md` is
+    # the CORRECT recipe, but the ticket BODY (written via a heredoc into
+    # body.md as part of the same Bash command) documents gh recipes that
+    # mention `--json` on the READ subcommands. The hook must only scan the
+    # actual command tokens, never the heredoc payload.
+
+    def test_heredoc_body_mentioning_json_recipe_does_not_block_create(self):
+        cmd = (
+            "cat > /tmp/body.md <<'EOF2'\n"
+            "Recipe: gh issue create -F body.md\n"
+            "Read fields: gh issue view $num --json number,title\n"
+            "EOF2\n"
+            'gh issue create -t "Title" -F /tmp/body.md -l bug'
+        )
+        self.assertAllowed(cmd)
+
+    def test_heredoc_body_containing_literal_json_flag_text_does_not_block(self):
+        # the body documents the BANNED flag verbatim (e.g. a gh-cli-recipes.md
+        # excerpt) — still just heredoc payload, never a real flag position.
+        cmd = (
+            "cat > /tmp/body.md <<'EOF3'\n"
+            "Never do `gh issue create --json number` — it has no --json flag.\n"
+            "EOF3\n"
+            "gh issue create -t T -F /tmp/body.md"
+        )
+        self.assertAllowed(cmd)
+
+    def test_real_json_flag_after_heredoc_is_still_blocked(self):
+        # the heredoc-stripping must not swallow a GENUINE violation that
+        # follows it on the actual command line.
+        cmd = (
+            "cat > /tmp/body.md <<'EOF4'\n"
+            "just a normal ticket body, nothing special here\n"
+            "EOF4\n"
+            "gh issue create -t T -F /tmp/body.md --json number"
+        )
+        self.assertBlocked(cmd)
+
+    def test_unterminated_heredoc_fails_safe_to_original_scan(self):
+        # malformed input (no closing delimiter) must not crash the hook;
+        # falling back to scanning everything (still allowed here, since no
+        # real --json flag exists on an actual command line) is acceptable.
+        cmd = "cat > /tmp/body.md <<'EOF5'\nno closing delimiter below\n"
+        r = run(cmd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 if __name__ == "__main__":
     main()
