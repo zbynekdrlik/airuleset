@@ -151,6 +151,18 @@ set -euo pipefail
 # is never counted and never blocked, or the cap would sit in front of the
 # only documented way out of it.
 #
+# #80 also RE-TUNED the block-list itself, by replaying ALL 687 of gk's real
+# main-agent Bash commands from 2026-07-26 through this hook and reading
+# every block. Three false-positive classes were found that way and are now
+# guarded by tests: an output REDUCER after a pipe (`gh pr merge ... 2>&1 |
+# tail -2` — only a statement's FIRST pipe stage is classified now), a
+# BOUNDED peek (`head -5 /tmp/out`, `tail -3 SKILL.md`, `sed -n '250,260p'`
+# — judge the SIZE that comes back, not the head token; the bound is
+# AIRULESET_PEEK_MAX_LINES, default 50), and an ASSERTION (`grep -c`,
+# `grep -q` return one number / nothing). Block rate on that corpus went
+# 18.6% -> 14.1%, and what remains is genuinely main reading source files
+# and logs into its own context — exactly what should be dispatched.
+#
 # The ticket's direction 1 (">N gh calls per TURN → batch them") was
 # REFUTED by the same measurement and deliberately NOT built: 687 of 687
 # main turns carried exactly ONE Bash call, so a per-turn counter could
@@ -283,6 +295,7 @@ log_block() {
 # ---- Bash path (#66): classify, don't size-gate ----
 if [ "$TOOL_NAME" = "Bash" ]; then
     CLASS=$(python3 - "$BASH_CMD" <<'PYEOF'
+import os
 import re
 import shlex
 import sys
@@ -328,7 +341,17 @@ cmd = strip_heredocs(cmd)
 # separators, quote-aware tokenization per segment. A segment that matches
 # neither list is left ambiguous (never classified) — the caller treats an
 # all-ambiguous command as ALLOW.
-SEGMENTS_RE = re.compile(r'&&|\|\||[;&|]|\n')
+# #80: statements and PIPE STAGES are different things. A statement
+# (`;`, `&&`, `||`, `&`, newline) starts a fresh command whose own first
+# stage decides what gets read. A downstream PIPE stage reads STDIN — and is
+# usually an output REDUCER (`... 2>&1 | tail -2`, `... | awk ... | uniq -c`,
+# the two most common shapes in gk's whole transcript), which makes what the
+# model sees SMALLER, never bigger. Classifying a reducer as a bulk read was
+# a false positive on the loop's most-used idiom. So: split into statements,
+# then classify only each statement's FIRST pipe stage. `cat file | grep x`
+# still blocks — its first stage IS the bulk read.
+STATEMENTS_RE = re.compile(r'&&|\|\||[;&]|\n')
+SEGMENTS_RE = STATEMENTS_RE          # kept: same shape name used elsewhere
 
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
@@ -473,15 +496,89 @@ def redirects_stdout_to_file(tk):
     return False
 
 
+# #80: `head`/`tail` are inherently BOUNDED (10 lines by default) and are the
+# loop's normal "did my write land / what did that command print" peek
+# (`... > /tmp/mt.out; head -5 /tmp/mt.out`). What makes a read expensive is
+# the SIZE that comes back, so judge the BOUND, not the head token. A peek up
+# to PEEK_MAX lines passes; a bigger -n, an unbounded `-n +N` (line N to EOF)
+# or a `-c` byte dump is still a bulk read. `cat`/`sed`/`awk`/`grep` unchanged.
+try:
+    PEEK_MAX = int(os.environ.get("AIRULESET_PEEK_MAX_LINES") or 50)
+except ValueError:
+    PEEK_MAX = 50
+
+
+def is_bounded_peek(tk):
+    n = None
+    i = 1
+    while i < len(tk):
+        t = tk[i]
+        if t == "-c" or t.startswith("--bytes"):
+            return False                      # byte dump, not a line peek
+        if t == "-n" and i + 1 < len(tk):
+            n = tk[i + 1]
+            i += 2
+            continue
+        if t.startswith("-n"):
+            n = t[2:]
+        elif re.match(r'^-\d+$', t):
+            n = t[1:]
+        elif t.startswith("--lines="):
+            n = t.split("=", 1)[1]
+        i += 1
+    if n is None:
+        return True                           # default 10 lines — bounded
+    if n.startswith("+"):
+        return False                          # `tail -n +N` runs to EOF
+    try:
+        return int(n) <= PEEK_MAX
+    except ValueError:
+        return False
+
+
+# #80: `sed -n 'A,Bp'` is a line SLICE — bounded exactly like `head -N`, so
+# judge its WIDTH. A slice up to PEEK_MAX lines is a peek; a wider one, a
+# pattern range (`/re/,/re/p` — unbounded by construction), or any non-`-n`
+# usage is not. `sed -i` edits a file and prints nothing — never a read.
+_SED_RANGE_RE = re.compile(r'^(\d+),(\d+)p$')
+_SED_SINGLE_RE = re.compile(r'^\d+p$')
+
+
+def is_bounded_sed(tk):
+    if any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+        return True                           # in-place edit, prints nothing
+    if not any(t == "-n" for t in tk[1:]):
+        return False
+    for t in tk[1:]:
+        if t.startswith("-"):
+            continue
+        m = _SED_RANGE_RE.match(t)
+        if m:
+            return (int(m.group(2)) - int(m.group(1)) + 1) <= PEEK_MAX
+        if _SED_SINGLE_RE.match(t):
+            return True
+    return False
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
     if redirects_stdout_to_file(tk):
         return False
     head = tk[0]
-    if head in ("grep", "rg", "ag", "find"):
+    if head in ("grep", "rg", "ag"):
+        # `-c` (count) / `-q` (quiet) return one number / nothing — an
+        # ASSERTION ("did my write land"), not a read. Everything else
+        # (notably `grep -rn`) really does dump matches.
+        return not any(t in ("-c", "-q", "--count", "--quiet", "--silent")
+                       for t in tk[1:])
+    if head == "find":
         return True
-    if head in ("cat", "head", "tail", "sed", "awk"):
+    if head in ("head", "tail"):
+        return not is_bounded_peek(tk)
+    if head == "sed":
+        return not is_bounded_sed(tk)
+    if head in ("cat", "awk"):
         return True
     if head == "pytest":
         return True
@@ -511,8 +608,23 @@ def is_blocked_segment(tk):
     return False
 
 
+def first_pipe_stage(statement):
+    # `|` inside quotes is not a pipe — tokenize, then cut at the first bare
+    # `|` token (shlex keeps an unquoted `|` as its own token only when it is
+    # space-separated, so also split a glued `a|b` conservatively).
+    parts = statement.split("|")
+    if len(parts) == 1:
+        return statement
+    head = parts[0]
+    # an unbalanced quote in the head means the `|` was quoted — keep it all
+    if head.count("'") % 2 or head.count('"') % 2:
+        return statement
+    return head
+
+
 def classify(text):
-    for seg in SEGMENTS_RE.split(text):
+    for statement in STATEMENTS_RE.split(text):
+        seg = first_pipe_stage(statement)
         tk = strip_prefix(tokens_of(seg))
         script = shell_dash_c_script(tk)
         if script is not None:
