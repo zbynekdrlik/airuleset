@@ -1095,6 +1095,41 @@ class TestGoalDriftBounded(GoalDriftBase):
             sent += len(tmux.typed())
         self.assertEqual(sent, wd.GOAL_DRIFT_MAX_ATTEMPTS)
 
+    def test_a_delivery_awaits_confirmation_before_trying_again(self):
+        """Live-observed: the re-arm landed byte-identically, but CC had not
+        yet written its arm record when the next sweep ran, so the job still
+        read the OLD payload and delivered a SECOND time. A delivery in
+        flight is not a failed one — it is the #72/#82 typed-vs-verified
+        distinction, applied here."""
+        state = {}
+        tp = self._templates(TPL_FULL)
+        now = time.time()
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state,
+                    now=now)
+        tp = self._templates(TPL_FULL_V2)
+        first, _ = self._sweep(templates_path=tp, state=state, now=now + 10,
+                               cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(first.typed(), [TPL_FULL_V2])
+        again, logs = self._sweep(templates_path=tp, state=state, now=now + 40,
+                                  cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(again.typed(),
+                         "a delivery still awaiting CC's arm record must not "
+                         "be repeated")
+
+    def test_an_unconfirmed_delivery_is_retried_once_the_window_passes(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        now = time.time()
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state,
+                    now=now)
+        tp = self._templates(TPL_FULL_V2)
+        self._sweep(templates_path=tp, state=state, now=now + 10,
+                    cap_seq=self._lit_seq(TPL_FULL_V2))
+        later = now + 10 + wd.GOAL_REARM_CONFIRM_S + 5
+        tmux, logs = self._sweep(templates_path=tp, state=state, now=later,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+
     def test_a_NEW_template_change_earns_a_fresh_budget(self):
         state = {}
         tp = self._templates(TPL_FULL)
