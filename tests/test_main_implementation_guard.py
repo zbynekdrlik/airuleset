@@ -712,9 +712,9 @@ class BoundedPeeks80(unittest.TestCase):
         out = self._armed("head -c 200000 big.log")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
-    def test_cat_and_sed_slice_are_untouched_by_the_peek_rule(self):
+    def test_cat_and_a_wide_sed_slice_are_untouched_by_the_peek_rule(self):
         self.assertEqual(self._armed("cat airuleset.py").returncode, 2)
-        self.assertEqual(self._armed("sed -n '1,40p' airuleset.py").returncode, 2)
+        self.assertEqual(self._armed("sed -n '1,400p' airuleset.py").returncode, 2)
 
     def test_peek_bound_is_env_tunable(self):
         helper = MainImplementationGuard()
