@@ -2419,8 +2419,14 @@ def cmd_watchdog(args):
     idle for 20+ minutes with no worker in flight (#39/#43 job 15), and — ONLY
     on the coordinator box (dev1) — merges every managed box's own hourly
     burn-snapshot row into one combined fleet.jsonl row, pinging when the
-    observed weekly-%/day pace exceeds budget (#55 job 16). Driven by the
-    systemd timer.
+    observed weekly-%/day pace exceeds budget (#55 job 16), and — since
+    Claude Code snapshots its hook set once at process start and never
+    re-reads it — RESTARTS any long-lived session whose settings.json hooks
+    block content hash no longer matches the hash it started under, so a
+    newly-deployed hook actually takes effect instead of staying inert for
+    that session's whole remaining lifetime (#70 job 18, coalesced with job
+    12's model restart into one restart when both fire the same sweep).
+    Driven by the systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that
@@ -2430,7 +2436,7 @@ def cmd_watchdog(args):
     `--verbose` is kept for any additional debug output a caller wants later."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
-                          compact_requests_path)
+                          compact_requests_path, hooks_settings_path)
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only dev1 fans out over ssh to
     # merge them. `os.uname().nodename` is the same "which host am I" check
@@ -2446,7 +2452,8 @@ def cmd_watchdog(args):
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
-                    fleet_path=burn.fleet_path())
+                    fleet_path=burn.fleet_path(),
+                    hooks_settings_path=hooks_settings_path())
     for line in logs:
         print(line)
 

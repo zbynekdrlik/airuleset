@@ -3307,11 +3307,19 @@ def _restart_pane(pid, run, sleep_fn, captured):
 
 
 def model_reconcile(now, run, state, target_model, dry_run=False,
-                    projects_dir=None, sleep_fn=None):
+                    projects_dir=None, sleep_fn=None, handled=None):
     """Job 12 — see the section comment. `target_model` MUST be passed in —
     cmd_watchdog passes `MANAGED_MODEL`; this module never hardcodes a model
     literal. A falsy `target_model` disables the job entirely (mirrors the
     other optional-fetch-gated jobs: usage_fetch=None skips job 3, etc.).
+
+    `handled` (#70, optional): a mutable set run_once passes so job 18
+    (hooks-reconcile, below) can see — within the SAME sweep — that this
+    session is ALREADY being restarted here for a MODEL change, and skip
+    firing a SECOND restart for a hooks-config change landing in the same
+    sweep. Populated ONLY at the real restart CLAIM (never in `dry_run` —
+    nothing is actually happening then, so there is nothing to coalesce
+    against — and never for a session that was merely SKIPPED this sweep).
 
     Dedup: `state['modelswitch'][<session id>]` is CLAIMED right before the
     restart keystrokes are sent and is only ever DELETED again on a FAILED
@@ -3398,6 +3406,8 @@ def model_reconcile(now, run, state, target_model, dry_run=False,
             continue
         reconciled[sid] = True
         state["modelswitch"] = reconciled
+        if handled is not None:
+            handled.add(sid)
         ok, reason = _restart_pane(pid, run, sleep_fn, captured)
         if ok:
             logs.append("OK (model-reconcile) %s %s -> %s (restarted)"
@@ -4472,6 +4482,179 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 18 — HOOKS RECONCILE, restart-based (#70, 2026-07-26 live incident). CC
+# snapshots its hook set ONCE at process START — `rCu()` / the telemetry event
+# `setup_hooks_captured`, read directly out of the CC 2.1.220 binary — and
+# NEVER re-reads it. There is no code path that calls `rCu()` a second time.
+# So a hook merged into `settings.json` while a session is ALREADY RUNNING
+# has ZERO effect on that session for its ENTIRE remaining lifetime, no
+# matter how many new hooks get deployed afterward — silently nullifying
+# every hook this repo has ever shipped into a long-lived loop (concretely,
+# #66's Bash-guard hook landed at `ed83955` but the gatekeeper master loop,
+# running since before that commit, never picked it up).
+#
+# This job is job 12's EXACT restart machinery (`_restart_pane`,
+# `_pane_has_bg_agent`, the boundary-classification guards) driven by a
+# DIFFERENT staleness signal: the CONTENT hash (never mtime — a touch/rewrite
+# with identical bytes must never trigger a restart) of the effective
+# settings.json `"hooks"` block, rather than a target-model string read out
+# of the transcript. Unlike job 12, there is no way to introspect from a
+# transcript what hook set a running process currently has loaded in memory
+# — hooks are never recorded per-message — so this job tracks its OWN
+# baseline per session id (`state['hooks_session_hash']`), bootstrapped on
+# the FIRST sweep it ever observes a given sid (there is no way to know
+# retroactively what hash a session ALREADY RUNNING at this job's own deploy
+# time actually started with, so the first observation is treated as the
+# baseline — this only ever matters once, at this job's own rollout; every
+# hooks change from then on is caught exactly, because the baseline was
+# recorded before that change landed). A LATER sweep where the CURRENT hash
+# no longer matches the stored baseline is what proves the session is
+# genuinely stale, and only then does it restart.
+#
+# Dedup / never-retry-a-success, mirroring job 12's shape exactly:
+# `state['hooks_restarted'][sid]` is CLAIMED right before the restart
+# keystrokes are sent and is only ever DELETED again on a FAILED restart
+# BELOW the attempt cap — a real success is never retried, a failed attempt
+# is retried on a later sweep instead of being stuck forever either way.
+# `state['hooks_restart_attempts'][sid]` counts failures; once it reaches
+# `HOOKS_RECONCILE_MAX_ATTEMPTS` the session GIVES UP for good (never
+# retried again), the exact same bounded-retry shape job 12/15/17 use.
+#
+# Coalescing with job 12 (#70's own explicit ask: "one restart, not two"):
+# run_once threads a SHARED per-sweep `handled` set into BOTH job 12 and this
+# job — a sid job 12 already restarted (or attempted to restart) THIS sweep
+# for a MODEL change is skipped outright here, so a hooks change landing in
+# the same sweep as a model change coalesces into the ONE restart job 12
+# already performs.
+#
+# Fails CLOSED on any uncertainty (#70 hard constraint: "make the restart
+# path fail CLOSED on any uncertainty"): an unreadable/missing/invalid
+# settings.json returns `None` from `_hooks_config_hash` and disables the
+# WHOLE job for that sweep — it never guesses "hash changed" from a read
+# failure, which would restart every live session on the box for no real
+# reason.
+# --------------------------------------------------------------------------- #
+
+HOOKS_RECONCILE_MAX_ATTEMPTS = 3   # same cap shape as job 12/15/17
+
+
+def hooks_settings_path():
+    """`~/.claude/settings.json` — the EFFECTIVE settings file Claude Code
+    reads its hook set from at its own process start, resolved at CALL time
+    (never a frozen module-level constant — mirrors `compact_requests_path()`'s
+    own documented reasoning: `Path.home()` must be read at call time, not at
+    import time)."""
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _hooks_config_hash(settings_path=None):
+    """Content hash (NEVER mtime — #70) of the `"hooks"` block inside the
+    effective settings.json. `sort_keys=True` so key REORDERING with
+    otherwise-identical content never looks like a change. Returns `None` on
+    ANY read/parse failure (missing file, bad JSON, not even a dict) — the
+    caller (`hooks_reconcile`) treats `None` as "disable this sweep", never
+    as "hash changed"; see the section comment's fail-closed rationale."""
+    path = settings_path or hooks_settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    hooks = d.get("hooks") or {}
+    return _hash(json.dumps(hooks, sort_keys=True))
+
+
+def hooks_reconcile(now, run, state, dry_run=False, projects_dir=None,
+                    sleep_fn=None, settings_path=None, handled=None):
+    """Job 18 — see the section comment above.
+
+    Reuses `_reconcile_candidate_panes` (claude/node/bun, same as job 12) and
+    `_restart_pane` (the identical `/exit` + relaunch + accept-"Resume from
+    summary" sequence) — never a parallel restart implementation. Never
+    restarts a pane that is in copy-mode, showing an open dialog, mid-turn/
+    busy, holding an unsent draft, not at a bare idle prompt, or running a
+    BACKGROUND AGENT (`_pane_has_bg_agent`) — the exact same guards job 12
+    uses, via the exact same helpers. Best-effort: exceptions are the
+    caller's (run_once's) responsibility to catch, same as every other job."""
+    cur_hash = _hooks_config_hash(settings_path)
+    if cur_hash is None:
+        return []                      # fail closed — unreadable settings.json
+    run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
+    projects_dir = projects_dir or PROJECTS_DIR
+    session_hash = state.get("hooks_session_hash") or {}
+    restarted = state.get("hooks_restarted") or {}
+    attempts_map = state.get("hooks_restart_attempts") or {}
+    logs = []
+    for pid, cwd, cmd in _reconcile_candidate_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        sid = tpath.stem
+        if restarted.get(sid):
+            continue                   # already restarted (or gave up) — never retry
+        known = session_hash.get(sid)
+        if known is None:
+            session_hash[sid] = cur_hash
+            state["hooks_session_hash"] = session_hash
+            continue                   # bootstrap: first sight, assume current hash
+        if known == cur_hash:
+            continue                   # up to date — the common case, no log
+        if handled is not None and sid in handled:
+            continue                   # job 12 already restarting this sid this sweep (#70)
+        loc = _pane_location(pid, run) or pid
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode (hooks-reconcile) %s" % loc)
+            continue
+        captured = capture_pane(pid, run, lines=40)
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (hooks-reconcile) %s" % loc)
+            continue
+        kind, draft = _classify_boundary(captured)
+        if kind == "no-input-line":
+            logs.append("skip no-input-line (hooks-reconcile) %s" % loc)
+            continue
+        if kind == "busy":
+            logs.append("skip busy (hooks-reconcile) %s" % loc)
+            continue
+        if draft:
+            logs.append("skip draft (hooks-reconcile) %s: %r" % (loc, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (hooks-reconcile) %s" % loc)
+            continue
+        if _pane_has_bg_agent(captured):
+            logs.append("skip bg-agent (hooks-reconcile) %s" % loc)
+            continue
+        if dry_run:
+            logs.append("READY (hooks-reconcile) %s (restart)" % loc)
+            continue
+        restarted[sid] = True
+        state["hooks_restarted"] = restarted
+        ok, reason = _restart_pane(pid, run, sleep_fn, captured)
+        if ok:
+            logs.append("OK restart (hooks changed) %s" % loc)
+            attempts_map.pop(sid, None)
+            state["hooks_restart_attempts"] = attempts_map
+        else:
+            attempts = attempts_map.get(sid, 0) + 1
+            attempts_map[sid] = attempts
+            state["hooks_restart_attempts"] = attempts_map
+            if attempts >= HOOKS_RECONCILE_MAX_ATTEMPTS:
+                logs.append("GAVE UP restart (hooks changed) %s after %d attempts (%s)"
+                            % (loc, attempts, reason))
+            else:
+                del restarted[sid]
+                state["hooks_restarted"] = restarted
+                logs.append("FAIL restart (hooks changed) %s (%s, attempt %d/%d)"
+                            % (loc, reason, attempts, HOOKS_RECONCILE_MAX_ATTEMPTS))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -4853,7 +5036,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
-             fleet_path=None):
+             fleet_path=None, hooks_settings_path=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -4934,6 +5117,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           ticket boundary (job 14) NOR ever goes idle 20 minutes (job 15),
           e.g. a continuous review/merge loop or a governance session that
           ends every turn `⏳ WORKING` (compact_hard_ceiling).
+      (18) (only when `hooks_settings_path` is given) HOOKS RECONCILE,
+          restart-based (#70) — Claude Code snapshots its hook set once at
+          process START and never re-reads it, so a hook deployed into
+          settings.json while a session is already running has zero effect
+          until that session restarts. A live claude/node/bun pane whose
+          settings.json hooks block content hash no longer matches the hash
+          this job first saw that session running under gets RESTARTED via
+          job 12's exact `_restart_pane` machinery — never busy/dialog/
+          draft/in-mode/running-a-background-agent (hooks_reconcile).
+          Coalesces with job 12 via a shared `handled` set so a model change
+          and a hooks change landing in the same sweep produce ONE restart,
+          not two. Same "wired = on" convention as jobs 13/14/16 (a path
+          param gates it — never a bare env/global default) so an existing
+          caller of run_once() that passes nothing sees NO behavior change
+          and never has its own test state polluted by this box's real
+          settings.json.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -5590,6 +5789,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     except Exception as e:
         logs.append("goal-autoarm error: %r" % (e,))
 
+    # #70 — shared per-sweep set: job 12 records every sid it actually
+    # restarts (or attempts to restart) THIS sweep so job 18 (hooks-reconcile,
+    # below) never fires a SECOND restart into the same pane for a hooks
+    # config change that happens to land in the same sweep as a model switch.
+    model_handled_this_sweep = set()
+
     # Job 12 — MODEL RECONCILE, restart-based (#42): only when `target_model`
     # is given (cmd_watchdog passes MANAGED_MODEL — this module never
     # hardcodes a model literal). Best-effort.
@@ -5597,9 +5802,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         try:
             logs += model_reconcile(now, run, state, target_model,
                                     dry_run=dry_run, projects_dir=projects_dir,
-                                    sleep_fn=sleep_fn)
+                                    sleep_fn=sleep_fn,
+                                    handled=model_handled_this_sweep)
         except Exception as e:
             logs.append("model-reconcile error: %r" % (e,))
+
+    # Job 18 — HOOKS RECONCILE, restart-based (#70): only when
+    # `hooks_settings_path` is given (cmd_watchdog passes
+    # watchdog.hooks_settings_path()) — same "wired = on" convention as jobs
+    # 13/14/16, so an existing caller of run_once() that knows nothing about
+    # this job (and every test that doesn't pass it) sees NO behavior change
+    # and is never polluted by this box's real ~/.claude/settings.json. Runs
+    # right after job 12 so the shared `handled` set above is already
+    # populated before this job checks it. Best-effort.
+    if hooks_settings_path:
+        try:
+            logs += hooks_reconcile(now, run, state, dry_run=dry_run,
+                                    projects_dir=projects_dir, sleep_fn=sleep_fn,
+                                    settings_path=hooks_settings_path,
+                                    handled=model_handled_this_sweep)
+        except Exception as e:
+            logs.append("hooks-reconcile error: %r" % (e,))
 
     # Job 13 — HOURLY BURN SNAPSHOT (#37): the automatic before/after
     # feedback loop — nothing for the user to remember to check. Only when
