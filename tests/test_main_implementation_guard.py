@@ -606,6 +606,76 @@ class CoordinatorOutputWrites80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class OneShotBypass80(unittest.TestCase):
+    """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
+    single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
+    the rest of the session. gk's main did exactly that at 01:24 ("Hook's
+    documented exception applies... Taking it (it's logged)") and then ran
+    304 Bash + 20 Write calls through it unguarded. "Deliberate exception"
+    means ONE deliberate action, so the hook now CONSUMES the marker: one
+    marker = one exempted call, still logged. Nothing dead-ends (it can
+    always be re-touched) but the cost of abuse grows linearly with abuse
+    instead of being paid once."""
+
+    def _marker(self, sid, legacy=False):
+        name = "fable" if legacy else "main"
+        return Path("/tmp/airuleset-%s-exec-ok-%s" % (name, sid))
+
+    def _run(self, sid, command="grep -rn 'TODO' .", **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command, sid=sid,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def test_marker_is_consumed_after_one_use(self):
+        sid = "t-mg-oneshot-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        first = self._run(sid)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertFalse(m.exists(), "marker must be consumed by the one use")
+
+    def test_second_call_after_the_marker_was_used_is_blocked_again(self):
+        sid = "t-mg-oneshot2-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.assertEqual(self._run(sid).returncode, 0)
+        second = self._run(sid)
+        self.assertEqual(second.returncode, 2,
+                         "a used marker must not keep the hook disabled")
+
+    def test_legacy_marker_is_also_consumed(self):
+        sid = "t-mg-oneshot3-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid, legacy=True)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.assertEqual(self._run(sid).returncode, 0)
+        self.assertFalse(m.exists())
+
+    def test_re_touching_the_marker_works_again(self):
+        sid = "t-mg-oneshot4-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        m.write_text("")
+        self.assertEqual(self._run(sid).returncode, 0)
+        self.assertEqual(self._run(sid).returncode, 2)
+        m.write_text("")
+        self.assertEqual(self._run(sid).returncode, 0,
+                         "the escape hatch must never dead-end")
+
+    def test_bypass_is_still_logged(self):
+        sid = "t-mg-oneshot5-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid)
+        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        self.assertTrue(log.exists())
+        self.assertTrue([ln for ln in log.read_text().splitlines() if sid in ln],
+                        "a consumed bypass must still be logged")
+
+
 class BlockLogging73(unittest.TestCase):
     """#73: every BLOCK must be written to its own log (timestamp, session,
     first ~120 chars of the command, which rule matched) — today the hook
