@@ -606,6 +606,65 @@ class CoordinatorOutputWrites80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class PipeReducers80(unittest.TestCase):
+    """#80, found by smoking the hook against gk's REAL main-agent commands:
+    the classifier splits on `|` and then judges each stage as if it were a
+    standalone command, so the single most common coordination idiom in the
+    whole transcript — piping an allow-listed command into an output REDUCER
+    (`gh pr merge 2193 2>&1 | tail -2`, `gh pr checks 2189 | awk -F'\\t'
+    '{print $2}' | sort | uniq -c`) — was BLOCKED on its `tail`/`awk` stage.
+
+    That is backwards: a downstream pipe stage reads STDIN, and a reducer
+    makes the output the model sees SMALLER. Only the FIRST stage of a
+    pipeline decides what is read at all, so only the first stage is
+    classified. `cat file | grep x` is still blocked — its first stage is
+    the bulk read."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def test_gh_merge_piped_into_tail_allowed(self):
+        out = self._armed("gh pr merge 2193 --merge --delete-branch 2>&1 | tail -2")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_gh_checks_piped_into_awk_pipeline_allowed(self):
+        out = self._armed(
+            "gh pr checks 2189 2>/dev/null | awk -F'\\t' '{print $2}' "
+            "| sort | uniq -c")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_git_log_piped_into_head_allowed(self):
+        out = self._armed("git log --oneline -20 | head -5")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_ci_poll_loop_with_awk_reducer_allowed(self):
+        # the exact CI-poll shape gk runs, reducer included
+        out = self._armed(
+            "for i in $(seq 1 17); do\n"
+            "  s=$(gh pr checks 2189 2>/dev/null | awk -F'\\t' '{print $2}' "
+            "| sort | uniq -c)\n  echo \"[$i] $s\"\n  sleep 60\ndone")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_bulk_read_as_the_first_stage_still_blocks(self):
+        out = self._armed("cat models19.py | grep -n warning | head -20")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_grep_sweep_piped_into_head_still_blocks(self):
+        out = self._armed("grep -rn 'TODO' . | head -20")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_a_second_statement_is_still_its_own_first_stage(self):
+        # `;` and `&&` start a NEW pipeline — each one's first stage counts
+        out = self._armed("gh pr view 42 | tail -3; cat /etc/passwd")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_journalctl_scrape_still_blocks_with_a_reducer(self):
+        out = self._armed("journalctl --user -u api-watchdog.service | tail -50")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class OneShotBypass80(unittest.TestCase):
     """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
     single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
