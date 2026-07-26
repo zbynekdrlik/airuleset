@@ -88,13 +88,13 @@ class TestTriggerTable(TestCase):
         topics = [r[0] for r in load_conf()]
         self.assertEqual(len(topics), len(set(topics)), "duplicate topic in table")
 
-    def test_every_action_shaped_stub_skill_has_a_trigger(self):
+    def test_every_stub_target_skill_has_a_trigger(self):
         """The whole point of #91: a converted skill must have a load path.
 
-        These are the stub-target skills whose content is bound to an ACTION,
-        so the hook is their surface. File-shaped ones (comprehensive-logging,
-        version-on-dashboard) live in rules/ instead and are covered by
-        test_situational_rules.py.
+        Every skill that is the target of a pointer stub in modules/ must be
+        reachable without the model volunteering a `Skill` call. rules/+paths:
+        is not an option for the write-shaped ones, because that surface fires
+        on Read only — never on Edit/Write.
         """
         bodies = {r[3] for r in load_conf()}
         for skill in [
@@ -112,6 +112,11 @@ class TestTriggerTable(TestCase):
             "subagent-type-discipline",
             "investigate-existing-first",
             "windows-remote-gui",
+            "comprehensive-logging",
+            "version-on-dashboard",
+            "deliver-files-as-urls",
+            "view-image-urls",
+            "notification-mechanics",
         ]:
             self.assertIn(
                 f"skills/{skill}/SKILL.md",
