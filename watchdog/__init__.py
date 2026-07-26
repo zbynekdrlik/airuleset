@@ -1964,6 +1964,28 @@ def _react_ok(channel, message_id, token):
 
 STASH_MARKER = "› stashed"          # "› stashed" — CC's stash-slot indicator
 
+# CC COLLAPSES a long literal `send-keys -l` into a single placeholder row
+# (`[Pasted text #3]`) instead of rendering the text — live-observed
+# 2026-07-26 on job 20's first real re-arm (a 3152-char /goal). Every
+# verified delivery here matches the typed text against the boundary line,
+# which can NEVER match that placeholder; the check only ever worked because
+# previous callers all sent short text.
+_PASTED_PLACEHOLDER_RX = re.compile(r"^\[Pasted text #\d+\]$")
+
+
+def _typed_landed(text, itext):
+    """True if the input-box content `itext` is evidence that `text` was
+    typed IN FULL — either the literal tail (a short type renders verbatim;
+    a WRAPPED one puts its tail on the boundary line, hence endswith) or
+    CC's collapsed `[Pasted text #N]` placeholder for a long one. A
+    genuinely TRUNCATED partial type matches neither and is still refused —
+    submitting one is the #36 disaster this verification exists to prevent."""
+    if not itext:
+        return False
+    if text.endswith(itext):
+        return True
+    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
+
 
 def deliver_with_stash(pid, text, run, captured=None, logs=None):
     """Deliver `text` into a pane that is IDLE but holds a foreign draft.
@@ -2020,7 +2042,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None):
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=30)
     itext = _input_line_text(cap)
-    if not (itext and text.endswith(itext)):
+    if not _typed_landed(text, itext):
         _log("stash-abort: type-verify-failed")
         run(["tmux", "send-keys", "-t", pid, "C-s"])      # restore the draft
         capture_pane(pid, run, lines=30)
@@ -2028,14 +2050,14 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None):
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=30)
     itext2 = _input_line_text(cap)
-    if itext2 and text.endswith(itext2):
+    if _typed_landed(text, itext2):
         # swallowed submit (#36 class) — ONE corrective Escape+Enter, never a
         # second Escape.
         run(["tmux", "send-keys", "-t", pid, "Escape"])
         run(["tmux", "send-keys", "-t", pid, "Enter"])
         cap = capture_pane(pid, run, lines=30)
         itext3 = _input_line_text(cap)
-        if itext3 and text.endswith(itext3):
+        if _typed_landed(text, itext3):
             _log("stash-abort: swallowed-submit-not-recovered")
             return False
     _log("stash-delivered")
@@ -5730,19 +5752,19 @@ def _send_goal_verified(pid, text, run, captured=None):
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=40)
     itext = _input_line_text(cap)
-    if not (itext and text.endswith(itext)):
+    if not _typed_landed(text, itext):
         return False                       # partial type — never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=40)
     itext2 = _input_line_text(cap)
-    if itext2 and text.endswith(itext2):
+    if _typed_landed(text, itext2):
         # swallowed submit (the #36 agent-strip class) — ONE corrective
         # Escape+Enter, never a second bare Enter, never two Escapes.
         run(["tmux", "send-keys", "-t", pid, "Escape"])
         run(["tmux", "send-keys", "-t", pid, "Enter"])
         cap = capture_pane(pid, run, lines=40)
         itext3 = _input_line_text(cap)
-        if itext3 and text.endswith(itext3):
+        if _typed_landed(text, itext3):
             return False
     return True
 

@@ -475,16 +475,15 @@ class TestLongPasteVerification(GoalRearmBase):
         # deliver_with_stash has the identical verify step, and job 20 routes
         # every draft-holding pane through it with the SAME long payload
         text = "/goal " + PAYLOAD
-        stashed = CONV + FOOTER_DARK.replace("❯ \n", "❯ \n").replace(
-            "  ● main\n", "  ● main\n  › stashed\n")
         with_draft = CONV + FOOTER_DARK.replace("❯ \n", "❯ draft\n")
-        bare = CONV + FOOTER_DARK
-        pasted = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
-        tmux = FakeTmux(with_draft, cap_seq=[bare, pasted, bare])
+        bare_stashed = (CONV + wd.STASH_MARKER + "\n" + FOOTER_DARK)
+        pasted = (CONV + wd.STASH_MARKER + "\n"
+                  + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n"))
+        # post-Ctrl+S (bare + slot lit) -> post-type (collapsed paste) -> post-Enter
+        tmux = FakeTmux(bare_stashed, cap_seq=[bare_stashed, pasted, bare_stashed])
         ok = wd.deliver_with_stash("%1", text, tmux, captured=with_draft)
         self.assertTrue(ok, tmux.sent)
         self.assertIn("Enter", tmux.keys())
-        del stashed
 
 
 class TestGoalLoopStallNudge(GoalRearmBase):
