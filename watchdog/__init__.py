@@ -5717,20 +5717,31 @@ def pane_goal_armed(captured):
     statusline row, and a pane whose CONVERSATION merely mentions `◎ /goal`
     (a session discussing this very ticket) must never read as armed.
 
-    `None` = UNDETERMINABLE, never a guess: no statusline row was captured at
-    all (a scrolled pane, a box without the managed statusline, an empty
-    capture), so neither "armed" nor "dark" can be claimed."""
+    `None` = UNDETERMINABLE, never a guess: the input box could not be located
+    (a BUSY pane's spinner occupies the boundary, a scrolled pane, an empty
+    capture) or nothing was rendered below it, so neither "armed" nor "dark"
+    can be claimed.
+
+    The footer is defined as everything BELOW the input box — NOT as
+    "`_is_bottom_chrome` rows" and NOT as "the row starting with `ctx `".
+    Live 2026-07-26: a freshly launched session renders the managed statusline
+    without caveman's `ctx …` block, a row `_is_bottom_chrome` does not
+    classify as chrome at all — so a peel-based read stopped ABOVE the very
+    row the indicator sits on, and a `ctx `-prefix guard declared the whole
+    pane unreadable. A SELECTED agent-strip row (`❯ ● main`, #36) renders
+    below the box and is excluded from the boundary search."""
     lines = (captured or "").splitlines()
-    i = len(lines)
-    n = 0
-    chrome = []
-    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
-        i -= 1
-        n += 1
-        chrome.append(lines[i])
-    if not any(ln.strip().startswith("ctx ") for ln in chrome):
-        return None
-    return any(GOAL_INDICATOR in ln for ln in chrome)
+    idx = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("❯") and not _is_bottom_chrome(s):
+            idx = i
+    if idx is None:
+        return None                        # no input box in view
+    footer = lines[idx + 1:]
+    if not any(ln.strip() for ln in footer):
+        return None                        # nothing rendered below it
+    return any(GOAL_INDICATOR in ln for ln in footer)
 
 
 def _send_goal_verified(pid, text, run, captured=None):
