@@ -109,6 +109,24 @@ set -euo pipefail
 # view <id> ...; sleep 30; done` — which must NEVER block just for being a
 # loop; its body (`gh run view ...`) is already allow-listed once `do` is
 # stripped.
+#
+# #80 (gatekeeper measurement, 2026-07-26) — the classifier's own FALSE
+# POSITIVE is what disabled all of #66. `cat > body.md <<'EOF' ... EOF` (the
+# recipe gh-cli-recipes.md MANDATES for every issue/PR body, `-F body.md`,
+# never an inline `--body`) classified as a BULK READ on its `cat` head
+# token. gk's main hit it 58× in a day, armed the bypass marker at 01:24,
+# and the hook was dead for the next 17 hours (332 bypass lines, 304 of them
+# Bash — `/tmp/airuleset-main-exec-block.log` never even got created, which
+# is the observation #80 was filed on). Two fixes in the classifier:
+#   • heredoc BODIES are stripped BEFORE segmentation (`strip_heredocs()`,
+#     the same shape block-gh-invalid-json-flag.sh already uses) — a body is
+#     payload text and routinely CONTAINS command-shaped prose;
+#   • a segment whose STDOUT is redirected to a FILE returns nothing to the
+#     model, so it is not the context cost this hook guards — it is a WRITE
+#     and it passes (`>`, `>>`, `1>`; `2>`/`>&` are NOT stdout-to-file and
+#     exempt nothing).
+# A genuine bulk read whose output DOES come back (`cat file`, `sed -n
+# '1,900p' file`, `grep -rn x .`) is unchanged — still blocked.
 
 command -v jq &>/dev/null || exit 0
 
@@ -206,6 +224,41 @@ import shlex
 import sys
 
 cmd = sys.argv[1]
+
+# ---- #80: strip heredoc BODIES before anything else. A heredoc body is
+# PAYLOAD text (a PR/issue body, a playbook section), never command tokens —
+# and it routinely CONTAINS command-shaped prose ("reproduce with: grep -rn
+# ... | head"). Segmenting on "\n" without this makes every such line a
+# "command" and blocks the mandated `gh ... -F body.md` recipe. Same
+# `strip_heredocs` shape block-gh-invalid-json-flag.sh already uses (one
+# parser shape in this repo, never a second invented one); an unterminated
+# heredoc falls through with the body left in place rather than crashing.
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def strip_heredocs(text):
+    lines = text.split("\n")
+    out = []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        mm = _HEREDOC_RE.search(line)
+        out.append(line)
+        i += 1
+        if not mm:
+            continue
+        delim = mm.group(2)
+        strip_leading = "<<-" in line
+        while i < n:
+            body_line = lines[i]
+            check = body_line.lstrip("\t") if strip_leading else body_line
+            i += 1
+            if check == delim:
+                break
+    return "\n".join(out)
+
+
+cmd = strip_heredocs(cmd)
 
 # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
 # separators, quote-aware tokenization per segment. A segment that matches
@@ -342,8 +395,24 @@ def is_allowed_segment(tk):
     return False
 
 
+# #80: a segment whose STDOUT goes to a FILE returns nothing to the model,
+# so it is not the context cost this hook guards — it is a WRITE, and it
+# passes (`cat > body.md`, `grep ... > /tmp/out`). `2>...` is a STDERR
+# redirect (the extremely common `gh ... 2>/dev/null`) and must NOT exempt
+# anything.
+def redirects_stdout_to_file(tk):
+    for t in tk[1:]:
+        if t.startswith("2>") or t.startswith(">&"):
+            continue          # stderr redirect / fd dup — not a file write
+        if t.startswith(">") or t.startswith("1>"):
+            return True
+    return False
+
+
 def is_blocked_segment(tk):
     if not tk:
+        return False
+    if redirects_stdout_to_file(tk):
         return False
     head = tk[0]
     if head in ("grep", "rg", "ag", "find"):
