@@ -117,7 +117,12 @@ class FakeTmux:
         j = " ".join(argv)
         self.sent.append(argv)
         if "list-panes" in j:
-            return "%1\tclaude\t" + self.cwd + "\t4242"
+            # `_reconcile_candidate_panes` (jobs 12/17/20) asks for THREE
+            # fields and rejects any other count; `list_claude_panes` asks
+            # for four (it also resolves sudo-hosted panes). Answer whichever
+            # this caller actually asked for.
+            row = "%1\tclaude\t" + self.cwd
+            return row + "\t4242" if "pane_pid" in j else row
         if "capture-pane" in j:
             if self.cap_seq:
                 return self.cap_seq.pop(0)
@@ -260,9 +265,12 @@ class GoalRearmBase(unittest.TestCase):
 
     def _go(self, captured, entries=None, state=None, now=None, cap_seq=(),
             handled=None, in_mode=False, dry_run=False):
-        if entries is None:
-            entries = [marker_entry("set", PAYLOAD)]
-        self._write(entries)
+        # One `_go` call = ONE watchdog sweep. The transcript is written once
+        # per test (appending it again would look like CC echoing a FRESH
+        # `Goal set:` marker — a real signal this job keys on).
+        if entries is not None or not getattr(self, "_wrote", False):
+            self._write(entries or [marker_entry("set", PAYLOAD)])
+            self._wrote = True
         tmux = FakeTmux(captured, cap_seq=cap_seq, in_mode=in_mode)
         logs = wd.goal_rearm(now or time.time(), tmux,
                              state if state is not None else {},

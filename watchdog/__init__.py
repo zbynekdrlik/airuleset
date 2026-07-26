@@ -5481,6 +5481,396 @@ def hooks_reconcile(now, run, state, dry_run=False, projects_dir=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 20 — GOAL RE-ARM BACKSTOP (#76, 2026-07-26 live incident, montalu@subdev).
+#
+# An armed `/goal` dies SILENTLY. Not (only) on a restart, as #76 originally
+# assumed — the montalu stream runs in ONE continuous transcript since
+# 2026-06-15 (240 MB, one session id) and the loop died TWICE in one day with
+# no restart at all, correlated with `/compact` (survived one compaction,
+# died at the next). The exact mechanism is NOT established: gatekeeper
+# survived 7+ compactions the same day with its goal intact, so compaction
+# alone is plainly not sufficient. What IS measured, and what this job keys
+# on, is the OBSERVABLE END STATE:
+#
+#   * NO `Goal cleared:` marker is ever written when this happens. That marker
+#     is `<local-command-stdout>` — the OUTPUT OF THE `/goal` SLASH COMMAND
+#     itself — so it only exists when a human (or this job) runs `/goal`.
+#     Whatever disarms the loop otherwise leaves the transcript's last marker
+#     saying `set`.
+#   * Therefore EVERY transcript-based goal detector is fooled — the
+#     `block-main-implementation.sh` goal-armed path (#54), and any re-arm
+#     mechanism built on the transcript alone — and nothing ever alerts. The
+#     user found the stream parked on a finished ticket ~6 hours later, twice.
+#
+# Hence the ticket's own demand: detection needs TWO independent sources.
+#   INTENT  = the transcript marker (`scan_goal_markers`): the last
+#             `<local-command-stdout>Goal set:` with no later `Goal cleared:`.
+#             Verified live against this repo's own session: the marker body
+#             is BYTE-IDENTICAL to the `/goal ` line that armed it (1612 chars
+#             both ways), so it is a faithful re-arm payload — unlike the
+#             rendered viewport, which hard-wraps a long goal (the 166-of-3100
+#             gk arm, 2026-07-20).
+#   REALITY = CC's own footer indicator `◎ /goal` (`pane_goal_armed`), read
+#             ONLY from the pane's trailing chrome region (the same
+#             `_is_bottom_chrome` peel every other job here uses) — a pane
+#             whose CONVERSATION merely quotes the indicator (this ticket's
+#             own discussion) must never read as armed.
+# INTENT says armed + REALITY says dark = this exact failure -> re-arm.
+#
+# This ALSO covers #76's original restart case with no per-job patching: a
+# watchdog restart (jobs 12/18) relaunches via `claude -c`, which CONTINUES
+# the same transcript, so the marker still says `set` while the fresh process
+# has no goal — precisely the mismatch above, healed on the next sweep.
+#
+# Bounded, because a goal can also disarm by legitimately RESOLVING (the
+# evaluator confirming the condition writes no marker either). Re-arming that
+# would spin one full-context turn per sweep forever. So: at most
+# `GOAL_REARM_MAX_ATTEMPTS` deliveries per `GOAL_REARM_STREAK_S` window per
+# session, ONE Discord ping on give-up, and the streak resets by TIME (never
+# by a confirmation — a confirm-then-die-again loop must still hit the cap)
+# so a stream that genuinely dies once or twice a day keeps healing itself.
+#
+# Delivery discipline (the payload is ~1.6-3.4 KB — far past what a short
+# `send-keys` can be assumed to queue safely, #65's busy-pane guarantee does
+# NOT extend to it): FREE PROMPT ONLY, every step verified against a fresh
+# capture, never a second Escape, and NEVER `Enter` after a type-verify
+# failure — a truncated goal is exactly the #36 disaster. A foreign draft
+# goes through `deliver_with_stash` (#35), never typed over. A pane already
+# compacting, holding an outstanding shared `/compact` claim (#78), or
+# compacted THIS sweep (#69's `handled` set) is skipped — the compaction
+# comes first, the re-arm heals afterwards.
+# --------------------------------------------------------------------------- #
+
+GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
+_GOAL_LCS_OPEN = "<local-command-stdout>"
+_GOAL_LCS_CLOSE = "</local-command-stdout>"
+
+# Bootstrap window for a session this job has never scanned before. Later
+# sweeps read ONLY the bytes appended since the stored offset, so the steady
+# state costs ~nothing regardless of how long ago the goal was armed.
+GOAL_MARK_TAIL_BYTES = 4_000_000
+
+GOAL_REARM_CONFIRM_S = 120          # after typing, allow this long for the
+                                    # `◎ /goal` indicator to light before
+                                    # calling the delivery a failure
+GOAL_REARM_MAX_ATTEMPTS = 2         # deliveries per streak window (the
+                                    # ticket's "try once, then ping, never a
+                                    # loop" — one retry for a genuinely lost
+                                    # keystroke, then stop)
+GOAL_REARM_STREAK_S = 2 * 3600      # streak window; resets by TIME only
+GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
+
+
+def _goal_marker_content(entry):
+    """TOP-LEVEL string content of a transcript entry — the ONLY shapes CC
+    writes a `local-command-stdout` marker as (`user` with a plain-string
+    `.message.content`, or `system` with a plain-string `.content`). A NESTED
+    `tool_result` is structurally excluded: its content is always a list, so
+    a session that grepped ANOTHER session's transcript can never be misread
+    as its own goal state (this repo's own CLAUDE.md, #54)."""
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("type") == "user":
+        msg = entry.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+            return msg["content"]
+        return None
+    if entry.get("type") == "system" and isinstance(entry.get("content"), str):
+        return entry["content"]
+    return None
+
+
+def _parse_goal_marker(content):
+    """`{"state": "set"|"cleared", "payload": str|None}` for a genuine `/goal`
+    marker, else None. The whole entry content must BE the marker (it starts
+    with the `<local-command-stdout>` tag) — a compaction SUMMARY narrating
+    "the loop's Goal set: …" in prose is not state."""
+    s = (content or "").strip()
+    if not s.startswith(_GOAL_LCS_OPEN):
+        return None
+    body = s[len(_GOAL_LCS_OPEN):]
+    if body.endswith(_GOAL_LCS_CLOSE):
+        body = body[:-len(_GOAL_LCS_CLOSE)]
+    for kind in ("set", "cleared"):
+        head = "Goal %s:" % kind
+        if body.startswith(head):
+            payload = body[len(head):].strip()
+            return {"state": kind, "payload": payload or None}
+    return None
+
+
+def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
+    """`(new_off, marker_or_None)` — the NEWEST `/goal` marker in the bytes
+    read, plus the offset to resume from next time.
+
+    `off is None` bootstraps from the file's TAIL (`tail_bytes`); a later call
+    passing the returned offset reads ONLY what was appended since, so a
+    long-lived 240 MB transcript costs one small read per sweep and the
+    marker's AGE never matters (the caller remembers the last marker it saw).
+    An `off` past EOF (a truncated/rotated file) falls back to the bootstrap.
+
+    `new_off` always stops after the LAST COMPLETE line — a transcript is
+    appended to live, so the final line may be half-written; consuming it
+    would drop a real marker on the next pass.
+
+    Fail-safe: an unreadable file returns `(off or 0, None)`; never raises."""
+    from datetime import datetime
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return (off or 0, None)
+    start = off
+    if start is None or start > size or start < 0:
+        start = max(0, size - tail_bytes)
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            raw = f.read()
+    except OSError:
+        return (off or 0, None)
+    cut = raw.rfind(b"\n")
+    if cut < 0:
+        return (start, None)              # no complete line in this window
+    new_off = start + cut + 1
+    body = raw[:cut]
+    if start > 0 and off is None:
+        # bootstrap mid-file: the first line is probably truncated
+        nl = body.find(b"\n")
+        body = body[nl + 1:] if nl >= 0 else b""
+    best = None
+    for ln in body.splitlines():
+        if _GOAL_LCS_OPEN.encode() not in ln:
+            continue
+        try:
+            entry = json.loads(ln)
+        except Exception:
+            continue
+        mark = _parse_goal_marker(_goal_marker_content(entry))
+        if mark is None:
+            continue
+        ts = None
+        try:
+            ts = datetime.fromisoformat(
+                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            ts = None
+        mark["ts"] = ts
+        best = mark
+    return (new_off, best)
+
+
+def pane_goal_armed(captured):
+    """`True` / `False` / `None` — is CC's `◎ /goal` footer indicator lit?
+
+    Read ONLY from the pane's trailing CHROME region (the `_is_bottom_chrome`
+    peel every keystroke job here shares): the indicator renders on the `ctx …`
+    statusline row, and a pane whose CONVERSATION merely mentions `◎ /goal`
+    (a session discussing this very ticket) must never read as armed.
+
+    `None` = UNDETERMINABLE, never a guess: no statusline row was captured at
+    all (a scrolled pane, a box without the managed statusline, an empty
+    capture), so neither "armed" nor "dark" can be claimed."""
+    lines = (captured or "").splitlines()
+    i = len(lines)
+    n = 0
+    chrome = []
+    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
+        i -= 1
+        n += 1
+        chrome.append(lines[i])
+    if not any(ln.strip().startswith("ctx ") for ln in chrome):
+        return None
+    return any(GOAL_INDICATOR in ln for ln in chrome)
+
+
+def _send_goal_verified(pid, text, run, captured=None):
+    """Type a LONG `/goal …` into a BARE input box and submit it, verifying
+    every step against a fresh capture — the same protocol
+    `deliver_with_stash` uses for its own type/submit steps (steps 5-7), minus
+    the stash (there is no draft here).
+
+    NEVER presses Enter after a type-verify failure: submitting a truncated
+    goal is the exact #36 disaster this job exists to avoid. NEVER sends two
+    consecutive Escapes (that permanently deletes a draft, #35). Returns True
+    only when the box is provably empty again after the submit."""
+    run = run or _default_run
+    cap = captured if captured is not None else capture_pane(pid, run, lines=40)
+    if _input_line_text(cap) != "":
+        return False                       # not a bare box — caller's problem
+    if _strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pid, "Escape"])
+    run(["tmux", "send-keys", "-t", pid, "-l", text])
+    cap = capture_pane(pid, run, lines=40)
+    itext = _input_line_text(cap)
+    if not (itext and text.endswith(itext)):
+        return False                       # partial type — never submit it
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    cap = capture_pane(pid, run, lines=40)
+    itext2 = _input_line_text(cap)
+    if itext2 and text.endswith(itext2):
+        # swallowed submit (the #36 agent-strip class) — ONE corrective
+        # Escape+Enter, never a second bare Enter, never two Escapes.
+        run(["tmux", "send-keys", "-t", pid, "Escape"])
+        run(["tmux", "send-keys", "-t", pid, "Enter"])
+        cap = capture_pane(pid, run, lines=40)
+        itext3 = _input_line_text(cap)
+        if itext3 and text.endswith(itext3):
+            return False
+    return True
+
+
+def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
+               handled=None, max_attempts=None, streak_s=None, confirm_s=None):
+    """Job 20 — see the section comment above (#76). Mutates
+    `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
+    run_once's to catch, like every other job here).
+
+    `handled` (optional): the SAME per-sweep set jobs 14/15/17 populate — a
+    sid compacted THIS sweep is skipped outright (a long goal must never be
+    typed into a pane whose `/compact` is still draining)."""
+    run = run or _default_run
+    projects_dir = projects_dir or PROJECTS_DIR
+    max_attempts = GOAL_REARM_MAX_ATTEMPTS if max_attempts is None else max_attempts
+    streak_s = GOAL_REARM_STREAK_S if streak_s is None else streak_s
+    confirm_s = GOAL_REARM_CONFIRM_S if confirm_s is None else confirm_s
+    recs = state.get("goal_rearm") or {}
+    logs = []
+
+    def _save():
+        state["goal_rearm"] = recs
+
+    for pid, cwd, _cmd in _reconcile_candidate_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        sid = tpath.stem
+        rec = recs.get(sid)
+        if not isinstance(rec, dict):
+            rec = {}
+        # --- REALITY: the footer indicator (cheap, no transcript read) ------
+        if pane_in_mode(pid, run):
+            continue                       # scrolled — the footer isn't current
+        captured = capture_pane(pid, run, lines=40)
+        armed = pane_goal_armed(captured)
+        if armed is None:
+            continue                       # undeterminable — never guess
+        # --- INTENT: the transcript marker (incremental, offset-resumed) ----
+        new_off, mark = scan_goal_markers(tpath, off=rec.get("off"))
+        rec["off"] = new_off
+        if mark is not None:
+            rec["mark"] = mark.get("state")
+            rec["payload"] = mark.get("payload")
+            rec["mts"] = mark.get("ts")
+            rec["mseen"] = now             # when WE first saw this marker
+        recs[sid] = rec
+        _save()
+        loc = _pane_location(pid, run) or pid
+        if armed:
+            if rec.get("queued_at"):
+                rec["queued_at"] = None
+                _save()
+                logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
+                            % loc)
+            continue
+        if rec.get("mark") != "set":
+            continue                       # never armed here, or the user
+                                           # deliberately cleared it
+        payload = rec.get("payload") or ""
+        if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
+            logs.append("skip unusable-payload (goal-rearm) %s (%d chars)"
+                        % (loc, len(payload)))
+            continue
+        h = _hash(payload)
+        if rec.get("hash") != h or (now - rec.get("first", now)) > streak_s:
+            rec.update({"hash": h, "n": 0, "first": now, "pinged": False})
+            _save()
+        # --- a delivery is in flight: confirm / expire it -------------------
+        q = rec.get("queued_at")
+        if q:
+            mts = rec.get("mts")
+            if mts is not None and rec.get("mseen", 0) > q:
+                # CC echoed a FRESH `Goal set:` marker after our keystrokes,
+                # yet the indicator is dark again — the goal armed and then
+                # resolved itself. The attempt still counts (that is what the
+                # cap is for); stop waiting on this delivery.
+                rec["queued_at"] = None
+                _save()
+                logs.append("RESOLVED-AGAIN (goal-rearm) %s -> re-armed goal "
+                            "disarmed itself" % loc)
+            elif (now - q) < confirm_s:
+                continue                   # grace — CC may still be arming
+            else:
+                rec["queued_at"] = None
+                _save()
+                logs.append("LOST (goal-rearm) %s -> typed /goal never armed"
+                            % loc)
+        if rec.get("n", 0) >= max_attempts:
+            if not rec.get("pinged"):
+                rec["pinged"] = True
+                _save()
+                if send_fn is not None and not dry_run:
+                    send_fn("⚠️ **%s** — `/goal` slučka ticho zanikla (v pätičke "
+                            "už nie je `◎ /goal`) a automatické prearmovanie sa "
+                            "nechytilo ani po %d pokusoch (%s). Prearmuj ju "
+                            "prosím ručne — dovtedy nič nebeží."
+                            % (project_label(cwd), max_attempts, loc),
+                            owner=pane_owner(pid, run) or None,
+                            dedup_key="goalrearm:%s:%s" % (sid, h),
+                            dry_run=dry_run)
+                logs.append("GAVE UP (goal-rearm) %s after %d attempts"
+                            % (loc, max_attempts))
+            else:
+                logs.append("skip gave-up (goal-rearm) %s" % loc)
+            continue
+        # --- coordination with the /compact senders (#69 / #78) -------------
+        if handled is not None and sid in handled:
+            logs.append("skip just-compacted (goal-rearm) %s" % loc)
+            continue
+        if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+            logs.append("skip compact-claim (goal-rearm) %s" % loc)
+            continue
+        if _pane_compacting(captured):
+            logs.append("skip already-compacting (goal-rearm) %s" % loc)
+            continue
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (goal-rearm) %s" % loc)
+            continue
+        kind, draft = _classify_boundary(captured)
+        if kind != "input":
+            logs.append("skip %s (goal-rearm) %s" % (kind, loc))
+            continue
+        text = "/goal " + payload
+        if dry_run:
+            logs.append("READY (goal-rearm) %s -> %d chars" % (loc, len(text)))
+            continue
+        if draft:
+            # never typed OVER a user's draft — stash it around the delivery
+            dlogs = []
+            ok = deliver_with_stash(pid, text, run, captured=captured,
+                                    logs=dlogs)
+            tag = "goal-rearm, stash"
+        else:
+            if not pane_at_idle_prompt(captured):
+                logs.append("skip not-idle (goal-rearm) %s" % loc)
+                continue
+            dlogs = []
+            ok = _send_goal_verified(pid, text, run, captured=captured)
+            tag = "goal-rearm"
+        rec["n"] = rec.get("n", 0) + 1
+        if ok:
+            rec["queued_at"] = now
+            _save()
+            logs.append("OK (%s) %s -> /goal re-armed (%d chars), awaiting ◎"
+                        % (tag, loc, len(text)))
+        else:
+            _save()
+            logs.append("FAIL (%s) %s -> delivery not verified%s"
+                        % (tag, loc, (" (%s)" % dlogs[-1]) if dlogs else ""))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Weekly token-usage alert (a 3rd reason work stalls: the WEEKLY subscription
 # limit runs out). Reads Anthropic's oauth/usage window state — the same data
 # `/usage` shows — and pings Discord once when a weekly window reaches a % cap.
@@ -5862,7 +6252,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
-             fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False):
+             fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False,
+             goal_rearm_enabled=False):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -5968,6 +6359,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           combined Discord ping (burn_alert_job). Coordinator-only, same
           "wired = on" convention as job 16 (cmd_watchdog computes the
           dev1-only gate; this module stays host-agnostic).
+      (20) (only when `goal_rearm_enabled` is truthy) GOAL RE-ARM BACKSTOP
+          (#76) — an armed `/goal` dies SILENTLY (no restart needed, no
+          `Goal cleared:` marker written), so every transcript-based
+          detector keeps reading "armed" while CC runs no loop at all. This
+          job cross-checks the TWO independent sources — the transcript
+          marker (INTENT, `scan_goal_markers`) against CC's own `◎ /goal`
+          footer indicator (REALITY, `pane_goal_armed`) — and re-arms a
+          proven mismatch with the marker's EXACT bytes, verified
+          keystroke by keystroke into a free prompt (goal_rearm). Bounded
+          (a self-resolving goal must not spin a turn per sweep) with ONE
+          Discord ping on give-up; a `Goal cleared:` newer than the last
+          `Goal set:` is a deliberate shutdown and is never touched. Runs
+          LAST so jobs 14/15/17 get first crack at the same pane, and
+          skips any sid they compacted this sweep (`handled`) or that
+          holds an outstanding shared claim (#78).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -6753,6 +7159,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                      handled=compact_handled_this_sweep)
     except Exception as e:
         logs.append("compact-ceiling error: %r" % (e,))
+
+    # Job 20 — GOAL RE-ARM BACKSTOP (#76): only when `goal_rearm_enabled` is
+    # truthy (cmd_watchdog passes True) — same "wired = on" convention as
+    # jobs 13/14/16/18/19, so an existing caller of run_once() that knows
+    # nothing about this job sees NO behavior change and never has a pane's
+    # goal re-armed by a test. Runs LAST, after every /compact sender, so the
+    # shared `compact_handled_this_sweep` set is fully populated before this
+    # job decides whether the pane is safe for a ~2 KB keystroke burst.
+    # Best-effort.
+    if goal_rearm_enabled:
+        try:
+            logs += goal_rearm(now, run, state, send_fn=send_fn,
+                               dry_run=dry_run, projects_dir=projects_dir,
+                               handled=compact_handled_this_sweep)
+        except Exception as e:
+            logs.append("goal-rearm error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
