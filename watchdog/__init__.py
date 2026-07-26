@@ -3264,6 +3264,24 @@ def _wait_for_idle_after_dialog(pid, run, sleep_fn):
     return False
 
 
+# #79 (2026-07-26 live incident) -- a bare `claude` typed into a shell OLDER
+# than #77's launcher rewrite resolves to whatever `.bashrc` that shell
+# already had loaded at ITS OWN start; bash reads `.bashrc` exactly once,
+# at shell start, and never again. A shell started before #77 shipped still
+# holds the OLD fat `claude()` function with `--settings
+# '{"ultracode":true}'` baked in -- live-verified on `david:0.0`@subdev
+# (shell started Jul 22, well before #77): `type claude` showed the frozen
+# old function even after #77's `.bashrc` rewrite had long since deployed.
+# `_restart_pane` is the ONE place that launches `claude` from OUTSIDE an
+# interactive user keystroke (job 12 model-reconcile, job 18
+# hooks-reconcile) -- re-sourcing `.bashrc` in the SAME command guarantees
+# the CURRENT wrapper resolves regardless of how old the target shell is.
+# Any FUTURE mechanism that launches `claude` from a pane must go through
+# this same shape (or call `_restart_pane` itself) -- there must never be a
+# second place typing a bare `claude`.
+RELAUNCH_CMD = "source ~/.bashrc && claude"
+
+
 def _restart_pane(pid, run, sleep_fn, captured):
     """Perform the restart sequence for a pane the caller already proved
     SAFE-TO-RESTART (idle, no draft, no open dialog, not in-mode, no
@@ -3275,7 +3293,11 @@ def _restart_pane(pid, run, sleep_fn, captured):
          caller's guards already read (no extra capture-pane round-trip
          needed for this step — it's the SAME frame).
       2. Poll (bounded) for the shell prompt to return.
-      3. `claude` + Enter — the managed bashrc function bakes
+      3. `RELAUNCH_CMD` (`source ~/.bashrc && claude`) + Enter — re-sourcing
+         `.bashrc` FIRST guarantees the CURRENT managed wrapper resolves
+         even in a shell that predates the last `.bashrc` deploy (#79) —
+         a bare `claude` would resolve to whatever that shell already had
+         loaded at its own start. The managed bashrc function bakes
          `--model MANAGED_MODEL` into every launch (airuleset.py); this job
          never passes a model itself.
       4. Poll (bounded) for EITHER the "Resume from summary" dialog (a
@@ -3294,7 +3316,7 @@ def _restart_pane(pid, run, sleep_fn, captured):
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if not _wait_for_shell_returns(pid, run, sleep_fn):
         return False, "shell did not return after /exit"
-    run(["tmux", "send-keys", "-t", pid, "-l", "claude"])
+    run(["tmux", "send-keys", "-t", pid, "-l", RELAUNCH_CMD])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     kind, _cap = _wait_for_relaunch(pid, run, sleep_fn)
     if kind is None:
