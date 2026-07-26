@@ -4074,19 +4074,31 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
     entry = claims.get(sid)
     if not isinstance(entry, dict):
         return False                      # never claimed — eligible
+    # #83 — a claim with NO "proc" key at ALL (written before #82, or whose
+    # owning pane could not be fingerprinted at queue time) has NOTHING that
+    # can ever prove delivery loss for the exact case that matters most: a
+    # watchdog-driven restart (jobs 12/18, `_restart_pane`) relaunches via
+    # `claude -c`, which CONTINUES the SAME transcript — the process-death
+    # check below is a no-op (no fingerprint to check), the session never
+    # changes id (the cwd/session-id FAILED check below can never fire
+    # either), and nothing forces a fresh `compact_boundary`. Live incident
+    # (gatekeeper, #83): a claim in this exact shape stayed queued for 3.5h,
+    # context climbing to 397010, zero compaction. Per the issue's preferred
+    # fix (option 1 — a one-time migration, not a permanent branch in
+    # practice: every real send after #82 DOES resolve a fingerprint, so
+    # this only ever matters for the pre-#82 shape or a genuine
+    # fingerprint-resolution failure): treat it as unresolvable and drop it
+    # on the FIRST evaluation instead of waiting on the other two checks —
+    # simplest and safe, the worst case is one redundant `/compact`.
+    if "proc" not in entry:
+        claims.pop(sid, None)
+        _save_compact_claims(claims, path)
+        return False                      # unresolvable — eligible again
     claimed_cwd = entry.get("cwd") or cwd
     # FAILED — the process that received the queued keystrokes is gone, or
     # a NEW process has since reused its PID (#82): a demonstrated delivery
-    # loss, independent of session id / cwd. This is what catches a
-    # watchdog-initiated restart (jobs 12/18, `_restart_pane`) that
-    # relaunches via `claude -c` and so CONTINUES the SAME transcript —
-    # neither CONSUMED (context never dropped: the keystrokes died with the
-    # old process) nor the cwd-session-id FAILED check below (the session
-    # id does not change on a `-c` resume) can ever fire for that case.
-    # `proc` is only present on a claim recorded after this fix and whose
-    # owning pane resolved at queue time — absent/unresolvable is treated
-    # as "not proven dead" (`_proc_fingerprint_alive` returns None), never
-    # as FAILED.
+    # loss, independent of session id / cwd. `proc` is guaranteed present
+    # here (the check above already dropped/returned any entry without it).
     proc = entry.get("proc")
     if proc and _proc_fingerprint_alive(proc) is False:
         claims.pop(sid, None)
@@ -5142,14 +5154,32 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
             continue                          # unrecognized/legacy shape --
                                                # leave it, main loop below
                                                # treats it as fresh-eligible
+        # #83 -- an entry with NO "proc" key at ALL (queued before #82, or
+        # whose pane could not be fingerprinted at send time) has nothing
+        # that can ever resolve it: the process-death check just below is a
+        # no-op, and for a watchdog restart that relaunches via `claude -c`
+        # (CONTINUES the same transcript) the session-id-replace check
+        # further down can never fire either -- exactly the shape that
+        # stayed queued FOREVER on gatekeeper (it never even reached the
+        # STUCK cycle counter in the main loop below, since the SHARED
+        # compact_claim_active gate blocked this sid before this job's own
+        # state machine ever ran). Drop it here -- logged as STUCK for
+        # visibility instead of a silent, permanent wedge -- and let the
+        # main loop below pick the session up fresh this SAME sweep.
+        if "proc" not in entry:
+            compacted.pop(stale_sid, None)
+            _save()
+            logs.append("STUCK (compact-ceiling) %s -> no process "
+                        "fingerprint recorded (pre-#82 claim), dropping, "
+                        "resend enabled" % (entry.get("cwd") or stale_sid))
+            continue
         # #82 -- a demonstrated PROCESS-death/reuse loss is checked FIRST
         # (cheap: a /proc read, no transcript walk at all). This is what
         # catches a watchdog-driven restart that relaunches via `claude -c`
         # and so CONTINUES the SAME transcript -- the session-id-replace
         # check below can never fire for that case, since the session id
-        # never changes on a `-c` resume. `proc` is absent on an
-        # entry queued before this fix (or whose pane could not be
-        # resolved at queue time) -- never treated as FAILED for that.
+        # never changes on a `-c` resume. `proc` is guaranteed present here
+        # (the check above already dropped/continued any entry without it).
         proc = entry.get("proc")
         if proc and _proc_fingerprint_alive(proc) is False:
             compacted.pop(stale_sid, None)
