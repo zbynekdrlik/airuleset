@@ -3682,13 +3682,66 @@ COMPACT_TEXT = "/compact"
 # floor without a code change.
 COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
 
+# #67 (2026-07-26 live incident, david@subdev): a forgotten USER DRAFT sitting
+# in the input box made job 14/15 log "skip draft" and retry FOREVER — the
+# same draft (one unfinished sentence) skipped 13 sweeps straight overnight
+# while the session's context grew 214K -> 449K with zero compactions. The
+# fix already existed for a DIFFERENT problem (job 7's Discord-reply
+# delivery, issue #35): `deliver_with_stash` parks the foreign draft via
+# CC's native Ctrl+S stash, delivers `/compact`, and lets CC auto-restore
+# the draft the instant the delivered turn completes — a draft is no longer
+# a dead end for EITHER compact job. Shared here so job 14 and job 15 apply
+# the identical policy (try stash -> on success proceed exactly like the
+# no-draft path; on "slot already occupied" -> log a DISTINCT skip reason
+# and count it, pinging the owner once every COMPACT_STASH_SKIP_PING_EVERY
+# consecutive occupied-skips so a permanently jammed stash slot never rots
+# silently, per the issue's acceptance).
+COMPACT_STASH_SKIP_PING_EVERY = 3
+
+
+def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
+                           owner=None, ctx=None, send_fn=None):
+    """Try `deliver_with_stash` for a session whose pane holds a DRAFT (#67).
+
+    Returns True if `/compact` was actually delivered (caller proceeds
+    exactly like its own no-draft success path: consume the request /
+    record the compacted-pending state), False if the stash slot was
+    already occupied by something else — stashing over it would SILENTLY
+    destroy whatever is parked there, so this is a LEGITIMATE skip, not a
+    failure: the caller retries next sweep, unchanged from the pre-#67
+    behavior, except the repeated-skip count is tracked in
+    `state['compact_stash_skips'][sid]` and the owner is pinged once every
+    Nth consecutive occupied-skip (deduped per (sid, n) so it never spams
+    every single sweep). A successful delivery clears any prior count for
+    this session."""
+    delivered = deliver_with_stash(pid, COMPACT_TEXT, run, captured=captured)
+    skips = state.get("compact_stash_skips") or {}
+    if delivered:
+        skips.pop(sid, None)
+        state["compact_stash_skips"] = skips
+        return True
+    n = int(skips.get(sid, 0)) + 1
+    skips[sid] = n
+    state["compact_stash_skips"] = skips
+    if send_fn is not None and n % COMPACT_STASH_SKIP_PING_EVERY == 0:
+        ctx_txt = (" (kontext %d tokenov)" % ctx) if ctx is not None else ""
+        send_fn(
+            "⚠️ **%s** (%s) — zabudnutý draft blokuje /compact už %d× po "
+            "sebe%s. Stash slot je obsadený iným príkazom, takže sa doň "
+            "nedá bezpečne zasiahnuť. Skontroluj okno a vybav draft rukou."
+            % (project, loc, n, ctx_txt),
+            owner=owner or None,
+            dedup_key="compact-stash-skip:%s:%d" % (sid, n))
+    return False
+
 
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
-                            path=None, projects_dir=None, min_context=None):
-    """Job 14 — see the section comment. `state` is accepted (and unused) for
-    the SAME call-shape every other job here has — run_once wires it
-    uniformly even though this job's own dedup lives entirely in the
-    requests file, not in api-watchdog-state.json.
+                            path=None, projects_dir=None, min_context=None,
+                            send_fn=None):
+    """Job 14 — see the section comment. `state` is used ONLY for #67's
+    stash-skip counter (`compact_stash_skips`) — this job's own request
+    dedup still lives entirely in the requests file, not in
+    api-watchdog-state.json.
 
     #48 context-threshold gate: right before actually sending `/compact` for
     an otherwise-ready request, the session's CURRENT context is measured via
@@ -3702,19 +3755,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     session — every pre-#48 test fixture here has no real transcript), the
     context is unmeasurable and this gate does not block the send: it only
     ever skips on a POSITIVELY confirmed small context, never on "we don't
-    know".
+    know". Measured BEFORE the draft/idle decision (moved up in #67) so a
+    trivial-context session never even attempts a stash dance.
 
     A request is REMOVED from the requests file (dedup — never retried) the
     MOMENT `/compact` is actually typed into an idle pane — sending the
     keystrokes IS the observable success here, the same fire-and-forget
     shape job 9's goal_autoarm uses (unlike job 12, `/compact` has no
     reliable confirmation text to poll for). A request is LEFT IN PLACE
-    (retried next sweep) whenever the pane is busy / mid-dialog / holding a
-    draft / in copy-mode, or when no live pane maps to that session yet —
+    (retried next sweep) whenever the pane is busy / mid-dialog / in
+    copy-mode / holding a draft whose STASH SLOT is already occupied by
+    something else, or when no live pane maps to that session yet —
     "release the claim on failure so it retries" per the spec: there is no
     separate claim step to release, because nothing is ever claimed until
-    the keystrokes are actually sent. Best-effort: exceptions are the
-    caller's (run_once's) responsibility to catch, same as every other job."""
+    the keystrokes are actually sent. A draft whose stash slot is FREE is no
+    longer a dead end (#67): `_compact_stash_attempt` parks it, delivers
+    `/compact`, and the request IS consumed on that success — the draft
+    auto-restores itself once the delivered turn completes. Best-effort:
+    exceptions are the caller's (run_once's) responsibility to catch, same
+    as every other job."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -3749,17 +3808,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if kind == "busy":
             logs.append("skip busy (compact-request) %s" % loc)
             continue
-        if draft:
-            logs.append("skip draft (compact-request) %s: %r" % (loc, draft[:40]))
-            continue
-        if not pane_at_idle_prompt(captured):
-            logs.append("skip not-idle (compact-request) %s" % loc)
-            continue
-        # #48 — read the FRESHEST context right before the send (it may have
-        # grown since the Stop hook recorded the request); a session with no
-        # resolvable transcript is unmeasurable, so it does NOT block the
-        # send (see the docstring above).
+        # #48 — read the FRESHEST context right before deciding anything else
+        # (it may have grown since the Stop hook recorded the request); a
+        # session with no resolvable transcript is unmeasurable, so it does
+        # NOT block the send (see the docstring above). Measured before the
+        # draft branch (#67) so a trivial-context draft-holding session is
+        # simply dropped, never stash-attempted for nothing.
         cwd = (reqs.get(sid) or {}).get("cwd", "")
+        ctx = None
         tpath = _transcript_for_session(pdir, sid, cwd)
         if tpath is not None:
             ctx = transcript_current_context(tpath)
@@ -3770,6 +3826,28 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     reqs.pop(sid, None)
                     changed = True
                 continue
+        if draft:
+            # #67 — a forgotten draft must not permanently block compaction:
+            # stash it around the /compact delivery instead of skipping
+            # forever.
+            if dry_run:
+                logs.append("READY (compact-request, draft) %s" % loc)
+                continue
+            project = project_label(cwd)
+            owner = pane_owner(pid, run)
+            if _compact_stash_attempt(pid, run, captured, state, sid, loc,
+                                      project, owner=owner, ctx=ctx,
+                                      send_fn=send_fn):
+                reqs.pop(sid, None)
+                changed = True
+                logs.append("OK (compact-request, stash) %s" % loc)
+            else:
+                logs.append("skip draft (stash occupied) %s: %r"
+                            % (loc, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (compact-request) %s" % loc)
+            continue
         if dry_run:
             logs.append("READY (compact-request) %s" % loc)
             continue
@@ -3894,7 +3972,7 @@ def _wait_for_compact_return(pid, run, sleep_fn):
 
 
 def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
-                          sleep_fn=None):
+                          sleep_fn=None, send_fn=None):
     """Job 15 — see the section comment. Always wired into run_once (no
     gating param — same "always on" shape as job 9's goal_autoarm), since
     it depends on nothing external (no fetcher, no target model).
@@ -3908,15 +3986,23 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
     and a log line.
 
     Never touches a pane that is in copy-mode, showing an open dialog,
-    mid-turn/busy, holding an unsent draft, or running a background agent —
-    identical guards to job 12's model_reconcile, reusing the very same
-    helpers (`pane_in_mode`, `pane_waiting_on_user`, `_classify_boundary`,
-    `pane_at_idle_prompt`, `_pane_has_bg_agent`, `_pane_location`) rather
-    than a parallel chrome-detector. `send_continue` already handles the
-    "Escape the agent-strip selector ONLY if it holds focus, then type +
-    Enter" sequence (issue #36) — never a second Escape anywhere (issue
-    #35). Best-effort: exceptions are the caller's (run_once's)
-    responsibility to catch, same as every other job."""
+    mid-turn/busy, or running a background agent — identical guards to
+    job 12's model_reconcile, reusing the very same helpers (`pane_in_mode`,
+    `pane_waiting_on_user`, `_classify_boundary`, `pane_at_idle_prompt`,
+    `_pane_has_bg_agent`, `_pane_location`) rather than a parallel
+    chrome-detector. A pane holding an unsent DRAFT is no longer a dead end
+    (#67, 2026-07-26): `_compact_stash_attempt` parks the draft via CC's
+    native Ctrl+S stash, delivers `/compact`, and lets CC auto-restore the
+    draft once the delivered turn completes — the same mechanism issue #35
+    already uses for job 7's Discord-reply delivery. Only a genuinely
+    OCCUPIED stash slot (something else already parked there) is a
+    legitimate skip, tracked + pinged after
+    `COMPACT_STASH_SKIP_PING_EVERY` repeats so it never rots silently.
+    `send_continue`/`deliver_with_stash` already handle the "Escape the
+    agent-strip selector ONLY if it holds focus, then type + Enter"
+    sequence (issue #36) — never a second Escape anywhere (issue #35).
+    Best-effort: exceptions are the caller's (run_once's) responsibility to
+    catch, same as every other job."""
     run = run or _default_run
     sleep_fn = sleep_fn or time.sleep
     projects_dir = projects_dir or PROJECTS_DIR
@@ -3965,20 +4051,35 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
         if kind == "busy":
             logs.append("skip busy (compact-stale) %s %d" % (loc, ctx))
             continue
-        if draft:
-            logs.append("skip draft (compact-stale) %s %d: %r" % (loc, ctx, draft[:40]))
-            continue
-        if not pane_at_idle_prompt(captured):
-            logs.append("skip not-idle (compact-stale) %s %d" % (loc, ctx))
-            continue
         if _pane_has_bg_agent(captured):
             logs.append("skip bg-agent (compact-stale) %s %d" % (loc, ctx))
             continue
-        if dry_run:
-            logs.append("READY (compact-stale) %s ctx=%d idle=%ds"
-                        % (loc, ctx, int(idle)))
-            continue
-        send_continue(pid, COMPACT_TEXT, run)
+        if draft:
+            # #67 — try the stash-around delivery instead of skipping forever.
+            if dry_run:
+                logs.append("READY (compact-stale, draft) %s ctx=%d idle=%ds"
+                            % (loc, ctx, int(idle)))
+                continue
+            project = project_label(cwd)
+            owner = pane_owner(pid, run)
+            delivered = _compact_stash_attempt(pid, run, captured, state, sid,
+                                               loc, project, owner=owner,
+                                               ctx=ctx, send_fn=send_fn)
+            if not delivered:
+                logs.append("skip draft (stash occupied) %s %d: %r"
+                            % (loc, ctx, draft[:40]))
+                continue
+            tag = "compact-stale, stash"
+        else:
+            if not pane_at_idle_prompt(captured):
+                logs.append("skip not-idle (compact-stale) %s %d" % (loc, ctx))
+                continue
+            if dry_run:
+                logs.append("READY (compact-stale) %s ctx=%d idle=%ds"
+                            % (loc, ctx, int(idle)))
+                continue
+            send_continue(pid, COMPACT_TEXT, run)
+            tag = "compact-stale"
         ok = _wait_for_compact_return(pid, run, sleep_fn)
         if ok:
             # PENDING, not permanently True — the claim clears once the
@@ -3990,7 +4091,7 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
             state["compact_stale"] = compacted
             attempts_map.pop(sid, None)
             state["compact_stale_attempts"] = attempts_map
-            logs.append("OK (compact-stale) %s ctx=%d -> compacted" % (loc, ctx))
+            logs.append("OK (%s) %s ctx=%d -> compacted" % (tag, loc, ctx))
         else:
             attempts = attempts_map.get(sid, 0) + 1
             attempts_map[sid] = attempts
@@ -4001,11 +4102,12 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
                 # context re-read on every single ~60s sweep forever).
                 compacted[sid] = True
                 state["compact_stale"] = compacted
-                logs.append("GAVE UP (compact-stale) %s ctx=%d after %d attempts"
-                            % (loc, ctx, attempts))
+                logs.append("GAVE UP (%s) %s ctx=%d after %d attempts"
+                            % (tag, loc, ctx, attempts))
             else:
-                logs.append("FAIL (compact-stale) %s ctx=%d (did not return idle, "
-                            "attempt %d/%d)" % (loc, ctx, attempts, COMPACT_STALE_MAX_ATTEMPTS))
+                logs.append("FAIL (%s) %s ctx=%d (did not return idle, "
+                            "attempt %d/%d)"
+                            % (tag, loc, ctx, attempts, COMPACT_STALE_MAX_ATTEMPTS))
     return logs
 
 
@@ -5158,7 +5260,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += compact_ticket_boundary(now, run, state, panes_by_sid,
                                             dry_run=dry_run,
                                             path=compact_requests_path,
-                                            projects_dir=projects_dir)
+                                            projects_dir=projects_dir,
+                                            send_fn=send_fn)
         except Exception as e:
             logs.append("compact-request error: %r" % (e,))
 
@@ -5169,7 +5272,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # completed-ticket boundary. Best-effort.
     try:
         logs += compact_stale_context(now, run, state, dry_run=dry_run,
-                                      projects_dir=projects_dir, sleep_fn=sleep_fn)
+                                      projects_dir=projects_dir, sleep_fn=sleep_fn,
+                                      send_fn=send_fn)
     except Exception as e:
         logs.append("compact-stale error: %r" % (e,))
 
