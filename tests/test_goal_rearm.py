@@ -396,6 +396,41 @@ class TestGoalRearmRefusals(GoalRearmBase):
         self.assertFalse(tmux.typed(), logs)
 
 
+class TestScrollbackNeverDecides(GoalRearmBase):
+    """LIVE 2026-07-26, the ticket's own acceptance test (`/exit` + relaunch
+    on an isolated session): after a `claude -c` restart the pane's tmux
+    SCROLLBACK still holds the DEAD session's `✔ Goal achieved` line — while
+    the fresh process has no goal at all and the transcript marker still says
+    `set`. Deciding off scrollback would refuse to heal exactly the case #76
+    was filed for.
+
+    Same lesson job 9 already learned the other way round (gk 2026-07-20: a
+    stale scrollback `/goal` line armed into a fresh session): goal decisions
+    read the VISIBLE VIEWPORT only. CC redraws its own screen, so the viewport
+    is always the CURRENT session's content."""
+
+    class ScrollbackTmux(FakeTmux):
+        def __call__(self, argv, timeout=8):
+            j = " ".join(argv)
+            if "capture-pane" in j and "-S" in j:
+                self.sent.append(argv)
+                return ("● staré sedenie\n"
+                        "✔ Goal achieved (3s · 1 turn · 56 tokens)\n"
+                        "❯ /exit\n  ⎿  Bye!\n" + FOOTER_DARK)
+            return super().__call__(argv, timeout)
+
+    def test_stale_achieved_line_in_scrollback_still_heals(self):
+        self._write([marker_entry("set", PAYLOAD)])
+        self._wrote = True
+        typed = CONV + FOOTER_DARK.replace("❯ \n", "❯ [Pasted text #1]\n")
+        tmux = self.ScrollbackTmux(PANE_DARK,
+                                   cap_seq=[PANE_DARK, typed, PANE_DARK])
+        wd.goal_rearm(time.time(), tmux, {}, send_fn=self._send,
+                      projects_dir=self.tmp.name)
+        self.assertEqual(tmux.typed()[:1], [GOAL_LINE],
+                         "a dead session's scrollback must not veto the heal")
+
+
 class TestGoalRearmCompactCoordination(GoalRearmBase):
     def test_sid_compacted_this_sweep_is_skipped(self):
         tmux, _logs = self._go(PANE_DARK, handled={SID})
