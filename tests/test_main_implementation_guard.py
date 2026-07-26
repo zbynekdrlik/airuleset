@@ -434,6 +434,160 @@ class MainBashGuard(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stderr)
 
 
+class ClassifierHoles73(unittest.TestCase):
+    """#73: three shapes the classifier let slip through as 'ambiguous ->
+    allow' because their FIRST token was neither allow- nor block-listed:
+    a for/while loop body, a `timeout N` / `nice` prefix wrapper, and a
+    `bash -c '...'` / `sh -c '...'` sub-shell. The loop body / wrapped /
+    quoted command must classify EXACTLY like a standalone command — never
+    block a whole loop just for being a loop (the CI-poll shape from
+    ci-monitoring.md is the non-negotiable ALLOW case)."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    def _plain(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    # ---- non-negotiable: the recommended CI-poll loop must NEVER block ----
+
+    def test_ci_poll_loop_allowed_while_armed(self):
+        out = self._armed(
+            "for i in $(seq 1 18); do gh run view 12345 "
+            "--json status,conclusion; sleep 30; done")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- for-loop body classifies like a standalone command ----
+
+    def test_for_loop_body_bulk_read_blocked_while_armed(self):
+        out = self._armed("for f in a b; do cat $f; done")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_for_loop_body_bulk_read_allowed_when_not_armed(self):
+        out = self._plain("for f in a b; do cat $f; done")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- timeout/nice prefix wrappers don't hide a blocked command ----
+
+    def test_timeout_prefixed_bulk_read_blocked_while_armed(self):
+        out = self._armed("timeout 60 grep -rn foo .")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_timeout_prefixed_allowed_command_still_allowed_while_armed(self):
+        out = self._armed("timeout 30 gh pr view 42")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_nice_prefixed_bulk_read_blocked_while_armed(self):
+        out = self._armed("nice -n 10 grep -rn foo .")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    # ---- bash -c / sh -c wraps the real command; classify the script ----
+
+    def test_bash_dash_c_bulk_read_blocked_while_armed(self):
+        out = self._armed("bash -c 'grep -rn foo .'")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_sh_dash_c_bulk_read_blocked_while_armed(self):
+        out = self._armed("sh -c 'grep -rn foo .'")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_bash_dash_c_allowed_command_still_allowed_while_armed(self):
+        out = self._armed("bash -c 'gh pr view 42'")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_bash_dash_c_bulk_read_allowed_when_not_armed(self):
+        out = self._plain("bash -c 'grep -rn foo .'")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- subagent still never blocked for the new shapes ----
+
+    def test_subagent_for_loop_never_blocked(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="for f in a b; do cat $f; done",
+                          agent_id="aWORKER3",
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_subagent_bash_dash_c_never_blocked(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="bash -c 'grep -rn foo .'",
+                          agent_id="aWORKER4",
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
+class BlockLogging73(unittest.TestCase):
+    """#73: every BLOCK must be written to its own log (timestamp, session,
+    first ~120 chars of the command, which rule matched) — today the hook
+    logs only bypasses, so there is no way to answer 'did it fire, on what'
+    after a deploy. Same style/location as the existing bypass log."""
+
+    LOG_PATH = Path("/tmp/airuleset-main-exec-block.log")
+
+    def _lines_for(self, sid):
+        if not self.LOG_PATH.exists():
+            return []
+        return [ln for ln in self.LOG_PATH.read_text().splitlines() if sid in ln]
+
+    def test_bash_block_is_logged(self):
+        sid = "t-mg-logbash-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
+                          sid=sid, transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 2, out.stderr)
+        lines = self._lines_for(sid)
+        self.assertTrue(lines, "no block-log line for session %s" % sid)
+        self.assertIn("Bash", lines[-1])
+        self.assertIn("grep", lines[-1])
+        self.assertIn(sid, lines[-1])
+
+    def test_edit_block_is_logged(self):
+        sid = "t-mg-logedit-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Edit", sid=sid)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        lines = self._lines_for(sid)
+        self.assertTrue(lines, "no block-log line for session %s" % sid)
+        self.assertIn("Edit", lines[-1])
+
+    def test_goal_armed_write_block_is_logged_with_rule(self):
+        sid = "t-mg-logwrite-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Write", sid=sid,
+                          transcript_text=goal_armed_transcript("claude-opus-4-8"))
+        self.assertEqual(out.returncode, 2, out.stderr)
+        lines = self._lines_for(sid)
+        self.assertTrue(lines)
+        self.assertIn("GOAL_ARMED", lines[-1])
+
+    def test_bypassed_command_is_not_logged_as_block(self):
+        sid = "t-mg-logbypass-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
+                          sid=sid, bypass="new",
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(self._lines_for(sid),
+                         "bypassed command must not appear in the BLOCK log")
+
+    def test_allowed_command_is_not_logged_as_block(self):
+        sid = "t-mg-logallow-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="gh pr view 42",
+                          sid=sid, transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(self._lines_for(sid),
+                         "allowed command must not appear in the BLOCK log")
+
+
 class TestWiringAndSkill(unittest.TestCase):
     def test_hook_exists_and_wired_for_edit_and_write(self):
         self.assertTrue(HOOK.exists())
