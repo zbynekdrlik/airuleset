@@ -2733,15 +2733,13 @@ def _hour_bucket_of_ts(ts_str):
     #60 bug (gk writes `+00:00`, dev1 `+02:00` — the SAME instant renders
     with different hour digits in each). None when `ts_str` is missing,
     None, or unparsable — the caller (`_fleet_remote_row`) treats that as
-    "can't verify freshness" and errors rather than trusting it."""
+    "can't verify freshness" and errors rather than trusting it.
+
+    Thin wrapper — the canonical implementation is `burn.hour_bucket_of_ts`
+    (#63: shared with `watchdog.fleet_burn_job`'s own local-row freshness
+    check, so the convention can never drift between the two call sites)."""
     import burn as burn_mod
-    dt = burn_mod._parse_ts(ts_str)
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        import datetime
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-    return int(dt.timestamp() // 3600)
+    return burn_mod.hour_bucket_of_ts(ts_str)
 
 
 def _fleet_remote_row(remote, want_hour_bucket, timeout=15):

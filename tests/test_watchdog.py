@@ -2535,11 +2535,14 @@ def _fleet_now(hour=20, minute=30):
 
 class TestFleetBurnJob(unittest.TestCase):
     def test_writes_once_and_updates_state_guard(self):
+        # #63 -- job 13 stamps the hour that JUST COMPLETED (`_fleet_now()` is
+        # 20:30 UTC, so the completed hour is 19:00-20:00 -> ts "19:00:00").
+        # The local row must match THAT bucket to count as fresh.
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         local_snap = Path(tmp) / "snapshots.jsonl"
         with open(local_snap, "w") as f:
-            f.write(json.dumps(_snap_row("2026-07-25T16:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
+            f.write(json.dumps(_snap_row("2026-07-25T19:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
         state = {}
         now = _fleet_now()
         hosts = [{"name": "dev2", "host": "5.6.7.8", "user": "newlevel"}]
@@ -2557,6 +2560,33 @@ class TestFleetBurnJob(unittest.TestCase):
         self.assertEqual(row["per_host"]["dev2"]["usd"], 2.0)
         self.assertEqual(row["total_usd"], 3.0)
         self.assertIn("fleet_burn_hour", state)
+        self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
+        # the row itself is stamped with the COMPLETED hour, not the current
+        # (still-open) one -- #63's other half of the fix.
+        import burn as burn_mod
+        self.assertEqual(burn_mod.hour_bucket_of_ts(row["ts"]), int(now // 3600) - 1)
+
+    def test_local_row_for_wrong_hour_is_excluded_not_silently_used(self):
+        # #63 core regression: dev1's own local snapshots.jsonl tail line must
+        # be freshness-checked against the SAME completed-hour bucket as every
+        # remote host -- before the fix, the local row was used UNCONDITIONALLY
+        # regardless of which hour it was actually for (the "dev1 always has a
+        # number, every remote is always --" asymmetry from the issue).
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        local_snap = Path(tmp) / "snapshots.jsonl"
+        now = _fleet_now()  # 2026-07-25T20:30:00+00:00 -- completed hour is 19:00
+        with open(local_snap, "w") as f:
+            # stamped for the CURRENT (not-yet-completed) hour -- must NOT be
+            # trusted as this cycle's sample.
+            f.write(json.dumps(_snap_row("2026-07-25T20:00:00+00:00", "dev1", 999.0, 5, 1000)) + "\n")
+        logs = wd.fleet_burn_job(now, {}, [], lambda *a, **k: None,
+                                 fetch=lambda hs, hb: {}, local_snapshot_path=local_snap,
+                                 fleet_path=fleet_path)
+        row = json.loads(fleet_path.read_text().strip().splitlines()[0])
+        self.assertIn("error", row["per_host"]["dev1"])
+        self.assertTrue(row["per_host"]["dev1"].get("stale"))
+        self.assertEqual(row["total_usd"], 0.0)
         self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
 
     def test_second_call_within_same_hour_is_a_noop(self):
@@ -2595,11 +2625,13 @@ class TestFleetBurnJob(unittest.TestCase):
         self.assertTrue(any("dry-run" in ln for ln in logs), logs)
 
     def test_a_raising_fetch_still_writes_local_only_row(self):
+        # local row stamped for the COMPLETED hour (#63) so it still counts
+        # as fresh even though the remote fetch raises.
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         local_snap = Path(tmp) / "snapshots.jsonl"
         with open(local_snap, "w") as f:
-            f.write(json.dumps(_snap_row("2026-07-25T16:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
+            f.write(json.dumps(_snap_row("2026-07-25T19:00:00+00:00", "dev1", 1.0, 5, 1000)) + "\n")
 
         def raising_fetch(hs, hb):
             raise RuntimeError("boom")
@@ -2691,10 +2723,12 @@ class TestFleetBurnJob(unittest.TestCase):
         self.assertIn("fleet_burn_hour", state)
         self.assertTrue(any("fleet-burn" in ln for ln in logs), logs)
 
-    def test_fetch_receives_the_same_hour_bucket_the_job_uses_for_its_own_guard(self):
-        # #60 -- the injected fetch must be hour-matched against THIS job's
-        # own epoch-hour bucket, not called blind, so _fleet_remote_row can
-        # reject a stale remote row for the SAME hour this job is collecting.
+    def test_fetch_receives_the_last_completed_hour_bucket_not_current(self):
+        # #63 -- job 13 (burn_snapshot_job) stamps the hour that JUST
+        # completed, never the current (still-open) one. Job 16 must request
+        # that SAME completed-hour bucket, or a remote's freshly-written row
+        # can never match (`_fleet_remote_row` would always see it as stale)
+        # -- the root cause of "every remote column is permanently --".
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
         now = _fleet_now()
@@ -2705,7 +2739,7 @@ class TestFleetBurnJob(unittest.TestCase):
             return {}
         wd.fleet_burn_job(now, {}, [], lambda *a, **k: None,
                           fetch=fetch, fleet_path=fleet_path)
-        self.assertEqual(received, [int(now // 3600)])
+        self.assertEqual(received, [int(now // 3600) - 1])
 
 
 class RunOnceFleetWiring(unittest.TestCase):

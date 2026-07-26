@@ -353,6 +353,28 @@ def _parse_ts(s):
         return None
 
 
+def hour_bucket_of_ts(ts_str):
+    """Epoch-hour bucket (`int(epoch_seconds // 3600)`) of an ISO-8601
+    timestamp STRING, converted to UTC first — comparing raw hour-of-day
+    digits (or the raw string) across differing UTC offsets is exactly the
+    #60 bug (gk writes `+00:00`, dev1 `+02:00` — the SAME instant renders
+    with different hour digits in each). None when `ts_str` is missing,
+    None, or unparsable — callers treat that as "can't verify freshness"
+    and error rather than trusting it.
+
+    The single canonical implementation — `airuleset._hour_bucket_of_ts`
+    (used by `_fleet_remote_row`) and `watchdog.fleet_burn_job`'s own
+    local-row freshness check (#63) both delegate here, so the "which hour
+    bucket is this timestamp in" question can never drift between the two
+    call sites again."""
+    dt = _parse_ts(ts_str)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp() // 3600)
+
+
 def _window_stats(rows, start, end):
     """Mean usd / avg_ctx / msgs across snapshot rows whose `ts` falls in
     [start, end). `n=0` (all other fields None) when the window is empty —
