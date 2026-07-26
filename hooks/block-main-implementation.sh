@@ -85,6 +85,30 @@ set -euo pipefail
 # compatibility (nothing outside this hook + its own tests referenced the
 # literal path, but an old habit or a stale note shouldn't silently stop
 # working).
+#
+# #73 (gatekeeper measurement, 2026-07-26): after #66 shipped there was no
+# way to answer "did the hook ever fire, on what" — only bypasses were
+# logged. Every BLOCK (Bash AND Edit/Write) is now ALSO appended to its own
+# log, /tmp/airuleset-main-exec-block.log (timestamp, session, tool, which
+# rule matched — FABLE / GOAL_ARMED / FABLE+GOAL_ARMED, the classifier match
+# or len=N, and the first ~120 chars of the command/file) — same
+# append-only style as the bypass log, via `log_block()`.
+#
+# #73 ALSO closed three classifier holes where the command's first token
+# was neither allow- nor block-listed, so it fell into "ambiguous -> allow"
+# even though it was really a bulk read/search wrapped or hidden one level
+# down: a for/while LOOP BODY (`for f in a b; do cat $f; done` — the `do`/
+# `then`/`else`/`elif` leader is stripped so the body classifies exactly
+# like a standalone command; the loop HEADER segment stays ambiguous on
+# purpose), a `timeout N` / `nice [-n N]` PREFIX WRAPPER (its own flags and
+# duration/niceness argument are skipped in `strip_prefix()`), and a
+# `bash -c '...'` / `sh -c '...'` (also zsh/dash) SUB-SHELL (`classify()` is
+# now recursive: it finds the wrapper's `-c`/`-Xc` flag and reclassifies the
+# QUOTED script string itself). The non-negotiable regression guard is the
+# CI-poll shape from ci-monitoring.md — `for i in $(seq 1 18); do gh run
+# view <id> ...; sleep 30; done` — which must NEVER block just for being a
+# loop; its body (`gh run view ...`) is already allow-listed once `do` is
+# stripped.
 
 command -v jq &>/dev/null || exit 0
 
@@ -151,11 +175,28 @@ fi
 
 if [ "$GOAL_ARMED" = "1" ] && [ "$IS_FABLE" = "1" ]; then
     REASON="this MAIN session runs FABLE *and* has an ARMED /goal"
+    RULE_TAG="FABLE+GOAL_ARMED"
 elif [ "$GOAL_ARMED" = "1" ]; then
     REASON="this MAIN session has an ARMED /goal"
+    RULE_TAG="GOAL_ARMED"
 else
     REASON="this MAIN session runs FABLE"
+    RULE_TAG="FABLE"
 fi
+
+# ---- #73: log EVERY block (not just bypasses) — same style/location as the
+# bypass log, so "did the hook ever fire, on what" is answerable from a log
+# instead of an unmeasurable correlation (the exact gap #73 was filed for).
+log_block() {
+    # $1 = match/detail string (classifier match for Bash, len=N for Edit/Write)
+    local detail snippet
+    detail="$1"
+    snippet=$(printf '%s' "$2" | jq -Rr '.[0:120]' 2>/dev/null \
+        || printf '%s' "$2" | cut -c1-120)
+    printf '%s main-exec BLOCK session=%s tool=%s rule=%s match=%s cmd=%s\n' \
+        "$(date -Is)" "$SESSION_ID" "$TOOL_NAME" "$RULE_TAG" "$detail" "$snippet" \
+        >> /tmp/airuleset-main-exec-block.log 2>/dev/null || true
+}
 
 # ---- Bash path (#66): classify, don't size-gate ----
 if [ "$TOOL_NAME" = "Bash" ]; then
@@ -173,6 +214,20 @@ cmd = sys.argv[1]
 SEGMENTS_RE = re.compile(r'&&|\|\||[;&|]|\n')
 
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+# #73: `do`/`then`/`else`/`elif` are the loop/conditional-BODY leaders left
+# behind once a segment is split on `;` — stripping them means the body
+# classifies exactly like a standalone command (never the whole loop
+# blocked/allowed just for being a loop). `for`/`while` themselves are left
+# alone — a loop HEADER segment (`for f in a b`) has no command to classify
+# and correctly stays ambiguous.
+LOOP_BODY_KEYWORDS = ("do", "then", "else", "elif")
+
+# `bash -c '...'` / `sh -c '...'` (also zsh/dash) wrap a REAL command in a
+# quoted script string — recurse into that string, never classify the
+# wrapper's own literal tokens.
+DASH_C_RE = re.compile(r'^-[A-Za-z]*c$')
+SHELL_WRAPPERS = ("bash", "sh", "zsh", "dash")
 
 
 def strip_unquoted_comment(text):
@@ -217,9 +272,43 @@ def tokens_of(segment):
 
 def strip_prefix(tk):
     i = 0
-    while i < len(tk) and (tk[i] in ("sudo", "env") or ASSIGN_RE.match(tk[i])):
-        i += 1
+    while i < len(tk):
+        t = tk[i]
+        if t in ("sudo", "env") or t in LOOP_BODY_KEYWORDS or ASSIGN_RE.match(t):
+            i += 1
+            continue
+        if t == "timeout":
+            # `timeout [-s SIG] [-k DUR] N cmd...` — skip the wrapper's own
+            # flags and its duration argument; what remains is the real cmd.
+            i += 1
+            while i < len(tk) and tk[i].startswith("-"):
+                i += 1
+            if i < len(tk):
+                i += 1               # the duration itself (e.g. "60", "30s")
+            continue
+        if t == "nice":
+            # `nice [-n N] cmd...` (or a bare `nice -10 cmd...`)
+            i += 1
+            while i < len(tk) and tk[i].startswith("-"):
+                flag = tk[i]
+                i += 1
+                if flag in ("-n", "--adjustment") and i < len(tk) \
+                        and not tk[i].startswith("-"):
+                    i += 1
+            continue
+        break
     return tk[i:]
+
+
+def shell_dash_c_script(tk):
+    # returns the quoted script string of a `bash -c '...'`-shaped command,
+    # or None if this isn't one.
+    if not tk or tk[0] not in SHELL_WRAPPERS:
+        return None
+    for i in range(1, len(tk)):
+        if tk[i] == "-c" or DASH_C_RE.match(tk[i]):
+            return tk[i + 1] if i + 1 < len(tk) else None
+    return None
 
 
 def is_allowed_segment(tk):
@@ -289,14 +378,23 @@ def is_blocked_segment(tk):
     return False
 
 
-blocked_reason = None
-for seg in SEGMENTS_RE.split(cmd):
-    tk = strip_prefix(tokens_of(seg))
-    if is_allowed_segment(tk):
-        continue
-    if is_blocked_segment(tk):
-        blocked_reason = " ".join(tk[:3]) if tk else seg.strip()
-        break
+def classify(text):
+    for seg in SEGMENTS_RE.split(text):
+        tk = strip_prefix(tokens_of(seg))
+        script = shell_dash_c_script(tk)
+        if script is not None:
+            inner = classify(script)
+            if inner:
+                return inner
+            continue
+        if is_allowed_segment(tk):
+            continue
+        if is_blocked_segment(tk):
+            return " ".join(tk[:3]) if tk else seg.strip()
+    return None
+
+
+blocked_reason = classify(cmd)
 
 if blocked_reason:
     print(blocked_reason)
@@ -309,6 +407,8 @@ PYEOF
     if [ "$CLASS_RC" -ne 2 ]; then
         exit 0            # allow-listed, ambiguous, or classifier malfunction (fail-open)
     fi
+
+    log_block "$CLASS" "$BASH_CMD"
 
     cat >&2 <<MSG
 BLOCKED: ${REASON} and this Bash command ('${CLASS}...') is a BULK
@@ -328,6 +428,9 @@ Deliberate exception (logged): touch /tmp/airuleset-main-exec-ok-<session_id>
 MSG
     exit 2
 fi
+
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")
+log_block "len=$LEN" "$FILE_PATH"
 
 cat >&2 <<MSG
 BLOCKED: ${REASON} and this ${LEN}-char write is IMPLEMENTATION work. Under
