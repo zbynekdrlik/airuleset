@@ -939,24 +939,26 @@ class TestGoalTemplateDrift(GoalDriftBase):
         self.assertEqual(tmux.typed(), [branch_v2], logs)
 
     def test_a_never_matched_goal_is_never_touched(self):
-        state = {}
+        state, seen = {}, []
         tp = self._templates(TPL_FULL, TPL_BRANCH)
-        self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp, state=state)
+        seen += self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp,
+                            state=state)[1]
         tp = self._templates(TPL_FULL_V2, TPL_BRANCH)
         tmux, logs = self._sweep(templates_path=tp, state=state,
                                  cap_seq=self._lit_seq(TPL_FULL_V2))
+        seen += logs
         self.assertFalse(tmux.typed(),
                          "a user's own goal must survive every template change")
-        self.assertTrue(any("untracked" in ln for ln in logs), logs)
+        self.assertTrue(any("untracked" in ln for ln in seen), seen)
 
     def test_the_untracked_reason_is_logged_once_not_every_sweep(self):
-        state = {}
+        state, seen = {}, []
         tp = self._templates(TPL_FULL)
-        self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp, state=state)
-        first = self._sweep(templates_path=tp, state=state)[1]
-        second = self._sweep(templates_path=tp, state=state)[1]
-        self.assertTrue(any("untracked" in ln for ln in first), first)
-        self.assertFalse(any("untracked" in ln for ln in second),
+        seen += self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp,
+                            state=state)[1]
+        for _ in range(4):
+            seen += self._sweep(templates_path=tp, state=state)[1]
+        self.assertEqual(len([ln for ln in seen if "untracked" in ln]), 1,
                          "a custom goal must not spam the journal every minute")
 
     def test_a_trimmed_arm_is_tracked_too(self):
