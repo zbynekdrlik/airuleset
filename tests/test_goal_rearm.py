@@ -244,6 +244,24 @@ class TestPaneGoalIndicator(unittest.TestCase):
                 + FOOTER_DARK)
         self.assertIs(wd.pane_goal_armed(pane), False)
 
+    def test_statusline_without_a_ctx_segment_still_reads(self):
+        # LIVE 2026-07-26: a freshly launched session renders the managed
+        # statusline WITHOUT the caveman `ctx …` block ("Fable 50% (5d)
+        # otazky inde 1 … /rc"). Keying determinability on a `ctx ` prefix
+        # made that whole pane unreadable — and worse, `_is_bottom_chrome`
+        # does not classify that row as chrome, so the peel stopped ABOVE the
+        # statusline and would have missed the indicator even when lit. The
+        # footer is everything BELOW the input box, whatever it contains.
+        fresh = ("● hello\n"
+                 "────────────────────────\n"
+                 "❯ \n"
+                 "────────────────────────\n"
+                 "  Fable 50% (5d)  otazky inde 1        ◎ /goal active (2m)\n"
+                 "  ⏵⏵ auto mode on (shift+tab to cycle)\n")
+        self.assertIs(wd.pane_goal_armed(fresh), True)
+        self.assertIs(wd.pane_goal_armed(fresh.replace(
+            "        ◎ /goal active (2m)", "")), False)
+
     def test_no_statusline_is_undeterminable(self):
         self.assertIsNone(wd.pane_goal_armed("● hello\n❯ \n"))
 
