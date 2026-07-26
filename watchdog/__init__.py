@@ -753,6 +753,9 @@ def _is_separator_line(s):
     return len(core) >= 3 and all(c in _SEP_CHARS for c in core)
 
 
+_QUEUED_PLACEHOLDER_TEXT = "press up to edit queued messages"
+
+
 def _find_boundary_line(captured):
     """Locate the pane's INPUT-BOX boundary line — the row `_has_free_prompt`
     and `_input_line_text` both test. Two strategies, issue #46:
@@ -786,8 +789,27 @@ def _find_boundary_line(captured):
     scar) — a window reaching up into that transcript would call a BUSY pane
     idle and INTERRUPT it. So the boundary is always exactly one line.
 
+    A boundary line showing CC's greyed `Press up to edit queued messages`
+    HINT (an otherwise-EMPTY box, recallable via the Up arrow — never text
+    the user typed) is normalized to a bare `❯` before returning (#65
+    acceptance: this placeholder is never mistaken for a real draft by any
+    caller — `_has_free_prompt`, `_input_line_text`, `_classify_boundary`
+    all resolve through this one function).
+
     Returns the raw (stripped) boundary line, or None if NEITHER strategy
     locates one at all (e.g. the whole capture is chrome, or it's empty)."""
+    line = _find_boundary_line_raw(captured)
+    if line is not None and line.startswith("❯"):
+        if line[1:].strip().lower() == _QUEUED_PLACEHOLDER_TEXT:
+            return "❯"
+    return line
+
+
+def _find_boundary_line_raw(captured):
+    """The two-strategy scan `_find_boundary_line` normalizes — see its
+    docstring for the full rationale. Split out so the queued-placeholder
+    normalization has exactly ONE place to apply, regardless of which
+    strategy located the boundary."""
     if not captured:
         return None
     lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
