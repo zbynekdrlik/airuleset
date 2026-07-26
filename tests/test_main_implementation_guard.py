@@ -524,6 +524,88 @@ class ClassifierHoles73(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
 
 
+class CoordinatorOutputWrites80(unittest.TestCase):
+    """#80 root cause (measured on gk, 2026-07-26): the #66 classifier saw the
+    head token `cat` in `cat > body.md <<'EOF' ... EOF` and called it a BULK
+    READ — but that is the recipe `gh-cli-recipes.md` MANDATES for every
+    issue/PR body (`-F body.md`, never an inline `--body`). gk's main ran it
+    58× in a day, got falsely blocked, and armed the permanent bypass marker
+    at 01:24 — after which the hook was dead for 17 hours (332 bypass log
+    lines, 304 of them Bash). So the false positive is what disabled #66
+    entirely.
+
+    Two fixes, both regression-guarded here:
+      1. heredoc BODIES are stripped before classification (the same
+         `strip_heredocs()` shape `block-gh-invalid-json-flag.sh` already
+         uses — one parser shape in this repo, never a second invented one);
+         a body line that happens to READ like a bulk command is payload
+         text, not a command.
+      2. a segment whose STDOUT is redirected to a file (`>`, `>>`, `1>`)
+         returns NOTHING to the model, so it is not the context cost this
+         hook guards — it is a WRITE, and it passes. `2>/dev/null` is a
+         STDERR redirect and must NOT exempt anything.
+    A genuine bulk read whose output DOES come back (`cat file`,
+    `sed -n '1,200p' file`, `grep -rn x .`) stays blocked."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    # ---- the mandated gh body recipe must pass ----
+
+    def test_heredoc_body_write_then_gh_comment_allowed_while_armed(self):
+        out = self._armed(
+            "cat > /tmp/body.md <<'EOF'\n"
+            "Unblocks the release: the shadow lane was red.\n"
+            "EOF\n"
+            "gh issue comment 2180 -F /tmp/body.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_heredoc_body_containing_bulk_command_text_is_payload(self):
+        # the BODY documents a command; it is text, never a command to classify
+        out = self._armed(
+            "cat > /tmp/finding.md <<'EOF'\n"
+            "Reproduce with: grep -rn 'warning' addons/ | head -20\n"
+            "Then run pytest tests/ to confirm.\n"
+            "EOF\n"
+            "gh issue comment 42 -F /tmp/finding.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_append_heredoc_to_playbook_allowed_while_armed(self):
+        out = self._armed(
+            "cat >> /tmp/wt/SKILL.md <<'EOF'\n## Gotcha\ntext\nEOF")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_stdout_redirect_to_file_is_not_a_context_cost(self):
+        out = self._armed("grep -rn 'TODO' . > /tmp/todos.txt")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_stdout_redirect_without_space_is_recognised(self):
+        out = self._armed("sed -n '1,900p' models.py >/tmp/slice.txt")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- genuine bulk reads must STILL block (no hole opened) ----
+
+    def test_plain_cat_of_a_source_file_still_blocked(self):
+        out = self._armed("cat addons/models/sale_order.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_sed_slice_read_still_blocked(self):
+        out = self._armed("sed -n '6996,7130p' models19.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_stderr_redirect_does_not_exempt_a_bulk_read(self):
+        out = self._armed("grep -rn 'TODO' . 2>/dev/null")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_bulk_read_after_a_heredoc_write_still_blocked(self):
+        # the heredoc write passes; the SEPARATE read segment still doesn't
+        out = self._armed(
+            "cat > /tmp/b.md <<'EOF'\nbody\nEOF\ncat /etc/passwd")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class BlockLogging73(unittest.TestCase):
     """#73: every BLOCK must be written to its own log (timestamp, session,
     first ~120 chars of the command, which rule matched) — today the hook
