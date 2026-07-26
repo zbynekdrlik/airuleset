@@ -5564,6 +5564,10 @@ def hooks_reconcile(now, run, state, dry_run=False, projects_dir=None,
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
+GOAL_ACHIEVED_MARKER = "Goal achieved"   # CC's own completion line, printed
+                                    # into the CONVERSATION (never persisted
+                                    # to the transcript) when the evaluator
+                                    # confirms the condition
 _GOAL_LCS_OPEN = "<local-command-stdout>"
 _GOAL_LCS_CLOSE = "</local-command-stdout>"
 
@@ -5913,6 +5917,21 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         if rec.get("mark") != "set":
             continue                       # never armed here, or the user
                                            # deliberately cleared it
+        if GOAL_ACHIEVED_MARKER in _above_input_box(captured):
+            # CC writes NO marker for a NATURAL resolution either (live:
+            # `/goal` -> `✔ Goal achieved (3s · 1 turn)` -> indicator gone,
+            # transcript marker untouched), so "marker set + footer dark" also
+            # describes a SUCCESSFULLY FINISHED run. Re-arming that restarts
+            # finished work and ends every good run with a false "goal died"
+            # ping. The transcript cannot tell the two apart — montalu's own
+            # HEALTHY loop wrote `stop_hook_summary` entries with
+            # `preventedContinuation: false` every ~19 min while working
+            # perfectly — so the pane's own completion line is the signal.
+            # Skipping is the safe direction: no wasted turns, no false ping,
+            # and the stall branch still covers a loop that merely stopped.
+            logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
+                        "legitimately" % loc)
+            continue
         payload = rec.get("payload") or ""
         if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
             logs.append("skip unusable-payload (goal-rearm) %s (%d chars)"
