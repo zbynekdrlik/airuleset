@@ -5560,6 +5560,34 @@ GOAL_REARM_MAX_ATTEMPTS = 2         # deliveries per streak window (the
 GOAL_REARM_STREAK_S = 2 * 3600      # streak window; resets by TIME only
 GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
 
+# --- the SECOND shape (same job, opposite reading of the indicator) --------
+# The 2026-07-26 forensics (montalu + gatekeeper transcripts and journals,
+# read side by side) does NOT support "a /compact disarms the goal". It
+# supports "the loop loses its STIMULUS": every SURVIVAL had something arrive
+# after the compaction — a background subagent's task-notification (montalu
+# 04:44, 155 ms later) or the human typing — and every DEATH had a `/compact`
+# land at a `## ✅ Work Complete` boundary with NO worker in flight, after
+# which nothing fired again until a human intervened (montalu 05:15:55 via job
+# 14's idle poll, 14:38:57 via #65's synchronous path — DIFFERENT senders,
+# identical outcome, so the delivery mechanism is not the discriminator).
+#
+# Nothing covered that: job 4, the only "idle when it should be working"
+# nudge, is hard-gated on the last marker being `⏳ WORKING`, while a
+# completed ticket inside an armed loop correctly ends `✅ DONE`
+# (message-status-marker.md, 2026-07-25). So "goal ARMED, last turn ✅, then
+# silence" was a total blind spot.
+#
+# Honest limit: it is NOT established that a local `/compact` is structurally
+# incapable of re-firing CC's own goal Stop hook — the pattern is consistent
+# across both deaths and absent in every survival, but it is an inference from
+# transcript timing, not documented CC behavior. Which is exactly why this
+# branch keys on the OBSERVABLE end state (armed + idle + nothing in flight)
+# rather than on any theory of the cause.
+GOAL_STALL_TEXT = "continue"        # same minimal wake job 1 uses
+GOAL_STALL_IDLE_S = 15 * 60         # transcript stale this long while ARMED
+GOAL_STALL_INTERVAL_S = 15 * 60     # min spacing between nudges
+GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
+
 
 def _goal_marker_content(entry):
     """TOP-LEVEL string content of a transcript entry — the ONLY shapes CC
@@ -5719,6 +5747,77 @@ def _send_goal_verified(pid, text, run, captured=None):
     return True
 
 
+def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
+                      loc, send_fn, dry_run, handled, projects_dir):
+    """The ARMED-but-silent branch of job 20 — see the `GOAL_STALL_*` section
+    comment. Mutates `rec` (the caller persists it); returns log lines.
+
+    A nudge fires ONLY when every one of these holds, and each refusal is a
+    deliberate lock, not an oversight:
+      * the transcript has been idle >= `GOAL_STALL_IDLE_S` (real progress
+        RESETS the counter — the bound is tied to observed movement, never a
+        blind timer);
+      * the last marker is not `⏳` (job 4 owns a working-stall) and not `❓`
+        (an unanswered question IS the loop's own stop condition — never
+        nudge past one, the user's hardest standing rule);
+      * no background worker is in flight (`_pane_has_bg_agent`) — its
+        task-notification is the stimulus, still coming;
+      * the pane is genuinely idle at a BARE prompt, not compacting, with no
+        outstanding `/compact` claim and not compacted this sweep."""
+    logs = []
+    idle = now - (tmtime or now)
+    if idle < GOAL_STALL_IDLE_S:
+        if rec.get("sn"):                  # the loop really advanced — the
+            rec.update({"sn": 0, "spinged": False})   # bound is progress-tied
+        return logs
+    marker = transcript_last_marker(tpath)
+    if marker in ("⏳", "❓"):
+        return logs                        # job 4's, or a legitimate block
+    if _pane_has_bg_agent(captured) or pane_waiting_on_user(captured):
+        return logs
+    if _pane_compacting(captured):
+        return logs
+    if handled is not None and sid in handled:
+        return logs
+    n = rec.get("sn", 0)
+    if n >= GOAL_STALL_MAX_NUDGES:
+        if not rec.get("spinged"):
+            rec["spinged"] = True
+            if send_fn is not None and not dry_run:
+                send_fn("⚠️ **%s** — `/goal` je armovaný (`◎ /goal` svieti), ale "
+                        "slučka sa už %d minút nepohla a ani po %d šťuchnutiach "
+                        "sa nerozbehla (%s). Pozri sa na ňu prosím — dovtedy "
+                        "nič nepokračuje."
+                        % (project_label(cwd), int(idle // 60),
+                           GOAL_STALL_MAX_NUDGES, loc),
+                        owner=pane_owner(pid, run) or None,
+                        dedup_key="goalstall:%s:%d" % (sid, int(tmtime or 0)),
+                        dry_run=dry_run)
+            logs.append("GAVE UP (goal-stall) %s after %d nudges"
+                        % (loc, GOAL_STALL_MAX_NUDGES))
+        return logs
+    last = rec.get("slast")
+    if last is not None and (now - last) < GOAL_STALL_INTERVAL_S:
+        return logs
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        return logs
+    kind, draft = _classify_boundary(captured)
+    if kind != "input" or draft:
+        logs.append("skip %s (goal-stall) %s" % (draft and "draft" or kind, loc))
+        return logs
+    if not pane_at_idle_prompt(captured):
+        return logs
+    if dry_run:
+        logs.append("READY (goal-stall) %s idle=%dm" % (loc, idle // 60))
+        return logs
+    send_continue(pid, GOAL_STALL_TEXT, run)
+    rec["sn"] = n + 1
+    rec["slast"] = now
+    logs.append("goal-stall nudge %s idle=%dm (%d/%d) -> armed goal not "
+                "advancing" % (loc, idle // 60, n + 1, GOAL_STALL_MAX_NUDGES))
+    return logs
+
+
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None):
     """Job 20 — see the section comment above (#76). Mutates
@@ -5743,7 +5842,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
             continue
-        tpath, _tmtime = tinfo
+        tpath, tmtime = tinfo
         sid = tpath.stem
         rec = recs.get(sid)
         if not isinstance(rec, dict):
@@ -5769,9 +5868,14 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         if armed:
             if rec.get("queued_at"):
                 rec["queued_at"] = None
-                _save()
                 logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
                             % loc)
+            # ARMED for real — but is the loop actually FIRING? (the second
+            # shape, and the one the forensics points at)
+            logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured,
+                                      tpath, tmtime, loc, send_fn, dry_run,
+                                      handled, projects_dir)
+            _save()
             continue
         if rec.get("mark") != "set":
             continue                       # never armed here, or the user
