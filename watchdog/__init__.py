@@ -3475,14 +3475,24 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     until `FLEET_BURN_DELAY_MINUTES` past the hour boundary (#60 point 4) —
     before that, this cycle no-ops WITHOUT claiming the hour, so the next
     sweep (60s later) retries until a remote box's own job 13 has had time to
-    write. `fetch(hosts, hour_bucket)` is the INJECTED remote collector (real
-    impl: `airuleset._watchdog_fleet_fetch`) — hour-matched against THIS
-    job's own `hour_bucket` (#60), so a failing OR stale host must come back
-    as `{"error": ...}` in its own slot, never raise; a fetch that DOES raise
-    is caught here too so one broken collector never drops the whole row
-    (still writes local-only data). `dry_run`: compute + log, but never write
-    the file, claim the hour, or send the budget alert — mirrors
-    `burn_snapshot_job`'s dry-run contract exactly."""
+    write. `fetch(hosts, want_hour_bucket)` is the INJECTED remote collector
+    (real impl: `airuleset._watchdog_fleet_fetch`) — hour-matched against the
+    LAST COMPLETED hour (#63; see `want_hour_bucket` below), so a failing OR
+    stale host must come back as `{"error": ...}` in its own slot, never
+    raise; a fetch that DOES raise is caught here too so one broken collector
+    never drops the whole row (still writes local-only data). `dry_run`:
+    compute + log, but never write the file, claim the hour, or send the
+    budget alert — mirrors `burn_snapshot_job`'s dry-run contract exactly.
+
+    #63: job 13 (`burn_snapshot_job`) stamps its row with the hour that JUST
+    completed (`bucket(now) - 1`), never the current still-open one — so this
+    job must collect against that SAME completed-hour bucket
+    (`want_hour_bucket = hour_bucket - 1`), for EVERY host including dev1's
+    own local `snapshots.jsonl` tail row (previously trusted unconditionally,
+    with no freshness check at all — the asymmetry behind "dev1 always has a
+    number, every remote column is permanently --"). `hour_bucket` itself
+    stays the CURRENT hour purely as the once-per-hour state guard (unchanged
+    from #60/#55) — it is never used to select data."""
     import burn as burn_mod
     hour_bucket = int(now // 3600)
     if state.get("fleet_burn_hour") == hour_bucket:
@@ -3490,20 +3500,28 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     now_utc = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
     if now_utc.minute < FLEET_BURN_DELAY_MINUTES:
         return []
+    want_hour_bucket = hour_bucket - 1
     host_rows = {}
     local_rows = burn_mod.load_snapshots(local_snapshot_path)
     if local_rows:
         last = local_rows[-1]
-        host_rows[last.get("host") or "dev1"] = last
+        name = last.get("host") or "dev1"
+        if burn_mod.hour_bucket_of_ts(last.get("ts")) == want_hour_bucket:
+            host_rows[name] = last
+        else:
+            host_rows[name] = {"error": "no local sample for hour %s (latest %s)"
+                                        % (want_hour_bucket, last.get("ts")),
+                               "stale": True}
     fetch = fetch or (lambda hs, hb: {})
     try:
-        remote_rows = fetch(hosts, hour_bucket) or {}
+        remote_rows = fetch(hosts, want_hour_bucket) or {}
     except Exception as e:
         remote_rows = {h.get("name", "?"): {"error": "fetch raised: %r" % (e,)}
                        for h in (hosts or [])}
     host_rows.update(remote_rows)
-    now_local = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).astimezone()
-    ts = now_local.replace(minute=0, second=0, microsecond=0).isoformat()
+    completed_hour_utc = datetime.datetime.fromtimestamp(
+        want_hour_bucket * 3600, datetime.timezone.utc)
+    ts = completed_hour_utc.astimezone().isoformat()
     cache = usage_cache if usage_cache is not None else burn_mod.load_usage_cache()
     wk = burn_mod.shared_weekly_window(cache) if cache else None
     weekly_pct, resets_at = wk if wk else (None, None)
