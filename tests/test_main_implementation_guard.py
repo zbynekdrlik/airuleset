@@ -733,6 +733,54 @@ class BoundedPeeks80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class CountsAndBoundedSlices80(unittest.TestCase):
+    """#80, third and last pass over the replayed gk corpus. Two more shapes
+    were blocked whose output is provably tiny — the same "judge the SIZE
+    that comes back, not the head token" principle as the bounded peek:
+
+      • `grep -c pattern file` / `grep -q` return ONE number / nothing. They
+        are assertions ("did my write land"), not reads. `grep -rn ...` is
+        untouched — that one really does dump matches.
+      • `sed -n '250,260p' file` is an 11-line slice — bounded exactly like
+        `head -11`. A slice wider than AIRULESET_PEEK_MAX_LINES (default 50)
+        stays blocked, as does a `sed -n '1,$p'`-style unbounded form and
+        every non `-n` sed usage."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def test_grep_count_is_an_assertion_not_a_read(self):
+        out = self._armed("grep -c 'sk_SK' /tmp/wt/SKILL.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_grep_quiet_allowed(self):
+        out = self._armed("grep -q 'needle' /tmp/wt/CHANGELOG.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_grep_dump_still_blocked(self):
+        out = self._armed("grep -rn 'warning' addons/")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_narrow_sed_slice_allowed(self):
+        out = self._armed("sed -n '250,260p' /tmp/wt/spec.ts")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_wide_sed_slice_still_blocked(self):
+        out = self._armed("sed -n '1765,1820p' models/sale_order.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_sed_range_by_pattern_is_unbounded_and_blocked(self):
+        out = self._armed("sed -n '/^def onchange/,/^    def [a-z]/p' models19.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_sed_in_place_edit_is_not_a_read_but_stays_conservative(self):
+        # not a read at all — must not be blocked as one
+        out = self._armed("sed -i 's/a/b/' /tmp/x.txt")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 class OneShotBypass80(unittest.TestCase):
     """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
     single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
