@@ -526,6 +526,51 @@ class StructuralInputLineDetection(unittest.TestCase):
                          ("input", "rozpisany draft text"))
 
 
+class QueuedMessagesPlaceholderNotADraft(unittest.TestCase):
+    """#65 acceptance: CC's greyed 'Press up to edit queued messages' HINT
+    (an otherwise-empty box, recallable via Up-arrow — never text the user
+    typed) must be normalized to a bare `❯` boundary, never mistaken for a
+    real draft. A synchronous /compact delivery — or any other keystroke
+    job — must never treat it as unsafe to type over."""
+
+    QUEUED_PLACEHOLDER_CAP = ("● Predošlá práca hotová.\n"
+                              "❯ Press up to edit queued messages\n"
+                              "  ctx ███░  caveman:lite\n")
+    QUEUED_PLACEHOLDER_STRUCTURAL_CAP = (
+        "● Predošlá práca hotová.\n"
+        "──────────\n"
+        "❯ Press up to edit queued messages\n"
+        "──────────\n"
+        "  ctx ███░  caveman:lite\n")
+    # case/whitespace variance is tolerated — the boundary line is already
+    # fully stripped by `_find_boundary_line_raw` before normalization.
+    QUEUED_PLACEHOLDER_CASE_CAP = "● hotovo\n❯ PRESS UP TO EDIT QUEUED MESSAGES\n  ctx ░\n"
+
+    def test_find_boundary_line_normalizes_to_bare_prompt(self):
+        self.assertEqual(wd._find_boundary_line(self.QUEUED_PLACEHOLDER_CAP), "❯")
+        self.assertEqual(
+            wd._find_boundary_line(self.QUEUED_PLACEHOLDER_STRUCTURAL_CAP), "❯")
+        self.assertEqual(
+            wd._find_boundary_line(self.QUEUED_PLACEHOLDER_CASE_CAP), "❯")
+
+    def test_input_line_text_is_empty_not_the_placeholder(self):
+        self.assertEqual(wd._input_line_text(self.QUEUED_PLACEHOLDER_CAP), "")
+
+    def test_classify_boundary_reports_empty_draft(self):
+        self.assertEqual(wd._classify_boundary(self.QUEUED_PLACEHOLDER_CAP),
+                         ("input", ""))
+
+    def test_pane_at_idle_prompt_is_true_safe_to_type(self):
+        self.assertTrue(wd.pane_at_idle_prompt(self.QUEUED_PLACEHOLDER_CAP))
+
+    def test_a_genuine_draft_mentioning_similar_words_is_still_a_draft(self):
+        # never over-match — only the EXACT placeholder text normalizes.
+        cap = "● hotovo\n❯ press up later to see queued messages maybe\n  ctx ░\n"
+        self.assertEqual(wd._input_line_text(cap),
+                         "press up later to see queued messages maybe")
+        self.assertFalse(wd.pane_at_idle_prompt(cap))
+
+
 class PaneQuestionExcerpt(unittest.TestCase):
     """The job-2 "čaká na teba" ping must CARRY the question + options extracted from
     the pane — the user's explicit complaint (2026-07-04) was pings saying only that
