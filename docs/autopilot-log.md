@@ -123,3 +123,34 @@
   Measured prefix (real `usage`, fresh session, this repo): **162,726 →
   135,303 tokens (−27,423)**. Items 2 (model-awareness) and 4 (8 hook-covered
   modules) still open — both rewrite deliberately test-locked rule text.
+
+## 2026-07-27 — #92 (context diet tier 1, items 2+4) + #93 + #39
+
+- **#92 items 2 and 4** — CLOSED. Item 2: `model-awareness.md` 18,379 → 10,793 B
+  (`321faf5` red → `c8cfd8b` green); the justification layer (pricing, CursorBench
+  and thinking citations, 2026-07-01/02/03 history, the Opus-4.8 community-report
+  record, the 76%-of-$13,600 burn, the #32/#54/#66/#80 hook narrative, the DORMANT
+  mode) moved VERBATIM into `skills/fable-advisor/SKILL.md`. Every phrase-lock was
+  decided PER PHRASE: actionable → stays inline with its lock; justification →
+  lock retargeted at the skill. None dropped. Wired to its action with a trigger
+  row on `airuleset.py fable-gate` (`74c62d5` green) so the move is not a silent
+  delete (#91's mechanism).
+  Item 4: the ticket's own mandated per-phrase verification REFUTED the blanket
+  trim for 7 of 8 modules and surfaced an enforcement gap instead — the
+  merge-bypass family printed VIOLATION to stderr and never called `add_hard`
+  while the module claimed "HARD-blocked at Stop". Split by ambiguity, 10
+  unambiguous shapes now block, bare delegation phrases stay warn-only
+  (`c53c59a` red → `c7d935b` green). Only hook-INTERNALS prose was cleared for
+  removal (`script-failure-policy.md` 1,395 → 850 B, `589b381` green).
+- **#93 playbook mandate growth** — CLOSED, not overcome. #92 item 1 emptied the
+  file once but the MANDATE still pointed future writes at `.claude/skills/`
+  (which #91 proved almost never loads) and the project `CLAUDE.md`. Fixed on all
+  three directing surfaces (skill routing table, module boundary table, hook block
+  message) → `.claude/rules/<area>.md` + `paths:`, plus the missing prune step that
+  MOVES an already-parked gotcha out. `## Services` internals moved verbatim to the
+  path-scoped rule; project `CLAUDE.md` 11,919 → 4,762 B (`4a95b51` red → `aaaf9ae`
+  green).
+- **#39 context diet ancestor** — superseded; item 2's premise dissolved by #91.
+- Measured prefix (real `usage`, fresh isolated-profile session, this repo):
+  **134,994 → 129,504 tokens (−5,490)**. Portable part (modules only, every
+  project): 220,303 → 214,098 B.
