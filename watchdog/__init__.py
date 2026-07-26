@@ -5931,6 +5931,17 @@ GOAL_ARM_ACTIVE_PREFIX = ('A session-scoped Stop hook is now active with '
                           'condition: "')
 _GOAL_ARM_PROBE = GOAL_ARM_ACTIVE_PREFIX[:-1].encode()   # quote-free (JSON)
 GOAL_DRIFT_MAX_ATTEMPTS = 2         # deliveries per NEW template hash
+GOAL_DRIFT_MIN_QUIET_S = 30         # the transcript must have been quiet this
+                                    # long before a multi-KB goal is typed —
+                                    # a loop mid-turn writes entries
+                                    # continuously, so this is what separates
+                                    # a PAUSED loop from a running one (a
+                                    # pane's momentary look is not enough:
+                                    # live-observed, a delivery started in
+                                    # such a moment, the loop fired again
+                                    # before the Enter landed, and the whole
+                                    # payload stayed UNSUBMITTED in the box,
+                                    # clearable by neither Escape nor C-u)
 _GOAL_TEMPLATE_RX = re.compile(r"^/goal .+$", re.M)
 
 GOAL_STALL_TEXT = "continue"        # same minimal wake job 1 uses
@@ -6289,7 +6300,8 @@ def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
 
 
 def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
-                         send_fn, dry_run, handled, projects_dir, sleep_fn):
+                         send_fn, dry_run, handled, projects_dir, sleep_fn,
+                         tmtime=None):
     """The STALE-TEMPLATE branch of job 20 (#64) — see the `GOAL_DRIFT_*`
     section comment. Runs only for a pane whose goal is provably ARMED.
     Mutates `rec` (the caller persists it); returns log lines.
@@ -6357,7 +6369,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
         return logs
     kind, draft = _classify_boundary(captured)
     if kind != "input":
-        # A LIVE loop is busy most of the time, so this is the common outcome
+        # A LIVE loop is busy much of the time, so this is a common outcome
         # and the delivery simply waits for a real prompt. Queuing a 3 KB
         # paste into a running turn is refused on purpose: #84 showed a queued
         # command can sit undrained for over an hour under an armed goal,
@@ -6365,19 +6377,35 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
         # and re-typing it every sweep — the #78 duplicate class.
         logs.append("skip %s (goal-drift) %s" % (kind, loc))
         return logs
+    # A pane can LOOK like a free prompt for a moment while the loop is merely
+    # between tool calls. Typing into such a moment is what left a 3 KB
+    # payload unsubmitted in a live box (see GOAL_DRIFT_MIN_QUIET_S), so the
+    # transcript's own quiet window has to agree that the loop is paused.
+    quiet = now - (tmtime or now)
+    if quiet < GOAL_DRIFT_MIN_QUIET_S:
+        logs.append("skip not-quiet (goal-drift) %s (%ds)" % (loc, int(quiet)))
+        return logs
     if dry_run:
         logs.append("READY (goal-drift) %s -> %d chars" % (loc, len(target)))
         return logs
+    # …and re-verify against a FRESH capture: by now the sweep's own capture is
+    # several tmux round-trips old, which is exactly the width of the race.
+    fresh = capture_pane(pid, run, lines=40)
+    kind, draft = _classify_boundary(fresh)
+    if kind != "input" or pane_goal_armed(fresh) is not True:
+        logs.append("skip raced (goal-drift) %s -> pane moved since the sweep"
+                    % loc)
+        return logs
     if draft:
         dlogs = []
-        ok = deliver_with_stash(pid, target, run, captured=captured, logs=dlogs)
+        ok = deliver_with_stash(pid, target, run, captured=fresh, logs=dlogs)
         tag = "goal-drift, stash"
     else:
-        if not pane_at_idle_prompt(captured):
+        if not pane_at_idle_prompt(fresh):
             logs.append("skip not-idle (goal-drift) %s" % loc)
             return logs
         dlogs = []
-        ok = _send_goal_verified(pid, target, run, captured=captured,
+        ok = _send_goal_verified(pid, target, run, captured=fresh,
                                  sleep_fn=sleep_fn)
         tag = "goal-drift"
     rec["dn"] = rec.get("dn", 0) + 1
@@ -6465,7 +6493,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs += _goal_template_drift(now, run, rec, sid, cwd, pid,
                                              captured, loc, templates, send_fn,
                                              dry_run, handled, projects_dir,
-                                             sleep_fn)
+                                             sleep_fn, tmtime=tmtime)
             _save()
             continue
         if rec.get("mark") != "set":
