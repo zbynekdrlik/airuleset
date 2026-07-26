@@ -84,6 +84,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-subdev-ssh-misuse.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
           }
         ]
       },
