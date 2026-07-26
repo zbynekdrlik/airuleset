@@ -431,6 +431,62 @@ class TestGoalRearmBounded(GoalRearmBase):
                         "a session that dies again hours later must be healed")
 
 
+class TestLongPasteVerification(GoalRearmBase):
+    """LIVE 2026-07-26, first automatic run of this job on dev1: it correctly
+    detected a real victim (`parovanie_produktov` — transcript marker `set`,
+    footer dark, last turn `✅`) and typed the 3152-char payload in… and then
+    refused to submit it, twice, because **Claude Code COLLAPSES a long
+    literal paste into `[Pasted text #N]`**. The tail-match every verified
+    delivery in this file uses (`text.endswith(itext)`, `deliver_with_stash`
+    step 5) can therefore NEVER match a long payload — it only ever worked
+    because every previous caller sent short text.
+
+    So the placeholder IS the success signal for a long type, and both
+    verified-delivery paths must accept it — while a genuinely truncated
+    partial type must still be refused (the #36 disaster this verification
+    exists to prevent)."""
+
+    PASTED = "[Pasted text #1]"
+
+    def test_paste_placeholder_counts_as_typed(self):
+        self.assertTrue(wd._typed_landed("/goal " + PAYLOAD, self.PASTED))
+
+    def test_tail_match_still_counts_as_typed(self):
+        text = "/goal short"
+        self.assertTrue(wd._typed_landed(text, "short"))
+
+    def test_partial_type_is_still_refused(self):
+        self.assertFalse(wd._typed_landed("/goal " + PAYLOAD, "/goal STOP COND"))
+
+    def test_empty_box_is_not_a_landed_type(self):
+        self.assertFalse(wd._typed_landed("/goal x", ""))
+
+    def test_long_rearm_is_submitted_not_abandoned(self):
+        typed_pane = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
+        tmux, logs = self._go(PANE_DARK,
+                              cap_seq=[PANE_DARK, typed_pane, PANE_DARK])
+        self.assertEqual(tmux.typed()[0], GOAL_LINE)
+        self.assertIn("Enter", tmux.keys(),
+                      "a collapsed paste is a SUCCESSFUL type — submit it")
+        self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
+                        logs)
+
+    def test_stash_delivery_also_accepts_the_placeholder(self):
+        # deliver_with_stash has the identical verify step, and job 20 routes
+        # every draft-holding pane through it with the SAME long payload
+        text = "/goal " + PAYLOAD
+        stashed = CONV + FOOTER_DARK.replace("❯ \n", "❯ \n").replace(
+            "  ● main\n", "  ● main\n  › stashed\n")
+        with_draft = CONV + FOOTER_DARK.replace("❯ \n", "❯ draft\n")
+        bare = CONV + FOOTER_DARK
+        pasted = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
+        tmux = FakeTmux(with_draft, cap_seq=[bare, pasted, bare])
+        ok = wd.deliver_with_stash("%1", text, tmux, captured=with_draft)
+        self.assertTrue(ok, tmux.sent)
+        self.assertIn("Enter", tmux.keys())
+        del stashed
+
+
 class TestGoalLoopStallNudge(GoalRearmBase):
     """The SECOND shape the same job must cover — and the one the 2026-07-26
     forensics actually points at.
