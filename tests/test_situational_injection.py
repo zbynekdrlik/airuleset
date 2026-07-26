@@ -245,6 +245,83 @@ class TestInjection(TestCase):
             self.assertEqual(r.returncode, 0, f"must not block: {cmd}")
 
 
+class TestFalsePositives(TestCase):
+    """A command that merely MENTIONS a trigger must not load anything.
+
+    Live incident during #91 itself: a `gh issue comment -F body.md` whose
+    heredoc body described the trigger table matched nine topics at once and
+    injected 65.3 KB into the session. Same class as #80 — classify the
+    command, never the document it carries.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_heredoc_body_mentioning_triggers_injects_nothing(self):
+        cmd = (
+            "cat > body.md <<'EOF'\n"
+            "The table binds `gh pr merge` and `git push` and `gh run list`\n"
+            "and `rsync` and `cargo mutants` to their rule bodies.\n"
+            "EOF\n"
+            "gh issue comment 91 -F body.md"
+        )
+        r = run({"command": cmd}, tmpdir=self.tmpdir)
+        self.assertEqual(
+            r.stdout.strip(), "", "a heredoc document is not an action"
+        )
+
+    def test_commit_message_mentioning_a_trigger_injects_nothing(self):
+        r = run(
+            {"command": 'git commit -m "docs: explain gh pr merge gating"'},
+            tmpdir=self.tmpdir,
+        )
+        ctx = injected(r)
+        if ctx is not None:
+            self.assertNotIn("pr-merge-policy", ctx)
+
+    def test_echoing_a_trigger_string_injects_nothing(self):
+        r = run({"command": "echo 'gh pr merge 5 --merge'"}, tmpdir=self.tmpdir)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_a_real_action_still_injects(self):
+        ctx = injected(run({"command": "gh pr merge 5 --merge"}, tmpdir=self.tmpdir))
+        self.assertIsNotNone(ctx, "the real action must still load the rule")
+        self.assertIn("pr-merge-policy", ctx)
+
+    def test_one_call_never_injects_an_unbounded_pile(self):
+        cmd = (
+            "gh pr merge 5 && git push && gh run list && rsync -a a b && "
+            "cargo mutants && gh issue view 1 && gh issue list && "
+            "cargo build && stryker run"
+        )
+        ctx = injected(run({"command": cmd}, tmpdir=self.tmpdir))
+        if ctx is not None:
+            self.assertLess(
+                len(ctx), 20000, "one tool call must not dump a rule pile into context"
+            )
+
+    def test_unconsumed_topics_stay_available_for_their_own_action(self):
+        """A topic skipped by the size cap must not be silently marked used."""
+        cmd = (
+            "gh pr merge 5 && git push && gh run list && rsync -a a b && "
+            "cargo mutants && gh issue view 1 && gh issue list && "
+            "cargo build && stryker run"
+        )
+        run({"command": cmd}, session_id="cap", tmpdir=self.tmpdir)
+        # whatever was dropped must still be loadable later; at least one of the
+        # later actions must still produce content in this same session
+        later = [
+            injected(run({"command": c}, session_id="cap", tmpdir=self.tmpdir))
+            for c in ["stryker run", "cargo build --release", "gh issue list"]
+        ]
+        self.assertTrue(
+            any(x is not None for x in later),
+            "capping must defer topics, not consume them",
+        )
+
+
 class TestWiring(TestCase):
     def test_hook_is_wired_on_pretooluse(self):
         conf = json.loads((ROOT / "settings" / "hooks.json").read_text())
