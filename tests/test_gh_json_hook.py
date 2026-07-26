@@ -108,5 +108,98 @@ class TestGhJsonHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+# --------------------------------------------------------------------------- #
+# #85 (2026-07-26) — PER-SEGMENT classification.
+#
+# The pre-#85 hook searched `--json` over the WHOLE command string and paired
+# it with ANY write subcommand found anywhere in the same string. A compound
+# command that WRITES and then READS BACK what it wrote — the correct, cheaper
+# one-turn pattern — was therefore falsely blocked:
+#
+#   gh issue comment 76 -F body.md && gh issue edit 76 --title "..." \
+#     && gh issue view 76 --json number,title,state
+#
+# `--json` sits on `view`, exactly where the hook's own message says it
+# belongs. Blocking it pushes the agent to TWO turns instead of one, i.e. MORE
+# token burn (#80) — the opposite of this hook's purpose.
+#
+# The fix classifies PER SEGMENT (split on `;`, `&&`, `||`, `|`), reusing
+# `block-main-implementation.sh`'s established shlex-based shape, including
+# its recursion into `bash -c '...'`. A segment violates only when its OWN
+# tokens are a write subcommand carrying its OWN `--json`.
+# --------------------------------------------------------------------------- #
+
+class TestGhJsonPerSegment(TestGhJsonHook):
+    """Inherits the assertBlocked/assertAllowed helpers (and re-runs the whole
+    pre-#85 suite under the new classifier, locking that nothing regresses)."""
+
+    # ---- the live false positive (#85) ----
+
+    def test_write_then_read_back_json_in_one_compound_command_allowed(self):
+        self.assertAllowed(
+            'gh issue edit 76 --title "T" && gh issue view 76 --json state')
+
+    def test_the_exact_live_three_segment_case_allowed(self):
+        self.assertAllowed(
+            "gh issue comment 76 -F body.md >/dev/null && "
+            'gh issue edit 76 --title "novy titul" >/dev/null && '
+            "gh issue view 76 --json number,title,state --jq '.state'")
+
+    def test_write_then_read_back_json_over_a_pipe_allowed(self):
+        self.assertAllowed(
+            "gh issue close 5 && gh issue list --json number | head -3")
+
+    def test_write_then_read_back_json_semicolon_separated_allowed(self):
+        self.assertAllowed("gh pr comment 5 -F b.md ; gh pr view 5 --json state")
+
+    # ---- the original protection must NOT weaken ----
+
+    def test_single_write_segment_with_json_still_blocked(self):
+        self.assertBlocked("gh issue edit 5 --json foo")
+
+    def test_bad_flag_only_in_the_last_of_many_segments_still_blocked(self):
+        self.assertBlocked(
+            "gh issue view 5 --json state && gh issue list --json number && "
+            "gh issue edit 5 --json foo")
+
+    def test_bad_flag_in_a_middle_segment_still_blocked(self):
+        self.assertBlocked(
+            "gh issue view 5 --json state && gh issue create -t T --json number "
+            "&& echo done")
+
+    def test_json_equals_form_on_a_write_segment_still_blocked(self):
+        self.assertBlocked("gh issue edit 5 --json=state")
+
+    # ---- bash -c recursion (the acceptance case the pre-#85 hook MISSED:
+    #      the quote-stripper deleted the whole double-quoted script) ----
+
+    def test_write_json_inside_bash_c_single_quotes_blocked(self):
+        self.assertBlocked("bash -c 'gh issue edit 5 --json foo'")
+
+    def test_write_json_inside_bash_c_double_quotes_blocked(self):
+        self.assertBlocked('bash -c "gh issue create -t T --json number"')
+
+    def test_write_then_read_back_inside_bash_c_allowed(self):
+        self.assertAllowed(
+            "bash -c 'gh issue edit 5 --title T && gh issue view 5 --json state'")
+
+    def test_sh_c_wrapper_also_recursed(self):
+        self.assertBlocked("sh -c 'gh issue comment 5 --json foo'")
+
+    # ---- prefixes / assignments must not hide a violation ----
+
+    def test_env_assignment_prefix_does_not_hide_the_violation(self):
+        self.assertBlocked("GH_TOKEN=x gh issue edit 5 --json foo")
+
+    def test_loop_body_keyword_prefix_does_not_hide_the_violation(self):
+        self.assertBlocked("for n in 1 2; do gh issue edit $n --json foo; done")
+
+    # ---- a read segment's --json is never attributed to another segment ----
+
+    def test_read_json_never_attributed_to_an_unrelated_write_segment(self):
+        self.assertAllowed(
+            "gh pr list --json number && gh issue create -t T -F body.md")
+
+
 if __name__ == "__main__":
     main()
