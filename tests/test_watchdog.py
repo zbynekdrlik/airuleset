@@ -3317,9 +3317,12 @@ class TestCompactHardCeiling(unittest.TestCase):
                                      initial_captured=MR_BUSY_CAP)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+        # #72 -- the send-time log must NEVER claim "compacted" -- only
+        # keystrokes were sent, nothing has been verified yet.
+        self.assertFalse(any("compacted" in ln for ln in logs
+                             if ln.startswith("OK")), logs)
         self.assertEqual(state["compact_ceiling"][self.SID],
-                         wd.COMPACT_STALE_PENDING_CONFIRM)
-        self.assertEqual(state["compact_ceiling_attempts"][self.SID], 1)
+                         {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD})
 
     def test_free_idle_input_also_gets_compacted(self):
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
@@ -3347,7 +3350,7 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertTrue(any(ln.startswith("OK (compact-ceiling, stash)")
                             for ln in logs), logs)
         self.assertEqual(state["compact_ceiling"][self.SID],
-                         wd.COMPACT_STALE_PENDING_CONFIRM)
+                         {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD})
         self.assertNotIn(self.SID, state.get("compact_stash_skips", {}))
 
     def test_draft_with_occupied_stash_slot_is_skipped_and_kept_for_retry(self):
@@ -3414,57 +3417,51 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertIn("/compact", tmux.typed_texts())
 
     # ------------------------------------------------------------------- #
-    # PENDING_CONFIRM state machine: no immediate resend, a bounded retry
-    # after COMPACT_CEILING_RETRY_S, confirmation-clears-the-claim, and a
-    # permanent give-up + Discord ping after COMPACT_CEILING_MAX_ATTEMPTS.
+    # #72 (2026-07-26 live incident, gatekeeper pane 0:0.0) -- QUEUED state
+    # machine: exactly ONE `/compact` per ceiling-trigger, then WAIT --
+    # regardless of elapsed time or how long the current turn runs. The
+    # ONLY two exits from "queued" are CONSUMED (context confirmed dropped
+    # -- a REAL compaction landed) and FAILED (the delivery target session
+    # is demonstrably gone -- a DIFFERENT, newer session now owns that cwd,
+    # i.e. the pane went through a restart) -- never a timer, never an
+    # attempt cap, never a permanent give-up while still above the ceiling.
+    #
+    # Live evidence job 17 must never reproduce again: it sent THREE
+    # `/compact` into gatekeeper's pane 0:0.0 over 12 minutes while a
+    # SINGLE turn ran for 1h14m, logged each as "compacted" (only keystrokes
+    # were sent, nothing was consumed), then GAVE UP while context kept
+    # climbing 306900 -> 308250 -> 311408 -> 323K with three duplicate,
+    # never-consumed `/compact` sitting in the pane's own queue.
     # ------------------------------------------------------------------- #
 
-    def test_pending_confirm_within_retry_window_does_not_resend(self):
+    def test_queued_still_above_ceiling_never_resends_no_matter_how_long(self):
+        # the exact #72 bug: a session STILL busy in the SAME long turn must
+        # NEVER get a second /compact, no matter how much time passes.
         now = time.time()
-        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
-                 "compact_ceiling_attempts": {self.SID: 1},
-                 "compact_ceiling_sent_at": {self.SID: now - 10}}
-        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1, state=state, now=now)
-        self.assertEqual(tmux.sent, [])
-        self.assertEqual(state["compact_ceiling"][self.SID],
-                         wd.COMPACT_STALE_PENDING_CONFIRM)
-
-    def test_pending_confirm_with_context_confirmed_low_clears_the_claim(self):
-        now = time.time()
-        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
-                 "compact_ceiling_attempts": {self.SID: 1},
-                 "compact_ceiling_sent_at": {self.SID: now - 10}}
-        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
-        self.assertEqual(tmux.sent, [])
-        self.assertNotIn(self.SID, state.get("compact_ceiling", {}))
-        self.assertNotIn(self.SID, state.get("compact_ceiling_attempts", {}))
-        self.assertTrue(any("CLEARED" in ln for ln in logs), logs)
-
-    def test_pending_confirm_past_retry_window_still_high_resends(self):
-        now = time.time()
-        state = {"compact_ceiling": {self.SID: wd.COMPACT_STALE_PENDING_CONFIRM},
-                 "compact_ceiling_attempts": {self.SID: 1},
-                 "compact_ceiling_sent_at": {self.SID: now - wd.COMPACT_CEILING_RETRY_S - 10}}
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
-                                     initial_captured=MR_BUSY_CAP, state=state, now=now)
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertEqual(state["compact_ceiling_attempts"][self.SID], 2)
-        self.assertTrue(any(" retry" in ln for ln in logs), logs)
-
-    def test_permanent_gaveup_claim_is_never_cleared_or_retried(self):
-        now = time.time()
-        state = {"compact_ceiling": {self.SID: True}}
-        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
+                                     initial_captured=MR_BUSY_CAP,
+                                     state=state, now=now)
         self.assertEqual(tmux.sent, [])
-        self.assertIs(state["compact_ceiling"][self.SID], True)
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
 
-    def test_repeated_retries_give_up_after_max_attempts_and_ping(self):
+        # a full hour later -- still busy, still above ceiling: still nothing.
+        now2 = now + 3600
+        tmux2, logs2, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                       initial_captured=MR_BUSY_CAP,
+                                       state=state, now=now2)
+        self.assertEqual(tmux2.sent, [])
+        self.assertFalse(any("GAVE UP" in ln for ln in logs2), logs2)
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
+
+    def test_never_gives_up_across_many_sweeps_while_above_ceiling(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
         now = time.time()
-        sid = "sess-giveup"
-        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_HARD_CEILING + 1,
-                                 idle_s=0, now=now)
+        sid = "sess-noresign"
         state = {}
         sent = []
 
@@ -3472,40 +3469,81 @@ class TestCompactHardCeiling(unittest.TestCase):
             sent.append((body, kw))
             return "sent"
 
-        # sweep 1: first send
-        tmux1 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
-        wd.compact_hard_ceiling(now, tmux1, state, dry_run=False,
-                                projects_dir=proj, send_fn=fake_send)
-        self.assertIn("/compact", tmux1.typed_texts())
-        self.assertEqual(state["compact_ceiling_attempts"][sid], 1)
+        for i in range(5):
+            now_i = now + i * 10 ** 6
+            _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_HARD_CEILING + 1,
+                                     idle_s=0, now=now_i)
+            tmux_i = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+            logs_i = wd.compact_hard_ceiling(now_i, tmux_i, state, dry_run=False,
+                                             projects_dir=proj, send_fn=fake_send)
+            if i == 0:
+                self.assertEqual(tmux_i.typed_texts().count("/compact"), 1, logs_i)
+            else:
+                self.assertEqual(tmux_i.sent, [], logs_i)
+            self.assertFalse(any("GAVE UP" in ln for ln in logs_i), logs_i)
+        self.assertEqual(sent, [])   # never pinged a give-up -- there is none
+        self.assertEqual(state["compact_ceiling"][sid]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
 
-        # sweep 2: retry window elapsed, still high -> 2nd send
-        now2 = now + wd.COMPACT_CEILING_RETRY_S + 1
-        tmux2 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
-        wd.compact_hard_ceiling(now2, tmux2, state, dry_run=False,
-                                projects_dir=proj, send_fn=fake_send)
-        self.assertIn("/compact", tmux2.typed_texts())
-        self.assertEqual(state["compact_ceiling_attempts"][sid], 2)
-        self.assertEqual(sent, [])   # no give-up ping yet
+    def test_send_time_log_never_claims_compacted(self):
+        # #72's core complaint: "OK ... -> compacted" is misleading at send
+        # time -- only KEYSTROKES were sent, nothing was verified yet.
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP)
+        ok_lines = [ln for ln in logs if ln.startswith("OK (compact-ceiling)")]
+        self.assertTrue(ok_lines, logs)
+        self.assertFalse(any("compacted" in ln for ln in ok_lines), ok_lines)
 
-        # sweep 3: retry window elapsed again, still high -> 3rd attempt hits
-        # COMPACT_CEILING_MAX_ATTEMPTS -> permanent give-up + ONE Discord ping
-        now3 = now2 + wd.COMPACT_CEILING_RETRY_S + 1
-        tmux3 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
-        logs3 = wd.compact_hard_ceiling(now3, tmux3, state, dry_run=False,
-                                        projects_dir=proj, send_fn=fake_send)
-        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs3), logs3)
-        self.assertIs(state["compact_ceiling"][sid], True)
-        self.assertEqual(len(sent), 1, sent)
+    def test_queued_with_context_confirmed_low_is_consumed_and_cleared(self):
+        now = time.time()
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
+        self.assertEqual(tmux.sent, [])
+        self.assertNotIn(self.SID, state.get("compact_ceiling", {}))
+        self.assertTrue(any(ln.startswith("CONSUMED (compact-ceiling)")
+                            for ln in logs), logs)
 
-        # sweep 4: permanently given up -- never retried again, no matter
-        # how much time passes.
-        now4 = now3 + 10 ** 6
-        tmux4 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
-        wd.compact_hard_ceiling(now4, tmux4, state, dry_run=False,
-                                projects_dir=proj, send_fn=fake_send)
-        self.assertEqual(tmux4.sent, [])
-        self.assertEqual(len(sent), 1, sent)   # no second ping
+    def test_lost_delivery_after_session_replaced_gets_exactly_one_resend(self):
+        # #72 acceptance: "strata dorucenia -> jedno nove poslanie" -- the
+        # pane's underlying session went through a restart (a DIFFERENT,
+        # newer session now owns this cwd) while the old /compact was still
+        # queued and unconsumed. This is the ONLY condition that legitimately
+        # triggers a resend.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        old_sid, new_sid = "sess-old", "sess-new"
+        _seed_context_transcript(proj, self.CWD, old_sid, wd.COMPACT_HARD_CEILING + 1,
+                                 idle_s=100, now=now)
+        state = {"compact_ceiling":
+                 {old_sid: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        # a NEW session's transcript is now the newest one for this cwd.
+        _seed_context_transcript(proj, self.CWD, new_sid, wd.COMPACT_HARD_CEILING + 1,
+                                 idle_s=0, now=now)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        logs = wd.compact_hard_ceiling(now, tmux, state, dry_run=False,
+                                       projects_dir=proj)
+        self.assertTrue(any(ln.startswith("FAILED (compact-ceiling)") for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts().count("/compact"), 1, logs)
+        self.assertNotIn(old_sid, state.get("compact_ceiling", {}))
+        self.assertEqual(state["compact_ceiling"][new_sid],
+                         {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD})
+
+    def test_intact_delivery_same_session_is_never_treated_as_lost(self):
+        # the SAME sid still owns the cwd -- never mistaken for a restart,
+        # even long after the send (false-positive-direction regression
+        # lock for the #72 fix).
+        now = time.time()
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP,
+                                     state=state, now=now + 10 ** 5)
+        self.assertEqual(tmux.sent, [])
+        self.assertFalse(any(ln.startswith("FAILED (compact-ceiling)") for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
 
     # ------------------------------------------------------------------- #
     # #69 acceptance: the `handled` set is what job 14/15 populate and job
