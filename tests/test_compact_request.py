@@ -302,6 +302,15 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
 
+    def test_idle_send_threads_pane_id_into_the_shared_claim(self):
+        # #82 -- the shared claim needs the sending PANE to fingerprint the
+        # process the keystrokes were delivered to; lock that this job
+        # actually threads it through, not just that a claim gets set.
+        with m.patch.object(wd, "compact_claim_set") as claim_mock:
+            self._go(CB_IDLE_CAP)
+        self.assertTrue(claim_mock.called)
+        self.assertEqual(claim_mock.call_args.kwargs.get("pane_id"), self.PANE)
+
     def test_success_removes_the_request_dedup(self):
         tmux, logs, path, _ = self._go(CB_IDLE_CAP)
         self.assertEqual(wd.load_compact_requests(path), {})
@@ -622,6 +631,27 @@ def _write_ctx_transcript(base, cwd, sid, ctx_tokens):
     return p
 
 
+def _spawn_dummy_proc(testcase):
+    """A real, short-lived subprocess (`sleep 60`) for #82's process-
+    fingerprint tests -- a genuine PID with a genuine `/proc/<pid>/stat`
+    entry, so `_proc_fingerprint`/`_proc_fingerprint_alive` are exercised
+    against real kernel data instead of a hand-built fake. Always killed
+    in cleanup, even if the test itself already terminated it.
+    # airuleset:script-ok best-effort test cleanup of a process the test
+    # may have already killed itself -- nothing left to log or handle.
+    """
+    p = subprocess.Popen(["sleep", "60"])
+
+    def _cleanup():
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            pass
+    testcase.addCleanup(_cleanup)
+    return p
+
+
 def _append_compact_boundary(path, ts=None):
     """#78 — append a `system`/`compact_boundary` entry (Claude Code's own
     durable "a real compaction landed" marker) onto an EXISTING transcript
@@ -755,6 +785,133 @@ class TestCompactClaimState(unittest.TestCase):
         self.assertEqual(len(d), 1)
         self.assertEqual(d["sid-1"]["cwd"], "/b")
         self.assertEqual(d["sid-1"]["ts"], 2)
+
+    # ------------------------------------------------------------------- #
+    # #82 (2026-07-26 live incident, gatekeeper) -- a THIRD, independent
+    # resolution: the process the keystrokes were delivered to is gone (or
+    # a new process has since reused its PID). This is what catches a
+    # watchdog-driven restart (`_restart_pane`, jobs 12/18) that relaunches
+    # via `claude -c` -- the SAME transcript, so the session id never
+    # changes and neither CONSUMED nor the cwd-session-id FAILED check
+    # above can ever fire for it.
+    # ------------------------------------------------------------------- #
+
+    def test_process_alive_same_starttime_stays_queued(self):
+        proc_handle = _spawn_dummy_proc(self)
+        proc = wd._proc_fingerprint(proc_handle.pid)
+        self.assertIsNotNone(proc)
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", path=p, proc=proc)
+        self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                projects_dir=self._proj()))
+
+    def test_process_dead_is_failed_and_resend_allowed(self):
+        proc_handle = _spawn_dummy_proc(self)
+        proc = wd._proc_fingerprint(proc_handle.pid)
+        proc_handle.terminate()
+        proc_handle.wait(timeout=5)
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", path=p, proc=proc)
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+        self.assertEqual(wd._load_compact_claims(p), {})
+
+    def test_pid_reused_with_different_starttime_is_failed(self):
+        # the exact PID-reuse case #82 calls out: the SAME numeric pid, but
+        # a DIFFERENT starttime -- must be treated as a different process,
+        # never as "still the same one running".
+        proc_handle = _spawn_dummy_proc(self)
+        proc = wd._proc_fingerprint(proc_handle.pid)
+        tampered = dict(proc, starttime=str(int(proc["starttime"]) + 1))
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", path=p, proc=tampered)
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+
+    def test_no_fingerprint_recorded_is_never_treated_as_process_failed(self):
+        # a claim set before this fix (or whose owning pane could not be
+        # resolved at queue time) carries no "proc" key -- the new check
+        # must be a complete no-op for it, unchanged from pre-#82 behavior.
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", path=p)
+        self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                projects_dir=self._proj()))
+
+    def test_set_with_pane_id_resolves_and_stores_a_fingerprint(self):
+        proc_handle = _spawn_dummy_proc(self)
+        p = self._p()
+        with m.patch.object(wd, "_pane_hosted_claude_pid",
+                            return_value=str(proc_handle.pid)):
+            wd.compact_claim_set("sid-1", "/x", path=p, pane_id="%9",
+                                 run=lambda argv, timeout=8: "12345")
+        d = wd._load_compact_claims(p)
+        self.assertEqual(d["sid-1"]["proc"]["pid"], str(proc_handle.pid))
+
+    def test_set_with_pane_id_unresolvable_records_no_fingerprint(self):
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", path=p, pane_id="%9",
+                             run=lambda argv, timeout=8: "")
+        d = wd._load_compact_claims(p)
+        self.assertNotIn("proc", d["sid-1"])
+
+
+# --------------------------------------------------------------------------- #
+# #82 -- the raw proc-fingerprint helpers, tested directly.
+# --------------------------------------------------------------------------- #
+
+class TestProcFingerprint(unittest.TestCase):
+    def test_live_process_has_a_fingerprint(self):
+        p = _spawn_dummy_proc(self)
+        fp = wd._proc_fingerprint(p.pid)
+        self.assertIsNotNone(fp)
+        self.assertEqual(fp["pid"], str(p.pid))
+        self.assertTrue(fp["starttime"])
+
+    def test_nonexistent_pid_has_no_fingerprint(self):
+        self.assertIsNone(wd._proc_fingerprint(999999999))
+
+    def test_alive_matching_fingerprint_is_alive(self):
+        p = _spawn_dummy_proc(self)
+        fp = wd._proc_fingerprint(p.pid)
+        self.assertTrue(wd._proc_fingerprint_alive(fp))
+
+    def test_dead_process_is_not_alive(self):
+        p = _spawn_dummy_proc(self)
+        fp = wd._proc_fingerprint(p.pid)
+        p.terminate()
+        p.wait(timeout=5)
+        self.assertFalse(wd._proc_fingerprint_alive(fp))
+
+    def test_reused_pid_different_starttime_is_not_alive(self):
+        p = _spawn_dummy_proc(self)
+        fp = wd._proc_fingerprint(p.pid)
+        tampered = dict(fp, starttime=str(int(fp["starttime"]) + 1))
+        self.assertFalse(wd._proc_fingerprint_alive(tampered))
+
+    def test_no_recorded_fingerprint_is_unknown_not_dead(self):
+        self.assertIsNone(wd._proc_fingerprint_alive(None))
+        self.assertIsNone(wd._proc_fingerprint_alive({}))
+        self.assertIsNone(wd._proc_fingerprint_alive({"pid": None}))
+
+    def test_pane_claude_proc_fingerprint_resolves_via_pane_pid(self):
+        p = _spawn_dummy_proc(self)
+
+        def fake_run(argv, timeout=8):
+            return "12345" if "#{pane_pid}" in argv else ""
+
+        with m.patch.object(wd, "_pane_hosted_claude_pid",
+                            return_value=str(p.pid)):
+            fp = wd._pane_claude_proc_fingerprint("%3", run=fake_run)
+        self.assertEqual(fp["pid"], str(p.pid))
+
+    def test_pane_claude_proc_fingerprint_none_when_pane_pid_unresolvable(self):
+        self.assertIsNone(wd._pane_claude_proc_fingerprint(
+            "%3", run=lambda argv, timeout=8: ""))
+
+    def test_pane_claude_proc_fingerprint_none_when_no_claude_in_tree(self):
+        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value=None):
+            self.assertIsNone(wd._pane_claude_proc_fingerprint(
+                "%3", run=lambda argv, timeout=8: "12345"))
 
 
 class TestTranscriptCompactBoundaryTs(unittest.TestCase):
@@ -1132,6 +1289,18 @@ class TestDeliverCompactNow(unittest.TestCase):
                                                 projects_dir=proj))
         log_text = wd.compact_sync_log_path().read_text()
         self.assertIn("SEND", log_text)
+
+    def test_successful_send_threads_pane_id_into_the_shared_claim(self):
+        # #82 -- the sync path is one of the four senders the fix must
+        # cover; lock that it threads the resolved pane through too.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_claim_set") as claim_mock:
+            wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(claim_mock.called)
+        self.assertEqual(claim_mock.call_args.kwargs.get("pane_id"), "%9")
 
     def test_small_context_drop_is_also_logged(self):
         proj = self._dir()

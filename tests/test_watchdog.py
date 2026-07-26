@@ -12,6 +12,7 @@ import datetime
 import hashlib
 import json
 import os
+import subprocess
 import time
 import unittest
 import unittest.mock
@@ -19,6 +20,28 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import watchdog as wd
+
+
+def _spawn_dummy_proc(testcase):
+    """A real, short-lived subprocess (`sleep 60`) for #82's process-
+    fingerprint tests — mirrors the identical helper in
+    tests/test_compact_request.py (kept local rather than cross-imported,
+    same convention this file already uses for its own transcript-seeding
+    helpers). Always killed in cleanup, even if the test already
+    terminated it.
+    # airuleset:script-ok best-effort test cleanup of a process the test
+    # may have already killed itself -- nothing left to log or handle.
+    """
+    p = subprocess.Popen(["sleep", "60"])
+
+    def _cleanup():
+        try:
+            p.terminate()
+            p.wait(timeout=5)
+        except Exception:
+            pass
+    testcase.addCleanup(_cleanup)
+    return p
 
 
 def _write_jsonl(path, entries):
@@ -2526,6 +2549,16 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
         self.assertTrue(state["compact_stale"]["sess-abc"])
 
+    def test_idle_send_threads_pane_id_into_the_shared_claim(self):
+        # #82 -- job 15 is one of the four senders the fix must cover;
+        # lock that it threads the sending pane through too.
+        with unittest.mock.patch.object(wd, "compact_claim_set") as claim_mock:
+            self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                    wd.COMPACT_MIN_IDLE_S + 10,
+                    cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
+        self.assertTrue(claim_mock.called)
+        self.assertEqual(claim_mock.call_args.kwargs.get("pane_id"), self.PANE)
+
     def test_bg_agent_strip_row_is_never_compacted(self):
         # issue #36/#42-style guard: a `◯ <agent>` row means a background
         # worker is in flight — /compact must never touch that pane.
@@ -3402,7 +3435,7 @@ class TestCompactHardCeiling(unittest.TestCase):
 
     def _go(self, ctx_tokens, initial_captured=MR_IDLE_CAP, cap_seq=(),
            state=None, dry_run=False, in_mode=False, now=None, sid=None,
-           send_fn=None, ceiling=None):
+           send_fn=None, ceiling=None, stuck_cycles=None):
         now = time.time() if now is None else now
         sid = sid or self.SID
         tmp = tempfile_mkdtemp_cleanup(self)
@@ -3413,7 +3446,7 @@ class TestCompactHardCeiling(unittest.TestCase):
         state = {} if state is None else state
         logs = wd.compact_hard_ceiling(now, tmux, state, dry_run=dry_run,
                                        projects_dir=proj, send_fn=send_fn,
-                                       ceiling=ceiling)
+                                       ceiling=ceiling, stuck_cycles=stuck_cycles)
         return tmux, logs, state
 
     def test_below_ceiling_is_skipped(self):
@@ -3656,6 +3689,124 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertFalse(any(ln.startswith("FAILED (compact-ceiling)") for ln in logs), logs)
         self.assertEqual(state["compact_ceiling"][self.SID]["status"],
                          wd.COMPACT_CEILING_QUEUED)
+
+    # ------------------------------------------------------------------- #
+    # #82 (2026-07-26 live incident, gatekeeper) -- a watchdog-driven
+    # RESTART (`_restart_pane`, jobs 12/18) relaunches via `claude -c`,
+    # which CONTINUES the SAME transcript -- the session id never changes,
+    # so the #72 pre-pass's session-id-replace check above can NEVER fire
+    # for it, and the claim wedges forever. The fix: this job's OWN
+    # `compact_ceiling` entry now also carries the fingerprint of the
+    # process the keystrokes were delivered to -- a process that no longer
+    # exists (or a different one that has since reused its PID) is a
+    # demonstrated delivery loss, independent of session id.
+    # ------------------------------------------------------------------- #
+
+    def test_process_death_with_unchanged_session_id_gets_exactly_one_resend(self):
+        # the EXACT #82 incident: same sid (a `-c` restart never changes
+        # it), but the process that held the queued keystrokes is gone.
+        proc_handle = _spawn_dummy_proc(self)
+        proc = wd._proc_fingerprint(proc_handle.pid)
+        now = time.time()
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
+                            "cwd": self.CWD, "proc": proc}}}
+        proc_handle.terminate()
+        proc_handle.wait(timeout=5)
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP,
+                                     state=state, now=now)
+        self.assertTrue(any(ln.startswith("FAILED (compact-ceiling)")
+                            for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts().count("/compact"), 1, logs)
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
+
+    def test_process_alive_same_starttime_is_never_treated_as_lost(self):
+        # false-positive-direction lock: a genuinely still-alive process
+        # (matching starttime) must NEVER be mistaken for a restart, no
+        # matter how long the send sat queued.
+        proc_handle = _spawn_dummy_proc(self)
+        proc = wd._proc_fingerprint(proc_handle.pid)
+        now = time.time()
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
+                            "cwd": self.CWD, "proc": proc}}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP,
+                                     state=state, now=now + 10 ** 5)
+        self.assertEqual(tmux.sent, [])
+        self.assertFalse(any(ln.startswith("FAILED (compact-ceiling)")
+                            for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
+
+    def test_send_computes_and_threads_a_proc_fingerprint_into_the_shared_claim(self):
+        # #82 -- job 17 is one of the four senders the fix must cover; it
+        # resolves the fingerprint ONCE (to share with its own
+        # `compact_ceiling` entry) and passes it through explicitly, rather
+        # than leaving `compact_claim_set` to resolve it a second time —
+        # lock that the `proc=` channel is actually used (pre-#82 this
+        # call carried no such kwarg at all).
+        with unittest.mock.patch.object(wd, "compact_claim_set") as claim_mock:
+            self._go(wd.COMPACT_HARD_CEILING + 1, initial_captured=MR_BUSY_CAP)
+        self.assertTrue(claim_mock.called)
+        self.assertIn("proc", claim_mock.call_args.kwargs)
+
+    # ------------------------------------------------------------------- #
+    # #82 -- STUCK visibility: a claim that stays queued AND above the
+    # ceiling for a long time must be LOGGED, not silently skipped forever
+    # (the exact reason the live incident ran for HOURS before an
+    # accident uncovered it).
+    # ------------------------------------------------------------------- #
+
+    def test_stuck_is_logged_after_threshold_cycles_still_queued(self):
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        now = time.time()
+        logs = []
+        for i in range(5):
+            _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                          initial_captured=MR_BUSY_CAP,
+                                          state=state, now=now + i)
+        # below the (default 30) threshold -- never logged as STUCK yet.
+        self.assertFalse(any("STUCK" in ln for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID].get("cycles"), 5)
+
+    def test_stuck_logs_every_sweep_once_threshold_is_crossed(self):
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
+                            "cwd": self.CWD, "cycles": 2}}}
+        now = time.time()
+        _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                      initial_captured=MR_BUSY_CAP,
+                                      state=state, now=now, ceiling=None,
+                                      stuck_cycles=3)
+        self.assertTrue(any(ln.startswith("STUCK (compact-ceiling)")
+                            for ln in logs), logs)
+        self.assertEqual(state["compact_ceiling"][self.SID]["cycles"], 3)
+
+    def test_below_stuck_threshold_never_logs_stuck(self):
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
+                            "cwd": self.CWD, "cycles": 0}}}
+        now = time.time()
+        _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                      initial_captured=MR_BUSY_CAP,
+                                      state=state, now=now, stuck_cycles=30)
+        self.assertFalse(any("STUCK" in ln for ln in logs), logs)
+
+    def test_env_override_lowers_the_stuck_threshold(self):
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
+                            "cwd": self.CWD, "cycles": 1}}}
+        now = time.time()
+        with unittest.mock.patch.dict(
+                os.environ, {"AIRULESET_COMPACT_CEILING_STUCK_CYCLES": "2"}):
+            _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                          initial_captured=MR_BUSY_CAP,
+                                          state=state, now=now)
+        self.assertTrue(any("STUCK" in ln for ln in logs), logs)
 
     # ------------------------------------------------------------------- #
     # #69 acceptance: the `handled` set is what job 14/15 populate and job
