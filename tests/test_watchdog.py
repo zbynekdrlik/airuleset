@@ -1766,9 +1766,24 @@ class TestModelReconcile(unittest.TestCase):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
                                      cap_seq=[MR_IDLE_CAP])
         self.assertIn("/exit", tmux.typed_texts())
-        self.assertIn("claude", tmux.typed_texts())
+        self.assertIn(wd.RELAUNCH_CMD, tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
         self.assertTrue(state["modelswitch"]["sess-abc"])
+
+    def test_restart_sources_bashrc_before_relaunching_claude(self):
+        # #79 -- a shell OLDER than #77's launcher rewrite never re-reads
+        # .bashrc on its own (bash reads it once, at shell start). A bare
+        # `claude` typed into such a shell resolves to the FROZEN old fat
+        # function with `--settings '{"ultracode":true}'` baked in, so
+        # every watchdog restart (job 12 / job 18) silently resurrects
+        # ultracode. The restart must re-source .bashrc in the SAME
+        # command so it always resolves the CURRENT wrapper, regardless
+        # of how old the target shell is -- a bare "claude" must never be
+        # typed by the restart sequence again.
+        tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertIn(wd.RELAUNCH_CMD, tmux.typed_texts())
+        self.assertNotIn("claude", tmux.typed_texts())
 
     def test_opus4_session_restarts_with_resume_dialog(self):
         tmux, logs, state = self._go("claude-opus-4-8", MR_IDLE_CAP,
@@ -1872,13 +1887,13 @@ class TestModelReconcile(unittest.TestCase):
     def test_exact_keystroke_sequence_no_dialog(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
                                      cap_seq=[MR_IDLE_CAP])
-        self.assertEqual(tmux.keys(), ["/exit", "Enter", "claude", "Enter"])
+        self.assertEqual(tmux.keys(), ["/exit", "Enter", wd.RELAUNCH_CMD, "Enter"])
 
     def test_exact_keystroke_sequence_with_dialog(self):
         tmux, logs, state = self._go("claude-fable-5", MR_IDLE_CAP,
                                      cap_seq=[MR_RESUME_DIALOG_CAP, MR_IDLE_CAP])
         self.assertEqual(tmux.keys(),
-                         ["/exit", "Enter", "claude", "Enter", "Enter"])
+                         ["/exit", "Enter", wd.RELAUNCH_CMD, "Enter", "Enter"])
 
     def test_strip_selected_gets_one_escape_before_exit(self):
         # issue #36: the agent-strip SELECTOR holding focus swallows a bare
@@ -1887,7 +1902,7 @@ class TestModelReconcile(unittest.TestCase):
         tmux, logs, state = self._go("claude-fable-5", MR_STRIP_SELECTED_IDLE_CAP,
                                      cap_seq=[MR_IDLE_CAP])
         self.assertEqual(tmux.keys(),
-                         ["Escape", "/exit", "Enter", "claude", "Enter"])
+                         ["Escape", "/exit", "Enter", wd.RELAUNCH_CMD, "Enter"])
         self.assertTrue(tmux.no_consecutive_escapes())
 
     def test_no_two_consecutive_escapes_ever_sent(self):
@@ -1933,7 +1948,7 @@ class TestModelReconcile(unittest.TestCase):
                                      cap_seq=[MR_BUSY_CAP])
         self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
         self.assertTrue(any("relaunch did not render" in ln for ln in logs), logs)
-        self.assertIn("claude", tmux.typed_texts())
+        self.assertIn(wd.RELAUNCH_CMD, tmux.typed_texts())
         self.assertNotIn("sess-abc", state.get("modelswitch", {}))
         self.assertEqual(tmux._cap_calls - 1, wd.MODEL_RESTART_LAUNCH_MAX_POLLS)
 
@@ -1945,7 +1960,7 @@ class TestModelReconcile(unittest.TestCase):
         self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
         self.assertTrue(any("did not settle idle" in ln for ln in logs), logs)
         self.assertEqual(tmux.keys(),
-                         ["/exit", "Enter", "claude", "Enter", "Enter"])
+                         ["/exit", "Enter", wd.RELAUNCH_CMD, "Enter", "Enter"])
         self.assertNotIn("sess-abc", state.get("modelswitch", {}))
 
     def test_attempts_counter_increments_on_each_failure(self):
@@ -2186,7 +2201,7 @@ class TestHooksReconcile(unittest.TestCase):
         tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
                                      cap_seq=[MR_IDLE_CAP])
         self.assertIn("/exit", tmux.typed_texts())
-        self.assertIn("claude", tmux.typed_texts())
+        self.assertIn(wd.RELAUNCH_CMD, tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK restart (hooks changed)")
                             for ln in logs), logs)
         self.assertTrue(state["hooks_restarted"]["sess-abc"])
@@ -2363,7 +2378,7 @@ class RunOnceHooksReconcileWiring(unittest.TestCase):
                              for ln in logs), logs)
         # exactly ONE restart sequence -- not two
         self.assertEqual(tmux.typed_texts().count("/exit"), 1, tmux.typed_texts())
-        self.assertEqual(tmux.typed_texts().count("claude"), 1, tmux.typed_texts())
+        self.assertEqual(tmux.typed_texts().count(wd.RELAUNCH_CMD), 1, tmux.typed_texts())
 
 
 # --------------------------------------------------------------------------- #
