@@ -3861,6 +3861,103 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# #65 (2026-07-26 live incident) — job 14's poll (above) loses the RACE with
+# an armed `/goal` loop: the Stop hook (notify-compact-request.sh) records a
+# request, but the loop's own next-ticket dispatch can fire within SECONDS —
+# long before the next ~60s watchdog tick ever gets a chance to see the pane
+# idle. Measured `## ✅ Work Complete` : actual-compaction ratios confirm the
+# gap: david 38→13, montalu 63→49, forestshop 63→16, gatekeeper 0→9 (it never
+# even emits a `Work Complete`, so its chain has nothing to start from).
+#
+# The fix is DELIVERY TIMING, not a smarter poll: `airuleset.py
+# compact-request --record` now ALSO attempts to deliver `/compact`
+# SYNCHRONOUSLY, in the same process, the MOMENT the Stop hook records the
+# request — before the loop gets a chance to dispatch the next ticket at
+# all. This is safe specifically because a SHORT `send-keys` command reliably
+# QUEUES even into a BUSY pane (verified live 2026-07-26 for /compact itself
+# and for `/goal clear`) — CC's own type-ahead queues it as the next turn
+# once the current one ends, so this delivery does NOT need to wait for an
+# idle pane the way job 14's poll does. Only a genuinely UNSAFE pane state
+# (in copy-mode, an open dialog, an unlocatable boundary, or a real unsent
+# DRAFT — never CC's own "Press up to edit queued messages" placeholder,
+# which `_find_boundary_line` already normalizes to bare) falls back to
+# `record_compact_request` for job 14's polled retry, unchanged.
+# --------------------------------------------------------------------------- #
+
+def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
+    """Resolve the SINGLE current live pane hosting session `sid` — for a
+    synchronous, Stop-hook-time delivery where there is no per-sweep
+    `panes_by_sid` map to consult (unlike job 14/7, which reuse the ONE map
+    run_once already built this cycle). Matches by TRANSCRIPT STEM, never by
+    cwd alone (a cwd can be revisited later by an unrelated session) — the
+    same discipline run_once's own `by_transcript` grouping uses. Ambiguous
+    (0 or >1 matching pane) returns None so the caller falls back to the
+    polled retry path rather than risk typing into the wrong pane."""
+    run = run or _default_run
+    projects_dir = projects_dir or PROJECTS_DIR
+    matches = []
+    for pid, pcwd in list_claude_panes(run):
+        tinfo = find_active_transcript(projects_dir, pcwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        if tpath.stem == sid:
+            matches.append(pid)
+    return matches[0] if len(matches) == 1 else None
+
+
+def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None):
+    """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
+    the ticket-boundary request is recorded (see the section comment above).
+
+    Returns True when this session is FULLY HANDLED (either `/compact` was
+    actually typed, or the #48 context-threshold gate confirms there is
+    genuinely nothing to compact) — the caller (`cmd_compact_request`) must
+    NOT leave a pending request behind in either case. Returns False when
+    the caller should fall back to `record_compact_request` for job 14's
+    polled retry: no pane resolves unambiguously, the pane is in copy-mode /
+    showing an open dialog / has no locatable boundary at all, or — the one
+    case this function deliberately stays conservative on — the pane holds
+    a genuine unsent DRAFT (job 14/15's `_compact_stash_attempt`, #67,
+    handles that on retry; a synchronous multi-round-trip stash dance at
+    Stop-hook time is unnecessary risk for what should be a rare case). A
+    pane merely BUSY (mid-turn) is NOT a reason to fall back — that is
+    exactly the case this function exists to handle, per the section
+    comment's queuing behavior."""
+    run = run or _default_run
+    projects_dir = projects_dir or PROJECTS_DIR
+    pid = _find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
+    if not pid:
+        return False
+    if pane_in_mode(pid, run):
+        return False
+    captured = capture_pane(pid, run, lines=40)
+    if pane_waiting_on_user(captured):
+        return False
+    kind, draft = _classify_boundary(captured)
+    if kind == "no-input-line":
+        return False
+    if draft:
+        return False
+    # kind is "input" (bare, or the queued-messages placeholder already
+    # normalized to bare) or "busy" — BOTH are safe to send into here (see
+    # the section comment: a short send-keys queues reliably even on a busy
+    # pane), so there is no `pane_at_idle_prompt` gate on this path.
+    if min_context is None:
+        try:
+            min_context = int(os.environ.get(
+                "AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT",
+                COMPACT_BOUNDARY_MIN_CONTEXT))
+        except ValueError:
+            min_context = COMPACT_BOUNDARY_MIN_CONTEXT
+    tpath = _transcript_for_session(projects_dir, sid, cwd)
+    if tpath is not None and transcript_current_context(tpath) < min_context:
+        return True   # #48 gate: nothing worth compacting — handled, drop it
+    send_continue(pid, COMPACT_TEXT, run)
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # Job 15 — COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up, 2026-07-25).
 #
 # Job 14 only /compact's a session at a completed-ticket boundary (its Stop

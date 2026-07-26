@@ -15,10 +15,18 @@ set -euo pipefail
 # A completed ticket's durable state already lives in git / GitHub / the
 # issue — whatever /compact discards AT THAT boundary is genuinely
 # disposable, unlike a mid-task compact which risks losing working context
-# nothing durable has captured yet. A SEPARATE watchdog job
-# (compact_ticket_boundary, watchdog/__init__.py job 14) types `/compact`
-# into the session's pane LATER, only once it is genuinely idle — never
-# from here (a hook must never type into its own live pane mid-turn).
+# nothing durable has captured yet.
+#
+# #65 (2026-07-26): `compact-request --record` below records the request
+# AND, in the same process, attempts to DELIVER `/compact` SYNCHRONOUSLY —
+# right now, before an armed `/goal` loop gets a chance to dispatch the
+# next ticket at all (waiting for watchdog job 14's next ~60s poll loses
+# that race: a short send-keys reliably queues even into a busy pane,
+# verified live, so there is no need to wait for the pane to go idle
+# first). Only when the immediate attempt is unsafe (an unlocatable pane,
+# copy-mode, an open dialog, or a genuine unsent draft) does the recorded
+# request survive for watchdog job 14 (compact_ticket_boundary) to retry on
+# its next poll, unchanged from the pre-#65 behavior.
 #
 # Silent + non-blocking: never writes to stdout, always exits 0 — must
 # never interfere with the Stop decision pipeline (the other

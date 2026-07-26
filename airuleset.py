@@ -2453,20 +2453,40 @@ def cmd_watchdog(args):
 
 def cmd_compact_request(args):
     """Record a `/compact` request for a session at a safe ticket boundary
-    ("krok 1c — ohraničenie kontextu", #39 follow-up). Called by the Stop
-    hook `notify-compact-request.sh` the MOMENT a turn's final message is a
-    completed-ticket report — never from inside the session's own turn (a
-    hook must never type into its own live pane mid-turn). The state lives
-    in its own file (~/.claude/compact-requests.json,
-    watchdog.record_compact_request) — never in the watchdog's own sweep
-    state; see the section comment above `compact_requests_path()` in
-    watchdog/__init__.py for why that would race the sweep's own
-    end-of-cycle save. Watchdog job 14 (compact_ticket_boundary) consumes
-    the request later, only once the pane is genuinely idle."""
-    from watchdog import record_compact_request
+    ("krok 1c — ohraničenie kontextu", #39 follow-up), and ALSO attempt to
+    DELIVER it SYNCHRONOUSLY in this SAME process (#65, 2026-07-26). Called
+    by the Stop hook `notify-compact-request.sh` the MOMENT a turn's final
+    message is a completed-ticket report.
+
+    #65: waiting for watchdog job 14's next ~60s poll loses the race with an
+    armed `/goal` loop, which can dispatch the next ticket within seconds —
+    long before that poll ever sees the pane idle. So this command records
+    the request FIRST (never lost, even if the immediate attempt below
+    raises) and then calls `deliver_compact_now`, which resolves the pane
+    hosting this EXACT session and, when safe, types `/compact` right now
+    (a short send-keys reliably queues even into a BUSY pane, so this does
+    not need to wait for idle the way job 14's poll does). On success the
+    just-recorded request is cleared immediately — job 14 never needs to
+    act on it. On any failure/exception the request stays recorded, exactly
+    as before #65, for job 14's polled retry (its own draft-handling,
+    #67, covers the one case this synchronous path stays conservative on:
+    a genuine unsent draft)."""
+    from watchdog import (record_compact_request, deliver_compact_now,
+                          clear_compact_request)
     if getattr(args, "record", False):
         ok = record_compact_request(args.session, args.cwd)
-        sys.stdout.write("recorded" if ok else "skip")
+        if not ok:
+            sys.stdout.write("skip")
+            return
+        try:
+            delivered = deliver_compact_now(args.session, args.cwd)
+        except Exception:
+            delivered = False
+        if delivered:
+            clear_compact_request(args.session)
+            sys.stdout.write("delivered")
+        else:
+            sys.stdout.write("recorded")
         return
     print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
           file=sys.stderr)
