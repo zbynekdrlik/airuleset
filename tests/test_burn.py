@@ -336,6 +336,116 @@ class TestHourlySnapshot(unittest.TestCase):
             self.assertEqual(row["by_model"], {})
 
 
+class TestDispatchRatioMeasurement80(unittest.TestCase):
+    """#80: the acceptance metric ("main Bash : Agent under 5:1, measured
+    from the transcript, not from an impression") was hand-derived with a
+    throwaway script. The hourly snapshot already walks every assistant
+    entry and already knows `isSidechain` — counting the MAIN agent's
+    `Bash` vs `Agent`/`Task` tool_use blocks in the same pass makes the
+    ratio readable straight out of snapshots.jsonl / fleet.jsonl, with no
+    second transcript parser."""
+
+    def _tool_line(self, model, tools, ts=None, sidechain=False):
+        content = [{"type": "tool_use", "id": "t%d" % i, "name": n, "input": {}}
+                   for i, n in enumerate(tools)]
+        return json.dumps({
+            "timestamp": ts or datetime.datetime.now(
+                datetime.timezone.utc).isoformat(),
+            "isSidechain": sidechain,
+            "type": "assistant",
+            "message": {"model": model, "content": content, "usage": {
+                "input_tokens": 0, "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 1000, "output_tokens": 0}},
+        })
+
+    def _prev_hour(self, now):
+        return (now - datetime.timedelta(hours=1)).astimezone().replace(
+            minute=0, second=0, microsecond=0)
+
+    def test_snapshot_counts_main_bash_and_dispatches(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 26, 15, 5, 0,
+                                    tzinfo=datetime.timezone.utc)
+            h = self._prev_hour(now)
+            _write(tmp, "proj-r", "s1", [
+                self._tool_line("claude-opus-5", ["Bash"], ts=h.isoformat()),
+                self._tool_line("claude-opus-5", ["Bash"], ts=h.isoformat()),
+                self._tool_line("claude-opus-5", ["Bash"], ts=h.isoformat()),
+                self._tool_line("claude-opus-5", ["Agent"], ts=h.isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="gk", user="g")
+            self.assertEqual(row["main_bash"], 3)
+            self.assertEqual(row["main_agent"], 1)
+
+    def test_sidechain_tool_calls_are_not_main_agent_calls(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 26, 15, 5, 0,
+                                    tzinfo=datetime.timezone.utc)
+            h = self._prev_hour(now)
+            _write(tmp, "proj-r2", "s1", [
+                self._tool_line("claude-sonnet-5", ["Bash", "Bash"],
+                                ts=h.isoformat(), sidechain=True),
+                self._tool_line("claude-opus-5", ["Bash"], ts=h.isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="gk", user="g")
+            self.assertEqual(row["main_bash"], 1,
+                             "a worker's own Bash is the wanted shape")
+
+    def test_task_counts_as_a_dispatch_too(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 26, 15, 5, 0,
+                                    tzinfo=datetime.timezone.utc)
+            h = self._prev_hour(now)
+            _write(tmp, "proj-r3", "s1", [
+                self._tool_line("claude-opus-5", ["Task"], ts=h.isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="gk", user="g")
+            self.assertEqual(row["main_agent"], 1)
+
+    def test_other_hours_do_not_bleed_in(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime(2026, 7, 26, 15, 5, 0,
+                                    tzinfo=datetime.timezone.utc)
+            h = self._prev_hour(now)
+            cur = now.astimezone().replace(minute=0, second=0, microsecond=0)
+            _write(tmp, "proj-r4", "s1", [
+                self._tool_line("claude-opus-5", ["Bash"], ts=h.isoformat()),
+                self._tool_line("claude-opus-5", ["Bash", "Bash"],
+                                ts=cur.isoformat()),
+            ])
+            row = burn.hourly_snapshot(now, root=tmp, host="gk", user="g")
+            self.assertEqual(row["main_bash"], 1)
+
+    def test_empty_hour_reports_zeroes(self):
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="gk", user="g")
+            self.assertEqual(row["main_bash"], 0)
+            self.assertEqual(row["main_agent"], 0)
+
+    def test_fleet_row_sums_the_ratio_inputs(self):
+        row = burn.merge_fleet_row("2026-07-26T15:00:00+00:00", {
+            "gk": {"usd": 30.0, "msgs": 176, "avg_ctx": 256000,
+                   "main_bash": 91, "main_agent": 2},
+            "dev1": {"usd": 3.0, "msgs": 20, "avg_ctx": 100000,
+                     "main_bash": 9, "main_agent": 3},
+        })
+        self.assertEqual(row["total_main_bash"], 100)
+        self.assertEqual(row["total_main_agent"], 5)
+        self.assertEqual(row["per_host"]["gk"]["main_bash"], 91)
+        self.assertEqual(row["per_host"]["gk"]["main_agent"], 2)
+
+    def test_fleet_row_tolerates_hosts_without_the_new_fields(self):
+        # an older box that has not been pushed yet sends a row with no
+        # main_bash/main_agent — it must count as zero, never crash.
+        row = burn.merge_fleet_row("t", {
+            "old": {"usd": 1.0, "msgs": 5, "avg_ctx": 1000},
+            "err": {"error": "ssh timeout"},
+        })
+        self.assertEqual(row["total_main_bash"], 0)
+        self.assertEqual(row["total_main_agent"], 0)
+
+
 class TestChangesAndSnapshotsIO(unittest.TestCase):
     def test_mark_change_appends_json_line(self):
         with TemporaryDirectory() as tmp:
