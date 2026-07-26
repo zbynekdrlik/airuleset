@@ -25,7 +25,8 @@ output/
 Thumbs.db
 
 # Claude Code local state
-.claude/
+.claude/*
+!.claude/rules/
 
 # Environment
 .env

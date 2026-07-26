@@ -37,7 +37,7 @@ INTERNALS_ANCHORS = [
     "An HTML/JS page served RAW (`PAGE.encode()`, NOT `.format()`) must have "
     "SINGLE braces",
     "Python stdlib only — no third-party dependencies",
-    "the api-watchdog timer executes the WORKING TREE live",
+    "api-watchdog timer executes the WORKING TREE live",
     "GitHub issue SEARCH tokenizes quoted phrases",
     "A tmux pane's AGENT STRIP rows",
     "CC's prompt STASH (Ctrl+S) is SINGLE-SLOT with a SILENT overwrite",
