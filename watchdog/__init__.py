@@ -5123,8 +5123,17 @@ _QUEUED_COMPACT_RX = re.compile(r"^❯\s+/compact\s*$")
 # `✳ Baking… (4m 2s · esc to interrupt)`, `✳ Baking… (7s · …)`. Anchored on
 # the ellipsis + parenthesised duration CC always renders, so a line of prose
 # that merely mentions a duration is not a spinner.
+#
+# EVERY component is optional because CC DROPS the seconds once a turn is a
+# few minutes old (`(2m · esc to interrupt)` — a shape that appears verbatim
+# in this repo's own live-captured fixtures). A seconds-mandatory pattern
+# therefore went blind exactly as a turn started getting long, which is the
+# one case job 21 exists for. `\b` after each unit keeps `(3 messages)` from
+# reading as 3 minutes, and an all-empty match (`(esc to interrupt)`, no
+# duration claimed at all) is rejected by the caller rather than invented as
+# 0s — a fake "just started" would reset the incident identity every sweep.
 _TURN_ELAPSED_RX = re.compile(
-    r"…\s*\(\s*(?:(\d+)\s*h\s*)?(?:(\d+)\s*m\s*)?(\d+)\s*s\b")
+    r"…\s*\(\s*(?:(\d+)\s*h\b)?\s*(?:(\d+)\s*m\b)?\s*(?:(\d+)\s*s\b)?")
 
 
 def _above_box_scan(captured, max_rows=25):
@@ -5181,7 +5190,9 @@ def pane_turn_elapsed(captured):
     if not mm:
         return None
     h, mi, s = mm.group(1), mm.group(2), mm.group(3)
-    return int(h or 0) * 3600 + int(mi or 0) * 60 + int(s)
+    if h is None and mi is None and s is None:
+        return None                    # a spinner claiming no elapsed time
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + int(s or 0)
 
 
 def _pane_compacting(captured):
