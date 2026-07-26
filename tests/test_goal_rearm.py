@@ -1071,28 +1071,36 @@ class TestGoalDriftRefusals(GoalDriftBase):
 
 
 class TestGoalDriftBounded(GoalDriftBase):
-    def test_gives_up_and_pings_once(self):
-        state = {}
+    def _unconfirmed_sweeps(self, n):
+        """`n` sweeps of a drifted session, each far enough apart that the
+        previous delivery's confirmation window has expired without CC ever
+        recording the new arm — i.e. deliveries that genuinely did not take."""
+        state, now = {}, time.time()
         tp = self._templates(TPL_FULL)
-        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state,
+                    now=now)
         tp = self._templates(TPL_FULL_V2)
-        for _ in range(wd.GOAL_DRIFT_MAX_ATTEMPTS + 3):
-            self._sweep(templates_path=tp, state=state,
-                        cap_seq=self._lit_seq(TPL_FULL_V2))
+        sent, logs = 0, []
+        for i in range(n):
+            tmux, ln = self._sweep(templates_path=tp, state=state,
+                                   now=now + (i + 1) * (wd.GOAL_REARM_CONFIRM_S
+                                                        + 30),
+                                   cap_seq=self._lit_seq(TPL_FULL_V2))
+            sent += len(tmux.typed())
+            logs += ln
+        return state, sent, logs
+
+    def test_gives_up_and_pings_once(self):
+        _state, _sent, logs = self._unconfirmed_sweeps(
+            wd.GOAL_DRIFT_MAX_ATTEMPTS + 3)
         self.assertEqual(len(self.pings), 1,
                          "exactly one Discord ping on give-up")
         self.assertIn("goal", self.pings[0][0].lower())
+        self.assertTrue(any("GAVE UP (goal-drift)" in ln for ln in logs), logs)
 
     def test_attempts_are_capped(self):
-        state = {}
-        tp = self._templates(TPL_FULL)
-        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
-        tp = self._templates(TPL_FULL_V2)
-        sent = 0
-        for _ in range(wd.GOAL_DRIFT_MAX_ATTEMPTS + 3):
-            tmux, _ = self._sweep(templates_path=tp, state=state,
-                                  cap_seq=self._lit_seq(TPL_FULL_V2))
-            sent += len(tmux.typed())
+        _state, sent, _logs = self._unconfirmed_sweeps(
+            wd.GOAL_DRIFT_MAX_ATTEMPTS + 3)
         self.assertEqual(sent, wd.GOAL_DRIFT_MAX_ATTEMPTS)
 
     def test_a_delivery_awaits_confirmation_before_trying_again(self):

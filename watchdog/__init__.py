@@ -6324,8 +6324,9 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     if cur is not None:
         # up to date — and this is also the ONLY place a session becomes
         # eligible for a future re-arm at all
-        if rec.get("tvar") != cur or rec.get("dhash"):
-            rec.update({"tvar": cur, "dhash": None, "dn": 0, "dpinged": False})
+        if rec.get("tvar") != cur or rec.get("dhash") or rec.get("dq"):
+            rec.update({"tvar": cur, "dhash": None, "dn": 0, "dpinged": False,
+                        "dq": None})
         rec["untracked_logged"] = False
         return logs
     tvar = rec.get("tvar")
@@ -6341,7 +6342,18 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     target = templates[tvar]
     th = goal_template_hash(target)
     if rec.get("dhash") != th:
-        rec.update({"dhash": th, "dn": 0, "dpinged": False})
+        rec.update({"dhash": th, "dn": 0, "dpinged": False, "dq": None})
+    # A delivery already in flight is not a failed one. CC records the new arm
+    # only once the session actually processes the command, so for a short
+    # window the marker scan legitimately still reports the OLD payload —
+    # live-observed re-delivering a re-arm that had in fact landed
+    # byte-identically. Wait it out before spending another attempt.
+    q = rec.get("dq")
+    if q and (now - q) < GOAL_REARM_CONFIRM_S:
+        return logs
+    if q:
+        rec["dq"] = None
+        logs.append("LOST (goal-drift) %s -> typed template never took" % loc)
     if rec.get("dn", 0) >= GOAL_DRIFT_MAX_ATTEMPTS:
         if not rec.get("dpinged"):
             rec["dpinged"] = True
@@ -6410,6 +6422,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
         tag = "goal-drift"
     rec["dn"] = rec.get("dn", 0) + 1
     if ok:
+        rec["dq"] = now
         logs.append("OK (%s) %s -> /goal updated to the current template "
                     "(%d chars), variant %d" % (tag, loc, len(target), tvar))
     else:
