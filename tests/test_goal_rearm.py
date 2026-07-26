@@ -294,7 +294,8 @@ class GoalRearmBase(unittest.TestCase):
         logs = wd.goal_rearm(now or time.time(), tmux,
                              state if state is not None else {},
                              send_fn=self._send, dry_run=dry_run,
-                             projects_dir=self.tmp.name, handled=handled)
+                             projects_dir=self.tmp.name, handled=handled,
+                             sleep_fn=lambda s: None)
         return tmux, logs
 
     def _typed_seq(self, text=GOAL_LINE):
@@ -542,6 +543,29 @@ class TestLongPasteVerification(GoalRearmBase):
                       "a collapsed paste is a SUCCESSFUL type — submit it")
         self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
                         logs)
+
+    def test_slow_render_of_a_big_paste_is_waited_out(self):
+        """LIVE 2026-07-26: a 2859-char payload really did land in the box —
+        it was visible as `[Pasted text #1]` seconds later — but the
+        verification capture taken IMMEDIATELY after `send-keys -l` still
+        showed a bare box, so the delivery was declared failed and never
+        submitted. CC needs a moment to ingest a big paste. Bounded poll, not
+        a bigger blind timeout: it returns the instant the text is there."""
+        bare = PANE_DARK
+        typed = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
+        # first post-type capture is still bare (not rendered yet)
+        tmux, logs = self._go(PANE_DARK,
+                              cap_seq=[PANE_DARK, bare, bare, typed, bare])
+        self.assertIn("Enter", tmux.keys(), logs)
+        self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
+                        logs)
+
+    def test_a_type_that_never_appears_is_still_refused(self):
+        tmux, logs = self._go(PANE_DARK,
+                              cap_seq=[PANE_DARK] + [PANE_DARK] * 20)
+        self.assertNotIn("Enter", tmux.keys(),
+                         "a type that never renders must never be submitted")
+        self.assertTrue(any(ln.startswith("FAIL") for ln in logs), logs)
 
     def test_stash_delivery_also_accepts_the_placeholder(self):
         # deliver_with_stash has the identical verify step, and job 20 routes
