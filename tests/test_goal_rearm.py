@@ -710,6 +710,374 @@ class TestGoalLoopStallNudge(GoalRearmBase):
                       "a session that really advanced must be helped again")
 
 
+# --------------------------------------------------------------------------- #
+# #64 — the THIRD shape of job 20: the goal is armed and FIRING, but with a
+# STALE version of the autopilot `/goal` template. The template is read once,
+# at arm time, so a running loop keeps its old stop conditions forever.
+#
+# Every constant below is anchored in a measurement recorded on the ticket:
+#   * fuzzy similarity CANNOT separate "same variant, older" from "different
+#     variant" — measured on 62 commits of template history, the two ranges
+#     overlap (tpl1-vs-tpl2, both CURRENT, = 0.7100; tpl0-current-vs-tpl0-from
+#     -07-05 = 0.7279). So identity is an EXACT hash, never a threshold.
+#   * the hash is taken over a NORMALIZED form (parenthetical citations,
+#     backtick spans and punctuation dropped) because a real armed payload is
+#     often the template minus a few editorial citations — live on this box,
+#     restreamer's loop was 0.9808 from the current template and matched NO
+#     historical version byte-exactly, yet is unambiguously that template.
+#   * a session is only ever re-armed when it was OBSERVED matching a template
+#     earlier (`tvar` recorded). A payload that never matched is a user's own
+#     goal and is untouchable — proved on this box by the airuleset session's
+#     own custom goal (0.2420 from its closest template).
+# --------------------------------------------------------------------------- #
+
+TPL_FULL = (
+    '/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds: (A) '
+    'BLOCKED ON MY ANSWER — the latest assistant message ends with a line '
+    'starting `❓ NEEDS YOU:` (the camera-box wall, 2026-07-05). (B) BACKLOG '
+    'DONE — every open issue not labeled autopilot-skip is closed via a merged '
+    'PR, proven by `gh issue list --state open --search "-label:autopilot-skip"` '
+    'showing none remain (this turn boundary is what lets the context compact '
+    '— #58).')
+
+# The SAME template after an editorial pass that only touched citations —
+# what a real agent prints when it trims the parentheticals (the restreamer
+# shape). Must be recognised as the SAME template.
+TPL_FULL_TRIMMED = (
+    '/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds: (A) '
+    'BLOCKED ON MY ANSWER — the latest assistant message ends with a line '
+    'starting `❓ NEEDS YOU:`. (B) BACKLOG DONE — every open issue not labeled '
+    'autopilot-skip is closed via a merged PR, proven by `gh issue list '
+    '--state open --search "-label:autopilot-skip"` showing none remain.')
+
+# A genuinely NEWER version of the same variant — a real stop condition added.
+TPL_FULL_V2 = TPL_FULL[:-1] + (
+    '. Verify the deployed version from the live target before counting a '
+    'ticket done.')
+
+TPL_BRANCH = (
+    '/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds: (A) '
+    'BLOCKED ON MY ANSWER — the latest assistant message ends with a line '
+    'starting `❓ NEEDS YOU:`. (B) SLICE DONE — every open issue ASSIGNED TO ME '
+    'is closed via my own PR merged into the INTEGRATION branch; my authority '
+    'ENDS there — never promote to staging/main, never deploy.')
+
+CUSTOM_GOAL = (
+    '/goal Refactor the importer until `python3 -m pytest tests/importer` is '
+    'green and the nightly run finishes under ten minutes, then stop.')
+
+
+def write_templates(root, *lines):
+    """A stand-in for the installed `skills/autopilot/SKILL.md` — the job must
+    read the `/goal …` lines out of the SKILL prose, not a bespoke data file
+    somebody has to remember to regenerate."""
+    p = Path(root) / "SKILL.md"
+    p.write_text(
+        "## Step 2 — Start the engine\n\n"
+        + "".join("**AUTHORITY: v%d**\n\n```\n%s\n```\n\n" % (i, ln)
+                  for i, ln in enumerate(lines)),
+        encoding="utf-8")
+    return str(p)
+
+
+def arm_entry(payload, ts="2026-07-26T12:54:10.000Z"):
+    """The record CC writes for EVERY arm, idle or queued — live-captured on
+    CC 2.1.220. A `/goal` typed into a BUSY pane drains from the type-ahead
+    queue and writes NO `<local-command-stdout>Goal set:` marker at all (it
+    becomes a `queue-operation` entry), so this is the only shape that sees
+    both paths."""
+    body = ('A session-scoped Stop hook is now active with condition: "%s". '
+            'Briefly acknowledge the goal, then immediately start (or '
+            'continue) working toward it — treat the condition itself as your '
+            'directive.' % payload)
+    return {"type": "user", "timestamp": ts, "message": {"content": body}}
+
+
+class TestGoalTemplateIdentity(unittest.TestCase):
+    """Identity is an EXACT hash of a NORMALIZED form — never a threshold."""
+
+    def test_shipped_templates_are_mutually_distinct(self):
+        tpls = [TPL_FULL, TPL_BRANCH]
+        self.assertNotEqual(wd.goal_template_hash(tpls[0]),
+                            wd.goal_template_hash(tpls[1]),
+                            "two variants must never collapse onto one hash")
+
+    def test_a_template_matches_itself(self):
+        self.assertEqual(wd.goal_template_variant(TPL_FULL,
+                                                  [TPL_BRANCH, TPL_FULL]), 1)
+
+    def test_trimmed_citations_still_match_the_same_template(self):
+        """The restreamer case: raw ratio 0.9808, byte-match against NO
+        shipped version, yet unmistakably that template."""
+        self.assertNotEqual(TPL_FULL, TPL_FULL_TRIMMED)
+        self.assertEqual(wd.goal_template_variant(TPL_FULL_TRIMMED,
+                                                  [TPL_FULL, TPL_BRANCH]), 0)
+
+    def test_a_real_content_change_is_NOT_absorbed(self):
+        """Normalisation must ignore citations WITHOUT ignoring substance —
+        otherwise a genuine template change is invisible and nothing re-arms."""
+        self.assertIsNone(wd.goal_template_variant(TPL_FULL_V2, [TPL_FULL]))
+
+    def test_a_users_own_goal_matches_nothing(self):
+        self.assertIsNone(wd.goal_template_variant(CUSTOM_GOAL,
+                                                   [TPL_FULL, TPL_BRANCH]))
+
+    def test_templates_are_read_out_of_the_skill_prose(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = write_templates(d.name, TPL_FULL, TPL_BRANCH)
+        self.assertEqual(wd.load_goal_templates(p), [TPL_FULL, TPL_BRANCH])
+
+    def test_missing_skill_file_is_not_fatal(self):
+        self.assertEqual(wd.load_goal_templates("/nonexistent/SKILL.md"), [])
+
+
+class TestQueuedArmIsSeen(unittest.TestCase):
+    """A `/goal` delivered into a BUSY pane writes no `local-command-stdout`
+    marker — without this shape the drift check reads a stale payload forever
+    and re-arms the same session every sweep."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _scan(self, entries):
+        p = write_transcript(entries, self.tmp.name)
+        return wd.scan_goal_markers(p)[1]
+
+    def test_arm_entry_is_a_set_marker_with_the_exact_payload(self):
+        mark = self._scan([arm_entry(PAYLOAD)])
+        self.assertEqual(mark["state"], "set")
+        self.assertEqual(mark["payload"], PAYLOAD)
+
+    def test_payload_containing_a_quote_survives(self):
+        payload = TPL_FULL[len("/goal "):]
+        self.assertIn('"', payload)
+        self.assertEqual(self._scan([arm_entry(payload)])["payload"], payload)
+
+    def test_prose_merely_quoting_the_sentence_is_not_state(self):
+        entry = {"type": "user", "timestamp": "2026-07-26T14:00:00.000Z",
+                 "message": {"content":
+                             "Earlier the log said: A session-scoped Stop hook "
+                             'is now active with condition: "%s".' % PAYLOAD}}
+        self.assertIsNone(self._scan([entry]))
+
+    def test_a_later_clear_still_wins_over_an_arm_entry(self):
+        mark = self._scan([arm_entry(PAYLOAD),
+                           marker_entry("cleared", PAYLOAD,
+                                        "2026-07-26T13:10:00.000Z")])
+        self.assertEqual(mark["state"], "cleared")
+
+
+class GoalDriftBase(unittest.TestCase):
+    def setUp(self):
+        isolate_claims(self)
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tpldir = TemporaryDirectory()
+        self.addCleanup(self.tpldir.cleanup)
+        self.pings = []
+        self._wrote = False
+
+    def _send(self, text, **kw):
+        self.pings.append((text, kw))
+
+    def _templates(self, *lines):
+        return write_templates(self.tpldir.name, *lines)
+
+    def _lit_seq(self, text):
+        """cap_seq for a verified delivery into the bare box of an ARMED pane:
+        the job's own capture, post-type, post-Enter."""
+        typed = CONV + FOOTER_LIT.replace("❯ \n", "❯ " + text[-40:] + "\n")
+        return [PANE_LIT, typed, PANE_LIT]
+
+    def _sweep(self, armed_payload=None, templates_path=None, state=None,
+               now=None, cap_seq=(), pane=None, handled=None, dry_run=False):
+        if armed_payload is not None:
+            write_transcript([arm_entry(armed_payload,
+                                        ts="2026-07-26T12:5%d:00.000Z"
+                                           % (len(self.pings) % 10))],
+                             self.tmp.name)
+        tmux = FakeTmux(pane or PANE_LIT, cap_seq=cap_seq)
+        logs = wd.goal_rearm(now or time.time(), tmux,
+                             state if state is not None else {},
+                             send_fn=self._send, dry_run=dry_run,
+                             projects_dir=self.tmp.name, handled=handled,
+                             templates_path=templates_path,
+                             sleep_fn=lambda s: None)
+        return tmux, logs
+
+
+class TestGoalTemplateDrift(GoalDriftBase):
+    def test_up_to_date_loop_is_left_alone(self):
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        tmux, _logs = self._sweep(TPL_FULL[len("/goal "):], templates_path=tp)
+        self.assertFalse(tmux.typed(), "a current template must never be retyped")
+
+    def test_tracked_loop_is_rearmed_when_the_template_changes(self):
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2, TPL_BRANCH)          # push landed
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+        self.assertIn("Enter", tmux.keys())
+        self.assertTrue(any("goal-drift" in ln for ln in logs), logs)
+
+    def test_rearm_keeps_the_SAME_variant_the_loop_was_running(self):
+        """Never re-resolve the authority profile — a branch-merge stream must
+        not be handed the full-authority template because this box's own
+        profile says so."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_BRANCH[len("/goal "):], templates_path=tp, state=state)
+        branch_v2 = TPL_BRANCH[:-1] + ", and never touch another stream's tickets."
+        tp = self._templates(TPL_FULL_V2, branch_v2)
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(branch_v2))
+        self.assertEqual(tmux.typed(), [branch_v2], logs)
+
+    def test_a_never_matched_goal_is_never_touched(self):
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2, TPL_BRANCH)
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(),
+                         "a user's own goal must survive every template change")
+        self.assertTrue(any("untracked" in ln for ln in logs), logs)
+
+    def test_the_untracked_reason_is_logged_once_not_every_sweep(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(CUSTOM_GOAL[len("/goal "):], templates_path=tp, state=state)
+        first = self._sweep(templates_path=tp, state=state)[1]
+        second = self._sweep(templates_path=tp, state=state)[1]
+        self.assertTrue(any("untracked" in ln for ln in first), first)
+        self.assertFalse(any("untracked" in ln for ln in second),
+                         "a custom goal must not spam the journal every minute")
+
+    def test_a_trimmed_arm_is_tracked_too(self):
+        """The restreamer shape must be covered — it is the one this ticket
+        was actually filed about."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL_TRIMMED[len("/goal "):], templates_path=tp,
+                    state=state)
+        tp = self._templates(TPL_FULL_V2, TPL_BRANCH)
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+
+    def test_a_successful_rearm_settles(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        self._sweep(templates_path=tp, state=state,
+                    cap_seq=self._lit_seq(TPL_FULL_V2))
+        # CC echoes the new arm; the next sweep must find nothing left to do
+        tmux, _logs = self._sweep(TPL_FULL_V2[len("/goal "):],
+                                  templates_path=tp, state=state,
+                                  cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), "the re-arm must not repeat itself")
+
+    def test_not_wired_means_no_drift_behaviour_at_all(self):
+        state = {}
+        self._sweep(TPL_FULL[len("/goal "):], state=state)
+        tmux, logs = self._sweep(state=state, cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), logs)
+        self.assertFalse(any("goal-drift" in ln for ln in logs), logs)
+
+    def test_dry_run_never_types(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        tmux, logs = self._sweep(templates_path=tp, state=state, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("READY" in ln and "goal-drift" in ln for ln in logs),
+                        logs)
+
+
+class TestGoalDriftRefusals(GoalDriftBase):
+    def _drifted(self):
+        """A tracked session whose template has since changed."""
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        return state, self._templates(TPL_FULL_V2)
+
+    def test_busy_pane_is_skipped(self):
+        state, tp = self._drifted()
+        tmux, _logs = self._sweep(templates_path=tp, state=state, pane=PANE_BUSY)
+        self.assertFalse(tmux.typed(),
+                         "a 3KB goal is never typed into a running turn")
+
+    def test_pane_compacted_this_sweep_is_skipped(self):
+        state, tp = self._drifted()
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 handled={SID}, cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), logs)
+
+    def test_outstanding_compact_claim_is_skipped(self):
+        state, tp = self._drifted()
+        with m.patch.object(wd, "compact_claim_active", return_value=True):
+            tmux, logs = self._sweep(templates_path=tp, state=state,
+                                     cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), logs)
+
+    def test_dark_footer_is_the_OTHER_shape_not_this_one(self):
+        """A dead goal is #76's re-arm (transcript bytes); drift only ever acts
+        on a loop that is provably still armed."""
+        state, tp = self._drifted()
+        tmux, logs = self._sweep(templates_path=tp, state=state, pane=PANE_DARK,
+                                 cap_seq=[PANE_DARK, PANE_DARK, PANE_DARK])
+        self.assertFalse(any("goal-drift" in ln for ln in logs), logs)
+
+
+class TestGoalDriftBounded(GoalDriftBase):
+    def test_gives_up_and_pings_once(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        for _ in range(wd.GOAL_DRIFT_MAX_ATTEMPTS + 3):
+            self._sweep(templates_path=tp, state=state,
+                        cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(len(self.pings), 1,
+                         "exactly one Discord ping on give-up")
+        self.assertIn("goal", self.pings[0][0].lower())
+
+    def test_attempts_are_capped(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        sent = 0
+        for _ in range(wd.GOAL_DRIFT_MAX_ATTEMPTS + 3):
+            tmux, _ = self._sweep(templates_path=tp, state=state,
+                                  cap_seq=self._lit_seq(TPL_FULL_V2))
+            sent += len(tmux.typed())
+        self.assertEqual(sent, wd.GOAL_DRIFT_MAX_ATTEMPTS)
+
+    def test_a_NEW_template_change_earns_a_fresh_budget(self):
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        for _ in range(wd.GOAL_DRIFT_MAX_ATTEMPTS + 2):
+            self._sweep(templates_path=tp, state=state,
+                        cap_seq=self._lit_seq(TPL_FULL_V2))
+        v3 = TPL_FULL_V2 + " Also stop on an unfixable CI failure."
+        tp = self._templates(v3)
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(v3))
+        self.assertEqual(tmux.typed(), [v3], logs)
+
+
 class TestRunOnceWiring(unittest.TestCase):
     """Same 'wired = on' convention as jobs 13/14/16/18/19 — an existing
     caller that passes nothing sees NO behavior change."""
@@ -740,6 +1108,15 @@ class TestRunOnceWiring(unittest.TestCase):
     def test_docstring_documents_job_20(self):
         self.assertIn("(20)", wd.run_once.__doc__)
 
+    def test_template_path_reaches_the_job(self):
+        calls = self._cycle(goal_rearm_enabled=True,
+                            goal_templates_path="/tmp/SKILL.md")
+        self.assertEqual(calls[0].get("templates_path"), "/tmp/SKILL.md")
+
+    def test_template_path_defaults_to_unwired(self):
+        calls = self._cycle(goal_rearm_enabled=True)
+        self.assertIsNone(calls[0].get("templates_path"))
+
 
 class TestCmdWatchdogEnablesJob20(unittest.TestCase):
     """The production caller must actually turn it on — a job wired only in
@@ -763,6 +1140,25 @@ class TestCmdWatchdogEnablesJob20(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 airuleset.cmd_watchdog(self._Args())
         self.assertTrue(seen.get("goal_rearm_enabled"), seen.keys())
+
+    def test_cmd_watchdog_points_at_the_INSTALLED_skill(self):
+        """Managed boxes (marek/david/montalu) have no airuleset checkout —
+        the templates must come from the skill `install` actually deployed."""
+        import contextlib
+        import io
+        import airuleset
+        seen = {}
+
+        def fake(*a, **kw):
+            seen.update(kw)
+            return []
+
+        with m.patch.object(wd, "run_once", side_effect=fake):
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_watchdog(self._Args())
+        p = str(seen.get("goal_templates_path"))
+        self.assertTrue(p.endswith("skills/autopilot/SKILL.md"), p)
+        self.assertNotIn("devel/airuleset", p)
 
 
 if __name__ == "__main__":
