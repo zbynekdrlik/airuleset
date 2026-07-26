@@ -343,6 +343,25 @@ class TestGoalRearmRefusals(GoalRearmBase):
         self.assertFalse(tmux.typed(),
                          "a deliberately cleared goal must never be re-armed")
 
+    def test_completed_goal_is_not_a_failure(self):
+        """A goal the evaluator legitimately ACHIEVED also leaves the marker
+        saying `set` and the footer dark — CC writes NO `Goal cleared:` for a
+        natural resolution (live-verified on an isolated session: `/goal` ->
+        `✔ Goal achieved (3s · 1 turn)` -> indicator gone, transcript marker
+        untouched). Re-arming that would restart a FINISHED autopilot run —
+        two wasted full-context turns and a false "goal died" ping at the end
+        of every successful run.
+
+        The transcript cannot tell the two apart: montalu's own healthy loop
+        wrote `stop_hook_summary` entries with `preventedContinuation: false`
+        every ~19 minutes while it was working perfectly, so that field is NOT
+        a resolution signal. The PANE is what distinguishes them."""
+        pane = ("● Hotovo.\n"
+                "✔ Goal achieved (3s · 1 turn · 56 tokens)\n" + FOOTER_DARK)
+        tmux, logs = self._go(pane)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("achieved" in ln.lower() for ln in logs), logs)
+
     def test_no_marker_no_action(self):
         tmux, _logs = self._go(PANE_DARK,
                                entries=[{"type": "assistant",
