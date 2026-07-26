@@ -3411,6 +3411,171 @@ class RunOnceFleetWiring(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #81 — Job 19: HOURLY BURN ALERT. Runs right after job 16; reads the
+# LATEST merged fleet.jsonl row and, at most once per hour bucket, pings
+# when it crosses an absolute/relative/weekly-step threshold. Plain JSONL
+# read + one POST — no agent, no model, never gated on remembering to check.
+# --------------------------------------------------------------------------- #
+
+class TestBurnAlertJob(unittest.TestCase):
+    def _fleet_file(self, tmp, rows):
+        p = Path(tmp) / "fleet.jsonl"
+        with open(p, "w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+        return p
+
+    def test_no_fleet_file_is_a_noop(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = Path(tmp) / "fleet.jsonl"   # never written
+        state = {}
+        logs = wd.burn_alert_job(time.time(), state, lambda *a, **k: "sent",
+                                 fleet_path=fleet_path)
+        self.assertEqual(logs, [])
+        self.assertNotIn("burn_alert_hour", state)
+
+    def test_quiet_hour_sends_nothing_but_claims_the_bucket(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = self._fleet_file(tmp, [
+            {"ts": "2026-07-26T14:00:00+00:00", "total_usd": 1.0, "total_msgs": 5}])
+        state = {}
+        sent = []
+        logs = wd.burn_alert_job(time.time(), state,
+                                 lambda *a, **k: sent.append((a, k)) or "sent",
+                                 fleet_path=fleet_path, abs_usd=20.0)
+        self.assertEqual(sent, [])
+        self.assertTrue(any("quiet" in ln for ln in logs), logs)
+        self.assertIsNotNone(state.get("burn_alert_hour"))
+
+    def test_triggered_hour_sends_exactly_one_message(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = self._fleet_file(tmp, [
+            {"ts": "2026-07-26T14:00:00+00:00", "total_usd": 64.88, "total_msgs": 337}])
+        state = {}
+        sent = []
+
+        def fake_send(msg, **kw):
+            sent.append((msg, kw))
+            return "sent"
+        logs = wd.burn_alert_job(time.time(), state, fake_send,
+                                 fleet_path=fleet_path, abs_usd=20.0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("64.88", sent[0][0])
+        self.assertEqual(sent[0][1].get("dedup_key"),
+                         "burn-alert:%d" % state["burn_alert_hour"])
+        self.assertTrue(any("TRIGGERED" in ln for ln in logs), logs)
+
+    def test_second_call_within_the_same_hour_sends_nothing_more(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = self._fleet_file(tmp, [
+            {"ts": "2026-07-26T14:00:00+00:00", "total_usd": 64.88, "total_msgs": 337}])
+        state = {}
+        sent = []
+
+        def fake_send(msg, **kw):
+            sent.append((msg, kw))
+            return "sent"
+        now = time.time()
+        wd.burn_alert_job(now, state, fake_send, fleet_path=fleet_path, abs_usd=20.0)
+        wd.burn_alert_job(now, state, fake_send, fleet_path=fleet_path, abs_usd=20.0)
+        self.assertEqual(len(sent), 1)
+
+    def test_dry_run_never_claims_the_hour_or_sends(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = self._fleet_file(tmp, [
+            {"ts": "2026-07-26T14:00:00+00:00", "total_usd": 64.88, "total_msgs": 337}])
+        state = {}
+        sent = []
+        logs = wd.burn_alert_job(time.time(), state,
+                                 lambda *a, **k: sent.append((a, k)) or "sent",
+                                 fleet_path=fleet_path, abs_usd=20.0, dry_run=True)
+        self.assertEqual(sent, [])
+        self.assertNotIn("burn_alert_hour", state)
+        self.assertTrue(any(ln.startswith("[dry-run]") for ln in logs), logs)
+
+    def test_env_override_lowers_the_absolute_threshold(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        fleet_path = self._fleet_file(tmp, [
+            {"ts": "2026-07-26T14:00:00+00:00", "total_usd": 5.0, "total_msgs": 5}])
+        state = {}
+        sent = []
+        with unittest.mock.patch.dict(
+                os.environ, {"AIRULESET_BURN_ALERT_ABS_USD": "1"}):
+            wd.burn_alert_job(time.time(), state,
+                              lambda *a, **k: sent.append((a, k)) or "sent",
+                              fleet_path=fleet_path)
+        self.assertEqual(len(sent), 1)
+
+
+class RunOnceBurnAlertWiring(unittest.TestCase):
+    """Job 19 is wired only when `burn_alert_enabled` is truthy
+    (coordinator-only — cmd_watchdog gates this on
+    os.uname().nodename == 'dev1', the SAME check job 16 already uses).
+    Must not change behavior for any existing caller that doesn't pass it."""
+
+    def test_disabled_by_default_never_attempts_burn_alert(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        with open(fleet_path, "w") as f:
+            f.write(json.dumps({"ts": "2026-07-26T14:00:00+00:00",
+                                "total_usd": 999.0, "total_msgs": 5}) + "\n")
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           fleet_path=fleet_path)
+        self.assertFalse(any("burn-alert" in ln for ln in logs), logs)
+
+    def test_enabled_wires_the_job_and_evaluates_the_fleet_file(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        fleet_path = Path(tmp) / "fleet.jsonl"
+        with open(fleet_path, "w") as f:
+            f.write(json.dumps({"ts": "2026-07-26T14:00:00+00:00",
+                                "total_usd": 999.0, "total_msgs": 5}) + "\n")
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: "sent",
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           fleet_path=fleet_path, burn_alert_enabled=True)
+        self.assertTrue(any("burn-alert" in ln and "TRIGGERED" in ln
+                           for ln in logs), logs)
+
+    def test_a_raising_burn_alert_never_breaks_the_sweep(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        # a fleet.jsonl containing a genuinely malformed line -- forces
+        # burn.load_fleet's own JSON parse to skip it silently, so instead
+        # point fleet_path at a path whose PARENT does not exist to force a
+        # real exception path inside burn_alert_job's own file handling.
+        fleet_path = Path(tmp) / "nonexistent-dir" / "fleet.jsonl"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        with unittest.mock.patch.object(
+                wd, "burn_alert_job", side_effect=RuntimeError("boom")):
+            logs = wd.run_once(now=time.time(), dry_run=False, run=fake_run,
+                               send_fn=lambda *a, **k: None,
+                               projects_dir=proj, state_path=state_path,
+                               pending_prefix=str(Path(tmp) / "pending-"),
+                               fleet_path=fleet_path, burn_alert_enabled=True)
+        self.assertTrue(any("burn-alert error" in ln for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
 # #69 — Job 17: HARD CONTEXT CEILING BACKSTOP. Job 14 only fires at a
 # completed-ticket boundary; job 15 only fires once a pane has been
 # genuinely idle for COMPACT_MIN_IDLE_S. A WHOLE CLASS of sessions has

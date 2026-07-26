@@ -779,6 +779,170 @@ class TestFleetBudgetAlert(unittest.TestCase):
         self.assertIn("claude-fable-5", alert["message"])
 
 
+class TestHourlyBurnAlert(unittest.TestCase):
+    """#81 -- `burn.hourly_burn_alert` / `burn.render_burn_alert`: the pure
+    comparison + Slovak message-render behind job 19's hourly Discord ping."""
+
+    def _row(self, ts, total_usd, total_msgs=0, weekly_pct=None, per_host=None):
+        row = {"ts": ts, "total_usd": total_usd, "total_msgs": total_msgs}
+        if weekly_pct is not None:
+            row["weekly_pct"] = weekly_pct
+        if per_host is not None:
+            row["per_host"] = per_host
+        return row
+
+    def test_empty_rows_is_none(self):
+        self.assertIsNone(burn.hourly_burn_alert([]))
+
+    def test_quiet_hour_below_every_threshold_is_none(self):
+        rows = [self._row("2026-07-26T10:00:00+00:00", 2.0, weekly_pct=50),
+               self._row("2026-07-26T11:00:00+00:00", 2.5, weekly_pct=51)]
+        self.assertIsNone(burn.hourly_burn_alert(rows))
+
+    def test_absolute_threshold_triggers(self):
+        rows = [self._row("2026-07-26T14:00:00+00:00", 64.88, total_msgs=337)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=20.0)
+        self.assertIsNotNone(alert)
+        self.assertTrue(any("absolutn" in r for r in alert["reasons"]), alert)
+        self.assertIn("64.88", alert["message"])
+
+    def test_below_absolute_threshold_does_not_trigger_alone(self):
+        rows = [self._row("2026-07-26T14:00:00+00:00", 19.99)]
+        self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=20.0))
+
+    def test_relative_multiple_of_median_triggers(self):
+        # median of the last 6 hours is $2.0 -- 10x that easily crosses a
+        # 3x multiplier, even though $6 is well under the absolute default.
+        prev = [self._row("2026-07-26T%02d:00:00+00:00" % h, 2.0)
+               for h in range(4, 10)]
+        rows = prev + [self._row("2026-07-26T10:00:00+00:00", 6.5)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=1000.0, rel_mult=3.0,
+                                       rel_window=6)
+        self.assertIsNotNone(alert)
+        self.assertTrue(any("median" in r for r in alert["reasons"]), alert)
+
+    def test_below_relative_multiple_does_not_trigger_alone(self):
+        prev = [self._row("2026-07-26T%02d:00:00+00:00" % h, 2.0)
+               for h in range(4, 10)]
+        rows = prev + [self._row("2026-07-26T10:00:00+00:00", 5.0)]
+        self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=1000.0,
+                                                 rel_mult=3.0, rel_window=6))
+
+    def test_no_prior_hours_never_crashes_the_relative_check(self):
+        rows = [self._row("2026-07-26T14:00:00+00:00", 5.0)]
+        # nothing to compute a median from -- must not raise, and must not
+        # spuriously trigger the relative check.
+        self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=1000.0,
+                                                 rel_mult=3.0))
+
+    def test_weekly_step_crossing_triggers(self):
+        rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=77),
+               self._row("2026-07-26T14:00:00+00:00", 1.0, weekly_pct=80)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=1000.0, rel_mult=1000.0,
+                                       weekly_step_pct=5)
+        self.assertIsNotNone(alert)
+        self.assertTrue(any("tyzdenny" in r for r in alert["reasons"]), alert)
+        self.assertIn("77", alert["message"])
+        self.assertIn("80", alert["message"])
+
+    def test_weekly_percent_within_the_same_step_does_not_trigger(self):
+        rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=77),
+               self._row("2026-07-26T14:00:00+00:00", 1.0, weekly_pct=78)]
+        self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=1000.0,
+                                                 rel_mult=1000.0, weekly_step_pct=5))
+
+    def test_weekly_window_reset_drop_is_never_a_crossing(self):
+        # a weekly reset drops the % back down -- must never misread the
+        # DROP itself as "crossed a step".
+        rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=97),
+               self._row("2026-07-26T14:00:00+00:00", 1.0, weekly_pct=2)]
+        self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=1000.0,
+                                                 rel_mult=1000.0, weekly_step_pct=5))
+
+    def test_multiple_thresholds_firing_produce_one_combined_message(self):
+        rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=77),
+               self._row("2026-07-26T14:00:00+00:00", 100.0, weekly_pct=80)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=20.0, rel_mult=3.0,
+                                       weekly_step_pct=5)
+        self.assertIsNotNone(alert)
+        # every threshold genuinely fires here (abs, relative-to-median, AND
+        # the weekly step) -- the point is ONE combined message regardless.
+        self.assertGreaterEqual(len(alert["reasons"]), 2)
+        self.assertEqual(alert["message"].count("Spotreba"), 1)
+
+    def test_message_names_top_two_hosts_and_previous_hours(self):
+        per_host = {
+            "gatekeeper": _host_row(31.57, 176, 257000),
+            "dev1": _host_row(29.68, 149, 211000),
+            "montalu": _host_row(3.63, 12, 90000),
+        }
+        rows = [self._row("2026-07-26T11:00:00+00:00", 17.60),
+               self._row("2026-07-26T12:00:00+00:00", 15.04),
+               self._row("2026-07-26T13:00:00+00:00", 8.86),
+               self._row("2026-07-26T14:00:00+00:00", 64.88, total_msgs=337,
+                        per_host=per_host)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=20.0)
+        self.assertIsNotNone(alert)
+        msg = alert["message"]
+        self.assertIn("14:00", msg)
+        self.assertIn("64.88", msg)
+        self.assertIn("337", msg)
+        self.assertIn("gatekeeper", msg)
+        self.assertIn("dev1", msg)
+        self.assertNotIn("montalu", msg)   # only the top 2 hosts
+        self.assertIn("17.60", msg)
+        self.assertIn("15.04", msg)
+        self.assertIn("8.86", msg)
+
+    def test_a_host_with_an_error_entry_is_excluded_from_top_hosts(self):
+        per_host = {"gatekeeper": _host_row(31.57, 176, 257000),
+                   "dev2": {"error": "ssh timeout"}}
+        rows = [self._row("2026-07-26T14:00:00+00:00", 31.57, per_host=per_host)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=20.0)
+        self.assertIsNotNone(alert)
+        self.assertIn("gatekeeper", alert["message"])
+        self.assertNotIn("dev2", alert["message"])
+
+    def test_hour_bucket_is_the_evaluated_rows_own(self):
+        ts = "2026-07-26T14:00:00+00:00"
+        rows = [self._row(ts, 64.88)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=20.0)
+        self.assertEqual(alert["hour_bucket"], burn.hour_bucket_of_ts(ts))
+
+
+class TestWeeklyStepCrossed(unittest.TestCase):
+    def test_crossing_upward_is_true(self):
+        self.assertTrue(burn._weekly_step_crossed(77, 80, 5))
+
+    def test_within_the_same_step_is_false(self):
+        self.assertFalse(burn._weekly_step_crossed(77, 78, 5))
+
+    def test_a_drop_is_never_a_crossing(self):
+        self.assertFalse(burn._weekly_step_crossed(97, 2, 5))
+
+    def test_equal_values_are_never_a_crossing(self):
+        self.assertFalse(burn._weekly_step_crossed(80, 80, 5))
+
+    def test_none_on_either_side_is_false(self):
+        self.assertFalse(burn._weekly_step_crossed(None, 80, 5))
+        self.assertFalse(burn._weekly_step_crossed(77, None, 5))
+        self.assertFalse(burn._weekly_step_crossed(None, None, 5))
+
+
+class TestMedianHelper(unittest.TestCase):
+    def test_odd_count(self):
+        self.assertEqual(burn._median([3.0, 1.0, 2.0]), 2.0)
+
+    def test_even_count_averages_the_middle_two(self):
+        self.assertEqual(burn._median([1.0, 2.0, 3.0, 4.0]), 2.5)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(burn._median([]))
+
+    def test_single_value(self):
+        self.assertEqual(burn._median([5.0]), 5.0)
+
+
 class TestFleetCompareRows(unittest.TestCase):
     def test_normalizes_to_snapshot_shape(self):
         rows = [{"ts": "t0", "total_usd": 3.0, "weighted_avg_ctx": 500, "total_msgs": 7}]
