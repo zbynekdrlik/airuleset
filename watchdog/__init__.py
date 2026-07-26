@@ -5887,7 +5887,14 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         # --- REALITY: the footer indicator (cheap, no transcript read) ------
         if pane_in_mode(pid, run):
             continue                       # scrolled — the footer isn't current
-        captured = capture_pane(pid, run, lines=40)
+        # VISIBLE VIEWPORT ONLY (no -S), the same discipline job 9 learned the
+        # hard way (gk 2026-07-20: a stale scrollback `/goal` line armed into a
+        # fresh session). Here it bites the OTHER way round: after a `claude
+        # -c` restart the scrollback still shows the DEAD session's `✔ Goal
+        # achieved` line, which would veto the heal for exactly the case this
+        # job exists for (live, 2026-07-26). CC redraws its own screen, so the
+        # viewport is always the CURRENT session's content.
+        captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
         armed = pane_goal_armed(captured)
         if armed is None:
             continue                       # undeterminable — never guess
