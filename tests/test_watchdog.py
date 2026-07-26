@@ -44,6 +44,22 @@ def _spawn_dummy_proc(testcase):
     return p
 
 
+def _alive_proc_fingerprint(testcase):
+    """#83 -- a genuine, currently-alive process fingerprint (the
+    `_proc_fingerprint` `{"pid", "starttime"}` shape) for tests that need a
+    `/compact` claim to PERSIST across multiple evaluations, exactly like a
+    real production send does (there, `_pane_claude_proc_fingerprint`
+    resolves a REAL running `claude` process, so the claim always carries a
+    "proc" key). The fake tmux `run`s in this file can never walk a real
+    /proc tree (their `display-message` fakes return a bogus pane pid), so
+    without this helper a claim they set always ends up "proc"-less --
+    and, per #83, a proc-less entry is now (correctly) dropped and made
+    eligible again on its very NEXT evaluation, breaking any test that
+    expects persistence across sweeps."""
+    p = _spawn_dummy_proc(testcase)
+    return wd._proc_fingerprint(p.pid)
+
+
 def _write_jsonl(path, entries):
     with open(path, "w") as f:
         for e in entries:
@@ -2757,7 +2773,10 @@ class TestCompactStaleContext(unittest.TestCase):
         sid = "sess-abc"
         _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
                                  idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
-        wd.compact_claim_set(sid, self.CWD)
+        # #83 -- a real claim always carries a live "proc" fingerprint; a
+        # proc-less claim now resolves (and re-enables sending) on its very
+        # first evaluation, so this test's claim needs one to stay blocking.
+        wd.compact_claim_set(sid, self.CWD, proc=_alive_proc_fingerprint(self))
         tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
         wd.compact_stale_context(now, tmux, {}, dry_run=False,
                                  projects_dir=proj, sleep_fn=lambda s: None)
@@ -2905,15 +2924,24 @@ class TestCompactStaleContext(unittest.TestCase):
                                  idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
         state = {}
         logs = []
-        for i in range(wd.COMPACT_STALE_MAX_ATTEMPTS + 2):
-            tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
-                                   MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP])
-            logs = wd.compact_stale_context(now, tmux, state, dry_run=False,
-                                            projects_dir=proj, sleep_fn=lambda s: None)
-            if i == 0:
-                self.assertIn("/compact", tmux.typed_texts())
-            else:
-                self.assertEqual(tmux.sent, [], "sweep %d must send nothing" % i)
+        # #83 -- the fake tmux `run` can never resolve a real proc
+        # fingerprint (its `display-message` fake returns a bogus pane
+        # pid), so the claim the FIRST sweep sets would otherwise be
+        # "proc"-less and (correctly, per #83) resolve again on sweep 2 --
+        # patched to a genuinely alive process so this test still proves
+        # the claim persists exactly like a real production send does.
+        alive_proc = _alive_proc_fingerprint(self)
+        with unittest.mock.patch.object(wd, "_pane_claude_proc_fingerprint",
+                                        return_value=alive_proc):
+            for i in range(wd.COMPACT_STALE_MAX_ATTEMPTS + 2):
+                tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                       MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP])
+                logs = wd.compact_stale_context(now, tmux, state, dry_run=False,
+                                                projects_dir=proj, sleep_fn=lambda s: None)
+                if i == 0:
+                    self.assertIn("/compact", tmux.typed_texts())
+                else:
+                    self.assertEqual(tmux.sent, [], "sweep %d must send nothing" % i)
         self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
         self.assertEqual(state["compact_stale_attempts"]["sess-abc"], 1)
         self.assertNotIn("sess-abc", state.get("compact_stale", {}))
@@ -3747,9 +3775,12 @@ class TestCompactHardCeiling(unittest.TestCase):
     def test_queued_still_above_ceiling_never_resends_no_matter_how_long(self):
         # the exact #72 bug: a session STILL busy in the SAME long turn must
         # NEVER get a second /compact, no matter how much time passes.
+        # #83 -- needs a live "proc" fingerprint: a proc-less entry now
+        # resolves (and re-enables sending) on its very first evaluation.
         now = time.time()
         state = {"compact_ceiling":
-                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD,
+                            "proc": _alive_proc_fingerprint(self)}}}
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
                                      initial_captured=MR_BUSY_CAP,
                                      state=state, now=now)
@@ -3779,18 +3810,26 @@ class TestCompactHardCeiling(unittest.TestCase):
             sent.append((body, kw))
             return "sent"
 
-        for i in range(5):
-            now_i = now + i * 10 ** 6
-            _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_HARD_CEILING + 1,
-                                     idle_s=0, now=now_i)
-            tmux_i = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
-            logs_i = wd.compact_hard_ceiling(now_i, tmux_i, state, dry_run=False,
-                                             projects_dir=proj, send_fn=fake_send)
-            if i == 0:
-                self.assertEqual(tmux_i.typed_texts().count("/compact"), 1, logs_i)
-            else:
-                self.assertEqual(tmux_i.sent, [], logs_i)
-            self.assertFalse(any("GAVE UP" in ln for ln in logs_i), logs_i)
+        # #83 -- RestartFakeTmux can never resolve a real proc fingerprint
+        # (its `display-message` fake returns a bogus pane pid), so the
+        # entry sweep 0 sends would otherwise be "proc"-less and resolve
+        # again on sweep 1 -- patched to a genuinely alive process so this
+        # still proves persistence exactly like a real production send.
+        alive_proc = _alive_proc_fingerprint(self)
+        with unittest.mock.patch.object(wd, "_pane_claude_proc_fingerprint",
+                                        return_value=alive_proc):
+            for i in range(5):
+                now_i = now + i * 10 ** 6
+                _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_HARD_CEILING + 1,
+                                         idle_s=0, now=now_i)
+                tmux_i = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+                logs_i = wd.compact_hard_ceiling(now_i, tmux_i, state, dry_run=False,
+                                                 projects_dir=proj, send_fn=fake_send)
+                if i == 0:
+                    self.assertEqual(tmux_i.typed_texts().count("/compact"), 1, logs_i)
+                else:
+                    self.assertEqual(tmux_i.sent, [], logs_i)
+                self.assertFalse(any("GAVE UP" in ln for ln in logs_i), logs_i)
         self.assertEqual(sent, [])   # never pinged a give-up -- there is none
         self.assertEqual(state["compact_ceiling"][sid]["status"],
                          wd.COMPACT_CEILING_QUEUED)
@@ -3805,9 +3844,13 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertFalse(any("compacted" in ln for ln in ok_lines), ok_lines)
 
     def test_queued_with_context_confirmed_low_is_consumed_and_cleared(self):
+        # #83 -- needs a live "proc" fingerprint, or the #83 pre-pass drops
+        # this entry (proc-less) BEFORE the main loop below ever reaches
+        # the CONSUMED check this test is locking.
         now = time.time()
         state = {"compact_ceiling":
-                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD,
+                            "proc": _alive_proc_fingerprint(self)}}}
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING - 1, state=state, now=now)
         self.assertEqual(tmux.sent, [])
         self.assertNotIn(self.SID, state.get("compact_ceiling", {}))
@@ -3826,8 +3869,13 @@ class TestCompactHardCeiling(unittest.TestCase):
         old_sid, new_sid = "sess-old", "sess-new"
         _seed_context_transcript(proj, self.CWD, old_sid, wd.COMPACT_HARD_CEILING + 1,
                                  idle_s=100, now=now)
+        # #83 -- needs a live "proc", or the #83 pre-pass drops this entry
+        # as proc-less BEFORE it ever reaches the session-swap FAILED check
+        # this test is locking (both end in "drop, resend" but with a
+        # different log line -- STUCK vs FAILED).
         state = {"compact_ceiling":
-                 {old_sid: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+                 {old_sid: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD,
+                           "proc": _alive_proc_fingerprint(self)}}}
         # a NEW session's transcript is now the newest one for this cwd.
         _seed_context_transcript(proj, self.CWD, new_sid, wd.COMPACT_HARD_CEILING + 1,
                                  idle_s=0, now=now)
@@ -3843,10 +3891,12 @@ class TestCompactHardCeiling(unittest.TestCase):
     def test_intact_delivery_same_session_is_never_treated_as_lost(self):
         # the SAME sid still owns the cwd -- never mistaken for a restart,
         # even long after the send (false-positive-direction regression
-        # lock for the #72 fix).
+        # lock for the #72 fix). #83 -- needs a live "proc" fingerprint, or
+        # this entry is dropped as proc-less and gets a genuine resend.
         now = time.time()
         state = {"compact_ceiling":
-                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD,
+                            "proc": _alive_proc_fingerprint(self)}}}
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
                                      initial_captured=MR_BUSY_CAP,
                                      state=state, now=now + 10 ** 5)
@@ -3926,8 +3976,12 @@ class TestCompactHardCeiling(unittest.TestCase):
     # ------------------------------------------------------------------- #
 
     def test_stuck_is_logged_after_threshold_cycles_still_queued(self):
+        # #83 -- needs a live "proc": a proc-less entry is now dropped (and
+        # logged as its OWN kind of STUCK line) on the very first
+        # evaluation, before ever reaching this job's cycle counter.
         state = {"compact_ceiling":
-                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD,
+                            "proc": _alive_proc_fingerprint(self)}}}
         now = time.time()
         logs = []
         for i in range(5):
@@ -3939,9 +3993,11 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertEqual(state["compact_ceiling"][self.SID].get("cycles"), 5)
 
     def test_stuck_logs_every_sweep_once_threshold_is_crossed(self):
+        # #83 -- needs a live "proc" (see the comment above).
         state = {"compact_ceiling":
                  {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
-                            "cwd": self.CWD, "cycles": 2}}}
+                            "cwd": self.CWD, "cycles": 2,
+                            "proc": _alive_proc_fingerprint(self)}}}
         now = time.time()
         _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
                                       initial_captured=MR_BUSY_CAP,
@@ -3952,9 +4008,11 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertEqual(state["compact_ceiling"][self.SID]["cycles"], 3)
 
     def test_below_stuck_threshold_never_logs_stuck(self):
+        # #83 -- needs a live "proc" (see the comment above).
         state = {"compact_ceiling":
                  {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
-                            "cwd": self.CWD, "cycles": 0}}}
+                            "cwd": self.CWD, "cycles": 0,
+                            "proc": _alive_proc_fingerprint(self)}}}
         now = time.time()
         _tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
                                       initial_captured=MR_BUSY_CAP,
@@ -3962,9 +4020,11 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertFalse(any("STUCK" in ln for ln in logs), logs)
 
     def test_env_override_lowers_the_stuck_threshold(self):
+        # #83 -- needs a live "proc" (see the comment above).
         state = {"compact_ceiling":
                  {self.SID: {"status": wd.COMPACT_CEILING_QUEUED,
-                            "cwd": self.CWD, "cycles": 1}}}
+                            "cwd": self.CWD, "cycles": 1,
+                            "proc": _alive_proc_fingerprint(self)}}}
         now = time.time()
         with unittest.mock.patch.dict(
                 os.environ, {"AIRULESET_COMPACT_CEILING_STUCK_CYCLES": "2"}):
@@ -4011,13 +4071,59 @@ class TestCompactHardCeiling(unittest.TestCase):
         now = time.time()
         _seed_context_transcript(proj, self.CWD, self.SID,
                                  wd.COMPACT_HARD_CEILING + 1, idle_s=0, now=now)
-        wd.compact_claim_set(self.SID, self.CWD)
+        # #83 -- a real claim always carries a live "proc" fingerprint; a
+        # proc-less claim now resolves (re-enabling sending) on its very
+        # first evaluation, so this test's claim needs one to stay blocking.
+        wd.compact_claim_set(self.SID, self.CWD, proc=_alive_proc_fingerprint(self))
         tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
         state = {}
         wd.compact_hard_ceiling(now, tmux, state, dry_run=False,
                                 projects_dir=proj)
         self.assertEqual(tmux.sent, [])
         self.assertEqual(state.get("compact_ceiling", {}), {})
+
+    # ------------------------------------------------------------------- #
+    # #83 (2026-07-26 live incident, gatekeeper) — #82 added the process
+    # fingerprint, but it never reaches a claim already written BEFORE #82
+    # shipped: such an entry has NO "proc" key at all, so #82's own
+    # process-death check is a no-op, and (for a `claude -c` restart, which
+    # never changes the session id) neither can the session-id-replace
+    # check ever fire. Live evidence: gatekeeper stayed queued 3.5h,
+    # context 397010, zero compaction — it never even reached the STUCK
+    # cycle counter below, because the SHARED compact_claim_active gate
+    # (also proc-less) blocked this job's own state machine from ever
+    # running. The fix: a proc-less QUEUED entry is dropped on the FIRST
+    # evaluation instead — logged as STUCK for visibility, sending
+    # re-enabled immediately.
+    # ------------------------------------------------------------------- #
+
+    def test_missing_proc_key_in_own_state_resolves_at_first_evaluation(self):
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP, state=state)
+        self.assertTrue(any(ln.startswith("STUCK (compact-ceiling)")
+                            for ln in logs), logs)
+        self.assertTrue(any("no process fingerprint" in ln for ln in logs), logs)
+        # dropped -> immediately eligible again -> resent THIS SAME sweep.
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
+
+    def test_live_incident_both_structures_proc_less_unblocks_in_one_cycle(self):
+        # reproduces the EXACT live gatekeeper finding: BOTH the shared
+        # compact-claims.json AND this job's OWN state['compact_ceiling']
+        # carried a proc-less entry for the same session. A single sweep
+        # must drop both and resend.
+        p = wd.compact_claims_path()   # isolated by setUp's _isolate_compact_claims
+        wd.compact_claim_set(self.SID, self.CWD, path=p)   # no proc
+        state = {"compact_ceiling":
+                 {self.SID: {"status": wd.COMPACT_CEILING_QUEUED, "cwd": self.CWD}}}
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=MR_BUSY_CAP, state=state)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertEqual(state["compact_ceiling"][self.SID]["status"],
+                         wd.COMPACT_CEILING_QUEUED)
 
 
 class RunOnceCompactHardCeilingWiring(unittest.TestCase):

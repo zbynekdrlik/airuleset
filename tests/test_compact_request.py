@@ -517,14 +517,24 @@ class TestCompactTicketBoundary(unittest.TestCase):
     # ----------------------------------------------------------------- #
 
     def test_queued_claim_blocks_send_regardless_of_a_different_msg_hash(self):
-        wd.compact_claim_set(self.SID, "/home/x/proj")
+        # #83 -- a real claim always carries a live "proc" fingerprint; a
+        # proc-less claim now resolves (re-enabling sending) on its very
+        # first evaluation, so this test's claim needs one to stay blocking.
+        wd.compact_claim_set(self.SID, "/home/x/proj", proc=_alive_proc_fingerprint(self))
         tmux, logs, path, _ = self._go(CB_IDLE_CAP, msg_hash="brand-new-hash")
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("claim-queued" in ln for ln in logs), logs)
         self.assertNotIn(self.SID, wd.load_compact_requests(path))
 
     def test_successful_idle_send_sets_the_shared_claim(self):
-        tmux, logs, path, _ = self._go(CB_IDLE_CAP)
+        # #83 -- CompactFakeTmux can never resolve a real proc fingerprint
+        # (its `display-message` fake returns a bogus pane pid); patched to
+        # a genuinely alive one so the claim this send sets actually
+        # persists, exactly like a real production send does.
+        alive_proc = _alive_proc_fingerprint(self)
+        with m.patch.object(wd, "_pane_claude_proc_fingerprint",
+                           return_value=alive_proc):
+            tmux, logs, path, _ = self._go(CB_IDLE_CAP)
         self.assertIn("/compact", tmux.typed_texts())
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -652,6 +662,22 @@ def _spawn_dummy_proc(testcase):
     return p
 
 
+def _alive_proc_fingerprint(testcase):
+    """#83 -- a genuine, currently-alive process fingerprint (the
+    `_proc_fingerprint` `{"pid", "starttime"}` shape) for tests that need a
+    `/compact` claim to PERSIST across evaluations, exactly like a real
+    production send does (there, `_pane_claude_proc_fingerprint` resolves a
+    REAL running `claude` process, so the claim always carries a "proc"
+    key). The fake tmux `run`s in this file can never walk a real /proc
+    tree (their `display-message` fakes return a bogus pane pid), so
+    without this helper a claim they set ends up "proc"-less -- and, per
+    #83, a proc-less entry is now (correctly) dropped and made eligible
+    again on its very NEXT evaluation, breaking any test that expects
+    persistence."""
+    p = _spawn_dummy_proc(testcase)
+    return wd._proc_fingerprint(p.pid)
+
+
 def _append_compact_boundary(path, ts=None):
     """#78 — append a `system`/`compact_boundary` entry (Claude Code's own
     durable "a real compaction landed" marker) onto an EXISTING transcript
@@ -707,28 +733,38 @@ class TestCompactClaimState(unittest.TestCase):
 
     def test_set_then_active_with_no_transcript_stays_queued(self):
         # unknown/unmeasurable transcript must NEVER resolve the claim --
-        # only positive evidence (a boundary or a session swap) can.
+        # only positive evidence (a boundary or a session swap) can. #83 --
+        # needs a live "proc": a proc-less claim now resolves (and
+        # re-enables sending) on its very first evaluation, so this is
+        # exercised with a genuine fingerprint to keep testing THIS path.
         p = self._p()
-        self.assertTrue(wd.compact_claim_set("sid-1", "/x", path=p))
+        proc = _alive_proc_fingerprint(self)
+        self.assertTrue(wd.compact_claim_set("sid-1", "/x", path=p, proc=proc))
         self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
                                                 projects_dir=self._proj()))
 
     def test_never_resolves_on_elapsed_time_alone(self):
         # #72's core lesson, generalized: a claim set LONG ago, with no
         # transcript evidence either way, must STILL read as queued no
-        # matter how much wall-clock time has passed.
+        # matter how much wall-clock time has passed. #83 -- needs a live
+        # "proc" (see the comment above).
         p = self._p()
-        wd.compact_claim_set("sid-1", "/x", now=time.time() - 100_000, path=p)
+        proc = _alive_proc_fingerprint(self)
+        wd.compact_claim_set("sid-1", "/x", now=time.time() - 100_000, path=p,
+                             proc=proc)
         self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
                                                 projects_dir=self._proj()))
 
     def test_consumed_by_a_newer_compact_boundary_clears_the_claim(self):
+        # #83 -- needs a live "proc", or the #83 no-proc-key check resolves
+        # this claim before it ever reaches the CONSUMED check being locked.
         p = self._p()
         proj = self._proj()
         cwd = "/home/x/claimproj"
         tpath = _write_ctx_transcript(proj, cwd, "sid-1", 1000)
         send_ts = time.time()
-        wd.compact_claim_set("sid-1", cwd, now=send_ts, path=p)
+        wd.compact_claim_set("sid-1", cwd, now=send_ts, path=p,
+                             proc=_alive_proc_fingerprint(self))
         _append_compact_boundary(tpath, ts=send_ts + 5)
         self.assertFalse(wd.compact_claim_active("sid-1", cwd, path=p,
                                                  projects_dir=proj))
@@ -737,12 +773,14 @@ class TestCompactClaimState(unittest.TestCase):
     def test_an_older_compact_boundary_does_not_consume(self):
         # a boundary from a PRIOR compaction (before this claim was even
         # set) must never be mistaken for proof of THIS send's success.
+        # #83 -- needs a live "proc" (see the comment above).
         p = self._p()
         proj = self._proj()
         cwd = "/home/x/claimproj2"
         tpath = _write_ctx_transcript(proj, cwd, "sid-1", 1000)
         _append_compact_boundary(tpath, ts=time.time() - 100)
-        wd.compact_claim_set("sid-1", cwd, now=time.time(), path=p)
+        wd.compact_claim_set("sid-1", cwd, now=time.time(), path=p,
+                             proc=_alive_proc_fingerprint(self))
         self.assertTrue(wd.compact_claim_active("sid-1", cwd, path=p,
                                                 projects_dir=proj))
 
@@ -750,12 +788,15 @@ class TestCompactClaimState(unittest.TestCase):
         # a demonstrated delivery LOSS -- the pane went through a restart
         # (a NEW, newer transcript now exists for the same cwd) -- is the
         # ONLY other legitimate resolution, per #72's model generalized.
+        # #83 -- needs a live "proc", or the #83 no-proc-key check resolves
+        # this claim before it ever reaches the session-swap check below.
         p = self._p()
         proj = self._proj()
         cwd = "/home/x/claimproj3"
         oldp = _write_ctx_transcript(proj, cwd, "sid-old", 1000)
         os.utime(oldp, (time.time() - 100, time.time() - 100))
-        wd.compact_claim_set("sid-old", cwd, path=p)
+        wd.compact_claim_set("sid-old", cwd, path=p,
+                             proc=_alive_proc_fingerprint(self))
         newp = _write_ctx_transcript(proj, cwd, "sid-new", 1000)
         os.utime(newp, (time.time(), time.time()))
         self.assertFalse(wd.compact_claim_active("sid-old", cwd, path=p,
@@ -828,14 +869,28 @@ class TestCompactClaimState(unittest.TestCase):
         self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
                                                  projects_dir=self._proj()))
 
-    def test_no_fingerprint_recorded_is_never_treated_as_process_failed(self):
-        # a claim set before this fix (or whose owning pane could not be
-        # resolved at queue time) carries no "proc" key -- the new check
-        # must be a complete no-op for it, unchanged from pre-#82 behavior.
+    # ------------------------------------------------------------------- #
+    # #83 (2026-07-26 live incident, gatekeeper) -- a claim written BEFORE
+    # #82 (or whose owning pane could not be fingerprinted at queue time)
+    # carries NO "proc" key at all. #82's own process-death check IS a
+    # no-op for it -- but so is EVERY other resolution path, for the exact
+    # case that matters most: a watchdog restart relaunches via `claude -c`,
+    # which CONTINUES the same transcript (the session id never changes),
+    # so the cwd/session-id FAILED check below can never fire either, and
+    # nothing forces a fresh compact_boundary. Live evidence: this claim
+    # stayed queued for 3.5h, context climbing to 397010, zero compaction.
+    # Fix (issue #83, preferred option 1): a claim missing "proc" is
+    # unresolvable and is dropped on the FIRST evaluation -- sending is
+    # re-enabled immediately (worst case: one redundant /compact).
+    # ------------------------------------------------------------------- #
+
+    def test_no_fingerprint_recorded_resolves_at_first_evaluation_and_reenables_send(self):
         p = self._p()
         wd.compact_claim_set("sid-1", "/x", path=p)
-        self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
-                                                projects_dir=self._proj()))
+        self.assertNotIn("proc", wd._load_compact_claims(p)["sid-1"])
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+        self.assertEqual(wd._load_compact_claims(p), {})
 
     def test_set_with_pane_id_resolves_and_stores_a_fingerprint(self):
         proc_handle = _spawn_dummy_proc(self)
@@ -1266,9 +1321,12 @@ class TestDeliverCompactNow(unittest.TestCase):
         # a second send). Every skip decision is logged (#78's own
         # incident was undebuggable from journalctl for exactly this
         # reason — the synchronous path's stdout is thrown at /dev/null).
+        # #83 -- a real claim always carries a live "proc" fingerprint; a
+        # proc-less claim now resolves (re-enabling sending) on its very
+        # first evaluation, so this test's claim needs one to stay blocking.
         proj = self._dir()
         _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
-        wd.compact_claim_set(self.SID, self.CWD)
+        wd.compact_claim_set(self.SID, self.CWD, proc=_alive_proc_fingerprint(self))
         tmux = DeliverCompactNowFakeTmux(
             [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
@@ -1278,11 +1336,18 @@ class TestDeliverCompactNow(unittest.TestCase):
         self.assertIn("SKIP claim-queued", log_text)
 
     def test_successful_send_sets_the_shared_claim_and_logs_it(self):
+        # #83 -- DeliverCompactNowFakeTmux can never resolve a real proc
+        # fingerprint (its `display-message` fake returns a bogus pane
+        # pid); patched to a genuinely alive one so the claim this send
+        # sets actually persists, exactly like a real production send does.
         proj = self._dir()
         _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
         tmux = DeliverCompactNowFakeTmux(
             [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        alive_proc = _alive_proc_fingerprint(self)
+        with m.patch.object(wd, "_pane_claude_proc_fingerprint",
+                           return_value=alive_proc):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
         self.assertTrue(ok)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(wd.compact_claim_active(self.SID, self.CWD,
