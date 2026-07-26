@@ -40,11 +40,8 @@ board-*.png
 filedrop-*.png
 design-*.png
 
-# machine-local TDD-skip audit trail (regression-test-first.md)
-audits/no-test-skips.log
-audits/test-skip-bypasses.log
-audits/history-rewrite-bypasses.log
-audits/secret-scan-bypasses.log
-audits/autopilot-lock-steals.log
-audits/destructive-remote-bypasses.log
-audits/script-check-bypasses.log
+# machine-local hook-bypass audit trail (regression-test-first.md) — glob so a
+# future new bypass-log type can't repeat the "missing pattern" gap (#62).
+# The tracked non-log audit docs in this dir (mdreview-*.md) are unaffected
+# since the glob only matches *.log.
+audits/*.log
