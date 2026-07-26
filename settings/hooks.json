@@ -89,6 +89,10 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       },
@@ -114,6 +118,10 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       },
@@ -129,6 +137,10 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       },
@@ -164,6 +176,15 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__win-.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       }
@@ -287,6 +308,10 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/clear-question-dedup.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       }
