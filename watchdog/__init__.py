@@ -5874,10 +5874,118 @@ GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
 # transcript timing, not documented CC behavior. Which is exactly why this
 # branch keys on the OBSERVABLE end state (armed + idle + nothing in flight)
 # rather than on any theory of the cause.
+# --- the THIRD shape (same job, the goal is ALIVE but running OLD text) ----
+# `/goal` reads the autopilot template ONCE, at arm time. Change the template
+# in `skills/autopilot/SKILL.md`, `airuleset.py push` it to all six boxes, and
+# every ALREADY-RUNNING loop keeps evaluating the OLD stop conditions —
+# forever, since nothing re-reads it (#64). That is not cosmetic: #58's
+# ticket-boundary `✅ Work Complete` rule is what fires the compaction chain,
+# so a loop still running a pre-#58 template never compacts and its context
+# grows without bound (the measured 214K -> 432K david case).
+#
+# The whole difficulty is telling "the template, older version" apart from "a
+# goal the user wrote themselves". Measured across 62 commits of this repo's
+# own template history, a similarity threshold CANNOT do it — the ranges
+# overlap:
+#     tpl1 vs tpl2, both CURRENT, DIFFERENT variants      ratio 0.7100
+#     tpl0 current vs tpl0 from 2026-07-05, SAME variant  ratio 0.7279
+# and the cost of the two mistakes is wildly asymmetric: missing a stale loop
+# is merely the status quo, while a false positive silently overwrites what
+# the user asked for. So identity here is an EXACT hash and never a threshold.
+#
+# The hash is taken over a NORMALIZED form (parenthetical citations, backtick
+# spans and punctuation dropped, lowercased, whitespace collapsed) because an
+# armed payload is frequently the template minus a few editorial citations —
+# the agent trims them when it prints the line. Live on this box when the
+# ticket was worked, all three cases were present at once:
+#     forestshop   payload == template verbatim              -> exact match
+#     restreamer   template minus 3 citations, ratio 0.9808,
+#                  byte-matching NO shipped version at all    -> exact match
+#     airuleset    the user's own goal, ratio 0.2420          -> no match
+# and normalisation does not blur real changes: 26 distinct raw historical
+# template strings collapse to 25 normalised ones, the single merged pair
+# being a citation-only edit, which is exactly what should be ignored.
+#
+# Proof that a payload IS the template comes from OBSERVATION, not from
+# similarity: the first time this job sees a session's armed goal matching a
+# CURRENT template it records the variant (`tvar`). Only such a TRACKED
+# session is ever re-armed, and only with the current text of the SAME variant
+# it was already running — the authority profile is never re-resolved, so a
+# branch-merge stream can never be handed the full-authority template. A
+# payload that never matched is untouchable by construction, not by threshold.
+#
+# Delivery is ONE `/goal <new>` — live-verified on CC 2.1.220 that this
+# REPLACES an armed goal (typing GOAL-BRAVO over an armed GOAL-ALPHA made
+# every subsequent Stop-hook evaluation cite BRAVO, and the later `/goal
+# clear` reported BRAVO as the active one). The ticket's proposed `/goal
+# clear` first is therefore not just unnecessary but harmful: it opens a
+# window with no loop at all, and if the second step failed the marker would
+# read `cleared`, which the #76 branch deliberately never revives.
+#
+# Confirmation needs no new mechanism: a successful re-arm changes the
+# payload, the next sweep's hash matches the current template, and the drift
+# state clears itself. Until then it is bounded exactly like every other shape
+# here — `GOAL_DRIFT_MAX_ATTEMPTS` deliveries per target, then ONE Discord
+# ping and silence.
+GOAL_ARM_ACTIVE_PREFIX = ('A session-scoped Stop hook is now active with '
+                          'condition: "')
+_GOAL_ARM_PROBE = GOAL_ARM_ACTIVE_PREFIX[:-1].encode()   # quote-free (JSON)
+GOAL_DRIFT_MAX_ATTEMPTS = 2         # deliveries per NEW template hash
+_GOAL_TEMPLATE_RX = re.compile(r"^/goal .+$", re.M)
+
 GOAL_STALL_TEXT = "continue"        # same minimal wake job 1 uses
 GOAL_STALL_IDLE_S = 15 * 60         # transcript stale this long while ARMED
 GOAL_STALL_INTERVAL_S = 15 * 60     # min spacing between nudges
 GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
+
+
+def goal_template_norm(text):
+    """The comparable form of a `/goal` line — see the GOAL_DRIFT section.
+
+    Drops parenthetical citations, backtick-quoted spans and punctuation, then
+    lowercases and collapses whitespace. What survives is the SUBSTANCE of the
+    stop conditions, which is what makes two prints of the same template equal
+    while keeping genuinely different templates (and genuinely changed ones)
+    apart."""
+    s = re.sub(r"\([^()]*\)", "", text or "")
+    s = re.sub(r"`[^`]*`", "", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return " ".join(s.lower().split())
+
+
+def goal_template_hash(text):
+    """Stable identity of a `/goal` line (hash of its normalized form)."""
+    return _hash(goal_template_norm(text))
+
+
+def load_goal_templates(path):
+    """The `/goal …` lines shipped in the autopilot SKILL, in file order.
+
+    Read out of the SKILL prose itself — never a side-car data file somebody
+    has to remember to regenerate when the template changes. Missing or
+    unreadable file returns `[]`, which switches the whole drift check off
+    rather than guessing."""
+    if not path:
+        return []
+    try:
+        with open(str(path), encoding="utf-8") as f:
+            body = f.read()
+    except OSError:
+        return []
+    return [ln.strip() for ln in _GOAL_TEMPLATE_RX.findall(body) if ln.strip()]
+
+
+def goal_template_variant(line, templates):
+    """Index of the template `line` IS (exact match on the normalized form),
+    else None. Never a nearest-neighbour — 'close to a template' is precisely
+    the ambiguous case that must do nothing."""
+    if not line or not templates:
+        return None
+    h = goal_template_hash(line)
+    for i, t in enumerate(templates):
+        if goal_template_hash(t) == h:
+            return i
+    return None
 
 
 def _goal_marker_content(entry):
@@ -5902,9 +6010,28 @@ def _goal_marker_content(entry):
 def _parse_goal_marker(content):
     """`{"state": "set"|"cleared", "payload": str|None}` for a genuine `/goal`
     marker, else None. The whole entry content must BE the marker (it starts
-    with the `<local-command-stdout>` tag) — a compaction SUMMARY narrating
-    "the loop's Goal set: …" in prose is not state."""
+    with the `<local-command-stdout>` tag, or with CC's own arm instruction)
+    — a compaction SUMMARY narrating "the loop's Goal set: …" in prose, or any
+    message merely QUOTING the arm sentence, is not state."""
     s = (content or "").strip()
+    if s.startswith(GOAL_ARM_ACTIVE_PREFIX):
+        # The record CC writes for EVERY arm — and the ONLY one it writes when
+        # the `/goal` was typed into a BUSY pane and drained from the
+        # type-ahead queue (that path logs a `queue-operation` entry instead of
+        # a `local-command-stdout` marker; live-captured on CC 2.1.220, #64).
+        # Without this shape a re-armed session keeps reporting its OLD payload
+        # forever, so the drift check would re-arm it every single sweep.
+        rest = s[len(GOAL_ARM_ACTIVE_PREFIX):]
+        # The payload itself contains quotes (`--search "-label:autopilot-skip"`
+        # is in every shipped template), so the terminator is the LAST `". `,
+        # never the first quote. CC's trailing instruction sentence carries no
+        # quote of its own, which is what makes this unambiguous.
+        cut = rest.rfind('". ')
+        if cut < 0:
+            cut = rest.rfind('"')
+        if cut <= 0:
+            return None
+        return {"state": "set", "payload": rest[:cut].strip() or None}
     if not s.startswith(_GOAL_LCS_OPEN):
         return None
     body = s[len(_GOAL_LCS_OPEN):]
@@ -5958,7 +6085,14 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
         body = body[nl + 1:] if nl >= 0 else b""
     best = None
     for ln in body.splitlines():
-        if _GOAL_LCS_OPEN.encode() not in ln:
+        # cheap pre-filter over the raw bytes — either of the TWO shapes CC
+        # writes (the `/goal` command's own stdout, or the arm instruction it
+        # injects, which is the only record a QUEUED arm leaves at all, #64).
+        # The arm probe deliberately stops BEFORE the prefix's opening quote:
+        # in the JSON line that quote is escaped as `\"`, so matching the full
+        # prefix here would never hit.
+        if (_GOAL_LCS_OPEN.encode() not in ln
+                and _GOAL_ARM_PROBE not in ln):
             continue
         try:
             entry = json.loads(ln)
@@ -6142,18 +6276,125 @@ def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
     return logs
 
 
+def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
+                         send_fn, dry_run, handled, projects_dir, sleep_fn):
+    """The STALE-TEMPLATE branch of job 20 (#64) — see the `GOAL_DRIFT_*`
+    section comment. Runs only for a pane whose goal is provably ARMED.
+    Mutates `rec` (the caller persists it); returns log lines.
+
+    Two states only, and the second is entered by OBSERVATION, never by
+    resemblance:
+      * the payload matches a CURRENT template  -> record the variant, clear
+        any drift bookkeeping, do nothing;
+      * it does not, and this session was recorded matching variant `tvar`
+        earlier -> the template has since changed under a live loop, so
+        re-arm it with that variant's current text.
+    Anything else (a goal that never matched anything) is the user's own and
+    is left alone, with the reason logged ONCE — never every 60 s."""
+    logs = []
+    payload = rec.get("payload") or ""
+    if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
+        return logs
+    line = "/goal " + payload
+    cur = goal_template_variant(line, templates)
+    if cur is not None:
+        # up to date — and this is also the ONLY place a session becomes
+        # eligible for a future re-arm at all
+        if rec.get("tvar") != cur or rec.get("dhash"):
+            rec.update({"tvar": cur, "dhash": None, "dn": 0, "dpinged": False})
+        rec["untracked_logged"] = False
+        return logs
+    tvar = rec.get("tvar")
+    if tvar is None or tvar >= len(templates):
+        # never seen matching a template => a goal the user wrote. Logged the
+        # first time only: a custom-goal session is otherwise a permanent
+        # resident and would print this line every sweep, forever.
+        if not rec.get("untracked_logged"):
+            rec["untracked_logged"] = True
+            logs.append("skip untracked (goal-drift) %s -> not the autopilot "
+                        "template, leaving it alone" % loc)
+        return logs
+    target = templates[tvar]
+    th = goal_template_hash(target)
+    if rec.get("dhash") != th:
+        rec.update({"dhash": th, "dn": 0, "dpinged": False})
+    if rec.get("dn", 0) >= GOAL_DRIFT_MAX_ATTEMPTS:
+        if not rec.get("dpinged"):
+            rec["dpinged"] = True
+            if send_fn is not None and not dry_run:
+                send_fn("⚠️ **%s** — beží `/goal` slučka so STAROU verziou "
+                        "autopilot šablóny a automatické preármovanie sa "
+                        "nechytilo ani po %d pokusoch (%s). Preármuj ju prosím "
+                        "ručne — dovtedy sa riadi starými podmienkami."
+                        % (project_label(cwd), GOAL_DRIFT_MAX_ATTEMPTS, loc),
+                        owner=pane_owner(pid, run) or None,
+                        dedup_key="goaldrift:%s:%s" % (sid, th),
+                        dry_run=dry_run)
+            logs.append("GAVE UP (goal-drift) %s after %d attempts"
+                        % (loc, GOAL_DRIFT_MAX_ATTEMPTS))
+        return logs
+    # --- the same refusals the #76 branch uses, for the same reasons --------
+    if handled is not None and sid in handled:
+        logs.append("skip just-compacted (goal-drift) %s" % loc)
+        return logs
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        logs.append("skip compact-claim (goal-drift) %s" % loc)
+        return logs
+    if _pane_compacting(captured) or pane_waiting_on_user(captured):
+        logs.append("skip busy-state (goal-drift) %s" % loc)
+        return logs
+    kind, draft = _classify_boundary(captured)
+    if kind != "input":
+        # A LIVE loop is busy most of the time, so this is the common outcome
+        # and the delivery simply waits for a real prompt. Queuing a 3 KB
+        # paste into a running turn is refused on purpose: #84 showed a queued
+        # command can sit undrained for over an hour under an armed goal,
+        # which would leave us unable to tell "not executed yet" from "lost"
+        # and re-typing it every sweep — the #78 duplicate class.
+        logs.append("skip %s (goal-drift) %s" % (kind, loc))
+        return logs
+    if dry_run:
+        logs.append("READY (goal-drift) %s -> %d chars" % (loc, len(target)))
+        return logs
+    if draft:
+        dlogs = []
+        ok = deliver_with_stash(pid, target, run, captured=captured, logs=dlogs)
+        tag = "goal-drift, stash"
+    else:
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (goal-drift) %s" % loc)
+            return logs
+        dlogs = []
+        ok = _send_goal_verified(pid, target, run, captured=captured,
+                                 sleep_fn=sleep_fn)
+        tag = "goal-drift"
+    rec["dn"] = rec.get("dn", 0) + 1
+    if ok:
+        logs.append("OK (%s) %s -> /goal updated to the current template "
+                    "(%d chars), variant %d" % (tag, loc, len(target), tvar))
+    else:
+        logs.append("FAIL (%s) %s -> delivery not verified%s"
+                    % (tag, loc, (" (%s)" % dlogs[-1]) if dlogs else ""))
+    return logs
+
+
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
-               sleep_fn=None):
+               sleep_fn=None, templates_path=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
 
     `handled` (optional): the SAME per-sweep set jobs 14/15/17 populate — a
     sid compacted THIS sweep is skipped outright (a long goal must never be
-    typed into a pane whose `/compact` is still draining)."""
+    typed into a pane whose `/compact` is still draining).
+
+    `templates_path` (optional, #64): the installed autopilot SKILL. Wired =
+    on, like jobs 13/14/16/18 — without it the STALE-TEMPLATE branch does not
+    run at all and this job behaves exactly as it did before."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
+    templates = load_goal_templates(templates_path)
     max_attempts = GOAL_REARM_MAX_ATTEMPTS if max_attempts is None else max_attempts
     streak_s = GOAL_REARM_STREAK_S if streak_s is None else streak_s
     confirm_s = GOAL_REARM_CONFIRM_S if confirm_s is None else confirm_s
@@ -6207,6 +6448,12 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured,
                                       tpath, tmtime, loc, send_fn, dry_run,
                                       handled, projects_dir)
+            # …and is it firing the CURRENT template? (the third shape, #64)
+            if templates:
+                logs += _goal_template_drift(now, run, rec, sid, cwd, pid,
+                                             captured, loc, templates, send_fn,
+                                             dry_run, handled, projects_dir,
+                                             sleep_fn)
             _save()
             continue
         if rec.get("mark") != "set":
