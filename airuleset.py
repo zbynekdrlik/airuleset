@@ -2493,8 +2493,12 @@ def cmd_watchdog(args):
     block content hash no longer matches the hash it started under, so a
     newly-deployed hook actually takes effect instead of staying inert for
     that session's whole remaining lifetime (#70 job 18, coalesced with job
-    12's model restart into one restart when both fire the same sweep).
-    Driven by the systemd timer.
+    12's model restart into one restart when both fire the same sweep), and
+    — since an armed `/goal` can die SILENTLY, in the same process, without
+    ever writing a `Goal cleared:` marker — cross-checks each session's
+    transcript marker against CC's own `◎ /goal` footer indicator and
+    re-arms a proven mismatch with the marker's exact bytes, bounded, with
+    one ping on give-up (#76 job 20). Driven by the systemd timer.
 
     Job logs print UNCONDITIONALLY (issue #36) — the systemd unit runs
     `watchdog --once` with NO `--verbose`, so gating the print behind that
@@ -2527,7 +2531,12 @@ def cmd_watchdog(args):
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
                     hooks_settings_path=hooks_settings_path(),
-                    burn_alert_enabled=burn_alert_enabled)
+                    burn_alert_enabled=burn_alert_enabled,
+                    # Job 20 (#76) runs on EVERY managed box — a silently
+                    # dead /goal is a per-session failure, not a
+                    # coordinator-only one (it was montalu's stream that
+                    # lost its loop twice in a day).
+                    goal_rearm_enabled=True)
     for line in logs:
         print(line)
 
