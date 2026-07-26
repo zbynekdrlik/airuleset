@@ -4432,6 +4432,73 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
 # Wired in run_once right after job 16, ALWAYS on (no gating param — same
 # "always on" shape as job 9's goal_autoarm and job 15 itself), since it
 # depends on nothing external.
+#
+# --------------------------------------------------------------------------- #
+# #72 (2026-07-26 live incident) -- the ORIGINAL state machine above (a fixed
+# `COMPACT_CEILING_RETRY_S` timer + a `COMPACT_CEILING_MAX_ATTEMPTS` give-up)
+# is broken on EXACTLY the session class job 17 exists for: a pane that stays
+# BUSY in one single long turn for far longer than the retry window. Live
+# proof, gatekeeper pane 0:0.0: a turn ran 1h14m; job 17 sent `/compact`,
+# waited 5 minutes, saw the context STILL above the ceiling (correctly, since
+# nothing had been consumed yet -- the turn was still running), and treated
+# that as license to resend -- twice more, then GAVE UP while three duplicate
+# `/compact` sat unconsumed in the pane's own input queue (CC only drains the
+# queue at a turn boundary, so resending never helps and just plants more
+# duplicates that later fire as "Not enough messages to compact"). Logging
+# each send as "-> compacted" was ALSO false: only keystrokes were typed,
+# nothing was verified.
+#
+# The fix replaces BOTH the timer and the give-up with a strict three-state
+# machine, `state['compact_ceiling'][sid] = {"status": ..., "cwd": ...}`:
+#
+#   absent                     -- never touched, or the previous claim was
+#                                  resolved (consumed or lost); eligible.
+#   {"status": QUEUED, "cwd"}  -- `/compact` was typed exactly once and is
+#                                  awaiting consumption. Every sweep re-reads
+#                                  the CURRENT context (cheap, local, no tmux
+#                                  round-trip) for a queued sid: while it is
+#                                  STILL >= ceiling, do ABSOLUTELY NOTHING --
+#                                  no resend, no log, no matter how much time
+#                                  has passed (this is the entire #72 fix --
+#                                  elapsed time is NEVER a resend trigger).
+#                                  The moment it reads BELOW the ceiling --
+#                                  proof a real compaction landed -- the claim
+#                                  is CONSUMED: cleared back to absent and
+#                                  logged as such, so a future re-growth past
+#                                  the ceiling is eligible again.
+#
+# The ONLY other exit from QUEUED is a demonstrated LOSS of delivery: the
+# `cwd` this claim was queued against now has a DIFFERENT, NEWER active
+# transcript (a genuinely new session id) than the one the claim was sent
+# to. Since a `/compact` keystroke lives in the OLD process's own type-ahead
+# queue, a session replacement (the pane went through a restart -- `/exit`
+# + relaunch always mints a fresh session id, it never resumes the old
+# transcript file) means that keystroke is gone forever with the process
+# that held it -- this is "the pane meanwhile went through a restart" from
+# the issue, and it is the ONLY condition under which a resend is legitimate.
+# Detected in a cheap PRE-PASS (pure transcript-directory reads, no tmux)
+# before the main per-pane loop even runs: for every currently QUEUED entry,
+# resolve the newest transcript for its recorded `cwd` and compare its
+# session id against the one the claim was queued under. A mismatch logs
+# FAILED, drops the stale entry, and lets the main loop's normal absent-state
+# eligibility check pick the NEW session up fresh -- producing exactly ONE
+# new send (the acceptance's "strata dorucenia -> jedno nove poslanie"), not
+# a special-cased immediate resend.
+#
+# There is NO permanent give-up state anymore, and NO Discord ping for
+# "tried too many times" -- the issue is explicit that a session still above
+# the ceiling must NEVER be abandoned. The only Discord-visible signal that
+# survives is the (unrelated, untouched) #67 stash-occupied-repeatedly ping.
+#
+# Coordination with #71 (compact-request delivered-dedup): #71's own
+# mechanism (`compact-delivered.json`, keyed by a ticket-completion message
+# hash) and this job's `handled`-set + `_pane_compacting` + QUEUED-state
+# checks are structurally independent but serve the SAME goal -- "one
+# trigger produces exactly one /compact". #71 closes it for job 14/#65's
+# ticket-boundary trigger; this fix closes the identical gap for job 17's
+# OWN ceiling trigger, so neither source can now double-fire against
+# itself, and the pre-existing `handled` set still keeps them from
+# double-firing against EACH OTHER within the same sweep.
 # --------------------------------------------------------------------------- #
 
 COMPACT_HARD_CEILING = 300_000     # tokens -- deliberately BETWEEN job 14's
@@ -4439,11 +4506,13 @@ COMPACT_HARD_CEILING = 300_000     # tokens -- deliberately BETWEEN job 14's
                                    # (400K); a true backstop, so it must not
                                    # sit so high that a session dies of
                                    # neglect waiting for it
-COMPACT_CEILING_RETRY_S = 5 * 60   # wait this long after a send before
-                                   # considering a retry -- gives a queued
-                                   # /compact real time to reach the head of
-                                   # a continuously-busy session's own queue
-COMPACT_CEILING_MAX_ATTEMPTS = 3   # same cap shape as job 15 / job 12
+
+# `state['compact_ceiling'][sid]["status"]` value while a `/compact` has been
+# typed and is awaiting confirmation (context drop) or a demonstrated loss
+# (session replaced) -- see the #72 section comment above. Deliberately its
+# OWN sentinel (not job 15's shared `COMPACT_STALE_PENDING_CONFIRM`) since
+# job 17's state entries are now dicts carrying `cwd`, a distinct shape.
+COMPACT_CEILING_QUEUED = "queued"
 
 COMPACTING_MARKER = "Compacting conversation"
 
@@ -4459,7 +4528,8 @@ def _pane_compacting(captured):
 
 def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                          send_fn=None, ceiling=None, handled=None):
-    """Job 17 — see the section comment above.
+    """Job 17 — see the section comments above (#69 for the job itself, #72
+    for this state machine).
 
     Local, cheap checks (dedup state, current context -- read off the
     transcript file, no tmux round-trip) run BEFORE any tmux call, mirroring
@@ -4474,6 +4544,13 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
     second `/compact` into the same pane. This is the concrete regression
     lock for "the ticket-boundary path stays primary and this backstop never
     double-fires against it" (#69 acceptance).
+
+    #72: a QUEUED claim is NEVER resent on a timer and NEVER permanently
+    given up -- it only resolves via CONSUMED (context confirmed below the
+    ceiling) or FAILED (the claim's `cwd` now belongs to a different, newer
+    session -- a demonstrated delivery loss, detected in a pre-pass before
+    any pane is even visited). See the section comment for the full
+    rationale.
 
     Only once a session is at/above `ceiling` (default `COMPACT_HARD_CEILING`,
     env `AIRULESET_COMPACT_HARD_CEILING`) is a tmux round-trip made at all --
@@ -4498,14 +4575,35 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
         except ValueError:
             ceiling = COMPACT_HARD_CEILING
     compacted = state.get("compact_ceiling") or {}
-    attempts_map = state.get("compact_ceiling_attempts") or {}
-    sent_at_map = state.get("compact_ceiling_sent_at") or {}
     logs = []
 
     def _save():
         state["compact_ceiling"] = compacted
-        state["compact_ceiling_attempts"] = attempts_map
-        state["compact_ceiling_sent_at"] = sent_at_map
+
+    # #72 PRE-PASS: a demonstrated delivery LOSS is the ONLY legitimate
+    # resend trigger -- detected here, independent of which (if any) live
+    # tmux pane the main loop below happens to visit this sweep. A QUEUED
+    # claim whose recorded `cwd` no longer resolves to the SAME session id
+    # means the process that held our typed `/compact` in its own input
+    # queue is gone (a restart always mints a fresh session id) -- the
+    # keystroke is lost with it. Dropping the stale claim here lets the
+    # main loop's normal absent-state eligibility check pick the new
+    # session up fresh, producing exactly ONE new send.
+    for stale_sid, entry in list(compacted.items()):
+        if not isinstance(entry, dict) or entry.get("status") != COMPACT_CEILING_QUEUED:
+            continue                          # unrecognized/legacy shape --
+                                               # leave it, main loop below
+                                               # treats it as fresh-eligible
+        cwd = entry.get("cwd") or ""
+        tinfo = find_active_transcript(projects_dir, cwd) if cwd else None
+        current_sid = tinfo[0].stem if tinfo else None
+        if current_sid == stale_sid:
+            continue                          # same session -- still
+                                               # genuinely queued, untouched
+        compacted.pop(stale_sid, None)
+        _save()
+        logs.append("FAILED (compact-ceiling) %s -> delivery lost (session "
+                    "replaced), resending once for the new session" % cwd)
 
     for pid, cwd, cmd in _reconcile_candidate_panes(run):
         tinfo = find_active_transcript(projects_dir, cwd)
@@ -4516,28 +4614,25 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
         if handled is not None and sid in handled:
             continue                          # job 14/15 already compacted
                                                # this sid THIS sweep (#69)
-        claim = compacted.get(sid)
-        if claim is True:
-            continue                          # gave up for good -- never retry
-        ctx = transcript_current_context(tpath)
-        retry_now = False
-        if claim == COMPACT_STALE_PENDING_CONFIRM:
+        entry = compacted.get(sid)
+        if isinstance(entry, dict) and entry.get("status") == COMPACT_CEILING_QUEUED:
+            # #72: cheap, local, no tmux round-trip for the common (still
+            # above ceiling) case -- NEVER resend here, no matter how long
+            # this has been queued. The only way out is CONSUMED (below) or
+            # FAILED (the pre-pass above, on a LATER sweep).
+            ctx = transcript_current_context(tpath)
             if ctx < ceiling:
                 compacted.pop(sid, None)
-                attempts_map.pop(sid, None)
-                sent_at_map.pop(sid, None)
                 _save()
                 loc = _pane_location(pid, run) or pid
-                logs.append("CLEARED (compact-ceiling) %s -> context "
-                            "confirmed below ceiling, eligible again" % loc)
-                continue
-            sent_at = sent_at_map.get(sid, 0)
-            if (now - sent_at) < COMPACT_CEILING_RETRY_S:
-                continue                      # still waiting -- no log (common)
-            retry_now = True                  # retry window elapsed, still high
-        else:
-            if ctx < ceiling:
-                continue                      # under the ceiling -- no log (common)
+                logs.append("CONSUMED (compact-ceiling) %s -> compact "
+                            "verified (context confirmed below ceiling), "
+                            "eligible again" % loc)
+            continue                          # still queued+high, or just
+                                               # consumed -- never send here
+        ctx = transcript_current_context(tpath)
+        if ctx < ceiling:
+            continue                          # under the ceiling -- no log (common)
         loc = _pane_location(pid, run) or pid
         if pane_in_mode(pid, run):
             logs.append("skip in-mode (compact-ceiling) %s %d" % (loc, ctx))
@@ -4577,31 +4672,10 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
                 continue
             send_continue(pid, COMPACT_TEXT, run)
             tag = "compact-ceiling"
-        attempts = attempts_map.get(sid, 0) + 1
-        if attempts >= COMPACT_CEILING_MAX_ATTEMPTS:
-            compacted[sid] = True
-            attempts_map.pop(sid, None)
-            sent_at_map.pop(sid, None)
-            _save()
-            logs.append("GAVE UP (%s) %s ctx=%d after %d attempts"
-                        % (tag, loc, ctx, attempts))
-            if send_fn is not None:
-                send_fn(
-                    "⚠️ **%s** (%s) — kontext ostáva nad tvrdým stropom "
-                    "(%d tokenov) aj po %d pokusoch o /compact. Skontroluj "
-                    "session ručne." % (project_label(cwd), loc, ctx,
-                                        COMPACT_CEILING_MAX_ATTEMPTS),
-                    owner=pane_owner(pid, run) or None,
-                    dedup_key="compact-ceiling-giveup:%s" % sid,
-                    dry_run=dry_run)
-            continue
-        attempts_map[sid] = attempts
-        sent_at_map[sid] = now
-        compacted[sid] = COMPACT_STALE_PENDING_CONFIRM
+        compacted[sid] = {"status": COMPACT_CEILING_QUEUED, "cwd": cwd}
         _save()
-        logs.append("OK (%s) %s ctx=%d -> compacted (attempt %d/%d)%s"
-                    % (tag, loc, ctx, attempts, COMPACT_CEILING_MAX_ATTEMPTS,
-                       " retry" if retry_now else ""))
+        logs.append("OK (%s) %s ctx=%d -> /compact sent, awaiting consumption"
+                    % (tag, loc, ctx))
     return logs
 
 
