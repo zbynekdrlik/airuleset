@@ -5939,6 +5939,18 @@ GOAL_STALL_INTERVAL_S = 15 * 60     # min spacing between nudges
 GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
 
 
+def goal_templates_path():
+    """`~/.claude/skills/autopilot/SKILL.md` — the INSTALLED autopilot skill,
+    resolved at CALL time (same reasoning as `hooks_settings_path()`).
+
+    Deliberately the installed copy, never a repo checkout: the isolated
+    sub-dev users (marek / david / montalu) have no `~/devel/airuleset`, and
+    the installed skill is by definition the text their `/autopilot` actually
+    prints — so it is the only source that can never disagree with what a
+    session was armed from."""
+    return Path.home() / ".claude" / "skills" / "autopilot" / "SKILL.md"
+
+
 def goal_template_norm(text):
     """The comparable form of a `/goal` line — see the GOAL_DRIFT section.
 
@@ -6952,7 +6964,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False,
-             goal_rearm_enabled=False, long_turn_enabled=False):
+             goal_rearm_enabled=False, long_turn_enabled=False,
+             goal_templates_path=None):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -7073,6 +7086,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           LAST so jobs 14/15/17 get first crack at the same pane, and
           skips any sid they compacted this sweep (`handled`) or that
           holds an outstanding shared claim (#78).
+          When `goal_templates_path` is ALSO given, the same job carries a
+          THIRD shape — STALE TEMPLATE (#64): `/goal` reads the autopilot
+          template once, at arm time, so a template change pushed to the
+          fleet leaves every RUNNING loop evaluating the old stop
+          conditions forever (which also starves compaction, since #58's
+          ticket-boundary report is what triggers it). A pane whose goal is
+          provably ARMED but whose payload no longer matches the shipped
+          template is re-armed with the current text — identity by EXACT
+          hash of a NORMALIZED form (citations / backtick spans /
+          punctuation dropped), never a similarity threshold, since two
+          CURRENT variants measure closer together than one variant does to
+          its own three-week-old version. Only a session OBSERVED matching
+          a template on an earlier sweep is ever re-armed, and only with
+          the SAME variant it already ran (the authority profile is never
+          re-resolved), so a goal the user wrote is untouchable by
+          construction rather than by threshold (`_goal_template_drift`).
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -7887,7 +7916,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += goal_rearm(now, run, state, send_fn=send_fn,
                                dry_run=dry_run, projects_dir=projects_dir,
                                handled=compact_handled_this_sweep,
-                               sleep_fn=sleep_fn)
+                               sleep_fn=sleep_fn,
+                               templates_path=goal_templates_path)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 

@@ -2508,7 +2508,8 @@ def cmd_watchdog(args):
     `--verbose` is kept for any additional debug output a caller wants later."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
-                          compact_requests_path, hooks_settings_path)
+                          compact_requests_path, hooks_settings_path,
+                          goal_templates_path)
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only dev1 fans out over ssh to
     # merge them. `os.uname().nodename` is the same "which host am I" check
@@ -2537,6 +2538,11 @@ def cmd_watchdog(args):
                     # coordinator-only one (it was montalu's stream that
                     # lost its loop twice in a day).
                     goal_rearm_enabled=True,
+                    # …and its STALE-TEMPLATE shape (#64) reads the skill
+                    # `install` actually deployed on THIS box — the sub-dev
+                    # users have no repo checkout, and the installed copy is
+                    # by definition the text their own /autopilot prints.
+                    goal_templates_path=str(goal_templates_path()),
                     # Job 21 (#84) likewise runs on EVERY managed box — a
                     # multi-hour turn starves compaction, question delivery
                     # and the keystroke queue of THAT session, wherever it
