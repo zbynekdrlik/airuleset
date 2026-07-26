@@ -139,6 +139,19 @@ class TestInjection(TestCase):
         self.assertIn("airuleset:autopilot=auto-merge", ctx)
         self.assertIn("pr-merge-policy", ctx)
 
+    def test_fable_gate_injects_the_tier_reference(self):
+        # #92 item 2 moved the tier/pricing/policy-history layer OUT of the
+        # always-on model-awareness module and INTO the fable-advisor skill.
+        # Running the budget gate IS the action that means "I am deciding a
+        # tier right now" — the moved content must load on it, or the move
+        # repeats the silent-delete failure #91 exists to prevent.
+        ctx = injected(run({"command": "python3 ~/devel/airuleset/airuleset.py fable-gate"},
+                           tmpdir=self.tmpdir))
+        self.assertIsNotNone(ctx, "fable-gate must load the tier reference")
+        # strings that now exist ONLY in the skill body, in no always-on module
+        self.assertIn("Fable 5 $10/$50", ctx)
+        self.assertIn("Dormant — the Fable-everywhere MAX-PERFORMANCE mode", ctx)
+
     def test_unrelated_command_injects_nothing(self):
         r = run({"command": "ls -la && echo hello"}, tmpdir=self.tmpdir)
         self.assertEqual(r.returncode, 0)
