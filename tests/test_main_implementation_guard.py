@@ -183,6 +183,63 @@ class MainImplementationGuard(unittest.TestCase):
         out = self._run(bypass="legacy")
         self.assertEqual(out.returncode, 0, out.stderr)
 
+    # ---- #38: the transcript LAGS the live turn -> stale-model false block ----
+
+    def test_model_switch_marker_after_last_assistant_entry_fails_open(self):
+        # LIVE incident (2026-07-25, session 2d02a127, transcript lines
+        # 38913-38935): the user switched /model Fable -> Opus 5, the very next
+        # Write was BLOCKED as "runs on FABLE". Replaying the real transcript
+        # prefix showed why: at PreToolUse the CURRENT turn's assistant entry
+        # is not flushed yet, so the newest `"model"` in the file is still the
+        # PREVIOUS turn's Fable one. CC's own `/model` stdout marker is the
+        # only in-file evidence of the switch — it must win over the older
+        # assistant entry.
+        tx = (transcript("claude-fable-5")
+              + _entry("user", "<local-command-stdout>Set model to \x1b[1m"
+                               "Opus 5 (1M context) (default)\x1b[22m and saved "
+                               "as your default for new sessions"
+                               "</local-command-stdout>") + "\n"
+              + json.dumps({"type": "pr-link"}) + "\n"
+              + json.dumps({"type": "bridge-session"}) + "\n")
+        out = self._run(transcript_text=tx)
+        self.assertEqual(out.returncode, 0,
+                         "stale Fable read after a /model switch: "
+                         + out.stdout + out.stderr)
+
+    def test_model_switch_marker_TO_fable_still_blocks(self):
+        # The same marker in the other direction must keep the guard armed —
+        # widening the detection must not open a hole.
+        tx = (transcript("claude-opus-5")
+              + _entry("user", "<local-command-stdout>Set model to \x1b[1m"
+                               "Fable 5\x1b[22m and saved as your default for "
+                               "new sessions</local-command-stdout>") + "\n")
+        out = self._run(transcript_text=tx)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("FABLE", out.stderr)
+
+    def test_quoted_foreign_model_in_tool_result_is_not_the_session_model(self):
+        # The raw `grep -oE '"model"…'` matched ANY occurrence in the tail —
+        # including a tool_result that quotes ANOTHER transcript. The incident
+        # session was doing exactly that (measuring per-message usage+model
+        # across transcripts). Same structural fix the goal-armed detector
+        # already uses: top-level entries only.
+        tx = (transcript("claude-opus-5")
+              + json.dumps({"type": "user", "message": {"content": [
+                  {"tool_use_id": "t1", "type": "tool_result",
+                   "content": '{"type":"assistant","message":{"model":'
+                              '"claude-fable-5","role":"assistant"}}'}]}})
+              + "\n")
+        out = self._run(transcript_text=tx)
+        self.assertEqual(out.returncode, 0,
+                         "a QUOTED foreign transcript decided the model: "
+                         + out.stdout + out.stderr)
+
+    def test_plain_fable_main_still_blocked_after_the_38_fix(self):
+        # regression guard: no switch marker, no quoting — the ordinary
+        # Fable-main case #32 exists for must still block.
+        out = self._run(transcript_text=transcript("claude-fable-5"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
     def test_threshold_env_tunable(self):
         env = dict(os.environ, AIRULESET_FABLE_EDIT_MAX="100000")
         sid = "t-mg-env-" + uuid.uuid4().hex[:6]
