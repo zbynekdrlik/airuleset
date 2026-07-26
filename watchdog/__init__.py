@@ -5792,16 +5792,16 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None):
     if not _await_typed(pid, text, run, sleep_fn, want=True):
         return False                       # never rendered — never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
-    cap = capture_pane(pid, run, lines=40)
-    itext2 = _input_line_text(cap)
-    if _typed_landed(text, itext2):
-        # swallowed submit (the #36 agent-strip class) — ONE corrective
-        # Escape+Enter, never a second bare Enter, never two Escapes.
+    if _await_typed(pid, text, run, sleep_fn, want=False):
+        # STILL in the box after the same bounded settle window — a genuinely
+        # swallowed submit (the #36 agent-strip class). ONE corrective
+        # Escape+Enter, never a second bare Enter, never two Escapes. The
+        # poll matters: checking immediately read a WORKING submit as a
+        # swallowed one and fired this Escape into a turn that had just
+        # started (live, 2026-07-26).
         run(["tmux", "send-keys", "-t", pid, "Escape"])
         run(["tmux", "send-keys", "-t", pid, "Enter"])
-        cap = capture_pane(pid, run, lines=40)
-        itext3 = _input_line_text(cap)
-        if _typed_landed(text, itext3):
+        if _await_typed(pid, text, run, sleep_fn, want=False):
             return False
     return True
 
