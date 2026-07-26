@@ -165,12 +165,26 @@ CB_UNKNOWN_CHROME_DRAFT_CAP = (
     "❯ rozpisany draft text\n"
     "──────────\n"
     "⧉  upomienky-prehlad\n"
-    "  ctx ███░  caveman:lite\n")
+    "  ctx ███░  caveman:lite  › stashed\n")
 # The whole capture IS chrome — no boundary line exists under EITHER
 # strategy. Distinct from "busy" (a real boundary found, just not `❯`-shaped).
 CB_ALL_CHROME_NO_BOX_CAP = ("  ctx ███░  caveman:lite\n"
                             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
                             "● main\n")
+
+# --------------------------------------------------------------------------- #
+# #67 (2026-07-26) — a draft-holding pane is no longer a dead end: job 14
+# tries `deliver_with_stash` instead of skipping forever. A capture already
+# showing the `› stashed` marker means some OTHER command already occupies
+# the ONE stash slot — stashing over it would silently destroy it, so THAT
+# is the one legitimate "skip and retry" case (zero keystrokes, same as the
+# pre-#67 behavior). A capture with NO stash marker is the free-slot case —
+# `deliver_with_stash` is actually attempted, scripted via `cap_seq` below.
+# --------------------------------------------------------------------------- #
+CB_DRAFT_STASH_OCCUPIED_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  › stashed\n"
+CB_STASH_BARE_CAP = "● Hotovo.\n❯\n  ctx ███░  › stashed\n"
+CB_STASH_TYPED_CAP = "● Hotovo.\n❯ /compact\n  ctx ███░\n"
+CB_STASH_SUBMITTED_CAP = "● Baking…\n✳ Baking… (2s · esc to interrupt)\n  ctx ███░\n"
 
 
 class CompactFakeTmux:
@@ -180,10 +194,12 @@ class CompactFakeTmux:
     panes_by_sid directly, same injection pattern as
     deliver_discord_replies)."""
 
-    def __init__(self, captured, in_mode=False):
+    def __init__(self, captured, in_mode=False, cap_seq=()):
         self.captured = captured
         self.in_mode = in_mode
+        self.cap_seq = list(cap_seq)
         self.sent = []
+        self._cap_calls = 0
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
@@ -195,7 +211,19 @@ class CompactFakeTmux:
             self.sent.append(argv)
             return ""
         if "capture-pane" in j:
-            return self.captured
+            # #67 — job 14 never re-captures BEFORE `deliver_with_stash` (it
+            # is handed the ALREADY-known `captured` value directly, same as
+            # `panes_by_sid` provides it), so every REAL capture-pane call
+            # here is one of `deliver_with_stash`'s own internal re-captures
+            # — no "first call = self.captured" special case needed (unlike
+            # job 15's RestartFakeTmux, which DOES take its own first
+            # capture-pane call). An empty cap_seq (every pre-#67 test)
+            # preserves the old fixed-`self.captured` behavior exactly.
+            if not self.cap_seq:
+                return self.captured
+            idx = min(self._cap_calls, len(self.cap_seq) - 1)
+            self._cap_calls += 1
+            return self.cap_seq[idx]
         return ""
 
     def typed_texts(self):
@@ -219,70 +247,104 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return str(Path(d.name) / "compact-requests.json")
 
-    def _go(self, captured, in_mode=False, dry_run=False, seed=True, path=None):
+    def _go(self, captured, in_mode=False, dry_run=False, seed=True, path=None,
+           cap_seq=(), state=None, send_fn=None):
         path = path or self._p()
         if seed:
             wd.record_compact_request(self.SID, "/home/x/proj", path=path)
-        tmux = CompactFakeTmux(captured, in_mode=in_mode)
+        tmux = CompactFakeTmux(captured, in_mode=in_mode, cap_seq=cap_seq)
         panes_by_sid = {self.SID: (self.PANE, captured)}
-        state = {}
+        state = {} if state is None else state
         logs = wd.compact_ticket_boundary(time.time(), tmux, state, panes_by_sid,
-                                          dry_run=dry_run, path=path)
-        return tmux, logs, path
+                                          dry_run=dry_run, path=path,
+                                          send_fn=send_fn)
+        return tmux, logs, path, state
 
     def test_idle_pane_gets_compact_typed(self):
-        tmux, logs, path = self._go(CB_IDLE_CAP)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
 
     def test_success_removes_the_request_dedup(self):
-        tmux, logs, path = self._go(CB_IDLE_CAP)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP)
         self.assertEqual(wd.load_compact_requests(path), {})
 
     def test_busy_pane_is_skipped_and_request_kept_for_retry(self):
-        tmux, logs, path = self._go(CB_BUSY_CAP)
+        tmux, logs, path, _ = self._go(CB_BUSY_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("busy" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
-    def test_draft_pane_is_never_typed_over(self):
-        tmux, logs, path = self._go(CB_DRAFT_CAP)
+    # ------------------------------------------------------------------- #
+    # #67 (2026-07-26) — a draft-holding pane is no longer a dead end: job 14
+    # tries deliver_with_stash instead of skipping forever. The occupied-slot
+    # case is unchanged in OUTCOME (zero keystrokes, request kept for
+    # retry) — only the REASON changes, since the pre-#67 code never even
+    # tried to look at the stash slot.
+    # ------------------------------------------------------------------- #
+
+    def test_draft_with_occupied_stash_slot_is_skipped_and_kept_for_retry(self):
+        tmux, logs, path, state = self._go(CB_DRAFT_STASH_OCCUPIED_CAP)
         self.assertEqual(tmux.sent, [])
-        self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertTrue(any("skip draft (stash occupied)" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
+        self.assertEqual(state["compact_stash_skips"][self.SID], 1)
+
+    def test_draft_with_free_stash_slot_gets_stash_delivered(self):
+        tmux, logs, path, state = self._go(
+            CB_DRAFT_CAP,
+            cap_seq=[CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP, CB_STASH_SUBMITTED_CAP])
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash)")
+                            for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertNotIn(self.SID, state.get("compact_stash_skips", {}))
 
     def test_unknown_chrome_below_box_is_reported_as_draft_not_busy(self):
-        # #46 live incident (job 14 is one of the jobs the ticket names).
-        tmux, logs, path = self._go(CB_UNKNOWN_CHROME_DRAFT_CAP)
+        # #46 live incident (job 14 is one of the jobs the ticket names). The
+        # fixture ALSO carries an occupied stash slot (#67) so the assertion
+        # stays about kind-classification, not stash mechanics.
+        tmux, logs, path, _ = self._go(CB_UNKNOWN_CHROME_DRAFT_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("draft" in ln for ln in logs), logs)
         self.assertFalse(any("skip busy" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_no_boundary_at_all_is_logged_as_no_input_line_not_busy(self):
-        tmux, logs, path = self._go(CB_ALL_CHROME_NO_BOX_CAP)
+        tmux, logs, path, _ = self._go(CB_ALL_CHROME_NO_BOX_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip no-input-line" in ln for ln in logs), logs)
         self.assertFalse(any("skip busy" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_open_dialog_is_skipped(self):
-        tmux, logs, path = self._go(CB_DIALOG_CAP)
+        tmux, logs, path, _ = self._go(CB_DIALOG_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("dialog" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_in_mode_pane_is_skipped(self):
-        tmux, logs, path = self._go(CB_IDLE_CAP, in_mode=True)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, in_mode=True)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("in-mode" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_dry_run_never_sends_keys_or_consumes_the_request(self):
-        tmux, logs, path = self._go(CB_IDLE_CAP, dry_run=True)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, dry_run=True)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any(ln.startswith("READY") for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_dry_run_never_attempts_stash_on_a_draft(self):
+        # deliver_with_stash performs REAL tmux sends unconditionally (it has
+        # no dry_run awareness) — the caller MUST gate it before ever calling
+        # in, exactly like the pre-existing send_continue dry_run gate.
+        tmux, logs, path, state = self._go(CB_DRAFT_CAP, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY (compact-request, draft)")
+                            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+        self.assertEqual(state.get("compact_stash_skips", {}), {})
 
     def test_no_pending_requests_is_a_noop(self):
         path = self._p()
@@ -301,13 +363,35 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.assertTrue(any("no-pane" in ln for ln in logs), logs)
 
     def test_exact_keystrokes_text_then_enter_only(self):
-        tmux, logs, path = self._go(CB_IDLE_CAP)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP)
         self.assertEqual(tmux.keys(), ["/compact", "Enter"])
 
     def test_no_two_consecutive_escapes_ever_sent(self):
         for cap in (CB_IDLE_CAP, CB_BUSY_CAP, CB_DRAFT_CAP, CB_DIALOG_CAP):
-            tmux, _, _ = self._go(cap)
+            tmux, _, _, _ = self._go(cap)
             self.assertTrue(tmux.no_consecutive_escapes())
+
+    def test_stash_skip_counter_pings_owner_every_nth_consecutive_skip(self):
+        # #67 acceptance: a permanently occupied stash slot must never rot
+        # silently — the owner is pinged once every
+        # COMPACT_STASH_SKIP_PING_EVERY consecutive occupied-skips.
+        sent = []
+
+        def fake_send(body, **kw):
+            sent.append((body, kw))
+            return "sent"
+
+        path = self._p()
+        state = {}
+        for _ in range(wd.COMPACT_STASH_SKIP_PING_EVERY - 1):
+            self._go(CB_DRAFT_STASH_OCCUPIED_CAP, path=path, seed=True,
+                    state=state, send_fn=fake_send)
+        self.assertEqual(sent, [])
+        self._go(CB_DRAFT_STASH_OCCUPIED_CAP, path=path, seed=True,
+                state=state, send_fn=fake_send)
+        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(state["compact_stash_skips"][self.SID],
+                         wd.COMPACT_STASH_SKIP_PING_EVERY)
 
     def test_multiple_pending_requests_each_handled_independently(self):
         path = self._p()

@@ -2056,12 +2056,25 @@ def _seed_context_transcript(projects_dir, cwd, sid, ctx_tokens, idle_s=0,
     return p
 
 
+# #67 (2026-07-26) — job 15's own stash-around-a-draft fixtures. A capture
+# already showing the `› stashed` marker means some OTHER command already
+# occupies the ONE stash slot (a legitimate skip, zero keystrokes); a
+# capture with no marker is the free-slot case, scripted step-by-step via
+# `cap_seq` to exercise deliver_with_stash's full C-s / type / Enter
+# sequence followed by job 15's own `_wait_for_compact_return` poll.
+CS_DRAFT_STASH_OCCUPIED_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  › stashed\n"
+CS_STASH_BARE_CAP = "● Hotovo.\n❯\n  ctx ███░  › stashed\n"
+CS_STASH_TYPED_CAP = "● Hotovo.\n❯ /compact\n  ctx ███░\n"
+CS_STASH_SUBMITTED_CAP = "● Baking…\n✳ Baking… (2s · esc to interrupt)\n  ctx ███░\n"
+
+
 class TestCompactStaleContext(unittest.TestCase):
     CWD = "/home/newlevel/devel/demo"
     PANE = "%9"
 
     def _go(self, ctx_tokens, idle_s, initial_captured=MR_IDLE_CAP, cap_seq=(),
-           state=None, dry_run=False, in_mode=False, now=None, sid="sess-abc"):
+           state=None, dry_run=False, in_mode=False, now=None, sid="sess-abc",
+           send_fn=None):
         now = time.time() if now is None else now
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
@@ -2070,7 +2083,8 @@ class TestCompactStaleContext(unittest.TestCase):
                                initial_captured, cap_seq=cap_seq, in_mode=in_mode)
         state = {} if state is None else state
         logs = wd.compact_stale_context(now, tmux, state, dry_run=dry_run,
-                                        projects_dir=proj, sleep_fn=lambda s: None)
+                                        projects_dir=proj, sleep_fn=lambda s: None,
+                                        send_fn=send_fn)
         return tmux, logs, state
 
     def test_below_threshold_context_is_skipped(self):
@@ -2114,16 +2128,76 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("busy" in ln for ln in logs), logs)
 
-    def test_draft_pane_is_never_typed_over(self):
+    # ------------------------------------------------------------------- #
+    # #67 (2026-07-26) — a draft-holding pane is no longer a dead end: job 15
+    # tries deliver_with_stash instead of skipping forever. The occupied-slot
+    # case keeps the pre-#67 OUTCOME (zero keystrokes, retried next sweep) —
+    # only the REASON changes, since the pre-#67 code never even looked at
+    # the stash slot.
+    # ------------------------------------------------------------------- #
+
+    def test_draft_with_occupied_stash_slot_is_skipped_and_kept_for_retry(self):
         tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
                                      wd.COMPACT_MIN_IDLE_S + 10,
-                                     initial_captured=MR_DRAFT_CAP)
+                                     initial_captured=CS_DRAFT_STASH_OCCUPIED_CAP)
         self.assertEqual(tmux.sent, [])
-        self.assertTrue(any("draft" in ln for ln in logs), logs)
+        self.assertTrue(any("skip draft (stash occupied)" in ln for ln in logs), logs)
+        self.assertNotIn("sess-abc", state.get("compact_stale", {}))
+        self.assertEqual(state["compact_stash_skips"]["sess-abc"], 1)
+
+    def test_draft_with_free_stash_slot_gets_stash_delivered(self):
+        tmux, logs, state = self._go(
+            wd.COMPACT_CONTEXT_THRESHOLD + 1, wd.COMPACT_MIN_IDLE_S + 10,
+            initial_captured=MR_DRAFT_CAP,
+            cap_seq=[CS_STASH_BARE_CAP, CS_STASH_TYPED_CAP,
+                    CS_STASH_SUBMITTED_CAP, MR_IDLE_CAP])
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-stale, stash)")
+                            for ln in logs), logs)
+        self.assertEqual(state["compact_stale"]["sess-abc"],
+                         wd.COMPACT_STALE_PENDING_CONFIRM)
+        self.assertNotIn("sess-abc", state.get("compact_stash_skips", {}))
+
+    def test_dry_run_never_attempts_stash_on_a_draft(self):
+        tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     wd.COMPACT_MIN_IDLE_S + 10,
+                                     initial_captured=MR_DRAFT_CAP, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY (compact-stale, draft)")
+                            for ln in logs), logs)
+        self.assertEqual(state.get("compact_stash_skips", {}), {})
+
+    def test_stash_skip_counter_pings_owner_every_nth_consecutive_skip(self):
+        sent = []
+
+        def fake_send(body, **kw):
+            sent.append((body, kw))
+            return "sent"
+
+        state = {}
+        for _ in range(wd.COMPACT_STASH_SKIP_PING_EVERY - 1):
+            self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1, wd.COMPACT_MIN_IDLE_S + 10,
+                    initial_captured=CS_DRAFT_STASH_OCCUPIED_CAP, state=state,
+                    send_fn=fake_send)
+        self.assertEqual(sent, [])
+        self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1, wd.COMPACT_MIN_IDLE_S + 10,
+                initial_captured=CS_DRAFT_STASH_OCCUPIED_CAP, state=state,
+                send_fn=fake_send)
+        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(state["compact_stash_skips"]["sess-abc"],
+                         wd.COMPACT_STASH_SKIP_PING_EVERY)
 
     def test_unknown_chrome_below_box_is_reported_as_draft_not_busy(self):
-        # #46 live incident, same class as job 12's.
-        cap = StructuralInputLineDetection.UNKNOWN_CHROME_DRAFT_CAP
+        # #46 live incident, same class as job 12's. ALSO carries an
+        # occupied stash slot (#67) so the assertion stays about
+        # kind-classification, not stash mechanics.
+        cap = (
+            "● Predošlá práca hotová.\n"
+            "──────────\n"
+            "❯ rozpisany draft text\n"
+            "──────────\n"
+            "⧉  upomienky-prehlad\n"
+            "  ctx ███░  caveman:lite  › stashed\n")
         tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
                                      wd.COMPACT_MIN_IDLE_S + 10,
                                      initial_captured=cap)
