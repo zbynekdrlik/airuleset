@@ -701,7 +701,6 @@ class DispatchRatioNudge80(unittest.TestCase):
 
     def _run(self, sid, command="gh issue view 42", n=None, agent_id=None,
              tool="Bash", armed=True, extra_env=None):
-        helper = MainImplementationGuard()
         env = dict(os.environ)
         env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = str(3 if n is None else n)
         if extra_env:

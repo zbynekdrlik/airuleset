@@ -71,6 +71,11 @@ def scan(root, days=7, now=None):
     by_hour = defaultdict(_empty_row)
     by_hour_model = defaultdict(_empty_row)
     side = defaultdict(_empty_row)
+    # #80: MAIN-agent tool-call counts per hour. The lever behind the burn is
+    # the NUMBER of main-agent turns (each re-sends the whole context), so
+    # the Bash:Agent ratio is the metric — counted here, in the pass that is
+    # already walking every assistant entry, rather than by a second parser.
+    by_hour_tools = defaultdict(lambda: [0, 0])       # hour -> [bash, agent]
     files = 0
     lines = 0
     for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
@@ -119,6 +124,18 @@ def scan(root, days=7, now=None):
                 day = local_t.strftime("%Y-%m-%d")
                 hour = local_t.strftime("%Y-%m-%dT%H:00")
                 sc = bool(e.get("isSidechain"))
+                if not sc:
+                    blocks = msg.get("content")
+                    if isinstance(blocks, list):
+                        counts = by_hour_tools[hour]
+                        for b in blocks:
+                            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                                continue
+                            nm = b.get("name")
+                            if nm == "Bash":
+                                counts[0] += 1
+                            elif nm in ("Agent", "Task"):
+                                counts[1] += 1
                 for d, k in (
                     (agg, model), (by_day, day), (by_proj, proj),
                     (by_day_model, day + "|" + tr),
@@ -143,6 +160,8 @@ def scan(root, days=7, now=None):
         "by_hour_model": dict(sorted(_dump(by_hour_model).items())),
         "by_project": _dump(by_proj, top=12),
         "main_vs_sidechain": _dump(side),
+        "by_hour_main_tools": {k: {"bash": v[0], "agent": v[1]}
+                               for k, v in sorted(by_hour_tools.items())},
     }
 
 
@@ -292,6 +311,7 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
                 for k, v in data["by_hour_model"].items() if k.startswith(prefix)}
     msgs = row["msgs"]
     avg_ctx = int(round((row["cache_r"] + row["cache_w"]) / msgs)) if msgs else 0
+    tools = data.get("by_hour_main_tools", {}).get(hour_key) or {}
     return {
         "ts": start.isoformat(),
         "host": host or os.uname().nodename,
@@ -301,6 +321,12 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
         "msgs": msgs,
         "avg_ctx": avg_ctx,
         "by_model": {k: round(v, 4) for k, v in by_model.items()},
+        # #80: the dispatch-ratio inputs — MAIN-agent Bash calls vs Agent/Task
+        # dispatches in this hour. `main_bash / main_agent` IS the acceptance
+        # metric ("under 5:1"), now readable from the file instead of from a
+        # hand-run script over a 23MB transcript.
+        "main_bash": int(tools.get("bash", 0)),
+        "main_agent": int(tools.get("agent", 0)),
     }
 
 
@@ -569,6 +595,8 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     total_usd = 0.0
     total_msgs = 0
     weighted_ctx_sum = 0.0
+    total_main_bash = 0
+    total_main_agent = 0
     for name, row in (host_rows or {}).items():
         if row is None or row == {}:
             per_host[name] = {"error": "no data"}
@@ -585,17 +613,26 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         usd = float(row.get("usd", 0.0) or 0.0)
         msgs = int(row.get("msgs", 0) or 0)
         avg_ctx = int(row.get("avg_ctx", 0) or 0)
+        # #80: a box that has not been pushed yet sends no main_bash/
+        # main_agent — count it as zero, never crash on the missing key.
+        main_bash = int(row.get("main_bash", 0) or 0)
+        main_agent = int(row.get("main_agent", 0) or 0)
         per_host[name] = {"usd": round(usd, 4), "msgs": msgs, "avg_ctx": avg_ctx,
+                          "main_bash": main_bash, "main_agent": main_agent,
                           "by_model": row.get("by_model") or {}}
         total_usd += usd
         total_msgs += msgs
         weighted_ctx_sum += avg_ctx * msgs
+        total_main_bash += main_bash
+        total_main_agent += main_agent
     out = {
         "ts": ts,
         "per_host": per_host,
         "total_usd": round(total_usd, 4),
         "total_msgs": total_msgs,
         "weighted_avg_ctx": int(round(weighted_ctx_sum / total_msgs)) if total_msgs else 0,
+        "total_main_bash": total_main_bash,
+        "total_main_agent": total_main_agent,
     }
     if weekly_pct is not None:
         out["weekly_pct"] = weekly_pct
