@@ -111,7 +111,8 @@ def goal_armed_transcript(model="claude-opus-4-8"):
 
 class MainImplementationGuard(unittest.TestCase):
     def _run(self, tool="Edit", content=BIG, model="claude-fable-5",
-             agent_id=None, transcript_text=None, sid=None, bypass=None):
+             agent_id=None, transcript_text=None, sid=None, bypass=None,
+             command=None):
         sid = sid or ("t-mg-" + uuid.uuid4().hex[:8])
         with TemporaryDirectory() as d:
             tp = str(Path(d) / "sess.jsonl")
@@ -123,9 +124,13 @@ class MainImplementationGuard(unittest.TestCase):
                           else "/tmp/airuleset-fable-exec-ok-%s" % sid)
                 Path(marker).write_text("")
                 self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
-            ti = ({"file_path": "/x/app.py", "old_string": "a",
-                   "new_string": content} if tool == "Edit"
-                  else {"file_path": "/x/app.py", "content": content})
+            if tool == "Bash":
+                ti = {"command": command if command is not None else content}
+            elif tool == "Edit":
+                ti = {"file_path": "/x/app.py", "old_string": "a",
+                      "new_string": content}
+            else:
+                ti = {"file_path": "/x/app.py", "content": content}
             payload = {"session_id": sid, "hook_event_name": "PreToolUse",
                        "tool_name": tool, "tool_input": ti,
                        "transcript_path": tp}
@@ -270,6 +275,165 @@ class MainImplementationGuard(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stderr)
 
 
+class MainBashGuard(unittest.TestCase):
+    """#66: `Bash` is now ALSO guarded in a goal-armed/Fable MAIN — measured
+    2026-07-26 (loop_health.py): gatekeeper's main agent ran 1222 Bash calls
+    vs only 97 subagent dispatches in one hour, each call re-sending the
+    whole (212K-avg) context. An ALLOW-LIST of short, constant-output
+    gh/git/airuleset/tmux/systemctl coordination commands always passes; a
+    BLOCK-LIST of bulk read/search/build/test/log-scrape commands is
+    rejected ONLY while goal-armed/Fable; anything matching NEITHER list is
+    ambiguous and is ALLOWED (conservative — never break a legitimate gh/git
+    call the loop depends on). A subagent (agent_id set) is NEVER blocked,
+    regardless of the command."""
+
+    # ---- ALLOW-LIST: must pass even while goal-armed ----
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    def _plain(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    def test_gh_pr_view_allowed_while_armed(self):
+        out = self._armed("gh pr view 42")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_gh_issue_create_allowed_while_armed(self):
+        out = self._armed('gh issue create -t "T" -F body.md -l bug')
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_gh_run_view_allowed_while_armed(self):
+        out = self._armed("gh run view 12345")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_git_status_allowed_while_armed(self):
+        out = self._armed("git status")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_git_log_oneline_bounded_allowed_while_armed(self):
+        out = self._armed("git log --oneline -5")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_git_rev_parse_allowed_while_armed(self):
+        out = self._armed("git rev-parse HEAD")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_git_fetch_allowed_while_armed(self):
+        out = self._armed("git fetch origin")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_airuleset_py_allowed_while_armed(self):
+        out = self._armed("python3 ~/devel/airuleset/airuleset.py notify --run-card")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_tmux_allowed_while_armed(self):
+        out = self._armed("tmux send-keys -t main 'hello' Enter")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_systemctl_user_allowed_while_armed(self):
+        out = self._armed("systemctl --user status api-watchdog.timer")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- BLOCK-LIST: rejected ONLY while goal-armed ----
+
+    def test_repo_grep_sweep_blocked_while_armed(self):
+        out = self._armed("grep -rn 'TODO' .")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("subagent", out.stderr.lower())
+
+    def test_rg_sweep_blocked_while_armed(self):
+        out = self._armed("rg -n 'pattern' src/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_find_sweep_blocked_while_armed(self):
+        out = self._armed("find . -name '*.py'")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cat_source_file_blocked_while_armed(self):
+        out = self._armed("cat airuleset.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_head_source_file_blocked_while_armed(self):
+        out = self._armed("head -100 airuleset.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_pytest_run_blocked_while_armed(self):
+        out = self._armed("python3 -m pytest tests/ -q")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cargo_test_blocked_while_armed(self):
+        out = self._armed("cargo test")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_npm_test_blocked_while_armed(self):
+        out = self._armed("npm test")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_journalctl_scrape_blocked_while_armed(self):
+        out = self._armed("journalctl -u api-watchdog -n 500")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_docker_logs_scrape_blocked_while_armed(self):
+        out = self._armed("docker logs some-container")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    # ---- not armed / not Fable: block-list commands still ALLOWED ----
+
+    def test_grep_sweep_allowed_when_not_armed(self):
+        out = self._plain("grep -rn 'TODO' .")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_pytest_allowed_when_not_armed(self):
+        out = self._plain("python3 -m pytest tests/ -q")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- ambiguous (neither list) -> conservative ALLOW even while armed ----
+
+    def test_ambiguous_command_allowed_while_armed(self):
+        out = self._armed("git diff --stat")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_gh_pr_diff_ambiguous_allowed_while_armed(self):
+        out = self._armed("gh pr diff 42")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- subagent is NEVER blocked, even for a sweep, even goal-armed ----
+
+    def test_subagent_bash_sweep_never_blocked(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
+                          agent_id="aWORKER2",
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- bypass marker works for Bash too ----
+
+    def test_bypass_marker_allows_blocked_bash_command(self):
+        sid = "t-mg-bash-bypass-" + uuid.uuid4().hex[:6]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
+                          sid=sid, bypass="new",
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- Fable-main (no goal armed) also blocks the same way ----
+
+    def test_fable_main_bash_sweep_blocked(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
+                          model="claude-fable-5")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+
 class TestWiringAndSkill(unittest.TestCase):
     def test_hook_exists_and_wired_for_edit_and_write(self):
         self.assertTrue(HOOK.exists())
@@ -280,6 +444,14 @@ class TestWiringAndSkill(unittest.TestCase):
                              if mm.get("matcher") == tool])
             self.assertIn("block-main-implementation.sh", ms,
                           "guard missing for PreToolUse(%s)" % tool)
+
+    def test_hook_wired_for_bash_too(self):
+        # #66: Bash is now ALSO guarded (goal-armed/Fable main only)
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        ms = json.dumps([mm for mm in cfg["hooks"]["PreToolUse"]
+                         if mm.get("matcher") == "Bash"])
+        self.assertIn("block-main-implementation.sh", ms,
+                      "guard missing for PreToolUse(Bash)")
         # the OLD filename must be gone from the wiring — this is a rename,
         # not an addition of a second hook.
         self.assertNotIn("block-fable-main-implementation.sh",
