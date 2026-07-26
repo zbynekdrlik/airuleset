@@ -137,6 +137,22 @@ LT_OTHER_QUEUED_CAP = (
     "  ctx ███░\n")
 
 
+def _isolate_compact_state(testcase):
+    """#78 — every `/compact` sender consults the SHARED claims file
+    unconditionally, and the live systemd watchdog runs this repo's WORKING
+    TREE every 60s on this box, so a test touching the real
+    `~/.claude/compact-claims.json` would race a production job. Returns the
+    temp dir so a caller can put its own fixtures beside it."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    for name, fname in (("compact_claims_path", "claims.json"),
+                        ("compact_sync_log_path", "sync.log")):
+        p = m.patch.object(wd, name, return_value=Path(d.name) / fname)
+        p.start()
+        testcase.addCleanup(p.stop)
+    return Path(d.name)
+
+
 class LTFakeTmux:
     """Minimal `run` fake — same shape as CompactFakeTmux (test_compact_request)
     but for a job that is handed `panes_by_sid` directly and never captures on
@@ -211,17 +227,8 @@ class TestQueuedCompactGuardJob14(unittest.TestCase):
     SID = "sess-lt14"
 
     def setUp(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        self.claims = Path(d.name) / "claims.json"
-        p1 = m.patch.object(wd, "compact_claims_path", return_value=self.claims)
-        p1.start()
-        self.addCleanup(p1.stop)
-        p2 = m.patch.object(wd, "compact_sync_log_path",
-                            return_value=Path(d.name) / "sync.log")
-        p2.start()
-        self.addCleanup(p2.stop)
-        self.reqs = str(Path(d.name) / "compact-requests.json")
+        d = _isolate_compact_state(self)
+        self.reqs = str(d / "compact-requests.json")
 
     def _go(self, captured):
         wd.record_compact_request(self.SID, "/home/x/proj", path=self.reqs)
@@ -249,16 +256,7 @@ class TestQueuedCompactGuardDeliverNow(unittest.TestCase):
     CWD = "/home/x/proj"
 
     def setUp(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        p1 = m.patch.object(wd, "compact_claims_path",
-                            return_value=Path(d.name) / "claims.json")
-        p1.start()
-        self.addCleanup(p1.stop)
-        self.log = Path(d.name) / "sync.log"
-        p2 = m.patch.object(wd, "compact_sync_log_path", return_value=self.log)
-        p2.start()
-        self.addCleanup(p2.stop)
+        self.log = _isolate_compact_state(self) / "sync.log"
 
     def _go(self, captured):
         tmux = LTFakeTmux(captured)
@@ -273,38 +271,10 @@ class TestQueuedCompactGuardDeliverNow(unittest.TestCase):
         self.assertIn("queued-compact", self.log.read_text())
 
 
-class TestQueuedCompactGuardJob17(unittest.TestCase):
-    """Job 17 — compact_hard_ceiling (the one sender that deliberately types
-    into a BUSY pane, so it is the most exposed to this duplicate)."""
-
-    SID = "sess-lt17"
-
-    def _go(self, captured):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / (self.SID + ".jsonl")
-        tpath.write_text("{}\n")
-        tmux = LTFakeTmux(captured)
-        with m.patch.object(wd, "list_claude_panes",
-                            return_value=[("%9", "/home/x/proj")]), \
-             m.patch.object(wd, "find_active_transcript",
-                            return_value=(tpath, time.time())), \
-             m.patch.object(wd, "transcript_current_context",
-                            return_value=900_000), \
-             m.patch.object(wd, "_pane_claude_proc_fingerprint",
-                            return_value=None):
-            logs = wd.compact_hard_ceiling(time.time(), tmux, {})
-        return tmux, logs
-
-    def test_pane_with_a_queued_compact_gets_no_second_one(self):
-        tmux, logs = self._go(LT_LIVE_QUEUED_CAP)
-        self.assertEqual(tmux.sent, [])
-        self.assertTrue(any("queued-compact" in ln for ln in logs), logs)
-
-    def test_busy_pane_with_nothing_queued_still_gets_one(self):
-        # the guard must not break job 17's whole reason to exist
-        tmux, logs = self._go(LT_BUSY_NO_QUEUE_CAP)
-        self.assertIn("/compact", tmux.typed_texts())
+# Jobs 15 and 17 are exercised against their OWN established harness
+# (RestartFakeTmux + _seed_context_transcript) in test_watchdog.py — see
+# TestCompactStaleContext / TestCompactHardCeiling there — rather than a
+# second, divergent fake being invented here.
 
 
 # --------------------------------------------------------------------------- #

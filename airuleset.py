@@ -2536,7 +2536,12 @@ def cmd_watchdog(args):
                     # dead /goal is a per-session failure, not a
                     # coordinator-only one (it was montalu's stream that
                     # lost its loop twice in a day).
-                    goal_rearm_enabled=True)
+                    goal_rearm_enabled=True,
+                    # Job 21 (#84) likewise runs on EVERY managed box — a
+                    # multi-hour turn starves compaction, question delivery
+                    # and the keystroke queue of THAT session, wherever it
+                    # runs. Detection only, so it never types into a pane.
+                    long_turn_enabled=True)
     for line in logs:
         print(line)
 

@@ -4452,6 +4452,19 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     if mhash:
                         mark_compact_delivered(sid, mhash, path=delivered_path)
                 continue
+        if _pane_has_queued_compact(captured):
+            # #84 — an unexecuted `/compact` is already queued in this pane;
+            # it is what will satisfy THIS boundary request, so drop the
+            # request rather than leaving it pending for a duplicate send.
+            logs.append("skip queued-compact (compact-request) %s" % loc)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+                if handled is not None:
+                    handled.add(sid)
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
+            continue
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
             # stash it around the /compact delivery instead of skipping
@@ -4595,6 +4608,12 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
     if draft:
         _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
         return False
+    if _pane_has_queued_compact(captured):
+        # #84 — the pane already holds an unexecuted `/compact`; a second one
+        # would only answer "Not enough messages to compact" when the queue
+        # finally drains. The queued one IS the handling.
+        _log_compact_sync("SKIP queued-compact sid=%s cwd=%s" % (sid, cwd))
+        return True
     # kind is "input" (bare, or the queued-messages placeholder already
     # normalized to bare) or "busy" — BOTH are safe to send into here (see
     # the section comment: a short send-keys queues reliably even on a busy
@@ -4838,6 +4857,9 @@ def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
         if _pane_has_bg_agent(captured):
             logs.append("skip bg-agent (compact-stale) %s %d" % (loc, ctx))
             continue
+        if _pane_has_queued_compact(captured):
+            logs.append("skip queued-compact (compact-stale) %s %d" % (loc, ctx))
+            continue                        # #84 — one is already pending
         if draft:
             # #67 — try the stash-around delivery instead of skipping forever.
             if dry_run:
@@ -5063,6 +5085,104 @@ COMPACT_CEILING_STUCK_CYCLES = 30
 
 COMPACTING_MARKER = "Compacting conversation"
 
+# --------------------------------------------------------------------------- #
+# #84 (2026-07-26 live gk incident) — reading the rows CC renders DIRECTLY
+# ABOVE the input box. Two independent consumers share this ONE walk:
+#
+#   * the QUEUED-COMPACT guard (`_pane_has_queued_compact`) — a pane that
+#     already has a `/compact` submitted-but-unexecuted must never be sent a
+#     second one. CC drains its type-ahead queue only where a turn actually
+#     ENDS, so during a long turn the queued commands just pile up and then
+#     fire back-to-back: the first really compacts, the rest answer "Not
+#     enough messages to compact". That is the duplicate-compact spam.
+#
+#   * the LONG-TURN detector (`pane_turn_elapsed`, job 21) — CC's spinner row
+#     carries the turn's own elapsed time.
+#
+# The walk starts at the input box and moves UP through blank spacer rows,
+# the box's own top separator, and the queued `❯ …` rows; the FIRST other
+# content row it meets is the spinner (if the pane is running a turn at all)
+# and also terminates the queue. That adjacency requirement is what keeps a
+# conversation that merely QUOTES a panel (a session working on this very
+# ticket) from being read as a live queue — real content below the quoted
+# rows stops the walk before it ever reaches them. Everything BELOW the box
+# (the agent strip, whose activity label is ARBITRARY model-generated text —
+# the #36 scar — plus the statusline and mode hint) is peeled by
+# `_above_input_box` and is never even looked at.
+#
+# Known, accepted limitation (the safe direction): a pane whose conversation
+# ends with quoted `❯ /compact` rows IMMEDIATELY above the box would read as
+# queued and skip one compaction. A missed compaction self-heals on the next
+# sweep as the viewport scrolls; a missed GUARD is the duplicate this exists
+# to kill.
+# --------------------------------------------------------------------------- #
+
+_QUEUED_COMPACT_RX = re.compile(r"^❯\s+/compact\s*$")
+
+# CC's spinner: `· Germinating… (2h 40m 36s · ↓ 69.3k tokens)`,
+# `✳ Baking… (4m 2s · esc to interrupt)`, `✳ Baking… (7s · …)`. Anchored on
+# the ellipsis + parenthesised duration CC always renders, so a line of prose
+# that merely mentions a duration is not a spinner.
+_TURN_ELAPSED_RX = re.compile(
+    r"…\s*\(\s*(?:(\d+)\s*h\s*)?(?:(\d+)\s*m\s*)?(\d+)\s*s\b")
+
+
+def _above_box_scan(captured, max_rows=25):
+    """Walk UP from the input box — see the section comment.
+
+    Returns `(queued_rows, spinner_row)`: every `❯ …` row contiguously above
+    the box (outermost last), and the first non-queued content row met, or
+    None when the walk runs out of region first. Bounded by `max_rows` so a
+    pathological capture can never make this walk the whole transcript."""
+    rows = [ln.strip() for ln in _above_input_box(captured or "").splitlines()]
+    queued = []
+    n = 0
+    for ln in reversed(rows):
+        if not ln or _is_separator_line(ln):
+            continue                       # spacer / the box's own top border
+        n += 1
+        if n > max_rows:
+            return queued, None
+        if ln.startswith("❯"):
+            queued.append(ln)
+            continue
+        return queued, ln                  # the spinner (or whatever is there)
+    return queued, None
+
+
+def _pane_has_queued_compact(captured):
+    """True if the pane ALREADY holds a `/compact` waiting to execute (#84).
+    Every `/compact` sender consults this immediately before its own send —
+    it composes with, never replaces, the shared claim (#78) and the
+    proc fingerprint (#82/#83): those track what THIS watchdog typed, while
+    this reads what the PANE actually shows, whoever put it there."""
+    queued, _spinner = _above_box_scan(captured)
+    return any(_QUEUED_COMPACT_RX.match(ln) for ln in queued)
+
+
+def pane_turn_elapsed(captured):
+    """How long the pane's CURRENT turn has been running, in seconds — read
+    off CC's own spinner row — or None when no turn is running (or the row
+    carries no elapsed time yet).
+
+    Deliberately a PANE read, not a transcript read. The #84 forensic
+    analysis showed CC logged the 2h40m incident as THREE internal turns,
+    each continued by the armed `/goal` loop's Stop hook REJECTING the stop —
+    and the input queue drained at NONE of those boundaries, only at the
+    user's manual interrupt. A transcript-boundary-based duration would
+    therefore have reported three short turns and missed the incident
+    entirely. The pane's label runs from the last genuine EXTERNAL input,
+    which is exactly the quantity that matters: how long the queue has been
+    unable to drain."""
+    _queued, spinner = _above_box_scan(captured)
+    if not spinner:
+        return None
+    mm = _TURN_ELAPSED_RX.search(spinner)
+    if not mm:
+        return None
+    h, mi, s = mm.group(1), mm.group(2), mm.group(3)
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + int(s)
+
 
 def _pane_compacting(captured):
     """True if the pane's OWN current text shows CC's "Compacting
@@ -5283,6 +5403,13 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
             logs.append("skip already-compacting (compact-ceiling) %s %d"
                         % (loc, ctx))
             continue
+        if _pane_has_queued_compact(captured):
+            # #84 — this job is the one sender that deliberately types into a
+            # BUSY pane, so it is the most exposed to stacking duplicates on
+            # a long turn that never drains its queue.
+            logs.append("skip queued-compact (compact-ceiling) %s %d"
+                        % (loc, ctx))
+            continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
             logs.append("skip no-input-line (compact-ceiling) %s %d" % (loc, ctx))
@@ -5326,6 +5453,133 @@ def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
         _save()
         logs.append("OK (%s) %s ctx=%d -> /compact sent, awaiting consumption"
                     % (tag, loc, ctx))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Job 21 — LONG-TURN WATCH (#84, 2026-07-26 live gatekeeper incident).
+#
+# The watchdog could only ever see CONTEXT SIZE. But a turn that simply RUNS
+# for hours is a fault state of its own, independent of how big the context
+# is: while it runs nothing compacts, no question is delivered, and every
+# keystroke anyone sends just piles up in CC's type-ahead queue. The live
+# incident: ONE turn at 2h40m, three `/compact` queued behind it, context at
+# 398K, and nothing moved until the user manually interrupted.
+#
+# WHY THE PANE AND NOT THE TRANSCRIPT. The forensic read of that session
+# (posted on #84) is what settles this. CC logged those 2h40m as THREE
+# internal turns — 13:25→14:36, 14:36→15:30, 15:30→15:44 — each ended by the
+# armed `/goal` loop's Stop hook REJECTING the stop and forcing continuation.
+# The input queue drained at NONE of those boundaries; the two queued
+# `/compact` commands sat there from 14:31 and 15:41 until the manual
+# interrupt at 15:44. So "CC drains the queue at a turn boundary" is really
+# "…only where the turn actually ENDS (the Stop is accepted)" — and a
+# detector built on transcript turn boundaries would have seen three ordinary
+# turns and missed this incident completely. The PANE's own elapsed label
+# runs from the last genuine EXTERNAL input, which is precisely the quantity
+# that matters here.
+#
+# (The same read DISPROVED the ticket's original hypothesis: no foreground
+# subagent dispatch was involved. Every `Agent` call in the window returned
+# async within ~100 ms and none was in flight during the long stretch — the
+# turn was a long unbroken chain of correctly-bounded foreground `Bash` CI
+# polls, extended over and over by CI restarting from concurrent merges.)
+#
+# Detection only — this job NEVER sends a keystroke. A long turn may be
+# entirely legitimate (a genuine long CI wait), so the response is ONE
+# deduped Discord ping per incident plus an unconditional log line every
+# sweep, never an interrupt: deciding to break a running turn is the user's
+# call, and interrupting a healthy one is the worse error.
+# --------------------------------------------------------------------------- #
+
+LONG_TURN_THRESHOLD_S = 1800          # 30 min; env AIRULESET_LONG_TURN_S
+# Two sweeps of the SAME turn compute `start = now - elapsed` from a
+# whole-second pane label read at slightly different moments, so the value
+# jitters by a second or two. A generous tolerance keeps that jitter from
+# reading as a new turn (which would re-ping); a genuinely new turn's start
+# is minutes-to-hours away, never within this window.
+LONG_TURN_SAME_TURN_TOLERANCE_S = 300
+
+
+def _human_duration(seconds):
+    """`9636` -> `2h 40m` — the phone-readable form for the ping."""
+    h, rem = divmod(int(seconds), 3600)
+    mins = rem // 60
+    if h:
+        return "%dh %dm" % (h, mins)
+    return "%dm" % mins
+
+
+def long_turn_watch(now, run, state, panes_by_sid, send_fn=None, dry_run=False,
+                    threshold=None, project_by_sid=None, owner_by_sid=None):
+    """Job 21 — see the section comment.
+
+    Reuses the ONE per-sweep capture run_once already took (`panes_by_sid`,
+    the same map jobs 7 and 14 consume), so a sweep costs no extra tmux
+    round-trip for panes that are idle or short-running.
+
+    Every DETECTION is logged unconditionally, every sweep (issue #36's
+    print-always convention) — a long turn that persists must be visible in
+    journalctl for as long as it lasts, not only on the sweep it crossed the
+    threshold. The PING is deduped per (session, turn): the turn's identity
+    is its START (`now - elapsed`, tolerant of read jitter per
+    `LONG_TURN_SAME_TURN_TOLERANCE_S`), so a single incident pings once no
+    matter how many sweeps it spans, while a NEW long turn later pings
+    again. `dry_run` logs exactly as usual but never pings and never records
+    state, mirroring every other job's dry-run contract."""
+    if threshold is None:
+        try:
+            threshold = int(os.environ.get("AIRULESET_LONG_TURN_S",
+                                           LONG_TURN_THRESHOLD_S))
+        except ValueError:
+            threshold = LONG_TURN_THRESHOLD_S
+    project_by_sid = project_by_sid or {}
+    owner_by_sid = owner_by_sid or {}
+    seen = state.get("long_turn") or {}
+    logs = []
+    live = set()
+
+    for sid, (pid, captured) in sorted((panes_by_sid or {}).items()):
+        elapsed = pane_turn_elapsed(captured)
+        if elapsed is None:
+            continue                       # no turn running — nothing to say
+        live.add(sid)
+        start = now - elapsed
+        prev = seen.get(sid) or {}
+        same_turn = abs(start - float(prev.get("start") or 0)) \
+            <= LONG_TURN_SAME_TURN_TOLERANCE_S
+        entry = {"start": start,
+                 "pinged": bool(same_turn and prev.get("pinged"))}
+        if elapsed < threshold:
+            if not dry_run:
+                seen[sid] = entry
+            continue
+
+        label = project_by_sid.get(sid) or _pane_location(pid, run) or pid
+        human = _human_duration(elapsed)
+        logs.append("long-turn %s [%s] elapsed=%ds (%s)"
+                    % (label, sid, elapsed, human))
+        if dry_run or entry["pinged"] or send_fn is None:
+            # `send_fn is None` (a caller with no notify path) must NOT mark
+            # the turn as pinged — nothing was delivered, so a later sweep
+            # with a real send_fn still owes the user this ping.
+            continue
+        status = send_fn(
+            "\U0001f570 **%s** — jeden ťah beží už %s\n"
+            "> Kým beží, nič sa nekompaktuje, otázky sa nedoručujú a "
+            "napísané príkazy čakajú vo fronte. Ak to nie je zámer "
+            "(dlhé čakanie na CI), treba sa pozrieť." % (label, human),
+            owner=owner_by_sid.get(sid) or None,
+            dedup_key="long-turn:%s:%d" % (sid, int(start)),
+            dry_run=dry_run)
+        logs.append("long-turn PING %s [%s] -> %s" % (label, sid, status))
+        entry["pinged"] = True
+        seen[sid] = entry
+
+    if not dry_run:
+        # drop sessions whose turn ended (or whose pane is gone) so the state
+        # file cannot grow without bound across a long-lived watchdog.
+        state["long_turn"] = {k: v for k, v in seen.items() if k in live}
     return logs
 
 
@@ -6440,7 +6694,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False,
-             goal_rearm_enabled=False):
+             goal_rearm_enabled=False, long_turn_enabled=False):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -6561,6 +6815,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           LAST so jobs 14/15/17 get first crack at the same pane, and
           skips any sid they compacted this sweep (`handled`) or that
           holds an outstanding shared claim (#78).
+      (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
+          a turn that simply RUNS for hours is a fault state of its own:
+          nothing compacts, no question is delivered, and every keystroke
+          piles up unexecuted in CC's type-ahead queue. Read from the PANE's
+          own spinner elapsed label (`pane_turn_elapsed`), never from
+          transcript turn boundaries — the live incident was logged by CC as
+          three ordinary turns, each continued by the goal loop's REJECTED
+          Stop, and the queue drained at none of them. Above
+          `LONG_TURN_THRESHOLD_S` (env `AIRULESET_LONG_TURN_S`, default 30
+          min) it logs unconditionally every sweep and sends ONE Discord
+          ping per (session, turn) via the #81 notify path
+          (long_turn_watch). DETECTION ONLY — it never types anything;
+          breaking a running turn is the user's call.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -6572,6 +6839,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     logs = []
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
+    project_by_sid = {}                 # session id -> project label, for job 21's ping
     panes_by_sid = {}                   # session id -> (pane_id, captured), for job 7 reply routing
     account_owner = ""                  # owner to @mention on the account-wide usage alert
 
@@ -6603,6 +6871,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             idle = now - tmtime
             project = project_label(cwd)
             key = tpath.stem                   # session id (stable across grouped panes)
+            project_by_sid[key] = project      # job 21: a human label for the ping
             owner = pane_owner(pid, run)       # @mention the right person for THIS pane
             if owner:
                 owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
@@ -7363,6 +7632,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                sleep_fn=sleep_fn)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
+
+    # Job 21 — LONG-TURN WATCH (#84): only when `long_turn_enabled` is truthy
+    # (cmd_watchdog passes True) — same "wired = on" convention as jobs
+    # 13/14/16/18/19/20. Detection only, so it is safe to run LAST: it takes
+    # no tmux round-trip beyond `_pane_location` for a pane already past the
+    # threshold, and it never types anything, so it cannot interact with any
+    # sender above it. Best-effort.
+    if long_turn_enabled:
+        try:
+            logs += long_turn_watch(now, run, state, panes_by_sid,
+                                    send_fn=send_fn, dry_run=dry_run,
+                                    project_by_sid=project_by_sid,
+                                    owner_by_sid=owner_by_sid)
+        except Exception as e:
+            logs.append("long-turn error: %r" % (e,))
 
     save_state(state_path, state)
     return logs

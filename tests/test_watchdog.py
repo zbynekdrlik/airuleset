@@ -2557,6 +2557,15 @@ class TestCompactStaleContext(unittest.TestCase):
                                      wd.COMPACT_MIN_IDLE_S - 10)
         self.assertEqual(tmux.sent, [])
 
+    def test_queued_compact_in_the_pane_blocks_a_second_one(self):
+        # #84 — see TestCompactHardCeiling's equivalent test.
+        tmux, logs, state = self._go(
+            wd.COMPACT_CONTEXT_THRESHOLD + 100000, wd.COMPACT_MIN_IDLE_S + 10,
+            initial_captured=CEIL_QUEUED_COMPACT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip queued-compact (compact-stale)" in ln
+                            for ln in logs), logs)
+
     def test_qualifying_session_gets_compacted(self):
         tmux, logs, state = self._go(wd.COMPACT_CONTEXT_THRESHOLD + 1,
                                      wd.COMPACT_MIN_IDLE_S + 10,
@@ -3617,6 +3626,14 @@ class RunOnceBurnAlertWiring(unittest.TestCase):
 CEIL_COMPACTING_CAP = ("✻ Compacting conversation… (12s · esc to interrupt)\n"
                        "  ctx ███░  caveman:lite\n")
 
+# #84 — the live gk shape: a long-running turn with `/compact` already queued
+# below the spinner, waiting for a turn boundary that never comes.
+CEIL_QUEUED_COMPACT_CAP = (
+    "· Germinating… (2h 40m 36s · ↓ 69.3k tokens)\n"
+    "  ❯ /compact\n"
+    "❯ \n"
+    "  ctx ███░  caveman:lite\n")
+
 
 class TestCompactHardCeiling(unittest.TestCase):
     CWD = "/home/newlevel/devel/demo-ceiling"
@@ -3667,6 +3684,23 @@ class TestCompactHardCeiling(unittest.TestCase):
                                      initial_captured=MR_IDLE_CAP)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK (compact-ceiling)") for ln in logs), logs)
+
+    # ---- #84: a pane that ALREADY has a /compact queued gets no second one.
+    # This job is the most exposed sender: it deliberately types into a BUSY
+    # pane, and a busy pane is exactly where a queued command sits
+    # unexecuted (CC drains its type-ahead queue only where a turn really
+    # ENDS). Stacking a second one produces "Not enough messages to compact"
+    # when the queue finally drains — the duplicate-compact spam of #84.
+
+    def test_queued_compact_in_the_pane_blocks_a_second_one(self):
+        tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
+                                     initial_captured=CEIL_QUEUED_COMPACT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip queued-compact (compact-ceiling)" in ln
+                            for ln in logs), logs)
+        # …and nothing is claimed, so the session stays eligible once the
+        # queue drains and the context is still above the ceiling.
+        self.assertEqual(state.get("compact_ceiling", {}), {})
 
     def test_exact_keystroke_sequence(self):
         tmux, logs, state = self._go(wd.COMPACT_HARD_CEILING + 1,
