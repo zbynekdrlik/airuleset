@@ -74,18 +74,6 @@ Three DIFFERENT multi-agent surfaces — do not conflate them:
 
 Like `/goal`, only the USER can type `/loop` — a skill prints the line to paste.
 
-#### `/fewer-permission-prompts` skill
-
-Analyzes session history, identifies safe Bash/MCP commands that keep triggering prompts, and suggests allowlist additions. Run periodically (monthly) to reduce friction.
-
-#### `/focus` mode
-
-Hides intermediate tool calls, shows only final results. Useful for long runs where you trust the model to do the right thing.
-
-#### Recaps
-
-Brief summaries of agent activity. Enabled by default. Review before resuming work after a break. Disable via `/config` if noisy.
-
 #### Verification tools
 
 4.8 benefits from explicit verification paths:
@@ -95,10 +83,3 @@ Brief summaries of agent activity. Enabled by default. Review before resuming wo
 
 Wire these into the workflow so Claude can self-verify without asking you to "check it".
 
-#### `--channels` flag
-
-Starts Claude Code with a push-message channel (Discord, Telegram, iMessage). Enables two-way remote control from chat platforms. Use when working away from the terminal.
-
-```bash
-claude --channels plugin:discord@claude-plugins-official
-```

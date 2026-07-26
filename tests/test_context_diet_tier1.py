@@ -179,7 +179,7 @@ class TestNotificationInternalsMoved(TestCase):
             "❓ ASKED",
             "ARMED GOAL",
             "Slovak",
-            "sleep window",
+            "Sleep window",
         ]:
             self.assertIn(keep, t, f"behaviour must stay always-on: {keep}")
 
