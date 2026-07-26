@@ -22,6 +22,7 @@ Context is bounded at TICKET BOUNDARIES instead (piece 2, kept):
      backlog) is a real completion report, so this fires once per batch.
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -38,6 +39,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 import watchdog as wd
+
+
+def _isolate_compact_claims(testcase):
+    """#78 — give this test its OWN isolated compact-claims.json AND
+    compact-sync.log instead of the real `~/.claude/` copies. Unlike the pre-#78
+    compact-delivered.json dedup (only touched when a msg_hash is
+    present), the shared claim gate is consulted UNCONDITIONALLY on every
+    `/compact` send attempt — job 14 iterates every PENDING request
+    regardless of context, and the synchronous #65 path
+    (`deliver_compact_now`) checks it before anything else. The live
+    systemd watchdog executes this repo's WORKING TREE every 60s on THIS
+    box (this repo's own CLAUDE.md) — a test process touching the real
+    file would race a live production job. Call from `setUp` in any test
+    class exercising job 14 or `deliver_compact_now`."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    p = Path(d.name) / "compact-claims-test.json"
+    patcher = m.patch.object(wd, "compact_claims_path", return_value=p)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+    logp = Path(d.name) / "compact-sync-test.log"
+    log_patcher = m.patch.object(wd, "compact_sync_log_path", return_value=logp)
+    log_patcher.start()
+    testcase.addCleanup(log_patcher.stop)
+    return p
 
 
 # --------------------------------------------------------------------------- #
@@ -241,6 +267,9 @@ class CompactFakeTmux:
 class TestCompactTicketBoundary(unittest.TestCase):
     PANE = "%9"
     SID = "sess-abc"
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
 
     def _p(self):
         d = TemporaryDirectory()
@@ -470,6 +499,29 @@ class TestCompactTicketBoundary(unittest.TestCase):
         tmux, logs, path, _ = self._go(CB_IDLE_CAP, delivered_path=delivered_path)
         self.assertIn("/compact", tmux.typed_texts())
 
+    # ----------------------------------------------------------------- #
+    # #78 (2026-07-26 live incident) — the SHARED /compact claim gate:
+    # generalizes #72's job-17-only model to job 14 too. A queued claim
+    # blocks the send REGARDLESS of msg_hash — even a genuinely DIFFERENT
+    # (never-before-seen) hash must not bypass it, which is exactly the
+    # #71 dedup's own blind spot the incident exposed.
+    # ----------------------------------------------------------------- #
+
+    def test_queued_claim_blocks_send_regardless_of_a_different_msg_hash(self):
+        wd.compact_claim_set(self.SID, "/home/x/proj")
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, msg_hash="brand-new-hash")
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("claim-queued" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(path))
+
+    def test_successful_idle_send_sets_the_shared_claim(self):
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP)
+        self.assertIn("/compact", tmux.typed_texts())
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.assertTrue(wd.compact_claim_active(self.SID, "/home/x/proj",
+                                                projects_dir=Path(d.name)))
+
 
 # --------------------------------------------------------------------------- #
 # 2b-1b. #71 (2026-07-26 live incident) — compact_already_delivered /
@@ -570,10 +622,177 @@ def _write_ctx_transcript(base, cwd, sid, ctx_tokens):
     return p
 
 
+def _append_compact_boundary(path, ts=None):
+    """#78 — append a `system`/`compact_boundary` entry (Claude Code's own
+    durable "a real compaction landed" marker) onto an EXISTING transcript
+    file, without disturbing its earlier entries. Real transcripts are
+    append-only."""
+    ts = time.time() if ts is None else ts
+    iso = (datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+          .isoformat().replace("+00:00", "Z"))
+    entry = {"type": "system", "subtype": "compact_boundary", "timestamp": iso}
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+# --------------------------------------------------------------------------- #
+# 2b-1c. #78 (2026-07-26 live incident) — SHARED /compact CLAIM, generalizing
+# #72's job-17-only QUEUED/CONSUMED/FAILED state machine to EVERY sender (the
+# synchronous #65 path, job 14, job 15, job 17). Live proof #71 did NOT fix:
+# a single completed-ticket report triggered the synchronous path TWICE with
+# two DIFFERENT msg_hashes (a Stop-hook rejection regenerated the report);
+# #71's msg_hash dedup saw two "new" boundaries, both queued behind the
+# first send's busy pane, and fired back-to-back once it went idle. The
+# fix: ONE claim per session, resolved ONLY via CONSUMED (a `compact_
+# boundary` transcript entry newer than the send) or FAILED (the claim's
+# cwd now belongs to a different, newer session) — never a timer.
+# --------------------------------------------------------------------------- #
+
+class TestCompactClaimState(unittest.TestCase):
+    """compact_claims_path / compact_claim_set / compact_claim_active — the
+    raw state-store functions, tested directly (mirrors CompactRequestState
+    / TestCompactDeliveredDedup's own direct-unit-test pattern)."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-claims.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_path_resolved_at_call_time(self):
+        with m.patch.dict(os.environ, {"HOME": "/tmp/fake-home-compact-claims"}):
+            self.assertEqual(
+                wd.compact_claims_path(),
+                Path("/tmp/fake-home-compact-claims") / ".claude" /
+                "compact-claims.json")
+
+    def test_no_claim_is_eligible(self):
+        p = self._p()
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+
+    def test_set_then_active_with_no_transcript_stays_queued(self):
+        # unknown/unmeasurable transcript must NEVER resolve the claim --
+        # only positive evidence (a boundary or a session swap) can.
+        p = self._p()
+        self.assertTrue(wd.compact_claim_set("sid-1", "/x", path=p))
+        self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                projects_dir=self._proj()))
+
+    def test_never_resolves_on_elapsed_time_alone(self):
+        # #72's core lesson, generalized: a claim set LONG ago, with no
+        # transcript evidence either way, must STILL read as queued no
+        # matter how much wall-clock time has passed.
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/x", now=time.time() - 100_000, path=p)
+        self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                projects_dir=self._proj()))
+
+    def test_consumed_by_a_newer_compact_boundary_clears_the_claim(self):
+        p = self._p()
+        proj = self._proj()
+        cwd = "/home/x/claimproj"
+        tpath = _write_ctx_transcript(proj, cwd, "sid-1", 1000)
+        send_ts = time.time()
+        wd.compact_claim_set("sid-1", cwd, now=send_ts, path=p)
+        _append_compact_boundary(tpath, ts=send_ts + 5)
+        self.assertFalse(wd.compact_claim_active("sid-1", cwd, path=p,
+                                                 projects_dir=proj))
+        self.assertEqual(wd._load_compact_claims(p), {})
+
+    def test_an_older_compact_boundary_does_not_consume(self):
+        # a boundary from a PRIOR compaction (before this claim was even
+        # set) must never be mistaken for proof of THIS send's success.
+        p = self._p()
+        proj = self._proj()
+        cwd = "/home/x/claimproj2"
+        tpath = _write_ctx_transcript(proj, cwd, "sid-1", 1000)
+        _append_compact_boundary(tpath, ts=time.time() - 100)
+        wd.compact_claim_set("sid-1", cwd, now=time.time(), path=p)
+        self.assertTrue(wd.compact_claim_active("sid-1", cwd, path=p,
+                                                projects_dir=proj))
+
+    def test_session_swap_for_the_claimed_cwd_fails_the_claim(self):
+        # a demonstrated delivery LOSS -- the pane went through a restart
+        # (a NEW, newer transcript now exists for the same cwd) -- is the
+        # ONLY other legitimate resolution, per #72's model generalized.
+        p = self._p()
+        proj = self._proj()
+        cwd = "/home/x/claimproj3"
+        oldp = _write_ctx_transcript(proj, cwd, "sid-old", 1000)
+        os.utime(oldp, (time.time() - 100, time.time() - 100))
+        wd.compact_claim_set("sid-old", cwd, path=p)
+        newp = _write_ctx_transcript(proj, cwd, "sid-new", 1000)
+        os.utime(newp, (time.time(), time.time()))
+        self.assertFalse(wd.compact_claim_active("sid-old", cwd, path=p,
+                                                 projects_dir=proj))
+        self.assertEqual(wd._load_compact_claims(p), {})
+
+    def test_blank_sid_set_is_rejected(self):
+        p = self._p()
+        self.assertFalse(wd.compact_claim_set("", "/x", path=p))
+
+    def test_blank_sid_active_check_is_false(self):
+        p = self._p()
+        self.assertFalse(wd.compact_claim_active("", "/x", path=p,
+                                                 projects_dir=self._proj()))
+
+    def test_load_bad_file_is_treated_as_no_claims(self):
+        p = self._p()
+        Path(p).write_text("not json")
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+
+    def test_later_set_overwrites_earlier_for_the_same_session(self):
+        p = self._p()
+        wd.compact_claim_set("sid-1", "/a", now=1, path=p)
+        wd.compact_claim_set("sid-1", "/b", now=2, path=p)
+        d = wd._load_compact_claims(p)
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d["sid-1"]["cwd"], "/b")
+        self.assertEqual(d["sid-1"]["ts"], 2)
+
+
+class TestTranscriptCompactBoundaryTs(unittest.TestCase):
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_finds_the_newest_boundary(self):
+        p = self._dir() / "s.jsonl"
+        p.write_text("")
+        _append_compact_boundary(p, ts=1_800_000_000.0)
+        _append_compact_boundary(p, ts=1_800_000_100.0)
+        self.assertEqual(wd._transcript_compact_boundary_ts(p), 1_800_000_100.0)
+
+    def test_no_boundary_entries_returns_none(self):
+        p = _write_ctx_transcript(self._dir(), "/x", "sid-1", 500)
+        self.assertIsNone(wd._transcript_compact_boundary_ts(p))
+
+    def test_nonexistent_file_returns_none(self):
+        self.assertIsNone(
+            wd._transcript_compact_boundary_ts(Path("/nonexistent/x.jsonl")))
+
+    def test_ignores_non_boundary_system_entries(self):
+        p = self._dir() / "s.jsonl"
+        with open(p, "w") as f:
+            f.write(json.dumps({"type": "system", "subtype": "stop_hook_summary",
+                                "timestamp": "2026-07-26T13:00:00.000Z"}) + "\n")
+        self.assertIsNone(wd._transcript_compact_boundary_ts(p))
+
+
 class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
     SID = "sess-ctx-1"
     CWD = "/home/x/ctxproj"
     PANE = "%7"
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -658,6 +877,9 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class RunOnceCompactRequestWiring(unittest.TestCase):
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
+
     def _tmp(self):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -795,6 +1017,9 @@ class TestDeliverCompactNow(unittest.TestCase):
     SID = "sess-deliver-1"
     CWD = "/home/newlevel/devel/delivernow"
 
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
+
     def _dir(self):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -872,6 +1097,60 @@ class TestDeliverCompactNow(unittest.TestCase):
     def test_exact_keystrokes_text_then_enter_only(self):
         ok, tmux = self._go(CB_IDLE_CAP)
         self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+
+    # ------------------------------------------------------------------- #
+    # #78 (2026-07-26 live incident) — the SHARED /compact claim gate.
+    # ------------------------------------------------------------------- #
+
+    def test_queued_claim_blocks_a_second_call_and_is_logged(self):
+        # while ANOTHER sender's claim is queued, this call must send
+        # NOTHING (even though the pane is perfectly idle/ready) and must
+        # return True (handled — the outstanding claim resolves this, not
+        # a second send). Every skip decision is logged (#78's own
+        # incident was undebuggable from journalctl for exactly this
+        # reason — the synchronous path's stdout is thrown at /dev/null).
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        wd.compact_claim_set(self.SID, self.CWD)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP claim-queued", log_text)
+
+    def test_successful_send_sets_the_shared_claim_and_logs_it(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(wd.compact_claim_active(self.SID, self.CWD,
+                                                projects_dir=proj))
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SEND", log_text)
+
+    def test_small_context_drop_is_also_logged(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("DROP small-context", log_text)
+
+    def test_no_pane_found_is_also_logged(self):
+        proj = self._dir()      # no transcript written -> no pane resolves
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP no-pane", log_text)
 
 
 # --------------------------------------------------------------------------- #

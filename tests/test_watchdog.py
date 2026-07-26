@@ -1479,6 +1479,30 @@ def tempfile_mkdtemp_cleanup(testcase):
     return tmp.name
 
 
+def _isolate_compact_claims(testcase):
+    """#78 — give this test its OWN isolated compact-claims.json AND
+    compact-sync.log instead of the real `~/.claude/` copies. Unlike the
+    pre-#78 compact-delivered.json dedup (only touched when a msg_hash is
+    present), the shared claim gate is consulted UNCONDITIONALLY on every
+    `/compact` send attempt — so any test exercising job 14/15/17 or the
+    synchronous #65 path would otherwise read/write the REAL files. The
+    live systemd watchdog executes this repo's WORKING TREE every 60s on
+    THIS box (this repo's own CLAUDE.md) — a test process touching the
+    real files would race a live production job. Call from `setUp` in any
+    test class that exercises those code paths."""
+    tmp = tempfile_mkdtemp_cleanup(testcase)
+    p = Path(tmp) / "compact-claims-test.json"
+    patcher = unittest.mock.patch.object(wd, "compact_claims_path", return_value=p)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+    logp = Path(tmp) / "compact-sync-test.log"
+    log_patcher = unittest.mock.patch.object(wd, "compact_sync_log_path",
+                                             return_value=logp)
+    log_patcher.start()
+    testcase.addCleanup(log_patcher.stop)
+    return p
+
+
 # --------------------------------------------------------------------------- #
 # #42 rework — Job 12: MODEL RECONCILE, restart-based. The managed default
 # (MANAGED_MODEL in airuleset.py) only binds a NEW Claude Code session;
@@ -2419,6 +2443,37 @@ def _seed_context_transcript(projects_dir, cwd, sid, ctx_tokens, idle_s=0,
     return p
 
 
+def _append_compact_boundary(path, ts=None):
+    """#78 — append a `system`/`compact_boundary` entry (Claude Code's own
+    durable "a real compaction landed" marker) onto an EXISTING transcript
+    file, without disturbing its earlier entries or the file's mtime.
+    Real transcripts are append-only; this mirrors that instead of
+    `_seed_context_transcript`'s overwrite shortcut."""
+    ts = time.time() if ts is None else ts
+    iso = (datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+          .isoformat().replace("+00:00", "Z"))
+    entry = {"type": "system", "subtype": "compact_boundary", "timestamp": iso}
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _append_usage_entry(path, ctx_tokens, mid):
+    """#78 — append ONE assistant usage entry (a UNIQUE `mid` per call,
+    never reused, so `transcript_current_context`'s "group by the newest
+    message.id" logic never merges entries from different simulated
+    sweeps) onto an EXISTING transcript file, mirroring real append-only
+    growth instead of `_seed_context_transcript`'s overwrite shortcut."""
+    cache_read = ctx_tokens // 2
+    cache_creation = ctx_tokens - cache_read
+    entry = {"type": "assistant", "message": {
+        "id": mid, "model": "claude-opus-5[1m]",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {"cache_read_input_tokens": cache_read,
+                 "cache_creation_input_tokens": cache_creation}}}
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 # #67 (2026-07-26) — job 15's own stash-around-a-draft fixtures. A capture
 # already showing the `› stashed` marker means some OTHER command already
 # occupies the ONE stash slot (a legitimate skip, zero keystrokes); a
@@ -2434,6 +2489,9 @@ CS_STASH_SUBMITTED_CAP = "● Baking…\n✳ Baking… (2s · esc to interrupt)\
 class TestCompactStaleContext(unittest.TestCase):
     CWD = "/home/newlevel/devel/demo"
     PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
 
     def _go(self, ctx_tokens, idle_s, initial_captured=MR_IDLE_CAP, cap_seq=(),
            state=None, dry_run=False, in_mode=False, now=None, sid="sess-abc",
@@ -2651,6 +2709,29 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertNotIn("sess-abc", state.get("compact_stale", {}))
         self.assertTrue(any("CLEARED" in ln for ln in logs), logs)
 
+    # ------------------------------------------------------------------- #
+    # #78 (2026-07-26 live incident) — the SHARED /compact claim gate:
+    # generalizes #72's job-17-only model to job 15 too. A claim already
+    # queued by ANOTHER sender (job 14, job 17, or the synchronous #65
+    # path) blocks job 15's own send THIS sweep, regardless of its own
+    # context/idle qualification.
+    # ------------------------------------------------------------------- #
+
+    def test_another_senders_queued_claim_blocks_job15s_send(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        sid = "sess-abc"
+        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        wd.compact_claim_set(sid, self.CWD)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.compact_stale_context(now, tmux, {}, dry_run=False,
+                                 projects_dir=proj, sleep_fn=lambda s: None)
+        # job 15 would otherwise fully qualify (high context, idle enough,
+        # idle pane) -- the ONLY reason nothing is sent is the shared claim.
+        self.assertEqual(tmux.sent, [])
+
     def test_after_clearing_a_later_regrowth_triggers_again(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
@@ -2658,8 +2739,8 @@ class TestCompactStaleContext(unittest.TestCase):
         sid = "sess-abc"
 
         # sweep 1: qualifies + succeeds — claim set to PENDING-CONFIRM, not True
-        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
-                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        p = _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
+                                     idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
         state = {}
         tmux1 = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
                                 MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
@@ -2676,9 +2757,16 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertEqual(tmux2.sent, [])
         self.assertEqual(state["compact_stale"][sid], wd.COMPACT_STALE_PENDING_CONFIRM)
 
-        # sweep 3: a real new turn landed — context confirmed dropped -> clears
-        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD - 1,
-                                 idle_s=5, now=now)
+        # sweep 3: a real compaction landed — a compact_boundary marker
+        # (#78's proof of CONSUMPTION for the SHARED claim, never a bare
+        # context read) followed by a fresh, lower-context turn. Real
+        # transcripts are append-only, so this APPENDS onto the same file
+        # (never `_seed_context_transcript`'s overwrite) — both this job's
+        # OWN state (context-based) and the shared claim (boundary-based)
+        # clear together, matching real production.
+        _append_compact_boundary(p, ts=time.time())
+        _append_usage_entry(p, wd.COMPACT_CONTEXT_THRESHOLD - 1, mid="msg_after_compact")
+        os.utime(p, (now - 5, now - 5))
         tmux3 = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
         wd.compact_stale_context(now, tmux3, state, dry_run=False,
                                  projects_dir=proj, sleep_fn=lambda s: None)
@@ -2686,8 +2774,9 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertNotIn(sid, state.get("compact_stale", {}))
 
         # sweep 4: a real RE-GROWTH past the threshold — eligible again
-        _seed_context_transcript(proj, self.CWD, sid, wd.COMPACT_CONTEXT_THRESHOLD + 1,
-                                 idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
+        # (the shared claim already resolved CONSUMED in sweep 3).
+        _append_usage_entry(p, wd.COMPACT_CONTEXT_THRESHOLD + 1, mid="msg_regrowth")
+        os.utime(p, (now - wd.COMPACT_MIN_IDLE_S - 10, now - wd.COMPACT_MIN_IDLE_S - 10))
         tmux4 = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
                                 MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP, MR_IDLE_CAP])
         logs4 = wd.compact_stale_context(now, tmux4, state, dry_run=False,
@@ -2765,11 +2854,16 @@ class TestCompactStaleContext(unittest.TestCase):
         self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
         self.assertNotIn("sess-abc", state.get("compact_stale", {}))
 
-    def test_repeated_failures_stop_retrying_after_max_attempts(self):
-        # mirrors job 12's live incident (gk, 2026-07-25): a session that
-        # FAILs verification every sweep must eventually GIVE UP for good
-        # instead of burning a context re-read on every single ~60s sweep
-        # forever.
+    def test_repeated_verify_failures_never_resend_the_shared_claim_blocks_it(self):
+        # #78 generalizes #72's lesson here too: once the FIRST send sets
+        # the SHARED /compact claim, a bounded verification timeout on a
+        # LATER sweep must NOT trigger a resend — the claim only resolves
+        # via CONSUMED (a real compact_boundary) or FAILED (a session
+        # swap), never a mere verification timeout. So the pre-#78
+        # "resend every sweep until MAX_ATTEMPTS, then GIVE UP" path never
+        # runs past sweep 1 anymore: `attempts_map` records exactly ONE
+        # failure and stays there, GIVE UP never fires (unreachable now —
+        # there is nothing left to "give up" on since nothing resends).
         tmp = tempfile_mkdtemp_cleanup(self)
         proj = Path(tmp) / "projects"
         now = time.time()
@@ -2778,21 +2872,18 @@ class TestCompactStaleContext(unittest.TestCase):
                                  idle_s=wd.COMPACT_MIN_IDLE_S + 10, now=now)
         state = {}
         logs = []
-        for _ in range(wd.COMPACT_STALE_MAX_ATTEMPTS):
+        for i in range(wd.COMPACT_STALE_MAX_ATTEMPTS + 2):
             tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
                                    MR_IDLE_CAP, cap_seq=[MR_BUSY_CAP])
             logs = wd.compact_stale_context(now, tmux, state, dry_run=False,
                                             projects_dir=proj, sleep_fn=lambda s: None)
-        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs), logs)
-        self.assertEqual(state["compact_stale_attempts"]["sess-abc"],
-                         wd.COMPACT_STALE_MAX_ATTEMPTS)
-        self.assertTrue(state["compact_stale"]["sess-abc"])
-
-        # one more sweep must not type anything at all — gave up for good
-        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
-        wd.compact_stale_context(now, tmux, state, dry_run=False,
-                                 projects_dir=proj, sleep_fn=lambda s: None)
-        self.assertEqual(tmux.sent, [])
+            if i == 0:
+                self.assertIn("/compact", tmux.typed_texts())
+            else:
+                self.assertEqual(tmux.sent, [], "sweep %d must send nothing" % i)
+        self.assertFalse(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertEqual(state["compact_stale_attempts"]["sess-abc"], 1)
+        self.assertNotIn("sess-abc", state.get("compact_stale", {}))
 
 
 # --------------------------------------------------------------------------- #
@@ -2957,6 +3048,9 @@ class RunOnceNewJobsWiring(unittest.TestCase):
 class RunOnceCompactStaleWiring(unittest.TestCase):
     """Job 15 is ALWAYS wired (no gating param, same shape as job 9's
     goal_autoarm) — run_once must invoke it every sweep, best-effort."""
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
 
     def test_qualifying_session_fires_through_run_once(self):
         tmp = tempfile_mkdtemp_cleanup(self)
@@ -3303,6 +3397,9 @@ class TestCompactHardCeiling(unittest.TestCase):
     PANE = "%9"
     SID = "sess-ceil"
 
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
+
     def _go(self, ctx_tokens, initial_captured=MR_IDLE_CAP, cap_seq=(),
            state=None, dry_run=False, in_mode=False, now=None, sid=None,
            send_fn=None, ceiling=None):
@@ -3583,11 +3680,37 @@ class TestCompactHardCeiling(unittest.TestCase):
         self.assertEqual(tmux2.sent, [])
         self.assertEqual(state2.get("compact_ceiling", {}), {})
 
+    # ------------------------------------------------------------------- #
+    # #78 (2026-07-26 live incident) — the SHARED /compact claim gate,
+    # checked BEFORE this job's OWN #72 compact_ceiling state machine. A
+    # claim already queued by ANOTHER sender (job 14, job 15, or the
+    # synchronous #65 path) blocks job 17's send THIS sweep too, even
+    # though this job's whole point is to back-stop a continuously-busy
+    # session that no other job can touch.
+    # ------------------------------------------------------------------- #
+
+    def test_another_senders_queued_claim_blocks_job17s_send(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        now = time.time()
+        _seed_context_transcript(proj, self.CWD, self.SID,
+                                 wd.COMPACT_HARD_CEILING + 1, idle_s=0, now=now)
+        wd.compact_claim_set(self.SID, self.CWD)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        state = {}
+        wd.compact_hard_ceiling(now, tmux, state, dry_run=False,
+                                projects_dir=proj)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("compact_ceiling", {}), {})
+
 
 class RunOnceCompactHardCeilingWiring(unittest.TestCase):
     """Job 17 is ALWAYS wired (no gating param) -- run_once must invoke it
     every sweep, best-effort, entirely independent of job 14's request file
     and job 15's idle-only threshold."""
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
 
     def test_qualifying_busy_session_fires_through_run_once(self):
         tmp = tempfile_mkdtemp_cleanup(self)
