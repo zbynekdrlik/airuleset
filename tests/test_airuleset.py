@@ -3018,23 +3018,28 @@ class TestManagedModelDefault(TestCase):
 
 
 class TestUltracodeLauncher(TestCase):
-    """apply_ultracode_launcher manages the ~/.bashrc block that launches claude
-    — idempotent, append-or-replace, never clobbers. Ultracode is OPT-IN (#53,
-    2026-07-25): default `claude`/`claude-new` carry NO ultracode settings —
-    only the dedicated `claude-ultracode` escape hatch does (today's OLD
-    default behavior, kept verbatim for deliberate opt-in)."""
+    """apply_ultracode_launcher manages the managed claude launcher (#77):
+    a thin ~/.bashrc block of one-line functions that just exec a SCRIPT
+    (script_path) carrying ALL the actual logic. This is the fix for the
+    bug where a bashrc FUNCTION is parsed once at shell startup and then
+    frozen in that shell's memory forever -- a `push` rewriting .bashrc had
+    ZERO effect on an already-running panel shell, so ultracode (or any
+    future flag change) silently kept resurrecting on every relaunch of a
+    stale shell. Ultracode itself stays OPT-IN (#53, 2026-07-25): only the
+    dedicated `ultracode` mode / `claude-ultracode` function carries it."""
 
     def _tmp(self, content=None):
         from pathlib import Path
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
+        s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
         if content is not None:
             p.write_text(content)
-        return p
+        return p, s
 
     def test_appends_to_existing_bashrc_preserving_content(self):
-        p = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
-        changed = airuleset.apply_ultracode_launcher(p)
+        p, s = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
+        changed = airuleset.apply_ultracode_launcher(p, s)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn("export PATH=$PATH:/x", text)           # preserved
@@ -3043,32 +3048,18 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn(airuleset.ULTRACODE_MARK_START, text)
         self.assertIn(airuleset.ULTRACODE_MARK_END, text)
 
-    def test_idempotent_no_change_second_run(self):
-        p = self._tmp("# my rc\n")
-        self.assertTrue(airuleset.apply_ultracode_launcher(p))
-        self.assertFalse(airuleset.apply_ultracode_launcher(p))   # second run no-op
-
-    def test_block_guarantees_local_bin_on_path(self):
-        # claude installs to ~/.local/bin, which NON-LOGIN interactive shells
-        # (su, tmux default-command, IDE terminals) never get from ~/.profile —
-        # the block itself must ensure it, idempotently (montalu@dev1
-        # "claude: command not found", 2026-07-04).
-        p = self._tmp("# rc\n")
-        airuleset.apply_ultracode_launcher(p)
-        text = p.read_text()
-        self.assertIn('case ":$PATH:" in *":$HOME/.local/bin:"*', text)
-        self.assertIn('PATH="$HOME/.local/bin:$PATH"', text)
-        # the guard must live INSIDE the managed block (so replace updates it)
-        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
-        self.assertIn('.local/bin', block.split(airuleset.ULTRACODE_MARK_END)[0])
+    def test_idempotent_bashrc_no_change_second_run(self):
+        p, s = self._tmp("# my rc\n")
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s))
+        self.assertFalse(airuleset.apply_ultracode_launcher(p, s))  # bashrc no-op
 
     def test_replaces_block_in_place_no_duplicate(self):
-        p = self._tmp("# rc\n")
-        airuleset.apply_ultracode_launcher(p)
+        p, s = self._tmp("# rc\n")
+        airuleset.apply_ultracode_launcher(p, s)
         # tamper inside the block, re-run -> block restored, exactly ONE block
         text = p.read_text().replace("claude-ultracode()", "BROKEN")
         p.write_text(text)
-        airuleset.apply_ultracode_launcher(p)
+        airuleset.apply_ultracode_launcher(p, s)
         out = p.read_text()
         self.assertEqual(out.count(airuleset.ULTRACODE_MARK_START), 1)
         self.assertNotIn("BROKEN", out)
@@ -3076,92 +3067,82 @@ class TestUltracodeLauncher(TestCase):
 
     def test_creates_bashrc_when_absent(self):
         from pathlib import Path
-        p = Path(tempfile.mkdtemp()) / ".bashrc"
-        self.assertTrue(airuleset.apply_ultracode_launcher(p))
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".bashrc"
+        s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s))
         self.assertIn("claude()", p.read_text())
 
     def test_function_not_alias_and_has_plain_escape(self):
-        p = self._tmp()
-        airuleset.apply_ultracode_launcher(p)
+        p, s = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s)
         text = p.read_text()
-        self.assertIn("claude() {", text)                  # function (multi-line since
-        self.assertNotIn("alias claude=", text)            # continue-or-new), not alias
-        self.assertIn("command claude --dangerously-skip-permissions", text)
-        self.assertIn("claude-new()", text)                # fresh-session escape hatch
-        self.assertIn("claude-ultracode() {", text)        # opt-in ultracode escape hatch
-        self.assertIn("claude-plain()", text)              # vanilla escape hatch
+        self.assertIn("claude() {", text)
+        self.assertNotIn("alias claude=", text)
+        self.assertIn("claude-new()", text)
+        self.assertIn("claude-ultracode()", text)
+        self.assertIn("claude-plain()", text)
 
-    def test_default_launcher_has_skip_perms_and_continue(self):
-        p = self._tmp()
-        airuleset.apply_ultracode_launcher(p)
-        # the `claude()` default is continue-or-new: BOTH branches carry
-        # auto-approve; -c only on the continue branch. claude-ultracode()
-        # mirrors the same continue-or-new shape for its own opt-in branch.
-        text = p.read_text()
-        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
+    def test_bashrc_block_has_no_flag_literals_only_script_calls(self):
+        # THE ACCEPTANCE CRITERION (#77): the .bashrc block must contain NO
+        # --settings / --model / --dangerously-skip-permissions literal --
+        # only a call into the managed script. This is what makes a `push`
+        # take effect in an already-running shell: nothing flag-shaped is
+        # frozen in that shell's memory anymore.
+        p, s = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s)
+        block = p.read_text().split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
-        # claude()'s continue branch + claude-ultracode()'s continue branch
-        self.assertEqual(block.count("--dangerously-skip-permissions -c "), 2)
-        # claude x2 + claude-new x1 + claude-ultracode x2
-        self.assertEqual(block.count("--dangerously-skip-permissions"), 5)
-        self.assertIn("compgen -G", block)             # conversation-exists probe
-        # claude-new is skip-perms but NOT ultracode and NOT -c (fresh session)
-        new_line = next(ln for ln in p.read_text().splitlines()
-                        if ln.startswith("claude-new() {"))
-        self.assertIn("--dangerously-skip-permissions", new_line)
-        self.assertNotIn(" -c ", new_line)
+        for literal in ("--settings", "--model", "--dangerously-skip-permissions",
+                        "ultracode\":true", airuleset.MANAGED_MODEL):
+            self.assertNotIn(literal, block, block)
+        self.assertIn(airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name, block)
+        for fn, mode in (("claude", "default"), ("claude-new", "new"),
+                         ("claude-ultracode", "ultracode"), ("claude-plain", "plain")):
+            line = next(ln for ln in block.splitlines() if ln.startswith(f"{fn}() {{"))
+            self.assertIn(f'"$HOME/.claude/{airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name}" {mode} "$@"',
+                          line)
 
-    def test_default_launchers_have_no_ultracode_settings(self):
-        # #53: ultracode used to be baked into EVERY default launch — it kept
-        # silently coming back on every session restart even after the user
-        # turned it off for that session (found repeatedly on restreamer).
-        # Ultracode must now be strictly opt-in: default claude()/claude-new()
-        # carry no ultracode settings at all.
-        p = self._tmp()
-        airuleset.apply_ultracode_launcher(p)
-        text = p.read_text()
-        claude_body = text.split("claude() {", 1)[1].split("\n}\n", 1)[0]
-        self.assertNotIn("ultracode", claude_body)
-        new_line = next(ln for ln in text.splitlines()
-                        if ln.startswith("claude-new() {"))
-        self.assertNotIn("ultracode", new_line)
+    def test_writes_executable_script_at_script_path(self):
+        p, s = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s)
+        self.assertTrue(s.exists())
+        self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
+        self.assertTrue(os.access(s, os.X_OK))
 
-    def test_claude_ultracode_carries_todays_old_default_behavior(self):
-        # claude-ultracode() is the deliberate opt-in escape hatch: exactly
-        # what claude() used to do by default — continue-or-new (-c branch),
-        # skip-perms, ultracode settings, and the model pin, in BOTH branches.
-        p = self._tmp()
-        airuleset.apply_ultracode_launcher(p)
-        text = p.read_text()
-        body = text.split("claude-ultracode() {", 1)[1].split("\n}\n", 1)[0]
-        self.assertEqual(body.count("--settings '{\"ultracode\":true}'"), 2)
-        self.assertEqual(body.count("--dangerously-skip-permissions"), 2)
-        self.assertEqual(body.count("--dangerously-skip-permissions -c "), 1)
-        self.assertIn("compgen -G", body)
-        expected_model = "--model '%s'" % airuleset.MANAGED_MODEL
-        self.assertEqual(body.count(expected_model), 2)
+    def test_script_rewritten_unconditionally_every_call(self):
+        # Unlike the bashrc block (idempotent no-op when unchanged), the
+        # script is ALWAYS (re)written -- so tampering with it (or a stale
+        # copy from a rollback) is self-healed on the very next install/push,
+        # the same unconditional-rewrite guarantee the caveman shim gives.
+        p, s = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s)
+        s.write_text("BROKEN")
+        airuleset.apply_ultracode_launcher(p, s)
+        self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
 
-    def test_model_flag_present_in_all_launch_branches(self):
+    def test_default_launchers_carry_no_ultracode_in_the_script(self):
+        # #53: ultracode used to be baked into EVERY default launch. The
+        # ultracode JSON literal must appear ONLY inside the script's own
+        # `ultracode)` case branch, never in the default/new/plain branches.
+        content = airuleset.render_claude_launch_script()
+        ultracode_branch = content.split("ultracode)", 1)[1].split(";;", 1)[0]
+        self.assertIn('"ultracode":true', ultracode_branch)
+        rest = content.split("ultracode)", 1)[0] + content.split(";;", 1)[-1]
+        self.assertNotIn('"ultracode":true', rest)
+
+    def test_model_flag_present_in_every_mode_except_plain(self):
         # THE BUG (live on gatekeeper): a RESUMED session (-c) silently kept
-        # its OLD model even though settings.json's managed `model` key said
-        # Opus 5[1m] — the launcher never passed --model, so `-c` inherited
-        # whatever the prior transcript was started with. Fix: bake
-        # `--model <MANAGED_MODEL>` into EVERY launch branch (claude()'s
-        # continue branch, claude()'s fresh branch, claude-new(), AND both
-        # branches of claude-ultracode()) at RENDER time, sourced from the
-        # airuleset.py MANAGED_MODEL constant — never left to inherit
-        # whatever a prior session happened to use.
-        p = self._tmp()
-        airuleset.apply_ultracode_launcher(p)
-        text = p.read_text()
-        block = text.split(airuleset.ULTRACODE_MARK_START)[1]
-        block = block.split(airuleset.ULTRACODE_MARK_END)[0]
+        # its OLD model -- the launcher never passed --model, so `-c`
+        # inherited whatever the prior transcript was started with. Fix:
+        # bake `--model <MANAGED_MODEL>` into every mode except the
+        # deliberate vanilla `plain` escape hatch.
+        content = airuleset.render_claude_launch_script()
         expected = "--model '%s'" % airuleset.MANAGED_MODEL
-        self.assertEqual(block.count(expected), 5, block)
-        # claude-plain() is the deliberate vanilla escape hatch — untouched.
-        plain_line = next(ln for ln in text.splitlines()
-                          if ln.startswith("claude-plain() {"))
-        self.assertNotIn("--model", plain_line)
+        # new(x1) + ultracode(if/else x2) + default(if/else x2) = 5
+        self.assertEqual(content.count(expected), 5, content)
+        plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
+        self.assertNotIn("--model", plain_branch)
 
 
 class TestClaudeLauncherContinueOrNew(TestCase):
@@ -3170,9 +3151,10 @@ class TestClaudeLauncherContinueOrNew(TestCase):
     died with "No conversation found to continue" in every new directory
     (david@gk, 2026-07-09), forcing users to know about claude-new."""
 
-    def _run_launcher(self, home, cwd):
+    def _run_launcher(self, home, cwd, fn="claude"):
         bashrc = Path(home) / ".bashrc"
-        airuleset.apply_ultracode_launcher(bashrc)
+        script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
+        airuleset.apply_ultracode_launcher(bashrc, script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir(exist_ok=True)
         stub = stub_dir / "claude"
@@ -3181,7 +3163,7 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         env = {**os.environ, "HOME": str(home),
                "PATH": f"{stub_dir}:{os.environ['PATH']}"}
         r = subprocess.run(
-            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; claude"],
+            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; {fn}"],
             capture_output=True, text=True, env=env)
         return r.stdout
 
@@ -3247,6 +3229,92 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         out = self._run_launcher(home, cwd)
         self.assertNotIn(" -c", out)
         self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
+
+    def test_claude_new_is_skip_perms_but_never_continue_or_ultracode(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")  # a prior convo exists
+        out = self._run_launcher(home, cwd, fn="claude-new")
+        self.assertIn("--dangerously-skip-permissions", out)
+        self.assertNotIn(" -c", out)                  # always fresh, even with a prior convo
+        self.assertNotIn("ultracode", out)
+
+    def test_claude_ultracode_is_the_deliberate_opt_in_escape_hatch(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out = self._run_launcher(home, cwd, fn="claude-ultracode")
+        self.assertIn(" -c", out)
+        self.assertIn('--settings {"ultracode":true}', out)
+        self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
+
+    def test_claude_plain_carries_no_flags_at_all(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher(home, cwd, fn="claude-plain")
+        self.assertEqual(out.strip(), "ARGS:")
+
+    def test_frozen_shell_gets_new_launcher_behavior_without_resourcing(self):
+        # THE BUG (#77): a bashrc FUNCTION is parsed once at shell startup and
+        # then frozen in that shell's memory forever -- a `push` rewriting
+        # .bashrc had ZERO effect on an already-running panel shell (measured
+        # live: two sessions launched HOURS/DAYS after #53 landed still carried
+        # the pre-#53 behavior). The fix: .bashrc holds only a thin wrapper
+        # that execs a SCRIPT, read fresh on every call. Prove it: source
+        # .bashrc ONCE in a persistent shell, observe behavior A, then mutate
+        # ONLY the script file (simulating a `push`) WITHOUT touching that
+        # shell again -- the very next `claude` call in the SAME shell must
+        # already show the new behavior.
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        bashrc = Path(home) / ".bashrc"
+        script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
+        airuleset.apply_ultracode_launcher(bashrc, script)
+        stub_dir = Path(home) / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "claude"
+        stub.write_text('#!/bin/bash\necho "ARGS:$*"\n')
+        stub.chmod(0o755)
+        env = {**os.environ, "HOME": str(home),
+               "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+
+        proc = subprocess.Popen(
+            ["bash"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, env=env, cwd=str(cwd))
+        try:
+            proc.stdin.write(f"source {bashrc}\n")
+            proc.stdin.flush()
+
+            def _run(cmd, marker):
+                proc.stdin.write(f"{cmd}\necho {marker}\n")
+                proc.stdin.flush()
+                lines = []
+                while True:
+                    line = proc.stdout.readline()
+                    if not line or line.strip() == marker:
+                        break
+                    lines.append(line)
+                return "".join(lines)
+
+            before = _run("claude", "__M1__")
+            self.assertNotIn("--v2marker", before)
+
+            # simulate a `push`: rewrite the SCRIPT only. The already-sourced
+            # shell above is NEVER touched again.
+            mutated = script.read_text().replace("exec claude ", "exec claude --v2marker ")
+            self.assertNotEqual(mutated, script.read_text())
+            script.write_text(mutated)
+
+            after = _run("claude", "__M2__")
+            self.assertIn("--v2marker", after, after)
+        finally:
+            proc.stdin.write("exit\n")
+            proc.stdin.flush()
+            proc.wait(timeout=10)
 
 
 class TestDiscordAutopilotNotify(TestCase):
