@@ -99,8 +99,11 @@ class TestModelCombinationFixes(TestCase):
         self.assertNotIn("The primary Claude Code agent runs **Opus 4.8**", t)
 
     def test_unverified_community_numbers_are_labelled(self):
+        # The community advisor-vs-solo cost numbers moved to the fable-advisor
+        # skill with the rest of the justification layer (#92 item 2) — the
+        # HONESTY requirement (labelled UNVERIFIED) travels with them.
         self.assertIn("UNVERIFIED indicative numbers",
-                      read("modules/core/model-awareness.md"))
+                      read("skills/fable-advisor/SKILL.md"))
 
     def test_ticket_validator_has_an_explicit_model_tier(self):
         self.assertIn("model: sonnet", read("agents/ticket-validator.md")[:400])

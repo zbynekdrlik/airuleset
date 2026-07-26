@@ -24,12 +24,22 @@ def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
+# #92 item 2 (2026-07-26): the always-on module keeps ONLY what the model must
+# ACT on (the lineup, the HARD criteria, the gate protocol, the advisor SHAPE).
+# The justification layer it cannot act on — pricing, benchmark citations, the
+# 2026-07-01/02/03 policy history, the DORMANT Fable-everywhere mode, and the
+# hook-internals narrative — moved VERBATIM to the `fable-advisor` skill, which
+# is where a session reasoning about tiers/costs actually loads it. Every lock
+# below that pinned moved text now pins it at its NEW home; nothing was dropped.
+ADVISOR = "skills/fable-advisor/SKILL.md"
+
+
 class TestFableOnHardBudgetGated(TestCase):
     def test_model_awareness_active_policy_is_fable_on_hard(self):
         t = read("modules/core/model-awareness.md")
         self.assertIn(
             "Fable 5 AUTO-escalates on genuinely HARD tasks, budget-gated (ACTIVE policy, 2026-07-03)", t)
-        self.assertIn("reverted the 2026-07-01", t)          # history preserved
+        self.assertIn("reverted the 2026-07-01", read(ADVISOR))   # history preserved (moved home)
         self.assertIn('EXECUTION of settled, scoped code = Sonnet 5 (`model: "sonnet"`)', t)
 
     def test_hard_criteria_are_enumerated(self):
@@ -60,11 +70,17 @@ class TestFableOnHardBudgetGated(TestCase):
         self.assertIn("Execution does NOT escalate to Fable", t)
 
     def test_fable_everywhere_is_dormant_not_active(self):
+        # The dormant policy is a RE-ACTIVATION switch only the user may flip —
+        # nothing to act on every turn, so it lives in the advisor skill now.
+        # The always-on module must NOT re-describe it (that was the point of
+        # the move); the DORMANT record itself must survive verbatim.
         t = read("modules/core/model-awareness.md")
-        self.assertIn("Dormant — the Fable-everywhere MAX-PERFORMANCE mode", t)
-        self.assertIn("re-activate ONLY on the user's explicit say-so", t)
-        self.assertNotIn("MAX-PERFORMANCE mode: Fable 5 everywhere judgment matters (ACTIVE", t)
-        self.assertNotIn("EVERY dispatch where judgment affects the outcome = Fable 5", t)
+        a = read(ADVISOR)
+        self.assertIn("Dormant — the Fable-everywhere MAX-PERFORMANCE mode", a)
+        self.assertIn("re-activate ONLY on the user's explicit say-so", a)
+        for txt in (t, a):
+            self.assertNotIn("MAX-PERFORMANCE mode: Fable 5 everywhere judgment matters (ACTIVE", txt)
+            self.assertNotIn("EVERY dispatch where judgment affects the outcome = Fable 5", txt)
 
     def test_workflow_stage_tiering_gates_fable_stages(self):
         t = read("modules/core/claude-code-tooling.md")
@@ -185,61 +201,78 @@ class TestOpus5EraLineup(TestCase):
 
     def test_main_session_default_recommendation_is_opus_5_not_a_fable_ban(self):
         t = read("modules/core/model-awareness.md")
-        # the pre-existing anchor phrase must survive byte-for-byte
+        a = read(ADVISOR)
+        # the pre-existing anchor phrase must survive byte-for-byte — this one
+        # is ACTIONABLE (it governs every session's model handling), stays inline
         self.assertIn("MAIN interactive session runs whatever the user set via `/model`", t)
         self.assertIn("say so plainly ONCE per session", t)
         self.assertIn("recommend Opus 5", t)
-        self.assertIn("Opus 5 retires that workaround", t)
-        self.assertIn("Sonnet 5 could not reliably carry the coordinator role", t)
+        # WHY Opus 5 replaced the Fable-as-main workaround is justification, not
+        # an instruction — it moved with the rest of the history.
+        self.assertIn("Opus 5 retires that workaround", a)
+        self.assertIn("Sonnet 5 could not reliably carry the coordinator role", a)
         # explicitly NOT a ban — the corrected 2026-07-25 principle
         self.assertIn("This is NOT a ban on Fable as main", t)
-        self.assertNotIn("Fable 5 is BANNED", t)
-        self.assertNotIn("Fable is forbidden", t)
+        for txt in (t, a):
+            self.assertNotIn("Fable 5 is BANNED", txt)
+            self.assertNotIn("Fable is forbidden", txt)
         # the manual-choice clause must survive verbatim (never gated)
         self.assertIn("user's own manual `/model` Fable is not gated", t)
 
     def test_opus_5_is_the_default_tier_with_cursorbench_citation(self):
         t = read("modules/core/model-awareness.md")
+        a = read(ADVISOR)
         self.assertIn("**Opus 5**", t)
         self.assertIn("`claude-opus-5`", t)
-        self.assertNotIn("claude-opus-4-8", t)
-        self.assertIn("within 0.5% of Fable 5 on CursorBench 3.2", t)
-        self.assertIn("HALF the price", t)
-        self.assertIn("https://www.anthropic.com/news/claude-opus-5", t)
+        for txt in (t, a):
+            self.assertNotIn("claude-opus-4-8", txt)
+        # the benchmark citation justifies the tier; it is read when reasoning
+        # about tiers/costs, not on every turn
+        self.assertIn("within 0.5% of Fable 5 on CursorBench 3.2", a)
+        self.assertIn("HALF the price", a)
+        self.assertIn("https://www.anthropic.com/news/claude-opus-5", a)
 
     def test_thinking_defaults_and_fable_cannot_disable_it(self):
-        t = read("modules/core/model-awareness.md")
-        self.assertIn("Opus 5 ships thinking ON by default", t)
-        self.assertIn("a change from 4.8, where it was opt-in", t)
-        self.assertIn("Fable 5 cannot disable thinking at all", t)
-        self.assertIn("structurally higher than Opus", t)
+        a = read(ADVISOR)
+        self.assertIn("Opus 5 ships thinking ON by default", a)
+        self.assertIn("a change from 4.8, where it was opt-in", a)
+        self.assertIn("Fable 5 cannot disable thinking at all", a)
+        self.assertIn("structurally higher than Opus", a)
 
     def test_pricing_is_current(self):
-        t = read("modules/core/model-awareness.md")
-        self.assertIn("Fable 5 $10/$50", t)
-        self.assertIn("Opus 5 $5/$25", t)
-        self.assertIn("cache read $0.50, cache write $6.25 5-min / $10 1-hour", t)
-        self.assertIn("Sonnet 5 $2/$10", t)
-        self.assertIn("Haiku 4.5 $1/$5", t)
+        a = read(ADVISOR)
+        self.assertIn("Fable 5 $10/$50", a)
+        self.assertIn("Opus 5 $5/$25", a)
+        self.assertIn("cache read $0.50, cache write $6.25 5-min / $10 1-hour", a)
+        self.assertIn("Sonnet 5 $2/$10", a)
+        self.assertIn("Haiku 4.5 $1/$5", a)
 
     def test_historical_incident_sections_survive_unchanged(self):
         # July-2026 community reports about Opus 4.8 degradation are a dated
-        # historical record, NOT a stale current-tier reference — must stay.
+        # historical record, NOT a stale current-tier reference — must stay
+        # (at the advisor skill, which is the tier/cost reference surface).
+        a = read(ADVISOR)
+        self.assertIn("community reports of Opus 4.8 degradation", a)
+        self.assertIn("no 4.8 model regression so far", a)
+        self.assertIn("2026-07-01 Fable-everywhere mode burned tokens brutally", a)
+        # the ACTIONABLE half of criterion 5 stays inline: the valve keys on
+        # observed circling, never on assuming the model is broken
         t = read("modules/core/model-awareness.md")
-        self.assertIn("community reports of Opus 4.8 degradation", t)
-        self.assertIn("no 4.8 model regression so far", t)
-        self.assertIn("2026-07-01 Fable-everywhere mode burned tokens brutally", t)
+        self.assertIn("OBSERVED circling", t)
 
     def test_shape_paragraph_cites_the_measured_burn(self):
         t = read("modules/core/model-awareness.md")
-        # the existing SHAPE anchors must survive
+        a = read(ADVISOR)
+        # the existing SHAPE anchors must survive INLINE — the shape is what a
+        # dispatching session has to act on
         self.assertIn("SHAPE — Fable escalation = ADVISOR, never worker", t)
         self.assertIn("re-reads the full conversation context every turn", t)
-        # the new measured-evidence sentence closing the loop (the deferred
-        # session-context-cost.md module is OUT of scope — no reference here)
+        # the measured-evidence sentence is the JUSTIFICATION for that shape
+        # (the deferred session-context-cost.md module is OUT of scope)
         self.assertIn(
-            "Fable running as MAIN (not advisor) accounted for 76% of a ~$13,600 token spend", t)
-        self.assertNotIn("session-context-cost.md", t)
+            "Fable running as MAIN (not advisor) accounted for 76% of a ~$13,600 token spend", a)
+        for txt in (t, a):
+            self.assertNotIn("session-context-cost.md", txt)
 
     def test_header_says_opus_5(self):
         t = read("modules/core/model-awareness.md")
