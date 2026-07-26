@@ -572,31 +572,246 @@ class RunOnceCompactRequestWiring(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2c-2. #65 (2026-07-26) — SYNCHRONOUS delivery at Stop-hook time.
+#
+# job 14's ~60s poll loses the race with an armed /goal loop's own rapid
+# re-fire. `deliver_compact_now` resolves the pane hosting the EXACT session
+# (`_find_pane_for_session`, matched by transcript stem — never cwd alone)
+# and, when safe, delivers `/compact` right now — including into a BUSY
+# pane, since a short send-keys reliably QUEUES there (verified live
+# 2026-07-26). Only copy-mode / an open dialog / no locatable boundary / a
+# genuine draft fall back to the caller's polled-retry path.
+# --------------------------------------------------------------------------- #
+
+class DeliverCompactNowFakeTmux:
+    def __init__(self, panes, captured, in_mode=False):
+        self.panes = panes          # [(pane_id, cmd, cwd, pid)]
+        self.captured = captured
+        self.in_mode = in_mode
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "\n".join("%s\t%s\t%s\t%s" % t for t in self.panes)
+        if "display-message" in j:
+            if argv[-1] == "#{pane_in_mode}":
+                return "1" if self.in_mode else "0"
+            return "sess:0.0"
+        if "send-keys" in j:
+            self.sent.append(argv)
+            return ""
+        if "capture-pane" in j:
+            return self.captured
+        return ""
+
+    def typed_texts(self):
+        return [a[-1] for a in self.sent if "-l" in a]
+
+    def keys(self):
+        return [a[-1] for a in self.sent]
+
+
+class TestFindPaneForSession(unittest.TestCase):
+    SID = "sess-find-1"
+    CWD = "/home/newlevel/devel/findme"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_single_matching_pane_resolves(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        self.assertEqual(
+            wd._find_pane_for_session(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj), "%9")
+
+    def test_no_matching_pane_returns_none(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "some-other-sid", 1000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        self.assertIsNone(
+            wd._find_pane_for_session(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj))
+
+    def test_no_panes_at_all_returns_none(self):
+        proj = self._dir()
+        tmux = DeliverCompactNowFakeTmux([], CB_IDLE_CAP)
+        self.assertIsNone(
+            wd._find_pane_for_session(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj))
+
+    def test_ambiguous_two_panes_same_cwd_returns_none(self):
+        # two DIFFERENT panes whose cwd both resolve to the SAME transcript
+        # stem — never guess which one is the real one.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111"),
+            ("%10", "claude", self.CWD, "222")], CB_IDLE_CAP)
+        self.assertIsNone(
+            wd._find_pane_for_session(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj))
+
+
+class TestDeliverCompactNow(unittest.TestCase):
+    SID = "sess-deliver-1"
+    CWD = "/home/newlevel/devel/delivernow"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, captured, ctx_tokens=300_000, in_mode=False, min_context=None):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, ctx_tokens)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], captured, in_mode=in_mode)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj, min_context=min_context)
+        return ok, tmux
+
+    def test_no_pane_found_falls_back(self):
+        proj = self._dir()      # no transcript written -> no pane resolves
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_idle_bare_pane_delivers(self):
+        ok, tmux = self._go(CB_IDLE_CAP)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_busy_pane_ALSO_delivers_this_is_the_whole_point_of_65(self):
+        # the exact fix: a busy pane is no longer a reason to fall back to
+        # the polled retry — a short send-keys queues reliably even here.
+        ok, tmux = self._go(CB_BUSY_CAP)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_queued_placeholder_pane_delivers(self):
+        cap = "● Predošlá práca hotová.\n❯ Press up to edit queued messages\n  ctx ███░\n"
+        ok, tmux = self._go(cap)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_genuine_draft_falls_back_never_typed_over(self):
+        ok, tmux = self._go(CB_DRAFT_CAP)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_copy_mode_falls_back(self):
+        ok, tmux = self._go(CB_IDLE_CAP, in_mode=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_open_dialog_falls_back(self):
+        ok, tmux = self._go(CB_DIALOG_CAP)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_no_boundary_at_all_falls_back(self):
+        ok, tmux = self._go(CB_ALL_CHROME_NO_BOX_CAP)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_small_context_is_handled_with_no_keystrokes(self):
+        # #48 gate: nothing worth compacting -- handled (True), never falls
+        # back to the polled retry, but also never types anything.
+        ok, tmux = self._go(CB_IDLE_CAP, ctx_tokens=1_000)
+        self.assertTrue(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_env_override_lowers_the_threshold(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT": "500"}):
+            ok, tmux = self._go(CB_IDLE_CAP, ctx_tokens=1_000)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_exact_keystrokes_text_then_enter_only(self):
+        ok, tmux = self._go(CB_IDLE_CAP)
+        self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+
+
+# --------------------------------------------------------------------------- #
 # 2d. airuleset.py compact-request CLI (the Stop hook's write path)
 # --------------------------------------------------------------------------- #
 
+class Args:
+    record = True
+    session = "sid-cli"
+    cwd = "/x"
+
+
 class TestCompactRequestCli(unittest.TestCase):
+    """#65 (2026-07-26): `--record` now ALSO attempts a SYNCHRONOUS
+    `deliver_compact_now` in the same process, right when the request is
+    recorded — the whole point being to beat an armed /goal loop's own
+    rapid re-fire, which job 14's ~60s poll cannot. `deliver_compact_now`
+    itself is mocked in every test here (it does real tmux/transcript work
+    tested separately) so these tests exercise ONLY `cmd_compact_request`'s
+    own record-then-maybe-clear wiring, deterministically."""
+
+    def _home(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fake_home = Path(d.name)
+        (fake_home / ".claude").mkdir()
+        return fake_home
+
     def test_registered_in_subcommands(self):
         self.assertIn("compact-request", airuleset.SUBCOMMANDS)
         self.assertIs(airuleset.SUBCOMMANDS["compact-request"],
                       airuleset.cmd_compact_request)
 
     def test_record_writes_the_request_file(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        fake_home = Path(d.name)
-        (fake_home / ".claude").mkdir()
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}):
-            class Args:
-                record = True
-                session = "sid-cli"
-                cwd = "/x"
+        fake_home = self._home()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=False):
             airuleset.cmd_compact_request(Args())
         reqfile = fake_home / ".claude" / "compact-requests.json"
         self.assertTrue(reqfile.exists())
         d2 = json.loads(reqfile.read_text())
         self.assertIn("sid-cli", d2)
         self.assertEqual(d2["sid-cli"]["cwd"], "/x")
+
+    def test_immediate_delivery_success_clears_the_just_recorded_request(self):
+        fake_home = self._home()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
+            airuleset.cmd_compact_request(Args())
+        dcn.assert_called_once_with("sid-cli", "/x")
+        reqfile = fake_home / ".claude" / "compact-requests.json"
+        d2 = json.loads(reqfile.read_text())
+        self.assertNotIn("sid-cli", d2)
+
+    def test_immediate_delivery_failure_leaves_the_request_recorded(self):
+        fake_home = self._home()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=False):
+            airuleset.cmd_compact_request(Args())
+        reqfile = fake_home / ".claude" / "compact-requests.json"
+        d2 = json.loads(reqfile.read_text())
+        self.assertIn("sid-cli", d2)
+
+    def test_immediate_delivery_exception_is_swallowed_and_request_stays_recorded(self):
+        fake_home = self._home()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now",
+                     side_effect=RuntimeError("boom")):
+            airuleset.cmd_compact_request(Args())   # must not raise
+        reqfile = fake_home / ".claude" / "compact-requests.json"
+        d2 = json.loads(reqfile.read_text())
+        self.assertIn("sid-cli", d2)
 
 
 # --------------------------------------------------------------------------- #
