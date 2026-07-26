@@ -27,6 +27,7 @@ for the same pane (#69/#78 shared gates).
 """
 
 import json
+import os
 import sys
 import time
 import unittest
@@ -428,6 +429,119 @@ class TestGoalRearmBounded(GoalRearmBase):
                         cap_seq=self._typed_seq())
         self.assertTrue(t.typed(),
                         "a session that dies again hours later must be healed")
+
+
+class TestGoalLoopStallNudge(GoalRearmBase):
+    """The SECOND shape the same job must cover — and the one the 2026-07-26
+    forensics actually points at.
+
+    Reading both boxes' transcripts (montalu: 4 compactions that day;
+    gatekeeper: 8) shows the goal did not simply "get disarmed". Every SURVIVAL
+    had a post-compaction STIMULUS arrive — a background subagent's
+    task-notification, or the human typing — and every DEATH had none: a
+    `/compact` landing at a `## ✅ Work Complete` boundary with NO worker in
+    flight, after which the loop never fired again until a human intervened
+    (montalu 05:15:55 via job 14's idle poll, 14:38:57 via #65's synchronous
+    path — different senders, identical outcome).
+
+    And nothing covers it: job 4, the only "idle when it should be working"
+    nudge, is hard-gated on the last marker being `⏳ WORKING`, while a
+    completed ticket inside an armed loop correctly ends `✅ DONE`
+    (message-status-marker.md, 2026-07-25). So "goal ARMED, last turn ✅, then
+    silence" had no watchdog coverage at all.
+
+    Refusals locked here matter as much as the nudge: a `⏳` turn belongs to
+    job 4, a `❓` turn is the loop's OWN legitimate stop condition (never
+    nudge past an unanswered question), and a running background worker means
+    the stimulus is still coming."""
+
+    IDLE = 40 * 60
+
+    def _sweep(self, marker="✅ DONE: ticket #12 hotový", idle=None,
+               captured=PANE_LIT, state=None, now=None, extra=None):
+        now = now or time.time()
+        entries = [marker_entry("set", PAYLOAD),
+                   {"type": "assistant", "timestamp": "2026-07-26T15:00:00.000Z",
+                    "message": {"content": "Hotovo.\n\n" + marker}}]
+        p = self._write(entries + (extra or []))
+        self._wrote = True
+        mt = now - (self.IDLE if idle is None else idle)
+        os.utime(p, (mt, mt))
+        tmux = FakeTmux(captured)
+        logs = wd.goal_rearm(now, tmux, state if state is not None else {},
+                             send_fn=self._send,
+                             projects_dir=self.tmp.name)
+        return tmux, logs
+
+    def test_armed_but_silent_after_a_done_turn_gets_nudged(self):
+        tmux, logs = self._sweep()
+        self.assertIn(wd.GOAL_STALL_TEXT, tmux.typed(), tmux.sent)
+        self.assertTrue(any("goal-stall" in ln for ln in logs), logs)
+
+    def test_working_marker_belongs_to_job4(self):
+        tmux, _ = self._sweep(marker="⏳ WORKING: worker beží")
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_question_marker_is_never_nudged_past(self):
+        tmux, _ = self._sweep(marker="❓ NEEDS YOU: schváliš to?")
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed(),
+                         "an unanswered question IS the loop's stop condition")
+
+    def test_fresh_transcript_is_not_a_stall(self):
+        tmux, _ = self._sweep(idle=60)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_background_worker_means_the_stimulus_is_still_coming(self):
+        pane = PANE_LIT + "  ◯ autopilot-worker  Polling CI    2m · ↓ 10k\n"
+        tmux, _ = self._sweep(captured=pane)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_busy_pane_is_never_nudged(self):
+        busy = CONV + FOOTER_LIT.replace("❯ \n", "✳ Baking… (esc to interrupt)\n")
+        tmux, _ = self._sweep(captured=busy)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_draft_is_never_typed_over(self):
+        draft = CONV + FOOTER_LIT.replace("❯ \n", "❯ rozpisany draft\n")
+        tmux, _ = self._sweep(captured=draft)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_unarmed_session_is_not_this_branch(self):
+        # a DARK footer is the re-arm branch's business, not the stall nudge's
+        tmux, _ = self._sweep(captured=PANE_DARK)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_nudge_is_spaced_not_every_sweep(self):
+        state, now = {}, time.time()
+        t1, _ = self._sweep(state=state, now=now)
+        self.assertIn(wd.GOAL_STALL_TEXT, t1.typed())
+        t2, _ = self._sweep(state=state, now=now + 90)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, t2.typed())
+
+    def test_bounded_then_one_ping(self):
+        state, now = {}, time.time()
+        for i in range(wd.GOAL_STALL_MAX_NUDGES):
+            t, _ = self._sweep(state=state,
+                               now=now + i * (wd.GOAL_STALL_INTERVAL_S + 30))
+            self.assertIn(wd.GOAL_STALL_TEXT, t.typed(), "nudge %d" % i)
+        late = now + wd.GOAL_STALL_MAX_NUDGES * (wd.GOAL_STALL_INTERVAL_S + 30)
+        t, logs = self._sweep(state=state, now=late)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, t.typed())
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(any("GAVE UP" in ln.upper() for ln in logs), logs)
+        t2, _ = self._sweep(state=state, now=late + wd.GOAL_STALL_INTERVAL_S + 30)
+        self.assertEqual(len(self.pings), 1, "one ping per stall, not per sweep")
+
+    def test_real_progress_resets_the_counter(self):
+        state, now = {}, time.time()
+        for i in range(wd.GOAL_STALL_MAX_NUDGES):
+            self._sweep(state=state,
+                        now=now + i * (wd.GOAL_STALL_INTERVAL_S + 30))
+        moved = now + wd.GOAL_STALL_MAX_NUDGES * (wd.GOAL_STALL_INTERVAL_S + 30)
+        self._sweep(state=state, now=moved, idle=30)     # the loop advanced
+        t, _ = self._sweep(state=state, now=moved + wd.GOAL_STALL_INTERVAL_S + 60)
+        self.assertIn(wd.GOAL_STALL_TEXT, t.typed(),
+                      "a session that really advanced must be helped again")
 
 
 class TestRunOnceWiring(unittest.TestCase):
