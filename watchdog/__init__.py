@@ -5748,7 +5748,30 @@ def pane_goal_armed(captured):
     return any(GOAL_INDICATOR in ln for ln in footer)
 
 
-def _send_goal_verified(pid, text, run, captured=None):
+GOAL_TYPE_SETTLE_POLLS = 8          # bounded: CC needs a moment to INGEST a
+GOAL_TYPE_SETTLE_S = 1              # multi-KB paste before it renders it
+
+
+def _await_typed(pid, text, run, sleep_fn, want=True):
+    """Poll (bounded) until the pane's input box shows evidence of `text`
+    (`want=True`) or has stopped showing it (`want=False`), returning the
+    final verdict. A 2859-char payload live-observed 2026-07-26 really did
+    land but was NOT yet rendered when the capture taken immediately after
+    `send-keys -l` was read — the delivery was declared failed and the goal
+    never re-armed. This is a render-settle poll, not a blind timeout: it
+    returns the instant the box agrees, and a type that never appears is
+    still refused (`no-timeout-band-aids.md`)."""
+    for i in range(GOAL_TYPE_SETTLE_POLLS):
+        landed = _typed_landed(text, _input_line_text(
+            capture_pane(pid, run, lines=40)))
+        if landed is want:
+            return landed
+        if i < GOAL_TYPE_SETTLE_POLLS - 1:
+            sleep_fn(GOAL_TYPE_SETTLE_S)
+    return not want
+
+
+def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None):
     """Type a LONG `/goal …` into a BARE input box and submit it, verifying
     every step against a fresh capture — the same protocol
     `deliver_with_stash` uses for its own type/submit steps (steps 5-7), minus
@@ -5759,16 +5782,15 @@ def _send_goal_verified(pid, text, run, captured=None):
     consecutive Escapes (that permanently deletes a draft, #35). Returns True
     only when the box is provably empty again after the submit."""
     run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else capture_pane(pid, run, lines=40)
     if _input_line_text(cap) != "":
         return False                       # not a bare box — caller's problem
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "-l", text])
-    cap = capture_pane(pid, run, lines=40)
-    itext = _input_line_text(cap)
-    if not _typed_landed(text, itext):
-        return False                       # partial type — never submit it
+    if not _await_typed(pid, text, run, sleep_fn, want=True):
+        return False                       # never rendered — never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=40)
     itext2 = _input_line_text(cap)
@@ -5856,7 +5878,8 @@ def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
 
 
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
-               handled=None, max_attempts=None, streak_s=None, confirm_s=None):
+               handled=None, max_attempts=None, streak_s=None, confirm_s=None,
+               sleep_fn=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
@@ -6018,7 +6041,8 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs.append("skip not-idle (goal-rearm) %s" % loc)
                 continue
             dlogs = []
-            ok = _send_goal_verified(pid, text, run, captured=captured)
+            ok = _send_goal_verified(pid, text, run, captured=captured,
+                                     sleep_fn=sleep_fn)
             tag = "goal-rearm"
         rec["n"] = rec.get("n", 0) + 1
         if ok:
@@ -7335,7 +7359,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         try:
             logs += goal_rearm(now, run, state, send_fn=send_fn,
                                dry_run=dry_run, projects_dir=projects_dir,
-                               handled=compact_handled_this_sweep)
+                               handled=compact_handled_this_sweep,
+                               sleep_fn=sleep_fn)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 

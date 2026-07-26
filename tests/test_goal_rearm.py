@@ -427,7 +427,7 @@ class TestScrollbackNeverDecides(GoalRearmBase):
         tmux = self.ScrollbackTmux(PANE_DARK,
                                    cap_seq=[PANE_DARK, typed, PANE_DARK])
         wd.goal_rearm(time.time(), tmux, {}, send_fn=self._send,
-                      projects_dir=self.tmp.name)
+                      projects_dir=self.tmp.name, sleep_fn=lambda s: None)
         self.assertEqual(tmux.typed()[:1], [GOAL_LINE],
                          "a dead session's scrollback must not veto the heal")
 
@@ -620,8 +620,8 @@ class TestGoalLoopStallNudge(GoalRearmBase):
         os.utime(p, (mt, mt))
         tmux = FakeTmux(captured)
         logs = wd.goal_rearm(now, tmux, state if state is not None else {},
-                             send_fn=self._send,
-                             projects_dir=self.tmp.name)
+                             send_fn=self._send, projects_dir=self.tmp.name,
+                             sleep_fn=lambda s: None)
         return tmux, logs
 
     def test_armed_but_silent_after_a_done_turn_gets_nudged(self):
