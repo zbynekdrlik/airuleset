@@ -129,6 +129,32 @@ set -euo pipefail
 #     exempt nothing).
 # A genuine bulk read whose output DOES come back (`cat file`, `sed -n
 # '1,900p' file`, `grep -rn x .`) is unchanged — still blocked.
+#
+# #80 also changed WHAT is measured. The command's CLASS was the wrong
+# variable: every main turn re-sends the whole 256-363K context, so a
+# `gh issue view` costs the same as a `grep`, and gk's ratio after #66 was
+# UNCHANGED (main Bash 687 : Agent 22 = 31:1 on 2026-07-26, ten hours with
+# zero dispatches, runs of up to 119 Bash calls between two dispatches).
+# The lever is the COUNT of main-agent Bash turns. So on top of the
+# classification above there is now a per-dispatch COUNTER
+# (/tmp/airuleset-main-bash-run-<session_id>): every allow-listed/ambiguous
+# main Bash call in a goal-armed/Fable session increments it, a DISPATCH
+# (PreToolUse Agent/Task/Workflow — the hook is wired on those matchers too,
+# exact tool names, never a regex that could silently never match) deletes
+# it, and passing AIRULESET_MAIN_BASH_PER_DISPATCH (default 20, 0 = off)
+# blocks ONCE with batching/dispatch instructions.
+#
+# That nudge RESETS the counter on purpose: #80's acceptance forbids any
+# block that could genuinely stop the loop, so this is at most one block per
+# N calls and NEVER two in a row — re-running the same command immediately
+# after a nudge passes. Arming the bypass marker (`touch ...-exec-ok-<sid>`)
+# is never counted and never blocked, or the cap would sit in front of the
+# only documented way out of it.
+#
+# The ticket's direction 1 (">N gh calls per TURN → batch them") was
+# REFUTED by the same measurement and deliberately NOT built: 687 of 687
+# main turns carried exactly ONE Bash call, so a per-turn counter could
+# never fire. Batching pressure lives in the nudge's message instead.
 
 command -v jq &>/dev/null || exit 0
 
@@ -138,9 +164,37 @@ AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
 
+RAW_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+RAW_SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
+RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
+
+# ---- #80: a DISPATCH resets the per-dispatch Bash counter ----
+# This is the whole point of the counter: it measures main-agent Bash calls
+# since the main last delegated. Handled before ANY transcript work — a
+# reset must be as cheap as possible and must happen regardless of model /
+# goal state (a session that arms a goal later starts from a clean count).
+case "$TOOL_NAME" in
+    Agent|Task|Workflow)
+        rm -f "$RUN_FILE" 2>/dev/null || true
+        exit 0
+        ;;
+esac
+
 if [ "$TOOL_NAME" = "Bash" ]; then
     BASH_CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
     [ -n "$BASH_CMD" ] || exit 0
+    # #80: ARMING the escape hatch is never blocked and never counted —
+    # otherwise the per-dispatch cap below could sit in front of the only
+    # documented way out of it, which would be exactly the dead end the
+    # ticket forbids. Deliberately narrow: the command must START with
+    # `touch` and name one of the two marker paths.
+    case "$(printf '%s' "$BASH_CMD" | tr -s ' \t' ' ' | sed 's/^ //')" in
+        touch\ *airuleset-main-exec-ok-*|touch\ *airuleset-fable-exec-ok-*)
+            echo "$(date -Is) main-exec bypass-arm session=$RAW_SID" \
+                >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+            exit 0
+            ;;
+    esac
 else
     LEN=$(echo "$INPUT" | jq -r \
         '(.tool_input.new_string // .tool_input.content // "") | length' \
@@ -149,8 +203,7 @@ else
     [ "$LEN" -gt "$MAX" ] 2>/dev/null || exit 0     # surgical edit — oversight
 fi
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
-SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
+SESSION_ID="${RAW_SID:-unknown}"
 
 # #80: the marker is ONE-SHOT — honoring it CONSUMES it. "Deliberate
 # exception" means one deliberate action, not "disable the guard for the
@@ -485,7 +538,62 @@ PYEOF
     CLASS_RC=${CLASS_RC:-0}
 
     if [ "$CLASS_RC" -ne 2 ]; then
-        exit 0            # allow-listed, ambiguous, or classifier malfunction (fail-open)
+        # ---- #80: the command's CLASS is not the lever — the COUNT is. ----
+        # Every main turn re-sends the whole context, so a `gh issue view` is
+        # as expensive as a `grep`; #66 optimised the wrong variable and gk's
+        # ratio was unchanged (Bash 687 : Agent 22 = 31:1, runs of up to 119
+        # calls with no dispatch). Count main-agent Bash calls SINCE THE LAST
+        # DISPATCH and nudge at the cap.
+        #
+        # The nudge RESETS the counter — deliberately. The ticket's own
+        # acceptance forbids any block that could actually stop the loop, so
+        # this is a periodic nudge (at most one block per N calls, never two
+        # in a row), never a wall. Worst case, if the dispatch reset above
+        # never fired at all, the loop still runs — one instructive block
+        # every N calls.
+        CAP="${AIRULESET_MAIN_BASH_PER_DISPATCH:-20}"
+        case "$CAP" in ''|*[!0-9]*) CAP=20 ;; esac
+        [ "$CAP" -eq 0 ] && exit 0
+
+        RUN_N=$(cat "$RUN_FILE" 2>/dev/null || echo 0)
+        case "$RUN_N" in ''|*[!0-9]*) RUN_N=0 ;; esac
+        RUN_N=$((RUN_N + 1))
+
+        if [ "$RUN_N" -le "$CAP" ]; then
+            echo "$RUN_N" > "$RUN_FILE" 2>/dev/null || true
+            exit 0
+        fi
+
+        rm -f "$RUN_FILE" 2>/dev/null || true      # never two blocks in a row
+        log_block "per-dispatch=$RUN_N/$CAP" "$BASH_CMD"
+
+        cat >&2 <<MSG
+BLOCKED: ${REASON}, and this is main-agent Bash call #${RUN_N} since the last
+DISPATCH (cap ${CAP}). The command itself is fine — the COUNT is the problem.
+Every main-agent turn re-sends the WHOLE context, so a \`gh issue view\` at a
+300K context costs the same as a \`grep\`; measured 2026-07-26 on gatekeeper,
+the main agent ran 687 Bash calls against 22 dispatches (31:1) — that ratio,
+not any single command, is the burn (#80).
+
+Do ONE of these, then continue:
+
+  • DISPATCH the state-gathering. Anything that is not a single fact — "what
+    is the state of these five tickets", "why did that run fail", "read this
+    file/log" — goes to an Agent (subagent_type: Explore or general-purpose,
+    model: sonnet, effort: low/medium for a mechanical read). It brings back
+    a CONCLUSION; you keep coordinating (main-context-hygiene.md). A
+    dispatch resets this counter immediately.
+  • BATCH the remaining reads into ONE call. Five \`gh issue view\` calls are
+    one \`gh issue list --json number,title,state,labels\`; a poll is ONE
+    bounded loop, not one call per tick (ci-monitoring.md).
+
+This is a nudge, not a wall: the counter is already reset, so re-running
+this exact command right now will pass. Ignoring the nudge is what the
+measurement will show.
+
+Deliberate exception (one-shot, logged): touch /tmp/airuleset-main-exec-ok-${SESSION_ID}
+MSG
+        exit 2
     fi
 
     log_block "$CLASS" "$BASH_CMD"

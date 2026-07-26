@@ -109,6 +109,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-agent-validate-subagent-type.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
           }
         ]
       },
@@ -135,6 +140,26 @@
             "command": "bash ~/devel/airuleset/hooks/pre-write-script-check.sh",
             "timeout": 5
           },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Workflow",
+        "hooks": [
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
