@@ -676,6 +676,144 @@ class OneShotBypass80(unittest.TestCase):
                         "a consumed bypass must still be logged")
 
 
+class DispatchRatioNudge80(unittest.TestCase):
+    """#80 direction 3 — the actual lever. Measured on gk 2026-07-26 (MAIN
+    agent, `isSidechain=false`): Bash 687 : Agent 22 = 31:1, ten hours with
+    ZERO dispatches, runs of consecutive main Bash calls between two
+    dispatches of max 119 / median 30. The cost of a main turn does not
+    depend on WHICH command runs — it depends on THAT another turn runs,
+    because every turn re-sends the whole (256-363K) context. So the lever is
+    the COUNT of main-agent Bash turns, not their class.
+
+    Direction 1 from the ticket (">N gh calls per TURN = batch them") is
+    REFUTED by the same measurement: 687 of 687 turns carried exactly ONE
+    Bash call — the model never puts two in one turn, so a per-turn counter
+    can never fire. Counting must be ACROSS turns, which is this: a
+    per-session counter of main-agent Bash calls since the last DISPATCH.
+
+    Non-negotiable acceptance constraint from the ticket ("ziadne
+    zablokovanie, ktore by loop realne zastavilo"): the nudge itself RESETS
+    the counter, so this can never become a wall — the worst case is one
+    instructive block per N calls, never two in a row. A dispatch
+    (PreToolUse Agent/Task/Workflow) resets it too; touching the bypass
+    marker is never counted and never blocked (or the escape hatch would
+    dead-end)."""
+
+    def _run(self, sid, command="gh issue view 42", n=None, agent_id=None,
+             tool="Bash", armed=True, extra_env=None):
+        helper = MainImplementationGuard()
+        env = dict(os.environ)
+        env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = str(3 if n is None else n)
+        if extra_env:
+            env.update(extra_env)
+        with TemporaryDirectory() as d:
+            tp = str(Path(d) / "sess.jsonl")
+            Path(tp).write_text(goal_armed_transcript() if armed
+                                else transcript("claude-opus-4-8"))
+            ti = ({"command": command} if tool == "Bash"
+                  else {"file_path": "/x/a.py", "content": SMALL})
+            payload = {"session_id": sid, "hook_event_name": "PreToolUse",
+                       "tool_name": tool, "tool_input": ti,
+                       "transcript_path": tp}
+            if agent_id:
+                payload["agent_id"] = agent_id
+            return subprocess.run(["bash", str(HOOK)],
+                                  input=json.dumps(payload), env=env,
+                                  capture_output=True, text=True)
+
+    def _sid(self, tag):
+        sid = "t-mg-%s-%s" % (tag, uuid.uuid4().hex[:8])
+        self.addCleanup(lambda: Path(
+            "/tmp/airuleset-main-bash-run-%s" % sid).unlink(missing_ok=True))
+        return sid
+
+    def test_allowed_calls_under_the_cap_pass(self):
+        sid = self._sid("cap1")
+        for _ in range(3):
+            out = self._run(sid)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_the_call_over_the_cap_is_nudged(self):
+        sid = self._sid("cap2")
+        for _ in range(3):
+            self._run(sid)
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("dispatch", out.stderr.lower())
+
+    def test_the_nudge_resets_so_it_is_never_a_wall(self):
+        sid = self._sid("cap3")
+        for _ in range(4):
+            self._run(sid)                      # 4th one nudges
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 0,
+                         "a nudge must never be followed by a second block")
+
+    def test_a_dispatch_resets_the_counter(self):
+        sid = self._sid("cap4")
+        for _ in range(3):
+            self._run(sid)
+        reset = self._run(sid, tool="Agent")
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 0,
+                         "dispatching is exactly the wanted response")
+
+    def test_task_and_workflow_also_reset(self):
+        for tool in ("Task", "Workflow"):
+            sid = self._sid("cap5" + tool)
+            for _ in range(3):
+                self._run(sid)
+            self._run(sid, tool=tool)
+            out = self._run(sid)
+            self.assertEqual(out.returncode, 0, "%s must reset too" % tool)
+
+    def test_not_goal_armed_main_is_never_counted(self):
+        sid = self._sid("cap6")
+        for _ in range(8):
+            out = self._run(sid, armed=False)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_subagent_calls_are_never_counted(self):
+        sid = self._sid("cap7")
+        for _ in range(8):
+            out = self._run(sid, agent_id="aWORKER1")
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_touching_the_bypass_marker_is_never_blocked_by_the_cap(self):
+        sid = self._sid("cap8")
+        for _ in range(6):
+            self._run(sid)
+        out = self._run(sid,
+                        command="touch /tmp/airuleset-main-exec-ok-%s" % sid)
+        self.addCleanup(lambda: Path(
+            "/tmp/airuleset-main-exec-ok-%s" % sid).unlink(missing_ok=True))
+        self.assertEqual(out.returncode, 0,
+                         "the escape hatch must never dead-end behind the cap")
+
+    def test_zero_disables_the_cap(self):
+        sid = self._sid("cap9")
+        for _ in range(10):
+            out = self._run(sid, n=0)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_the_nudge_is_logged(self):
+        sid = self._sid("cap10")
+        for _ in range(4):
+            self._run(sid)
+        log = Path("/tmp/airuleset-main-exec-block.log")
+        self.assertTrue(log.exists())
+        mine = [ln for ln in log.read_text().splitlines() if sid in ln]
+        self.assertTrue(mine, "the nudge must be in the block log")
+        self.assertIn("per-dispatch", " ".join(mine))
+
+    def test_a_blocked_bulk_read_still_blocks_before_the_cap(self):
+        sid = self._sid("cap11")
+        out = self._run(sid, command="grep -rn 'TODO' .")
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("BULK", out.stderr)
+
+
 class BlockLogging73(unittest.TestCase):
     """#73: every BLOCK must be written to its own log (timestamp, session,
     first ~120 chars of the command, which rule matched) — today the hook
@@ -762,6 +900,18 @@ class TestWiringAndSkill(unittest.TestCase):
         # not an addition of a second hook.
         self.assertNotIn("block-fable-main-implementation.sh",
                          (REPO / "settings" / "hooks.json").read_text())
+
+    def test_hook_wired_for_dispatch_tools_so_the_counter_can_reset(self):
+        # #80: the per-dispatch counter resets on a DISPATCH — the hook must
+        # therefore run on PreToolUse(Agent/Task/Workflow) too. Exact tool
+        # names, never a regex matcher: an unsupported regex would silently
+        # never match and the counter would never reset.
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        for tool in ("Agent", "Task", "Workflow"):
+            ms = json.dumps([mm for mm in cfg["hooks"]["PreToolUse"]
+                             if mm.get("matcher") == tool])
+            self.assertIn("block-main-implementation.sh", ms,
+                          "counter reset missing for PreToolUse(%s)" % tool)
 
     def test_fable_advisor_skill_exists_and_registered(self):
         sk = REPO / "skills" / "fable-advisor" / "SKILL.md"
