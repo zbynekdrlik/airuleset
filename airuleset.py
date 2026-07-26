@@ -2485,7 +2485,9 @@ def cmd_watchdog(args):
     idle for 20+ minutes with no worker in flight (#39/#43 job 15), and — ONLY
     on the coordinator box (dev1) — merges every managed box's own hourly
     burn-snapshot row into one combined fleet.jsonl row, pinging when the
-    observed weekly-%/day pace exceeds budget (#55 job 16), and — since
+    observed weekly-%/day pace exceeds budget (#55 job 16), pings a SECOND,
+    independent way right after that merge when the completed hour itself
+    crosses an absolute/relative/weekly-step threshold (#81 job 19), and — since
     Claude Code snapshots its hook set once at process start and never
     re-reads it — RESTARTS any long-lived session whose settings.json hooks
     block content hash no longer matches the hash it started under, so a
@@ -2510,6 +2512,11 @@ def cmd_watchdog(args):
     # host tag — the machine hostnames ARE the tailscale/MagicDNS names now
     # (machine-identities.md), so this is a plain string compare, no ssh probe.
     fleet_fetch = _watchdog_fleet_fetch if os.uname().nodename == "dev1" else None
+    # Job 19 (#81) is coordinator-only for the identical reason job 16 is:
+    # every OTHER managed box never writes fleet.jsonl at all (only dev1
+    # collects the merged fleet view), so evaluating it anywhere else would
+    # just see an empty file. Same host check, reused verbatim.
+    burn_alert_enabled = os.uname().nodename == "dev1"
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
@@ -2519,7 +2526,8 @@ def cmd_watchdog(args):
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
-                    hooks_settings_path=hooks_settings_path())
+                    hooks_settings_path=hooks_settings_path(),
+                    burn_alert_enabled=burn_alert_enabled)
     for line in logs:
         print(line)
 

@@ -857,3 +857,122 @@ def render_fleet(rows, hours=24, cache=None, now=None):
         lines.append("    aktualne tempo: %.2f %%/den" % sus["observed_pct_per_day"])
     lines.append("    verdikt: %s" % sus.get("verdict", "?"))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# #81 (2026-07-26) -- HOURLY BURN ALERT. Job 16 above only ever WRITES the
+# hourly fleet row; nothing ever LOOKS at it against a reference and pings
+# on its own. The user's own words: "jedina vec, ktora to ma dnes robit, je
+# to, ze si na to spomeniem... a prave pri incidente spotreba vyskoci
+# najviac" (the only thing that does this today is remembering to check --
+# and exactly during an incident, when spend spikes most, there's no time
+# to remember). Pure comparison + Slovak message-render over already-
+# collected `fleet.jsonl` rows -- `watchdog.burn_alert_job` (job 19) is the
+# thin wiring/dedup/send wrapper around this, mirroring how job 16 already
+# wraps `fleet_budget_alert` above. Three independent thresholds (env-
+# overridable, sane defaults): an absolute $ ceiling for one hour, a
+# multiple of the MEDIAN of the last N hours, and crossing a whole step of
+# the weekly usage window (job 16 already stamps `weekly_pct` onto every
+# row, #55) -- any one firing sends ONE combined message.
+# --------------------------------------------------------------------------- #
+
+BURN_ALERT_ABS_USD = 20.0          # one hour above this many USD alone triggers
+BURN_ALERT_REL_MULT = 3.0          # one hour more than this many x the median
+                                    # of the last BURN_ALERT_REL_WINDOW hours
+BURN_ALERT_REL_WINDOW = 6
+BURN_ALERT_WEEKLY_STEP_PCT = 5.0   # crossing each whole this-many-percent step
+                                    # of the weekly window triggers
+
+
+def _median(vals):
+    vals = sorted(vals)
+    n = len(vals)
+    if not n:
+        return None
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _weekly_step_crossed(prev_pct, cur_pct, step):
+    """True iff the weekly usage % genuinely INCREASED since the previous
+    hourly row and moved into a NEW whole `step`-sized bucket -- e.g.
+    77 -> 80 with step=5: floor(77/5)=15, floor(80/5)=16, crossed. A drop
+    (a weekly-window RESET, or a missing sample on either side) is never
+    treated as a crossing -- only a genuine forward step counts."""
+    if prev_pct is None or cur_pct is None or cur_pct <= prev_pct:
+        return False
+    return int(cur_pct // step) > int(prev_pct // step)
+
+
+def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
+                      weekly_step_pct=None):
+    """None, or `{"hour_bucket", "reasons", "message"}` for the LATEST
+    hourly row in `rows` (job 16's merged `fleet.jsonl`, oldest-first,
+    newest-last) -- the trigger for job 19's ONE hourly deduped Discord
+    ping. `rows` empty -> None (nothing to evaluate yet). A quiet hour
+    (no threshold crossed) also returns None -- the caller sends nothing.
+
+    The three thresholds are independent; ANY one firing produces ONE
+    combined message (never a ping per threshold) via `render_burn_alert`.
+    `reasons` lists which threshold(s) actually fired, in plain terms, for
+    the job's own log line -- never shown to the user (the message itself
+    is user-facing; `reasons` is operator-facing)."""
+    if not rows:
+        return None
+    abs_usd = BURN_ALERT_ABS_USD if abs_usd is None else abs_usd
+    rel_mult = BURN_ALERT_REL_MULT if rel_mult is None else rel_mult
+    rel_window = BURN_ALERT_REL_WINDOW if rel_window is None else rel_window
+    weekly_step_pct = (BURN_ALERT_WEEKLY_STEP_PCT if weekly_step_pct is None
+                      else weekly_step_pct)
+    latest = rows[-1]
+    hb = hour_bucket_of_ts(latest.get("ts"))
+    total_usd = latest.get("total_usd", 0.0) or 0.0
+    prev_rows = rows[max(0, len(rows) - 1 - rel_window):-1]
+    prev_totals = [r.get("total_usd", 0.0) or 0.0 for r in prev_rows]
+    median_prev = _median(prev_totals)
+    reasons = []
+    if total_usd > abs_usd:
+        reasons.append("nad absolutnym prahom $%.2f" % abs_usd)
+    if median_prev is not None and median_prev > 0 and total_usd > rel_mult * median_prev:
+        reasons.append("%.1fx median poslednych %d hodin ($%.2f)"
+                       % (rel_mult, len(prev_totals), median_prev))
+    prev_pct = rows[-2].get("weekly_pct") if len(rows) >= 2 else None
+    cur_pct = latest.get("weekly_pct")
+    if _weekly_step_crossed(prev_pct, cur_pct, weekly_step_pct):
+        reasons.append("tyzdenny krok %.0f%% -> %.0f%%" % (prev_pct, cur_pct))
+    if not reasons:
+        return None
+    return {"hour_bucket": hb, "reasons": reasons,
+           "message": render_burn_alert(latest, prev_rows, prev_pct, cur_pct)}
+
+
+def render_burn_alert(latest, prev_rows, prev_pct=None, cur_pct=None):
+    """Slovak, phone-readable burn-alert message -- the ticket's own
+    example format: `Spotreba 14:00 -- $64.88 (337 sprav), tyzdenne 77 ->
+    80 %` + the top 2 hosts by $ for that hour + the $ totals of the up to
+    3 hours immediately before it (most recent first). `prev_pct`/
+    `cur_pct` are omitted from the header entirely when either is None
+    (no weekly-window crossing to report for this hour)."""
+    ts = latest.get("ts") or "?"
+    hour_label = ts[11:16] if len(ts) >= 16 else ts   # "...T14:00+02:00" -> "14:00"
+    total_usd = latest.get("total_usd", 0.0) or 0.0
+    total_msgs = latest.get("total_msgs", 0)
+    weekly_part = (", tyzdenne %.0f -> %.0f %%" % (prev_pct, cur_pct)
+                  if (prev_pct is not None and cur_pct is not None) else "")
+    lines = ["Spotreba %s -- $%.2f (%d sprav)%s"
+            % (hour_label, total_usd, total_msgs, weekly_part)]
+    per_host = latest.get("per_host") or {}
+    top = sorted((kv for kv in per_host.items() if "error" not in kv[1]),
+                key=lambda kv: -kv[1].get("usd", 0.0))[:2]
+    if top:
+        lines.append("najviac: " + " · ".join(
+            "%s $%.2f (%d sprav, ctx %s)"
+            % (h, v.get("usd", 0.0), v.get("msgs", 0), _fmt_int(v.get("avg_ctx", 0)))
+            for h, v in top))
+    prev3 = list(reversed(prev_rows[-3:]))
+    if prev3:
+        n = len(prev3)
+        unit = "hodinu" if n == 1 else ("hodiny" if n < 5 else "hodin")
+        lines.append("predchadzajuce %d %s: " % (n, unit) + " · ".join(
+            "$%.2f" % (r.get("total_usd", 0.0) or 0.0) for r in prev3))
+    return "\n".join(lines)

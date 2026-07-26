@@ -3658,6 +3658,84 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
 
 
 # --------------------------------------------------------------------------- #
+# Job 19 -- HOURLY BURN ALERT (#81, 2026-07-26 follow-up to job 16). Job 16
+# above only ever WRITES the merged hourly fleet row; nothing ever LOOKS at
+# it against a reference and pings on its own -- "the only thing that does
+# that today is remembering to check, and exactly during an incident, when
+# spend spikes most, there's no time to remember" (the ticket's own words).
+# Runs right after job 16 in run_once, on the SAME dev1-only coordinator
+# gate (cmd_watchdog computes it, this module stays host-agnostic, mirroring
+# job 16's own convention) -- every other managed box never writes
+# fleet.jsonl at all, so the job would simply see an empty file there.
+#
+# Plain JSONL read + comparison (`burn.hourly_burn_alert`) + one Discord
+# POST -- no agent, no model, so it survives the operator being busy
+# fighting whatever incident is actually driving the spend up.
+# --------------------------------------------------------------------------- #
+
+def _env_num(name, default, cast=float):
+    """Resolve one env-overridable numeric threshold, falling back to
+    `default` on a missing or unparsable value. Shared by every
+    `AIRULESET_BURN_ALERT_*` threshold below -- avoids four near-identical
+    try/except blocks."""
+    try:
+        return cast(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def burn_alert_job(now, state, send_fn, fleet_path=None, owner=None,
+                   dry_run=False, abs_usd=None, rel_mult=None,
+                   rel_window=None, weekly_step_pct=None):
+    """Job 19 -- see the section comment. Reads the CURRENT latest row of
+    `fleet.jsonl` (job 16's merge, run immediately before this in
+    `run_once`) -- if that row's hour bucket was already evaluated
+    (`state['burn_alert_hour']`), this is a no-op, the SAME at-most-once-
+    per-hour convention jobs 13/16 already use ("druhe spustenie v tej
+    istej hodine neposle nic"). Otherwise claims the bucket and checks it
+    via `burn.hourly_burn_alert`; a triggered hour sends ONE combined
+    Discord ping, deduped a SECOND time via `send_fn`'s own `dedup_key`
+    (mirrors job 16's `fleet-burn-budget` dedup) so a lost/reset `state`
+    can never double-post either. A quiet hour still claims the bucket
+    (never re-evaluated) and sends nothing -- "ticha hodina neposiela
+    nic". `dry_run`: compute + log, but never claim the hour or send
+    (mirrors `fleet_burn_job`'s own dry-run contract exactly). Best-
+    effort: exceptions are the caller's (run_once's) responsibility to
+    catch, same as every other job."""
+    import burn as burn_mod
+    fleet_path = fleet_path or burn_mod.fleet_path()
+    rows = burn_mod.load_fleet(fleet_path)
+    if not rows:
+        return []
+    hb = burn_mod.hour_bucket_of_ts(rows[-1].get("ts"))
+    if hb is None or state.get("burn_alert_hour") == hb:
+        return []
+    if abs_usd is None:
+        abs_usd = _env_num("AIRULESET_BURN_ALERT_ABS_USD", burn_mod.BURN_ALERT_ABS_USD)
+    if rel_mult is None:
+        rel_mult = _env_num("AIRULESET_BURN_ALERT_REL_MULT", burn_mod.BURN_ALERT_REL_MULT)
+    if rel_window is None:
+        rel_window = _env_num("AIRULESET_BURN_ALERT_REL_WINDOW",
+                              burn_mod.BURN_ALERT_REL_WINDOW, cast=int)
+    if weekly_step_pct is None:
+        weekly_step_pct = _env_num("AIRULESET_BURN_ALERT_WEEKLY_STEP_PCT",
+                                   burn_mod.BURN_ALERT_WEEKLY_STEP_PCT)
+    alert = burn_mod.hourly_burn_alert(rows, abs_usd=abs_usd, rel_mult=rel_mult,
+                                       rel_window=rel_window,
+                                       weekly_step_pct=weekly_step_pct)
+    if dry_run:
+        return ["[dry-run] burn-alert hour=%s %s (not claimed, not sent)"
+               % (hb, "TRIGGERED" if alert else "quiet")]
+    state["burn_alert_hour"] = hb
+    if not alert:
+        return ["burn-alert hour=%s quiet" % hb]
+    status = send_fn(alert["message"], owner=owner,
+                     dedup_key="burn-alert:%d" % hb, dry_run=dry_run)
+    return ["burn-alert hour=%s TRIGGERED (%s) -> %s"
+           % (hb, "; ".join(alert["reasons"]), status)]
+
+
+# --------------------------------------------------------------------------- #
 # Compact-request state ("krok 1c — ohraničenie kontextu", #39 follow-up,
 # 2026-07-25). A completed-ticket report is a SAFE compaction boundary — the
 # ticket's durable state already lives in git/GitHub/the issue, so whatever
@@ -5754,7 +5832,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              target_model=None, sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
-             fleet_path=None, hooks_settings_path=None):
+             fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False):
     """Scan every `claude` pane once. Jobs:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
@@ -5851,6 +5929,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           caller of run_once() that passes nothing sees NO behavior change
           and never has its own test state polluted by this box's real
           settings.json.
+      (19) (only when `burn_alert_enabled` is truthy) HOURLY BURN ALERT
+          (#81) — runs right after job 16; reads the LATEST merged
+          `fleet.jsonl` row and, at most once per hour bucket, checks it
+          against three thresholds (absolute $, a multiple of the median
+          of the last N hours, crossing a whole step of the weekly usage
+          window) via `burn.hourly_burn_alert` — any one firing sends ONE
+          combined Discord ping (burn_alert_job). Coordinator-only, same
+          "wired = on" convention as job 16 (cmd_watchdog computes the
+          dev1-only gate; this module stays host-agnostic).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -6607,6 +6694,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                    owner=account_owner or None, dry_run=dry_run)
         except Exception as e:
             logs.append("fleet-burn error: %r" % (e,))
+
+    # Job 19 — HOURLY BURN ALERT (#81): only when `burn_alert_enabled` is
+    # truthy (cmd_watchdog computes it the SAME dev1-only way it computes
+    # `fleet_fetch` for job 16 — every other managed box never writes
+    # fleet.jsonl at all, so this job would just see an empty file there).
+    # Runs right after job 16 so it evaluates the row job 16 may have just
+    # written THIS sweep. Best-effort; internally cadence-gated to at most
+    # once per hour bucket.
+    if burn_alert_enabled:
+        try:
+            logs += burn_alert_job(now, state, send_fn, fleet_path=fleet_path,
+                                   owner=account_owner or None, dry_run=dry_run)
+        except Exception as e:
+            logs.append("burn-alert error: %r" % (e,))
 
     # Job 17 — HARD CONTEXT CEILING BACKSTOP (#69): ALWAYS wired (no gating
     # param — same "always on" shape as job 9's goal_autoarm and job 15
