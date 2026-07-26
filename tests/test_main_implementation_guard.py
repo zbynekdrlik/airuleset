@@ -665,6 +665,74 @@ class PipeReducers80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class BoundedPeeks80(unittest.TestCase):
+    """#80, found by replaying all 687 of gk's real main-agent Bash commands
+    through the hook: after the heredoc and pipe-stage fixes the remaining
+    false positives were all the same shape — a small BOUNDED peek at a file
+    the command itself just produced (`... > /tmp/mt.out; head -5 /tmp/mt.out`,
+    `cat >> SKILL.md <<'EOF' ... EOF; tail -3 SKILL.md`).
+
+    `head`/`tail` are inherently bounded (10 lines by default) — what makes
+    a read expensive is the SIZE that comes back, so the bound is what
+    should be judged, not the head token. A peek up to
+    AIRULESET_PEEK_MAX_LINES (default 50) passes; anything larger, an
+    unbounded `-n +N` tail, or a byte-count dump is still a bulk read, and
+    `cat file` / `sed -n 'A,Bp'` / `grep` are untouched."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def test_tail_verification_peek_allowed(self):
+        out = self._armed("tail -3 /tmp/wt-pb/.claude/skills/x/SKILL.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_head_small_peek_allowed(self):
+        out = self._armed("head -5 /tmp/mt.out")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_bare_tail_is_bounded_by_default_and_allowed(self):
+        out = self._armed("tail /tmp/deploy.log")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_dash_n_form_allowed(self):
+        out = self._armed("tail -n 20 /tmp/out.txt")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_large_head_still_blocked(self):
+        out = self._armed("head -100 airuleset.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_tail_from_line_n_to_end_is_unbounded_and_blocked(self):
+        out = self._armed("tail -n +1 airuleset.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_byte_count_dump_still_blocked(self):
+        out = self._armed("head -c 200000 big.log")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cat_and_sed_slice_are_untouched_by_the_peek_rule(self):
+        self.assertEqual(self._armed("cat airuleset.py").returncode, 2)
+        self.assertEqual(self._armed("sed -n '1,40p' airuleset.py").returncode, 2)
+
+    def test_peek_bound_is_env_tunable(self):
+        helper = MainImplementationGuard()
+        sid = "t-mg-peek-" + uuid.uuid4().hex[:6]
+        env = dict(os.environ, AIRULESET_PEEK_MAX_LINES="2")
+        with TemporaryDirectory() as d:
+            tp = str(Path(d) / "s.jsonl")
+            Path(tp).write_text(goal_armed_transcript())
+            payload = {"session_id": sid, "hook_event_name": "PreToolUse",
+                       "tool_name": "Bash",
+                       "tool_input": {"command": "tail -30 /tmp/x.log"},
+                       "transcript_path": tp}
+            out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                                 env=env, capture_output=True, text=True)
+        del helper
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class OneShotBypass80(unittest.TestCase):
     """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
     single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
