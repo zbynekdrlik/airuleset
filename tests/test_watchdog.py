@@ -2019,6 +2019,353 @@ class TestModelReconcile(unittest.TestCase):
         self.assertNotIn("sess-abc", state.get("modelswitch_pending", {}))
 
 
+class TestModelReconcileHandledSet(unittest.TestCase):
+    """#70: job 12 must record every sid it actually attempts to restart THIS
+    sweep into a shared `handled` set, so job 18 (hooks-reconcile) can see —
+    within the SAME sweep — that this session is already being restarted for
+    a MODEL change, and skip firing a SECOND restart for a hooks change that
+    happens to land in the same sweep."""
+
+    CWD = "/home/newlevel/devel/demo"
+    PANE = "%9"
+
+    def test_handled_set_records_sid_on_real_restart_claim(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               MR_IDLE_CAP, cap_seq=[MR_IDLE_CAP])
+        state = {}
+        handled = set()
+        wd.model_reconcile(time.time(), tmux, state, MR_TARGET, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None,
+                           handled=handled)
+        self.assertIn("sess-abc", handled)
+
+    def test_dry_run_never_populates_the_handled_set(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        state = {}
+        handled = set()
+        wd.model_reconcile(time.time(), tmux, state, MR_TARGET, dry_run=True,
+                           projects_dir=proj, sleep_fn=lambda s: None,
+                           handled=handled)
+        self.assertEqual(handled, set())
+
+    def test_skipped_pane_never_populates_the_handled_set(self):
+        # a busy pane is never claimed at all -- nothing to coalesce against.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", "claude-fable-5")
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_BUSY_CAP)
+        state = {}
+        handled = set()
+        wd.model_reconcile(time.time(), tmux, state, MR_TARGET, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None,
+                           handled=handled)
+        self.assertEqual(handled, set())
+
+
+# --------------------------------------------------------------------------- #
+# #70 — Job 18: HOOKS RECONCILE, restart-based. Claude Code snapshots its
+# hook set ONCE at process START (`rCu()` / telemetry event
+# `setup_hooks_captured`, read directly out of the CC 2.1.220 binary -- #70's
+# own binary citation) and NEVER re-reads it -- so a hook deployed into
+# `settings.json` while a session is ALREADY RUNNING has ZERO effect on that
+# session for its entire remaining lifetime, no matter how many new hooks get
+# deployed. This job is job 12's EXACT restart machinery
+# (`_restart_pane`/`_pane_has_bg_agent`/the boundary-classification guards)
+# driven by a DIFFERENT staleness signal: the CONTENT hash (never mtime) of
+# the effective settings.json `"hooks"` block, tracked per session id from
+# the first sweep this job observes that session, rather than a target-model
+# string read out of the transcript.
+#
+# There is no way to know retroactively what hash a session ALREADY RUNNING
+# at this job's own deploy time actually started with -- so the FIRST sweep
+# this job ever sees a given session, it bootstraps: records the CURRENT
+# hash as that session's known baseline, takes no action. A LATER sweep
+# where the current hash no longer matches that stored baseline is what
+# proves the session is genuinely stale, and only then does it restart.
+# --------------------------------------------------------------------------- #
+
+
+def _write_settings(path, hooks_block):
+    Path(path).write_text(json.dumps({"hooks": hooks_block}))
+
+
+HR_HOOKS_A = {"PreToolUse": [{"matcher": "Bash",
+                              "hooks": [{"type": "command", "command": "a.sh"}]}]}
+HR_HOOKS_B = {"PreToolUse": [{"matcher": "Bash",
+                              "hooks": [{"type": "command", "command": "b.sh"}]}]}
+
+
+class TestHooksConfigHash(unittest.TestCase):
+    def test_same_content_same_hash(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "settings.json"
+        _write_settings(p, HR_HOOKS_A)
+        h1 = wd._hooks_config_hash(p)
+        h2 = wd._hooks_config_hash(p)
+        self.assertIsNotNone(h1)
+        self.assertEqual(h1, h2)
+
+    def test_different_content_different_hash(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "settings.json"
+        _write_settings(p, HR_HOOKS_A)
+        ha = wd._hooks_config_hash(p)
+        _write_settings(p, HR_HOOKS_B)
+        hb = wd._hooks_config_hash(p)
+        self.assertNotEqual(ha, hb)
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(wd._hooks_config_hash(Path("/nonexistent/settings.json")))
+
+    def test_invalid_json_returns_none(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "settings.json"
+        p.write_text("{not json")
+        self.assertIsNone(wd._hooks_config_hash(p))
+
+    def test_key_order_does_not_change_the_hash(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "settings.json"
+        p.write_text('{"hooks": {"A": 1, "B": 2}}')
+        h1 = wd._hooks_config_hash(p)
+        p.write_text('{"hooks": {"B": 2, "A": 1}}')
+        h2 = wd._hooks_config_hash(p)
+        self.assertEqual(h1, h2)
+
+
+class TestHooksReconcile(unittest.TestCase):
+    CWD = "/home/newlevel/devel/demo"
+    PANE = "%9"
+
+    def _seed(self, model="claude-sonnet-5"):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_transcript(proj, self.CWD, "sess-abc", model)
+        settings = Path(tmp) / "settings.json"
+        _write_settings(settings, HR_HOOKS_A)
+        return proj, settings
+
+    def _go(self, settings, initial_captured, proj, cap_seq=(), state=None,
+           dry_run=False, in_mode=False, shell_after=1, handled=None):
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               initial_captured, cap_seq=cap_seq,
+                               shell_after=shell_after, in_mode=in_mode)
+        state = {} if state is None else state
+        logs = wd.hooks_reconcile(time.time(), tmux, state, dry_run=dry_run,
+                                  projects_dir=proj, sleep_fn=lambda s: None,
+                                  settings_path=settings, handled=handled)
+        return tmux, logs, state
+
+    def test_first_sighting_bootstraps_without_restarting(self):
+        proj, settings = self._seed()
+        state = {}
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state["hooks_session_hash"]["sess-abc"],
+                         wd._hooks_config_hash(settings))
+
+    def test_unchanged_hash_does_nothing(self):
+        proj, settings = self._seed()
+        state = {}
+        self._go(settings, MR_IDLE_CAP, proj, state=state)   # bootstrap sweep
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("hooks_restarted", {}), {})
+
+    def test_changed_hash_restarts_no_dialog(self):
+        proj, settings = self._seed()
+        state = {}
+        self._go(settings, MR_IDLE_CAP, proj, state=state)   # bootstrap on hooks A
+        _write_settings(settings, HR_HOOKS_B)                 # config changes
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertIn("/exit", tmux.typed_texts())
+        self.assertIn("claude", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK restart (hooks changed)")
+                            for ln in logs), logs)
+        self.assertTrue(state["hooks_restarted"]["sess-abc"])
+
+    def test_changed_hash_restarts_with_resume_dialog(self):
+        proj, settings = self._seed()
+        state = {}
+        self._go(settings, MR_IDLE_CAP, proj, state=state)
+        _write_settings(settings, HR_HOOKS_B)
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
+                                     cap_seq=[MR_RESUME_DIALOG_CAP, MR_IDLE_CAP])
+        self.assertTrue(any(ln.startswith("OK restart (hooks changed)")
+                            for ln in logs), logs)
+
+    def test_already_restarted_session_is_never_retried(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"},
+                 "hooks_restarted": {"sess-abc": True}}
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+
+    def test_busy_pane_is_skipped(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_BUSY_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
+
+    def test_draft_pane_is_never_typed_over(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_DRAFT_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+
+    def test_open_dialog_is_skipped(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_DIALOG_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("dialog" in ln for ln in logs), logs)
+
+    def test_in_mode_pane_is_skipped(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
+                                     in_mode=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+
+    def test_bg_agent_blocks_restart(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_BG_AGENT_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
+
+    def test_dry_run_never_sends_keys(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
+                                     dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY") for ln in logs), logs)
+        self.assertEqual(state.get("hooks_restarted", {}), {})
+
+    def test_unreadable_settings_disables_job_entirely(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        tmux, logs, state = self._go(Path("/nonexistent/settings.json"),
+                                     MR_IDLE_CAP, proj, state=state)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(logs, [])
+        self.assertEqual(state["hooks_session_hash"], {"sess-abc": "stale-hash"})
+
+    def test_repeated_failures_stop_retrying_after_max_attempts(self):
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        logs = []
+        for _ in range(wd.HOOKS_RECONCILE_MAX_ATTEMPTS):
+            tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                   MR_IDLE_CAP, shell_after=10 ** 6)
+            logs = wd.hooks_reconcile(time.time(), tmux, state, dry_run=False,
+                                      projects_dir=proj, sleep_fn=lambda s: None,
+                                      settings_path=settings)
+        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertEqual(state["hooks_restart_attempts"]["sess-abc"],
+                         wd.HOOKS_RECONCILE_MAX_ATTEMPTS)
+        self.assertTrue(state["hooks_restarted"]["sess-abc"])
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)], MR_IDLE_CAP)
+        wd.hooks_reconcile(time.time(), tmux, state, dry_run=False,
+                           projects_dir=proj, sleep_fn=lambda s: None,
+                           settings_path=settings)
+        self.assertEqual(tmux.sent, [])
+
+    def test_coalesces_with_model_reconcile_handled_set(self):
+        # #70 acceptance: if job 12 already restarted (or is restarting) this
+        # sid THIS sweep for a model change, job 18 must NOT also fire a
+        # second restart for a hooks change landing in the same sweep.
+        proj, settings = self._seed()
+        state = {"hooks_session_hash": {"sess-abc": "stale-hash"}}
+        handled = {"sess-abc"}
+        tmux, logs, state = self._go(settings, MR_IDLE_CAP, proj, state=state,
+                                     handled=handled)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("hooks_restarted", {}), {})
+
+
+class RunOnceHooksReconcileWiring(unittest.TestCase):
+    """Job 18 is ALWAYS wired (no gating param) -- run_once must invoke it
+    every sweep, best-effort, and coalesce with job 12 into ONE restart when
+    both a model change and a hooks change hit the same session the same
+    sweep (#70)."""
+
+    def test_qualifying_session_fires_through_run_once(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        cwd = "/home/newlevel/devel/hooks-demo"
+        # cmd="node" so run_once's OWN list_claude_panes-based jobs (1-9)
+        # skip it entirely -- isolates this to job 18's wiring, same pattern
+        # as test_target_model_wires_into_model_reconcile.
+        _seed_transcript(proj, cwd, "sess-x", "claude-sonnet-5")
+        settings = Path(tmp) / "settings.json"
+        _write_settings(settings, HR_HOOKS_A)
+        state_path.write_text(json.dumps(
+            {"hooks_session_hash": {"sess-x": "stale-hash"}}))
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_IDLE_CAP,
+                               cap_seq=[MR_IDLE_CAP])
+        logs = wd.run_once(now=time.time(), dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           hooks_settings_path=settings)
+        self.assertTrue(any(ln.startswith("OK restart (hooks changed)")
+                            for ln in logs), logs)
+
+    def test_no_qualifying_session_produces_no_hooks_reconcile_restart_logs(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"))
+        self.assertFalse(any("hooks changed" in ln for ln in logs), logs)
+
+    def test_model_and_hooks_change_together_coalesce_into_one_restart(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        cwd = "/home/newlevel/devel/coalesce-demo"
+        _seed_transcript(proj, cwd, "sess-y", "claude-fable-5")  # stale model too
+        settings = Path(tmp) / "settings.json"
+        _write_settings(settings, HR_HOOKS_A)
+        state_path.write_text(json.dumps(
+            {"hooks_session_hash": {"sess-y": "stale-hash"}}))
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_IDLE_CAP,
+                               cap_seq=[MR_IDLE_CAP])
+        logs = wd.run_once(now=time.time(), dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           target_model=MR_TARGET,
+                           hooks_settings_path=settings)
+        self.assertTrue(any(ln.startswith("OK (model-reconcile)") for ln in logs), logs)
+        self.assertFalse(any(ln.startswith("OK restart (hooks changed)")
+                             for ln in logs), logs)
+        # exactly ONE restart sequence -- not two
+        self.assertEqual(tmux.typed_texts().count("/exit"), 1, tmux.typed_texts())
+        self.assertEqual(tmux.typed_texts().count("claude"), 1, tmux.typed_texts())
+
+
 # --------------------------------------------------------------------------- #
 # #39/#43 follow-up — Job 15: COMPACT OVERGROWN IDLE SESSIONS. Job 14 only
 # compacts at a completed-ticket boundary; a long-lived session that is NOT
