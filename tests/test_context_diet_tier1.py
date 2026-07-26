@@ -114,5 +114,79 @@ class TestDevelopmentRulesMoved(TestCase):
         self.assertIn("!.claude/rules/", ignore)
 
 
+class TestProductDocsDropped(TestCase):
+    """claude-code-tooling.md carried four blocks of Claude Code PRODUCT
+    documentation — what a feature is, not how the agent must behave. They
+    changed no behaviour and were locked by no test (verified: zero references
+    anywhere in tests/, modules/, skills/, profiles/).
+    """
+
+    def test_product_documentation_subsections_are_gone(self):
+        t = read("modules/core/claude-code-tooling.md")
+        for gone in [
+            "#### Recaps",
+            "#### `/focus` mode",
+            "#### `--channels` flag",
+            "#### `/fewer-permission-prompts` skill",
+        ]:
+            self.assertNotIn(gone, t, f"product doc still on the prefix: {gone}")
+
+    def test_the_behavioural_sections_stay(self):
+        t = read("modules/core/claude-code-tooling.md")
+        for keep in [
+            "#### Auto Mode (Shift+Tab in CLI)",
+            "#### Effort levels",
+            "#### Dynamic Workflows (the `Workflow` tool)",
+            "#### Autonomous Goals (`/goal`)",
+            "#### Verification tools",
+            "`opts.model: 'fable'` for the genuinely HARD judgment stages",
+            "Applies to all rewordings and semantic equivalents",
+        ]:
+            self.assertIn(keep, t, f"behavioural content must stay: {keep}")
+
+
+class TestNotificationInternalsMoved(TestCase):
+    """milestone-notifications.md described what three shell scripts do
+    INTERNALLY. The hooks run identically whether or not the model read that —
+    so it belongs in the notification-mechanics skill, which the #91 trigger
+    table loads on `airuleset.py notify` / `notify-discord`.
+    """
+
+    MECHANICS = "skills/notification-mechanics/SKILL.md"
+
+    def test_hook_internals_left_the_always_on_module(self):
+        t = read("modules/core/milestone-notifications.md")
+        for gone in [
+            "`notify-discord-pending.sh` (Stop) scans the message",
+            "`notify-discord.sh` (Notification : idle_prompt) sends the pending",
+            "`notify-discord-send.sh` is the single send path both call",
+        ]:
+            self.assertNotIn(gone, t, f"hook internals still on the prefix: {gone}")
+
+    def test_hook_internals_landed_in_the_mechanics_skill_verbatim(self):
+        t = read(self.MECHANICS)
+        for anchor in [
+            "`notify-discord-pending.sh` (Stop) scans the message",
+            "`notify-discord-send.sh` is the single send path both call",
+            "clear-question-dedup.sh",
+        ]:
+            self.assertIn(anchor, t, f"lost in the move: {anchor}")
+
+    def test_the_behavioural_core_stays_inline(self):
+        t = read("modules/core/milestone-notifications.md")
+        for keep in [
+            "do NOT call the discord `reply` tool",
+            "❓ ASKED",
+            "ARMED GOAL",
+            "Slovak",
+            "sleep window",
+        ]:
+            self.assertIn(keep, t, f"behaviour must stay always-on: {keep}")
+
+    def test_the_module_points_at_the_mechanics_skill(self):
+        t = read("modules/core/milestone-notifications.md")
+        self.assertIn("notification-mechanics", t)
+
+
 if __name__ == "__main__":
     main()
