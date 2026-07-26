@@ -19,7 +19,7 @@ RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
 MAX_RETRIES=3
 if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
   echo "$((RETRIES+1))" > "$RETRY_FILE"
-  REASON="Completion report is missing the '📔 Playbook:' line. Per project-playbook-maintenance.md, run the playbook-review skill before the report: capture any reusable procedure/gotcha to the project's .claude/skills/ (or CLAUDE.md router / memory per the routing rule), then add a 1-2 line '📔 Playbook: <what you learned/updated>' (or '📔 Playbook: nič nové' if genuinely nothing). This keeps project knowledge fresh + visible."
+  REASON="Completion report is missing the '📔 Playbook:' line. Per project-playbook-maintenance.md, run the playbook-review skill before the report: capture any reusable procedure/gotcha to the project's .claude/rules/<area>.md with 'paths:' frontmatter (the surface that auto-loads when a matching file is read — NOT the project CLAUDE.md, which is re-read every session and grows without bound), then add a 1-2 line '📔 Playbook: <what you learned/updated>' (or '📔 Playbook: nič nové' if genuinely nothing). This keeps project knowledge fresh + visible."
   jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
   exit 0
 fi
