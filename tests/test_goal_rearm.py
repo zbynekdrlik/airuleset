@@ -887,17 +887,25 @@ class GoalDriftBase(unittest.TestCase):
 
     def _lit_seq(self, text):
         """cap_seq for a verified delivery into the bare box of an ARMED pane:
-        the job's own capture, post-type, post-Enter."""
+        the job's own sweep capture, the FRESH pre-delivery re-check, then
+        post-type and post-Enter."""
         typed = CONV + FOOTER_LIT.replace("❯ \n", "❯ " + text[-40:] + "\n")
-        return [PANE_LIT, typed, PANE_LIT]
+        return [PANE_LIT, PANE_LIT, typed, PANE_LIT]
 
     def _sweep(self, armed_payload=None, templates_path=None, state=None,
-               now=None, cap_seq=(), pane=None, handled=None, dry_run=False):
+               now=None, cap_seq=(), pane=None, handled=None, dry_run=False,
+               quiet=600):
         if armed_payload is not None:
             write_transcript([arm_entry(armed_payload,
                                         ts="2026-07-26T12:5%d:00.000Z"
                                            % (len(self.pings) % 10))],
                              self.tmp.name)
+        # How long the transcript has been QUIET is what tells a paused loop
+        # from one mid-turn; every test states it explicitly.
+        p = Path(self.tmp.name) / wd.encode_project_dir(CWD) / (SID + ".jsonl")
+        if p.exists():
+            t = (now or time.time()) - quiet
+            os.utime(p, (t, t))
         tmux = FakeTmux(pane or PANE_LIT, cap_seq=cap_seq)
         logs = wd.goal_rearm(now or time.time(), tmux,
                              state if state is not None else {},
@@ -1029,6 +1037,28 @@ class TestGoalDriftRefusals(GoalDriftBase):
         with m.patch.object(wd, "compact_claim_active", return_value=True):
             tmux, logs = self._sweep(templates_path=tp, state=state,
                                      cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), logs)
+
+    def test_a_loop_mid_turn_is_never_typed_into(self):
+        """Live-observed while building this: the pane read as a free prompt
+        for one moment, the delivery typed 3 KB into it, the loop fired its
+        next turn before the Enter landed, and the whole payload was left
+        sitting UNSUBMITTED in the box — where every other job then sees it
+        as a foreign draft. A pane's momentary look is not enough; the
+        transcript's own quiet window is what distinguishes a paused loop
+        from one mid-turn."""
+        state, tp = self._drifted()
+        tmux, logs = self._sweep(templates_path=tp, state=state, quiet=5,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("quiet" in ln for ln in logs), logs)
+
+    def test_a_pane_that_went_busy_since_the_sweep_capture_is_left_alone(self):
+        """The sweep's capture is several tmux round-trips old by the time
+        delivery is reached — re-verify against a FRESH one first."""
+        state, tp = self._drifted()
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=[PANE_LIT, PANE_BUSY])
         self.assertFalse(tmux.typed(), logs)
 
     def test_dark_footer_is_the_OTHER_shape_not_this_one(self):
