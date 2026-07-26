@@ -247,17 +247,25 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return str(Path(d.name) / "compact-requests.json")
 
+    def _dp(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
     def _go(self, captured, in_mode=False, dry_run=False, seed=True, path=None,
-           cap_seq=(), state=None, send_fn=None):
+           cap_seq=(), state=None, send_fn=None, msg_hash=None,
+           delivered_path=None):
         path = path or self._p()
         if seed:
-            wd.record_compact_request(self.SID, "/home/x/proj", path=path)
+            wd.record_compact_request(self.SID, "/home/x/proj", path=path,
+                                      msg_hash=msg_hash)
         tmux = CompactFakeTmux(captured, in_mode=in_mode, cap_seq=cap_seq)
         panes_by_sid = {self.SID: (self.PANE, captured)}
         state = {} if state is None else state
         logs = wd.compact_ticket_boundary(time.time(), tmux, state, panes_by_sid,
                                           dry_run=dry_run, path=path,
-                                          send_fn=send_fn)
+                                          send_fn=send_fn,
+                                          delivered_path=delivered_path)
         return tmux, logs, path, state
 
     def test_idle_pane_gets_compact_typed(self):
@@ -412,6 +420,130 @@ class TestCompactTicketBoundary(unittest.TestCase):
         remaining = wd.load_compact_requests(path)
         self.assertNotIn("sess-a", remaining)   # idle → handled, dedup'd
         self.assertIn("sess-b", remaining)      # busy → kept for retry
+
+    # ----------------------------------------------------------------- #
+    # #71 — delivered-dedup: an entry whose msg_hash was ALREADY marked
+    # delivered (by this job, or by the synchronous #65 path) is dropped
+    # with ZERO keystrokes — the "vice versa" half of #71's fix (job 14
+    # must not re-deliver a boundary the sync path already handled).
+    # ----------------------------------------------------------------- #
+
+    def test_entry_already_delivered_is_dropped_with_zero_keystrokes(self):
+        delivered_path = self._dp()
+        wd.mark_compact_delivered(self.SID, "stale-hash", path=delivered_path)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, msg_hash="stale-hash",
+                                       delivered_path=delivered_path)
+        self.assertEqual(tmux.sent, [])
+        self.assertNotIn(self.SID, wd.load_compact_requests(path))
+        self.assertTrue(any("already-delivered" in ln for ln in logs), logs)
+
+    def test_successful_send_marks_delivered_for_its_own_hash(self):
+        delivered_path = self._dp()
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, msg_hash="fresh-hash",
+                                       delivered_path=delivered_path)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(wd.compact_already_delivered(self.SID, "fresh-hash",
+                                                      path=delivered_path))
+
+    def test_stash_success_marks_delivered_for_its_own_hash(self):
+        delivered_path = self._dp()
+        tmux, logs, path, _ = self._go(
+            CB_DRAFT_CAP, msg_hash="stash-hash", delivered_path=delivered_path,
+            cap_seq=(CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP, CB_STASH_SUBMITTED_CAP))
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(wd.compact_already_delivered(self.SID, "stash-hash",
+                                                      path=delivered_path))
+
+    def test_different_hash_is_not_treated_as_already_delivered(self):
+        delivered_path = self._dp()
+        wd.mark_compact_delivered(self.SID, "old-hash", path=delivered_path)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, msg_hash="new-hash",
+                                       delivered_path=delivered_path)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_no_hash_never_consults_delivered_state(self):
+        # pre-#71 requests (no msg_hash) behave exactly as before -- no
+        # delivered-file consultation at all, even if this SAME session is
+        # marked delivered under some OTHER (unrelated) hash.
+        delivered_path = self._dp()
+        wd.mark_compact_delivered(self.SID, "unrelated-hash", path=delivered_path)
+        tmux, logs, path, _ = self._go(CB_IDLE_CAP, delivered_path=delivered_path)
+        self.assertIn("/compact", tmux.typed_texts())
+
+
+# --------------------------------------------------------------------------- #
+# 2b-1b. #71 (2026-07-26 live incident) — compact_already_delivered /
+# mark_compact_delivered state functions. Live evidence (gatekeeper,
+# 2026-07-26 ~07:35): a SINGLE completed-ticket report ("#2180") produced
+# THREE separate synchronous /compact deliveries in a row (one success,
+# two "Not enough messages") within ~2.5 minutes, with ZERO watchdog job
+# 14/17 log lines in that window (confirmed via journalctl) — proving the
+# duplicates came from REPEATED Stop-hook fires against an UNCHANGED
+# last_assistant_message (the armed goal loop re-evaluating completion
+# right after the first compaction finished), not from a job-14 race. A
+# fingerprint of the triggering report, tracked here, stops a repeat fire
+# reporting the SAME (unchanged) boundary from re-delivering, from EITHER
+# channel. Lives in its OWN file (compact-delivered.json) so the existing
+# compact-requests.json "success clears the entry" contract is untouched.
+# --------------------------------------------------------------------------- #
+
+class TestCompactDeliveredDedup(unittest.TestCase):
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
+    def test_not_delivered_by_default(self):
+        p = self._p()
+        self.assertFalse(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+
+    def test_mark_then_check_matches(self):
+        p = self._p()
+        self.assertTrue(wd.mark_compact_delivered("sid-1", "hash-a", path=p))
+        self.assertTrue(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+
+    def test_different_hash_is_not_a_match(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        self.assertFalse(wd.compact_already_delivered("sid-1", "hash-b", path=p))
+
+    def test_different_session_is_not_a_match(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        self.assertFalse(wd.compact_already_delivered("sid-2", "hash-a", path=p))
+
+    def test_blank_hash_never_matches_even_after_marking_something_else(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        self.assertFalse(wd.compact_already_delivered("sid-1", "", path=p))
+
+    def test_blank_session_mark_is_rejected(self):
+        p = self._p()
+        self.assertFalse(wd.mark_compact_delivered("", "hash-a", path=p))
+
+    def test_blank_hash_mark_is_a_noop_and_never_touches_disk(self):
+        p = self._p()
+        self.assertFalse(wd.mark_compact_delivered("sid-1", "", path=p))
+        self.assertFalse(Path(p).exists())
+
+    def test_later_mark_overwrites_earlier_for_the_same_session(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        wd.mark_compact_delivered("sid-1", "hash-b", path=p)
+        self.assertFalse(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+        self.assertTrue(wd.compact_already_delivered("sid-1", "hash-b", path=p))
+
+    def test_load_bad_file_is_treated_as_not_delivered(self):
+        p = self._p()
+        Path(p).write_text("not json")
+        self.assertFalse(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+
+    def test_path_resolved_at_call_time(self):
+        with m.patch.dict(os.environ, {"HOME": "/tmp/fake-home-compact-delivered"}):
+            self.assertEqual(
+                wd.compact_delivered_path(),
+                Path("/tmp/fake-home-compact-delivered") / ".claude" /
+                "compact-delivered.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -813,6 +945,63 @@ class TestCompactRequestCli(unittest.TestCase):
         d2 = json.loads(reqfile.read_text())
         self.assertIn("sid-cli", d2)
 
+    # ----------------------------------------------------------------- #
+    # #71 — a REPEAT `--record` carrying the SAME `--msg-hash` as one
+    # already delivered must be a complete no-op: no re-record, no second
+    # `deliver_compact_now` attempt. This is the actual live bug (a single
+    # completed-ticket report producing multiple synchronous deliveries in
+    # a row, per journalctl proof job 14 was never even invoked in that
+    # window) — the msg_hash coming from the hook fingerprints the exact
+    # `last_assistant_message` that triggered the request.
+    # ----------------------------------------------------------------- #
+
+    def test_duplicate_msg_hash_after_delivery_is_a_noop(self):
+        fake_home = self._home()
+        a = Args()
+        a.msg_hash = "dup-hash"
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
+            airuleset.cmd_compact_request(a)   # 1st: delivers + marks
+            airuleset.cmd_compact_request(a)   # 2nd: SAME hash -> no-op
+        dcn.assert_called_once()
+        reqfile = fake_home / ".claude" / "compact-requests.json"
+        d2 = json.loads(reqfile.read_text()) if reqfile.exists() else {}
+        self.assertNotIn("sid-cli", d2)
+
+    def test_different_msg_hash_after_delivery_still_delivers(self):
+        fake_home = self._home()
+        a1 = Args()
+        a1.msg_hash = "hash-1"
+        a2 = Args()
+        a2.msg_hash = "hash-2"
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
+            airuleset.cmd_compact_request(a1)
+            airuleset.cmd_compact_request(a2)
+        self.assertEqual(dcn.call_count, 2)
+
+    def test_failed_delivery_is_not_marked_so_a_retry_with_same_hash_still_tries(self):
+        fake_home = self._home()
+        a = Args()
+        a.msg_hash = "fail-hash"
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=False):
+            airuleset.cmd_compact_request(a)   # fails -> must NOT be marked
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
+            airuleset.cmd_compact_request(a)   # same hash -> still tries
+        dcn.assert_called_once()
+
+    def test_blank_msg_hash_never_dedupes_pre_71_callers(self):
+        # Args() with no msg_hash attribute at all (the pre-#71 shape) must
+        # behave exactly as before -- every call attempts delivery.
+        fake_home = self._home()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
+            airuleset.cmd_compact_request(Args())
+            airuleset.cmd_compact_request(Args())
+        self.assertEqual(dcn.call_count, 2)
+
 
 # --------------------------------------------------------------------------- #
 # 2e. notify-compact-request.sh — the Stop hook that records the request
@@ -885,6 +1074,40 @@ class TestCompactRequestHook(unittest.TestCase):
                for entry in cfg.get("hooks", {}).get("Stop", [])
                for h in entry.get("hooks", [])]
         self.assertTrue(any("notify-compact-request.sh" in c for c in cmds), cmds)
+
+    # ----------------------------------------------------------------- #
+    # #71 — the hook fingerprints `last_assistant_message` (sha256) and
+    # passes it through as `--msg-hash`, so a REPEATED Stop-hook fire for
+    # the SAME (unchanged) message can be recognized as a duplicate one
+    # level down (cmd_compact_request / compact_already_delivered).
+    # ----------------------------------------------------------------- #
+
+    def test_msg_hash_is_recorded_and_non_empty(self):
+        r, reqfile = self._run(
+            "sid-hash-1", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(reqfile.read_text())
+        self.assertTrue(d["sid-hash-1"].get("msg_hash"))
+
+    def test_msg_hash_is_deterministic_for_the_same_message(self):
+        r1, reqfile1 = self._run(
+            "sid-hash-2", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
+        r2, reqfile2 = self._run(
+            "sid-hash-3", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/y")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        d1 = json.loads(reqfile1.read_text())
+        d2 = json.loads(reqfile2.read_text())
+        self.assertEqual(d1["sid-hash-2"]["msg_hash"], d2["sid-hash-3"]["msg_hash"])
+
+    def test_msg_hash_differs_for_a_different_message(self):
+        r1, reqfile1 = self._run(
+            "sid-hash-4", "## ✅ Work Complete\n✅ DONE: hotovo A", cwd="/x")
+        r2, reqfile2 = self._run(
+            "sid-hash-5", "## ✅ Work Complete\n✅ DONE: hotovo B", cwd="/x")
+        d1 = json.loads(reqfile1.read_text())
+        d2 = json.loads(reqfile2.read_text())
+        self.assertNotEqual(d1["sid-hash-4"]["msg_hash"], d2["sid-hash-5"]["msg_hash"])
 
 
 if __name__ == "__main__":
