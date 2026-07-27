@@ -1776,6 +1776,44 @@ class TestTranscriptCurrentContext(unittest.TestCase):
         self.assertEqual(wd.transcript_current_context(Path("/nonexistent/x.jsonl")), 0)
 
 
+class TestTranscriptFirstModel(unittest.TestCase):
+    """Feeds job 23 (#44, model_generation_reconcile) — the session's
+    LAUNCH-time model, opposite direction from TestTranscriptLastModel."""
+
+    def test_returns_first_assistant_model(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "assistant",
+             "message": {"model": "claude-sonnet-5",
+                        "content": [{"type": "text", "text": "hi"}]}},
+            {"type": "assistant",
+             "message": {"model": "claude-fable-5",
+                        "content": [{"type": "text", "text": "bye"}]}},
+        ])
+        self.assertEqual(wd.transcript_first_model(p), "claude-sonnet-5")
+
+    def test_missing_model_field_returns_empty(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [{"type": "user", "message": {"content": "hi"}}])
+        self.assertEqual(wd.transcript_first_model(p), "")
+
+    def test_nonexistent_file_returns_empty(self):
+        self.assertEqual(wd.transcript_first_model(Path("/nonexistent/x.jsonl")), "")
+
+    def test_skips_leading_entries_without_a_model(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "s1.jsonl"
+        _write_jsonl(p, [
+            {"type": "user", "message": {"content": "hi"}},
+            {"type": "system", "content": "boot"},
+            {"type": "assistant", "message": {"model": "claude-opus-5[1m]",
+                                              "content": [{"type": "text", "text": "hi"}]}},
+        ])
+        self.assertEqual(wd.transcript_first_model(p), "claude-opus-5[1m]")
+
+
 class TestReconcileCandidatePanes(unittest.TestCase):
     def test_filters_to_claude_node_bun(self):
         def fake_run(argv, timeout=8):
@@ -2442,6 +2480,205 @@ class RunOnceHooksReconcileWiring(unittest.TestCase):
         # exactly ONE restart sequence -- not two
         self.assertEqual(tmux.typed_texts().count("/exit"), 1, tmux.typed_texts())
         self.assertEqual(tmux.typed_texts().count(wd.RELAUNCH_CMD), 1, tmux.typed_texts())
+
+
+# --------------------------------------------------------------------------- #
+# #44 — Job 23: MANAGED_MODEL GENERATION RECONCILE. The general form of job
+# 12: restarts a session whose LAUNCH-time model no longer matches the
+# current target, but ONLY when the user has never manually touched /model
+# in that session (current model still equals the launch model).
+# --------------------------------------------------------------------------- #
+
+MGR_TARGET = "claude-sonnet-6"
+
+
+def _seed_gen_transcript(projects_dir, cwd, sid, launch_model, last_model=None):
+    d = Path(projects_dir) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    entries = [{"type": "assistant", "message": {"model": launch_model,
+                                                  "content": [{"type": "text", "text": "hi"}]}}]
+    if last_model is not None and last_model != launch_model:
+        entries.append({"type": "assistant", "message": {"model": last_model,
+                                                          "content": [{"type": "text", "text": "later"}]}})
+    _write_jsonl(p, entries)
+    return p
+
+
+class TestModelGenerationReconcile(unittest.TestCase):
+    CWD = "/home/newlevel/devel/demo"
+    PANE = "%9"
+
+    def _go(self, launch_model, initial_captured, last_model=None, cap_seq=(),
+           state=None, target_model=MGR_TARGET, dry_run=False, in_mode=False,
+           shell_after=1, handled=None):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_gen_transcript(proj, self.CWD, "sess-abc", launch_model, last_model)
+        tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                               initial_captured, cap_seq=cap_seq,
+                               shell_after=shell_after, in_mode=in_mode)
+        state = {} if state is None else state
+        logs = wd.model_generation_reconcile(time.time(), tmux, state, target_model,
+                                             dry_run=dry_run, projects_dir=proj,
+                                             sleep_fn=lambda s: None, handled=handled)
+        return tmux, logs, state
+
+    def test_stale_untouched_session_restarts(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP,
+                                     cap_seq=[MR_IDLE_CAP])
+        self.assertIn("/exit", tmux.typed_texts())
+        self.assertIn(wd.RELAUNCH_CMD, tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertTrue(state["modelgen_restarted"]["sess-abc"])
+
+    def test_already_on_target_is_skipped(self):
+        tmux, logs, state = self._go(MGR_TARGET, MR_IDLE_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("modelgen_restarted", {}), {})
+
+    def test_manually_switched_session_is_never_touched(self):
+        # launch != target, but the user has ALREADY touched /model
+        # mid-session (last != launch) -- a deliberate choice, never fought,
+        # regardless of what MANAGED_MODEL says.
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP,
+                                     last_model="claude-fable-5")
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("modelgen_restarted", {}), {})
+
+    def test_manually_switched_to_current_target_is_never_touched(self):
+        # the user already manually converged to the current target by hand
+        # -- still a manual /model action, never fought even though it
+        # happens to land on the "right" value.
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP,
+                                     last_model=MGR_TARGET)
+        self.assertEqual(tmux.sent, [])
+
+    def test_no_target_model_disables_the_job_entirely(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP, target_model=None)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(logs, [])
+
+    def test_busy_pane_is_skipped(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_BUSY_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
+
+    def test_draft_pane_is_never_typed_over(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_DRAFT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("draft" in ln for ln in logs), logs)
+
+    def test_open_dialog_is_skipped(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_DIALOG_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("dialog" in ln for ln in logs), logs)
+
+    def test_in_mode_pane_is_skipped(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP, in_mode=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("in-mode" in ln for ln in logs), logs)
+
+    def test_bg_agent_blocks_restart(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_BG_AGENT_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("bg-agent" in ln for ln in logs), logs)
+
+    def test_dry_run_never_sends_keys(self):
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP, dry_run=True)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any(ln.startswith("READY") for ln in logs), logs)
+        self.assertEqual(state.get("modelgen_restarted", {}), {})
+
+    def test_already_restarted_session_is_never_retried(self):
+        state = {"modelgen_restarted": {"sess-abc": True}}
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP, state=state)
+        self.assertEqual(tmux.sent, [])
+
+    def test_coalesces_with_job12_handled_set(self):
+        handled = {"sess-abc"}
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP, handled=handled)
+        self.assertEqual(tmux.sent, [])
+        self.assertEqual(state.get("modelgen_restarted", {}), {})
+
+    def test_populates_handled_set_on_real_restart(self):
+        handled = set()
+        tmux, logs, state = self._go("claude-sonnet-5", MR_IDLE_CAP,
+                                     cap_seq=[MR_IDLE_CAP], handled=handled)
+        self.assertIn("sess-abc", handled)
+
+    def test_repeated_failures_stop_retrying_after_max_attempts(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        _seed_gen_transcript(proj, self.CWD, "sess-abc", "claude-sonnet-5")
+        state = {}
+        logs = []
+        for _ in range(wd.MODEL_GEN_RECONCILE_MAX_ATTEMPTS):
+            tmux = RestartFakeTmux([(self.PANE, "claude", self.CWD)],
+                                   MR_IDLE_CAP, shell_after=10 ** 6)
+            logs = wd.model_generation_reconcile(time.time(), tmux, state, MGR_TARGET,
+                                                 dry_run=False, projects_dir=proj,
+                                                 sleep_fn=lambda s: None)
+        self.assertTrue(any(ln.startswith("GAVE UP") for ln in logs), logs)
+        self.assertEqual(state["modelgen_restart_attempts"]["sess-abc"],
+                         wd.MODEL_GEN_RECONCILE_MAX_ATTEMPTS)
+        self.assertTrue(state["modelgen_restarted"]["sess-abc"])
+
+
+class RunOnceModelGenReconcileWiring(unittest.TestCase):
+    def test_qualifying_session_fires_through_run_once(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        cwd = "/home/newlevel/devel/modelgen-demo"
+        _seed_gen_transcript(proj, cwd, "sess-x", "claude-sonnet-5")
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_IDLE_CAP,
+                               cap_seq=[MR_IDLE_CAP])
+        logs = wd.run_once(now=time.time(), dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           target_model=MGR_TARGET)
+        self.assertTrue(any(ln.startswith("OK (model-gen-reconcile)")
+                            for ln in logs), logs)
+
+    def test_coalesces_with_job12_through_run_once(self):
+        # a session that job 12 ALSO wants (fable, matches its substring
+        # filter) must fire exactly ONE restart, not two, when it happens
+        # to ALSO qualify for job 23 (fable != target, untouched).
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+        cwd = "/home/newlevel/devel/modelgen-coalesce"
+        _seed_gen_transcript(proj, cwd, "sess-y", "claude-fable-5")
+        tmux = RestartFakeTmux([("%1", "node", cwd)], MR_IDLE_CAP,
+                               cap_seq=[MR_IDLE_CAP])
+        logs = wd.run_once(now=time.time(), dry_run=False, run=tmux,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           target_model=MR_TARGET)
+        self.assertTrue(any(ln.startswith("OK (model-reconcile)") for ln in logs), logs)
+        self.assertFalse(any(ln.startswith("OK (model-gen-reconcile)")
+                             for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts().count("/exit"), 1, tmux.typed_texts())
+
+    def test_no_qualifying_session_produces_no_restart(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        proj.mkdir()
+        state_path = Path(tmp) / "state.json"
+
+        def fake_run(argv, timeout=8):
+            return ""
+        logs = wd.run_once(now=time.time(), dry_run=True, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"),
+                           target_model=MGR_TARGET)
+        self.assertFalse(any("model-gen-reconcile" in ln for ln in logs), logs)
 
 
 # --------------------------------------------------------------------------- #

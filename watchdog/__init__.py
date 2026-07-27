@@ -366,6 +366,49 @@ def transcript_last_model(path, max_lines=200):
     return ""
 
 
+def transcript_first_model(path, max_lines=2000):
+    """`message.model` of the session's FIRST assistant entry that carries
+    one — the LAUNCH-time model this session actually started under (the
+    managed bashrc bakes `--model MANAGED_MODEL` into every launch,
+    airuleset.py, so this is exactly what MANAGED_MODEL resolved to at
+    session start). Feeds job 23 (#44, MODEL GENERATION RECONCILE): unlike
+    `transcript_last_model` above (the CURRENT model, moved by a live `/model`
+    switch — job 12's comparison target), this is the session's ORIGIN,
+    used to detect a session that started under an OLDER `MANAGED_MODEL`
+    value than what is configured now, with no hardcoded tier substrings.
+
+    Reads the file FORWARD (opposite direction from `_iter_jsonl_tail`) and
+    stops at the FIRST match — a huge transcript is never read past its
+    first assistant reply, which is always near the front; `max_lines` is
+    just a fail-safe cap for a pathological file. '' if none found /
+    unreadable."""
+    try:
+        f = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        for i, line in enumerate(f):
+            if i >= max_lines:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            msg = entry.get("message")
+            if isinstance(msg, dict):
+                model = msg.get("model")
+                if model:
+                    return model
+        return ""
+    finally:
+        f.close()
+
+
 def transcript_current_context(path, max_lines=200):
     """The session's CURRENT context size — cache_read_input_tokens +
     cache_creation_input_tokens off the newest assistant usage entry.
@@ -5427,6 +5470,142 @@ def hooks_reconcile(now, run, state, dry_run=False, projects_dir=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 23 — MANAGED_MODEL GENERATION RECONCILE (#44, follow-up to #42/job 12).
+#
+# Job 12 (`model_reconcile`) restarts a session whose CURRENT transcript
+# model still matches the hardcoded `fable`/`opus-4` substrings — the
+# specific tiers #37's cost cleanup cared about. That is a deliberately
+# NARROW, one-off migration scope (pinned by `test_sonnet_session_is_skipped`
+# in tests/test_watchdog.py) — it never notices a session that simply
+# started under some OTHER older `MANAGED_MODEL` value that has since moved
+# on to something else entirely (e.g. an old sonnet tier -> a newer one),
+# because no such generic comparison exists anywhere. This job is that
+# general form: it compares each session's LAUNCH-time model
+# (`transcript_first_model` — what the managed bashrc's `--model
+# MANAGED_MODEL` actually bound at session start) against the CURRENT
+# `target_model`.
+#
+# Respecting a DELIBERATE manual `/model` switch is the hard constraint here
+# (model-awareness.md: "the main session runs whatever the user set via
+# /model ... never auto-downtier it") — unlike job 12's narrow, deliberate
+# cost-migration exception (which this job does not touch or widen), this
+# job ONLY EVER acts on a session whose CURRENT model
+# (`transcript_last_model`) still EQUALS its own launch model — i.e. one the
+# user has NEVER manually repointed with `/model` at all. The moment
+# `last != first` the session shows a deliberate in-session choice and this
+# job leaves it alone FOREVER, regardless of what `MANAGED_MODEL` says now
+# or later. So the only sessions ever restarted here are ones purely
+# coasting on a stale launch default with zero manual intervention — exactly
+# the #42 gk-incident shape (a resumed session sitting on a config value
+# nobody ever touched by hand).
+#
+# No bootstrap-on-first-sight step is needed (unlike job 18's hooks hash,
+# which cannot be known retroactively for a session already running at
+# deploy time) — `launch != target` is a fact recoverable from the
+# transcript on the VERY FIRST sweep that observes it, exactly like job 12.
+#
+# Coalesces with job 12 via the SAME shared `handled` set (a model change
+# job 12 already restarted this sweep is never double-restarted here), and
+# adds its own restarts to `handled` too. Reuses job 12/18's exact restart
+# machinery (`_restart_pane`, `_pane_has_bg_agent`, the boundary-
+# classification guards) — never a parallel implementation.
+# --------------------------------------------------------------------------- #
+
+MODEL_GEN_RECONCILE_MAX_ATTEMPTS = 3   # same bounded-retry shape as job 12/18
+
+
+def model_generation_reconcile(now, run, state, target_model, dry_run=False,
+                               projects_dir=None, sleep_fn=None, handled=None):
+    """Job 23 — see the section comment above. Only when `target_model` is
+    given (same "wired = on" convention as job 12 — cmd_watchdog passes
+    MANAGED_MODEL; this module never hardcodes a model literal).
+
+    Dedup/attempts mirror job 12/18 exactly: `state['modelgen_restarted']`
+    is claimed right before the restart keystrokes are sent and only
+    released again on a FAILED restart below the attempt cap;
+    `state['modelgen_restart_attempts']` counts failures, capped at
+    `MODEL_GEN_RECONCILE_MAX_ATTEMPTS`. Best-effort: exceptions are the
+    caller's (run_once's) responsibility, same as every other job."""
+    if not target_model:
+        return []
+    run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
+    projects_dir = projects_dir or PROJECTS_DIR
+    restarted = state.get("modelgen_restarted") or {}
+    attempts_map = state.get("modelgen_restart_attempts") or {}
+    logs = []
+    for pid, cwd, cmd in _reconcile_candidate_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        sid = tpath.stem
+        if restarted.get(sid):
+            continue                   # already restarted (or gave up) — never retry
+        launch_model = transcript_first_model(tpath)
+        if not launch_model or launch_model == target_model:
+            continue                   # unknown, or already on target — nothing stale
+        last_model = transcript_last_model(tpath)
+        if last_model != launch_model:
+            continue                   # user manually touched /model — never fight it
+        if handled is not None and sid in handled:
+            continue                   # job 12 already restarting this sid this sweep
+        loc = _pane_location(pid, run) or pid
+        if pane_in_mode(pid, run):
+            logs.append("skip in-mode (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        captured = capture_pane(pid, run, lines=40)
+        if pane_waiting_on_user(captured):
+            logs.append("skip dialog-open (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        kind, draft = _classify_boundary(captured)
+        if kind == "no-input-line":
+            logs.append("skip no-input-line (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        if kind == "busy":
+            logs.append("skip busy (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        if draft:
+            logs.append("skip draft (model-gen-reconcile) %s %s: %r"
+                        % (loc, launch_model, draft[:40]))
+            continue
+        if not pane_at_idle_prompt(captured):
+            logs.append("skip not-idle (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        if _pane_has_bg_agent(captured):
+            logs.append("skip bg-agent (model-gen-reconcile) %s %s" % (loc, launch_model))
+            continue
+        if dry_run:
+            logs.append("READY (model-gen-reconcile) %s %s -> %s (restart)"
+                        % (loc, launch_model, target_model))
+            continue
+        restarted[sid] = True
+        state["modelgen_restarted"] = restarted
+        if handled is not None:
+            handled.add(sid)
+        ok, reason = _restart_pane(pid, run, sleep_fn, captured)
+        if ok:
+            logs.append("OK (model-gen-reconcile) %s %s -> %s (restarted)"
+                        % (loc, launch_model, target_model))
+            attempts_map.pop(sid, None)
+            state["modelgen_restart_attempts"] = attempts_map
+        else:
+            attempts = attempts_map.get(sid, 0) + 1
+            attempts_map[sid] = attempts
+            state["modelgen_restart_attempts"] = attempts_map
+            if attempts >= MODEL_GEN_RECONCILE_MAX_ATTEMPTS:
+                logs.append("GAVE UP (model-gen-reconcile) %s %s -> %s after %d attempts (%s)"
+                            % (loc, launch_model, target_model, attempts, reason))
+            else:
+                del restarted[sid]
+                state["modelgen_restarted"] = restarted
+                logs.append("FAIL (model-gen-reconcile) %s %s -> %s (%s, attempt %d/%d)"
+                            % (loc, launch_model, target_model, reason, attempts,
+                               MODEL_GEN_RECONCILE_MAX_ATTEMPTS))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Job 20 — GOAL RE-ARM BACKSTOP (#76, 2026-07-26 live incident, montalu@subdev).
 #
 # An armed `/goal` dies SILENTLY. Not (only) on a restart, as #76 originally
@@ -6957,6 +7136,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (`cleanup_stale_exec_markers`); a live session's marker is never
           touched no matter its age, since removing it would silently
           revoke a deliberately granted exception mid-work.
+      (23) (only when `target_model` is given) MANAGED_MODEL GENERATION
+          RECONCILE (#44, follow-up to #42/job 12) — job 12 only restarts a
+          session still parked on the hardcoded fable/opus-4 tiers; this
+          job is the GENERAL form, restarting a live claude/node/bun pane
+          whose LAUNCH-time model (`transcript_first_model`) no longer
+          matches the current target, but ONLY when its CURRENT model
+          still equals that launch model too — i.e. the user has NEVER
+          manually touched `/model` in that session, so a deliberate
+          manual choice is never fought (model_generation_reconcile).
+          Coalesces with job 12 via the shared `handled` set; same
+          restart machinery, same safe-boundary guards.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -7649,6 +7839,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                     handled=model_handled_this_sweep)
         except Exception as e:
             logs.append("hooks-reconcile error: %r" % (e,))
+
+    # Job 23 — MANAGED_MODEL GENERATION RECONCILE (#44): only when
+    # `target_model` is given, same gate as job 12 (which this job shares
+    # `target_model` and the `handled` set with — no new cmd_watchdog
+    # plumbing needed). Best-effort.
+    if target_model:
+        try:
+            logs += model_generation_reconcile(now, run, state, target_model,
+                                               dry_run=dry_run,
+                                               projects_dir=projects_dir,
+                                               sleep_fn=sleep_fn,
+                                               handled=model_handled_this_sweep)
+        except Exception as e:
+            logs.append("model-gen-reconcile error: %r" % (e,))
 
     # Job 13 — HOURLY BURN SNAPSHOT (#37): the automatic before/after
     # feedback loop — nothing for the user to remember to check. Only when
