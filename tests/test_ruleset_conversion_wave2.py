@@ -109,7 +109,7 @@ NEW_SKILLS = {
         [
             "**Anything long-running you LAUNCH",
             "compaction",
-            "PLAIN prompt",
+            "Every wait has an expected duration.",
             "The intent: every long thing you launch is polled for real "
             "liveness on a bounded cadence",
         ],
@@ -187,7 +187,7 @@ class TestWave2SkillConversions(TestCase):
     def test_verify_launched_work_liveness_stub_keeps_locked_phrases(self):
         t = read("modules/quality/verify-launched-work-liveness.md")
         self.assertIn("compaction", t)
-        self.assertIn("PLAIN prompt", t)
+        self.assertIn("SIGTERMed with no re-invoke", t)
 
 
 class TestMilestoneNotificationsPartialSplit(TestCase):

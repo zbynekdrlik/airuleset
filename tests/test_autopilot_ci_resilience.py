@@ -32,16 +32,16 @@ class TestAutopilotCiResilience(TestCase):
     def test_ci_monitoring_warns_bg_poll_dies_on_compaction(self):
         # The recurring "background polls keep getting killed by session events": a
         # detached run_in_background poll is SIGKILLed on compaction with NO re-invoke.
-        # The robust default is a foreground bounded loop; ScheduleWakeup must use a
-        # PLAIN prompt (a slash command re-fires — CC #54086). Locked in both the CI
-        # rule and the liveness rule.
+        # The robust default is a foreground bounded loop. (#103: ScheduleWakeup was
+        # dropped from this recommendation entirely — by its own tool description it
+        # is a /loop dynamic-mode pacer and a silent no-op outside an armed /loop, so
+        # it never belonged here as a general long-wait mechanism.) Locked in both the
+        # CI rule and the liveness rule.
         ci = read("modules/core/ci-monitoring.md")
         lv = read("modules/quality/verify-launched-work-liveness.md")
         for t in (ci, lv):
             self.assertIn("compaction", t)
-            self.assertIn("PLAIN prompt", t)
         self.assertIn("Foreground bounded poll loop", ci)
-        self.assertIn("#54086", ci)
 
     def test_worker_bans_background_ci_wait(self):
         t = read("agents/autopilot-worker.md")
