@@ -194,13 +194,26 @@ class TestMultiInterfaceUrls(TestCase):
                         "must fail on the child's exit, not on the deadline")
 
     def test_no_fixed_startup_sleep_survives_in_this_module(self):
-        # Locks the fix itself: `time.sleep(0.6)` was the startup guess at five
-        # separate call sites here, and re-adding one at a sixth would silently
-        # reintroduce #113 in a place no other test covers.
+        # Locks the fix itself: the startup guess sat at five separate call
+        # sites here, and re-adding one at a sixth would silently reintroduce
+        # #113 in a place no other test covers. Two locks, because either
+        # alone is escapable:
+        #   (a) no CODE line IS a bare fixed startup sleep. Matching the bare
+        #       statement (not the substring) is what lets this file keep
+        #       NAMING the old literal in its own prose, which the docstrings
+        #       above and these comments necessarily do;
+        #   (b) exactly one Popen exists in the whole module, so every server
+        #       start goes through _serve() and inherits its poll — a sixth
+        #       call site cannot grow a private start-and-guess of its own.
         src = Path(__file__).read_text(encoding="utf-8")
-        self.assertNotIn("time.sleep(0.6)", src,
+        guesses = [n for n, ln in enumerate(src.splitlines(), 1)
+                   if ln.split("#", 1)[0].strip() == "time.sleep(0.6)"]
+        self.assertEqual([], guesses,
                          "a fixed startup sleep is a readiness GUESS (#113) — "
                          "start the server through _serve(), which polls")
+        self.assertEqual(1, src.count("subprocess.Popen("),
+                         "every upload_server start must go through _serve() "
+                         "(#113); a second Popen is a new un-polled call site")
 
     def test_cmd_upload_prints_a_url_per_interface(self):
         import airuleset
