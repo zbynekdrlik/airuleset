@@ -582,3 +582,60 @@ Gate: 2228 tests pass, `ruff check .` clean, `airuleset.py validate` OK.
 Deployed with `python3 airuleset.py push`; the second run showed
 `Already up to date.` for all five remotes (dev2, gatekeeper, montalu@subdev,
 marek@subdev, david@subdev).
+
+## 2026-07-27 — #24 #44 #68 (bundled batch, one repo push)
+
+**#24 — post-push-ci-cleanup force-cancel escalation.** A normal `gh run
+cancel` can have no visible effect (live restreamer incident, 2026-07-21).
+A synchronous 120s wait inside the hook would slow every push, so cancelled
+run ids + timestamps are now recorded to a per-repo `.git/airuleset-pending-
+cancels.json`; the hook's NEXT invocation re-checks any entry >=120s old via
+`gh run view` and escalates to `gh api .../force-cancel -X POST` if still
+not `completed` — one-shot, never retried. Hit and fixed the #96-documented
+`cmd | python3 - <<'PYEOF'` stdin-vs-heredoc trap while writing the
+append-to-pending step (fixed by passing the id list via argv instead).
+Commits: `90f7002` [red] → `18bfa3b` [green]. Tests:
+`TestPostPushCiCleanupHook` (`test_new_cancel_is_recorded_to_pending_file`,
+`test_stale_pending_run_escalates_to_force_cancel`,
+`test_pending_run_too_recent_is_not_escalated_yet`,
+`test_pending_run_already_terminal_is_dropped_without_escalating`).
+Approach: issues/24#issuecomment-5095064059.
+
+**#44 — watchdog job 23, MANAGED_MODEL generation reconcile.** Job 12
+(#42) only restarts a session still parked on the hardcoded fable/opus-4
+substrings (#37's cost-migration scope, deliberately narrow — pinned by
+`test_sonnet_session_is_skipped`) — it never notices a session that started
+under some OTHER older `MANAGED_MODEL` default. New `transcript_first_model`
+(launch-time model, read forward) + job 23 (`model_generation_reconcile`)
+restart a session whose launch model no longer matches the current target,
+but ONLY when the session's CURRENT model still equals its launch model —
+i.e. the user never manually touched `/model` — so a deliberate manual
+choice (model-awareness.md: never auto-downtier `/model`) is never fought
+in either direction. Coalesces with job 12 via the existing shared
+`handled` set; no new `cmd_watchdog` wiring (reuses `target_model`). Commit:
+`8e3efcc` (feature, tests+impl together per tdd-workflow.md's flexible
+order for greenfield features). Tests: `TestTranscriptFirstModel`,
+`TestModelGenerationReconcile` (14 cases incl. the two manual-choice
+guards), `RunOnceModelGenReconcileWiring` (incl. 3-way coalescing).
+Approach: issues/44#issuecomment-5095066143.
+
+**#68 — block-subdev-ssh-misuse.sh gatekeeper root@subdev identity.** The
+hook's allow-list only recognized montalu/marek/david — the gatekeeper
+VPS's own sanctioned `root@subdev` + `~/.ssh/subdev_admin` identity (used
+explicitly, or implicitly via the box's own `~/.ssh/config` `Host subdev`
+stanza, the real `process-subdev` nudge shape) was unconditionally blocked.
+Added `root` as an allowed user gated on the `subdev_admin` key basename
+(generalized `has_gatekeeper_key` -> `has_identity(tokens, basename)`), and
+a best-effort `_resolve_ssh_config_host` reader for the bare-`ssh subdev`
+form, read at hook-execution time so dev1 (no such stanza) is unaffected.
+Commits: `02c0af2` [red] -> `d0bf7f9` [green]. Tests: 7 new cases in
+`TestBlockSubdevSshMisuseHook` (explicit identity, wrong identity, bare
+form via real ssh-config resolution, and 3 negative-resolution guards).
+Approach: issues/68#issuecomment-5095067956.
+
+Gate: 2261 tests pass (2228 baseline + 33 new), `ruff check .` clean,
+`airuleset.py validate` OK. Deployed with `python3 airuleset.py push`; the
+second AND third run both showed `Already up to date.` for all five
+remotes (dev2, gatekeeper, montalu@subdev, marek@subdev, david@subdev).
+All three issues auto-closed by GitHub on push (direct-to-main, `Closes
+#N` in the commit message — no PR needed on this repo's flow).
