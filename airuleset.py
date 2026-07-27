@@ -2014,6 +2014,30 @@ def _write_autopilot_progress(name, remaining):
         pass
 
 
+def _gh_env():
+    """Env for the `git`/`gh` subprocess calls in tickets-status --refresh, with
+    a fallback GH_TOKEN extracted from ~/.git-credentials when the shell has
+    none (#25). A reduced-authority sub-dev stream (david) never runs
+    `gh auth login` — its CLAUDE.md External Developer Workflow authenticates
+    per-command by extracting the token from ~/.git-credentials instead. Without
+    this, every `gh` call in that shell fails silently and the cache is stuck
+    at open=None forever. A real GH_TOKEN/GITHUB_TOKEN already in the env
+    always wins — never overridden by a stale credentials-file token."""
+    import re
+
+    env = os.environ.copy()
+    if env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
+        return env
+    try:
+        text = (Path.home() / ".git-credentials").read_text()
+    except OSError:
+        return env
+    m = re.search(r"https://[^:/@\s]+:([^@\s]+)@github\.com", text)
+    if m:
+        env["GH_TOKEN"] = m.group(1)
+    return env
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -2029,16 +2053,31 @@ def cmd_tickets_status(args):
         sys.stdout.write(statusbar.tickets_segment(cwd))
         return
 
+    gh_env = _gh_env()
+
     def _out(argv, cd):
         try:
             r = subprocess.run(argv, cwd=cd, capture_output=True, text=True,
-                               timeout=20)
+                               timeout=20, env=gh_env)
             return r.stdout.strip() if r.returncode == 0 else ""
         except Exception:
             return ""
 
     entry = {"ts": int(time.time()), "open": None, "name": "", "root": ""}
     root = _out(["git", "rev-parse", "--show-toplevel"], cwd)
+    if not root:
+        # #61: cwd may be the PARENT of the actual repo (montalu's session cwd
+        # ~/devel/odoo, repo at ~/devel/odoo/odoo-slovnormal) — git rev-parse
+        # only ever walks UPWARD, so it never finds a repo BELOW cwd. Scan
+        # cwd's immediate subdirectories for exactly one `.git` and descend
+        # into it; 0 or >1 candidates stays ambiguous — never guess.
+        try:
+            candidates = [p for p in Path(cwd).iterdir()
+                          if p.is_dir() and (p / ".git").exists()]
+        except OSError:
+            candidates = []
+        if len(candidates) == 1:
+            root = _out(["git", "rev-parse", "--show-toplevel"], str(candidates[0]))
     if root:
         entry["root"] = root
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
