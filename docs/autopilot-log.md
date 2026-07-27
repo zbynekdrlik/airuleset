@@ -744,3 +744,36 @@ enqueue time and is caught only on the next delivery attempt.
 
 Gate: 2311 tests pass (2298 baseline + 13 new), `ruff check .` clean,
 `airuleset.py validate` OK.
+
+## #111 — nudge-poll-loop-timeout.sh false-positives on a bare sleep+done mention
+
+`1c1c0dd` [red] (3 mention-shapes must go quiet + a nested-loop guard that must
+stay loud) -> `979f32d` [green]. Root cause: two INDEPENDENT existence greps
+(`sleep` anywhere AND `done` anywhere) answer "does this token appear", never
+"is this sleep the loop's body" — so writing a note about a poll loop, grepping
+the rule that documents one, or a settle `sleep` beside an unrelated fan-out all
+took the full nudge. Replaced by ONE ordered `do` … `sleep` … `done` test over a
+token-stream normalization of the command.
+
+Evidence is a real corpus replay, not unit tests: every Bash `tool_use` in all 94
+local transcripts (77,365 calls / 66,392 unique), each replayed through the
+SHIPPED hook with its real timeout/run_in_background, and paired with its own
+`tool_result` for ground truth. Before 983 nudges (41 really killed by the
+harness, 233 really ran >110 s); after 793 (39 killed, 228 long) — 190 fewer
+nudges, 95 % of the genuinely-needed ones retained. The 6 dropped long/killed
+calls are all bare `sleep 200`-style waits with no loop.
+
+The replay earned its keep twice: it caught that the FIRST green draft, built
+from consuming character classes, went quiet on 243 real `until …; do sleep 5;
+done` polls, because the single space between `do` and `sleep` cannot be both
+boundaries at once — invisible to every unit test, since their loops all put a
+command between the two tokens. Now pinned by
+`test_tight_do_sleep_body_is_still_nudged`.
+
+Rejected with numbers: containment (`sleep` before the NEXT `done`) — tighter but
+stops nudging nested retry polls; heredoc-body stripping — 71 fewer nudges but
+`ssh host 'bash -s' <<EOF` executes its body (residual filed as #112); `grep -Pzq`
+— `-z` is NUL-data in GNU grep and *decompress* in ugrep.
+
+Gate: 2316 tests pass (2311 baseline + 5 new), `ruff check .` clean,
+`airuleset.py validate` OK.
