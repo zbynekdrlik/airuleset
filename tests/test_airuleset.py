@@ -6338,3 +6338,162 @@ class TestQualityGateExemptsArmQuestions(TestCase):
     def test_ordinary_bare_question_still_blocked(self):
         r = self._run("❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertIn('"block"', r.stdout)
+
+
+class TestCiMonitoringPollSnippetSelfBounds(TestCase):
+    """#90 (gk subagent, 2026-07-26): the bounded poll loop shape in
+    ci-monitoring.md is only safe against the harness's own SIGTERM if the
+    Bash tool's `timeout` PARAMETER is raised near its 600000ms cap — easy to
+    forget, since the loop body reads as complete without it. Live-hit: a
+    poll written exactly per the (old) shape, with no `timeout` raised, was
+    SIGTERM'd (exit 143) at the harness's observed 120000ms default, mid-poll,
+    with NO output. This EXECUTES the real doc snippet (extracted verbatim
+    from the .md, not retyped) to prove it now ends CLEANLY on its own
+    `SECONDS`-based budget well before any external kill, regardless of
+    whether the tool timeout was ever set."""
+
+    def _extract_snippet(self):
+        import re
+        text = (airuleset.REPO_DIR / "modules" / "core" / "ci-monitoring.md").read_text()
+        m = re.search(r"```bash\n(.*?)\n\s*```", text, re.S)
+        self.assertIsNotNone(m, "the DEADLINE= poll snippet must exist in ci-monitoring.md")
+        return m.group(1)
+
+    def _run_snippet(self, gh_stub_body, extra_env=None, sleep_interval="0.2"):
+        import shutil
+        snippet = self._extract_snippet()
+        self.assertIn("DEADLINE=", snippet)
+        self.assertIn("SECONDS", snippet)
+        # Scale the real-time sleep down for a fast test — the ALGORITHM
+        # (DEADLINE check via SECONDS, break + message) is untouched; only
+        # the numeric wait between polls is substituted so the test doesn't
+        # need to burn 30 real seconds per iteration.
+        snippet = snippet.replace("sleep 30", f"sleep {sleep_interval}")
+        snippet = snippet.replace("<id>", "12345")
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        binroot = os.path.join(root, "bin")
+        os.makedirs(binroot)
+        gh_path = os.path.join(binroot, "gh")
+        with open(gh_path, "w") as fh:
+            fh.write("#!/usr/bin/env bash\n" + gh_stub_body + "\n")
+        os.chmod(gh_path, 0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = binroot + os.pathsep + env.get("PATH", "")
+        if extra_env:
+            env.update(extra_env)
+
+        # `jq` is still the REAL jq — only `gh` is stubbed, and the stub
+        # prints JSON so the snippet's own `--jq` post-processing runs for
+        # real, exactly as in production.
+        script = "set -uo pipefail\n" + snippet
+        # An external timeout MUCH larger than the loop's own configured
+        # budget: if the snippet did NOT self-bound, it would run until this
+        # fires (exit 124) instead of exiting cleanly on its own well before it.
+        return subprocess.run(["timeout", "20", "bash", "-c", script],
+                              capture_output=True, text=True, env=env, cwd=root)
+
+    def test_never_reaches_terminal_exits_on_own_budget_before_external_kill(self):
+        # gh always reports "queued" (never completed) -- the stub mimics
+        # what `gh ... --jq '.status+" "+(.conclusion//"")'` itself already
+        # prints (gh applies --jq internally; there is no separate `jq`
+        # call to fake). The loop must give up on its OWN budget and print
+        # the last-known status, never rely on the external `timeout`
+        # wrapper to kill it.
+        r = self._run_snippet(
+            "echo 'queued '",
+            extra_env={"AIRULESET_POLL_BUDGET_S": "1"},
+        )
+        self.assertNotEqual(r.returncode, 124,
+                            "external timeout fired -- snippet did not self-bound: "
+                            + r.stdout + r.stderr)
+        self.assertIn("POLL BUDGET REACHED", r.stdout, r.stdout + r.stderr)
+        self.assertNotIn("TERMINAL", r.stdout)
+
+    def test_terminal_state_still_breaks_immediately(self):
+        # regression guard: a genuinely completed run must still short-circuit
+        # via the TERMINAL branch, not wait out the whole budget.
+        r = self._run_snippet(
+            "echo 'completed success'",
+            extra_env={"AIRULESET_POLL_BUDGET_S": "100"},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("TERMINAL: completed success", r.stdout)
+        self.assertNotIn("POLL BUDGET REACHED", r.stdout)
+
+    def test_default_budget_is_under_the_observed_harness_timeout(self):
+        # The DEFAULT literal (no AIRULESET_POLL_BUDGET_S set) must stay
+        # safely under the harness's OBSERVED default tool-call timeout
+        # (120s) -- a static check on the real snippet text, not a full
+        # ~100s real-time execution (the runtime behavior itself is already
+        # proven above with an explicit override). This is the whole point
+        # of #90: a model that forgets to raise the Bash tool `timeout`
+        # parameter still gets a clean "not yet terminal" message before the
+        # observed 120s default SIGTERMs it, instead of a silent kill.
+        import re
+        snippet = self._extract_snippet()
+        m = re.search(r"AIRULESET_POLL_BUDGET_S:-(\d+)\}", snippet)
+        self.assertIsNotNone(m, "no default literal found: " + snippet)
+        default_budget = int(m.group(1))
+        self.assertLess(default_budget, 120,
+                        "default poll budget (%ds) is not safely under the "
+                        "harness's observed 120s default timeout" % default_budget)
+
+
+class TestNudgePollLoopTimeoutHook(TestCase):
+    """#90: a PreToolUse(Bash) NUDGE (never a block -- the poll must always
+    pass) reminding the model to raise the Bash tool's own `timeout`
+    parameter whenever it is about to run a bounded sleep/poll loop without
+    one -- the mechanical half of #90, since prose alone ("set the timeout
+    near its cap") is easy to forget and #14 already showed hooks can only
+    ever act on the assistant's own OUTPUT/COMMAND, never on module prose."""
+
+    HOOK = "nudge-poll-loop-timeout.sh"
+
+    def _run(self, command, timeout=None):
+        tool_input = {"command": command}
+        if timeout is not None:
+            tool_input["timeout"] = timeout
+        payload = json.dumps({"tool_input": tool_input})
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True, timeout=30)
+
+    def test_poll_loop_with_no_timeout_param_is_nudged(self):
+        r = self._run("for i in $(seq 1 18); do gh run view 1 "
+                       "--json status; sleep 30; done")
+        self.assertEqual(r.returncode, 0, "must NEVER block: " + r.stdout + r.stderr)
+        self.assertIn("timeout", r.stdout + r.stderr)
+
+    def test_poll_loop_with_a_low_timeout_param_is_nudged(self):
+        r = self._run("for i in $(seq 1 18); do gh run view 1 "
+                       "--json status; sleep 30; done", timeout=60000)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("timeout", r.stdout + r.stderr)
+
+    def test_poll_loop_with_a_raised_timeout_param_is_silent(self):
+        r = self._run("for i in $(seq 1 18); do gh run view 1 "
+                       "--json status; sleep 30; done", timeout=580000)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_ordinary_short_command_is_never_nudged(self):
+        r = self._run("gh pr view 42")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_non_loop_command_with_sleep_alone_is_not_nudged(self):
+        # `sleep` with no loop-body `done` closer is not a poll shape -- a
+        # one-shot `sleep 5 && curl ...` is a normal short wait, not the
+        # multi-minute pattern this hook targets.
+        r = self._run("sleep 5 && curl -s http://example.com")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_wired_into_pretooluse_bash(self):
+        cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
+        cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
+                if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+        self.assertTrue(any("nudge-poll-loop-timeout.sh" in c for c in cmds))
