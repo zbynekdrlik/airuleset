@@ -1,0 +1,46 @@
+diff --git a/hooks/block-main-implementation.sh b/hooks/block-main-implementation.sh
+index bf53609..b867fcd 100755
+--- a/hooks/block-main-implementation.sh
++++ b/hooks/block-main-implementation.sh
+@@ -413,6 +413,41 @@ def strip_heredocs(text):
+ 
+ cmd = strip_heredocs(cmd)
+ 
++# #88: a `$( … )` substitution is invisible to STATEMENTS_RE/first_pipe_stage
++# below — both are blind regex/text splits with no notion of paren nesting.
++# When a pipeline INSIDE a substitution (or anywhere) continues on the next
++# physical line by ending in a trailing `|`, `&`, or backslash (a common
++# formatting style — `"$(curl ... |\n  grep -oP '...')"`, the exact shape
++# from gk's real corpus: 1/687 real main-agent commands, a health-check
++# script), STATEMENTS_RE's `\n` alternative splits the continuation's OWN
++# next command into a FRESH top-level statement. In isolation
++# `grep -oP '...'` then classifies — correctly — as a genuine bulk
++# read/search, so a cheap one-line-output health check false-blocks. Fix:
++# join a trailing-operator/backslash line break with the next line BEFORE
++# segmentation, so the pipeline reads as ONE statement exactly as bash
++# itself parses it — first_pipe_stage's existing quote-parity check then
++# correctly recognizes the whole thing sits inside quotes (when it does)
++# and leaves it alone, same as any single-line equivalent. A genuine bulk
++# read is unaffected either way (`grep -rn foo \` + newline + `  .` still
++# blocks — the join only removes the line break, never the command).
++_CONTINUATION_RE = re.compile(r'([|&\\])[ \t]*\n[ \t]*')
++
++
++def _join_continuation(m):
++    op = m.group(1)
++    return " " if op == "\\" else op + " "
++
++
++def join_line_continuations(text):
++    prev = None
++    while prev != text:
++        prev = text
++        text = _CONTINUATION_RE.sub(_join_continuation, text)
++    return text
++
++
++cmd = join_line_continuations(cmd)
++
+ # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
+ # separators, quote-aware tokenization per segment. A segment that matches
+ # neither list is left ambiguous (never classified) — the caller treats an

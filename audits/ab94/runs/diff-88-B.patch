@@ -1,0 +1,219 @@
+diff --git a/.claude/rules/airuleset-internals.md b/.claude/rules/airuleset-internals.md
+index 391da16..1c13372 100644
+--- a/.claude/rules/airuleset-internals.md
++++ b/.claude/rules/airuleset-internals.md
+@@ -140,3 +140,4 @@ hook internals, not a rule a session acts on.
+ - **`\b` in `grep -E` (GNU grep) genuinely IS a correct word-boundary — don't trust a filed ticket's own caveat about it without checking.** #41's ticket text asserted `\bit\(` "won't fully fix it either since `exit(` still has a word boundary before `it(` too" — empirically FALSE: `echo 'sys.exit(1)' | grep -E '\bit\('` is NOMATCH, because `\b` requires a transition between a `\w` and non-`\w` character, and `x`+`i` in "exit(" are both word characters (no transition). `\bit\(['"]` (the ticket's OWN fallback suggestion) was implemented anyway since it is strictly tighter and free — but the reasoning that justified needing it was wrong. Always verify a regex claim with a real `grep -E` invocation before trusting the prose that motivated the fix.
+ - **Real corpus replay for a classifier fix costs almost nothing when the corpus already exists on disk — use it instead of a hand-written smoke list, every time (#38, #41, #86).** Three cheap real sources, reused this session: (1) THIS repo's own live session transcript at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — real historical `/model` switches, real turn boundaries, no fabrication needed; (2) `git ls-files -z | xargs -0 grep -nE '<old-pattern>'` vs the new pattern, across the repo's OWN tracked files, to quantify false-positive drop; (3) a REAL 3-branch git repo built with actual `git init`/`commit`/`update-ref` calls (never hand-typed diff text) when the bug is diff-base-shaped. All three report a concrete before/after number (e.g. "250 matches -> 1"), which is the evidence a classifier fix needs per the #80/#91/#96 "three strikes" lesson — a passing unit test alone is not enough.
+ - **`airuleset.py push`'s own pre-push test-suite step can print unrelated unittest fixture output (e.g. `gk-request: #8 commented`, placeholder repo `o/r` URLs, notify-card renders) straight into the push log — this is normal test noise, not a real GitHub/Discord event.** Don't chase it as a live incident; confirm by checking the surrounding lines say "Tests passed." right after.
++- **A ticket's own reproduction narrative can name the wrong mechanism even when the bug is real (#88).** The ticket said a bare pipe inside `$( … )` gets misread as a standalone statement — empirically false: `first_pipe_stage`'s quote-balance check already keeps a `|` that sits behind an odd quote count together, and even when it doesn't, only the FIRST token of the outer statement (e.g. `echo`) ever becomes `tk[0]`, never the inner command. The real trigger is a `;` or a literal newline *inside* `$( … )`/backticks — `STATEMENTS_RE` splits on those with zero notion of substitution boundaries, so the text right after becomes its own "statement" whose first token really is the inner `grep`/`awk`. Verified by extracting the classifier into a standalone script and brute-force trying shapes against it before writing the regression test — don't trust a ticket's stated repro shape for a classifier bug; reproduce it for real first (same lesson as #41's `\b` caveat above).
+diff --git a/hooks/block-main-implementation.sh b/hooks/block-main-implementation.sh
+index bf53609..b7b7f94 100755
+--- a/hooks/block-main-implementation.sh
++++ b/hooks/block-main-implementation.sh
+@@ -169,6 +169,22 @@ set -euo pipefail
+ # REFUTED by the same measurement and deliberately NOT built: 687 of 687
+ # main turns carried exactly ONE Bash call, so a per-turn counter could
+ # never fire. Batching pressure lives in the nudge's message instead.
++#
++# #88 (found replaying the same 687-command corpus, 1 hit = 0.15%): the
++# classifier segments on raw statement separators (`;`, `&&`, `||`, `&`, a
++# real newline) with NO notion of `$( … )` / `` ` … ` `` boundaries at all —
++# a health-check one-liner whose STATUS STRING embeds a `;` or a real
++# newline INSIDE a command substitution (`$(curl -s "$u" -m 15; grep -oP
++# '...' /tmp/f)` — a "run it, then read the cached result" idiom, or the
++# same thing written multi-line for readability) gets segmented as if that
++# `;`/newline were a genuine top-level statement boundary: the inner `grep`
++# then IS its own "statement" and blocks on its own, even though the OUTER
++# shape is a single cheap echo/printf line producing a small status string.
++# Fixed the same way #80 fixed heredoc bodies: substitution CONTENT is
++# stripped before segmentation (`strip_command_substitutions`) — it is
++# payload to the outer command, not a statement of its own. Losing the
++# ability to classify a genuine bulk read hidden inside a substitution is
++# the same accepted trade-off.
+ 
+ command -v jq &>/dev/null || exit 0
+ 
+@@ -413,6 +429,99 @@ def strip_heredocs(text):
+ 
+ cmd = strip_heredocs(cmd)
+ 
++# #88: strip `$( … )` / `` ` … ` `` command-substitution CONTENT before
++# segmentation, same shape/rationale as the heredoc-body strip above — it is
++# PAYLOAD to the OUTER command (a cheap one-line status string), not a
++# statement of its own. Found replaying gk's real corpus (#80's method): a
++# health-check one-liner with `$(curl -s "$u" -m 15; grep -oP '...' /tmp/f)`
++# (or the same thing written across a real newline) has a `;`/newline INSIDE
++# the substitution — the classifier only ever segments on RAW statement
++# separators (`;`, `&&`, `||`, `&`, a literal newline), with no notion of
++# `$( … )` boundaries at all, so that inner `grep` gets read as its OWN
++# top-level statement and blocks a call whose OUTER shape is a single cheap
++# echo/printf line (1/687 in the replayed corpus, 0.15%). Losing the ability
++# to classify a genuine BULK read hidden INSIDE a substitution is the same
++# accepted trade-off #80 already made for heredoc bodies — a false positive
++# is what disabled the whole guard for 17 hours in #80's OWN incident, so
++# this class of hole gets closed on sight rather than left for a repeat.
++# `$( … )` is expansion-active even inside a double-quoted string (only
++# single quotes suppress it in real bash), so this is tracked char-by-char
++# rather than delegated to shlex, which has no idea `$(...)` is not just
++# more quoted text.
++
++
++def _skip_balanced_parens(text, i, n):
++    # `i` sits just past the opening `$(` — return the index just past its
++    # matching close paren. Tracks nested parens/quotes so an inner `$(...)`,
++    # a `)` inside a string literal, or an escaped char never closes it early.
++    depth = 1
++    in_sq = in_dq = False
++    while i < n and depth > 0:
++        c = text[i]
++        if in_sq:
++            if c == "'":
++                in_sq = False
++        elif in_dq:
++            if c == "\\" and i + 1 < n:
++                i += 1
++            elif c == '"':
++                in_dq = False
++        else:
++            if c == "'":
++                in_sq = True
++            elif c == '"':
++                in_dq = True
++            elif c == "\\" and i + 1 < n:
++                i += 1
++            elif c == "(":
++                depth += 1
++            elif c == ")":
++                depth -= 1
++        i += 1
++    return i
++
++
++def strip_command_substitutions(text):
++    out = []
++    i, n = 0, len(text)
++    in_sq = False
++    while i < n:
++        c = text[i]
++        if in_sq:
++            out.append(c)
++            if c == "'":
++                in_sq = False
++            i += 1
++            continue
++        if c == "'":
++            in_sq = True
++            out.append(c)
++            i += 1
++            continue
++        if c == "\\" and i + 1 < n:
++            out.append(c)
++            out.append(text[i + 1])
++            i += 2
++            continue
++        if c == "$" and i + 1 < n and text[i + 1] == "(":
++            i = _skip_balanced_parens(text, i + 2, n)
++            continue
++        if c == "`":
++            j = i + 1
++            while j < n and text[j] != "`":
++                if text[j] == "\\" and j + 1 < n:
++                    j += 2
++                    continue
++                j += 1
++            i = j + 1 if j < n else j
++            continue
++        out.append(c)
++        i += 1
++    return "".join(out)
++
++
++cmd = strip_command_substitutions(cmd)
++
+ # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
+ # separators, quote-aware tokenization per segment. A segment that matches
+ # neither list is left ambiguous (never classified) — the caller treats an
+diff --git a/tests/test_main_implementation_guard.py b/tests/test_main_implementation_guard.py
+index 2a0feec..4a2e17a 100644
+--- a/tests/test_main_implementation_guard.py
++++ b/tests/test_main_implementation_guard.py
+@@ -722,6 +722,78 @@ class PipeReducers80(unittest.TestCase):
+         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+ 
+ 
++class CommandSubstitution88(unittest.TestCase):
++    """#88, found replaying gk's real corpus (1/687, 0.15%): the classifier
++    segments on raw statement/pipe separators (`;`, `&&`, `||`, `&`, a real
++    newline) with NO notion of `$( … )` / `` ` … ` `` boundaries at all — a
++    health-check one-liner whose STATUS STRING embeds a `;`/newline INSIDE a
++    command substitution (`$(curl -s "$u" -m 15; grep -oP '...' /tmp/f)`,
++    the shape gk's real liveness/version probe used) gets segmented as if
++    that `;`/newline were a genuine top-level statement boundary — the
++    inner `grep` then IS its own "statement" and blocks, even though the
++    outer shape is a single cheap echo/printf line producing a small status
++    string (never the context cost this hook guards).
++
++    Fixed the same way #80 fixed heredoc bodies: substitution content is
++    payload to the outer command, not a statement of its own, and is
++    stripped before segmentation."""
++
++    def _armed(self, command, **kw):
++        helper = MainImplementationGuard()
++        return helper._run(tool="Bash", command=command,
++                           transcript_text=goal_armed_transcript(), **kw)
++
++    def test_health_check_semicolon_inside_dollar_paren_allowed(self):
++        # RED without the fix: `;` inside $( … ) is read as a genuine
++        # statement separator, and the `grep` after it blocks on its own.
++        out = self._armed(
++            'echo "version: $(curl -s https://erp.montalu.sk/web/health '
++            '-m 15; grep -oP \'(?<=.version.: .)[0-9.]+\' /tmp/last.json)"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_health_check_loop_with_semicolon_reducer_allowed(self):
++        # the fuller multi-line health-check shape from the real gk incident
++        out = self._armed(
++            'echo "=== liveness ==="\n'
++            'for u in https://erp.montalu.sk/web/health https://erp.montalu.sk; do\n'
++            '  printf "%s -> %s\\n" "$u" "$(curl -s -o /dev/null -w '
++            "'%{http_code}' -m 15 \"$u\")\"\n"
++            'done\n'
++            'echo "version: $(curl -s https://erp.montalu.sk/web/health '
++            '-m 15; grep -oP \'(?<=.version.: .)[0-9.]+\' /tmp/last.json)"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_newline_inside_dollar_paren_allowed(self):
++        # RED without the fix: a literal newline inside $( … ) (a script
++        # written multi-line for readability) is read the same way as a `;`
++        out = self._armed(
++            'echo "n=$(curl -s https://erp.montalu.sk/web/health\n'
++            "grep -oP '[0-9.]+' /tmp/last.json)\"")
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_backtick_substitution_with_semicolon_reducer_allowed(self):
++        out = self._armed(
++            'echo "n=`curl -s https://erp.montalu.sk/web/health -m 15; '
++            'grep -oP \'[0-9.]+\' /tmp/last.json`"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_bulk_read_outside_the_substitution_still_blocks(self):
++        # stripping the substitution's CONTENT must not swallow a genuine
++        # bulk read sitting in a SIBLING statement outside it
++        out = self._armed(
++            'echo "v=$(curl -s "$u" -m 15; grep -oP \'[0-9.]+\' /tmp/f)"\n'
++            'cat /etc/passwd')
++        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
++
++    def test_bare_dollar_paren_curl_untouched(self):
++        # the common non-piped shape ($(...) with no inner separator at
++        # all) must keep working exactly as before
++        out = self._armed(
++            'printf "%s -> %s\\n" "$u" "$(curl -s -o /dev/null -w '
++            "'%{http_code}' -m 15 \"$u\")\"")
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++
+ class BoundedPeeks80(unittest.TestCase):
+     """#80, found by replaying all 687 of gk's real main-agent Bash commands
+     through the hook: after the heredoc and pipe-stage fixes the remaining

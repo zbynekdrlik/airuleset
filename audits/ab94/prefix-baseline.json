@@ -1,0 +1,26 @@
+{
+  "what": "Cost of one trivial turn ('Reply with exactly: OK') in each condition — identical repo tree, identical model (sonnet), identical settings apart from the rule text.",
+  "measured": "2026-07-27, Claude Code 2.1.220, scratch CLAUDE_CONFIG_DIR profiles",
+  "A_full_ruleset": {
+    "cache_creation_input_tokens": 93431,
+    "cache_read_input_tokens": 29476,
+    "prefix_tokens_total": 122907,
+    "output_tokens": 4,
+    "cost_usd": 0.5695,
+    "num_turns": 1
+  },
+  "B_minimal_ruleset": {
+    "cache_creation_input_tokens": 21861,
+    "cache_read_input_tokens": 23684,
+    "prefix_tokens_total": 45545,
+    "output_tokens": 4,
+    "cost_usd": 0.1383,
+    "num_turns": 1
+  },
+  "delta": {
+    "prefix_tokens": 77362,
+    "prefix_ratio": 2.70,
+    "cost_ratio": 4.12,
+    "note": "Both figures include Claude Code's own system prompt, tool definitions, the project CLAUDE.md and the path-scoped .claude/rules/ — those are constant across conditions, so the 77k delta is attributable to the global rule prefix alone. 122.9k independently confirms the ~124k figure asserted in #92."
+  }
+}

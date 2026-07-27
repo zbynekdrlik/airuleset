@@ -454,3 +454,37 @@ rules/*.md entry -- airuleset.py's profile parser treats "rules/" entries
 specially (symlink only, no @import), so main-session behavior is unchanged.
 Full suite 2167 passed, ruff clean, validate: 59 modules (+5). No new
 hooks/jobs/detectors -- content restored to a surface already proven to load.
+
+## 2026-07-27 — #94 A/B experiment: full ruleset vs minimal ruleset
+
+Harness f468294 (scripts/rules_ab_experiment.py + tests/test_rules_ab_experiment.py,
+27 tests). Retro-ticket replay: each task is a real closed ticket replayed at <red>^,
+and CORRECTNESS is decided by the RED test that actually shipped with the real fix --
+no LLM judge on the primary axis. Conditions differ only in rule TEXT (CLAUDE.md
+prefix + inject-situational-rule.sh, which injects rule bodies and blocks nothing);
+every block-*/stop-check-* gate stayed live in both. Isolation: CLAUDE_CONFIG_DIR
+scratch profiles, standalone clones with no origin, empty GH_TOKEN.
+
+Measured layer: the MAIN-session prefix -- the only layer a main session and a
+dispatched worker share (#104/#105).
+
+Prefix cost (one trivial turn, everything else identical): full 122,907 tokens /
+$0.5695 vs minimal 45,545 / $0.1383 -- 2.70x tokens, 4.12x cost. Independently
+confirms the ~124k figure asserted in #92.
+
+Behaviour, equal $4 budget per run, Sonnet 5: full = oracle 2/2, 67 turns;
+minimal = oracle 1/2, 109 turns. Blind soft grade (anonymised diffs, grader
+unaware of condition) tied 3-3, "most robust" split 1-1. Zero regressions in all
+four runs. All four runs were terminated by the budget cap, so no run reached the
+Stop gates and hook_blocks was 0/0/0/0 -- the experiment says nothing about hooks.
+
+The one nameable behavioural difference (#88): the ticket body proposed its own fix
+("strip $( … ) content"); the minimal condition implemented exactly that and solved
+the stated case, while the full condition distrusted the ticket, replayed the real
+command corpus and found the actual cause was line-continuation splicing -- which is
+what really landed. Not "worse code", but "believed the ticket vs verified it".
+
+Verdict: the COST claim is confirmed and quantified (+77k tokens every session);
+the "rules make the model worse" claim is NOT supported. No module implicated --
+naming one would be invented. n=1 per cell, no repeats: signal, not proof.
+Statistical-power follow-up filed as #106. Evidence: audits/ab94/.
