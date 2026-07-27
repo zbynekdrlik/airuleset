@@ -66,3 +66,12 @@ Applies to all rewordings and semantic equivalents — any made-up `<plugin>:<ag
 **The prompt is not enforcement.** "Please only report", "do not commit", "no push" are text a subagent may reason its way past — only the agent TYPE's tool list actually constrains it. Real incident (#49, parovanie-produktov PR #228, 2026-07-25): a diff-review subagent dispatched `general-purpose` for a task whose prompt asked for a verification report wrote 8 assert-free scratch probe tests into the worktree and committed on its own. Its content happened to be correct; the authority was not.
 
 **After ANY subagent run, `git status` BEFORE `git add -A`.** A write-capable subagent can leave scratch files behind, and a blanket add sweeps them into your commit — in #49 that is exactly how assert-free tests reached a branch, where they would have run forever in CI as false coverage. Commit named paths, or read the status first and delete what you did not intend.
+
+#### `fork` continues the WHOLE task — a bounded side-task gets a FRESH dispatch (#50)
+
+**`fork` inherits your ENTIRE conversation, including the parts you have NOT executed yet** — a ready-to-run command line you were about to send, a plan you laid out three steps ago, your own meta-instructions about how to behave as an agent. Those read to the fork as live directives, so a fork handed a narrow task can go and do your PENDING broader task instead. Real incident (#50, restreamer, 2026-07-25): a fork dispatched late in a long session for a 2-call post-deploy check instead spawned a nested agent, started polling its own transcript for "fork completion status" the way the parent's rules described, appears to have fired the three `notify --run-card` commands that were sitting in the inherited context unsent, and returned a bare `⏳ WORKING` placeholder with no verification in it.
+
+Pick by SCOPE, not by convenience:
+
+- **`fork`** — you want the WHOLE remaining task continued with your context and cache intact (that is what its full inheritance is FOR).
+- **a FRESH dispatch** (`Explore` / `general-purpose`, self-contained prompt) — you want ONE bounded side-task done in isolation. It is safer here precisely BECAUSE it does not inherit your unexecuted plans; it starts from the always-on rules plus the prompt you wrote. The later you are in a long session, the bigger the difference.
