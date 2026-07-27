@@ -4563,6 +4563,29 @@ def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
     return False
 
 
+def _compact_blocked_by_question(cwd, sid, projects_dir=None):
+    """#102 (2026-07-27 live incident, camera-box) — True when the session's
+    CURRENT last real turn ends on a `❓` status marker (NEEDS YOU / ASKED):
+    genuinely blocked, in-flight work awaiting the user's answer that lives
+    ONLY in context. Every `/compact` SENDER must consult this right before
+    its own send point, not just once at record time: the record-time gate
+    (notify-compact-request.sh) only ever sees the turn that JUST reported
+    `✅ DONE` / `## ✅ Work Complete` — a request recorded there can still be
+    sitting in compact-requests.json once the session has since moved on to
+    a NEW `❓` turn (CC only drains its type-ahead queue at an ACCEPTED
+    Stop, so a `/compact` queued behind a goal-loop-continued turn can land
+    exactly as the NEXT turn asks its question — the reported incident:
+    `❓ NEEDS YOU` fired, then `/compact` arrived before the user could
+    answer). Unmeasurable (no resolvable transcript) never blocks — same
+    "never block on don't know" philosophy as every other compact gate here
+    (#48/#99)."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    return transcript_last_marker(tpath) == "❓"
+
+
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                             path=None, projects_dir=None, min_context=None,
                             send_fn=None, handled=None, delivered_path=None,
@@ -4679,6 +4702,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             continue
         if pane_waiting_on_user(captured):
             logs.append("skip dialog-open (compact-request) %s" % loc)
+            continue
+        # #102 -- never deliver while the session's CURRENT last turn is a
+        # ❓ block: re-checked HERE (delivery time), not just at record
+        # time -- see `_compact_blocked_by_question`'s docstring. Left in
+        # place (never consumed) so the next sweep retries once the
+        # question resolves (or the entry is superseded by a newer
+        # ticket-boundary report for this same sid).
+        if _compact_blocked_by_question(cwd, sid, projects_dir=pdir):
+            logs.append("skip blocked-question (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
@@ -4837,9 +4869,10 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     either case. Returns False when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
-    no locatable boundary at all, or — the one case this function
-    deliberately stays conservative on — the pane holds a genuine unsent
-    DRAFT (job 14/15's `_compact_stash_attempt`, #67, handles that on
+    no locatable boundary at all, the session's CURRENT last turn is a ❓
+    block (#102 — `_compact_blocked_by_question`), or — the one case this
+    function deliberately stays conservative on — the pane holds a genuine
+    unsent DRAFT (job 14's `_compact_stash_attempt`, #67, handles that on
     retry; a synchronous multi-round-trip stash dance at Stop-hook time is
     unnecessary risk for what should be a rare case). A pane merely BUSY
     (mid-turn) is NOT a reason to fall back — that is exactly the case
@@ -4871,6 +4904,13 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     captured = capture_pane(pid, run, lines=40)
     if pane_waiting_on_user(captured):
         _log_compact_sync("SKIP dialog-open sid=%s cwd=%s" % (sid, cwd))
+        return False
+    # #102 -- never deliver while the session's CURRENT last turn is a ❓
+    # block (see `_compact_blocked_by_question`'s docstring). Falls back to
+    # job 14's polled retry, exactly like every other "unsafe right now"
+    # state this function refuses on.
+    if _compact_blocked_by_question(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("SKIP blocked-question sid=%s cwd=%s" % (sid, cwd))
         return False
     kind, draft = _classify_boundary(captured)
     if kind == "no-input-line":
