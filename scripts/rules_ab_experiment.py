@@ -224,6 +224,46 @@ def build_prompt(task: Task, issue_body: str) -> str:
     )
 
 
+def slot_name(issue: int, cond: str, rep: int = 1) -> str:
+    """File/tree stem for a (task, condition, replicate) run.
+
+    ``rep=1`` keeps the original unsuffixed naming (``88-A``) so the #94
+    round-1 artifacts already committed to ``audits/ab94/`` stay addressable
+    with no rename; ``rep>=2`` appends ``-rN`` (the #106 power follow-up:
+    "opakovania na bunku" so a one-ticket difference can be told apart from
+    ordinary run-to-run variance).
+    """
+    base = f"{issue}-{cond}"
+    return base if rep <= 1 else f"{base}-r{rep}"
+
+
+def summarise_by_task(results: list[dict]) -> dict:
+    """Per-TASK, per-condition aggregates (never pooled across tasks).
+
+    ``summarise()`` pools every record into one A-vs-B total regardless of
+    which ticket it replays — fine for the prefix-cost claim, but a
+    behavioural comparison across several DIFFERENT tickets must stay
+    separable per ticket, or a strong effect on one task can hide/inflate a
+    null effect on another. Also reports the replicate COUNT per cell so a
+    report can show its own sample size, not just its outcome.
+    """
+    by_task: dict[str, dict] = {}
+    for r in results:
+        task_key = str(r.get("task"))
+        by_task.setdefault(task_key, []).append(r)
+
+    def _sort_key(kv):
+        # numeric issue numbers sort numerically; a record with no/odd "task"
+        # (older artifacts, hand-built test fixtures) sorts after, by text —
+        # never crash on a non-numeric key.
+        try:
+            return (0, int(kv[0]))
+        except ValueError:
+            return (1, kv[0])
+
+    return {task: summarise(rs) for task, rs in sorted(by_task.items(), key=_sort_key)}
+
+
 def summarise(results: list[dict]) -> dict:
     """Aggregate per-condition totals from a list of graded run records."""
     agg: dict[str, dict] = {}
@@ -340,9 +380,9 @@ def bootstrap(root: Path) -> None:
     print(f"  CLAUDE.md bytes: A={len(a_md)} B={len(b_md)}")
 
 
-def make_tree(root: Path, task: Task, cond: str) -> Path:
+def make_tree(root: Path, task: Task, cond: str, rep: int = 1) -> Path:
     """A standalone clone at the pre-fix commit, with no remote to push to."""
-    tree = root / f"run-{task.issue}-{cond}"
+    tree = root / f"run-{slot_name(task.issue, cond, rep)}"
     if tree.exists():
         shutil.rmtree(tree)
     _run(["git", "clone", "--local", "--no-checkout", str(REPO), str(tree)], timeout=600)
@@ -353,11 +393,13 @@ def make_tree(root: Path, task: Task, cond: str) -> Path:
     return tree
 
 
-def run_condition(root: Path, task: Task, cond: str, budget: float, model: str) -> dict:
-    tree = make_tree(root, task, cond)
+def run_condition(root: Path, task: Task, cond: str, budget: float, model: str,
+                  rep: int = 1) -> dict:
+    tree = make_tree(root, task, cond, rep)
+    slot = slot_name(task.issue, cond, rep)
     issue_body = (REPO / "audits" / "ab94" / f"issue-{task.issue}.md").read_text()
     prompt = build_prompt(task, issue_body)
-    (root / f"prompt-{task.issue}.txt").write_text(prompt)
+    (root / f"prompt-{slot}.txt").write_text(prompt)
 
     env = dict(os.environ)
     env["CLAUDE_CONFIG_DIR"] = str(root / f"config-{cond}")
@@ -387,26 +429,27 @@ def run_condition(root: Path, task: Task, cond: str, budget: float, model: str) 
     except Exception:
         payload = {"is_error": True, "subtype": "unparseable", "result": raw[-4000:]}
 
-    record = {"task": task.issue, "condition": cond, "wall_s": round(wall, 1)}
+    record = {"task": task.issue, "condition": cond, "rep": rep, "wall_s": round(wall, 1)}
     record.update(parse_run_json(payload))
     record["exit_code"] = proc.returncode
     record["final_message"] = str(payload.get("result", ""))[-4000:]
     record["stderr_tail"] = proc.stderr[-2000:]
 
-    out = root / f"result-{task.issue}-{cond}.json"
+    out = root / f"result-{slot}.json"
     out.write_text(json.dumps({"record": record, "raw": payload}, indent=2))
     print(json.dumps(record, indent=2))
     return record
 
 
-def grade(root: Path, task: Task, cond: str) -> dict:
+def grade(root: Path, task: Task, cond: str, rep: int = 1) -> dict:
     """Apply the objective oracle + collect the run's own artefacts."""
-    tree = root / f"run-{task.issue}-{cond}"
-    record = json.loads((root / f"result-{task.issue}-{cond}.json").read_text())["record"]
+    slot = slot_name(task.issue, cond, rep)
+    tree = root / f"run-{slot}"
+    record = json.loads((root / f"result-{slot}.json").read_text())["record"]
 
     # what the run itself produced, BEFORE the oracle overwrites anything
     diff = _run(["git", "diff", task.base, "--", "."], cwd=tree, timeout=120).stdout
-    (root / f"diff-{task.issue}-{cond}.patch").write_text(diff)
+    (root / f"diff-{slot}.patch").write_text(diff)
     record["commits"] = _run(
         ["git", "log", "--oneline", f"{task.base}..HEAD"], cwd=tree
     ).stdout.strip()
@@ -451,7 +494,7 @@ def grade(root: Path, task: Task, cond: str) -> dict:
             continue
     record["hook_blocks"] = count_hook_blocks(text)
 
-    (root / f"graded-{task.issue}-{cond}.json").write_text(json.dumps(record, indent=2))
+    (root / f"graded-{slot}.json").write_text(json.dumps(record, indent=2))
     print(json.dumps({k: v for k, v in record.items() if k != "final_message"}, indent=2))
     return record
 
@@ -460,9 +503,13 @@ def report(root: Path) -> None:
     records = [
         json.loads(p.read_text()) for p in sorted(root.glob("graded-*.json"))
     ]
-    out = {"runs": records, "aggregate": summarise(records)}
+    out = {
+        "runs": records,
+        "aggregate": summarise(records),
+        "by_task": summarise_by_task(records),
+    }
     (root / "report.json").write_text(json.dumps(out, indent=2))
-    print(json.dumps(out["aggregate"], indent=2))
+    print(json.dumps({"aggregate": out["aggregate"], "by_task": out["by_task"]}, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -473,6 +520,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--condition", choices=CONDITIONS)
     ap.add_argument("--budget", type=float, default=1.5)
     ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--rep", type=int, default=1,
+                    help="Replicate number for this (task, condition) cell — "
+                         "1 keeps the original #94 unsuffixed naming; >=2 is "
+                         "the #106 power follow-up (adds -rN to every artifact "
+                         "so replicates never overwrite each other).")
     args = ap.parse_args(argv)
 
     root = Path(args.root)
@@ -489,9 +541,9 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--task and --condition are required for run/grade")
     task = TASKS[args.task]
     if args.command == "run":
-        run_condition(root, task, args.condition, args.budget, args.model)
+        run_condition(root, task, args.condition, args.budget, args.model, args.rep)
     else:
-        grade(root, task, args.condition)
+        grade(root, task, args.condition, args.rep)
     return 0
 
 

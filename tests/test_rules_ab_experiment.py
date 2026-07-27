@@ -271,6 +271,115 @@ def test_summarise_aggregates_per_condition():
     assert agg["B"]["runs"] == 1
 
 
+# --- replicates (#106: n=1 per cell is not enough to separate a real effect
+# from ordinary run-to-run variance) --------------------------------------
+
+
+def test_slot_name_rep1_keeps_the_original_unsuffixed_naming():
+    """Round-1 (#94) artifacts are already committed unsuffixed — rep=1 must
+    stay addressable with no rename."""
+    assert ab.slot_name(88, "A", 1) == "88-A"
+    assert ab.slot_name(88, "A") == "88-A"
+
+
+def test_slot_name_rep2_appends_a_replicate_suffix():
+    assert ab.slot_name(88, "A", 2) == "88-A-r2"
+    assert ab.slot_name(96, "B", 3) == "96-B-r3"
+
+
+def test_slot_name_different_reps_never_collide():
+    names = {ab.slot_name(88, "A", r) for r in range(1, 5)}
+    assert len(names) == 4
+
+
+def test_make_tree_uses_the_replicate_slot(tmp_path):
+    task = ab.TASKS[88]
+    t1 = ab.make_tree(tmp_path, task, "A", rep=1)
+    t2 = ab.make_tree(tmp_path, task, "A", rep=2)
+    assert t1 != t2
+    assert t1.name == "run-88-A"
+    assert t2.name == "run-88-A-r2"
+
+
+def test_summarise_by_task_never_pools_different_tickets():
+    """Pooling task 88 and task 96 into one A-vs-B total can hide a real
+    per-ticket effect behind an unrelated one — each task gets its own
+    aggregate."""
+    records = [
+        {"task": 88, "condition": "A", "oracle_pass": True, "suite_green": True,
+         "wrote_own_test": True, "num_turns": 10, "cost_usd": 1.0,
+         "duration_ms": 1000, "output_tokens": 100, "cache_read_tokens": 5,
+         "hook_blocks": {}},
+        {"task": 88, "condition": "B", "oracle_pass": False, "suite_green": True,
+         "wrote_own_test": False, "num_turns": 4, "cost_usd": 0.5,
+         "duration_ms": 400, "output_tokens": 40, "cache_read_tokens": 1,
+         "hook_blocks": {}},
+        {"task": 96, "condition": "A", "oracle_pass": False, "suite_green": True,
+         "wrote_own_test": True, "num_turns": 20, "cost_usd": 2.0,
+         "duration_ms": 2000, "output_tokens": 200, "cache_read_tokens": 9,
+         "hook_blocks": {}},
+        {"task": 96, "condition": "B", "oracle_pass": True, "suite_green": True,
+         "wrote_own_test": False, "num_turns": 8, "cost_usd": 0.7,
+         "duration_ms": 700, "output_tokens": 70, "cache_read_tokens": 2,
+         "hook_blocks": {}},
+    ]
+    by_task = ab.summarise_by_task(records)
+    assert set(by_task) == {"88", "96"}
+    assert by_task["88"]["A"]["oracle_pass"] == 1
+    assert by_task["88"]["B"]["oracle_pass"] == 0
+    assert by_task["96"]["A"]["oracle_pass"] == 0
+    assert by_task["96"]["B"]["oracle_pass"] == 1
+    # a naive pool of all four records would read 2/4 each condition, masking
+    # that 88 and 96 disagree in OPPOSITE directions
+    pooled = ab.summarise(records)
+    assert pooled["A"]["oracle_pass"] == 1 and pooled["B"]["oracle_pass"] == 1
+
+
+def test_summarise_by_task_reports_replicate_count_per_cell():
+    records = [
+        {"task": 88, "condition": "A", "rep": 1, "oracle_pass": True,
+         "suite_green": True, "wrote_own_test": True, "num_turns": 10,
+         "cost_usd": 1.0, "duration_ms": 1000, "output_tokens": 100,
+         "cache_read_tokens": 5, "hook_blocks": {}},
+        {"task": 88, "condition": "A", "rep": 2, "oracle_pass": True,
+         "suite_green": True, "wrote_own_test": True, "num_turns": 12,
+         "cost_usd": 1.1, "duration_ms": 1100, "output_tokens": 110,
+         "cache_read_tokens": 6, "hook_blocks": {}},
+    ]
+    by_task = ab.summarise_by_task(records)
+    assert by_task["88"]["A"]["runs"] == 2
+
+
+def test_report_writes_a_by_task_breakdown(tmp_path):
+    (tmp_path / "graded-88-A.json").write_text(json.dumps({
+        "task": 88, "condition": "A", "oracle_pass": True, "suite_green": True,
+        "wrote_own_test": True, "num_turns": 3, "cost_usd": 0.1,
+        "duration_ms": 10, "output_tokens": 1, "cache_read_tokens": 1,
+        "hook_blocks": {},
+    }))
+    (tmp_path / "graded-88-A-r2.json").write_text(json.dumps({
+        "task": 88, "condition": "A", "rep": 2, "oracle_pass": True,
+        "suite_green": True, "wrote_own_test": True, "num_turns": 4,
+        "cost_usd": 0.2, "duration_ms": 20, "output_tokens": 2,
+        "cache_read_tokens": 2, "hook_blocks": {},
+    }))
+    ab.report(tmp_path)
+    out = json.loads((tmp_path / "report.json").read_text())
+    assert out["by_task"]["88"]["A"]["runs"] == 2
+    assert out["aggregate"]["A"]["runs"] == 2
+
+
+def test_run_and_grade_cli_accept_rep():
+    out = subprocess.run(
+        ["python3", str(SCRIPT), "run", "--help"], capture_output=True, text=True
+    )
+    assert "--rep" in out.stdout
+    out = subprocess.run(
+        ["python3", str(SCRIPT), "grade", "--help"], capture_output=True, text=True
+    )
+    assert "--rep" in out.stdout
+
+
 # --- isolation ------------------------------------------------------------
 
 
