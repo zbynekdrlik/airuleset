@@ -1025,17 +1025,23 @@ def cmd_diff(args):
 
 # Binaries the deployed surface depends on at RUNTIME: jq + curl (every
 # notify/stop hook parses its stdin payload with jq and sends via curl), git +
-# gh (tickets-status, autopilot, bounce), tmux (watchdog pane jobs). A box
-# missing one degrades SILENTLY at hook time — subdev 2026-07-23: provisioned
+# gh (tickets-status, autopilot, bounce), tmux (watchdog pane jobs), sshpass
+# (the burn-metrics remote-ssh helpers, #98 — was used by the code but never
+# tracked here, so a box missing it was never auto-installed or warned about).
+# A box missing one degrades SILENTLY at hook time — subdev 2026-07-23: provisioned
 # without jq, so david's ❓ never pinged Discord, never entered the question
 # map and the statusline badge stayed empty. The check AUTO-INSTALLS the gap
 # (user directive 2026-07-24: 'ak ti nieco chyba mas to doinstalovat') and
 # re-verifies; only a box where the install itself fails (no sudo — the
 # isolated sub-dev users) keeps the LOUD warning in every install/push output
 # (per-machine gaps are invisible to git-deploy — the gatekeeper .env lesson).
+# A sudo-less box that hits a STILL-missing dep files a gk-request naming the
+# package (autonomous-verification.md's sudo-less branch, #98); fulfilling it
+# means adding the package HERE and running push, which installs + verifies
+# it on every target in one shot.
 # Push runs install on EVERY target, so every deploy verifies + heals the
 # whole fleet's toolset.
-RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux")
+RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass")
 
 
 def check_runtime_deps(deps=RUNTIME_DEPS):
