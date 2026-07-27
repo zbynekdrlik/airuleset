@@ -9,7 +9,9 @@ skill, invisible to every other session. Promoted to a first-class CLI
 """
 
 import contextlib
+import http.client
 import io
+import re
 import socket
 import subprocess
 import sys
@@ -56,6 +58,37 @@ def _drain(proc):
         return "<stderr unavailable>"
 
 
+def _wait_until_serving(test, proc, url, deadline_s):
+    """Block until `url` actually answers — or fail with a diagnosis.
+
+    #113: the readiness signal is the endpoint ANSWERING, never a stopwatch.
+    Two exits besides success, both of which a fixed sleep gets wrong:
+    the child already EXITED (a dead process never answers, so waiting out the
+    budget is pointless — verify-launched-work-liveness.md), or the budget ran
+    out (report the server's own stderr, e.g. `upload: skip bind …`, instead of
+    a bare `Connection refused` the next reader has to re-diagnose).
+    """
+    end = time.monotonic() + deadline_s
+    last = None
+    while time.monotonic() < end:
+        if proc.poll() is not None:
+            test.fail("upload server exited (rc=%s) before serving %s\n"
+                      "stderr:\n%s" % (proc.returncode, url, _drain(proc)))
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                r.read()
+            return
+        except urllib.error.HTTPError as e:
+            e.close()                   # answered (any status) → it is up
+            return
+        except (OSError, http.client.HTTPException) as e:
+            last = e
+            time.sleep(0.05)
+    proc.kill()
+    test.fail("upload server never served %s within %.1fs (last: %r)\nstderr:\n%s"
+              % (url, deadline_s, last, _drain(proc)))
+
+
 def _serve(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None,
            deadline_s=10.0):
     """Start upload_server.py on a free port and return (proc, port) once it
@@ -65,14 +98,17 @@ def _serve(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None,
     — a guess at how long a fresh CPython takes to import http.server and
     bind. Under load the guess is wrong and the request hits a socket nobody
     listens on yet (`[Errno 111] Connection refused`, reproduced 1-in-50 under
-    CPU+fork load).
+    CPU+fork load). Polling costs less on an idle box (returns as soon as the
+    port answers, typically well under the old 0.6s) and does not lose on a
+    loaded one.
     """
     port = _free_port()
     argv = list(launcher or [sys.executable, str(SERVER)]) + [
         token, str(port), ips, str(dest), str(ttl)]
     proc = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
     test.addCleanup(proc.kill)
-    time.sleep(0.6)
+    _wait_until_serving(test, proc, "http://127.0.0.1:%d/%s/" % (port, token),
+                        deadline_s)
     return proc, port
 
 
@@ -184,14 +220,37 @@ class TestMultiInterfaceUrls(TestCase):
         # budget and then report a bare connection error. Binding only TEST-NET-3
         # makes upload_server.py exit with its own diagnosis — the wait must
         # notice the exit and surface that text.
+        # ttl=0 because a TTL keeps the child ALIVE through its own failure:
+        # upload_server.py arms a NON-daemon threading.Timer before the bind
+        # loop, so `sys.exit("upload: no address …")` cannot end the process —
+        # it lingers the full TTL and then exits 0 via the timer's os._exit
+        # (measured: 20.06s, rc=0, vs 0.07s and rc=1 at ttl=0). Filed as #114;
+        # this test is about the WAIT, so it uses the ttl that lets the child
+        # genuinely die.
         dest = Path(tempfile.mkdtemp())
         t0 = time.monotonic()
         with self.assertRaises(AssertionError) as ctx:
-            _serve(self, "tok113dead", dest, ips="203.0.113.9", deadline_s=10.0)
+            _serve(self, "tok113dead", dest, ips="203.0.113.9", ttl=0,
+                   deadline_s=10.0)
         took = time.monotonic() - t0
         self.assertIn("no address", str(ctx.exception))
         self.assertLess(took, 8.0,
                         "must fail on the child's exit, not on the deadline")
+
+    def test_readiness_timeout_reports_the_servers_own_stderr(self):
+        # The ticket's other requirement: when the budget DOES run out, fail
+        # with the server's captured stderr rather than a bare connection
+        # error, so the next reader gets a diagnosis instead of a mystery.
+        # This launcher never binds and never exits — the zombie shape a
+        # lingering child (above) presents to the wait.
+        dest = Path(tempfile.mkdtemp())
+        mute = ('import sys, time; sys.stderr.write("DIAG-never-bound\\n"); '
+                'sys.stderr.flush(); time.sleep(30)')
+        with self.assertRaises(AssertionError) as ctx:
+            _serve(self, "tok113mute", dest, deadline_s=1.0,
+                   launcher=[sys.executable, "-c", mute])
+        self.assertIn("never served", str(ctx.exception))
+        self.assertIn("DIAG-never-bound", str(ctx.exception))
 
     def test_no_fixed_startup_sleep_survives_in_this_module(self):
         # Locks the fix itself: the startup guess sat at five separate call
@@ -211,7 +270,11 @@ class TestMultiInterfaceUrls(TestCase):
         self.assertEqual([], guesses,
                          "a fixed startup sleep is a readiness GUESS (#113) — "
                          "start the server through _serve(), which polls")
-        self.assertEqual(1, src.count("subprocess.Popen("),
+        # Matched as a STATEMENT (`x = subprocess.Popen(`), not as a substring:
+        # this assertion's own message names the call, so a bare count would
+        # count itself — the same self-reference trap the sleep lock above hit.
+        starts = re.findall(r"^\s*\w+\s*=\s*subprocess\.Popen\(", src, re.M)
+        self.assertEqual(1, len(starts),
                          "every upload_server start must go through _serve() "
                          "(#113); a second Popen is a new un-polled call site")
 
@@ -322,7 +385,11 @@ class TestMultiFileUpload(TestCase):
             saved = dest / name
             self.assertTrue(saved.exists(), name)
             self.assertEqual(saved.stat().st_size, len(body), name)
-        time.sleep(0.3)
+        # No wait here either (#113, same defect class as the startup guess):
+        # upload_server.py writes `upload SAVED …` BEFORE it sends the 200, and
+        # CPython's sys.stderr is line-buffered even when it is a pipe — so the
+        # 200 already received above IS the proof the line is in the pipe. The
+        # sleep that used to sit here was a guess at a race that cannot happen.
         proc.terminate()
         err = proc.stderr.read()
         for name, body in bodies.items():
