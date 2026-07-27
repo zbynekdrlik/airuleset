@@ -179,7 +179,25 @@ yourself — just do your work; the lock is the supervisor's concern.
    already bumped and some members are partially done, CONTINUE from there — do NOT re-bump or redo
    version-bump→RED, and do NOT re-do an already-committed member. Only on a truly fresh start do you
    **version bump FIRST** (`version-bumping.md`) before any feature code.
-2. Implement **the named issue(s) ONLY** — the whole batch, nothing beyond the named set, no scope
+2. **DESIGN THE APPROACH BEFORE ANY CODE — UNCONDITIONAL, once per issue.** Before the first line
+   of code for a member, the approach must exist as a deliberate decision, never as whatever the
+   first edit happened to be. Establish, in your own words: **the root cause** (for a bug: WHY it
+   happens, traced in the code — not the symptom restated), **the approach you chose**, and **the
+   alternative you rejected and why**. Then post it to the issue with
+   `gh issue comment <N>` **BEFORE the first code commit** for that member — that comment is the
+   step's durable artifact and the proof it happened, readable forever from `gh issue view` and
+   provably earlier than the code in `git log`.
+   **The step is unconditional; its DEPTH scales with the problem.** A scoped fix with one obvious
+   cause = one honest paragraph — that is complete, not a shortcut. A genuine design fork (several
+   valid approaches with different consequences, an unclear root cause, a cross-cutting change)
+   = go deeper BEFORE coding: dispatch your own design/hard-debug consult (`model: "opus"` first,
+   per the escalation ladder above), or — when the fork is the USER's call, not yours
+   (`ask-before-assuming.md`) — ask them via the `❓` marker. What is banned is skipping straight
+   to edits and discovering the design through a stream of corrections; the user's report of that
+   failure is exactly what this step exists to prevent ("len sa strieľa ako príde, náhodné
+   riešenie, následne milión opráv", #104). Never satisfy this step by naming a skill — a skill
+   body does NOT reach a dispatched worker (probes, 2026-07-27); the thinking has to be yours.
+3. Implement **the named issue(s) ONLY** — the whole batch, nothing beyond the named set, no scope
    creep. Do each member in sequence on the SAME `dev` branch. Per-issue calibrated TDD
    (`tdd-workflow.md`): each bug → its RED test commit BEFORE its GREEN fix commit
    (`regression-test-first.md`); feature → tests in the same PR; UI → Playwright E2E
@@ -188,9 +206,9 @@ yourself — just do your work; the lock is the supervisor's concern.
    with a comment on what you found, finish the remaining members, and note the drop in your evidence
    block (`dropped:` line) — the supervisor re-dispatches it solo. Do NOT let one member's scope blow
    up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
-3. **Search the codebase before assuming anything is missing** — never re-implement what
+4. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
-4. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
+5. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
    push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
    **CRITICAL — NEVER wait with `Bash(run_in_background=True)`. You are a SUBAGENT: a subagent that
    backgrounds a wait and ends its turn TERMINATES** — the detached background task re-invokes the
@@ -204,24 +222,24 @@ yourself — just do your work; the lock is the supervisor's concern.
    wait (it survives long waits via `run_in_background` + re-invocation) and re-dispatches a fresh
    worker for the next stage (`skills/autopilot/SKILL.md`). **If the supervisor dispatches you FOR a
    specific promotion stage** (e.g. "promote develop→staging for #N"), do ONLY that stage's PR /
-   promotion and RETURN; only the FINAL `merge→deploy-verify` stage worker runs steps 6–7 and fires
+   promotion and RETURN; only the FINAL `merge→deploy-verify` stage worker runs steps 7–8 and fires
    the per-ticket card. For a plain 2-branch single-CI repo you own the one short CI yourself
-   (foreground), running the whole cycle (steps 5–7) as below.
-5. Open ONE PR `dev`→`main` whose body lists `Closes #<n>` for **EVERY** member (separate lines, so
+   (foreground), running the whole cycle (steps 6–8) as below.
+6. Open ONE PR `dev`→`main` whose body lists `Closes #<n>` for **EVERY** member (separate lines, so
    GitHub closes them all on merge). Drive EVERY gate green: CI all jobs, `mergeable: true` +
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
-6. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
+7. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
-   member AFTER post-deploy verification (step 7), so its 📦 line carries the deployed version you
+   member AFTER post-deploy verification (step 8), so its 📦 line carries the deployed version you
    read from the DOM** (`notify --run-card --repo <owner/name> --issue <N> --goal "<plain goal>"
-   --achieved "<plain what landed>" --version "<version read in step 7>" --url "<Label=URL where the
+   --achieved "<plain what landed>" --version "<version read in step 8>" --url "<Label=URL where the
    change shows>"` — `--goal`/`--achieved` PLAIN non-technical Slovak; `--url` is the deep link to SEE
    the change live (NOT a PR/diff); see the PER-TICKET DISCORD CARD note above). For each resolved
    member also clear the bounce lane: `gh issue edit <N> --remove-label prio:bounce 2>/dev/null ||
    true` (best-effort no-op when the label isn't there — a resolved reviewer-injected priority
    ticket must leave the lane so the supervisor's seed ordering moves on).
-7. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
+8. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
    the live app, read the version label from the DOM, exercise the changed feature. No per-issue
@@ -230,12 +248,12 @@ yourself — just do your work; the lock is the supervisor's concern.
    NON-deploy op (rebooting the HOST, stopping/killing a service or process OUTSIDE the deploy,
    deleting data / DB `DROP`/`DELETE`/`TRUNCATE`) or a project carrying the
    `<!-- airuleset:merge=manual -->` marker (`no-destructive-remote-actions.md`).
-8. Anything you identify but do not finish → `gh issue create` NOW (`no-dropped-work.md`).
+9. Anything you identify but do not finish → `gh issue create` NOW (`no-dropped-work.md`).
    Use `needs-design` if the new issue's design is genuinely ambiguous. **NEVER** apply
    `autopilot-skip` — that label is the user's start-of-run exclusion only.
-9. Append one terse line PER member to `docs/autopilot-log.md` (issue #, commit SHAs, RED→GREEN
+10. Append one terse line PER member to `docs/autopilot-log.md` (issue #, commit SHAs, RED→GREEN
    test names, decisions, and the shared PR #). Create the file if missing.
-10. Run the `playbook-review` skill — capture reusable procedures, gotchas, and non-obvious
+11. Run the `playbook-review` skill — capture reusable procedures, gotchas, and non-obvious
     decisions to the project playbook per `project-playbook-maintenance.md`. The completion report
     MUST carry the `📔 Playbook:` line (enforced by the Stop gate `stop-check-playbook-review.sh`).
 
@@ -260,6 +278,7 @@ them all):
 ```
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
 validated: <per issue: how you proved each is still real: repro/test/MCP/curl | "OBSOLETE — closed: <what>">
+approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, AND proof it predates that member's first code commit (comment timestamp vs first commit SHA). NEVER "n/a" — CYCLE step 2 is unconditional.>
 achieved: <per issue, ONE Slovak line of what actually LANDED — used verbatim as the Discord card's "Dosiahnuté" (#A: …; #B: …)>
 pr: #<M> <url>  (body Closes #A #B …)
 merge_sha: <sha | "NOT MERGED (manual marker)" | "STOPPED: <reason>">
@@ -279,6 +298,7 @@ OPEN):
 ```
 issues: #<A> <title>, #<B> <title>, …
 validated: <per issue: how you proved each is still real | "OBSOLETE — commented, left OPEN: <what>">
+approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
 achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
 branch: <your fork branch name, pushed>
 local_verify: <tests + lint command → result (green), the proof the maintainer will re-check>
