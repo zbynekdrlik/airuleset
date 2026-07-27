@@ -2376,6 +2376,32 @@ BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
                 "alone queues them; with NO loop armed, validate and dispatch "
                 "the background autopilot-worker for them now.")
 
+# #89 (2026-07-26 restreamer incident): `prio:bounce` only has protocol
+# meaning INSIDE the gatekeeper<->sub-dev cross-stream flow (`## Cross-stream
+# protocol`, skills/autopilot/SKILL.md) -- a bare label on an unrelated repo
+# (a human using it as a generic "priority" marker, exactly what happened on
+# restreamer #337, author+label both zbynekdrlik, nothing to do with any
+# bounce) must never read as a real bounce. There is no reliable PER-TICKET
+# signal (the false ticket had a real, unrelated comment too, so "has a
+# comment" doesn't discriminate) -- the discriminator is the REPO: job 8 may
+# only ever query/nudge repos that actually PARTICIPATE in the protocol. Add
+# a repo's basename here the day it onboards a gatekeeper<->sub-dev flow;
+# everything else is structurally exempt, by construction, from job 8 ever
+# even asking GitHub about it.
+_CROSS_STREAM_REPOS = frozenset({"odoo-erp"})
+
+
+def _repo_in_cross_stream_flow(root, cross_stream_repos=None):
+    """Does the repo at `root` actually participate in the gatekeeper<->
+    sub-dev cross-stream flow? `cross_stream_repos=None` resolves to the
+    real registry above (the DI convention every other bounce_backstop
+    input already follows: `gh_fetch=None` -> the real fetcher,
+    `projects_dir=None` -> the real PROJECTS_DIR) -- pass an explicit set
+    only to override it (e.g. in a test)."""
+    repos = _CROSS_STREAM_REPOS if cross_stream_repos is None else cross_stream_repos
+    name = os.path.basename(str(root or "").rstrip("/"))
+    return name in repos
+
 
 def _bounce_quals(cwd):
     """gh search quals scoping the bounce query to the PANE's stream, derived
@@ -2557,7 +2583,7 @@ _FOREIGN_TMUX_USERS = ()
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=BOUNCE_INTERVAL,
                     renudge=BOUNCE_RENUDGE_SECONDS, persist=None,
-                    projects_dir=None, user=None):
+                    projects_dir=None, user=None, cross_stream_repos=None):
     """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
     caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
     the process — the live incident: TimeoutStartSec killed the run after the
@@ -2613,6 +2639,13 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     for root, (name, pid) in sorted(targets.items()):
         if not _bounce_quals(root):
             continue                           # gatekeeper: never bounce-nudged
+        if not _repo_in_cross_stream_flow(root, cross_stream_repos):
+            # #89: prio:bounce has no protocol meaning outside a repo that
+            # actually participates in the gatekeeper<->sub-dev flow — never
+            # even ask GitHub, let alone nudge (the restreamer #337 false
+            # nudge: a bare label used as a generic priority marker).
+            logs.append("bounce-skip-not-cross-stream %s" % name)
+            continue
         tickets = fetch(root)
         if tickets is None:
             continue                           # gh error → keep prior state
