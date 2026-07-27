@@ -7021,6 +7021,68 @@ def _safe_unlink(path):
 
 
 # --------------------------------------------------------------------------- #
+# Job 22 — STALE EXEC-MARKER CLEANUP (#97, 2026-07-27). block-main-
+# implementation.sh's bypass markers (/tmp/airuleset-main-exec-ok-<sid>, and
+# the legacy /tmp/airuleset-fable-exec-ok-<sid>) are ONE-SHOT since #80 — the
+# hook itself deletes a marker the moment it honors it. But a marker touched
+# for a session that then just ENDS without ever making another main-agent
+# Bash/Edit/Write call never gets consumed, and sits in /tmp forever (a real
+# one found on gk: 0 bytes, ~21h old, for a session id that no longer ran
+# anywhere). This is HYGIENE, not a security hole — the hook pairs a marker
+# to its session id, so a marker for a dead session is already inert; the
+# ONLY hazard is deleting a marker that belongs to a session STILL RUNNING
+# (that would silently revoke a deliberately granted exception mid-work).
+# So cleanup requires BOTH: the marker is older than `max_age_s`, AND no
+# currently-live pane's transcript stem matches its session id.
+MAIN_EXEC_MARKER_MAX_AGE_S = 6 * 3600     # a one-shot marker has no business outliving a session by this long
+_EXEC_MARKER_PREFIXES = ("airuleset-main-exec-ok-", "airuleset-fable-exec-ok-")
+
+
+def _session_id_is_live(sid, run=None, projects_dir=None):
+    """True when SOME currently-live claude pane's transcript stem is this
+    exact session id — regardless of which cwd it runs in (unlike
+    `_find_pane_for_session`, which needs a specific target cwd; a stale
+    marker only carries a session id, no cwd)."""
+    run = run or _default_run
+    projects_dir = projects_dir or PROJECTS_DIR
+    for _pid, cwd in list_claude_panes(run):
+        tinfo = find_active_transcript(projects_dir, cwd)
+        if tinfo and tinfo[0].stem == sid:
+            return True
+    return False
+
+
+def cleanup_stale_exec_markers(now, run=None, projects_dir=None,
+                               max_age_s=MAIN_EXEC_MARKER_MAX_AGE_S,
+                               tmp_dir="/tmp", dry_run=False):
+    """Job 22 — see the section comment. Best-effort (never raises); returns
+    log lines. Never removes a marker whose session id still resolves to a
+    live pane, no matter how old the file is."""
+    logs = []
+    try:
+        entries = os.listdir(tmp_dir)
+    except OSError:
+        return logs
+    for name in entries:
+        prefix = next((p for p in _EXEC_MARKER_PREFIXES if name.startswith(p)), None)
+        if not prefix:
+            continue
+        sid = name[len(prefix):]
+        if not sid:
+            continue
+        path = os.path.join(tmp_dir, name)
+        age = now - _safe_mtime(path)
+        if age < max_age_s:
+            continue                            # not old enough to be orphaned yet
+        if _session_id_is_live(sid, run=run, projects_dir=projects_dir):
+            continue                            # a live session — NEVER touch its marker
+        if not dry_run:
+            _safe_unlink(path)
+        logs.append("exec-marker-cleanup %s age=%ds" % (name, int(age)))
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # One poll cycle
 # --------------------------------------------------------------------------- #
 
@@ -7189,6 +7251,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           ping per (session, turn) via the #81 notify path
           (long_turn_watch). DETECTION ONLY — it never types anything;
           breaking a running turn is the user's call.
+      (22) STALE EXEC-MARKER CLEANUP (#97) — always on. block-main-
+          implementation.sh's one-shot bypass markers
+          (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) are
+          consumed the moment the hook honors one, but a session that ends
+          without another guarded call never consumes its own marker — it
+          sits in /tmp forever (a real orphan found live: 0 bytes, ~21h
+          old, no session anywhere still matching it). Hygiene, not a
+          security hole (a marker is matched by session id, so a stale one
+          is already inert) — a marker older than `MAIN_EXEC_MARKER_MAX_AGE_S`
+          (default 6h) is removed ONLY when no currently-live pane's
+          transcript stem still resolves to its session id
+          (`cleanup_stale_exec_markers`); a live session's marker is never
+          touched no matter its age, since removing it would silently
+          revoke a deliberately granted exception mid-work.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -8009,6 +8085,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                     owner_by_sid=owner_by_sid)
         except Exception as e:
             logs.append("long-turn error: %r" % (e,))
+
+    # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
+    # param — same "always on" shape as jobs 9/15/17, since it depends on
+    # nothing external beyond /tmp + the pane list already available this
+    # sweep). Pure hygiene, never security-critical (a marker is matched by
+    # session id, so a stale one is already inert) — best-effort.
+    try:
+        logs += cleanup_stale_exec_markers(now, run=run,
+                                           projects_dir=projects_dir,
+                                           dry_run=dry_run)
+    except Exception as e:
+        logs.append("exec-marker-cleanup error: %r" % (e,))
 
     save_state(state_path, state)
     return logs
