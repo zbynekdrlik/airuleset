@@ -46,7 +46,9 @@ A test written BEFORE the fix is a real regression guard. You watched it fail. Y
 
 The pre-push hook accepts `[no-test: <reason>]` to skip the test gate. Bare `[no-test]` is no longer accepted. The reason MUST explain why a test is not feasible (typical valid reasons: "config-only change, no logic", "release tag", "auto-generated file"). Every skip is appended to `~/devel/airuleset/audits/no-test-skips.log` with timestamp + project + commit SHA + reason. Review the log periodically — if the same project keeps skipping, that's a TDD-discipline regression.
 
-NEVER use `[no-test: …]` to skip a real bug fix. If a bug exists, a test exists that catches it. If you can't figure out how to write that test, stop and ask the user — don't bypass the gate.
+NEVER use `[no-test: …]` to skip a bug fix whose logic CAN be unit-tested. If a bug exists, a test exists that catches it. If you can't figure out how to write that test, stop and ask the user — don't bypass the gate.
+
+**One sanctioned category: a CI-YAML conditional-logic fix** (a GitHub Actions `if:` / `needs.job.result` expression) has no realistic unit-testable surface outside a real workflow run — use `[no-test: ci-yaml conditional logic, not unit-testable outside a real run]` ONLY when the workflow file already carries its own self-check step (a `run:` block asserting the exact condition, so the regression guard IS running on every future push — just not as a `#[test]`/`def test_`-shaped unit test). This is deliberately a documented bypass category, not a new pattern-matcher: this repo has shipped a wrong CLASSIFIER fix three times already (#80, #91, #96) — widening the hook's own test-detection regex to recognize YAML self-checks would be a fourth surface for the same class of bug, for a case that already has a safe, honest, logged escape hatch (#41).
 
 #### Completion-report evidence (required for bug-fix PRs)
 

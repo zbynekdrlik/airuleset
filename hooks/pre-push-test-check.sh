@@ -78,8 +78,13 @@ if echo "$LAST_MSG" | grep -qE '\[no-test\](\s|$)'; then
     echo ""
     echo "  Use [no-test: <reason>] explaining WHY a test is not feasible."
     echo "  Valid reasons: 'config-only change, no logic', 'release tag',"
-    echo "                  'auto-generated file', 'docs only'."
-    echo "  NEVER use this for bug fixes — see regression-test-first.md."
+    echo "                  'auto-generated file', 'docs only',"
+    echo "                  'ci-yaml conditional logic, not unit-testable"
+    echo "                  outside a real run' (#41 — a GitHub Actions"
+    echo "                  if:/needs.job.result expression fix, when the"
+    echo "                  workflow's own self-check IS the regression"
+    echo "                  guard already running on every future push)."
+    echo "  NEVER use this for a bug fix with testable logic — see regression-test-first.md."
     echo ""
     exit 2
 fi
