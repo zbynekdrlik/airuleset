@@ -12,6 +12,7 @@ never into a busy pane, one arm per pane per window (dedup)."""
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -120,6 +121,72 @@ class TestGoalAutoarm(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDraftGoesThroughStashDelivery(unittest.TestCase):
+    """#100 live incident (dev2, 2026-07-27): `/autopilot` printed the /goal
+    line and the arm question at `10:42:39Z`; the pane held the user's own
+    half-typed `/goal` paste the whole time, so the OLD job 9 (bare-prompt-
+    only, never touch a draft) just sat there for 43 minutes until the user
+    submitted it by hand. A held draft must not be a dead end: it goes
+    through the SAME `deliver_with_stash` primitive job 20's revival path
+    already uses — the shared mechanism, never a second invented one — and a
+    refusal that never touched the pane must not burn the whole
+    `GOAL_ARM_WINDOW_S` dedup window (the #101 lesson, applied here too)."""
+
+    def _stub(self, ok, reason=None):
+        calls = []
+
+        def _fake(pid, text, run, captured=None, logs=None):
+            calls.append((pid, text, captured))
+            if reason and isinstance(logs, list):
+                logs.append(reason)
+            return ok
+        return calls, m.patch.object(wd, "deliver_with_stash", side_effect=_fake)
+
+    def test_successful_stash_arms_and_consumes_the_window(self):
+        calls, patcher = self._stub(True)
+        with patcher:
+            tmux, logs = go(USER_TEXT_PANE)
+        self.assertEqual(len(calls), 1, "the draft must go through the stash "
+                         "primitive, not be skipped outright")
+        self.assertEqual(calls[0][1], GOAL_LINE)
+        self.assertFalse(tmux.typed(),
+                         "the draft is stashed, not typed over directly — "
+                         "deliver_with_stash owns the actual keystrokes")
+        self.assertTrue(any("goal-autoarm" in ln and "stash" in ln
+                            for ln in logs), logs)
+
+    def test_transient_refusal_is_retried_next_sweep_not_after_the_window(self):
+        state = {}
+        now = time.time()
+        _calls, patcher = self._stub(False, "stash-abort: not idle-with-draft")
+        with patcher:
+            _tmux, logs = go(USER_TEXT_PANE, state, now)
+        self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs), logs)
+        # a transient refusal must NOT consume the dedup window — an
+        # IMMEDIATE next sweep (not GOAL_ARM_WINDOW_S later) must retry
+        calls2, patcher2 = self._stub(True)
+        with patcher2:
+            go(USER_TEXT_PANE, state, now + 5)
+        self.assertEqual(len(calls2), 1,
+                         "a transient pre-send refusal must not burn the "
+                         "10-minute dedup window")
+
+    def test_permanent_refusal_still_consumes_the_window(self):
+        state = {}
+        now = time.time()
+        _calls, patcher = self._stub(False, "stash-abort: type-verify-failed")
+        with patcher:
+            _tmux, logs = go(USER_TEXT_PANE, state, now)
+        self.assertTrue(any(ln.startswith("goal-autoarm FAIL") for ln in logs),
+                        logs)
+        calls2, patcher2 = self._stub(True)
+        with patcher2:
+            go(USER_TEXT_PANE, state, now + 5)
+        self.assertEqual(len(calls2), 0,
+                         "a real (post-send) delivery failure DOES consume "
+                         "the dedup window, same as any other real attempt")
 
 
 class TestScrollbackNeverArms(unittest.TestCase):
