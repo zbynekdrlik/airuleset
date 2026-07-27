@@ -81,14 +81,36 @@ class TestPathRuleConversions(TestCase):
             self.assertIn("paths:", t[:300], rel)
             self.assertIn(rel, profile)
 
-    def test_old_module_paths_are_gone_for_path_rules(self):
-        for old in ["modules/ci/no-continue-on-error.md",
-                    "modules/ci/coverage-thresholds.md",
-                    "modules/ci/browser-console-zero-errors.md",
-                    "modules/ci/e2e-real-user-testing.md",
-                    "modules/quality/database-migrations.md"]:
-            self.assertFalse((ROOT / old).exists(), old)
-            self.assertNotIn(old, read("profiles/universal.profile"))
+    def test_old_module_paths_are_stubs_for_path_rules(self):
+        # #105: a live structural probe (nested_memory attachment presence in
+        # a subagent's own transcript) proved a rules/*.md + paths: file NEVER
+        # injects into a dispatched SUBAGENT, even when the matching file is
+        # read from within the subagent's own correct cwd -- only a MAIN
+        # session gets the nested_memory attachment. e9d1022 left these 5
+        # topics with NO always-on surface at all (unlike its sibling skill
+        # conversions, which all kept a stub), so a dispatched autopilot
+        # worker editing a CI workflow / migration / Playwright spec never
+        # saw them. Restored a short always-on stub at the old module path,
+        # same pattern as the NEW_SKILLS stubs above.
+        stubs = {
+            "modules/ci/no-continue-on-error.md": "rules/no-continue-on-error.md",
+            "modules/ci/coverage-thresholds.md": "rules/coverage-thresholds.md",
+            "modules/ci/browser-console-zero-errors.md":
+                "rules/browser-console-zero-errors.md",
+            "modules/ci/e2e-real-user-testing.md": "rules/e2e-real-user-testing.md",
+            "modules/quality/database-migrations.md": "rules/database-migrations.md",
+        }
+        profile = read("profiles/universal.profile")
+        for old, rule in stubs.items():
+            self.assertTrue((ROOT / old).exists(), old)
+            t = read(old)
+            self.assertLess(len(t.splitlines()), 8, f"{old} must stay a stub")
+            self.assertIn(rule, t, f"{old} must point at {rule}")
+            self.assertIn(old, profile, f"{old} must be imported in the profile")
+            # the rules/*.md entry must ALSO still be present -- the stub is
+            # additive (subagent reach), never a replacement for the rich
+            # main-session path-scoped injection.
+            self.assertIn(rule, profile)
 
 
 class TestModelCombinationFixes(TestCase):
