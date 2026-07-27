@@ -56,6 +56,28 @@ set -euo pipefail
 # on 243 real `until …; do sleep 5; done` polls. Hence the ` do( .*)?
 # sleep( .*)? done ` form, where each separator is claimed exactly once.
 #
+# #112 — heredoc bodies are NOT stripped, and that is deliberate. The
+# residual false positive #111 left (a heredoc body that is PROSE happening
+# to contain the three tokens in order) looks like it should be cheap to
+# remove, and #112 proposed doing it. Replaying all 77,433 Bash calls in the
+# 94 local transcripts says otherwise: stripping bodies drops 75 nudges
+# (796 -> 721), but only ~6 of those 75 are prose. 49 are `cat > poll.sh
+# <<'EOF' … EOF` followed by running that script — the loop is IN the body
+# and really executes (`poll_pr.sh`, `wait_map.sh`, `suite_watch.sh`; one ran
+# 120s) — and 15 more are `ssh host 'bash -s' <<EOF` / `python3 - <<PY`
+# bodies that run remotely, up to 151s. So ~64 of the 75 are nudges the hook
+# is RIGHT to fire, and the trade is inverted from how it was filed.
+#
+# It also kills the discriminator #112 proposed (strip only when the
+# heredoc's owner is not a shell/interpreter): `cat` is not an interpreter,
+# so that rule strips exactly the 49-command majority whose bodies do run.
+# A correct classifier would have to follow the written PATH to a later
+# execution — a second classifier that is wrong on its dominant class is
+# worse than the 1.03% nudge rate it was meant to trim, especially when the
+# whole prose class is ~6 calls in 77k and every one of them is a ticket
+# ABOUT poll loops in this repo. Closed won't-fix with these numbers; do not
+# re-propose without a replay that separates written-and-run from inert.
+#
 # Threshold: nudge when the call's own `tool_input.timeout` is missing or
 # below AIRULESET_POLL_NUDGE_MIN_MS (default 400000 — comfortably above
 # the harness's observed 120000ms default, comfortably below the 600000ms
