@@ -548,6 +548,42 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.assertTrue(wd.compact_claim_active(self.SID, "/home/x/proj",
                                                 projects_dir=Path(d.name)))
 
+    # ------------------------------------------------------------------- #
+    # #102 (2026-07-27 live incident) — a request recorded at an earlier ✅
+    # boundary must never fire while the session's CURRENT last turn is a
+    # ❓ block: re-checked HERE (delivery time), not just at record time.
+    # ------------------------------------------------------------------- #
+
+    def test_currently_blocked_on_a_question_is_skipped_and_kept_for_retry(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name) / "projects"
+        _write_marker_transcript(proj, "/home/x/proj", self.SID,
+                                 "❓ NEEDS YOU: schváliš reštart?")
+        path = self._p()
+        wd.record_compact_request(self.SID, "/home/x/proj", path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("blocked-question" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_currently_on_a_done_marker_still_delivers(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name) / "projects"
+        _write_marker_transcript(proj, "/home/x/proj", self.SID,
+                                 "✅ DONE: hotovo")
+        path = self._p()
+        wd.record_compact_request(self.SID, "/home/x/proj", path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts())
+
 
 # --------------------------------------------------------------------------- #
 # 2b-1b. #71 (2026-07-26 live incident) — compact_already_delivered /
@@ -644,6 +680,27 @@ def _write_ctx_transcript(base, cwd, sid, ctx_tokens):
     p = d / (sid + ".jsonl")
     entry = {"type": "assistant", "message": {"id": "msg_1", "usage": {
         "cache_read_input_tokens": ctx_tokens, "cache_creation_input_tokens": 0}}}
+    p.write_text(json.dumps(entry) + "\n")
+    return p
+
+
+def _write_marker_transcript(base, cwd, sid, marker_text, ctx_tokens=300_000):
+    """Write a minimal real transcript at <base>/<encoded-cwd>/<sid>.jsonl
+    whose last assistant message's `content` is `marker_text` (a plain
+    string, e.g. an actual `❓ NEEDS YOU: ...` line) -- #102's ❓-turn gate
+    needs a REAL transcript for `transcript_last_marker` to read the
+    CURRENT last turn's status marker from, the same file shape
+    `_write_ctx_transcript` uses (so a `content`-less fixture, like every
+    pre-#102 ctx-only test, still reads as marker `''` -- an empty
+    `content` is one of `_SENTINELS`, so a marker-less entry is silently
+    skipped, exactly matching existing test behavior)."""
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    entry = {"type": "assistant", "message": {
+        "id": "msg_1", "content": marker_text,
+        "usage": {"cache_read_input_tokens": ctx_tokens,
+                  "cache_creation_input_tokens": 0}}}
     p.write_text(json.dumps(entry) + "\n")
     return p
 
@@ -1092,6 +1149,60 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2b-1d. #102 (2026-07-27 live incident, camera-box) — never deliver `/compact`
+# while the session's CURRENT last real turn is blocked on the user (`❓`).
+#
+# The record-time gate (notify-compact-request.sh) already refuses to RECORD
+# a request for a turn that itself ends `❓` — but a request recorded for an
+# earlier ✅ boundary can still be sitting in compact-requests.json once the
+# session has since moved on to a NEW `❓` turn (a `/compact` queued behind a
+# goal-loop-continued turn is only drained at the NEXT accepted Stop, which
+# can be exactly the turn that asks the question). `_compact_blocked_by_
+# question` re-reads the CURRENT last marker right before every send.
+# --------------------------------------------------------------------------- #
+
+class TestCompactBlockedByQuestion(unittest.TestCase):
+    SID = "sess-q-1"
+    CWD = "/home/x/qproj"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_no_transcript_is_not_blocked(self):
+        proj = self._dir()   # nothing written -> unmeasurable, never blocks
+        self.assertFalse(
+            wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+    def test_last_marker_needs_you_question_is_blocked(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "❓ NEEDS YOU: schváliš reštart?")
+        self.assertTrue(
+            wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+    def test_last_marker_asked_question_is_blocked(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "❓ ASKED: ktorá možnosť?")
+        self.assertTrue(
+            wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+    def test_last_marker_done_is_not_blocked(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        self.assertFalse(
+            wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+    def test_no_marker_at_all_is_not_blocked(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "plain reply, no marker")
+        self.assertFalse(
+            wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+
+# --------------------------------------------------------------------------- #
 # 2c. run_once wiring — job 14 fires ONLY when compact_requests_path is given
 # --------------------------------------------------------------------------- #
 
@@ -1392,6 +1503,32 @@ class TestDeliverCompactNow(unittest.TestCase):
         wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
         log_text = wd.compact_sync_log_path().read_text()
         self.assertIn("SKIP no-pane", log_text)
+
+    # ------------------------------------------------------------------- #
+    # #102 (2026-07-27 live incident) — never deliver while the session's
+    # CURRENT last turn is a ❓ block.
+    # ------------------------------------------------------------------- #
+
+    def test_currently_blocked_on_a_question_falls_back(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "❓ NEEDS YOU: schváliš reštart?")
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP blocked-question", log_text)
+
+    def test_currently_on_a_done_marker_still_delivers(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
 
 
 # --------------------------------------------------------------------------- #
