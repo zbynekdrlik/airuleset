@@ -6721,6 +6721,18 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("timeout", r.stdout + r.stderr)
 
+    def test_tight_do_sleep_body_is_still_nudged(self):
+        # #111 boundary-SHARING guard: `do sleep 5` has exactly ONE space
+        # between the two tokens, so a detector built from CONSUMING
+        # character classes cannot match it (the space would have to be
+        # both `do`'s closing boundary and `sleep`'s opening one). Every
+        # other loop test here happens to put a command between `do` and
+        # `sleep`, which hid that from the unit tests entirely -- the
+        # corpus replay caught it going quiet on 243 real polls.
+        r = self._run("until [ -s /tmp/out ]; do sleep 5; done; cat /tmp/out")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("timeout", r.stdout + r.stderr)
+
     def test_backgrounded_poll_loop_is_not_nudged(self):
         # #107: ci-monitoring.md now sanctions ONE `run_in_background: true`
         # waiter for a LONG wait -- it detaches immediately, so the Bash
