@@ -15,17 +15,29 @@ set -euo pipefail
 # sshpass-wrapped) whose target host is one of the subdev VPS's known
 # addresses (MagicDNS name, public FQDN, tailscale IP, public IP).
 #
-# ALLOW-list — mirrors airuleset.py's REMOTE_HOSTS EXACTLY (the single
-# source of truth for these identities):
+# ALLOW-list — mirrors airuleset.py's REMOTE_HOSTS for montalu/marek/david
+# (the single source of truth for THOSE three identities), PLUS one identity
+# REMOTE_HOSTS structurally cannot express (#68): REMOTE_HOSTS is dev1's own
+# OUTBOUND push-target list, but the gatekeeper VPS reaches subdev INBOUND
+# from ITS OWN box as root, via a locally-deployed ~/.ssh/config `Host
+# subdev` stanza — not something dev1 ever pushes to.
 #   - montalu@<subdev>   — no identity requirement (default key AND the
 #                          sshpass -p path are both legitimate per
 #                          REMOTE_HOSTS — montalu has no `identity` entry).
 #   - marek@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
 #   - david@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
+#   - root@<subdev>      — ONLY with -i .../subdev_admin (#68, gatekeeper
+#                          VPS's own admin identity) — explicit on the
+#                          command line, OR implicit via a bare `ssh subdev`
+#                          whose LOCAL ~/.ssh/config `Host subdev` stanza
+#                          itself resolves to User root + that identity
+#                          (read at hook-execution time, never guessed).
 # BLOCK everything else, in particular:
-#   - no user at all (`ssh subdev` = implicit current shell user), or any
-#     user other than montalu/marek/david (root, newlevel, gatekeeper, ...).
+#   - no user at all UNLESS the local ~/.ssh/config resolves it to the
+#     sanctioned root+subdev_admin case above.
+#   - any user other than montalu/marek/david/root (newlevel, gatekeeper,...).
 #   - marek/david WITHOUT the gatekeeper_access_ed25519 identity.
+#   - root WITHOUT the subdev_admin identity.
 #
 # A non-subdev target (dev2, gatekeeper, anything else) is completely
 # untouched by this hook — it only ever looks at the 4 subdev addresses.
@@ -97,6 +109,12 @@ SUBDEV_ADDRS = {"subdev", "subdev.newlevel.media",
                 "100.118.174.27", "116.203.108.177"}
 SSH_LIKE = {"ssh", "scp", "rsync", "sftp"}
 GATEKEEPER_KEY_BASENAME = "gatekeeper_access_ed25519"
+# The gatekeeper VPS's OWN sanctioned admin identity for reaching subdev as
+# root (#68) — its deployed ~/.ssh/config carries `Host subdev { User root;
+# IdentityFile ~/.ssh/subdev_admin; IdentitiesOnly yes }`, the normal path
+# `process-subdev`'s bounce-nudge uses. Distinct from GATEKEEPER_KEY_BASENAME
+# (marek/david's identity) — root@subdev uses its OWN key, never that one.
+SUBDEV_ADMIN_KEY_BASENAME = "subdev_admin"
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 # ssh/scp/rsync/sftp flags that take a SEPARATE-token value (so the walk that
@@ -196,12 +214,66 @@ def identity_values(tokens):
     return out
 
 
-def has_gatekeeper_key(tokens):
+def has_identity(tokens, basename):
     for v in identity_values(tokens):
         v = v.strip().strip('"').strip("'").rstrip("/")
-        if os.path.basename(v) == GATEKEEPER_KEY_BASENAME:
+        if os.path.basename(v) == basename:
             return True
     return False
+
+
+def has_gatekeeper_key(tokens):
+    return has_identity(tokens, GATEKEEPER_KEY_BASENAME)
+
+
+def _ssh_config_path():
+    home = os.environ.get("HOME", "")
+    return os.path.join(home, ".ssh", "config") if home else ""
+
+
+def _resolve_ssh_config_host(alias):
+    """Best-effort ~/.ssh/config lookup (#68) for an EXACT `Host <alias>`
+    stanza — no wildcard/Match/Include support, same best-effort rigor the
+    file's own KNOWN GAPS header already declares for the rsync `-e` case.
+    Returns (user_or_None, identityfile_or_None) from the block whose `Host`
+    line is LITERALLY just `alias` (a multi-pattern or globbed Host line is
+    never treated as a match). (None, None) on no config / no match /
+    unreadable file. Read at HOOK-EXECUTION time (never baked into the
+    allow-list) so it reflects whatever is actually deployed on the box the
+    command runs from — dev1 has no such `Host subdev` stanza, so this never
+    affects the existing dev1 behavior."""
+    path = _ssh_config_path()
+    if not path or not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None, None
+    in_block = False
+    user = None
+    identity = None
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, val = parts[0].lower(), parts[1].strip()
+        if key == "host":
+            in_block = (val.split() == [alias])
+            if in_block:
+                user = None
+                identity = None
+            continue
+        if not in_block:
+            continue
+        if key == "user":
+            user = val
+        elif key == "identityfile":
+            identity = val
+    return user, identity
 
 
 def resolve_target(host_tok):
@@ -251,8 +323,24 @@ def check_target(user, host, tokens, label):
     if host.lower() not in SUBDEV_ADDRS:
         return None
     if user is None:
+        # #68: a bare `ssh subdev` with no explicit user relies entirely on
+        # the box's own ~/.ssh/config `Host subdev` stanza (the real
+        # process-subdev nudge shape) — allow it ONLY when that stanza
+        # itself resolves to root + the subdev_admin identity, never as a
+        # blanket "no user = fine".
+        cfg_user, cfg_identity = _resolve_ssh_config_host(host)
+        if (cfg_user == "root" and cfg_identity and
+                os.path.basename(cfg_identity.strip().strip('"').strip("'")
+                                 .rstrip("/")) == SUBDEV_ADMIN_KEY_BASENAME):
+            return None
         return ("%s to subdev with NO user specified (implicit current "
                 "shell user) — must be montalu / marek / david" % label)
+    if user == "root":
+        # #68: the gatekeeper VPS's own sanctioned root@subdev identity.
+        if has_identity(tokens, SUBDEV_ADMIN_KEY_BASENAME):
+            return None
+        return ("%s as root@subdev without -i .../%s"
+                % (label, SUBDEV_ADMIN_KEY_BASENAME))
     if user == "montalu":
         return None
     if user in ("marek", "david"):
@@ -335,6 +423,8 @@ if [ "$RC" -eq 2 ]; then
     echo "    montalu@subdev        — default key OR sshpass -p" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
+    echo "    root@subdev   -i ~/.ssh/subdev_admin (gatekeeper VPS only," >&2
+    echo "                  explicit or via its own ~/.ssh/config Host subdev)" >&2
     echo "" >&2
     echo "  If dev1 is CURRENTLY banned, do NOT retry/probe — wait for the ban" >&2
     echo "  to expire (verify from another vantage, e.g. gk, before assuming" >&2
