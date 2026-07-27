@@ -22,6 +22,47 @@ MSG_NOGOAL=$(printf '%s\n' "$MSG" | grep -v '^[[:space:]]*/goal ' || true)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$MSG" ] && exit 0
 
+# #96: use vs MENTION — third occurrence of the exact classifier-blindness
+# class as #80 (a heredoc BODY read as a command) and #91 (a comment body
+# DESCRIBING a trigger table read as the trigger itself). Right after #92
+# turned the quality-bypass family HARD, this gate blocked a status message
+# that merely REFERRED to the rule — it enumerated the newly-banned phrases
+# while describing what the hook now blocks; no bypass was offered to
+# anyone. A MENTION carries a stable structural signal a genuine bare-
+# sentence OFFER never has: the phrase sits in backticks, a fenced code
+# block, or a quoted span. Strip those spans BEFORE the phrase-matching
+# checks below run (never the structural/report-shape checks — those are
+# about PRESENCE/ABSENCE of report fields, not about a banned phrase, so
+# they keep reading the raw MSG unchanged). GREEN must never open a hole:
+# a genuine bare, unquoted offer keeps matching because it carries none of
+# these signals — verified in tests/test_quality_bypass_gate.py against
+# every existing unambiguous-bypass case.
+strip_mentions() {
+    # Argv, never stdin: `python3 - <<'PYEOF'` would consume the heredoc AS
+    # the script source, leaving nothing in stdin for a piped message to
+    # fill — the same argv-over-stdin shape block-main-implementation.sh
+    # already uses for exactly this reason.
+    python3 - "$1" <<'PYEOF'
+import re
+import sys
+
+text = sys.argv[1]
+text = re.sub(r"```.*?```", " ", text, flags=re.S)   # fenced code block
+text = re.sub(r"`[^`]*`", " ", text)                  # backtick span
+text = re.sub(r'"[^"]*"', " ", text)                  # double-quoted span
+# NOTE: deliberately no single-quote (') stripping — English contractions
+# ("it's", "won't", "I'll") make a bare apostrophe pair unreliable as a
+# quote delimiter (a real regression caught in review: "It's mergeable but
+# I won't claim it's clean." has 3 apostrophes, and a naive '...' strip ate
+# the middle of the sentence). Backticks + double quotes + fenced code are
+# the reliable mention signals; that is already enough for every real
+# mention shape seen (#96).
+sys.stdout.write(text)
+PYEOF
+}
+MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
+MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$MSG_NOGOAL")
+
 # HARD violations collected here trigger {"decision":"block"} response.
 # SOFT violations go to stderr as warnings. Both can fire in the same hook run.
 HARD_VIOLATIONS=""
@@ -36,7 +77,7 @@ RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
 MAX_RETRIES=5
 
 # Check for subagent vs inline prose question (HARD block — repeat offender pattern).
-if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
+if echo "$MSG_MENTION" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
     echo "VIOLATION: You asked 'subagent or inline' / 'two execution options' / 'dispatch now or skim' in prose at the end of your message. This is a pre-answered question — always use subagent-driven, dispatch immediately. The pre-ask-auto-answer hook blocks the structured AskUserQuestion form; writing the same question in prose is the same violation. Rewrite this message: cut the question entirely, and proceed with subagent-driven dispatch. See ask-before-assuming.md pre-answered table." >&2
     add_hard "Pre-answered prose question: subagent-vs-inline / two execution options / dispatch-now-or-skim"
 fi
@@ -73,7 +114,7 @@ fi
 # tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks — banned.
 # Escape: if the message contains "UNVERIFIED:" explicitly stating WHAT cannot be tested
 # and WHY (true user-only access), allow it — that is the documented exception.
-if echo "$MSG" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
+if echo "$MSG_MENTION" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
     # Allow if explicitly marked UNVERIFIED with a reason (the documented exception)
     if ! echo "$MSG" | grep -qE "UNVERIFIED:"; then
         echo "VIOLATION: You handed verification to the user ('please test', 'let me know if it works', 'ping me when', 'tell me what you see', 'on your end', 'next user test', 'using you as tester', etc.). The user is NEVER your tester. You have Playwright, curl, SSH, MCP tools, your own test harness — use them. A blocker (MCP auth failure, timeout, 500 error, opaque reference ID) is YOUR work to debug, not a hand-off trigger." >&2
@@ -112,7 +153,7 @@ fi
 # Check for spec/plan/design review handoff prose, including
 # "Does this design look right? If yes, I'll commit/write/spec ..."
 # AND "dispatch via subagent now, or hold for your review of the plan"
-if echo "$MSG_NOGOAL" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)|(dispatch|kick.?off|launch|start|begin|fire|trigger).*(subagent|implement|impl|task|work|run).*(now|immediately).*(or|vs).*(hold|wait|pause|review|stop|skim|check)|(hold|wait|pause).*(for|on).*(your|user) review|(go|proceed|now).*(or|vs).*review (first|the plan)|pre.implementation.*(pause|skim|review|check)|(skim|review).*(plan|spec).*before.*(dispatch|kick.?off|launch|implement)"; then
+if echo "$MSG_NOGOAL_MENTION" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)|(dispatch|kick.?off|launch|start|begin|fire|trigger).*(subagent|implement|impl|task|work|run).*(now|immediately).*(or|vs).*(hold|wait|pause|review|stop|skim|check)|(hold|wait|pause).*(for|on).*(your|user) review|(go|proceed|now).*(or|vs).*review (first|the plan)|pre.implementation.*(pause|skim|review|check)|(skim|review).*(plan|spec).*before.*(dispatch|kick.?off|launch|implement)"; then
     echo "VIOLATION: You stopped to ask 'does this design look right?' / 'if yes I'll commit' / 'dispatch now or hold for review' / 'review the spec' / 'dispatch now or skim plan first'. These are all pre-answered — always proceed autonomously. The user approved the workflow when they invoked brainstorming/spec-writing. Rewrite this message: cut the question, commit / dispatch / chain to next step directly. See ask-before-assuming.md pre-answered table." >&2
     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
@@ -311,7 +352,7 @@ fi
 if [ "$IS_COMPLETION" = "1" ]; then
     # Detect deferral phrases (broad — many rewordings)
     DEFER_HIT=0
-    if echo "$MSG" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
+    if echo "$MSG_MENTION" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
         DEFER_HIT=1
     fi
     if [ "$DEFER_HIT" = "1" ]; then
@@ -353,7 +394,7 @@ fi
 # module's "HARD-blocked at Stop" claim was false and nothing was corrected.
 #
 # HARD — each shape names a merge/gate bypass explicitly; no innocent reading.
-if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
+if echo "$MSG_MENTION" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
     echo "VIOLATION: You offered a quality-bypass shortcut (admin-merge / bypass branch protection / close PR and roll into the next one / 'merge despite' / 'functionally ready' / 'good enough to merge' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
     add_hard "Quality-bypass shortcut offered (admin-merge / merge despite / functionally ready / UNSTABLE-but-merge / informational-check dismissal) — fix the gate instead"
 fi
