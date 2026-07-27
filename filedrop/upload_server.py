@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tiny LAN upload endpoint. Browser drag-drop -> streams a file to disk.
+"""Tiny LAN upload endpoint. Browser drag-drop -> streams one or more files
+to disk, one at a time.
 
 The user is remote (VPN+SSH) with NO local filesystem access to the dev boxes,
 and airuleset's filedrop is download-only — so to RECEIVE a big recording from
@@ -10,8 +11,12 @@ unguessable token in the path is the auth.
 Usage:
     python3 upload_server.py <token> <port> <bind_ips_csv> <dest_dir> [ttl_seconds]
 
-  GET  /<token>/         -> serves the drag-drop upload page
-  PUT  /<token>/<name>   -> streams the bytes to <dest_dir>/<name>
+  GET  /<token>/         -> serves the drag-drop upload page (accepts a
+                            multi-file selection/drop; the page's own JS
+                            sends one PUT per file, sequentially)
+  PUT  /<token>/<name>   -> streams the bytes to <dest_dir>/<name> (each PUT
+                            is its own independent request/save/log line —
+                            one file failing never affects another)
 
 <bind_ips_csv> is a comma-separated list of the PRIVATE addresses to listen on
 (tailscale + LAN — filedrop.bind_ips()), so the user reaches the endpoint whether
@@ -59,35 +64,54 @@ PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
  .bar{height:10px;background:#334155;border-radius:6px;overflow:hidden;margin-top:16px;display:none}
  .bar>i{display:block;height:100%;width:0;background:#38bdf8;transition:width .2s}
  #status{margin-top:12px;font-size:14px;color:#cbd5e1;white-space:pre-line}
+ #results{margin-top:10px;font-size:13px;color:#cbd5e1}
+ #results div{padding:2px 0}
  .ok{color:#4ade80} .err{color:#f87171}
 </style>
 <div class=card>
- <h1>Upload súboru na server</h1>
- <p>Potiahni súbor sem alebo klikni. Veľké súbory OK — streamuje sa priamo na server.</p>
- <div id=drop>📁 <b>Vyber alebo potiahni súbor</b></div>
- <input id=f type=file>
+ <h1>Upload súborov na server</h1>
+ <p>Potiahni jeden alebo viac súborov sem alebo klikni. Veľké súbory OK — streamujú sa priamo na server, jeden po druhom.</p>
+ <div id=drop>📁 <b>Vyber alebo potiahni súbory</b></div>
+ <input id=f type=file multiple>
  <div class=bar><i id=fill></i></div>
  <div id=status></div>
+ <div id=results></div>
 </div>
 <script>
 const drop=document.getElementById('drop'),f=document.getElementById('f'),
- bar=document.querySelector('.bar'),fill=document.getElementById('fill'),st=document.getElementById('status');
+ bar=document.querySelector('.bar'),fill=document.getElementById('fill'),st=document.getElementById('status'),
+ results=document.getElementById('results');
 drop.onclick=()=>f.click();
 ['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hot')}));
 ['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('hot')}));
-drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)send(ev.dataTransfer.files[0])});
-f.onchange=()=>{if(f.files.length)send(f.files[0])};
+drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)sendAll(ev.dataTransfer.files)});
+f.onchange=()=>{if(f.files.length)sendAll(f.files)};
 function fmt(b){return (b/1073741824).toFixed(2)+' GB'}
-function send(file){
- st.className='';st.textContent='Nahrávam '+file.name+' ('+fmt(file.size)+')…';bar.style.display='block';
+function sendAll(fileList){
+ const files=Array.from(fileList);
+ results.innerHTML='';
+ bar.style.display='block';fill.style.width='0%';
+ files.forEach(fl=>{const d=document.createElement('div');d.id='r-'+fl.name.replace(/[^A-Za-z0-9._-]/g,'_');
+   d.textContent='⏳ '+fl.name+' ('+fmt(fl.size)+') — čaká…';results.appendChild(d)});
+ uploadOne(files,0);
+}
+function uploadOne(files,idx){
+ if(idx>=files.length){st.className='ok';st.textContent='Hotovo — '+files.length+' súbor(ov) spracovaných. Môžeš zavrieť okno.';return}
+ const file=files[idx],row=document.getElementById('r-'+file.name.replace(/[^A-Za-z0-9._-]/g,'_'));
+ st.className='';st.textContent='Nahrávam ('+(idx+1)+'/'+files.length+') '+file.name+' ('+fmt(file.size)+')…';
  const xhr=new XMLHttpRequest();
  xhr.open('PUT',location.pathname.replace(/\\/$/,'')+'/'+encodeURIComponent(file.name));
- xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=e.loaded/e.total*100;fill.style.width=p+'%';
-   st.textContent='Nahrávam '+file.name+'  '+p.toFixed(1)+'%  ('+fmt(e.loaded)+' / '+fmt(file.size)+')'}};
- xhr.onload=()=>{if(xhr.status===200){fill.style.width='100%';st.className='ok';
-   st.textContent='✅ Hotovo — '+file.name+' je na serveri. Môžeš zavrieť okno.'}
-   else{st.className='err';st.textContent='❌ Chyba '+xhr.status+': '+xhr.responseText}};
- xhr.onerror=()=>{st.className='err';st.textContent='❌ Sieťová chyba pri nahrávaní.'};
+ xhr.upload.onprogress=e=>{if(e.lengthComputable){const per=e.loaded/e.total;
+   fill.style.width=((idx+per)/files.length*100)+'%';
+   if(row)row.textContent='⏳ '+file.name+'  '+(per*100).toFixed(1)+'%  ('+fmt(e.loaded)+' / '+fmt(file.size)+')'}};
+ // one file's failure must never stop the rest -- uploadOne(idx+1) always
+ // runs from BOTH onload and onerror, regardless of this file's outcome.
+ xhr.onload=()=>{if(row)row.textContent=(xhr.status===200
+   ?'✅ '+file.name+' — hotovo':'❌ '+file.name+' — chyba '+xhr.status+': '+xhr.responseText);
+   if(row)row.className=(xhr.status===200?'ok':'err');
+   uploadOne(files,idx+1)};
+ xhr.onerror=()=>{if(row){row.textContent='❌ '+file.name+' — sieťová chyba';row.className='err'}
+   uploadOne(files,idx+1)};
  xhr.send(file);
 }
 </script></html>"""
