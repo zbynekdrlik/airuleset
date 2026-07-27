@@ -314,3 +314,43 @@ tickets closed with live/static evidence, no RED/GREEN pairs.
   `airuleset.py validate` all pre-verified clean (repo unchanged since
   last green run). `airuleset.py push` run for the docs/playbook commit
   only, twice — second run `Already up to date.` on every remote.
+
+## 2026-07-27 batch — #101 + #100 (watchdog job 20/9 keystroke delivery)
+
+- #101 (job 20 permanent give-up + stale-goal revival): RED `ba0cae7`
+  (TestGoalRearmTransientRefusalNeverGivesUp,
+  TestGoalRearmStaleMarkerIsNeverRevived) → GREEN `2cc95b0`. A
+  `deliver_with_stash` refusal that never sent a keystroke
+  (`_GOAL_REARM_TRANSIENT_STASH_REASONS`) no longer counts toward the
+  permanent give-up cap; a `Goal set:` marker older than
+  `GOAL_REARM_MAX_DARK_S` (6h) since it was last confirmed armed
+  (`rec["last_armed"]`, falling back to the marker's own timestamp) is
+  never revived.
+- #100 (`/autopilot` Step 2 manual paste): investigation found the
+  ticket's own premise wrong — job 20 cannot arm a goal that was never
+  armed before (requires a pre-existing `Goal set:` marker); job 9
+  (`goal_autoarm`, always on) already does that, it just had no answer
+  for a draft-holding pane. RED `f256e9a`
+  (TestDraftGoesThroughStashDelivery) → GREEN `19d675b`: job 9 now
+  routes a draft through `deliver_with_stash`, the same shared
+  primitive job 20 uses; a pre-send transient refusal doesn't burn the
+  10-minute per-pane dedup window. Docs commit `994f05b` clarifies
+  Step 2's printed line is auto-armed as a backstop, manual paste
+  stays the documented fallback.
+- Live verification (real CC v2.1.220 scratch session, `CLAUDE_CONFIG_DIR`
+  recipe) surfaced a THIRD, previously-unknown production bug:
+  `_has_free_prompt(bare_only=False)` required a literal ASCII space
+  after `❯`, but CC actually renders a non-breaking space (`\xa0`) —
+  so `deliver_with_stash`'s own idle-with-draft precondition NEVER
+  matched a real held draft, reproducing the exact #101 "not
+  idle-with-draft" signature regardless of true pane state. RED
+  `45b0356` (DeliverWithStashRecognizesTheRealNbspSeparator) → GREEN
+  `488c189`. This was the actual root cause underneath both tickets'
+  reported symptoms; found only by live testing, since every existing
+  unit-test fixture in the repo modeled the wrong character.
+- `python -m pytest tests/` (2211), `ruff check .`, `airuleset.py
+  validate` all green. `airuleset.py push` run twice — second run
+  `Already up to date.` on every remote (dev2, gatekeeper,
+  montalu/marek/david@subdev). Production `api-watchdog.service`
+  observed running the fixed code error-free (journalctl, dev1) before
+  and after the push.
