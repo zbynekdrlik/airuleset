@@ -272,3 +272,45 @@
   validate` clean throughout. `airuleset.py push` run twice after the final
   commit — second run showed `Already up to date.` on all 5 remotes (dev2,
   gatekeeper, montalu@subdev, marek@subdev, david@subdev).
+
+2026-07-27 batch (#78+#87): pure PROOF batch, no code change needed — both
+tickets closed with live/static evidence, no RED/GREEN pairs.
+
+- #78 (compact: #71 didn't fix duplicate `/compact` — dedup protects the
+  DECISION, not the pane's type-ahead queue): the actual code fix
+  (`f350575`[red]/`dd0ad07`[green], shared `compact-claims.json` claim
+  gating all 4 senders) was ALREADY deployed 2026-07-26 16:14:50+02:00 —
+  the OWNER's own prior comment left the ticket open only for missing live
+  proof on a foreign project. Found it by scanning every OTHER project's
+  transcript (`~/.claude/projects/*/*.jsonl`) + `~/.claude/compact-sync.log`
+  for post-deploy `/compact` SENT/BOUNDARY pairs: pz-server shows a clean
+  single SEND(09:51:24)→BOUNDARY(09:53:15)→quiet DROPs cycle; even
+  stronger, forestshop/parovanie_produktov shows the guard ACTIVELY firing
+  — SEND(11:02:54) then a second trigger 30s later correctly
+  SKIP(claim-queued)(11:03:24), the queued keystroke only actually landing
+  at 11:04:32 (~98s later, busy-pane queue drain), and exactly ONE
+  compact_boundary(11:06:56) despite two trigger attempts — the exact
+  original incident shape, now correctly deduped. Closed with evidence
+  (https://github.com/zbynekdrlik/airuleset/issues/78#issuecomment-5090797518).
+- #87 (goal: prove whether local `/compact` can re-arm the goal Stop hook
+  at all, leftover from #76): pure static-analysis proof, no code needed.
+  Traced the installed CC 2.1.220 binary (`~/.local/share/claude/versions/`)
+  — `executeStopHooks`/`VEe` has exactly ONE implementation, called from
+  exactly TWO places in the whole binary: `Ycd` (post-processing of a REAL
+  model-queried turn — this is also where the `activeGoal` condition check
+  itself lives) and `Xdd` (a "forked slash command"'s own agent sub-turn
+  completing). A local built-in command like `/compact` returns
+  `{shouldQuery:false, messages:[<local-command-stdout>...]}` from
+  `processSlashCommand` and the main dispatcher (`Q0b`) returns immediately
+  on that branch — it NEVER reaches `EDp`/`Ycd` (no real query happened) and
+  is not a forked command (no `Xdd` either). Definitive answer: NO, a local
+  `/compact` cannot structurally re-invoke the goal Stop hook by itself —
+  it is causally inert; only a genuine subsequent model-queried turn
+  re-evaluates the goal. Confirms job 20 (#76)'s design (react to observed
+  end-state, never the unproven mechanism) was already correct — no code
+  change made. Closed with evidence
+  (https://github.com/zbynekdrlik/airuleset/issues/87#issuecomment-5090802752).
+- No code touched this batch; `python -m pytest tests/`, `ruff check .`,
+  `airuleset.py validate` all pre-verified clean (repo unchanged since
+  last green run). `airuleset.py push` run for the docs/playbook commit
+  only, twice — second run `Already up to date.` on every remote.
