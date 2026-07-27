@@ -92,6 +92,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/nudge-poll-loop-timeout.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]

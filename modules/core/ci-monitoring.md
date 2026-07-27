@@ -13,17 +13,23 @@
 
 **Pick a monitoring mechanism that SURVIVES session events — a bare `run_in_background` poll does NOT.** A detached `run_in_background` bash poll (`sleep N && gh run view`) is **silently KILLED (SIGTERM) on context compaction** — which fires as the conversation grows, i.e. exactly during a long CI wait — and on session end, with **NO re-invocation**: the task just disappears and CI monitoring dies unnoticed. This is confirmed CC behavior (the live-observed "background polly ma harness zabíja / background polls keep getting killed by session events"; corroborated by anthropics/claude-code #25188 compaction-kills-background, #43944 session-end-orphan). So do NOT rely on a detached background poll for a long wait. The robust options, in order:
 
-- **Foreground bounded poll loop — the DEFAULT for CI. The WAITING happens INSIDE ONE Bash call, never one tool call per poll.** Use a single FOREGROUND Bash call carrying a bounded shell loop that returns only on a terminal state (or its own timeout), e.g.:
+- **Foreground bounded poll loop — the DEFAULT for CI. The WAITING happens INSIDE ONE Bash call, never one tool call per poll.** Use a single FOREGROUND Bash call carrying a bounded shell loop that returns only on a terminal state (or its own budget), e.g.:
 
   ```bash
+  DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-100}))
   for i in $(seq 1 18); do
     s=$(gh run view <id> --json status,conclusion --jq '.status+" "+(.conclusion//"")')
     case "$s" in completed*) echo "TERMINAL: $s"; break;; esac
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "POLL BUDGET REACHED (not yet terminal): $s"; break
+    fi
     sleep 30
   done
   ```
 
   Set the Bash tool `timeout` near its 600000 ms cap so one call covers ~9 minutes of waiting; repeat the call only if the run is still going. There is NO background task to kill, so it survives compaction (it runs in-turn).
+
+  **The loop bounds ITSELF via `SECONDS` (bash's own elapsed-time counter) — never trust the Bash tool `timeout` PARAMETER alone (#90).** That parameter is easy to forget, since the loop body looks complete without it — live-hit 2026-07-26: a poll written exactly per this shape, with no `timeout` param raised, got SIGTERM'd (exit 143) at the harness's own **default (observed: 120000 ms / 2 minutes)**, mid-poll, with NO output — three tool calls where one was intended, because the dead call had to be silently retried twice before the timeout finally got set correctly. `AIRULESET_POLL_BUDGET_S` (default **100** — safely under that observed 120 s default) makes the loop exit CLEANLY and print its last-known status BEFORE an unset/forgotten tool `timeout` ever SIGTERMs it — a graceful "not yet terminal" beats a silent kill every time. Raising the tool's own `timeout` param is STILL required to cover the full ~9 minutes usefully — no in-process logic can out-run an external SIGTERM — so when you DO raise it near the 600000 ms cap, also raise the budget to match (e.g. `AIRULESET_POLL_BUDGET_S=540 bash -c '...'`, or export it inline before the loop). A PreToolUse nudge (`nudge-poll-loop-timeout.sh`, never blocking — the poll must always pass) reminds you to raise the tool `timeout` whenever it sees a bounded sleep/poll loop shape without one.
 
   **Why the loop must live inside the call: every returned tool call is another TURN, and every turn re-sends the WHOLE conversation context.** One poll per tool call turns a normal CI wait into hundreds of full-context turns — measured 2026-07-26 on the gatekeeper box: 121 `gh run view` + 116 `gh run list` calls in the MAIN agent, each one paying for the entire context again. Same total waiting, an order of magnitude fewer turns. Do NOT spam empty "Waiting" messages between polls either — that is the same waste without even a status read.
 - **`ScheduleWakeup` with a PLAIN prompt — for a very long wait you want to free the session for.** A scheduled re-invoke survives because it is not an in-flight process. **NEVER pass a slash command as the wakeup prompt** (CC #54086 re-fires the slash command → duplicate runs); use plain text ("check the erp-test rebuild status + verify").
