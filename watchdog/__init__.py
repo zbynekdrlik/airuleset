@@ -3152,8 +3152,18 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         busy_tail = _BG_AGENTS_WAIT_RX.sub("", tail)
         if "esc to interrupt" in busy_tail or "Waiting for" in busy_tail:
             continue                       # live work on screen — not at rest
-        if not pane_at_idle_prompt(cap) or pane_in_mode(pid, run):
-            continue                       # busy, or user text in the box
+        if pane_in_mode(pid, run):
+            continue                       # copy-mode / other non-text mode
+        # #100 — a BARE prompt arms directly; a FOREIGN DRAFT (incl. the
+        # user's own half-typed /goal paste — the live incident this ticket
+        # was filed from, a 43-minute idle gap while the pane held exactly
+        # that) is never overwritten, but is no longer a dead end either: it
+        # goes through the SAME stash-around delivery job 20's revival path
+        # already uses (`deliver_with_stash`), never a second, invented
+        # mechanism. Only a genuinely busy/undeterminable boundary skips.
+        kind, draft = _classify_boundary(cap)
+        if kind != "input":
+            continue
         goals = re.findall(r"^\s*(/goal \S.*)$", cap, re.M)
         if not goals:
             continue
@@ -3174,12 +3184,33 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
                             % (pid, os.path.basename(cwd.rstrip("/"))))
                 continue
             full = frag
+        loc = os.path.basename(cwd.rstrip("/"))
+        if draft:
+            if dry_run:
+                logs.append("goal-autoarm READY (stash) %s (%s)" % (pid, loc))
+                continue
+            dlogs = []
+            ok = deliver_with_stash(pid, full, run, captured=cap, logs=dlogs)
+            if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_STASH_REASONS:
+                # never touched the pane (still mid-typing, another stash in
+                # flight) — NOT counted against the per-pane dedup window, so
+                # it is retried next sweep instead of waiting out the full
+                # GOAL_ARM_WINDOW_S (the exact #101 lesson, applied here).
+                logs.append("goal-autoarm SKIP-TRANSIENT (stash) %s (%s) -> %s"
+                            % (pid, loc, dlogs[-1]))
+                continue
+            ga[pid] = int(now)
+            state["goalarm"] = ga
+            status = "OK" if ok else "FAIL"
+            reason = (", %s" % dlogs[-1]) if (dlogs and not ok) else ""
+            logs.append("goal-autoarm %s (stash%s) %s (%s)"
+                        % (status, reason, pid, loc))
+            continue
         ga[pid] = int(now)
         state["goalarm"] = ga          # key exists only once something armed
         if not dry_run:
             send_continue(pid, full, run)
-        logs.append("goal-autoarm %s (%s)" % (pid,
-                                              os.path.basename(cwd.rstrip("/"))))
+        logs.append("goal-autoarm %s (%s)" % (pid, loc))
     return logs
 
 
