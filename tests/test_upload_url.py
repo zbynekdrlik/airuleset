@@ -25,10 +25,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 
 ROOT = Path(__file__).resolve().parent.parent
+SERVER = ROOT / "filedrop" / "upload_server.py"
 
 
 def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def _free_port():
+    """An ephemeral port the kernel says is free RIGHT NOW (#113 source 2).
+
+    A hardcoded literal is shared with every other run of the suite and with
+    any leftover server a killed run orphaned — and `upload_server.py` skips a
+    failed bind rather than dying on it, so the test could end up talking to
+    the OTHER process and passing for the wrong reason. Same idiom the sibling
+    tests in TestMultiInterfaceUrls already use.
+    """
+    sk = socket.socket()
+    sk.bind(("127.0.0.1", 0))
+    port = sk.getsockname()[1]
+    sk.close()
+    return port
+
+
+def _drain(proc):
+    """The child's stderr — the diagnosis a readiness failure must carry."""
+    try:
+        return proc.communicate(timeout=5)[1] or ""
+    except Exception:                                   # noqa: BLE001
+        return "<stderr unavailable>"
+
+
+def _serve(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None,
+           deadline_s=10.0):
+    """Start upload_server.py on a free port and return (proc, port) once it
+    is ACTUALLY serving.
+
+    #113: every call site used to Popen the server and then `time.sleep(0.6)`
+    — a guess at how long a fresh CPython takes to import http.server and
+    bind. Under load the guess is wrong and the request hits a socket nobody
+    listens on yet (`[Errno 111] Connection refused`, reproduced 1-in-50 under
+    CPU+fork load).
+    """
+    port = _free_port()
+    argv = list(launcher or [sys.executable, str(SERVER)]) + [
+        token, str(port), ips, str(dest), str(ttl)]
+    proc = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
+    test.addCleanup(proc.kill)
+    time.sleep(0.6)
+    return proc, port
 
 
 class TestUploadCli(TestCase):
@@ -44,13 +89,7 @@ class TestUploadCli(TestCase):
         # live-found fix (2026-07-10): the served HTML must contain real single
         # braces (`body{font`), never an escaped `{{`.
         dest = Path(tempfile.mkdtemp())
-        port = 8794
-        proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
-             "toktoktoktoktok16", str(port), "127.0.0.1", str(dest), "20"],
-            stderr=subprocess.DEVNULL)
-        self.addCleanup(proc.kill)
-        time.sleep(0.6)
+        _, port = _serve(self, "toktoktoktoktok16", dest)
         html = urllib.request.urlopen(
             f"http://127.0.0.1:{port}/toktoktoktoktok16/", timeout=5).read().decode()
         self.assertNotIn("{{", html)            # no escaped-brace leak
@@ -58,13 +97,7 @@ class TestUploadCli(TestCase):
 
     def test_server_saves_a_put_and_respects_ttl(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8797
-        proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
-             "tok123", str(port), "127.0.0.1", str(dest), "30"],
-            stderr=subprocess.PIPE, text=True)
-        self.addCleanup(proc.kill)
-        time.sleep(0.6)
+        _, port = _serve(self, "tok123", dest, ttl=30)
         # GET page
         page = urllib.request.urlopen(
             f"http://127.0.0.1:{port}/tok123/", timeout=5).read()
@@ -119,18 +152,55 @@ class TestMultiInterfaceUrls(TestCase):
 
     def test_upload_server_skips_unbindable_ip_but_serves_the_rest(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8796
         # 203.0.113.9 (TEST-NET-3) is not local → bind fails → skipped; 127.0.0.1
         # binds → the endpoint still comes up. Proves multi-bind is resilient.
-        proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
-             "tok", str(port), "203.0.113.9,127.0.0.1", str(dest), "20"],
-            stderr=subprocess.PIPE, text=True)
-        self.addCleanup(proc.kill)
-        time.sleep(0.6)
+        _, port = _serve(self, "tok", dest, ips="203.0.113.9,127.0.0.1")
         page = urllib.request.urlopen(
             f"http://127.0.0.1:{port}/tok/", timeout=5).read()
         self.assertIn(b"Upload", page)
+
+    # ---- #113: the readiness wait itself, as a first-class contract ---- #
+
+    def test_readiness_wait_survives_a_slow_server_start(self):
+        # The live flake, made deterministic. The server is launched behind a
+        # wrapper that delays its bind past the old fixed 0.6s budget — exactly
+        # what a loaded box does to a fresh CPython startup (reproduced 1-in-50
+        # under 8 CPU spinners + 2 fork storms on this 4-core box, failing with
+        # `[Errno 111] Connection refused`). A readiness POLL waits for the port
+        # to actually answer, so the delay is irrelevant; a fixed sleep cannot.
+        dest = Path(tempfile.mkdtemp())
+        slow = ("import os, sys, time; time.sleep(1.5); "
+                "os.execv(sys.executable, [sys.executable, %r] + sys.argv[1:])"
+                % str(SERVER))
+        _, port = _serve(self, "tok113slow", dest,
+                         launcher=[sys.executable, "-c", slow])
+        page = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/tok113slow/", timeout=5).read()
+        self.assertIn(b"Upload", page)
+
+    def test_a_server_that_can_bind_nothing_fails_fast_with_its_stderr(self):
+        # The other half of a readiness poll (verify-launched-work-liveness.md):
+        # a DEAD child never answers, so a success-only wait would burn the whole
+        # budget and then report a bare connection error. Binding only TEST-NET-3
+        # makes upload_server.py exit with its own diagnosis — the wait must
+        # notice the exit and surface that text.
+        dest = Path(tempfile.mkdtemp())
+        t0 = time.monotonic()
+        with self.assertRaises(AssertionError) as ctx:
+            _serve(self, "tok113dead", dest, ips="203.0.113.9", deadline_s=10.0)
+        took = time.monotonic() - t0
+        self.assertIn("no address", str(ctx.exception))
+        self.assertLess(took, 8.0,
+                        "must fail on the child's exit, not on the deadline")
+
+    def test_no_fixed_startup_sleep_survives_in_this_module(self):
+        # Locks the fix itself: `time.sleep(0.6)` was the startup guess at five
+        # separate call sites here, and re-adding one at a sixth would silently
+        # reintroduce #113 in a place no other test covers.
+        src = Path(__file__).read_text(encoding="utf-8")
+        self.assertNotIn("time.sleep(0.6)", src,
+                         "a fixed startup sleep is a readiness GUESS (#113) — "
+                         "start the server through _serve(), which polls")
 
     def test_cmd_upload_prints_a_url_per_interface(self):
         import airuleset
@@ -195,29 +265,21 @@ class TestMultiFileUpload(TestCase):
     (its own SAVED log line + size), and one file failing must not bring
     down the others."""
 
-    def _server(self, port, dest):
-        proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "filedrop" / "upload_server.py"),
-             "toktoktoktoktok27", str(port), "127.0.0.1", str(dest), "30"],
-            stderr=subprocess.PIPE, text=True)
-        self.addCleanup(proc.kill)
-        time.sleep(0.6)
-        return proc
+    def _server(self, dest):
+        return _serve(self, "toktoktoktoktok27", dest, ttl=30)
 
     # -- the served PAGE must actually ENABLE + PERFORM a multi-file send -- #
 
     def test_file_input_accepts_multiple_files(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8798
-        self._server(port, dest)
+        _, port = self._server(dest)
         html = urllib.request.urlopen(
             f"http://127.0.0.1:{port}/toktoktoktoktok27/", timeout=5).read().decode()
         self.assertIn("type=file multiple", html)
 
     def test_page_js_sends_every_dropped_file_not_just_the_first(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8798
-        self._server(port, dest)
+        _, port = self._server(dest)
         html = urllib.request.urlopen(
             f"http://127.0.0.1:{port}/toktoktoktoktok27/", timeout=5).read().decode()
         # the OLD bug: only ever `send(ev.dataTransfer.files[0])` /
@@ -234,8 +296,7 @@ class TestMultiFileUpload(TestCase):
 
     def test_each_file_in_a_batch_is_saved_and_logged_individually(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8798
-        proc = self._server(port, dest)
+        proc, port = self._server(dest)
         bodies = {"photo1.jpg": b"a" * 5000, "photo2.jpg": b"b" * 7000,
                  "photo3.jpg": b"c" * 3000}
         for name, body in bodies.items():
@@ -257,8 +318,7 @@ class TestMultiFileUpload(TestCase):
 
     def test_one_failing_file_does_not_block_the_others(self):
         dest = Path(tempfile.mkdtemp())
-        port = 8798
-        self._server(port, dest)
+        _, port = self._server(dest)
         # a bad PUT (no Content-Length -> 411) must not affect the endpoint's
         # ability to accept the NEXT file right after it.
         bad = urllib.request.Request(
