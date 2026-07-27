@@ -5923,6 +5923,83 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("root", r.stderr)
 
+    # --- gatekeeper root@subdev identity (#68) ------------------------------
+    # `hooks/block-subdev-ssh-misuse.sh` had no allowed identity for the
+    # gatekeeper VPS's own sanctioned root@subdev + ~/.ssh/subdev_admin
+    # identity, so every legitimate gatekeeper->subdev bounce-nudge needed a
+    # bypass marker. Allow it explicitly (-i .../subdev_admin) AND via the
+    # box's own ~/.ssh/config `Host subdev` stanza (the real process-subdev
+    # nudge shape: no explicit user, no explicit -i on the command line).
+
+    def _home_with_ssh_config(self, config_text):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        ssh_dir = os.path.join(home, ".ssh")
+        os.makedirs(ssh_dir, exist_ok=True)
+        if config_text is not None:
+            with open(os.path.join(ssh_dir, "config"), "w") as f:
+                f.write(config_text)
+        return home
+
+    def test_allows_explicit_root_with_subdev_admin_identity(self):
+        r = self._run('ssh -i ~/.ssh/subdev_admin root@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_blocks_root_with_wrong_identity(self):
+        r = self._run('ssh -i ~/.ssh/id_rsa root@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("root", r.stderr)
+
+    def test_blocks_bare_root_without_identity(self):
+        r = self._run('ssh root@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("root", r.stderr)
+
+    def test_allows_bare_subdev_via_gatekeeper_sshconfig(self):
+        # the REAL process-subdev nudge shape: no explicit user, no explicit
+        # -i on the command line at all -- relies entirely on the box's own
+        # ~/.ssh/config `Host subdev` stanza (User root, IdentityFile
+        # ~/.ssh/subdev_admin), exactly as deployed on the gatekeeper VPS.
+        home = self._home_with_ssh_config(
+            "Host subdev\n"
+            "    HostName 100.118.174.27\n"
+            "    User root\n"
+            "    IdentityFile ~/.ssh/subdev_admin\n"
+            "    IdentitiesOnly yes\n"
+        )
+        r = self._run('ssh subdev "sudo -n -u david -H tmux send-keys -t david hi"',
+                      env_extra={"HOME": home})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_bare_subdev_still_blocked_without_matching_sshconfig(self):
+        # dev1 has no such Host subdev block -- the base "NO user specified"
+        # behavior must be completely unaffected.
+        home = self._home_with_ssh_config(None)
+        r = self._run('ssh subdev "ls"', env_extra={"HOME": home})
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("NO user specified", r.stderr)
+
+    def test_bare_subdev_blocked_when_sshconfig_points_elsewhere(self):
+        # a Host subdev block resolving to a DIFFERENT user must not
+        # accidentally authorize anything.
+        home = self._home_with_ssh_config(
+            "Host subdev\n"
+            "    User newlevel\n"
+            "    IdentityFile ~/.ssh/id_rsa\n"
+        )
+        r = self._run('ssh subdev "ls"', env_extra={"HOME": home})
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_bare_subdev_blocked_when_sshconfig_has_wrong_identity_basename(self):
+        home = self._home_with_ssh_config(
+            "Host subdev\n"
+            "    User root\n"
+            "    IdentityFile ~/.ssh/id_rsa\n"
+        )
+        r = self._run('ssh subdev "ls"', env_extra={"HOME": home})
+        self.assertEqual(r.returncode, 2, r.stdout)
+
     # --- fail-closed on internal error -------------------------------------
 
     def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
