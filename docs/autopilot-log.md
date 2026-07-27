@@ -419,3 +419,38 @@ user's own corrected agreement regardless, not on incident attribution.
 Closed with the full evidence posted as an issue comment (no PR/CI in
 this repo -- commits went direct to `main` per its own flow;
 `airuleset.py push` confirms both dev1+dev2+4 remote targets in sync).
+
+## #103 -- ScheduleWakeup is a /loop-only pacer, never a general long-wait mechanism
+
+RED 1bb2a03 (test_schedule_wakeup_loop_only.py, salvaged from a probe worker's
+prior comment) -> GREEN c9ee2ad. Subtractive-only fix per the user's explicit
+correction ruling out any detector: removed the ScheduleWakeup recommendation
+from modules/core/ci-monitoring.md (2 spots) and verify-launched-work-liveness
+(module stub + skill, 4 spots total). Working alternatives (foreground bounded
+poll loop, a run_in_background loop that re-arms, bounded Monitor) untouched.
+Updated 2 pre-existing tests (test_autopilot_ci_resilience.py,
+test_ruleset_conversion_wave2.py) that pinned "PLAIN prompt"/"#54086" -- those
+phrases lived only inside the removed sentences -- to pin surviving anchors.
+Full suite 2167 passed, ruff clean, validate clean. No hooks/jobs/gates added.
+
+## #105 -- 5 e9d1022 path-scoped rules never reach a dispatched subagent
+
+RED 4cf95ff -> GREEN 2a8c306. Settled empirically (#104's own open question):
+built an isolated CLAUDE_CONFIG_DIR scratch profile, ran the real claude
+2.1.220 binary against real project files (audiotester/playwright.config.ts +
+ci.yml, an odoo-erp-697 migration .sql). MAIN session: all 5 rules
+(no-continue-on-error, coverage-thresholds, browser-console-zero-errors,
+e2e-real-user-testing, database-migrations) inject as nested_memory
+attachments when a matching file is Read -- confirmed working, no change
+needed. Dispatched SUBAGENT, same file, same correct cwd: the subagent's OWN
+transcript (subagents/agent-<id>.jsonl) has ZERO nested_memory attachments,
+only deferred_tools_delta + skill_listing -- confirmed NOT reaching a worker,
+ruling out both confounders (wrong cwd, subagent context) the two prior #104
+probes left open. Restored a short (<8 line) always-on stub at each old
+module path (modules/ci/*.md x4, modules/quality/database-migrations.md),
+same pattern as e9d1022's sibling skill conversions, added to
+profiles/universal.profile ALONGSIDE (never replacing) the existing
+rules/*.md entry -- airuleset.py's profile parser treats "rules/" entries
+specially (symlink only, no @import), so main-session behavior is unchanged.
+Full suite 2167 passed, ruff clean, validate: 59 modules (+5). No new
+hooks/jobs/detectors -- content restored to a surface already proven to load.

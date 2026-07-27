@@ -175,7 +175,8 @@ each subagent was asked only to report its own context):
 | Auto-memory `MEMORY.md` | **YES** |
 | An agent file (`agents/<name>.md`) | **YES** — it IS the subagent's system prompt |
 | **Skill BODIES (`skills/*/SKILL.md`)** | **NO** — only the name + one-line description from the skill list |
-| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) | **NOT OBSERVED** — see #105, unresolved |
+| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) — MAIN session | **YES** — `nested_memory` attachment on Read (#105) |
+| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) — dispatched SUBAGENT | **NO** — zero `nested_memory` attachments even with the correct cwd (#105) |
 
 Consequences that keep biting:
 
@@ -218,3 +219,26 @@ behave; this repo has repeatedly shipped fixes whose stated cause was wrong.
 and a prompt that never names the behavior under test. If the behavior shows up
 unprompted, that is proof; a prompt that hints at it proves nothing. Salvage any
 work the guarded run produced onto its ticket before `git worktree remove`.
+
+### #105 resolved — `rules/*.md` path-scoped injection is MAIN-session-only, never reaches a dispatched subagent
+
+Settled the row #104 left open. A dispatched subagent has its OWN transcript
+file, separate from the parent: `<projects-dir>/<encoded-cwd>/<session-id>/subagents/agent-<id>.jsonl`
+(found by `find <projects-dir> -newer <marker>`, or from the parent's
+`SubagentStop` payload). Reading it directly (not the parent transcript) is
+what proves the negative: a real subagent, dispatched from a session whose cwd
+correctly contained the matching file, produced ZERO `nested_memory` entries —
+only `deferred_tools_delta` and `skill_listing` — across its whole transcript,
+while the identical Read in the parent MAIN session produced two. This is the
+structural proof form (grep the transcript for `"type":"nested_memory"`, read
+the `.attachment.path`), never a self-report ("did you see rule X?" — a model
+can answer correctly from always-on content it already has, proving nothing).
+
+Fix pattern for any FUTURE `rules/*.md` conversion whose topic a dispatched
+worker must act on (CI config, migrations, anything editable): restore a short
+(<8 line) always-on stub at the module's old path, alongside — never instead
+of — its `rules/*.md` entry in `profiles/universal.profile`. Confirmed safe:
+`airuleset.py`'s profile parser branches on the `rules/` prefix and ONLY
+symlinks that entry into `~/.claude/rules/` — it never `@import`s it into
+CLAUDE.md — so adding the stub doesn't change or duplicate the MAIN-session
+path-scoped behavior; it only adds the subagent-reachable half.
