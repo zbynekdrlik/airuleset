@@ -580,8 +580,8 @@ class TestCompactTicketBoundary(unittest.TestCase):
         wd.record_compact_request(self.SID, "/home/x/proj", path=path)
         tmux = CompactFakeTmux(CB_IDLE_CAP)
         panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
-        logs = wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
-                                          path=path, projects_dir=proj)
+        wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
+                                   path=path, projects_dir=proj)
         self.assertIn("/compact", tmux.typed_texts())
 
 

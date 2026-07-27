@@ -369,7 +369,8 @@ def transcript_last_model(path, max_lines=200):
 def transcript_current_context(path, max_lines=200):
     """The session's CURRENT context size — cache_read_input_tokens +
     cache_creation_input_tokens off the newest assistant usage entry.
-    Feeds job 15 (COMPACT OVERGROWN IDLE SESSIONS).
+    Feeds job 14's #48 small-context gate (job 15's own use, REMOVED #102,
+    no longer applies).
 
     A SINGLE API call can render as SEVERAL transcript lines (a thinking
     block, a text block, a tool_use block — each its own JSONL entry) that
@@ -4210,8 +4211,8 @@ def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
 # msg_hash dedup protects the DECISION to send. It does not protect the
 # PANEL's own type-ahead QUEUE — the window between "keystrokes typed" and
 # "compaction actually landed" is as wide as the whole busy turn, and every
-# sender (the synchronous #65 path, job 14, job 15, job 17) is blind to
-# what any OTHER sender already queued during it.
+# sender (the synchronous #65 path, job 14, and — until REMOVED, #102 —
+# jobs 15/17) is blind to what any OTHER sender already queued during it.
 #
 # The fix: ONE claim per session, shared by every sender, checked BEFORE
 # any of a sender's own logic (msg_hash, context threshold, ticket
@@ -4230,10 +4231,12 @@ def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
 #                   live against the camera-box incident transcript itself,
 #                   entry at 2026-07-26T13:09:26.880Z) NEWER than the
 #                   claim's send time. This is the #78-mandated proof —
-#                   NEVER a context-threshold read (job 15/17's OWN
-#                   internal state machines still use that for their own
-#                   re-trigger cadence, which is a SEPARATE, narrower
-#                   concern from "did anyone already queue a /compact").
+#                   NEVER a context-threshold read (jobs 15/17's OWN
+#                   internal state machines used that for their own
+#                   re-trigger cadence — a SEPARATE, narrower concern from
+#                   "did anyone already queue a /compact"; both jobs are
+#                   REMOVED, #102, but the claim's own resolution rule is
+#                   unchanged since it never depended on them existing).
 #                 FAILED -- the claim's `cwd` now resolves to a DIFFERENT,
 #                   NEWER session id than the one the claim was queued
 #                   under (the pane went through a restart — `/exit` +
@@ -4241,12 +4244,14 @@ def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
 #                   process holding the queued keystrokes is gone). A
 #                   resend is legitimate ONLY here.
 #
-# Deliberately does NOT replace job 15's `compact_stale` / job 17's
-# `compact_ceiling` state machines — those decide WHEN THEIR OWN job should
-# next consider re-triggering (idle duration, context regrowth). This claim
-# answers a narrower, independent question — "does ANY sender already have
-# an outstanding, unconfirmed /compact for this session" — and gates every
-# sender's send point, in ADDITION to (before) each job's own logic.
+# Deliberately did NOT replace job 15's `compact_stale` / job 17's
+# `compact_ceiling` state machines (both REMOVED, #102) — those decided
+# WHEN THEIR OWN job should next consider re-triggering (idle duration,
+# context regrowth). This claim answers a narrower, independent question —
+# "does ANY sender already have an outstanding, unconfirmed /compact for
+# this session" — and gates every sender's send point, in ADDITION to
+# (before) each job's own logic. Still true for the two surviving senders
+# (job 14, the synchronous #65 path).
 # --------------------------------------------------------------------------- #
 
 
@@ -4327,11 +4332,11 @@ def _transcript_compact_boundary_ts(path, tail_bytes=4_000_000):
 
 def compact_claim_active(sid, cwd, path=None, projects_dir=None):
     """#78 — the SINGLE shared gate every `/compact` sender (the
-    synchronous #65 path, job 14, job 15, job 17) MUST consult BEFORE
-    typing `/compact` into `sid`'s pane, and BEFORE any of the sender's OWN
-    logic (msg_hash dedup, context threshold, ticket boundary, hard
-    ceiling) runs. Returns True iff `sid` currently has an outstanding,
-    UNRESOLVED claim — a send is FORBIDDEN.
+    synchronous #65 path, job 14 — jobs 15/17, once also senders, REMOVED
+    #102) MUST consult BEFORE typing `/compact` into `sid`'s pane, and
+    BEFORE any of the sender's OWN logic (msg_hash dedup, context
+    threshold, ticket boundary) runs. Returns True iff `sid` currently has
+    an outstanding, UNRESOLVED claim — a send is FORBIDDEN.
 
     Reconciles the stored claim against reality on every call (never
     trusts a stale entry blindly), resolving it via EXACTLY the two paths
@@ -4518,10 +4523,11 @@ COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
 # delivery, issue #35): `deliver_with_stash` parks the foreign draft via
 # CC's native Ctrl+S stash, delivers `/compact`, and lets CC auto-restore
 # the draft the instant the delivered turn completes — a draft is no longer
-# a dead end for EITHER compact job. Shared here so job 14 and job 15 apply
-# the identical policy (try stash -> on success proceed exactly like the
-# no-draft path; on "slot already occupied" -> log a DISTINCT skip reason
-# and count it, pinging the owner once every COMPACT_STASH_SKIP_PING_EVERY
+# a dead end for the compact job. Shared here so job 14 (and, until
+# REMOVED #102, job 15) applied the identical policy (try stash -> on
+# success proceed exactly like the no-draft path; on "slot already
+# occupied" -> log a DISTINCT skip reason and count it, pinging the owner
+# once every COMPACT_STASH_SKIP_PING_EVERY
 # consecutive occupied-skips so a permanently jammed stash slot never rots
 # silently, per the issue's acceptance).
 COMPACT_STASH_SKIP_PING_EVERY = 3
@@ -4600,7 +4606,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     already has an outstanding claim for this sid, this request is dropped
     with ZERO tmux interaction, regardless of msg_hash/context. Every real
     send (idle or stash) below also SETS the claim via
-    `compact_claim_set`, so job 15/17/the sync path see it too.
+    `compact_claim_set`, so the sync path sees it too.
 
     #71: an entry whose `msg_hash` is ALREADY marked delivered (in
     `delivered_path` — default `compact_delivered_path()`, checked via
@@ -4615,17 +4621,18 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     all — `compact_already_delivered`/`mark_compact_delivered` are no-ops on
     a blank hash, so existing behavior is untouched.
 
-    `handled` (#69, optional): a mutable set run_once passes so job 17 (the
-    hard-ceiling backstop) can see, WITHIN THE SAME SWEEP, which session ids
-    this job already sent `/compact` into — and skip them, rather than
-    relying solely on the pane's own "Compacting conversation" text (which
-    can lag a beat behind the send). Every real send (direct or stash)
-    records its sid here; a dropped/skipped request never does.
+    `handled` (#69, optional): a mutable set run_once passes so job 20 (goal
+    re-arm) can see, WITHIN THE SAME SWEEP, which session ids this job
+    already sent `/compact` into — and skip them, rather than relying
+    solely on the pane's own "Compacting conversation" text (which can lag
+    a beat behind the send). Every real send (direct or stash) records its
+    sid here; a dropped/skipped request never does. (Originally also fed
+    jobs 15/17 for the same reason — both REMOVED, #102.)
 
     #48 context-threshold gate: right before actually sending `/compact` for
     an otherwise-ready request, the session's CURRENT context is measured via
-    `transcript_current_context()` — the SAME helper job 15 uses, resolved
-    for this specific sid+cwd via `_transcript_for_session` (falls back to a
+    `transcript_current_context()`, resolved for this specific sid+cwd via
+    `_transcript_for_session` (falls back to a
     sid-only glob across the whole projects tree, same as the ❓-reply-prune
     path). Below `min_context` (default `COMPACT_BOUNDARY_MIN_CONTEXT`, env
     `AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT`) the request is DROPPED (cleared
@@ -4671,10 +4678,10 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         entry = reqs.get(sid) or {}
         cwd = entry.get("cwd", "")
         # #78 -- the SHARED claim gate, checked FIRST and unconditionally:
-        # if ANY sender (this job, job 15, job 17, or the synchronous #65
-        # path) already has an outstanding, unresolved /compact claim for
-        # this session, drop this request with ZERO tmux interaction --
-        # regardless of msg_hash, context, or anything else below.
+        # if ANY sender (this job, or the synchronous #65 path) already has
+        # an outstanding, unresolved /compact claim for this session, drop
+        # this request with ZERO tmux interaction -- regardless of
+        # msg_hash, context, or anything else below.
         if compact_claim_active(sid, cwd, projects_dir=pdir):
             logs.append("skip claim-queued (compact-request) %s" % sid)
             if not dry_run:
@@ -4959,452 +4966,43 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
 
 
 # --------------------------------------------------------------------------- #
-# Job 15 — COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up, 2026-07-25).
+# Job 15 -- COMPACT OVERGROWN IDLE SESSIONS -- REMOVED (#102, 2026-07-27).
 #
-# Job 14 only /compact's a session at a completed-ticket boundary (its Stop
-# hook fires the request). A long-lived session that is NOT an autopilot
-# loop — nothing ever reports a "ticket done" — can sit on the right model
-# with a huge, still-growing context FOREVER with no mechanism to shrink it.
-# Measured live on dev1 over 10 hours, grouped by `message.id` (never raw
-# line count — a thinking/text/tool_use burst shares one id and one usage
-# snapshot): `restreamer` (an autopilot session that got compacted) ran at
-# $0.40/turn @ 375K context vs $0.185/turn @ ~250K post-compaction — a real
-# 2.2x. `forestshop-parovanie-produktov` (untouched all day, no ticket
-# boundary) stayed at $0.38-0.40/turn while its context climbed 559K ->
-# 642K and kept climbing — exactly the gap job 14 cannot close.
-#
-# This job closes it: for every live claude/node/bun pane (SAME detection
-# job 12 uses, `_reconcile_candidate_panes` — deliberately its own
-# enumeration, not run_once's narrower `list_claude_panes`) whose newest
-# transcript turn's context (`transcript_current_context` — cache_read +
-# cache_creation, grouped by message.id, never summed) exceeds
-# COMPACT_CONTEXT_THRESHOLD, AND whose transcript has been quiet for at
-# least COMPACT_MIN_IDLE_S, AND the pane is genuinely idle at a bare prompt
-# (no draft, no open dialog, not in copy-mode, not mid-turn) AND has no
-# in-flight background agent (`_pane_has_bg_agent`, reused from job 12 — a
-# worker in flight must never be interrupted), `/compact` is typed in.
-#
-# This is DELIBERATELY NOT Claude Code's own `autoCompactWindow` (which the
-# user had airuleset actively STRIP from settings.json in the 2026-07-25
-# correction batch, reverting the SAME-DAY "krok 1c" addition — see the
-# comment above `MANAGED_MODEL` in airuleset.py). `autoCompactWindow` fires
-# at a raw token threshold regardless of what the session is doing, so it
-# cuts a long task off MID-WORK and defeats the entire point of the 1M
-# context window. This job only ever fires on a session that is
-# DEMONSTRABLY doing nothing — idle >= COMPACT_MIN_IDLE_S, no draft, no
-# worker in flight — so compaction here cannot interrupt anything, and the
-# full 1M window stays available to any task that actually needs the depth.
-#
-# Dedup: unlike job 14 (fire-and-forget — sending the keystrokes IS success,
-# no confirmation text exists to poll for), THIS job's own trigger condition
-# (current context) does NOT reliably clear right after `/compact` is sent —
-# the transcript's last usage record still reads the PRE-compaction (huge)
-# number until the session's NEXT real turn, which may never come for an
-# idle session with nobody prompting it. A NAIVE immediate re-check would
-# re-send `/compact` on EVERY ~60s sweep forever.
-#
-# STATE MACHINE for `state['compact_stale'][sid]` (issue #46 part 2 — the
-# original design claimed PERMANENTLY on every outcome, so a session that
-# lives for days got compacted exactly ONCE, ever, even after its context
-# regrew past the threshold well past compaction):
-#
-#   absent                          -- never touched by this job; eligible.
-#   True                             -- GAVE UP after COMPACT_STALE_MAX_ATTEMPTS
-#                                       failed verifications (mirrors job 12's
-#                                       bounded-attempts fix for the live gk
-#                                       incident, 2026-07-25, where a FAILing
-#                                       pane retried every sweep forever).
-#                                       PERMANENT — never reconsidered, no
-#                                       matter what the context does later.
-#   COMPACT_STALE_PENDING_CONFIRM    -- a REAL `/compact` success is recorded
-#                                       but not yet CONFIRMED to have landed.
-#                                       Every sweep re-reads the CURRENT
-#                                       context for a pending sid (cheap,
-#                                       local, no tmux round-trip): while it
-#                                       is STILL >= threshold, do nothing (no
-#                                       resend, no log — the stale-reading
-#                                       race the original design worried
-#                                       about); the moment it is observed
-#                                       BELOW threshold — proof the session
-#                                       had a real turn and the compaction's
-#                                       effect reached the transcript — the
-#                                       claim is CLEARED back to absent, so a
-#                                       future re-growth past the threshold
-#                                       is eligible again.
-#
-# A below-cap verify FAILURE still releases the claim entirely (absent) so
-# the next sweep retries, same as before this rework.
+# `compact_stale_context` fired /compact purely off CONTEXT SIZE + IDLE
+# DURATION, with no regard for what marker the session's last turn ended
+# on -- exactly the mechanism the #102 correction identified as the live
+# camera-box incident's likely cause (a `❓ NEEDS YOU` turn, blocked
+# awaiting the user's answer, sat idle long enough to qualify and got
+# compacted). The user's corrected agreement (#102): compaction fires
+# ONLY at a completed-ticket boundary (job 14, `compact_ticket_boundary`)
+# -- nothing else, no context-size heuristic of our own. Claude Code's
+# own native auto-compact already handles a genuinely full context; this
+# job never fed anything else (its state keys `compact_stale`/
+# `compact_stale_attempts`, its constants COMPACT_CONTEXT_THRESHOLD/
+# COMPACT_MIN_IDLE_S/COMPACT_STALE_*, and `_wait_for_compact_return` were
+# ALL private to this job's own delivery and are removed with it -- none
+# of it was reused elsewhere). See #102's evidence block for the full
+# audit of what survived from jobs 15/17 and why.
 # --------------------------------------------------------------------------- #
 
-COMPACT_CONTEXT_THRESHOLD = 400_000   # tokens (cache_read + cache_creation) —
-                                      # measured 2.2x cost improvement below this
-COMPACT_MIN_IDLE_S = 20 * 60          # transcript must be this stale (no new turn)
-                                      # before compaction is safe — this IS the
-                                      # guard that makes the whole job safe: a
-                                      # session doing nothing for 20 minutes with
-                                      # no worker running cannot be interrupted
-COMPACT_STALE_MAX_ATTEMPTS = 3        # cap verify-failure retries per session,
-                                      # same rationale as MODEL_RECONCILE_MAX_ATTEMPTS
-COMPACT_STALE_VERIFY_POLL_S = 1
-COMPACT_STALE_VERIFY_MAX_POLLS = 10   # bounded (no-timeout-band-aids.md)
-# Marker for "compacted, awaiting confirmation the context actually dropped"
-# — see the STATE MACHINE comment above. Deliberately a non-True truthy value
-# so `claim is True` (give-up) and `claim == COMPACT_STALE_PENDING_CONFIRM`
-# (awaiting confirmation) are never confused with each other.
-COMPACT_STALE_PENDING_CONFIRM = "pending-confirm"
-
-
-def _wait_for_compact_return(pid, run, sleep_fn):
-    """Poll (bounded) for the pane to land back at a free idle prompt after
-    `/compact` was typed — the only observable "it worked" signal available
-    for this command. Unlike job 12's fixed "Resume from summary" dialog
-    text, `/compact` has no reliable confirmation TEXT to match (job 14's
-    own docstring already notes this) — so "the pane returned to a bare `❯`"
-    is the verification."""
-    for _ in range(COMPACT_STALE_VERIFY_MAX_POLLS):
-        sleep_fn(COMPACT_STALE_VERIFY_POLL_S)
-        captured = capture_pane(pid, run, lines=40) or ""
-        if pane_at_idle_prompt(captured):
-            return True
-    return False
-
-
-def compact_stale_context(now, run, state, dry_run=False, projects_dir=None,
-                          sleep_fn=None, send_fn=None, handled=None):
-    """Job 15 — see the section comment. Always wired into run_once (no
-    gating param — same "always on" shape as job 9's goal_autoarm), since
-    it depends on nothing external (no fetcher, no target model).
-
-    `handled` (#69, optional): same shared per-sweep set job 14 populates —
-    a real success here (either path) records the sid so job 17 (hard
-    ceiling) never double-fires on it within the same sweep.
-
-    #78: the SHARED `/compact` claim (`compact_claim_active`) is checked
-    right before any tmux round-trip, AFTER this job's OWN `compact_stale`
-    state machine has already had its say (PENDING_CONFIRM clearing / a
-    below-threshold skip) — those decide THIS job's own re-trigger
-    cadence and are UNCHANGED. The shared claim answers the separate,
-    narrower question "does anyone else already have one in flight" and
-    takes precedence over a bare failed-verification retry: while another
-    sender's claim (or this job's own prior send) is still queued, this
-    sweep's send attempt is skipped outright — never resent on a mere
-    verification timeout (the #72 lesson, generalized). Every real send
-    (idle or stash) also SETS the claim via `compact_claim_set`.
-
-    Local, cheap checks (dedup, current context, idle duration — all read
-    off the transcript file, no tmux round-trip) run BEFORE any tmux call,
-    so the overwhelmingly common case (a session under threshold, or idle
-    under 20 minutes) costs nothing beyond a transcript read and is never
-    logged — logging would spam every sweep for every ordinary session.
-    Only a pane that already cleared BOTH gates is worth a tmux round-trip
-    and a log line.
-
-    Never touches a pane that is in copy-mode, showing an open dialog,
-    mid-turn/busy, or running a background agent — identical guards to
-    job 12's model_reconcile, reusing the very same helpers (`pane_in_mode`,
-    `pane_waiting_on_user`, `_classify_boundary`, `pane_at_idle_prompt`,
-    `_pane_has_bg_agent`, `_pane_location`) rather than a parallel
-    chrome-detector. A pane holding an unsent DRAFT is no longer a dead end
-    (#67, 2026-07-26): `_compact_stash_attempt` parks the draft via CC's
-    native Ctrl+S stash, delivers `/compact`, and lets CC auto-restore the
-    draft once the delivered turn completes — the same mechanism issue #35
-    already uses for job 7's Discord-reply delivery. Only a genuinely
-    OCCUPIED stash slot (something else already parked there) is a
-    legitimate skip, tracked + pinged after
-    `COMPACT_STASH_SKIP_PING_EVERY` repeats so it never rots silently.
-    `send_continue`/`deliver_with_stash` already handle the "Escape the
-    agent-strip selector ONLY if it holds focus, then type + Enter"
-    sequence (issue #36) — never a second Escape anywhere (issue #35).
-    Best-effort: exceptions are the caller's (run_once's) responsibility to
-    catch, same as every other job."""
-    run = run or _default_run
-    sleep_fn = sleep_fn or time.sleep
-    projects_dir = projects_dir or PROJECTS_DIR
-    compacted = state.get("compact_stale") or {}
-    attempts_map = state.get("compact_stale_attempts") or {}
-    logs = []
-    for pid, cwd, cmd in _reconcile_candidate_panes(run):
-        tinfo = find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, tmtime = tinfo
-        sid = tpath.stem
-        claim = compacted.get(sid)
-        if claim is True:
-            continue                          # gave up for good — never retry, ever
-        if claim == COMPACT_STALE_PENDING_CONFIRM:
-            # Awaiting confirmation the earlier /compact success landed (the
-            # STATE MACHINE comment above). Cheap, local, no tmux round-trip
-            # for the common (still-high) case — only a genuine CLEAR is
-            # worth logging + a pane-location lookup.
-            if transcript_current_context(tpath) < COMPACT_CONTEXT_THRESHOLD:
-                compacted.pop(sid, None)
-                state["compact_stale"] = compacted
-                loc = _pane_location(pid, run) or pid
-                logs.append("CLEARED (compact-stale) %s -> context confirmed "
-                            "below threshold, eligible again" % loc)
-            continue                          # still high, or just cleared — never resend THIS sweep
-        idle = now - tmtime
-        if idle < COMPACT_MIN_IDLE_S:
-            continue                          # too fresh to touch — no log (the common case)
-        ctx = transcript_current_context(tpath)
-        if ctx < COMPACT_CONTEXT_THRESHOLD:
-            continue                          # under threshold — no log (the common case)
-        # #78 -- the SHARED claim gate, checked right before any tmux
-        # round-trip (cheap, local): if ANY sender (job 14, job 17, or the
-        # synchronous #65 path) already has an outstanding, unresolved
-        # /compact claim for this sid, skip THIS SWEEP's send attempt --
-        # this job's OWN `compact_stale` state (above) still governs ITS
-        # OWN re-trigger cadence (PENDING_CONFIRM clearing, give-up); the
-        # shared claim is the separate, narrower "does anyone else already
-        # have one in flight" question, and it takes precedence over a
-        # bare failed-verification retry (the #72 lesson, generalized:
-        # never resend on a mere timeout).
-        if compact_claim_active(sid, cwd, projects_dir=projects_dir):
-            continue
-        loc = _pane_location(pid, run) or pid
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode (compact-stale) %s %d" % (loc, ctx))
-            continue
-        captured = capture_pane(pid, run, lines=40)
-        if pane_waiting_on_user(captured):
-            logs.append("skip dialog-open (compact-stale) %s %d" % (loc, ctx))
-            continue
-        kind, draft = _classify_boundary(captured)
-        if kind == "no-input-line":
-            logs.append("skip no-input-line (compact-stale) %s %d" % (loc, ctx))
-            continue
-        if kind == "busy":
-            logs.append("skip busy (compact-stale) %s %d" % (loc, ctx))
-            continue
-        if _pane_has_bg_agent(captured):
-            logs.append("skip bg-agent (compact-stale) %s %d" % (loc, ctx))
-            continue
-        if _pane_has_queued_compact(captured):
-            logs.append("skip queued-compact (compact-stale) %s %d" % (loc, ctx))
-            continue                        # #84 — one is already pending
-        if draft:
-            # #67 — try the stash-around delivery instead of skipping forever.
-            if dry_run:
-                logs.append("READY (compact-stale, draft) %s ctx=%d idle=%ds"
-                            % (loc, ctx, int(idle)))
-                continue
-            project = project_label(cwd)
-            owner = pane_owner(pid, run)
-            delivered = _compact_stash_attempt(pid, run, captured, state, sid,
-                                               loc, project, owner=owner,
-                                               ctx=ctx, send_fn=send_fn)
-            if not delivered:
-                logs.append("skip draft (stash occupied) %s %d: %r"
-                            % (loc, ctx, draft[:40]))
-                continue
-            compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
-            tag = "compact-stale, stash"
-        else:
-            if not pane_at_idle_prompt(captured):
-                logs.append("skip not-idle (compact-stale) %s %d" % (loc, ctx))
-                continue
-            if dry_run:
-                logs.append("READY (compact-stale) %s ctx=%d idle=%ds"
-                            % (loc, ctx, int(idle)))
-                continue
-            send_continue(pid, COMPACT_TEXT, run)
-            compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
-            tag = "compact-stale"
-        ok = _wait_for_compact_return(pid, run, sleep_fn)
-        if ok:
-            # PENDING, not permanently True — the claim clears once the
-            # observed context confirms the compaction actually landed (the
-            # STATE MACHINE comment above), so a later re-growth past the
-            # threshold is eligible again instead of this session being
-            # compacted exactly once for its entire lifetime.
-            compacted[sid] = COMPACT_STALE_PENDING_CONFIRM
-            state["compact_stale"] = compacted
-            attempts_map.pop(sid, None)
-            state["compact_stale_attempts"] = attempts_map
-            if handled is not None:
-                handled.add(sid)
-            logs.append("OK (%s) %s ctx=%d -> compacted" % (tag, loc, ctx))
-        else:
-            attempts = attempts_map.get(sid, 0) + 1
-            attempts_map[sid] = attempts
-            state["compact_stale_attempts"] = attempts_map
-            if attempts >= COMPACT_STALE_MAX_ATTEMPTS:
-                # Bounded — never retry this session again (same rationale as
-                # job 12's give-up: a failing pane must not burn a full
-                # context re-read on every single ~60s sweep forever).
-                compacted[sid] = True
-                state["compact_stale"] = compacted
-                logs.append("GAVE UP (%s) %s ctx=%d after %d attempts"
-                            % (tag, loc, ctx, attempts))
-            else:
-                logs.append("FAIL (%s) %s ctx=%d (did not return idle, "
-                            "attempt %d/%d)"
-                            % (tag, loc, ctx, attempts, COMPACT_STALE_MAX_ATTEMPTS))
-    return logs
-
-
 # --------------------------------------------------------------------------- #
-# Job 17 — HARD CONTEXT CEILING BACKSTOP (#69, 2026-07-26 live incident).
+# Job 17 -- HARD CONTEXT CEILING BACKSTOP -- REMOVED (#102, 2026-07-27).
 #
-# Job 14 only fires at a completed-ticket boundary (its Stop hook records the
-# request). Job 15 only fires once a pane has been genuinely IDLE for
-# `COMPACT_MIN_IDLE_S` (20 min). Measured live 2026-07-26, a WHOLE CLASS of
-# sessions has NEITHER trigger: the gatekeeper master loop (a continuous
-# review/merge loop across repos, 3460 turns / 9 compactions / zero `Work
-# Complete` reports — job 14 has nothing to fire from) and the supervisor/
-# governance session on dev1 (340K context, never compacted all day — it ends
-# every turn `⏳ WORKING` per `message-status-marker.md`, so the Stop hook
-# never records a job-14 request, and it is CONTINUOUSLY busy dispatching
-# subagents so it is never idle 20 minutes for job 15 either).
-#
-# This job is the BACKSTOP: independent of both the ticket boundary AND idle
-# duration. Above `COMPACT_HARD_CEILING` (deliberately its OWN threshold,
-# separate from job 14's floor `COMPACT_BOUNDARY_MIN_CONTEXT` (200K, #48) and
-# job 15's own `COMPACT_CONTEXT_THRESHOLD` (400K) — sitting BETWEEN the two),
-# `COMPACT_MIN_IDLE_S` is IGNORED entirely: delivery only needs the pane to be
-# in a state a short `send-keys` can reach at all (a real input boundary
-# exists — `kind != "no-input-line"`, no open dialog, not in copy-mode). This
-# is the ONE deliberate divergence from job 15: job 15 treats `kind == "busy"`
-# as a skip (it wants proof of genuine stillness before compacting); THIS job
-# treats "busy" as a perfectly fine send target, reusing the exact insight
-# #65 already proved live: a SHORT `send-keys` command reliably QUEUES even
-# into a BUSY pane — CC types it as the next turn the moment the current one
-# ends, so nothing in flight is interrupted. That is precisely what makes
-# this a real backstop for a CONTINUOUSLY busy session (the master loop, the
-# supervisor) rather than one more mechanism that also needs stillness to
-# fire. For the SAME reason this job deliberately does NOT check
-# `_pane_has_bg_agent` (unlike job 15) — queuing `/compact` behind a running
-# background agent does not kill or interrupt that agent, it only adds one
-# more turn to the front of the queue; skipping on a live bg-agent would
-# re-create the exact gap this job exists to close, since the supervisor's
-# whole failure mode IS "always has a worker in flight". A DRAFT is still
-# handled exactly like #67: stashed around the delivery, never typed over.
-#
-# Dedup / re-fire safety, THREE layers:
-#   1. `handled` (a set run_once builds fresh each sweep and threads through
-#      job 14 -> job 15 -> job 17, in that order): a sid job 14 or job 15
-#      ALREADY sent `/compact` into THIS SAME sweep is skipped outright —
-#      the deterministic, race-free regression lock for "the ticket-boundary
-#      path stays primary and this backstop never double-fires against it"
-#      (#69 acceptance; see `RunOnceCompactHardCeilingWiring.
-#      test_ticket_boundary_fires_first_and_ceiling_never_double_fires` in
-#      tests/test_watchdog.py). This is the mechanism that actually decides
-#      ordering — job 14/15 simply run first in run_once and populate the
-#      set before job 17 ever looks at it.
-#   2. `_pane_compacting` — defense in depth for a LATER sweep: if the
-#      pane's OWN current text shows CC's "Compacting conversation" progress
-#      indicator (from a manual user /compact, or a prior sweep's send that
-#      hasn't cleared PENDING_CONFIRM yet), resending would just queue a
-#      redundant second compaction. Checked right after the pane capture,
-#      before any send.
-#   3. The STATE MACHINE below (`state['compact_ceiling'][sid]`), the same
-#      shape as job 15's `compact_stale` — `absent` (eligible) /
-#      `COMPACT_STALE_PENDING_CONFIRM` (sent, awaiting confirmation the
-#      context actually dropped) / `True` (gave up for good after
-#      `COMPACT_CEILING_MAX_ATTEMPTS`, permanent, Discord-pinged once). While
-#      PENDING, a session is left ALONE until `COMPACT_CEILING_RETRY_S` has
-#      elapsed since the last send — resending immediately would just stack
-#      another queued `/compact` behind one that may simply not have run yet
-#      (a continuously-busy pane can take a long time to reach the head of
-#      its own queue). Once the retry window elapses AND the context still
-#      reads at/above the ceiling, this is a genuine retry, bounded by
-#      `COMPACT_CEILING_MAX_ATTEMPTS`; exceeding it gives up permanently and
-#      pings the owner (unlike job 15's silent give-up — this job's whole
-#      point is that NOTHING ELSE will ever compact this session, so a
-#      terminal failure here must be visible).
-#
-# Wired in run_once right after job 16, ALWAYS on (no gating param — same
-# "always on" shape as job 9's goal_autoarm and job 15 itself), since it
-# depends on nothing external.
-#
+# `compact_hard_ceiling` fired /compact purely off CONTEXT SIZE (a fixed
+# ceiling), regardless of idle duration and even into a BUSY pane, with no
+# regard for what marker the session's last turn ended on. Same #102
+# correction as job 15: compaction fires ONLY at a completed-ticket
+# boundary (job 14) -- no context-size heuristic of our own. This job's
+# state key (`state['compact_ceiling']`), its own constants
+# (COMPACT_HARD_CEILING/COMPACT_CEILING_QUEUED/COMPACT_CEILING_STUCK_CYCLES)
+# were private to its own delivery and are removed with it. The SHARED
+# helpers it also used (`_pane_compacting`/COMPACTING_MARKER,
+# `_reconcile_candidate_panes`, `_pane_has_queued_compact`,
+# `_proc_fingerprint_alive`/`_pane_claude_proc_fingerprint`, the shared
+# `/compact` claim `compact_claim_active`/`compact_claim_set`) are KEPT --
+# every one of them is still used by job 14, the synchronous #65 path,
+# and/or jobs 18/20/21. See #102's evidence block for the full audit.
 # --------------------------------------------------------------------------- #
-# #72 (2026-07-26 live incident) -- the ORIGINAL state machine above (a fixed
-# `COMPACT_CEILING_RETRY_S` timer + a `COMPACT_CEILING_MAX_ATTEMPTS` give-up)
-# is broken on EXACTLY the session class job 17 exists for: a pane that stays
-# BUSY in one single long turn for far longer than the retry window. Live
-# proof, gatekeeper pane 0:0.0: a turn ran 1h14m; job 17 sent `/compact`,
-# waited 5 minutes, saw the context STILL above the ceiling (correctly, since
-# nothing had been consumed yet -- the turn was still running), and treated
-# that as license to resend -- twice more, then GAVE UP while three duplicate
-# `/compact` sat unconsumed in the pane's own input queue (CC only drains the
-# queue at a turn boundary, so resending never helps and just plants more
-# duplicates that later fire as "Not enough messages to compact"). Logging
-# each send as "-> compacted" was ALSO false: only keystrokes were typed,
-# nothing was verified.
-#
-# The fix replaces BOTH the timer and the give-up with a strict three-state
-# machine, `state['compact_ceiling'][sid] = {"status": ..., "cwd": ...}`:
-#
-#   absent                     -- never touched, or the previous claim was
-#                                  resolved (consumed or lost); eligible.
-#   {"status": QUEUED, "cwd"}  -- `/compact` was typed exactly once and is
-#                                  awaiting consumption. Every sweep re-reads
-#                                  the CURRENT context (cheap, local, no tmux
-#                                  round-trip) for a queued sid: while it is
-#                                  STILL >= ceiling, do ABSOLUTELY NOTHING --
-#                                  no resend, no log, no matter how much time
-#                                  has passed (this is the entire #72 fix --
-#                                  elapsed time is NEVER a resend trigger).
-#                                  The moment it reads BELOW the ceiling --
-#                                  proof a real compaction landed -- the claim
-#                                  is CONSUMED: cleared back to absent and
-#                                  logged as such, so a future re-growth past
-#                                  the ceiling is eligible again.
-#
-# The ONLY other exit from QUEUED is a demonstrated LOSS of delivery: the
-# `cwd` this claim was queued against now has a DIFFERENT, NEWER active
-# transcript (a genuinely new session id) than the one the claim was sent
-# to. Since a `/compact` keystroke lives in the OLD process's own type-ahead
-# queue, a session replacement (the pane went through a restart -- `/exit`
-# + relaunch always mints a fresh session id, it never resumes the old
-# transcript file) means that keystroke is gone forever with the process
-# that held it -- this is "the pane meanwhile went through a restart" from
-# the issue, and it is the ONLY condition under which a resend is legitimate.
-# Detected in a cheap PRE-PASS (pure transcript-directory reads, no tmux)
-# before the main per-pane loop even runs: for every currently QUEUED entry,
-# resolve the newest transcript for its recorded `cwd` and compare its
-# session id against the one the claim was queued under. A mismatch logs
-# FAILED, drops the stale entry, and lets the main loop's normal absent-state
-# eligibility check pick the NEW session up fresh -- producing exactly ONE
-# new send (the acceptance's "strata dorucenia -> jedno nove poslanie"), not
-# a special-cased immediate resend.
-#
-# There is NO permanent give-up state anymore, and NO Discord ping for
-# "tried too many times" -- the issue is explicit that a session still above
-# the ceiling must NEVER be abandoned. The only Discord-visible signal that
-# survives is the (unrelated, untouched) #67 stash-occupied-repeatedly ping.
-#
-# Coordination with #71 (compact-request delivered-dedup): #71's own
-# mechanism (`compact-delivered.json`, keyed by a ticket-completion message
-# hash) and this job's `handled`-set + `_pane_compacting` + QUEUED-state
-# checks are structurally independent but serve the SAME goal -- "one
-# trigger produces exactly one /compact". #71 closes it for job 14/#65's
-# ticket-boundary trigger; this fix closes the identical gap for job 17's
-# OWN ceiling trigger, so neither source can now double-fire against
-# itself, and the pre-existing `handled` set still keeps them from
-# double-firing against EACH OTHER within the same sweep.
-# --------------------------------------------------------------------------- #
-
-COMPACT_HARD_CEILING = 300_000     # tokens -- deliberately BETWEEN job 14's
-                                   # floor (200K) and job 15's own threshold
-                                   # (400K); a true backstop, so it must not
-                                   # sit so high that a session dies of
-                                   # neglect waiting for it
-
-# `state['compact_ceiling'][sid]["status"]` value while a `/compact` has been
-# typed and is awaiting confirmation (context drop) or a demonstrated loss
-# (session replaced) -- see the #72 section comment above. Deliberately its
-# OWN sentinel (not job 15's shared `COMPACT_STALE_PENDING_CONFIRM`) since
-# job 17's state entries are now dicts carrying `cwd`, a distinct shape.
-COMPACT_CEILING_QUEUED = "queued"
-
-# #82 -- once a QUEUED entry has been observed still above the ceiling for
-# this many consecutive sweeps (~30 sweeps * the 60s cadence = ~30 minutes),
-# the job starts LOGGING it every sweep as STUCK instead of the silent
-# `continue` that let the live incident run for HOURS before an accident
-# uncovered it. Never a resend trigger -- purely a visibility fix.
-COMPACT_CEILING_STUCK_CYCLES = 30
 
 COMPACTING_MARKER = "Compacting conversation"
 
@@ -5521,274 +5119,12 @@ def pane_turn_elapsed(captured):
 def _pane_compacting(captured):
     """True if the pane's OWN current text shows CC's "Compacting
     conversation" progress indicator -- a `/compact` already in flight, sent
-    by THIS job, job 14, job 15, or #65's synchronous delivery (the
-    indicator does not care who triggered it). Resending `/compact` while
-    this shows would just queue a redundant second compaction (#69)."""
+    by job 14 or #65's synchronous delivery (jobs 15/17, once also senders,
+    were REMOVED #102 -- the indicator does not care who triggered it, so
+    this stays a useful defense-in-depth for any remaining sender).
+    Resending `/compact` while this shows would just queue a redundant
+    second compaction (#69)."""
     return COMPACTING_MARKER in (captured or "")
-
-
-def compact_hard_ceiling(now, run, state, dry_run=False, projects_dir=None,
-                         send_fn=None, ceiling=None, handled=None,
-                         stuck_cycles=None):
-    """Job 17 — see the section comments above (#69 for the job itself, #72
-    for this state machine).
-
-    Local, cheap checks (dedup state, current context -- read off the
-    transcript file, no tmux round-trip) run BEFORE any tmux call, mirroring
-    job 15's own cost discipline: the overwhelmingly common case (a session
-    under the ceiling) costs nothing beyond a transcript read and is never
-    logged.
-
-    `handled` (#69, optional): the SAME per-sweep set run_once threads
-    through job 14 and job 15 — a sid already in it was JUST compacted by
-    one of them this very sweep (their own capture may not show "Compacting
-    conversation" yet), so this job skips it outright rather than racing a
-    second `/compact` into the same pane. This is the concrete regression
-    lock for "the ticket-boundary path stays primary and this backstop never
-    double-fires against it" (#69 acceptance).
-
-    #72: a QUEUED claim is NEVER resent on a timer and NEVER permanently
-    given up -- it only resolves via CONSUMED (context confirmed below the
-    ceiling) or FAILED (the claim's `cwd` now belongs to a different, newer
-    session -- a demonstrated delivery loss, detected in a pre-pass before
-    any pane is even visited). See the section comment for the full
-    rationale.
-
-    #78: the SHARED `/compact` claim (`compact_claim_active`) is checked
-    BEFORE this job's OWN `compact_ceiling` state machine (above) -- if
-    another sender already has an outstanding claim for this sid, this job
-    skips it entirely this sweep. Every real send (idle or stash) also SETS
-    the shared claim via `compact_claim_set`, so job 14/15/the sync path
-    see it too. This job's #72 state machine is UNCHANGED -- it still
-    decides its OWN re-trigger cadence against the ceiling; the shared
-    claim answers the separate, narrower "does anyone already have one in
-    flight" question.
-
-    #82: both this job's OWN `compact_ceiling` entries AND the shared claim
-    now also carry a process fingerprint (`_pane_claude_proc_fingerprint`)
-    captured at send time, resolved via `pid`/`starttime` from
-    `/proc/<pid>/stat`. A watchdog-driven restart of THAT process
-    (`_restart_pane`, jobs 12/18) relaunches via `claude -c`, which
-    CONTINUES the same transcript -- so the session id never changes and
-    neither CONSUMED nor the pre-pass's session-id-replace check can ever
-    fire for it. The fingerprint closes that gap: a missing or
-    different-starttime process is a demonstrated delivery loss (FAILED),
-    independent of session id. `stuck_cycles` (default
-    `COMPACT_CEILING_STUCK_CYCLES`, env
-    `AIRULESET_COMPACT_CEILING_STUCK_CYCLES`) bounds how many consecutive
-    still-queued-and-above-ceiling sweeps pass silently before this job
-    starts logging the entry as STUCK every sweep -- never a resend
-    trigger, purely so a genuine wedge (neither CONSUMED nor FAILED ever
-    fires) is visible in journalctl instead of silently skipped for hours.
-
-    Only once a session is at/above `ceiling` (default `COMPACT_HARD_CEILING`,
-    env `AIRULESET_COMPACT_HARD_CEILING`) is a tmux round-trip made at all --
-    `pane_in_mode` / `pane_waiting_on_user` / `_classify_boundary` guard the
-    genuinely unsafe states (copy-mode, an open dialog, no locatable
-    boundary at all) exactly like jobs 12/14/15 do, reusing the identical
-    helpers. Unlike job 15, `kind == "busy"` is NOT a skip here -- see the
-    section comment's rationale (#65's proven busy-pane queuing). A DRAFT
-    still goes through `_compact_stash_attempt` (#67) exactly like job
-    14/15 -- shares the SAME `state['compact_stash_skips']` counter, since
-    an occupied stash slot is the same real-world condition regardless of
-    which job hit it.
-
-    Best-effort: exceptions are the caller's (run_once's) responsibility to
-    catch, same as every other job."""
-    run = run or _default_run
-    projects_dir = projects_dir or PROJECTS_DIR
-    if ceiling is None:
-        try:
-            ceiling = int(os.environ.get("AIRULESET_COMPACT_HARD_CEILING",
-                                         COMPACT_HARD_CEILING))
-        except ValueError:
-            ceiling = COMPACT_HARD_CEILING
-    if stuck_cycles is None:
-        try:
-            stuck_cycles = int(os.environ.get(
-                "AIRULESET_COMPACT_CEILING_STUCK_CYCLES",
-                COMPACT_CEILING_STUCK_CYCLES))
-        except ValueError:
-            stuck_cycles = COMPACT_CEILING_STUCK_CYCLES
-    compacted = state.get("compact_ceiling") or {}
-    logs = []
-
-    def _save():
-        state["compact_ceiling"] = compacted
-
-    # #72 PRE-PASS: a demonstrated delivery LOSS is the ONLY legitimate
-    # resend trigger -- detected here, independent of which (if any) live
-    # tmux pane the main loop below happens to visit this sweep. A QUEUED
-    # claim whose recorded `cwd` no longer resolves to the SAME session id
-    # means the process that held our typed `/compact` in its own input
-    # queue is gone (a restart always mints a fresh session id) -- the
-    # keystroke is lost with it. Dropping the stale claim here lets the
-    # main loop's normal absent-state eligibility check pick the new
-    # session up fresh, producing exactly ONE new send.
-    for stale_sid, entry in list(compacted.items()):
-        if not isinstance(entry, dict) or entry.get("status") != COMPACT_CEILING_QUEUED:
-            continue                          # unrecognized/legacy shape --
-                                               # leave it, main loop below
-                                               # treats it as fresh-eligible
-        # #83 -- an entry with NO "proc" key at ALL (queued before #82, or
-        # whose pane could not be fingerprinted at send time) has nothing
-        # that can ever resolve it: the process-death check just below is a
-        # no-op, and for a watchdog restart that relaunches via `claude -c`
-        # (CONTINUES the same transcript) the session-id-replace check
-        # further down can never fire either -- exactly the shape that
-        # stayed queued FOREVER on gatekeeper (it never even reached the
-        # STUCK cycle counter in the main loop below, since the SHARED
-        # compact_claim_active gate blocked this sid before this job's own
-        # state machine ever ran). Drop it here -- logged as STUCK for
-        # visibility instead of a silent, permanent wedge -- and let the
-        # main loop below pick the session up fresh this SAME sweep.
-        if "proc" not in entry:
-            compacted.pop(stale_sid, None)
-            _save()
-            logs.append("STUCK (compact-ceiling) %s -> no process "
-                        "fingerprint recorded (pre-#82 claim), dropping, "
-                        "resend enabled" % (entry.get("cwd") or stale_sid))
-            continue
-        # #82 -- a demonstrated PROCESS-death/reuse loss is checked FIRST
-        # (cheap: a /proc read, no transcript walk at all). This is what
-        # catches a watchdog-driven restart that relaunches via `claude -c`
-        # and so CONTINUES the SAME transcript -- the session-id-replace
-        # check below can never fire for that case, since the session id
-        # never changes on a `-c` resume. `proc` is guaranteed present here
-        # (the check above already dropped/continued any entry without it).
-        proc = entry.get("proc")
-        if proc and _proc_fingerprint_alive(proc) is False:
-            compacted.pop(stale_sid, None)
-            _save()
-            logs.append("FAILED (compact-ceiling) %s -> delivery lost "
-                        "(process gone/replaced), resending once for the "
-                        "same session" % (entry.get("cwd") or stale_sid))
-            continue
-        cwd = entry.get("cwd") or ""
-        tinfo = find_active_transcript(projects_dir, cwd) if cwd else None
-        current_sid = tinfo[0].stem if tinfo else None
-        if current_sid == stale_sid:
-            continue                          # same session -- still
-                                               # genuinely queued, untouched
-        compacted.pop(stale_sid, None)
-        _save()
-        logs.append("FAILED (compact-ceiling) %s -> delivery lost (session "
-                    "replaced), resending once for the new session" % cwd)
-
-    for pid, cwd, cmd in _reconcile_candidate_panes(run):
-        tinfo = find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, _tmtime = tinfo
-        sid = tpath.stem
-        if handled is not None and sid in handled:
-            continue                          # job 14/15 already compacted
-                                               # this sid THIS sweep (#69)
-        # #78 -- the SHARED claim gate, checked BEFORE this job's OWN
-        # compact_ceiling state machine: if ANY sender already has an
-        # outstanding, unresolved /compact claim for this sid, skip it
-        # entirely this sweep -- this job's own state machine below still
-        # decides ITS re-trigger cadence, the shared claim decides whether
-        # anyone else already has one in flight right now.
-        if compact_claim_active(sid, cwd, projects_dir=projects_dir):
-            continue
-        entry = compacted.get(sid)
-        if isinstance(entry, dict) and entry.get("status") == COMPACT_CEILING_QUEUED:
-            # #72: cheap, local, no tmux round-trip for the common (still
-            # above ceiling) case -- NEVER resend here, no matter how long
-            # this has been queued. The only way out is CONSUMED (below) or
-            # FAILED (the pre-pass above, on a LATER sweep).
-            ctx = transcript_current_context(tpath)
-            if ctx < ceiling:
-                compacted.pop(sid, None)
-                _save()
-                loc = _pane_location(pid, run) or pid
-                logs.append("CONSUMED (compact-ceiling) %s -> compact "
-                            "verified (context confirmed below ceiling), "
-                            "eligible again" % loc)
-            else:
-                # #82 -- a queued claim that stays above the ceiling for a
-                # long time must be VISIBLE, not silently skipped every
-                # sweep forever (exactly what let the live incident run for
-                # HOURS before an accident uncovered it). Never a resend
-                # trigger by itself -- only makes the wedge loggable.
-                cycles = entry.get("cycles", 0) + 1
-                entry["cycles"] = cycles
-                _save()
-                if cycles >= stuck_cycles:
-                    loc = _pane_location(pid, run) or pid
-                    logs.append("STUCK (compact-ceiling) %s ctx=%d queued "
-                                "%d cycles, still unresolved (no CONSUMED, "
-                                "no FAILED)" % (loc, ctx, cycles))
-            continue                          # still queued+high, or just
-                                               # consumed -- never send here
-        ctx = transcript_current_context(tpath)
-        if ctx < ceiling:
-            continue                          # under the ceiling -- no log (common)
-        loc = _pane_location(pid, run) or pid
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode (compact-ceiling) %s %d" % (loc, ctx))
-            continue
-        captured = capture_pane(pid, run, lines=40)
-        if pane_waiting_on_user(captured):
-            logs.append("skip dialog-open (compact-ceiling) %s %d" % (loc, ctx))
-            continue
-        if _pane_compacting(captured):
-            logs.append("skip already-compacting (compact-ceiling) %s %d"
-                        % (loc, ctx))
-            continue
-        if _pane_has_queued_compact(captured):
-            # #84 — this job is the one sender that deliberately types into a
-            # BUSY pane, so it is the most exposed to stacking duplicates on
-            # a long turn that never drains its queue.
-            logs.append("skip queued-compact (compact-ceiling) %s %d"
-                        % (loc, ctx))
-            continue
-        kind, draft = _classify_boundary(captured)
-        if kind == "no-input-line":
-            logs.append("skip no-input-line (compact-ceiling) %s %d" % (loc, ctx))
-            continue
-        # NOTE: no `kind == "busy": skip` branch -- see the section comment.
-        if draft:
-            if dry_run:
-                logs.append("READY (compact-ceiling, draft) %s ctx=%d"
-                            % (loc, ctx))
-                continue
-            project = project_label(cwd)
-            owner = pane_owner(pid, run)
-            delivered = _compact_stash_attempt(pid, run, captured, state, sid,
-                                               loc, project, owner=owner,
-                                               ctx=ctx, send_fn=send_fn)
-            if not delivered:
-                logs.append("skip draft (stash occupied) (compact-ceiling) "
-                            "%s %d: %r" % (loc, ctx, draft[:40]))
-                continue
-            tag = "compact-ceiling, stash"
-        else:
-            if dry_run:
-                logs.append("READY (compact-ceiling) %s ctx=%d kind=%s"
-                            % (loc, ctx, kind))
-                continue
-            send_continue(pid, COMPACT_TEXT, run)
-            tag = "compact-ceiling"
-        # #82 -- fingerprint the process the keystrokes were actually
-        # delivered to (resolved ONCE, shared between the two state
-        # machines below) so a later restart of THIS PROCESS is a
-        # detectable delivery loss even when the session id never changes
-        # (a `-c` resume). None in the common test/no-pane-info case --
-        # both call sites simply omit the "proc" key then, unchanged from
-        # before this fix.
-        proc = _pane_claude_proc_fingerprint(pid, run=run)
-        compact_claim_set(sid, cwd, proc=proc)   # #78/#82 -- keystrokes typed, claim it
-        entry_out = {"status": COMPACT_CEILING_QUEUED, "cwd": cwd}
-        if proc:
-            entry_out["proc"] = proc
-        compacted[sid] = entry_out
-        _save()
-        logs.append("OK (%s) %s ctx=%d -> /compact sent, awaiting consumption"
-                    % (tag, loc, ctx))
-    return logs
-
 
 # --------------------------------------------------------------------------- #
 # Job 21 — LONG-TURN WATCH (#84, 2026-07-26 live gatekeeper incident).
@@ -6792,8 +6128,9 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
 
-    `handled` (optional): the SAME per-sweep set jobs 14/15/17 populate — a
-    sid compacted THIS sweep is skipped outright (a long goal must never be
+    `handled` (optional): the SAME per-sweep set job 14 populates (jobs
+    15/17 also populated it once, before both were REMOVED, #102) — a sid
+    compacted THIS sweep is skipped outright (a long goal must never be
     typed into a pane whose `/compact` is still draining).
 
     `templates_path` (optional, #64): the installed autopilot SKILL. Wired =
@@ -7503,19 +6840,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (14) (only when `compact_requests_path` is given) /COMPACT AT TICKET
           BOUNDARIES (#39 krok 1c) — a session whose Stop hook just recorded
           a completed-ticket report gets `/compact` typed into its pane once
-          it goes genuinely idle (never busy/dialog/draft/in-mode;
-          compact_ticket_boundary) — a safe compaction point, since the
-          ticket's durable state already lives in git/GitHub/the issue.
-      (15) COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up) — always on,
-          no gating param: a live claude/node/bun pane whose CURRENT
-          context (cache_read + cache_creation, grouped by message.id)
-          exceeds COMPACT_CONTEXT_THRESHOLD AND has been idle
-          >= COMPACT_MIN_IDLE_S gets `/compact` typed in, but only while
-          genuinely idle (no draft/dialog/busy/in-mode) and with no
-          in-flight background agent (compact_stale_context) — closes the
-          gap job 14 leaves for a long-lived session that never reports a
-          completed-ticket boundary; deliberately NOT the token-threshold
-          `autoCompactWindow` the user had this project actively strip.
+          it goes genuinely idle (never busy/dialog/draft/in-mode; never
+          while its CURRENT last turn is a ❓ block, #102 —
+          `_compact_blocked_by_question`; compact_ticket_boundary) — a safe
+          compaction point, since the ticket's durable state already lives
+          in git/GitHub/the issue. THE ONLY /compact SENDER left in this
+          module besides the synchronous #65 path (`deliver_compact_now`,
+          called from `cmd_compact_request`) — see (15)/(17) below.
+      (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Used
+          to fire `/compact` purely off CONTEXT SIZE + IDLE DURATION, with
+          no regard for what marker the session's last turn ended on — the
+          user's corrected agreement: compaction fires ONLY at a completed-
+          ticket boundary (14), nothing else. See the removed section
+          comment above `_pane_compacting` for the full audit of what
+          survived. Number retained (not reused) for historical
+          addressability of prior comments/logs referencing "job 15".
       (16) (only when `fleet_fetch` is given) HOURLY FLEET BURN (#55) —
           coordinator-only (cmd_watchdog wires this ONLY on dev1): merges
           every managed box's own hourly burn-snapshot row (job 13's output,
@@ -7523,14 +6862,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `~/.claude/burn-history/fleet.jsonl` row per hour
           (fleet_burn_job), plus a deduped Discord ping when the observed
           weekly-%/day pace exceeds the budget implied by the usage cache.
-      (17) HARD CONTEXT CEILING BACKSTOP (#69) — always on, no gating param:
-          a live claude/node/bun pane whose CURRENT context exceeds
-          `COMPACT_HARD_CEILING` gets `/compact` typed in REGARDLESS of idle
-          duration and even into a BUSY pane (a short send-keys reliably
-          queues — #65) — the backstop for a session that neither reports a
-          ticket boundary (job 14) NOR ever goes idle 20 minutes (job 15),
-          e.g. a continuous review/merge loop or a governance session that
-          ends every turn `⏳ WORKING` (compact_hard_ceiling).
+      (17) HARD CONTEXT CEILING BACKSTOP — REMOVED (#102, 2026-07-27). Used
+          to fire `/compact` purely off CONTEXT SIZE (a fixed ceiling),
+          regardless of idle duration and even into a BUSY pane — the same
+          #102 correction as (15): compaction fires ONLY at a completed-
+          ticket boundary (14). See the removed section comment above
+          `_pane_compacting` for the full audit. Number retained for
+          historical addressability.
       (18) (only when `hooks_settings_path` is given) HOOKS RECONCILE,
           restart-based (#70) — Claude Code snapshots its hook set once at
           process START and never re-reads it, so a hook deployed into
@@ -7572,9 +6910,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `Goal set:` marker older than `GOAL_REARM_MAX_DARK_S` since it was
           last confirmed lit is never revived at all (#101); a `Goal cleared:`
           newer than the last `Goal set:` is a deliberate shutdown and is
-          never touched. Runs LAST so jobs 14/15/17 get first crack at the
-          same pane, and skips any sid they compacted this sweep (`handled`)
-          or that holds an outstanding shared claim (#78).
+          never touched. Runs LAST so job 14 (and, until REMOVED #102, jobs
+          15/17) gets first crack at the same pane, and skips any sid it
+          compacted this sweep (`handled`) or that holds an outstanding
+          shared claim (#78).
           When `goal_templates_path` is ALSO given, the same job carries a
           THIRD shape — STALE TEMPLATE (#64): `/goal` reads the autopilot
           template once, at arm time, so a template change pushed to the
@@ -8327,10 +7666,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         except Exception as e:
             logs.append("burn-snapshot error: %r" % (e,))
 
-    # #69 — shared per-sweep set: job 14 and job 15 record every sid they
-    # actually compact THIS sweep so job 17 (hard-ceiling backstop, below)
-    # never races a second /compact into the same pane. See job 17's own
-    # docstring / section comment for the full rationale.
+    # #69 — shared per-sweep set: job 14 records every sid it actually
+    # compacts THIS sweep. Originally also fed job 15/17 (both REMOVED,
+    # #102) to keep them from double-firing on the same pane; job 14 is now
+    # this module's only /compact sender that populates it, and job 20
+    # still reads it (a session just compacted this sweep is not safe for
+    # a fresh keystroke burst either).
     compact_handled_this_sweep = set()
 
     # Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c): only when
@@ -8350,18 +7691,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         except Exception as e:
             logs.append("compact-request error: %r" % (e,))
 
-    # Job 15 — COMPACT OVERGROWN IDLE SESSIONS (#39/#43 follow-up): ALWAYS
-    # wired (no gating param — same "always on" shape as job 9's
-    # goal_autoarm), since it depends on nothing external. Closes the gap
-    # job 14 leaves open for a long-lived session that never reports a
-    # completed-ticket boundary. Best-effort.
-    try:
-        logs += compact_stale_context(now, run, state, dry_run=dry_run,
-                                      projects_dir=projects_dir, sleep_fn=sleep_fn,
-                                      send_fn=send_fn,
-                                      handled=compact_handled_this_sweep)
-    except Exception as e:
-        logs.append("compact-stale error: %r" % (e,))
+    # Job 15 — REMOVED (#102, 2026-07-27). Used to fire /compact off context
+    # size + idle duration alone; see run_once's own docstring paragraph
+    # (15) and the removed section comment above `_pane_compacting`.
 
     # Job 16 — HOURLY FLEET BURN (#55): only when `fleet_fetch` is given
     # (cmd_watchdog wires this ONLY on the coordinator, dev1 — every other
@@ -8391,20 +7723,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         except Exception as e:
             logs.append("burn-alert error: %r" % (e,))
 
-    # Job 17 — HARD CONTEXT CEILING BACKSTOP (#69): ALWAYS wired (no gating
-    # param — same "always on" shape as job 9's goal_autoarm and job 15
-    # itself), since it depends on nothing external. Runs LAST so job 14's
-    # ticket-boundary send (this same sweep, reusing the initial
-    # `panes_by_sid` capture) and job 15's idle-based send both get first
-    # crack; `_pane_compacting` + the per-session state machine keep this
-    # job from double-firing on a session either of them already handled.
-    # Best-effort.
-    try:
-        logs += compact_hard_ceiling(now, run, state, dry_run=dry_run,
-                                     projects_dir=projects_dir, send_fn=send_fn,
-                                     handled=compact_handled_this_sweep)
-    except Exception as e:
-        logs.append("compact-ceiling error: %r" % (e,))
+    # Job 17 — REMOVED (#102, 2026-07-27). Used to fire /compact off a fixed
+    # context ceiling alone, regardless of idle duration; see run_once's own
+    # docstring paragraph (17) and the removed section comment above
+    # `_pane_compacting`.
 
     # Job 20 — GOAL RE-ARM BACKSTOP (#76): only when `goal_rearm_enabled` is
     # truthy (cmd_watchdog passes True) — same "wired = on" convention as
