@@ -112,6 +112,55 @@ class TestCleanMessagesArePassedThrough(TestCase):
         self.assertFalse(warned(r))
 
 
+class TestMentionOfBannedPhrasesDoesNotBlock(TestCase):
+    """#96: right after #92 turned this family HARD, the gate blocked a
+    supervisor STATUS message that merely REFERRED to the rule -- it
+    enumerated the newly-blocked phrases while describing what the hook now
+    does, offering no bypass to anyone. Third occurrence of the same
+    classifier-blindness class as #80 (heredoc body read as a command) and
+    #91 (a comment body describing a trigger table read as the trigger
+    itself): the classifier could not tell USE from MENTION.
+
+    A mention carries a stable signal a genuine bare-sentence OFFER never
+    has: the phrase sits in backticks, a fenced code block, or a quoted
+    span. GREEN must not open a hole -- TestUnambiguousBypassIsHardBlocked
+    above (bare, unquoted sentences) must keep blocking unchanged."""
+
+    def test_status_message_describing_the_hook_does_not_block(self):
+        msg = ("Just shipped #92: the Stop hook now HARD-blocks the "
+               "unambiguous bypass family -- `admin-merge`, `bypass branch "
+               "protection`, `merge despite X`, `functionally ready`, "
+               "`UNSTABLE ... merge`. Ambiguous delegation phrases like "
+               "`your call` stay soft warnings.")
+        r = run(msg)
+        self.assertFalse(blocked(r), f"a description must not block: {r.stdout}")
+
+    def test_quoted_mention_does_not_block(self):
+        msg = ('Reviewed the module and confirmed it no longer claims '
+               '"merge despite the failing check" is an acceptable option -- '
+               'the whole "admin-merge" family is documented as banned.')
+        r = run(msg)
+        self.assertFalse(blocked(r), f"a quoted mention must not block: {r.stdout}")
+
+    def test_fenced_code_block_mention_does_not_block(self):
+        msg = ("Here is the exact regex branch that fires:\n"
+               "```\nif echo \"$MSG\" | grep -qiE \"admin.?merge|merge "
+               "despite\"; then\n```\nNo bypass is being proposed here.")
+        r = run(msg)
+        self.assertFalse(blocked(r), f"a fenced-code mention must not block: {r.stdout}")
+
+    def test_bare_unquoted_offer_still_hard_blocks(self):
+        # the exact non-negotiable: GREEN must never widen the gate itself
+        r = run("All gates green except codecov. I'll admin-merge it.")
+        self.assertTrue(blocked(r), "a genuine bare offer must still block")
+
+    def test_all_unambiguous_cases_still_block_unchanged(self):
+        for msg in TestUnambiguousBypassIsHardBlocked.CASES:
+            with self.subTest(msg=msg):
+                r = run(msg)
+                self.assertTrue(blocked(r), f"regressed: {msg!r}\n{r.stdout}")
+
+
 class TestModuleClaimMatchesReality(TestCase):
     def test_module_no_longer_claims_the_whole_family_is_hard(self):
         t = MODULE.read_text(encoding="utf-8")
