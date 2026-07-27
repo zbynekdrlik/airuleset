@@ -32,6 +32,7 @@ import sys
 import time
 import unittest
 import unittest.mock as m
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -66,10 +67,26 @@ PANE_BUSY = CONV + FOOTER_DARK.replace("❯ \n", "✳ Baking… (2m · esc to in
 PANE_DRAFT = CONV + FOOTER_DARK.replace("❯ \n", "❯ rozpisany draft\n")
 
 
-def marker_entry(kind, payload, ts="2026-07-26T12:54:10.000Z"):
+def _iso(epoch):
+    """An ISO-8601 UTC timestamp string in the exact shape CC writes, for a
+    given epoch — lets a test place a marker a controlled distance from
+    whatever `now` it drives the sweep with (#101's staleness gate)."""
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def marker_entry(kind, payload, ts=None):
     """The EXACT shape CC writes a /goal marker as — a TOP-LEVEL `user` entry
     whose `.message.content` is a plain STRING (verified live against this
-    repo's own session transcript)."""
+    repo's own session transcript).
+
+    `ts` defaults to the REAL current wall clock (never a fixed calendar
+    date) — #101's staleness gate compares a marker's own embedded timestamp
+    against real elapsed time, so a hardcoded date would silently drift into
+    "stale" as the test suite ages past it. Tests exercising that gate itself
+    pass an explicit `ts` (via `_iso`) anchored to their own synthetic `now`."""
+    if ts is None:
+        ts = _iso(time.time())
     body = "<local-command-stdout>Goal %s: %s</local-command-stdout>" % (
         kind, payload)
     return {"type": "user", "timestamp": ts, "message": {"content": body}}
@@ -502,6 +519,112 @@ class TestGoalRearmBounded(GoalRearmBase):
                         cap_seq=self._typed_seq())
         self.assertTrue(t.typed(),
                         "a session that dies again hours later must be healed")
+
+
+class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
+    """#101 live incident (dev2, 2026-07-27): two `deliver_with_stash`
+    refusals in a row — both `stash-abort: not idle-with-draft`, neither ever
+    sent a single keystroke — permanently gave the backstop up for the whole
+    2h streak window, even though the only real obstacle (a foreign draft
+    sitting unsent) clears itself the moment it's submitted or cleared. A
+    refusal that never touched the pane must be retried forever, not counted
+    toward the cap; only a refusal that actually typed something and failed
+    to verify is a real attempt."""
+
+    def _stub(self, reason):
+        def _fake(pid, text, run, captured=None, logs=None):
+            if isinstance(logs, list):
+                logs.append(reason)
+            return False
+        return m.patch.object(wd, "deliver_with_stash", side_effect=_fake)
+
+    def test_pre_send_refusal_is_never_a_counted_attempt(self):
+        state = {}
+        now = time.time()
+        with self._stub("stash-abort: not idle-with-draft"):
+            for i in range(wd.GOAL_REARM_MAX_ATTEMPTS + 3):
+                t, logs = self._go(PANE_DRAFT, state=state, now=now + i * 5,
+                                   cap_seq=[PANE_DRAFT])
+                self.assertFalse(t.typed())
+                self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs),
+                                logs)
+        self.assertEqual(self.pings, [],
+                         "a transient pre-send refusal must never trip the "
+                         "give-up ping, however many sweeps it recurs on")
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec.get("n", 0), 0,
+                         "a pre-send refusal must not consume the attempt cap")
+
+    def test_draft_clearing_still_delivers_after_repeated_refusals(self):
+        state = {}
+        now = time.time()
+        with self._stub("stash-abort: not idle-with-draft"):
+            for i in range(wd.GOAL_REARM_MAX_ATTEMPTS + 1):
+                self._go(PANE_DRAFT, state=state, now=now + i * 5,
+                        cap_seq=[PANE_DRAFT])
+        # the draft is gone now (submitted or cleared elsewhere) -> a real
+        # bare-box delivery, unaffected by the earlier transient refusals
+        t, logs = self._go(PANE_DARK, state=state, now=now + 1000,
+                           cap_seq=self._typed_seq())
+        self.assertTrue(t.typed(), logs)
+
+    def test_post_send_refusal_still_counts_and_gives_up(self):
+        state = {}
+        now = time.time()
+        with self._stub("stash-abort: type-verify-failed"):
+            for i in range(wd.GOAL_REARM_MAX_ATTEMPTS):
+                t, _ = self._go(PANE_DRAFT, state=state,
+                                now=now + i * (wd.GOAL_REARM_CONFIRM_S + 30),
+                                cap_seq=[PANE_DRAFT])
+                self.assertFalse(t.typed(), "attempt %d" % i)
+            late = (now
+                   + wd.GOAL_REARM_MAX_ATTEMPTS * (wd.GOAL_REARM_CONFIRM_S + 30))
+            t, logs = self._go(PANE_DRAFT, state=state, now=late,
+                               cap_seq=[PANE_DRAFT])
+        self.assertFalse(t.typed())
+        self.assertTrue(any("GAVE UP" in ln.upper() for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+
+class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
+    """#101 live incident (dev2, 2026-07-27): the last `Goal set:` marker on
+    record was 3 days old, from an already-closed autopilot run — and this
+    job tried to type that dead payload into whatever the pane was now being
+    used for. The natural-completion viewport check only protects a RECENT
+    death (days of conversation scroll `✔ Goal achieved` out of view), so a
+    marker this old — never recently confirmed armed — must never be
+    revived at all."""
+
+    def test_marker_older_than_the_bound_is_skipped(self):
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", PAYLOAD, old_ts)],
+                              now=base)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("skip stale-goal" in ln for ln in logs), logs)
+
+    def test_marker_within_the_bound_is_revived_normally(self):
+        base = time.time()
+        fresh_ts = _iso(base - 60)
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", PAYLOAD, fresh_ts)],
+                              now=base, cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+
+    def test_a_goal_confirmed_armed_recently_overrides_an_old_marker_ts(self):
+        # the goal was legitimately alive off one old arm and only just went
+        # dark THIS sweep — `last_armed` (this job's own most recent sighting
+        # of the lit indicator), not the marker's raw age, is what decides
+        # whether a fresh death is genuine.
+        state = {}
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, old_ts)],
+                 state=state, now=base)
+        tmux, logs = self._go(PANE_DARK, state=state, now=base + 60,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
 
 
 class TestLongPasteVerification(GoalRearmBase):
