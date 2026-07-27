@@ -3970,6 +3970,184 @@ def mark_compact_delivered(session, msg_hash, path=None):
 
 
 # --------------------------------------------------------------------------- #
+# #99 (2026-07-27 live incident) — SUBSTANTIALITY GATE. The #48 context-size
+# gate (COMPACT_BOUNDARY_MIN_CONTEXT, above) answers "is compacting worth it
+# size-wise", not "did real work actually happen this boundary" — a
+# long-running session's context climbs past 200K from ordinary back-and-forth
+# regardless of whether any given turn did anything durable, so once a
+# session is big enough EVERY completed-ticket-shaped turn (a one-line
+# answer, filing a single ticket) also compacts. Live proof: user wrote
+# "sprav ticket", Claude filed #602 and ended `✅ DONE:` — nothing was
+# committed, merged, or deployed, yet `/compact` fired.
+#
+# A ticket boundary's durable state lives in git (the whole point of
+# `notify-compact-request.sh`'s design comment: "whatever /compact discards
+# AT THAT boundary is genuinely disposable" — true only when something was
+# actually committed). So the signal this gate reads is COMMITS in the
+# session's own `cwd` git repo, counted from an ANCHOR forward:
+#   - the last time THIS repo actually had `/compact` delivered through this
+#     gate (persisted in `compact-substantiality.json`, updated by
+#     `mark_compact_boundary` on every real send), or
+#   - failing that (first boundary ever seen for this repo), this SESSION's
+#     own start time (its transcript's first timestamped entry) — never
+#     "always permissive on first sight", or a repo that has literally never
+#     had a real ticket done in it would compact on its very first trivial
+#     Q&A turn.
+#
+# Exactly like the #48 context gate, this only ever BLOCKS on a POSITIVELY
+# CONFIRMED zero-commits measurement — an unmeasurable case (cwd is not a
+# git repo, git unavailable, no resolvable anchor) returns None and the
+# caller falls through to the pre-#99 behavior (context gate only), never a
+# block on "we don't know".
+# --------------------------------------------------------------------------- #
+
+
+def compact_substantiality_path():
+    """`~/.claude/compact-substantiality.json` — {cwd: last_boundary_ts}, the
+    per-repo anchor `compact_boundary_substantial` counts commits FROM.
+    Resolved at CALL time, never a frozen module-level constant (matches
+    every other compact-* path helper here)."""
+    return Path.home() / ".claude" / "compact-substantiality.json"
+
+
+def _load_compact_substantiality(path=None):
+    path = path or compact_substantiality_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_compact_substantiality(d, path=None):
+    path = path or compact_substantiality_path()
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def mark_compact_boundary(cwd, now=None, path=None):
+    """Record that a REAL `/compact` just fired for `cwd`'s repo, at `now`
+    (default: current time) — the anchor the NEXT substantiality check
+    counts commits from. A blank `cwd` is a no-op. Fail-safe (never
+    raises). Returns True on success."""
+    cwd = str(cwd or "").strip()
+    if not cwd:
+        return False
+    now = time.time() if now is None else now
+    d = _load_compact_substantiality(path)
+    d[cwd] = float(now)
+    return _save_compact_substantiality(d, path)
+
+
+def _session_start_ts(tpath, head_bytes=200_000):
+    """Epoch of the FIRST timestamped entry in the transcript at `tpath` —
+    this session's own start time, the fallback anchor for a repo that has
+    never had a `/compact` boundary recorded yet. Reads only the HEAD of
+    the file (a session's opening entries), not the whole transcript. None
+    when the file can't be read or carries no timestamped entry in that
+    head window."""
+    try:
+        with open(tpath, "rb") as f:
+            raw = f.read(head_bytes)
+    except OSError:
+        return None
+    from datetime import datetime
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict):
+            continue
+        t = e.get("timestamp")
+        if not t:
+            continue
+        try:
+            return datetime.fromisoformat(
+                str(t).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+    return None
+
+
+def _last_boundary_ts(cwd, sid, projects_dir=None, path=None):
+    """The anchor `compact_boundary_substantial` counts commits SINCE: the
+    persisted last-real-boundary time for `cwd` if one exists, else this
+    session's own start time (via its transcript), else None
+    (unmeasurable — no anchor could be resolved at all)."""
+    d = _load_compact_substantiality(path)
+    ts = d.get(str(cwd or "").strip())
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    projects_dir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(projects_dir, sid, cwd)
+    if tpath is None:
+        return None
+    return _session_start_ts(tpath)
+
+
+def _default_git_run(argv, timeout=10):
+    import subprocess
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=timeout)
+        if r.returncode != 0:
+            return None
+        return r.stdout
+    except Exception:
+        return None
+
+
+def _git_commit_count_since(cwd, since_ts, git_run=None):
+    """Count commits reachable from HEAD in `cwd`'s repo with commit date
+    on/after `since_ts` (epoch). None (unmeasurable) when `cwd`/`since_ts`
+    is missing, `cwd` is not a git repo, or `git` itself is unavailable —
+    NEVER a reason to block, only a reason to defer to the caller's
+    pre-#99 fallback. An int (possibly 0) on a successful git call."""
+    if not cwd or since_ts is None:
+        return None
+    from datetime import datetime, timezone
+    git_run = git_run or _default_git_run
+    since_iso = datetime.fromtimestamp(
+        float(since_ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = git_run(["git", "-C", str(cwd), "rev-list", "--count",
+                   "--since=" + since_iso, "HEAD"])
+    if out is None:
+        return None
+    out = out.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
+                                 git_run=None):
+    """#99 — did real work (>=1 commit) land in `cwd`'s repo since the
+    substantiality anchor (see `_last_boundary_ts`)? Returns True (>=1
+    commit — a genuine boundary), False (0 commits measured — NOT a
+    boundary, e.g. a bare Q&A turn or a single filed ticket with no code
+    change), or None (unmeasurable — not a git repo, git unavailable, or no
+    anchor resolvable — caller must treat this exactly like "don't know",
+    never as a block)."""
+    since = _last_boundary_ts(cwd, sid, projects_dir=projects_dir, path=path)
+    if since is None:
+        return None
+    n = _git_commit_count_since(cwd, since, git_run=git_run)
+    if n is None:
+        return None
+    return n >= 1
+
+
+# --------------------------------------------------------------------------- #
 # #78 (2026-07-26 live incident) — SHARED /compact CLAIM, generalizing #72's
 # job-17-only QUEUED/CONSUMED/FAILED state machine to EVERY sender.
 #
@@ -4345,7 +4523,8 @@ def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
 
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                             path=None, projects_dir=None, min_context=None,
-                            send_fn=None, handled=None, delivered_path=None):
+                            send_fn=None, handled=None, delivered_path=None,
+                            git_run=None):
     """Job 14 — see the section comment. `state` is used ONLY for #67's
     stash-skip counter (`compact_stash_skips`) — this job's own request
     dedup still lives entirely in the requests file, not in
@@ -4466,6 +4645,20 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if kind == "busy":
             logs.append("skip busy (compact-request) %s" % loc)
             continue
+        # #99 — did REAL work (>=1 commit) happen since the last genuine
+        # boundary for this repo? A positively-confirmed zero drops the
+        # request outright, regardless of context size. Unmeasurable falls
+        # through unchanged to the #48 context gate below.
+        substantial = compact_boundary_substantial(cwd, sid, projects_dir=pdir,
+                                                    git_run=git_run)
+        if substantial is False:
+            logs.append("skip no-work (compact-request) %s" % loc)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
+            continue
         # #48 — read the FRESHEST context right before deciding anything else
         # (it may have grown since the Stop hook recorded the request); a
         # session with no resolvable transcript is unmeasurable, so it does
@@ -4517,6 +4710,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 if mhash:
                     mark_compact_delivered(sid, mhash, path=delivered_path)
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
+                mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
                 logs.append("OK (compact-request, stash) %s" % loc)
             else:
                 logs.append("skip draft (stash occupied) %s: %r"
@@ -4536,6 +4730,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if mhash:
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
+        mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
         logs.append("OK (compact-request) %s" % loc)
     if changed:
         _save_compact_requests(reqs, path)
@@ -4588,7 +4783,8 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
     return matches[0] if len(matches) == 1 else None
 
 
-def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None):
+def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
+                        git_run=None):
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
 
@@ -4647,6 +4843,17 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
         # finally drains. The queued one IS the handling.
         _log_compact_sync("SKIP queued-compact sid=%s cwd=%s" % (sid, cwd))
         return True
+    # #99 — did REAL work (>=1 commit) actually happen since the last
+    # genuine boundary for this repo? A positively-confirmed zero drops the
+    # request outright — a bare Q&A turn or a single filed ticket is not a
+    # safe/worthwhile compaction boundary, no matter how large the context
+    # has grown. Unmeasurable (not a git repo, no anchor) falls through to
+    # the pre-#99 behavior below, unchanged.
+    substantial = compact_boundary_substantial(cwd, sid, projects_dir=projects_dir,
+                                                git_run=git_run)
+    if substantial is False:
+        _log_compact_sync("DROP no-work sid=%s cwd=%s" % (sid, cwd))
+        return True   # #99 gate: nothing durable happened — handled, drop it
     # kind is "input" (bare, or the queued-messages placeholder already
     # normalized to bare) or "busy" — BOTH are safe to send into here (see
     # the section comment: a short send-keys queues reliably even on a busy
@@ -4664,6 +4871,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None)
         return True   # #48 gate: nothing worth compacting — handled, drop it
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
+    mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
     _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
     return True
 
