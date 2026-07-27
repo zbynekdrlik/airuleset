@@ -5,8 +5,8 @@ set -euo pipefail
 #
 # The ❓ device ping delivers the final contiguous question block to the
 # user's phone (notify-discord-pending.sh), and a Discord REPLY to it is typed
-# back into this session (watchdog job 7). Two live failures this gate kills
-# (user, 2026-07-05, after the block-delivery fix):
+# back into this session (watchdog job 7). Three live failures this gate kills
+# (user, 2026-07-05 + 2026-07-25, after the block-delivery fix):
 #   1. NO ÚVOD — a question block with no briefing ("Po zmazaní hneď overím…"
 #      — deleting WHAT? which project? why?). The reader is on a phone with
 #      ZERO terminal context; user-questions-slovak.md mandates the briefing,
@@ -16,6 +16,13 @@ set -euo pipefail
 #      Discord-reply routing: the reply lands in the session as ONE prompt and
 #      nobody knows which sub-question it answers. ONE ping = ONE decision;
 #      ask the NEXT question after the first answer arrives.
+#   3. HISTORY ALLUSION (#45) — a still-unanswered question, after an
+#      intervening conversation, referenced by allusion ("pýtal som sa skôr",
+#      "jediné otvorené rozhodnutie je X") instead of restated in full. This is
+#      DIFFERENT from the VERBATIM-repeat re-poke bypass below (no user input
+#      since the last ask) — anything reaching Check 5 already failed that
+#      bypass, so it is either a genuinely new ask or a lazy reference to an
+#      old one; user-questions-slovak.md mandates the full block either way.
 #
 # Required shape of the delivered block (user-questions-slovak.md):
 #   **Otázka — projekt <meno> (<čo projekt robí>):** <čo sa deje — 2–4 vety>
@@ -221,6 +228,25 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 5 — never reference an old unanswered question by ALLUSION instead of
+# restating it (#45). The VERBATIM-repeat bypass above already exits for the
+# ONE legitimate case that reuses old wording (a re-poke with no user input
+# since the last ask) — so anything still reaching this check is a genuinely
+# NEW ask, and a shorthand reference here means the model skipped restating
+# the full question after an intervening conversation. Banned Slovak
+# referencing phrases (user-questions-slovak.md), all rewordings apply.
+if [ -z "$VIOLATION" ]; then
+    if printf '%s' "$BLOCK" | grep -qiE \
+        '(p[ýy]tal[a]?[[:space:]]+som[[:space:]]+sa[[:space:]]+(sk[ôo]r|u[žz]|vy[šs][šs]ie))'\
+'|(ako[[:space:]]+som[[:space:]]+(sa[[:space:]]+)?(u[žz][[:space:]]+)?(p[ýy]tal|spom[íi]nal|p[íi]sal|uviedol))'\
+'|(vr[áa][ťt].{0,12}(sa[[:space:]]+)?k[[:space:]].{0,20}ot[áa]zke)'\
+'|(st[áa]le[[:space:]]+[čc]ak[áa]m[[:space:]]+na[[:space:]]+odpove[ďd])'\
+'|(ot[áa]zka.{0,40}st[áa]le[[:space:]]+plat[íi])'\
+'|(jedin[éy][[:space:]]+otvoren[ée][[:space:]]+rozhodnutie[[:space:]]+je)'; then
+        VIOLATION="reference"
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -233,6 +259,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ briefing is a wall of text (${BRIEF_LEN:-?} > 600 chars before the options). Úvod = 2–4 KRÁTKE vety; technical detail belongs in the ticket, not the phone ping.${TEMPLATE}" ;;
         options)
             REASON="Your ❓ question has no option bullets (odrážky). Add '• <možnosť> (odporúčam) — <dôsledok>' lines; an open question offers candidates + '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
+        reference)
+            REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
