@@ -1,0 +1,236 @@
+diff --git a/hooks/block-main-implementation.sh b/hooks/block-main-implementation.sh
+index bf53609..1e14d9e 100755
+--- a/hooks/block-main-implementation.sh
++++ b/hooks/block-main-implementation.sh
+@@ -413,6 +413,107 @@ def strip_heredocs(text):
+ 
+ cmd = strip_heredocs(cmd)
+ 
++# #88: `$( … )` / `` ` … ` `` command substitutions are INVISIBLE to the
++# statement segmentation below, so a substitution whose own pipeline reducer
++# happens to land on its own line (an ordinary long `curl | grep` wrapping
++# style — 1/687 in the #80 gk replay) gets its reducer sliced off as its OWN
++# top-level statement and blocked, even though the substitution as a whole
++# is a cheap single-value read. Fix, mirroring `bash -c '...'`'s existing
++# recursion: mask each substitution span with a neutral placeholder BEFORE
++# segmentation (so its internal `;`/`|`/newline can never corrupt the OUTER
++# split), then recursively classify() the extracted inner text with the
++# SAME pipeline rules — a substitution hiding a genuine bulk read
++# (`X=$(cat bigfile)`) is still caught. Quote/backslash-aware, paren-depth
++# aware for nesting (`$(echo $(date))`); an unterminated span is left as-is
++# rather than crashing, same fallback style as strip_heredocs above.
++_CMDSUB_PLACEHOLDER = "AIRULESETCMDSUB%d"
++
++
++def mask_command_substitutions(text):
++    out = []
++    inner_scripts = []
++    i, n = 0, len(text)
++    in_sq = in_dq = False
++    while i < n:
++        c = text[i]
++        if in_sq:
++            out.append(c)
++            in_sq = c != "'"
++            i += 1
++            continue
++        if in_dq:
++            if c == '\\' and i + 1 < n:
++                out.append(text[i:i + 2])
++                i += 2
++                continue
++            out.append(c)
++            if c == '"':
++                in_dq = False
++            i += 1
++            continue
++        if c == "'":
++            in_sq = True
++            out.append(c)
++            i += 1
++            continue
++        if c == '"':
++            in_dq = True
++            out.append(c)
++            i += 1
++            continue
++        if c == '\\' and i + 1 < n:
++            out.append(text[i:i + 2])
++            i += 2
++            continue
++        if c == '$' and i + 1 < n and text[i + 1] == '(':
++            j = i + 2
++            depth = 1
++            isq = idq = False
++            while j < n and depth > 0:
++                cj = text[j]
++                if isq:
++                    isq = cj != "'"
++                elif idq:
++                    if cj == '\\' and j + 1 < n:
++                        j += 1
++                    elif cj == '"':
++                        idq = False
++                elif cj == "'":
++                    isq = True
++                elif cj == '"':
++                    idq = True
++                elif cj == '\\' and j + 1 < n:
++                    j += 1
++                elif cj == '(':
++                    depth += 1
++                elif cj == ')':
++                    depth -= 1
++                j += 1
++            if depth == 0:
++                inner_scripts.append(text[i + 2:j - 1])
++                out.append(_CMDSUB_PLACEHOLDER % (len(inner_scripts) - 1))
++                i = j
++                continue
++            out.append(c)          # unterminated — leave as-is
++            i += 1
++            continue
++        if c == '`':
++            j = i + 1
++            while j < n and text[j] != '`':
++                j += 2 if text[j] == '\\' and j + 1 < n else 1
++            if j < n:
++                inner_scripts.append(text[i + 1:j])
++                out.append(_CMDSUB_PLACEHOLDER % (len(inner_scripts) - 1))
++                i = j + 1
++                continue
++            out.append(c)          # unterminated — leave as-is
++            i += 1
++            continue
++        out.append(c)
++        i += 1
++    return "".join(out), inner_scripts
++
++
+ # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
+ # separators, quote-aware tokenization per segment. A segment that matches
+ # neither list is left ambiguous (never classified) — the caller treats an
+@@ -429,6 +530,23 @@ cmd = strip_heredocs(cmd)
+ STATEMENTS_RE = re.compile(r'&&|\|\||[;&]|\n')
+ SEGMENTS_RE = STATEMENTS_RE          # kept: same shape name used elsewhere
+ 
++# #88: a bare trailing `|` at the end of a raw split fragment is a PIPELINE
++# CONTINUING onto the next line, never a real statement boundary (that's
++# exactly how bash itself parses a pipe followed by a newline) — the
++# fragment after it is the reducer stage of the SAME pipeline, not a fresh
++# statement. `||` can never appear here since STATEMENTS_RE already consumes
++# it whole. Rejoin with a plain space; downstream tokenization treats
++# newlines and spaces identically anyway.
++def split_statements(text):
++    raw = STATEMENTS_RE.split(text)
++    merged = []
++    for seg in raw:
++        if merged and merged[-1].rstrip().endswith("|"):
++            merged[-1] = merged[-1].rstrip() + " " + seg.lstrip()
++        else:
++            merged.append(seg)
++    return merged
++
+ ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+ 
+ # #73: `do`/`then`/`else`/`elif` are the loop/conditional-BODY leaders left
+@@ -699,7 +817,8 @@ def first_pipe_stage(statement):
+ 
+ 
+ def classify(text):
+-    for statement in STATEMENTS_RE.split(text):
++    masked, subs = mask_command_substitutions(text)
++    for statement in split_statements(masked):
+         seg = first_pipe_stage(statement)
+         tk = strip_prefix(tokens_of(seg))
+         script = shell_dash_c_script(tk)
+@@ -712,6 +831,14 @@ def classify(text):
+             continue
+         if is_blocked_segment(tk):
+             return " ".join(tk[:3]) if tk else seg.strip()
++    # #88: a `$( … )` / `` ` … ` `` substitution's own pipeline is judged
++    # with the SAME first-pipe-stage rule, recursively — a substitution
++    # hiding a genuine bulk read still blocks even though its outer
++    # statement (now just a placeholder token) classified as ambiguous.
++    for inner_script in subs:
++        inner = classify(inner_script)
++        if inner:
++            return inner
+     return None
+ 
+ 
+diff --git a/tests/test_main_implementation_guard.py b/tests/test_main_implementation_guard.py
+index 2a0feec..17e611d 100644
+--- a/tests/test_main_implementation_guard.py
++++ b/tests/test_main_implementation_guard.py
+@@ -722,6 +722,70 @@ class PipeReducers80(unittest.TestCase):
+         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+ 
+ 
++class CommandSubstitution88(unittest.TestCase):
++    """#88, found replaying gk's real commands under #80: the classifier
++    segments a command into statements (`;`/`&&`/`||`/`&`/newline) and
++    never looks INSIDE a `$( … )` (or backtick) command substitution first —
++    so a substitution whose own pipeline happens to break across a line
++    (a completely ordinary style for a long `curl | grep` health-check
++    one-liner) gets its reducer stage sliced off as its OWN top-level
++    statement and blocked, even though the substitution as a whole is a
++    cheap, single-value read. 1 of 687 real gk commands (0.15%) — rare, but
++    exactly the false-positive shape that killed #66 for 17 hours in #80.
++
++    Fix: mask `$( … )` / `` ` … ` `` spans before segmentation (so their
++    internal separators can never corrupt the OUTER statement split), then
++    classify each extracted span recursively with the SAME pipeline rules
++    (first-pipe-stage-only) the `bash -c '...'` branch already reuses — so
++    a substitution hiding a genuine bulk read is still blocked."""
++
++    def _armed(self, command, **kw):
++        helper = MainImplementationGuard()
++        return helper._run(tool="Bash", command=command,
++                           transcript_text=goal_armed_transcript(), **kw)
++
++    def test_reducer_inside_command_substitution_allowed(self):
++        # the pipe's reducer stage lands on its own LINE inside $( … ) — a
++        # completely ordinary long-curl-pipeline wrapping style.
++        out = self._armed(
++            "VERSION=$(curl -s https://erp.montalu.sk/web/health |\n"
++            "  grep -oP '(?<=\"version\": \")[0-9.]+')")
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_real_health_check_corpus_shape_allowed(self):
++        # the exact gk shape from #88's ticket: a liveness loop plus a
++        # trailing version extraction whose $( … ) wraps a curl|grep.
++        command = r"""echo "=== liveness ==="
++for u in https://erp.montalu.sk/web/health https://erp.montalu.sk/web/database/selector; do
++  printf "%s -> %s\n" "$u" "$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$u")"
++done
++printf "version -> %s\n" "$(curl -s https://erp.montalu.sk/web/health |
++  grep -oP '(?<="version": ")[0-9.]+')"
++"""
++        out = self._armed(command)
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_backtick_reducer_split_across_lines_allowed(self):
++        out = self._armed(
++            "VERSION=`curl -s https://erp.montalu.sk/web/health |\n"
++            "  grep -oP '(?<=\"version\": \")[0-9.]+'`")
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_bulk_read_inside_command_substitution_still_blocks(self):
++        # a genuine bulk read hidden inside $( … ) must still be caught —
++        # the fix must not turn command substitution into a blanket escape.
++        out = self._armed("X=$(cat models19.py)")
++        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
++
++    def test_bulk_read_inside_backtick_still_blocks(self):
++        out = self._armed("X=`cat models19.py`")
++        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
++
++    def test_bulk_read_as_the_first_stage_inside_substitution_still_blocks(self):
++        out = self._armed("X=$(grep -rn 'TODO' . | head -20)")
++        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
++
++
+ class BoundedPeeks80(unittest.TestCase):
+     """#80, found by replaying all 687 of gk's real main-agent Bash commands
+     through the hook: after the heredoc and pipe-stage fixes the remaining

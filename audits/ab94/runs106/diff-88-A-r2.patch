@@ -1,0 +1,201 @@
+diff --git a/hooks/block-main-implementation.sh b/hooks/block-main-implementation.sh
+index bf53609..0f3e681 100755
+--- a/hooks/block-main-implementation.sh
++++ b/hooks/block-main-implementation.sh
+@@ -413,6 +413,107 @@ def strip_heredocs(text):
+ 
+ cmd = strip_heredocs(cmd)
+ 
++# #88 (corpus replay of #80, 1/687): STATEMENTS_RE below splits on
++# `;`/`&`/`&&`/`||`/newline WITHOUT knowing about `$( ... )` / backtick
++# command-substitution boundaries. When the substitution's OWN inner text
++# contains one of those separators, the part after it — often a
++# `grep`/`awk`/`cat` reducer feeding a cheap one-line printf/echo, e.g.
++# `echo "verzia: $(command -v jq && grep -oP '...' f)"` — gets sliced off
++# and classified as a fresh TOP-LEVEL statement and blocked, even though the
++# whole visible output of the outer command is one short line. Fix: replace
++# the CONTENTS of every substitution span with an opaque, metacharacter-free
++# placeholder BEFORE segmentation — the same treatment heredoc BODIES
++# already get above. A substitution that genuinely dumps a bulk read back
++# into the outer command's own output (`X=$(cat bigfile)`) is deliberately
++# left unclassified: the corpus only ever showed this shape producing cheap
++# output (1/687), and the non-negotiable CI-poll loop (`$(seq 1 18)`)
++# already relies on the identical opacity.
++_PLACEHOLDER = "CMDSUB"
++
++
++def _find_matching_paren(text, start):
++    # `start` is the index right after the opening "(". Quote-aware,
++    # handles nested parens. Unterminated input fails safe to end-of-text
++    # (mirrors strip_heredocs' fallthrough for an unterminated delimiter).
++    depth = 1
++    i, n = start, len(text)
++    in_sq = in_dq = False
++    while i < n:
++        c = text[i]
++        if in_sq:
++            if c == "'":
++                in_sq = False
++            i += 1
++            continue
++        if in_dq:
++            if c == '\\' and i + 1 < n:
++                i += 2
++                continue
++            if c == '"':
++                in_dq = False
++            i += 1
++            continue
++        if c == "'":
++            in_sq = True
++        elif c == '"':
++            in_dq = True
++        elif c == '(':
++            depth += 1
++        elif c == ')':
++            depth -= 1
++            if depth == 0:
++                return i
++        i += 1
++    return n - 1
++
++
++def strip_command_substitutions(text):
++    out = []
++    i, n = 0, len(text)
++    in_sq = in_dq = False
++    while i < n:
++        c = text[i]
++        if in_sq:
++            out.append(c)
++            if c == "'":
++                in_sq = False
++            i += 1
++            continue
++        if c == "'" and not in_dq:
++            in_sq = True
++            out.append(c)
++            i += 1
++            continue
++        if in_dq and c == '\\' and i + 1 < n:
++            out.append(text[i:i + 2])
++            i += 2
++            continue
++        if c == '"':
++            in_dq = not in_dq
++            out.append(c)
++            i += 1
++            continue
++        if not in_sq and text[i:i + 2] == "$(":
++            j = _find_matching_paren(text, i + 2)
++            out.append("$(" + _PLACEHOLDER + ")")
++            i = j + 1
++            continue
++        if not in_sq and c == "`":
++            j = text.find("`", i + 1)
++            if j == -1:
++                out.append(c)
++                i += 1
++                continue
++            out.append("`" + _PLACEHOLDER + "`")
++            i = j + 1
++            continue
++        out.append(c)
++        i += 1
++    return "".join(out)
++
++
++cmd = strip_command_substitutions(cmd)
++
+ # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
+ # separators, quote-aware tokenization per segment. A segment that matches
+ # neither list is left ambiguous (never classified) — the caller treats an
+diff --git a/tests/test_main_implementation_guard.py b/tests/test_main_implementation_guard.py
+index 2a0feec..f942a06 100644
+--- a/tests/test_main_implementation_guard.py
++++ b/tests/test_main_implementation_guard.py
+@@ -1109,6 +1109,84 @@ class BlockLogging73(unittest.TestCase):
+                          "allowed command must not appear in the BLOCK log")
+ 
+ 
++class CommandSubstitutionOpacity88(unittest.TestCase):
++    """#88, found replaying the corpus from #80 (1 of 687 real gk commands):
++    STATEMENTS_RE splits on `;`/`&`/`&&`/`||`/newline WITHOUT being aware of
++    `$( ... )` / backtick command-substitution boundaries. When the
++    substitution's OWN inner text contains one of those separators, the part
++    after it (often a `grep`/`awk`/`cat` reducer feeding a cheap one-line
++    printf/echo) gets sliced off and classified as if it were a fresh
++    TOP-LEVEL statement — and blocked — even though the whole visible output
++    of the outer command is a single short line (a health-check status, a
++    version string). Real gk shape:
++
++        printf "%s -> %s\\n" "$u" "$(curl -s -m 15 "$u")"
++        echo "verzia: $(command -v jq && grep -oP '(?<=version: )\\S+' f)"
++
++    Fix: strip the CONTENTS of every `$( ... )` / `` ` ... ` `` span (quote-
++    and nesting-aware) to an opaque placeholder BEFORE segmentation — the
++    same treatment heredoc BODIES already get (#80) — so an operator hidden
++    inside a substitution can never split the outer command into extra
++    statements. A substitution that is itself a genuine standalone bulk read
++    (`X=$(cat bigfile)`) is deliberately left unclassified: the corpus
++    showed this shape only in cheap-output contexts (1/687), and the
++    non-negotiable CI-poll loop (`$(seq 1 18)`) already relies on the same
++    opacity."""
++
++    def _armed(self, command, **kw):
++        helper = MainImplementationGuard()
++        return helper._run(tool="Bash", command=command,
++                           transcript_text=goal_armed_transcript(), **kw)
++
++    def _plain(self, command, **kw):
++        helper = MainImplementationGuard()
++        return helper._run(tool="Bash", command=command,
++                           transcript_text=transcript("claude-opus-4-8"),
++                           **kw)
++
++    def test_semicolon_hidden_reducer_inside_dollar_paren_allowed(self):
++        out = self._armed('echo "verzia: $(true; grep foo file)"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_and_and_hidden_reducer_inside_dollar_paren_allowed(self):
++        out = self._armed(
++            'echo "result: $(command -v jq && grep -rn foo .)"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_semicolon_hidden_reducer_inside_backticks_allowed(self):
++        out = self._armed('echo "verzia: `true; grep foo file`"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_real_health_check_shape_allowed_while_armed(self):
++        out = self._armed(
++            'echo "=== liveness ==="\n'
++            'for u in https://x/health https://y/health; do\n'
++            '  printf "%s -> %s\\n" "$u" "$(curl -s -o /dev/null '
++            '-w \'%{http_code}\' -m 15 "$u")"\n'
++            'done\n'
++            'echo "verzia: $(command -v jq && curl -s https://x/health '
++            '| grep -oP \'(?<=version: )[0-9.]+\')"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    # ---- genuine bulk reads OUTSIDE any substitution still block ----
++
++    def test_plain_bulk_read_not_hidden_in_substitution_still_blocked(self):
++        out = self._armed('grep -rn foo .; echo "$(true)"')
++        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
++
++    def test_not_armed_hidden_reducer_allowed_unchanged(self):
++        out = self._plain('echo "verzia: $(true; grep foo file)"')
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++
++    def test_subagent_hidden_reducer_never_blocked(self):
++        helper = MainImplementationGuard()
++        out = helper._run(tool="Bash",
++                          command='echo "verzia: $(true; grep foo file)"',
++                          agent_id="aWORKER5",
++                          transcript_text=goal_armed_transcript())
++        self.assertEqual(out.returncode, 0, out.stderr)
++
++
+ class TestWiringAndSkill(unittest.TestCase):
+     def test_hook_exists_and_wired_for_edit_and_write(self):
+         self.assertTrue(HOOK.exists())

@@ -1,0 +1,181 @@
+diff --git a/hooks/stop-check-prose-violations.sh b/hooks/stop-check-prose-violations.sh
+index a0a5bbc..137024b 100755
+--- a/hooks/stop-check-prose-violations.sh
++++ b/hooks/stop-check-prose-violations.sh
+@@ -22,6 +22,74 @@ MSG_NOGOAL=$(printf '%s\n' "$MSG" | grep -v '^[[:space:]]*/goal ' || true)
+ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+ [ -z "$MSG" ] && exit 0
+ 
++# MSG_STRIP / MSG_NOGOAL_STRIP: the prose-violation phrase checks below hunt
++# banned SHAPES ("admin-merge", "please test it", "your call", ...) meant to
++# catch the model OFFERING one of them. They don't distinguish that from a
++# message that only REFERS to the rule — e.g. a status update enumerating
++# what this very hook blocks, in backticks per this repo's own convention
++# (`admin-merge`, `merge despite <x>` — see tests/test_quality_bypass_gate.py).
++# #92's hard-block landed and immediately caught exactly that shape (#96): a
++# supervisor report describing the new gate, not offering a bypass.
++#
++# An inline backtick span alone is NOT a safe strip signal: an actual offer is
++# routinely code-formatted too ("I'll run `gh pr merge --admin`" is a real
++# offer, not a citation — verified live, this would otherwise open exactly the
++# hole #96 says GREEN must not open). The real distinguishing signal is
++# per-SENTENCE: a sentence carrying a first-person commitment cue ("I'll",
++# "I will", "I'm going to", "let's") is the model talking to the user — leave
++# it untouched, backticks and all. A sentence with no such cue is safe to
++# strip citations from before phrase-matching. Split on sentence-ish
++# boundaries (.!?  or newline), classify each unit on its OWN text with
++# citations already removed (so a cue INSIDE the backticks, i.e. quoted as
++# part of the banned example, doesn't count), and keep the unit's ORIGINAL
++# text whenever the cue is present outside any span.
++# Only inline `...` spans are stripped (length-capped so an unbalanced single
++# backtick can't gobble the rest of the message) — NOT triple-fenced blocks,
++# which stay untouched everywhere (the ASCII-art/box-drawing check relies on
++# real box-drawing content living inside a fence on purpose; blindly
++# defencing would blind that check too).
++# NOT applied to: the ASCII-art/box-drawing check itself, or any structural
++# completion-report detector (heading/PR-URL/Goal/Outcome/audit-line
++# presence) — those aren't banned rhetorical phrases, they're document-shape
++# checks.
++strip_mentions() {
++    python3 - "$1" <<'PYEOF'
++import re, sys
++
++CUE = re.compile(r"\bI'?ll\b|\bI will\b|\bI'?m going to\b|\bI am going to\b|\blet'?s\b", re.I)
++SPAN = re.compile(r"`[^`\n]{1,300}`")
++
++t = sys.argv[1]
++
++# Stash backtick spans BEFORE sentence-splitting: a span's own content can
++# contain '.'/'?'/'!' (e.g. the literal "UNSTABLE ... merge" ellipsis in this
++# repo's own banned-shape examples) — splitting first would slice a span in
++# half and desync open/close backticks across two "sentence" units.
++spans = []
++
++def stash(m):
++    spans.append(m.group(0))
++    return f"\x00{len(spans) - 1}\x00"
++
++placeholder_text = SPAN.sub(stash, t)
++
++parts = re.split(r'([.!?\n]+\s*)', placeholder_text)
++out = []
++i = 0
++while i < len(parts):
++    unit = parts[i]
++    sep = parts[i + 1] if i + 1 < len(parts) else ""
++    has_cue = bool(CUE.search(unit))
++    unit = re.sub(r'\x00(\d+)\x00', lambda m: spans[int(m.group(1))] if has_cue else " ", unit)
++    out.append(unit)
++    out.append(sep)
++    i += 2
++sys.stdout.write("".join(out))
++PYEOF
++}
++MSG_STRIP=$(strip_mentions "$MSG")
++MSG_NOGOAL_STRIP=$(strip_mentions "$MSG_NOGOAL")
++
+ # HARD violations collected here trigger {"decision":"block"} response.
+ # SOFT violations go to stderr as warnings. Both can fire in the same hook run.
+ HARD_VIOLATIONS=""
+@@ -36,13 +104,13 @@ RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
+ MAX_RETRIES=5
+ 
+ # Check for subagent vs inline prose question (HARD block — repeat offender pattern).
+-if echo "$MSG" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
++if echo "$MSG_STRIP" | grep -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
+     echo "VIOLATION: You asked 'subagent or inline' / 'two execution options' / 'dispatch now or skim' in prose at the end of your message. This is a pre-answered question — always use subagent-driven, dispatch immediately. The pre-ask-auto-answer hook blocks the structured AskUserQuestion form; writing the same question in prose is the same violation. Rewrite this message: cut the question entirely, and proceed with subagent-driven dispatch. See ask-before-assuming.md pre-answered table." >&2
+     add_hard "Pre-answered prose question: subagent-vs-inline / two execution options / dispatch-now-or-skim"
+ fi
+ 
+ # Check for visual companion prose question
+-if echo "$MSG" | grep -qiE "want to try.*(visual|mockup|browser)|easier to explain.*browser|visual companion"; then
++if echo "$MSG_STRIP" | grep -qiE "want to try.*(visual|mockup|browser)|easier to explain.*browser|visual companion"; then
+     echo "VIOLATION: You offered visual companion in prose. This is a pre-answered question — always yes. Next time, just use it without asking. See ask-before-assuming.md pre-answered table." >&2
+ fi
+ 
+@@ -73,7 +141,7 @@ fi
+ # tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks — banned.
+ # Escape: if the message contains "UNVERIFIED:" explicitly stating WHAT cannot be tested
+ # and WHY (true user-only access), allow it — that is the documented exception.
+-if echo "$MSG" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
++if echo "$MSG_STRIP" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
+     # Allow if explicitly marked UNVERIFIED with a reason (the documented exception)
+     if ! echo "$MSG" | grep -qE "UNVERIFIED:"; then
+         echo "VIOLATION: You handed verification to the user ('please test', 'let me know if it works', 'ping me when', 'tell me what you see', 'on your end', 'next user test', 'using you as tester', etc.). The user is NEVER your tester. You have Playwright, curl, SSH, MCP tools, your own test harness — use them. A blocker (MCP auth failure, timeout, 500 error, opaque reference ID) is YOUR work to debug, not a hand-off trigger." >&2
+@@ -105,14 +173,14 @@ if echo "$MSG" | grep -qiE "(can|could|would) you (please )?(test|verify|confirm
+ fi
+ 
+ # Check for "say go / ready to proceed" prose questions
+-if echo "$MSG_NOGOAL" | grep -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when you are|ready for.?next|ready to execute"; then
++if echo "$MSG_NOGOAL_STRIP" | grep -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when you are|ready for.?next|ready to execute"; then
+     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2
+ fi
+ 
+ # Check for spec/plan/design review handoff prose, including
+ # "Does this design look right? If yes, I'll commit/write/spec ..."
+ # AND "dispatch via subagent now, or hold for your review of the plan"
+-if echo "$MSG_NOGOAL" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)|(dispatch|kick.?off|launch|start|begin|fire|trigger).*(subagent|implement|impl|task|work|run).*(now|immediately).*(or|vs).*(hold|wait|pause|review|stop|skim|check)|(hold|wait|pause).*(for|on).*(your|user) review|(go|proceed|now).*(or|vs).*review (first|the plan)|pre.implementation.*(pause|skim|review|check)|(skim|review).*(plan|spec).*before.*(dispatch|kick.?off|launch|implement)"; then
++if echo "$MSG_NOGOAL_STRIP" | grep -qiE "review the (spec|plan|design|brainstorm|approach)|let me know.*(any )?changes?|before (i|we) hand.?off|before (handing|moving).?(off|on)|hand.?off to writing.?plans|any (changes?|edits?|tweaks?) before|(does|is) (this|the) (design|spec|plan|approach|architecture|interface|api|schema|model|structure|layout|flow) (look|seem|sound) (right|good|ok|fine|correct|reasonable)|if (yes|good|ok|approved),? .*(write|create|commit|push|save|file|spec|generate|hand.?off|proceed)|(approve|approved|sign.?off|sign off|green.?light) (this|the) (design|spec|plan|approach|architecture)|(dispatch|kick.?off|launch|start|begin|fire|trigger).*(subagent|implement|impl|task|work|run).*(now|immediately).*(or|vs).*(hold|wait|pause|review|stop|skim|check)|(hold|wait|pause).*(for|on).*(your|user) review|(go|proceed|now).*(or|vs).*review (first|the plan)|pre.implementation.*(pause|skim|review|check)|(skim|review).*(plan|spec).*before.*(dispatch|kick.?off|launch|implement)"; then
+     echo "VIOLATION: You stopped to ask 'does this design look right?' / 'if yes I'll commit' / 'dispatch now or hold for review' / 'review the spec' / 'dispatch now or skim plan first'. These are all pre-answered — always proceed autonomously. The user approved the workflow when they invoked brainstorming/spec-writing. Rewrite this message: cut the question, commit / dispatch / chain to next step directly. See ask-before-assuming.md pre-answered table." >&2
+     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
+ fi
+@@ -300,7 +368,7 @@ fi
+ # out-of-scope work that fails the bundling gate (>300 LoC, schema change, API break,
+ # security boundary, cross-cut refactor).
+ if [ "$IS_COMPLETION" = "1" ]; then
+-    if echo "$MSG" | grep -qiE "follow.?up (filed|issue|tracked|created|opened|logged)[:= ]+#[0-9]+|filed (as|under) #[0-9]+ for (next|follow.?up|separate|dedicated)|tracked (in|as) #[0-9]+ (as|for) (separate|follow.?up|next|dedicated)|(will|to) address.*(in (a )?(next|follow.?up|dedicated|separate) pr|in (the )?next session)|(opened|created) #[0-9]+ (for|to track) (the )?(follow.?up|cleanup|tidy|polish|migration|refactor|migrate)"; then
++    if echo "$MSG_STRIP" | grep -qiE "follow.?up (filed|issue|tracked|created|opened|logged)[:= ]+#[0-9]+|filed (as|under) #[0-9]+ for (next|follow.?up|separate|dedicated)|tracked (in|as) #[0-9]+ (as|for) (separate|follow.?up|next|dedicated)|(will|to) address.*(in (a )?(next|follow.?up|dedicated|separate) pr|in (the )?next session)|(opened|created) #[0-9]+ (for|to track) (the )?(follow.?up|cleanup|tidy|polish|migration|refactor|migrate)"; then
+         echo "VIOLATION: You filed a follow-up issue from a completion report. Per complete-planned-work.md 'Follow-up gate', same-PR small cleanups (<100 LoC, same-file polish, enum migration, type tightening, magic-number extraction, missing test on touched path) MUST land in the CURRENT PR — not a follow-up. Follow-ups are reserved for work that FAILS the bundling gate (>300 LoC, DB schema change, API break, security boundary, cross-cut refactor). If the discovered task does NOT meet one of those criteria, close the follow-up issue and add a commit to THIS PR. See complete-planned-work.md → 'Follow-up gate' and ask-before-assuming.md pre-answered table." >&2
+     fi
+ fi
+@@ -311,7 +379,7 @@ fi
+ if [ "$IS_COMPLETION" = "1" ]; then
+     # Detect deferral phrases (broad — many rewordings)
+     DEFER_HIT=0
+-    if echo "$MSG" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
++    if echo "$MSG_STRIP" | grep -qiE "\b(is |has been |will be |to be )?deferred\b|\bdefer(ring|ral)\b|root.?cause (fix|repair) (is )?(later|deferred|for later|not yet|in follow.?up|next pr|next session)|(actual|real) (fix|root.?cause) (is )?(later|deferred|coming|in follow.?up|for follow.?up|next pr|next session|not yet)|(will|to) be addressed (in (the )?(next pr|next session|follow.?up|dedicated pr|future))|(remains|still) (outstanding|unresolved|pending|to.?be.?done|to.?fix)|this pr (does ?n'?t|doesn'?t|will not|won.?t) (fix|address|resolve|close|complete) (the |that )?(root.?cause|actual|underlying|real)|(not yet|won.?t be) fix(ed|ing) (in|until) (this pr|next session|follow.?up)|patch(ed)? around|workaround for now|temporary (fix|patch|band.?aid)|placeholder until|stub until|leave[sd]? broken|stays broken|known (issue|broken)|moves? to a (next|future|separate|dedicated) pr|punt(ed|ing)? (to|until|for)"; then
+         DEFER_HIT=1
+     fi
+     if [ "$DEFER_HIT" = "1" ]; then
+@@ -342,7 +410,7 @@ fi
+ 
+ # Check for "skip 🔵 review findings" / "🔵 deferred / out of scope / minor" patterns.
+ # The user wants every review finding fixed inside the diff — no skipping minor issues.
+-if echo "$MSG" | grep -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then
++if echo "$MSG_STRIP" | grep -qiE "🔵.*(defer|skip|out of scope|not address|leave (it|them|for|to)|next (session|pr|commit)|not blocking|low.priority|nice.?to.?have|stylistic|cosmetic|address later|address next)|(defer|skip|leave|ignore).*🔵|out of scope.*(suggestion|🔵|stylistic|nit|nice.?to.?have|minor finding)|(suggestions?|minor findings?|🔵 findings?).*(defer|skip|out of scope|leave|next session|next pr|won.?t address|will not address|not addressing|can wait|low.priority|address later|address next)|(won.?t|will not|not) address(ing)?.*(suggestion|🔵|minor finding)"; then
+     echo "VIOLATION: You're skipping or deferring 🔵 (suggestion) review findings. The user wants the highest-quality code possible — fix EVERY review finding inside this PR's diff, including 🔵. Phrases like '🔵 deferred', '🔵 out of scope', '🔵 minor — leaving them', '🔵 stylistic — skip', '🔵 nice-to-have — defer', or 'won't address the suggestions' are banned. The ONLY allowed exception is a 🔵 finding that points at code OUTSIDE the diff — for that, file a GitHub issue with a title and reference it. NEVER silently skip a 🔵 inside the diff. See completion-report.md → 'Pre-completion gate'." >&2
+ fi
+ 
+@@ -353,20 +421,20 @@ fi
+ # module's "HARD-blocked at Stop" claim was false and nothing was corrected.
+ #
+ # HARD — each shape names a merge/gate bypass explicitly; no innocent reading.
+-if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
++if echo "$MSG_STRIP" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
+     echo "VIOLATION: You offered a quality-bypass shortcut (admin-merge / bypass branch protection / close PR and roll into the next one / 'merge despite' / 'functionally ready' / 'good enough to merge' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
+     add_hard "Quality-bypass shortcut offered (admin-merge / merge despite / functionally ready / UNSTABLE-but-merge / informational-check dismissal) — fix the gate instead"
+ fi
+ 
+ # SOFT — bare delegation phrases carry real non-bypass uses ("the cheaper
+ # option is a smaller VM"), so they warn without gating an honest message.
+-if echo "$MSG" | grep -qiE "your call|cheaper option|quicker option|easier path|you decide(.*merge)?|your decision|up to you.*merge"; then
++if echo "$MSG_STRIP" | grep -qiE "your call|cheaper option|quicker option|easier path|you decide(.*merge)?|your decision|up to you.*merge"; then
+     echo "VIOLATION: You shifted a decision back to the user ('your call' / 'you decide' / 'cheaper / quicker option' / 'easier path'). When the goals already determine the answer, make the call yourself and keep working. Genuine product/scope decisions the user has a stake in are still theirs — everything else is yours. See autonomous-quality-discipline.md, ask-before-assuming.md." >&2
+ fi
+ 
+ # Detect "STOP at green PR URL" / "Awaiting your merge it" / "Phase N remains gated" prose
+ # These are template-bypass shorthands. If they appear, the message must use the full template.
+-if echo "$MSG" | grep -qiE "STOP at (the )?green pr|stop at green pr url|stop at green-pr"; then
++if echo "$MSG_STRIP" | grep -qiE "STOP at (the )?green pr|stop at green pr url|stop at green-pr"; then
+     if [ "$IS_COMPLETION_HEADING" = "0" ]; then
+         echo "VIOLATION: 'STOP at green PR URL' is template-bypass prose. Any 'we're done, PR is ready, awaiting merge' message MUST use the full Completion Report template (## ✅ Work Complete with audits, Goal, What changed, 🌐 URLs, PR title/URL). Replace the prose with the template. See completion-report.md → 'Full template every time'." >&2
+     fi
+@@ -374,7 +442,7 @@ fi
+ 
+ # Detect "Phase N remains gated on Phase M merge" / "Phase N is gated on" / "next phase awaits"
+ # This is a "Remaining/Future" mention disguised as plan continuity — banned per complete-planned-work.md.
+-if echo "$MSG" | grep -qiE "phase [0-9]+ (remains|is) gated on|phase [0-9]+ awaits|phase [0-9]+ blocked on .*(merge|phase)|next phase (awaits|gated|blocked)|gated on phase [0-9]+ merge"; then
++if echo "$MSG_STRIP" | grep -qiE "phase [0-9]+ (remains|is) gated on|phase [0-9]+ awaits|phase [0-9]+ blocked on .*(merge|phase)|next phase (awaits|gated|blocked)|gated on phase [0-9]+ merge"; then
+     echo "VIOLATION: 'Phase N remains gated on Phase M' is a 'Remaining / Future' mention disguised as plan continuity. complete-planned-work.md and completion-report.md ban these in the report. The next phase is the next session's prompt — do NOT explain gating here. Cut the line. See completion-report.md → 'Banned shortcuts'." >&2
+ fi
+ 

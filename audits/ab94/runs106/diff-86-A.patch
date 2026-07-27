@@ -1,0 +1,146 @@
+diff --git a/hooks/block-test-skips.sh b/hooks/block-test-skips.sh
+index bb08230..38a7558 100755
+--- a/hooks/block-test-skips.sh
++++ b/hooks/block-test-skips.sh
+@@ -46,6 +46,22 @@ fi
+ DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+ PROJECT=$(basename "$(git rev-parse --show-toplevel)")
+ 
++# Diff base: prefer the merge-base with THIS branch's own upstream tracking
++# branch over the hardcoded default-branch guess (#86). The default-branch
++# guess is correct only for a 2-branch (dev/main) model — in a 3-branch
++# model (develop -> staging -> main) a develop-target push was diffed
++# against a REAL but STALE origin/main, attributing every sanctioned
++# skip-shaped test change already on develop since the last release to
++# THIS push (live repro: zbynekdrlik/odoo-erp, its own #2206 exception).
++# Falls back to the default-branch guess when there's no upstream (e.g. a
++# brand-new branch never pushed), and to HEAD~1 when neither resolves.
++UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
++BASE=""
++if [ -n "$UPSTREAM" ]; then
++    BASE=$(git merge-base HEAD "$UPSTREAM" 2>/dev/null || echo "")
++fi
++[ -z "$BASE" ] && BASE="origin/${DEFAULT_BRANCH}"
++
+ AUDIT_LOG="$HOME/devel/airuleset/audits/test-skip-bypasses.log"
+ mkdir -p "$(dirname "$AUDIT_LOG")"
+ 
+@@ -67,7 +83,7 @@ fi
+ # substring match also matched non-code paths like "docs/xspec.md" ("xspec"
+ # contains "spec"), false-blocking a push whose ONLY change is prose in a
+ # doc that merely mentions a banned pattern as an example.
+-CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
++CHANGED_FILES=$(git diff --name-only "${BASE}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
+ TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' \
+     | grep -iE '\.(rs|py|ts|tsx|js|jsx|mjs|cjs|go|rb|java|kt|kts|cs|cpp|cc|c|swift|scala)$' \
+     || echo "")
+@@ -90,12 +106,12 @@ mapfile -t TEST_FILES_ARR <<< "$TEST_CHANGES"
+ # (before RC=$? can even run) — the `|| RC=$?` keeps this in a tested
+ # context so set -e does not fire, and lets the block message print below.
+ RC=0
+-VIOLATIONS=$(python3 - "$DEFAULT_BRANCH" "${TEST_FILES_ARR[@]}" <<'PYEOF'
++VIOLATIONS=$(python3 - "$BASE" "${TEST_FILES_ARR[@]}" <<'PYEOF'
+ import re
+ import subprocess
+ import sys
+ 
+-default_branch = sys.argv[1]
++base_ref = sys.argv[1]
+ test_files = sys.argv[2:]
+ 
+ PATTERNS = [
+@@ -128,7 +144,7 @@ for tf in test_files:
+         continue
+     try:
+         out = subprocess.run(
+-            ["git", "diff", "-U0", f"origin/{default_branch}...HEAD", "--", tf],
++            ["git", "diff", "-U0", f"{base_ref}...HEAD", "--", tf],
+             capture_output=True, text=True,
+         ).stdout
+     except Exception:
+diff --git a/tests/test_airuleset.py b/tests/test_airuleset.py
+index 1d49d10..c28f410 100644
+--- a/tests/test_airuleset.py
++++ b/tests/test_airuleset.py
+@@ -5334,6 +5334,81 @@ class TestBlockTestSkipsHook(TestCase):
+                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
+         self.assertTrue(any("block-test-skips.sh" in c for c in cmds))
+ 
++    # --- 3-branch model false-block (#86, live repro: zbynekdrlik/odoo-erp) -
++
++    def _repo_develop_tracking(self, stale_skip_content, new_added_content):
++        """3-branch model repro (#86, live: zbynekdrlik/odoo-erp
++        develop -> staging -> main). The work branch `develop` tracks
++        `origin/develop`; `origin/main` is REAL but STALE — it points at
++        the last release, well behind develop. `stale_skip_content` is
++        sanctioned skip-shaped test content that landed on develop AFTER
++        that release (e.g. odoo-erp's own #2206 E2E exception) — it is
++        already on origin/develop, so it must NOT be attributed to a later
++        push that only adds unrelated content. `new_added_content` is what
++        THIS push adds. `origin/HEAD` is deliberately left unset (a normal
++        checkout has no symbolic-ref for it), so the old default-branch
++        guess falls back to the hardcoded "main" — which DOES exist here,
++        unlike a simpler repro, reproducing the real false-block."""
++        import shutil
++        root = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
++
++        def g(*a):
++            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
++        g("init", "-q", "-b", "develop")
++        g("config", "user.email", "t@t")
++        g("config", "user.name", "t")
++        test_path = os.path.join(root, "tests", "test_thing.py")
++        os.makedirs(os.path.dirname(test_path), exist_ok=True)
++        # commit A: last release state, becomes the stale origin/main
++        with open(test_path, "w") as fh:
++            fh.write("")
++        g("add", "tests/test_thing.py")
++        g("commit", "-qm", "release base")
++        release_sha = g("rev-parse", "HEAD").stdout.strip()
++        g("update-ref", "refs/remotes/origin/main", release_sha)
++        # commit B: sanctioned skip landed on develop since the release,
++        # already pushed — becomes origin/develop (this push's real base)
++        with open(test_path, "a") as fh:
++            fh.write(stale_skip_content)
++        g("add", "tests/test_thing.py")
++        g("commit", "-qm", "chore: sanctioned e2e skip exception")
++        develop_sha = g("rev-parse", "HEAD").stdout.strip()
++        g("update-ref", "refs/remotes/origin/develop", develop_sha)
++        # a bare branch.*.remote/.merge config is NOT enough for `@{u}` to
++        # resolve — git also needs a real `remote.origin.*` fetch refspec
++        # to map refs/heads/develop (remote-side) to the local
++        # remote-tracking ref; the URL itself is never dereferenced here.
++        g("remote", "add", "origin", "file:///nonexistent-origin")
++        g("config", "branch.develop.remote", "origin")
++        g("config", "branch.develop.merge", "refs/heads/develop")
++        # commit C: THIS push's actual new content, on top of develop's tip
++        with open(test_path, "a") as fh:
++            fh.write(new_added_content)
++        g("add", "tests/test_thing.py")
++        g("commit", "-qm", "test: add coverage on develop")
++        return root
++
++    def test_three_branch_model_does_not_falsely_block_on_stale_develop_skip(self):
++        # This push only adds an unrelated real test on top of develop's
++        # tip. The old default-branch guess diffed against the REAL but
++        # STALE origin/main instead of develop's own upstream, attributing
++        # the sanctioned skip that already landed on develop (since the
++        # last release) to THIS push, and false-blocked on it.
++        base = "test.skip('sanctioned e2e exception', () => { expect(1).toBe(1); });\n"
++        root = self._repo_develop_tracking(base, "def test_new_real():\n    assert 2 + 2 == 4\n")
++        r = self._run("git push origin develop", root)
++        self.assertEqual(r.returncode, 0, r.stdout)
++
++    def test_three_branch_model_still_blocks_genuine_new_violation(self):
++        # sanity check for the fix above: a REAL new skip added on develop
++        # must still be caught, even though the diff base is no longer
++        # origin/main.
++        root = self._repo_develop_tracking("", "test.skip('lazy', () => { expect(1).toBe(1); });\n")
++        r = self._run("git push origin develop", root)
++        self.assertEqual(r.returncode, 2, r.stdout)
++        self.assertIn("test.skip", r.stdout)
++
+ 
+ class TestBlockHistoryRewriteHook(TestCase):
+     """hooks/block-history-rewrite.sh (issue #11) — two absolute bans that

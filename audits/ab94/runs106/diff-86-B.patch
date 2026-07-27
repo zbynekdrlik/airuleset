@@ -1,0 +1,88 @@
+diff --git a/tests/test_airuleset.py b/tests/test_airuleset.py
+index 1d49d10..a51363e 100644
+--- a/tests/test_airuleset.py
++++ b/tests/test_airuleset.py
+@@ -5335,6 +5335,83 @@ class TestBlockTestSkipsHook(TestCase):
+         self.assertTrue(any("block-test-skips.sh" in c for c in cmds))
+ 
+ 
++class TestBlockTestSkipsHookBaseRef(TestCase):
++    """block-test-skips.sh false-blocks every push in a 3-branch repo (#86,
++    live odoo-erp gatekeeper/montalu incident 2026-07-26): the diff base was
++    ALWAYS origin/<default>, so on a develop→staging→main repo a
++    develop-target push got diffed against origin/main and was blocked on a
++    SANCTIONED skip pattern that already landed on develop via an earlier
++    merged PR (odoo-erp #2206) — never touched by the push itself. Mirrors
++    TestPrePushTestCheckBaseRef's existing fix for pre-push-test-check.sh:
++    diff against the branch's own PR target (the develop/staging integration
++    branch), not the repo's default branch."""
++
++    HOOK = "block-test-skips.sh"
++
++    def _run(self, command, cwd):
++        payload = json.dumps({"tool_input": {"command": command}})
++        env = dict(os.environ)
++        env["HOME"] = tempfile.mkdtemp()
++        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
++                              input=payload, text=True, capture_output=True,
++                              cwd=cwd, timeout=60, env=env)
++
++    def _mkrepo(self):
++        import shutil
++        root = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
++
++        def g(*a):
++            return subprocess.run(["git", *a], cwd=root, capture_output=True, text=True)
++        g("init", "-q", "-b", "main")
++        g("config", "user.email", "t@t")
++        g("config", "user.name", "t")
++        open(os.path.join(root, "app.py"), "w").write("x = 1\n")
++        g("add", "app.py")
++        g("commit", "-qm", "base")
++        return root, g
++
++    def test_develop_push_not_blocked_by_sanctioned_skip_already_on_develop(self):
++        root, g = self._mkrepo()
++        base = g("rev-parse", "HEAD").stdout.strip()
++        g("update-ref", "refs/remotes/origin/main", base)
++        g("checkout", "-qb", "develop")
++        test_path = os.path.join(root, "tests", "test_e2e.py")
++        os.makedirs(os.path.dirname(test_path), exist_ok=True)
++        with open(test_path, "w") as fh:
++            fh.write("test.skip(notApplicable(), 'sanctioned exception #2206')\n")
++        g("add", "tests/test_e2e.py")
++        g("commit", "-qm", "test: sanctioned skip exception (#2206)")
++        g("update-ref", "refs/remotes/origin/develop", g("rev-parse", "HEAD").stdout.strip())
++        g("checkout", "-qb", "feature-x")
++        with open(os.path.join(root, "CHANGELOG.md"), "w") as fh:
++            fh.write("# changelog\n")
++        g("add", "CHANGELOG.md")
++        g("commit", "-qm", "docs: update changelog")
++        r = self._run("git push origin feature-x", root)
++        self.assertEqual(r.returncode, 0,
++                         "sanctioned skip already merged into develop must NOT "
++                         "be attributed to this push: %s" % r.stdout)
++
++    def test_two_branch_dev_keeps_default_branch_range(self):
++        # No develop remote → base stays origin/main (today's 2-branch
++        # dev→main behavior is unchanged): a REAL skip added by this push
++        # must still block.
++        root, g = self._mkrepo()
++        g("update-ref", "refs/remotes/origin/main",
++          g("rev-parse", "HEAD").stdout.strip())
++        g("checkout", "-qb", "dev")
++        test_path = os.path.join(root, "tests", "test_thing.py")
++        os.makedirs(os.path.dirname(test_path), exist_ok=True)
++        with open(test_path, "w") as fh:
++            fh.write("#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
++        g("add", "tests/test_thing.py")
++        g("commit", "-qm", "test: add coverage")
++        r = self._run("git push origin dev", root)
++        self.assertEqual(r.returncode, 2, r.stdout)
++        self.assertIn("BLOCKED", r.stdout)
++
++
+ class TestBlockHistoryRewriteHook(TestCase):
+     """hooks/block-history-rewrite.sh (issue #11) — two absolute bans that
+     previously existed only as prose: git history rewrite (commit-conventions.md)

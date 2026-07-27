@@ -1,0 +1,51 @@
+Work GitHub issue #86 in this repository (a local checkout of zbynekdrlik/airuleset).
+
+This checkout has NO access to GitHub: do not run `gh`, do not push, do not open a PR. Do the work locally and commit it to the current branch.
+
+The local gate is `python -m pytest tests/ -q` and `ruff check .` — both must be green before the work is done.
+
+--- ISSUE #86: block-test-skips.sh false-blocks every push in a 3-branch repo ---
+`hooks/block-test-skips.sh` picks its diff base as the repo's *default branch*:
+
+```bash
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
+CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" ...)
+```
+
+That is correct only for a 2-branch (`dev`/`main`) repo. It breaks on any 3-branch model — concretely `zbynekdrlik/odoo-erp` (`develop → staging → main`), where every work branch targets `develop`, `main` only advances on a release, and `refs/remotes/origin/HEAD` is normally unset locally so the hardcoded `"main"` fallback wins.
+
+Result: a `develop`-target push is diffed against `origin/main`, so every test-file change that landed on `develop` since the last release is attributed to *this* push. A commit that adds zero new skip/tautology patterns gets blocked, citing ~20 files it never touched.
+
+## Live reproduction (odoo-erp, montalu stream, 2026-07-26)
+
+The pushed commit's real diff:
+
+```
+.claude/skills/dev-env-lifecycle/SKILL.md
+.claude/skills/gatekeeper-session-ops/SKILL.md
+.claude/skills/montalu-ceo-guide/SKILL.md
+CHANGELOG.md
+CLAUDE.md
+scripts/test_ceo_guide_line_pricelist_mix.py
+```
+
+What the hook blocked on: `scripts/test_ci_workflow_guards.py`, `scripts/test_local_gates_hygiene.py`, and ~18 `tests/e2e/montalu-*.spec.ts` files — none of which appear in that diff. They carry odoo-erp's *sanctioned* `test.skip(notApplicable(), "<reason>")` E2E exception (odoo-erp #2206), which already lives on `develop`.
+
+## Suggested fix
+
+Diff against the branch's merge-base with its own upstream tracking branch instead of a default-branch guess:
+
+```bash
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+[ -n "$UPSTREAM" ] && BASE=$(git merge-base HEAD "$UPSTREAM" 2>/dev/null || echo "")
+CHANGED_FILES=$(git diff --name-only "${BASE:-origin/$DEFAULT_BRANCH}...HEAD" ...)
+```
+
+Falling back to the existing `origin/HEAD`-or-`main` logic only when no upstream/merge-base exists. For a brand-new branch on its first push, scoping to the commit range actually being pushed is the safer secondary fallback — anything that measures what *this* push introduces rather than the full history gap to a possibly-stale default branch.
+
+## Impact
+
+Every `develop`-target push in `zbynekdrlik/odoo-erp` — gatekeeper plus all three sub-dev streams — is exposed to this false block whenever `develop` has accumulated any sanctioned skip-shaped test content since the last release, which is already true today because of #2206 there.
+
+Filed from the odoo-erp gatekeeper session, which does not write to this repo. Tracking ticket on that side: zbynekdrlik/odoo-erp#2233.
+--- END ISSUE ---

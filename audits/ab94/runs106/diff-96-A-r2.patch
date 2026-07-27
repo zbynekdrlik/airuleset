@@ -1,0 +1,106 @@
+diff --git a/hooks/stop-check-prose-violations.sh b/hooks/stop-check-prose-violations.sh
+index a0a5bbc..46d2aff 100755
+--- a/hooks/stop-check-prose-violations.sh
++++ b/hooks/stop-check-prose-violations.sh
+@@ -352,10 +352,97 @@ fi
+ # stderr, which a non-blocking Stop hook never feeds back to the model — so the
+ # module's "HARD-blocked at Stop" claim was false and nothing was corrected.
+ #
+-# HARD — each shape names a merge/gate bypass explicitly; no innocent reading.
+-if echo "$MSG" | grep -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
+-    echo "VIOLATION: You offered a quality-bypass shortcut (admin-merge / bypass branch protection / close PR and roll into the next one / 'merge despite' / 'functionally ready' / 'good enough to merge' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
+-    add_hard "Quality-bypass shortcut offered (admin-merge / merge despite / functionally ready / UNSTABLE-but-merge / informational-check dismissal) — fix the gate instead"
++# HARD — each shape names a merge/gate bypass explicitly; no innocent reading
++# WHEN IT IS AN OFFER. A phrase MATCH alone is not enough (#96): the same
++# words legitimately appear when a message REFERS to this very rule — a
++# status update naming a hook/ticket ("#11 history-rewrite/admin-merge
++# hook"), a playbook note quoting what the gate now blocks, a backticked
++# `admin-merge` in a diagnostic sentence — rather than OFFERING the bypass
++# to the user. This is the same use-vs-mention miss as #80/#91, third
++# strike: a classifier over real command/message TEXT must not fire on a
++# MENTION of the trigger shape, only on its USE. The grep below stays as a
++# cheap pre-filter (skip the python call on the common case of no match at
++# all); when it matches, classify-quality-bypass.py decides OFFER vs
++# MENTION: a match fully enclosed in parentheses that ALSO name a hook,
++# gate, ticket (#N) or hook/rule filename (.sh/.md/.py) is a MENTION
++# (describing the mechanism, not proposing to use it); a match inside
++# backticks, a fenced code block, or a blockquote line is masked out
++# entirely; anything else is a bare-sentence OFFER and still blocks.
++# Corpus-replayed against ~4.4k real transcript messages from this
++# project's own history (#96) — see tests/test_quality_bypass_gate.py for
++# the exact real message that used to false-block, and the full replay
++# counts. Fails CLOSED: if python3 is unavailable or errors, treat as OFFER
++# (never silently let a real bypass offer through because the classifier
++# broke).
++QB_PATTERN='admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same'
++if echo "$MSG" | grep -qiE "$QB_PATTERN"; then
++    QB_VERDICT=$(MSG_FOR_PY="$MSG" QB_PATTERN_FOR_PY="$QB_PATTERN" python3 - <<'PYEOF' || echo "OFFER"
++import os
++import re
++
++MSG = os.environ.get("MSG_FOR_PY", "")
++PATTERN = re.compile(os.environ.get("QB_PATTERN_FOR_PY", ""), re.IGNORECASE)
++
++# Nouns that name the DETECTION MACHINERY itself (hook, gate, ticket,
++# rule/hook filename) rather than generic CI vocabulary ("check", "test",
++# "rule" are deliberately excluded — too common in genuine bypass-offer
++# sentences to safely treat their mere presence as proof of a mention).
++MENTION_RE = re.compile(
++    r"\bhooks?\b|\bgates?\b|\bregex(es)?\b|\bpatterns?\b|\bmodules?\b|"
++    r"\bclassifiers?\b|\bdetectors?\b|\bguards?\b|\bphrases?\b|\bshapes?\b|"
++    r"\bskills?\b|#[0-9]+|\.(sh|md|py)\b",
++    re.IGNORECASE,
++)
++
++
++def mask_backticks(line):
++    return re.sub(r"`[^`\n]*`", lambda m: " " * len(m.group(0)), line)
++
++
++def enclosing_parens_contain_mention(line, start, end):
++    stack = []
++    spans = []
++    for i, ch in enumerate(line):
++        if ch == "(":
++            stack.append(i)
++        elif ch == ")" and stack:
++            o = stack.pop()
++            spans.append((o, i))
++    # Only a span that FULLY contains the match counts — a match that merely
++    # starts before an opening paren (or ends after a closing one) is not
++    # "enclosed", so it stays a bare-sentence offer, never exempted.
++    candidates = [s for s in spans if s[0] <= start and s[1] >= end - 1]
++    if not candidates:
++        return False
++    o, c = min(candidates, key=lambda s: s[1] - s[0])
++    return MENTION_RE.search(line[o:c + 1]) is not None
++
++
++def is_offer(msg):
++    # grep ran per-LINE (no -z), so mirror that: each line is judged on its
++    # own — a match on one line is never excused by context on another.
++    in_fence = False
++    for raw_line in msg.split("\n"):
++        stripped = raw_line.strip()
++        if stripped.startswith("```"):
++            in_fence = not in_fence
++            continue
++        if in_fence or stripped.startswith(">"):
++            continue
++        line = mask_backticks(raw_line)
++        for m in PATTERN.finditer(line):
++            if not enclosing_parens_contain_mention(line, m.start(), m.end()):
++                return True
++    return False
++
++
++print("OFFER" if is_offer(MSG) else "MENTION")
++PYEOF
++)
++    if [ "$QB_VERDICT" = "OFFER" ]; then
++        echo "VIOLATION: You offered a quality-bypass shortcut (admin-merge / bypass branch protection / close PR and roll into the next one / 'merge despite' / 'functionally ready' / 'good enough to merge' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
++        add_hard "Quality-bypass shortcut offered (admin-merge / merge despite / functionally ready / UNSTABLE-but-merge / informational-check dismissal) — fix the gate instead"
++    fi
+ fi
+ 
+ # SOFT — bare delegation phrases carry real non-bypass uses ("the cheaper
