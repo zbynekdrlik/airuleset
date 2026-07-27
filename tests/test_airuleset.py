@@ -1262,6 +1262,116 @@ exit 0
         self.assertFalse(os.path.exists(cancels) and open(cancels).read().strip(),
                          "cancelled a run although the push did not land")
 
+    # --- force-cancel escalation (#24) --------------------------------------
+    # A normal `gh run cancel` can have NO visible effect (live incident:
+    # restreamer 2026-07-21 -- an old run kept starting new jobs for 50+ min).
+    # A 120s SYNCHRONOUS wait inside this hook would slow down every single
+    # push, so escalation checks a run cancelled on a PRIOR invocation
+    # instead -- never blocking here.
+
+    def _escalation_fixture(self, run_list_json="[]", view_status="in_progress"):
+        import subprocess
+        import shutil
+        import stat
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        repo = os.path.join(root, "repo")
+        bind = os.path.join(root, "bin")
+        os.makedirs(repo)
+        os.makedirs(bind)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
+        g("init", "-q", "-b", "dev")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(repo, "f"), "w").write("a\n")
+        g("add", "f")
+        g("commit", "-qm", "a")
+        head = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/dev", head)  # simulate a LANDED push
+
+        cancels = os.path.join(root, "cancels")
+        force_cancels = os.path.join(root, "force_cancels")
+        gh = os.path.join(bind, "gh")
+        with open(gh, "w") as fh:
+            fh.write(f'''#!/usr/bin/env bash
+[ "$1 $2" = "repo view" ] && {{ echo '{{"name":"x"}}'; exit 0; }}
+if [ "$1 $2" = "run list" ]; then
+  echo '{run_list_json}'
+  exit 0
+fi
+[ "$1 $2" = "run cancel" ] && {{ echo "$3" >> "{cancels}"; exit 0; }}
+if [ "$1 $2" = "run view" ]; then
+  echo "{view_status}"
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  echo "$2" >> "{force_cancels}"
+  exit 0
+fi
+exit 0
+''')
+        os.chmod(gh, os.stat(gh).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        env = dict(os.environ)
+        env["PATH"] = bind + os.pathsep + env["PATH"]
+        git_dir = os.path.join(repo, ".git")
+        pending_file = os.path.join(git_dir, "airuleset-pending-cancels.json")
+        return repo, env, cancels, force_cancels, pending_file
+
+    def _seed_pending(self, pending_file, rid, age_seconds):
+        import time
+        with open(pending_file, "w") as f:
+            json.dump([[rid, time.time() - age_seconds]], f)
+
+    def test_new_cancel_is_recorded_to_pending_file(self):
+        # reuse the ancestor-producing fixture (from the base class) -- its
+        # run list has an actual candidate (111) to cancel.
+        repo, env, cancels, head, old = self._cancel_fixture()
+        pending_file = os.path.join(repo, ".git", "airuleset-pending-cancels.json")
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(pending_file), "no pending-cancel file written")
+        recorded = json.loads(open(pending_file).read())
+        self.assertEqual([rid for rid, _ts in recorded], [111], recorded)
+
+    def test_stale_pending_run_escalates_to_force_cancel(self):
+        repo, env, cancels, force_cancels, pending_file = self._escalation_fixture(
+            view_status="in_progress")
+        self._seed_pending(pending_file, 999, age_seconds=200)
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(force_cancels), "force-cancel API never called")
+        calls = open(force_cancels).read()
+        self.assertIn("999", calls)
+        self.assertIn("force-cancel", calls)
+        # one-shot: the entry is dropped from pending afterward
+        remaining = json.loads(open(pending_file).read())
+        self.assertEqual(remaining, [])
+
+    def test_pending_run_too_recent_is_not_escalated_yet(self):
+        repo, env, cancels, force_cancels, pending_file = self._escalation_fixture(
+            view_status="in_progress")
+        self._seed_pending(pending_file, 999, age_seconds=10)
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(force_cancels) and open(force_cancels).read(),
+                         "escalated a run that is not old enough yet")
+        # kept for a LATER invocation, never dropped early
+        remaining = json.loads(open(pending_file).read())
+        self.assertEqual([rid for rid, _ts in remaining], [999])
+
+    def test_pending_run_already_terminal_is_dropped_without_escalating(self):
+        repo, env, cancels, force_cancels, pending_file = self._escalation_fixture(
+            view_status="completed")
+        self._seed_pending(pending_file, 999, age_seconds=200)
+        r = self._run_env(repo, env, "git push origin dev")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(force_cancels) and open(force_cancels).read(),
+                         "escalated a run that was already terminal")
+        remaining = json.loads(open(pending_file).read())
+        self.assertEqual(remaining, [])
+
 
 class TestPrePushGatesFire(TestCase):
     """pre-push-lint.sh + pre-push-test-check.sh were DEAD ($TOOL_INPUT-only). Lock
