@@ -10,6 +10,11 @@ paths:
   - "tests/**"
   - "settings/**"
   - "scripts/**"
+  - "modules/**"
+  - "skills/**"
+  - "agents/**"
+  - "profiles/**"
+  - "rules/**"
 ---
 
 ### airuleset Internals — Development Rules
@@ -154,3 +159,62 @@ hook internals, not a rule a session acts on.
 - **A "scratch, isolated" `CLAUDE_CONFIG_DIR` Claude Code session is isolated for CONFIG/PROJECTS/CREDENTIALS — it is NOT isolated from the REAL CWD, and typing a literal `/goal ...`-shaped line as plain chat text (even split across several `send-keys -l` + `Enter` calls meant to just make CC PRINT that text) gets interpreted as a REAL slash command and REALLY arms a goal, which then autonomously starts working (real `gh` calls against the real repo) — burning real tokens on unintended work.** Live-verifying #100/#101's stash delivery: a multi-line "print this text verbatim" prompt caused the scratch session to itself synthesize and ARM a full `/autopilot`-shaped goal for the real `zbynekdrlik/airuleset` repo, which then ran `gh issue view` against real issue numbers before being caught and `/goal clear`ed. Never send anything starting with `/goal ` as literal keystrokes to a scratch/test pane unless arming a REAL goal there is the intended, contained test — and always end a scratch-session live-proof with `/goal clear` + capture-pane confirmation BEFORE `tmux kill-session`, not just the kill.
 - **Corpus-replaying "was the /compact SEND's PRECEDING status marker ❓" needs two things #78's own recipe (above) doesn't spell out: (1) job 14/15/17's OWN "OK (compact-...)" journalctl lines log the PANE LOCATION (`zbynek-0:6.0`), never the session id — only the synchronous path's `compact-sync.log` is sid-keyed — so attributing a periodic job's send to a specific transcript needs a PROXIMITY match (the nearest real `compact_boundary` system entry across the WHOLE corpus within a few minutes after the send timestamp), not a text-substring sid search (which silently finds ZERO matches and looks like "no evidence" when the evidence is just filed under a different key). (2) The marker at SEND TIME is NOT `transcript_last_marker(path)` — that function reads to EOF, i.e. the session's marker as of TODAY, not as of the historical send; replaying a past decision needs a small variant that walks entries backward with a `timestamp <= cutoff` filter first.** #102: this exact recipe replayed job 14 (14 real historical sends, 0 preceded by ❓), the synchronous path (7 real sends via `compact-sync.log`, 0 preceded by ❓), and job 17 (8 real sends, 0 preceded by ❓ but 4 preceded by ⏳/blank — proof it WAS firing off non-ticket-boundary turns, the exact unauthorized behavior the ticket's correction forbids, even though it never happened to catch a ❓ specifically in this box's log window) — and found the two ❓-preceded `compact_boundary` events in the post-#39 corpus had ZERO matching watchdog log lines nearby (one had a "question answered in-session" line ~1 minute later — a human at the terminal, not automation). Absence of a nearby log line is evidence of a MANUAL `/compact`, not proof the fix is unnecessary — the user's corrected agreement (#102) stands on its own regardless of whether the one reported incident can be forensically pinned on a specific sender.
 - **Retiring a numbered watchdog job: NEVER renumber the survivors.** #102 removed jobs 15 and 17 entirely (constants, state, tests) but left their NUMBERS as gaps in `run_once`'s docstring (`(15) ... — REMOVED (#102, ...)`) and in the job-count bullet above, rather than shifting 16→15/18→16/etc. Dozens of historical comments, `docs/autopilot-log.md` entries, and this very playbook file address incidents by job number ("job 17's own `compact_ceiling`") — renumbering would silently break every one of those references for a purely cosmetic gain. A short REMOVED note at the old number (what it did, why it's gone, pointer to the removing ticket) is enough for a future reader to orient.
+
+### Which surface actually LOADS — measure before converting a module (#104, 2026-07-27)
+
+Every `module → skill` or `module → path-scoped rule` conversion in this repo is
+a bet that the target surface is loaded on the path that needs it. `e9d1022` lost
+that bet once already, and the loss was invisible for 18 days. Before converting
+anything, know these EMPIRICAL facts (three introspection probes, 2026-07-27 —
+each subagent was asked only to report its own context):
+
+| Surface | Reaches a dispatched subagent? |
+|---|---|
+| Global `~/.claude/CLAUDE.md` with `@import`ed module BODIES expanded | **YES** — probes quoted verbatim sentences from inside the modules |
+| Project `CLAUDE.md` | **YES** |
+| Auto-memory `MEMORY.md` | **YES** |
+| An agent file (`agents/<name>.md`) | **YES** — it IS the subagent's system prompt |
+| **Skill BODIES (`skills/*/SKILL.md`)** | **NO** — only the name + one-line description from the skill list |
+| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) | **NOT OBSERVED** — see #105, unresolved |
+
+Consequences that keep biting:
+
+- **Content a dispatched worker must ACT on cannot live in a skill body.** It only
+  arrives if that worker itself calls the `Skill` tool, and nothing in the
+  `/autopilot` dispatch chain tells it to. This is exactly how the design-first
+  step vanished from the ticket path (#104): the supervisor loads
+  `batch-issue-development` in ITS context; the worker is a separate dispatch
+  joined to it by a one-line prompt.
+- **The always-on STUB is what actually enforces.** `test_dynamic_application.py`
+  caps every stub at `< 8 lines`, so the stub must carry the enforcement-critical
+  CORE tersely. `e9d1022`'s batch stub kept the bundling invariants and dropped
+  the per-issue design cycle — that single omission was the whole bug.
+- **A conversion is safe when a HOOK backs it**, not when the prose moved.
+  `git-fetch-first` (session-start-fetch + pre-push-base-sync),
+  `local-builds` (block-tier0-local-build), `deploy-from-clean-tree`
+  (pre-deploy-clean-tree) survive because a hook enforces the core regardless of
+  which surface loaded.
+- **Measure invocations before trusting a skill conversion.** Lifetime census over
+  all transcripts:
+  `cd ~/.claude/projects && grep -rhoE '"skill": ?"[a-zA-Z0-9:_-]+"' --include=*.jsonl . | sed 's/.*: *"//;s/"//' | sort | uniq -c | sort -rn`
+  (one single pass — a per-name loop over this tree times out past 2 min).
+  2026-07-27 results: `version-on-dashboard` **0**, `pr-merge-policy` 1,
+  `deploy-ssh` 1, `ci-push-discipline` 1, `verify-issue-still-valid` 1,
+  `view-image-urls` 1. A skill with ~0 invocations holds knowledge that is, in
+  practice, deleted.
+- **`docs/superpowers/plans/2026-06-13-pipeline-v2.md:619` is DISPROVEN** — it says
+  in-session subagents "boot with a reduced system prompt and no rules". They do
+  not; they inherit the rules fully. The real gap is skills. Do not redesign the
+  dispatch mechanism on the strength of that sentence.
+
+**Probing is cheap and settles these questions in ~20 s** — dispatch a `haiku`
+`general-purpose` agent whose whole task is "report what is literally in your own
+context, edit nothing". Prefer that over reasoning about how Claude Code *should*
+behave; this repo has repeatedly shipped fixes whose stated cause was wrong.
+
+**Verifying a rule/agent change actually reached runtime:** dispatch a real
+`autopilot-worker` on a real ticket with `isolation: "worktree"` and a guard —
+"make NO commits or pushes; stop when you would create the first code commit" —
+and a prompt that never names the behavior under test. If the behavior shows up
+unprompted, that is proof; a prompt that hints at it proves nothing. Salvage any
+work the guarded run produced onto its ticket before `git worktree remove`.
