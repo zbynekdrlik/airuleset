@@ -5335,6 +5335,97 @@ class TestBlockTestSkipsHook(TestCase):
         self.assertTrue(any("block-test-skips.sh" in c for c in cmds))
 
 
+class TestBlockTestSkipsThreeBranchBase(TestCase):
+    """#86 (odoo-erp, 2026-07-26): the diff base was ALWAYS
+    origin/<default-branch> ("main"), correct only for a 2-branch dev->main
+    repo. On a 3-branch model (develop->staging->main) every work branch
+    targets develop, so origin/main lags develop by every already-MERGED,
+    green-CI PR — a push whose OWN diff adds no skip pattern at all got
+    false-blocked on a sanctioned test.skip() that had already landed on
+    develop via an earlier, unrelated PR. Reused the SAME PR-target base
+    resolution pre-push-test-check.sh already ships (a feature branch off
+    develop targets origin/develop; develop itself promotes to
+    origin/staging; staging/default/detached keep the default base)."""
+
+    HOOK = "block-test-skips.sh"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=cwd, timeout=60, env=env)
+
+    def _mk_3branch_repo(self):
+        """A REAL 3-branch repo layout, built with real git commands so the
+        diffs the hook sees are genuine — not hand-typed diff text. main and
+        develop start equal; develop then gets a commit that ALREADY landed
+        a sanctioned test.skip() (simulating a merged, pre-existing PR);
+        origin/main stays behind (never advanced past the base), mirroring
+        the real odoo-erp gap between main and develop."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+
+        g("checkout", "-qb", "develop")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_old.py"), "w").write(
+            "import pytest\n\n@pytest.mark.skip(reason='sanctioned, e2e#2206')\n"
+            "def test_old():\n    assert 1 == 1\n"
+        )
+        g("add", "tests/test_old.py")
+        g("commit", "-qm", "test: sanctioned skip already merged into develop")
+        g("update-ref", "refs/remotes/origin/develop", g("rev-parse", "HEAD").stdout.strip())
+
+        g("checkout", "-qb", "feature-ceo-guide")
+        return root, g
+
+    def test_default_branch_base_false_blocks_on_already_merged_skip(self):
+        # RED reproduction (current buggy behavior, before the base-ref
+        # fix): this push's OWN diff adds a real test with no skip pattern
+        # at all — but because the base is stubbornly origin/main (which
+        # never saw the develop-only commit), the diff origin/main...HEAD
+        # ALSO contains the already-merged test_old.py skip, and the hook
+        # false-blocks a push that introduces zero new skip/tautology code.
+        root, g = self._mk_3branch_repo()
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n"
+        )
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add real coverage for the ceo guide")
+        r = self._run("git push origin feature-ceo-guide", root)
+        self.assertEqual(r.returncode, 0,
+                         "already-merged develop skip false-blocked this push: "
+                         + r.stdout)
+
+    def test_real_new_skip_on_a_feature_branch_still_blocks(self):
+        # regression guard: a GENUINELY new skip added BY THIS push (on top
+        # of the same 3-branch history) must still block — the base-ref fix
+        # must not also blind Gate to real violations in the branch's own
+        # diff against its real PR target (origin/develop).
+        root, g = self._mk_3branch_repo()
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "#[ignore]\nfn test_x() { assert!(1 == 1); }\n"
+        )
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feature-ceo-guide", root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("#[ignore]", r.stdout)
+
+
 class TestBlockHistoryRewriteHook(TestCase):
     """hooks/block-history-rewrite.sh (issue #11) — two absolute bans that
     previously existed only as prose: git history rewrite (commit-conventions.md)
