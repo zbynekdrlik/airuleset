@@ -58,3 +58,11 @@ A dispatch that runs but with the wrong agent is WORSE than a dispatch that fail
 Ask yourself: "Did I see this exact `subagent_type` string in the Agent tool description in THIS prompt?" If no → use `general-purpose`. If yes → proceed.
 
 Applies to all rewordings and semantic equivalents — any made-up `<plugin>:<agent>` string is banned regardless of plugin name.
+
+#### Dispatch with the LEAST tool authority the task needs (#49)
+
+**A read-only task gets a read-only agent. `Explore` has every tool EXCEPT `Agent`/`Edit`/`Write`/`NotebookEdit` — that removal is enforced by the harness, so it holds no matter what the subagent decides mid-run.** Use it for review, audit, verification, "find/read/report" work. Reserve `general-purpose` (tool list `*`) for work that genuinely must WRITE.
+
+**The prompt is not enforcement.** "Please only report", "do not commit", "no push" are text a subagent may reason its way past — only the agent TYPE's tool list actually constrains it. Real incident (#49, parovanie-produktov PR #228, 2026-07-25): a diff-review subagent dispatched `general-purpose` for a task whose prompt asked for a verification report wrote 8 assert-free scratch probe tests into the worktree and committed on its own. Its content happened to be correct; the authority was not.
+
+**After ANY subagent run, `git status` BEFORE `git add -A`.** A write-capable subagent can leave scratch files behind, and a blanket add sweeps them into your commit — in #49 that is exactly how assert-free tests reached a branch, where they would have run forever in CI as false coverage. Commit named paths, or read the status first and delete what you did not intend.
