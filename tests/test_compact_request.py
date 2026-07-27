@@ -1976,5 +1976,250 @@ class TestCompactRequestHook(unittest.TestCase):
         self.assertNotEqual(d1["sid-hash-4"]["msg_hash"], d2["sid-hash-5"]["msg_hash"])
 
 
+# --------------------------------------------------------------------------- #
+# 9. #109 (2026-07-27, reported live from the presenter project) — the compact
+# request is not ATOMIC with respect to the completion it reacts to: the
+# condition is verified when the keystrokes are ENQUEUED, never when CC finally
+# EXECUTES them.
+#
+# `deliver_compact_now` (#65) types `/compact` DURING the Stop-hook batch —
+# i.e. before that Stop's verdict exists at all. When an EARLIER Stop hook has
+# already REFUSED the message, the ticket boundary never happens, CC does not
+# drain its type-ahead queue (#84), and the keystrokes fire at some LATER
+# accepted Stop — in the report, several turns on, with a dispatched worker
+# running and the turn ending `⏳ WORKING`.
+#
+# Measured on this box's own 12 real sync-path sends (~/.claude/compact-sync.log,
+# 2026-07-27; compaction START derived from `compactMetadata.durationMs`):
+# 9 sends with no rejection pending all started within ~6s (atomic); all 3
+# sends made while a `Stop hook feedback:` entry was already in the transcript
+# started +24s / +77s / +98s later, every one of them with the marker moved to
+# `⏳`. Clean separation in both directions.
+# --------------------------------------------------------------------------- #
+
+def _write_rejected_boundary_transcript(base, cwd, sid, marker_text="✅ DONE: hotovo",
+                                        feedback="Stop hook feedback:\nHard "
+                                                 "violations detected in your "
+                                                 "message:\n- Missing **Goal:** line",
+                                        ctx_tokens=300_000, order="after"):
+    """A transcript whose last real assistant message is a completed-ticket
+    report AND which carries a `Stop hook feedback:` user entry — i.e. the very
+    boundary a compact request would react to was ALREADY refused by an earlier
+    Stop hook in the same batch. `order="before"` puts the feedback entry ahead
+    of the report instead (an OLDER turn's rejection — must NOT count)."""
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    report = {"type": "assistant", "message": {
+        "id": "msg_1", "content": marker_text,
+        "usage": {"cache_read_input_tokens": ctx_tokens,
+                  "cache_creation_input_tokens": 0}}}
+    fb = {"type": "user", "message": {"role": "user", "content": feedback}}
+    rows = [fb, report] if order == "before" else [report, fb]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return p
+
+
+class TestStopAlreadyRejected(unittest.TestCase):
+    """#109 — the enqueue-time gate: is the boundary we are about to act on
+    already REFUSED? Same "never block on don't know" philosophy as every
+    other compact gate (#48/#99/#102): unmeasurable never blocks."""
+
+    SID = "sess-rej-1"
+    CWD = "/home/x/rejproj"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_no_transcript_is_not_rejected(self):
+        self.assertFalse(
+            wd._stop_already_rejected(self.CWD, self.SID, projects_dir=self._dir()))
+
+    def test_feedback_after_the_report_is_a_rejection(self):
+        proj = self._dir()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID)
+        self.assertTrue(
+            wd._stop_already_rejected(self.CWD, self.SID, projects_dir=proj))
+
+    def test_report_with_nothing_after_it_is_not_rejected(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        self.assertFalse(
+            wd._stop_already_rejected(self.CWD, self.SID, projects_dir=proj))
+
+    def test_feedback_from_an_older_turn_is_not_a_rejection(self):
+        proj = self._dir()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID, order="before")
+        self.assertFalse(
+            wd._stop_already_rejected(self.CWD, self.SID, projects_dir=proj))
+
+    def test_an_ordinary_user_entry_after_the_report_is_not_a_rejection(self):
+        proj = self._dir()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID,
+                                            feedback="pokracuj prosim")
+        self.assertFalse(
+            wd._stop_already_rejected(self.CWD, self.SID, projects_dir=proj))
+
+
+class TestDeliverCompactNowRefusesRejectedBoundary(unittest.TestCase):
+    """#109 — the reported incident, at the ONE moment it is still preventable:
+    `deliver_compact_now` must NOT type `/compact` for a boundary whose Stop
+    was already refused. It falls back (returns False) so the request survives
+    for job 14's polled retry, which re-checks the CURRENT state."""
+
+    SID = "sess-rej-deliver"
+    CWD = "/home/x/rejdeliver"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _call(self, proj):
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1)
+        return handled, tmux
+
+    def test_rejected_boundary_is_not_typed(self):
+        proj = self._proj()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID)
+        handled, tmux = self._call(proj)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
+
+    def test_accepted_boundary_is_still_typed(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        handled, tmux = self._call(proj)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(handled)
+
+
+class TestCompactDeliveryTimeBoundaryGate(unittest.TestCase):
+    """#109 — the DELIVERY-time half #102 never built. #102 re-checked only for
+    a `❓` turn; a session that has moved on to `⏳ WORKING` (a dispatched worker
+    whose in-flight state lives ONLY in context — the reported incident's exact
+    execution state) passed that gate untouched."""
+
+    SID = "sess-working-gate"
+    CWD = "/home/x/workingproj"
+    PANE = "%7"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_job14_does_not_deliver_while_the_turn_is_working(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "⏳ WORKING: worker implementing #608")
+        path = self._p()
+        wd.record_compact_request(self.SID, self.CWD, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(time.time(), tmux,
+                                          {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                          path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
+
+    def test_job14_still_delivers_on_a_real_done_boundary(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        path = self._p()
+        wd.record_compact_request(self.SID, self.CWD, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(time.time(), tmux, {},
+                                   {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                   path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_sync_path_does_not_deliver_while_the_turn_is_working(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "⏳ WORKING: worker implementing #608")
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
+
+
+class TestCompactRequestExpiry(unittest.TestCase):
+    """#109 point 3 — a request that never found a safe delivery moment must
+    LAPSE, not fire hours after the boundary that justified it."""
+
+    SID = "sess-expiry"
+    CWD = "/home/x/expiryproj"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_a_stale_request_is_dropped_with_no_tmux_interaction(self):
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD,
+                                  now=now - wd.COMPACT_REQUEST_MAX_AGE_S - 60,
+                                  path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(now, tmux, {},
+                                          {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                          path=path)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("expired" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_fresh_request_is_not_expired(self):
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD, now=now - 60, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(now, tmux, {},
+                                          {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                          path=path)
+        self.assertFalse(any("expired" in ln for ln in logs), logs)
+
+
+class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
+    """#109 — the enqueue-time gate can only SEE a rejection that an earlier
+    hook has already produced, so `notify-compact-request.sh` must stay ordered
+    AFTER every `stop-check-*.sh` gate in the managed Stop chain."""
+
+    def test_notify_compact_request_is_ordered_after_every_stop_check_gate(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent
+                          / "settings" / "hooks.json").read_text())
+        cmds = []
+        for entry in cfg["hooks"]["Stop"]:
+            for h in entry.get("hooks", []):
+                cmds.append(h.get("command", ""))
+        compact = [i for i, c in enumerate(cmds) if "notify-compact-request.sh" in c]
+        gates = [i for i, c in enumerate(cmds) if "stop-check-" in c]
+        self.assertTrue(compact, cmds)
+        self.assertTrue(gates, cmds)
+        self.assertGreater(compact[0], max(gates), cmds)
+
+
 if __name__ == "__main__":
     unittest.main()
