@@ -63,6 +63,13 @@ def _isolate_compact_claims(testcase):
     log_patcher = m.patch.object(wd, "compact_sync_log_path", return_value=logp)
     log_patcher.start()
     testcase.addCleanup(log_patcher.stop)
+    # #99 — every real `/compact` send now writes compact-substantiality.json
+    # (mark_compact_boundary); isolate it too so a test send never touches
+    # the real `~/.claude/` file the live systemd watchdog also reads/writes.
+    subp = Path(d.name) / "compact-substantiality-test.json"
+    sub_patcher = m.patch.object(wd, "compact_substantiality_path", return_value=subp)
+    sub_patcher.start()
+    testcase.addCleanup(sub_patcher.stop)
     return p
 
 
@@ -1385,6 +1392,215 @@ class TestDeliverCompactNow(unittest.TestCase):
         wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
         log_text = wd.compact_sync_log_path().read_text()
         self.assertIn("SKIP no-pane", log_text)
+
+
+# --------------------------------------------------------------------------- #
+# 2c-3. #99 (2026-07-27 live incident) — SUBSTANTIALITY GATE. A completed-
+# ticket-shaped turn (`✅ DONE:`) that did no durable work (no commit) must
+# NOT raise `/compact`, no matter how big the context has grown; a genuinely
+# completed ticket (real commits) still must. Signal: commits in the
+# session's own `cwd` git repo since the last real `/compact` boundary for
+# that repo (or, on the first-ever boundary, since the session's own start).
+# --------------------------------------------------------------------------- #
+
+def _git(repo, *args, env=None):
+    full_env = dict(os.environ)
+    if env:
+        full_env.update(env)
+    r = subprocess.run(["git", "-C", str(repo)] + list(args),
+                       capture_output=True, text=True, env=full_env)
+    assert r.returncode == 0, "git %s failed: %s" % (args, r.stderr)
+    return r.stdout
+
+
+def _make_git_repo(testcase):
+    """A REAL git repo in a temp dir (never a hand-typed diff/log) — per the
+    repo's own playbook note on classifier-style fixes, corpus-style proof
+    needs the actual tool, not a simulation of it."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    repo = Path(d.name)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    return repo
+
+
+def _commit_at(repo, epoch_ts, msg="c"):
+    """One commit whose author+committer date is EXACTLY `epoch_ts` (a
+    fixed ISO-8601 UTC string via GIT_*_DATE) — never wall-clock `now`, so
+    a test placing commits before/after an anchor is deterministic."""
+    from datetime import datetime, timezone
+    iso = datetime.fromtimestamp(epoch_ts, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    (repo / ("f-%s.txt" % msg)).write_text(msg)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", msg,
+        env={"GIT_AUTHOR_DATE": iso, "GIT_COMMITTER_DATE": iso})
+
+
+class TestCompactBoundarySubstantial(unittest.TestCase):
+    """Core signal: `compact_boundary_substantial` + its building blocks,
+    against REAL git repos — never a hand-typed log."""
+
+    def _isolate(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-substantiality-test.json"
+
+    def test_no_commits_since_anchor_is_false(self):
+        repo = _make_git_repo(self)
+        subp = self._isolate()
+        anchor = 1_700_000_000
+        _commit_at(repo, anchor - 3600)   # BEFORE the anchor — doesn't count
+        wd.mark_compact_boundary(str(repo), now=anchor, path=subp)
+        self.assertFalse(
+            wd.compact_boundary_substantial(str(repo), "sid", path=subp))
+
+    def test_commit_after_anchor_is_true(self):
+        repo = _make_git_repo(self)
+        subp = self._isolate()
+        anchor = 1_700_000_000
+        wd.mark_compact_boundary(str(repo), now=anchor, path=subp)
+        _commit_at(repo, anchor + 3600)   # AFTER the anchor — counts
+        self.assertTrue(
+            wd.compact_boundary_substantial(str(repo), "sid", path=subp))
+
+    def test_not_a_git_repo_is_unmeasurable_none(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.assertIsNone(
+            wd.compact_boundary_substantial(d.name, "sid", path=self._isolate()))
+
+    def test_mark_then_read_back_round_trips(self):
+        subp = self._isolate()
+        wd.mark_compact_boundary("/some/repo", now=1_700_000_000.0, path=subp)
+        self.assertEqual(
+            wd._last_boundary_ts("/some/repo", "sid", path=subp), 1_700_000_000.0)
+
+    def test_no_persisted_anchor_falls_back_to_session_start(self):
+        proj = self._isolate().parent
+        cwd = "/home/x/fallback-proj"
+        sid = "sess-fallback"
+        d = Path(proj) / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (sid + ".jsonl")).write_text(json.dumps(
+            {"type": "user", "timestamp": "2026-07-27T08:00:00.000Z"}) + "\n")
+        ts = wd._last_boundary_ts(cwd, sid, projects_dir=proj,
+                                  path=self._isolate())
+        self.assertIsNotNone(ts)
+
+    def test_git_command_failure_is_unmeasurable_none(self):
+        self.assertIsNone(wd._git_commit_count_since(
+            "/x", 1_700_000_000, git_run=lambda argv: None))
+
+    def test_blank_cwd_or_missing_anchor_is_unmeasurable_none(self):
+        self.assertIsNone(wd._git_commit_count_since("", 1_700_000_000))
+        self.assertIsNone(wd._git_commit_count_since("/x", None))
+
+
+class TestSubstantialityGateInDeliverCompactNow(unittest.TestCase):
+    """Integration: `deliver_compact_now` drops a no-work boundary outright,
+    regardless of context size, and still sends a genuine one."""
+    SID = "sess-subst-1"
+    CWD = "/home/newlevel/devel/substproj"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_no_work_drops_even_with_huge_context(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=False):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj)
+        self.assertTrue(ok)             # handled — nothing to fall back for
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("DROP no-work", log_text)
+
+    def test_real_work_still_sends(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=True):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_unmeasurable_falls_through_to_old_behavior(self):
+        # compact_boundary_substantial returning None (not a git repo) must
+        # not change pre-#99 behavior at all: this CWD isn't a real repo,
+        # so the real function already returns None here with no patching.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_successful_send_marks_the_boundary(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        before = time.time()
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=True):
+            wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        ts = wd._load_compact_substantiality().get(self.CWD)
+        self.assertIsNotNone(ts)
+        self.assertGreaterEqual(ts, before)
+
+
+class TestSubstantialityGateInJob14(unittest.TestCase):
+    """Same gate, polled path (job 14 / `compact_ticket_boundary`)."""
+    SID = "sess-subst-job14"
+    CWD = "/home/x/subst-job14-proj"
+    PANE = "%7"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, substantial):
+        base = self._dir()
+        proj = base / "projects"
+        reqpath = base / "compact-requests.json"
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        wd.record_compact_request(self.SID, self.CWD, path=reqpath)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        with m.patch.object(wd, "compact_boundary_substantial",
+                           return_value=substantial):
+            logs = wd.compact_ticket_boundary(
+                time.time(), tmux, {}, panes_by_sid, path=reqpath,
+                projects_dir=proj)
+        return tmux, logs, reqpath
+
+    def test_no_work_drops_and_clears_the_request(self):
+        tmux, logs, reqpath = self._go(False)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip no-work" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(reqpath))
+
+    def test_real_work_still_sends(self):
+        tmux, logs, reqpath = self._go(True)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
 
 
 # --------------------------------------------------------------------------- #
