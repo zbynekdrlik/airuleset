@@ -113,11 +113,23 @@ TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' || 
 # tests for a change touch e.g. `src/foo.rs`, NOT a `*test*`-named path. Mirror Gate 2's
 # inline-test recognition here so a feature/bugfix that DOES ship inline tests is not
 # wrongly flagged "no test files modified". Look at lines ADDED in the branch diff.
+#
+# #41: the `it\(` alternative used to be a bare substring with no boundary,
+# so it matched INSIDE unrelated code — `sys.exit(1)`, `.split(...)`,
+# `.init()` all contain the literal substring `it(` right after a word
+# character, and a real corpus replay of this repo's own 250 real `it\(`-
+# substring hits (48 files) turned up not ONE genuine JS test call among
+# them. Now `\bit\(['"]` — a word boundary (so `exit(`/`split(`/`init(` can
+# never match, since the char before "it(" there is itself a word char) AND
+# a quote as the first argument (the actual Jest/Mocha `it('desc', ...)`
+# shape). Same replay: 1 real match left in this repo's own tracked files,
+# and it IS a genuine `it('does nothing', () => {})` test-body literal
+# (tests/test_airuleset.py, block-test-skips.sh coverage).
 INLINE_TEST_ADDED=0
 BRANCH_DIFF_ADDED=$(git diff -U0 "${BASE_REF}...HEAD" 2>/dev/null \
     | grep -E '^\+' || true)
 if printf '%s' "$BRANCH_DIFF_ADDED" \
-    | grep -qE '#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|it\(|describe\('; then
+    | grep -qE "#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|\bit\(['\"]|describe\("; then
     INLINE_TEST_ADDED=1
 fi
 
@@ -166,7 +178,7 @@ if [ -n "$COMMITS" ]; then
         if [ "$SEEN_TEST_COMMIT" = "0" ]; then
             ADDED=$(git diff-tree --no-commit-id -p -r "$SHA" 2>/dev/null \
                 | grep -E '^\+' || true)
-            if printf '%s' "$ADDED" | grep -qE '#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|it\(|describe\('; then
+            if printf '%s' "$ADDED" | grep -qE "#\[(test|cfg\(test\)|tokio::test|rstest)\]|assert(_eq|_ne)?!|\bfn test_|def test_|\bit\(['\"]|describe\("; then
                 SEEN_TEST_COMMIT=1
             fi
         fi
