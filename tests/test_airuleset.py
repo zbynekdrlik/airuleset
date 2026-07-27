@@ -1434,6 +1434,82 @@ class TestPrePushTestCheckBaseRef(TestCase):
         self.assertIn("BLOCKED", r.stdout)
 
 
+class TestPrePushTestCheckItParenFalsePositive(TestCase):
+    """#41 (restreamer PR #324, 2026-07-25): Gate 2's inline-test regex had a
+    bare `it\\(` alternative with no word boundary, so it matched the
+    substring `it(` inside completely unrelated code — `sys.exit(1)`,
+    `.split(...)`, `.init()` all contain it right after a word character.
+    A commit whose diff happened to add ANY such call flipped
+    SEEN_TEST_COMMIT=1, silently defeating Gate 2's RED-before-GREEN check
+    for every later bug-fix commit in the same push — a false NEGATIVE,
+    harder to notice than a false block. Fixed to `\\bit\\(['\"]` — a word
+    boundary (excludes exit(/split(/init() plus a quote as the first arg
+    (the real Jest/Mocha `it('desc', ...)` shape)."""
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / "pre-push-test-check.sh")],
+            input=payload, text=True, capture_output=True, cwd=cwd, timeout=60,
+            env=env)
+
+    def _mkrepo(self):
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "dev")
+        return root, g
+
+    def test_sys_exit_call_does_not_count_as_a_test_commit(self):
+        # LIVE shape (restreamer #324): a validator script's `sys.exit(1)`
+        # call incidentally flipped SEEN_TEST_COMMIT before it ever saw a
+        # real test. Gate 2 must still block the later bug-fix commit.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "validate.py"), "w").write(
+            "import sys\n\ndef validate(ok):\n"
+            "    if not ok:\n        sys.exit(1)\n"
+        )
+        g("add", "validate.py")
+        g("commit", "-qm", "chore: add config validator")
+        open(os.path.join(root, "app.py"), "a").write("# fixed\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #41")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2,
+                         "sys.exit(1) masked the missing test: " + r.stdout)
+        self.assertIn("BLOCKED", r.stdout)
+
+    def test_genuine_js_it_test_commit_still_recognized(self):
+        # regression guard: a REAL inline it('...') test (non-test-named
+        # path, so only the INLINE recognition can catch it) must still
+        # count as the preceding test commit — the tightened regex must not
+        # also lose the genuine case.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "checks.js"), "w").write(
+            "it('validates the thing', () => { expect(f(1)).toBe(2); });\n"
+        )
+        g("add", "checks.js")
+        g("commit", "-qm", "add inline coverage")
+        open(os.path.join(root, "app.py"), "a").write("# fixed\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #41")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0,
+                         "genuine it(...) test no longer recognized: " + r.stdout)
+
+
 class TestPrePushBaseSyncHook(TestCase):
     """pre-push-base-sync.sh — GLOBAL conflict-churn guard. Blocks a push ONLY when
     a trial merge of the base into HEAD has a REAL CONFLICT (git merge-tree). It
