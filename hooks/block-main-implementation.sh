@@ -411,7 +411,62 @@ def strip_heredocs(text):
     return "\n".join(out)
 
 
+# ---- #88: splice out bash LINE CONTINUATIONS before segmentation. A
+# backslash immediately followed by a newline joins the two physical lines
+# into ONE logical line in bash (`curl ... |\` + newline + `  grep ...` is a
+# single pipe, not two commands) -- but STATEMENTS_RE below splits on a bare
+# "\n" with no notion of this, so the continued line (typically a pipe's
+# REDUCER stage, e.g. the version-extracting `grep` after a health-check
+# `curl`) becomes its own top-level statement and misclassifies as a bulk
+# read. Reproduces both inside a `$( … )` command substitution (the real gk
+# health-check that was blocked by mistake) and at plain top level -- the
+# root cause is line-continuation handling, not `$( … )` specifically.
+# Quote-aware (mirrors `strip_unquoted_comment`'s tracking): a
+# backslash-newline INSIDE single quotes is two literal characters in bash,
+# not a continuation, and must be left alone.
+def join_line_continuations(text):
+    out = []
+    in_sq = in_dq = False
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_sq:
+            if c == "'":
+                in_sq = False
+            out.append(c)
+            i += 1
+            continue
+        if in_dq:
+            if c == "\\" and i + 1 < n:
+                out.append(c)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_dq = False
+            out.append(c)
+            i += 1
+            continue
+        if c == "'":
+            in_sq = True
+            out.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_dq = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n and text[i + 1] == "\n":
+            i += 2                # splice out the backslash + newline
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 cmd = strip_heredocs(cmd)
+cmd = join_line_continuations(cmd)
 
 # Same rigor level as block-history-rewrite.sh: split on shell statement/pipe
 # separators, quote-aware tokenization per segment. A segment that matches
