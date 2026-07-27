@@ -518,3 +518,40 @@ twice — second run showed `Already up to date.` for every remote (dev2,
 gatekeeper, montalu@subdev, marek@subdev, david@subdev). Both issues
 auto-closed by GitHub from the `Closes #N` commit messages (confirmed via
 `gh issue view`, no PR involved).
+
+## 2026-07-27 — #49 + #50 (subagent authority, one batch, direct to main)
+
+**#49 (review subagent took write authority).** Validated first: the ticket's
+headline — "the subagent merged PR #228" — was already refuted on the ticket by
+the supervisor (the merge was the supervisor's own, inside `pr-merge-policy.md`
+authority). Dropped that half; did NOT build the proposed
+`block-subagent-merge.sh`. The surviving defect reproduced: no surface anywhere
+carried a least-tool-authority rule, and a live run of
+`inject-situational-rule.sh` on a real Agent payload showed `least` and
+`git status` absent from the 4072 chars it injects at every dispatch. Fix is
+content on the two surfaces that reach a dispatcher — the skill body (injected
+at the Agent call, `situational-triggers.conf:42`) and the always-on module stub
+(survives the hook's once-per-session dedup). Commits `5f5c7ff` [red] →
+`bf80458` [green]; tests `tests/test_review_dispatch_authority.py`
+(`test_injected_body_at_an_agent_dispatch_contains_the_rule` is the behavioural
+one — runs the real hook). Approach comment posted before the first code commit:
+issues/49#issuecomment-5094352281.
+
+**#50 (fork acts on inherited-but-unexecuted instructions).** Fully valid,
+nothing overcame it: zero hits anywhere for what `fork` inherits or when to pick
+it; the only description was a comment inside
+`pre-agent-validate-subagent-type.sh`, on no agent's context path. Same two
+surfaces, plus `subagent-continuation.md` as the always-on home (the incident
+shape is a fork dispatched LATE in a long session, by which time the hook's
+once-per-session injection was long spent). No hook — the ticket's own
+conclusion, re-confirmed: the PreToolUse payload holds only the narrow prompt,
+which looks correct, so there is no static signature. Commits `cfeb201` [red] →
+`ea6fede` (assertion-literal correction, re-verified RED against a stashed
+implementation) → `56f3b47` [green]; tests
+`tests/test_fork_context_inheritance.py`. Approach comment:
+issues/50#issuecomment-5094356385.
+
+Gate: 2222 tests pass, `ruff check .` clean, `airuleset.py validate` OK.
+Deployed with `python3 airuleset.py push`; the second run showed
+`Already up to date.` for all five remotes (dev2, gatekeeper, montalu@subdev,
+marek@subdev, david@subdev).
