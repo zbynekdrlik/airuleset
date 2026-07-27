@@ -4569,6 +4569,16 @@ COMPACT_TEXT = "/compact"
 # floor without a code change.
 COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
 
+# #109 point 3 — a request that never found a safe delivery moment must LAPSE,
+# not fire hours after the boundary that justified it. A request is only ever
+# retried while the session stays away from a boundary (busy pane, occupied
+# stash slot, a `⏳`/`❓` turn, no live pane at all); past this age the
+# completion it was recorded for is simply no longer the session's present, so
+# job 14 drops it with ZERO tmux interaction. Generous on purpose: this is a
+# floor against a stale request, not a second delivery policy — the state
+# gates above are what decide whether a fresh request is safe.
+COMPACT_REQUEST_MAX_AGE_S = 30 * 60
+
 # #67 (2026-07-26 live incident, david@subdev): a forgotten USER DRAFT sitting
 # in the input box made job 14/15 log "skip draft" and retry FOREVER — the
 # same draft (one unfinished sentence) skipped 13 sweeps straight overnight
@@ -4644,6 +4654,92 @@ def _compact_blocked_by_question(cwd, sid, projects_dir=None):
     if tpath is None:
         return False
     return transcript_last_marker(tpath) == "❓"
+
+
+# #109's own delivery-time marker set. #102 blocked only on `❓`; the reported
+# incident executed while the turn read `⏳ WORKING: worker implementing #608`
+# — a DISPATCHED worker whose in-flight state lives ONLY in context, which is
+# the very thing a completed-ticket boundary is supposed to guarantee is
+# already durable. Both markers are POSITIVE evidence that the session is not
+# at a boundary; a missing/unreadable marker stays "don't know" and never
+# blocks, exactly like #48/#99/#102.
+_COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
+
+# The `user` entry Claude Code writes when a Stop hook REFUSES a turn's final
+# message — verified against this box's own transcripts (2026-07-27): every
+# rejection appears as a top-level `user` entry whose string content starts
+# with exactly this prefix. It is the ONLY durable record of a refused Stop:
+# `stop_hook_summary.preventedContinuation` is `false` on all 20,257 such
+# entries in the local corpus and carries no rejection signal at all.
+_STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
+
+
+def _compact_not_at_boundary(cwd, sid, projects_dir=None):
+    """#109 — the DELIVERY-time half of #102's gate. True when the session's
+    CURRENT last real turn carries a marker that POSITIVELY says "this is not
+    a completed-ticket boundary" (`❓` blocked on the user, `⏳` still working
+    — a dispatched worker's state lives only in context).
+
+    #102 re-checked only `❓`. The reported incident (#109, presenter,
+    2026-07-27) executed on a `⏳ WORKING` turn with a live worker, several
+    turns after the `✅ DONE` that had justified the request — so the request
+    outlived its own boundary and the ❓-only gate waved it through. Every
+    `/compact` sender consults this right before its own send point; a
+    request it blocks is LEFT IN PLACE (never consumed) so the next sweep
+    retries once the session genuinely returns to a boundary — or the entry
+    expires (`COMPACT_REQUEST_MAX_AGE_S`). Unmeasurable never blocks."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    return transcript_last_marker(tpath) in _COMPACT_NON_BOUNDARY_MARKERS
+
+
+def _stop_already_rejected(cwd, sid, projects_dir=None):
+    """#109 — the ENQUEUE-time gate, and the ONE moment the reported incident
+    is still preventable.
+
+    True when the session's last real assistant message (the completed-ticket
+    report a compact request is reacting to) is ALREADY followed by a
+    `Stop hook feedback:` user entry — i.e. an earlier hook in this SAME Stop
+    batch has refused it, so the turn does not end, the ticket boundary never
+    happens, and CC will not drain its type-ahead queue (#84). Typing
+    `/compact` into that pane does not compact anything now; it parks
+    keystrokes that fire at some arbitrary LATER accepted Stop, in a state
+    that would never have justified them.
+
+    This is readable at enqueue time only because `notify-compact-request.sh`
+    is ordered AFTER every `stop-check-*.sh` gate in the managed Stop chain
+    (pinned by `TestCompactHookRunsAfterTheStopGates`), so their verdicts are
+    already in the transcript when it runs. A hook that runs AFTER it — the
+    session-scoped `/goal` hook does — is structurally invisible here; such a
+    request is caught instead by `_compact_not_at_boundary` on the next
+    delivery attempt. Unmeasurable never blocks (same philosophy as every
+    other compact gate); a missed rejection just means today's behavior."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    entries = _iter_jsonl_tail(tpath)
+    last_assistant = -1
+    for i in range(len(entries) - 1, -1, -1):
+        e = entries[i]
+        if not isinstance(e, dict) or e.get("type") != "assistant":
+            continue
+        if (_entry_text(e) or "").strip() in _SENTINELS:
+            continue    # synthetic / tool-only — keep scanning back
+        last_assistant = i
+        break
+    if last_assistant < 0:
+        return False
+    for e in entries[last_assistant + 1:]:
+        if not isinstance(e, dict) or e.get("type") != "user":
+            continue
+        msg = e.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, str) and content.startswith(_STOP_FEEDBACK_PREFIX):
+            return True
+    return False
 
 
 def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
@@ -4731,6 +4827,19 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     for sid in list(reqs.keys()):
         entry = reqs.get(sid) or {}
         cwd = entry.get("cwd", "")
+        # #109 -- EXPIRY, checked before any tmux work: a request older than
+        # COMPACT_REQUEST_MAX_AGE_S no longer describes the session's present,
+        # so it lapses instead of firing at some unrelated later moment.
+        try:
+            age = float(now) - float(entry.get("ts") or 0)
+        except (TypeError, ValueError):
+            age = 0.0
+        if entry.get("ts") and age > COMPACT_REQUEST_MAX_AGE_S:
+            logs.append("skip expired (compact-request) %s age=%ds" % (sid, int(age)))
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+            continue
         # #78 -- the SHARED claim gate, checked FIRST and unconditionally:
         # if ANY sender (this job, or the synchronous #65 path) already has
         # an outstanding, unresolved /compact claim for this session, drop
@@ -4772,6 +4881,16 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # ticket-boundary report for this same sid).
         if _compact_blocked_by_question(cwd, sid, projects_dir=pdir):
             logs.append("skip blocked-question (compact-request) %s" % loc)
+            continue
+        # #109 -- the general delivery-time boundary re-check: the request was
+        # justified by a `✅` boundary that may be several turns in the past.
+        # A session now on `⏳ WORKING` (a dispatched worker whose state lives
+        # only in context) is NOT a boundary, and the ❓-only gate above waved
+        # exactly that case through. Left in place, never consumed -- the next
+        # sweep retries once the session is genuinely back at a boundary, or
+        # the entry expires.
+        if _compact_not_at_boundary(cwd, sid, projects_dir=pdir):
+            logs.append("skip not-a-boundary (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
@@ -4894,6 +5013,40 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
 # DRAFT — never CC's own "Press up to edit queued messages" placeholder,
 # which `_find_boundary_line` already normalizes to bare) falls back to
 # `record_compact_request` for job 14's polled retry, unchanged.
+#
+# #109 (2026-07-27, reported live from the presenter project) — the cost of
+# that queuing behavior, and its bound. Because this path types DURING the
+# Stop-hook batch, it acts BEFORE the turn's Stop verdict exists. When an
+# earlier gate REFUSES the message the boundary never happens, CC never
+# drains its type-ahead queue (#84), and the keystrokes execute at some later
+# accepted Stop — the report had it fire several turns on, with a dispatched
+# worker running and the turn ending `⏳ WORKING`.
+#
+# Measured on this box's 12 real sends (compact-sync.log, 2026-07-27;
+# compaction START = boundary_ts - compactMetadata.durationMs): 9 sends with
+# no rejection pending started within ~6s (genuinely atomic); all 3 made
+# while a `Stop hook feedback:` entry already sat in the transcript started
+# +24s / +77s / +98s later, every one with the marker moved to `⏳`.
+#
+# THERE IS NO WORK-COMPLETE CALLBACK TO USE INSTEAD, and this says so plainly
+# rather than inventing something that merely looks atomic:
+#   * the Stop hook fires BEFORE the accept/reject decision — that IS the bug,
+#     not a detail of how we call it;
+#   * #87 already proved by tracing the CC 2.1.220 call graph that a local
+#     `/compact` returns `shouldQuery:false` and never reaches either call
+#     site of the Stop-hook implementation, so a self-signalling `/compact`
+#     is closed;
+#   * once keystrokes are in CC's type-ahead queue they cannot be safely
+#     recalled: the only key that clears the input box is Escape, which
+#     INTERRUPTS a running turn (it would abort live work), and the whole
+#     manoeuvre races the drain it is trying to beat.
+# So the fix is PREVENTION AT ENQUEUE (`_stop_already_rejected`), plus a
+# delivery-time re-check on every retry (`_compact_not_at_boundary`) and a
+# lapse (`COMPACT_REQUEST_MAX_AGE_S`) — no new job, no new state machine.
+# Residual, stated rather than papered over: a Stop refused by a hook that
+# runs AFTER `notify-compact-request.sh` (the session-scoped `/goal` hook
+# does) is invisible at enqueue time; such a request is caught only by the
+# delivery-time gate on its next attempt.
 # --------------------------------------------------------------------------- #
 
 def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
@@ -4972,6 +5125,22 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # state this function refuses on.
     if _compact_blocked_by_question(cwd, sid, projects_dir=projects_dir):
         _log_compact_sync("SKIP blocked-question sid=%s cwd=%s" % (sid, cwd))
+        return False
+    # #109 -- the general form of the gate above: never deliver while the
+    # session's CURRENT last turn positively says "not a boundary" (`⏳` too,
+    # not just `❓`).
+    if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
+        return False
+    # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident
+    # is still preventable: this function runs INSIDE the Stop-hook batch, so
+    # the boundary it is acting on may ALREADY have been refused by an earlier
+    # hook. Typing `/compact` then does not compact anything now -- it parks
+    # keystrokes CC will only drain at some LATER accepted Stop (#84), in a
+    # state that would never have justified them. Fall back to job 14's polled
+    # retry, which re-checks the session's then-current state.
+    if _stop_already_rejected(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("SKIP stop-rejected sid=%s cwd=%s" % (sid, cwd))
         return False
     kind, draft = _classify_boundary(captured)
     if kind == "no-input-line":
@@ -7034,9 +7203,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           while its CURRENT last turn is a ❓ block, #102 —
           `_compact_blocked_by_question`; compact_ticket_boundary) — a safe
           compaction point, since the ticket's durable state already lives
-          in git/GitHub/the issue. THE ONLY /compact SENDER left in this
-          module besides the synchronous #65 path (`deliver_compact_now`,
-          called from `cmd_compact_request`) — see (15)/(17) below.
+          in git/GitHub/the issue. #109 adds the DELIVERY-time half of that
+          re-check (`_compact_not_at_boundary` — `⏳` too, not just `❓`: a
+          request justified by a `✅` boundary several turns ago must not
+          fire once a dispatched worker's context-only state is in flight)
+          and a lapse for a request that never found a safe moment
+          (`COMPACT_REQUEST_MAX_AGE_S`). THE ONLY /compact SENDER left in
+          this module besides the synchronous #65 path
+          (`deliver_compact_now`, called from `cmd_compact_request`, which
+          #109 also stops from typing into a boundary whose Stop an earlier
+          hook already refused — `_stop_already_rejected`) — see (15)/(17)
+          below.
       (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Used
           to fire `/compact` purely off CONTEXT SIZE + IDLE DURATION, with
           no regard for what marker the session's last turn ended on — the
