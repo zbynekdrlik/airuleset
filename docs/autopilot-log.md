@@ -488,3 +488,33 @@ Verdict: the COST claim is confirmed and quantified (+77k tokens every session);
 the "rules make the model worse" claim is NOT supported. No module implicated --
 naming one would be invented. n=1 per cell, no repeats: signal, not proof.
 Statistical-power follow-up filed as #106. Evidence: audits/ab94/.
+
+## 2026-07-27 batch — #45 (unanswered question re-ask) + #47 (gk run-card silence)
+
+- #45 (question re-asked by allusion instead of restated after an intervening
+  conversation): RED `3d97641` (tests/test_question_policy.py::TestUnansweredQuestionReaskedFull,
+  tests/test_notify_question_block.py::TestHistoryAllusionBlocked), GREEN `dafd0de`.
+  Documented the two branches (VERBATIM re-poke vs full NANOVO re-ask) in
+  message-status-marker.md + user-questions-slovak.md; extended
+  stop-check-question-quality.sh with Check 5 (banned Slovak referencing
+  phrases), sitting after the pre-existing VERBATIM-repeat bypass so it only
+  ever fires on a genuinely new ask. Live-verified the hook blocks the exact
+  ticket-quoted phrase ("jediné otvorené rozhodnutie je ultracode (pýtal som
+  sa skôr)") post-deploy.
+- #47 (gk per-ticket Discord run-card silent since 06:09 — autopilot-master
+  and process-subdev never mentioned run-card in their own bodies, 0 vs 4 in
+  skills/autopilot/SKILL.md): RED `7fcc2c1` (tests/test_autopilot_master_skill.py::TestRunCardFiredInEveryLane,
+  tests/test_process_subdev_skill.py::TestRunCardFiredOnReleasedSlice), GREEN
+  `ffabb71`. process-subdev step 5.4 now fires `notify --run-card` once per
+  ticket in the released slice, right after post-deploy verification;
+  autopilot-master LANE 1/LANE 3 carry explicit reinforcement lines (never
+  rely solely on the "load the other skill" pointer — see the playbook entry
+  on grep-locking a cross-skill pointer).
+
+Both: no dev branch / no PR / no CI in this repo (commits go direct to
+`main`). Local gate: `python -m pytest tests/` (2207 passed), `ruff check .`
+(clean), `python3 airuleset.py validate` (clean). `airuleset.py push` ran
+twice — second run showed `Already up to date.` for every remote (dev2,
+gatekeeper, montalu@subdev, marek@subdev, david@subdev). Both issues
+auto-closed by GitHub from the `Closes #N` commit messages (confirmed via
+`gh issue view`, no PR involved).
