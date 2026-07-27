@@ -838,6 +838,62 @@ class CountsAndBoundedSlices80(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
+class LineContinuationInsideSubstitution_88(unittest.TestCase):
+    """#88: a real gk health-check command was blocked by mistake. A
+    multi-line curl+grep pipeline written with a bash LINE CONTINUATION
+    (`|\\` at end of line, the pipe's reducer stage on the NEXT physical
+    line — normal style for a readable one-liner):
+
+        VERSION=$(curl -s https://erp.montalu.sk/web/health |\\
+          grep -oP '(?<=.version.: .)[0-9.]+')
+
+    STATEMENTS_RE splits on a bare '\\n' with no notion of bash's
+    backslash-newline continuation, so the continued line becomes its OWN
+    top-level statement — and since it has no further '|', its head token
+    IS 'grep' (no -c/-q), which classifies as a genuine bulk read even
+    though it is really just the tail of the previous pipe, feeding a
+    single bounded version string into a command substitution. Reproduced
+    directly (1/687 in the #80 corpus, filed separately since #80's own
+    fixes did not touch it): a bare top-level continued pipe
+    (`curl -s https://x |\\` + newline + `  grep -oP 'pattern'`, no
+    substitution at all) hits the exact same misclassification — the root
+    cause is line-continuation handling, not `$( … )` specifically."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def test_health_check_version_extraction_inside_substitution_allowed(self):
+        cmd = ("VERSION=$(curl -s https://erp.montalu.sk/web/health |\\\n"
+               "  grep -oP '(?<=.version.: .)[0-9.]+')")
+        out = self._armed(cmd)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_bare_top_level_continued_pipe_allowed(self):
+        cmd = "curl -s https://erp.montalu.sk/web/health |\\\n  grep -oP 'pattern'"
+        out = self._armed(cmd)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_continuation_inside_single_quotes_is_left_alone(self):
+        # a backslash-newline INSIDE single quotes is two literal characters
+        # in bash, not a continuation — the joiner must be quote-aware and
+        # never touch it. This uses a genuinely blocked bulk read (cat) so a
+        # naive "always splice" implementation that also mangles the quoted
+        # payload would still show SOME behavior change here to catch a
+        # regression the other direction.
+        cmd = "cat 'line one\\\nline two' file.txt"
+        out = self._armed(cmd)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_ci_poll_regression_guard_still_allowed(self):
+        # non-negotiable guard from #73/#80 — must never regress
+        cmd = ("for i in $(seq 1 18); do gh run view 1 --json status,"
+               "conclusion --jq '.status'; sleep 30; done")
+        out = self._armed(cmd)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 class OneShotBypass80(unittest.TestCase):
     """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
     single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
