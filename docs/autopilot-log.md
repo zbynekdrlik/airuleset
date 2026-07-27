@@ -639,3 +639,69 @@ second AND third run both showed `Already up to date.` for all five
 remotes (dev2, gatekeeper, montalu@subdev, marek@subdev, david@subdev).
 All three issues auto-closed by GitHub on push (direct-to-main, `Closes
 #N` in the commit message — no PR needed on this repo's flow).
+
+## 2026-07-27 batch — #34 (watchdog hosted-stream wording) + #43 (cost report, superseded) + #106 (A/B power follow-up)
+
+**#34 — sudo-hosted stream mechanism (jobs 7/9/10), keep-generic + reword
+to historical.** Validated: `_FOREIGN_TMUX_USERS` was already emptied by
+#33, but the WIDER `_foreign_user`/`_foreign_session_info`/
+`_foreign_transcript_goal` + job 7's `hosted_users` merge + job 10's
+hosted `waiting=True` path still described montalu in present tense.
+Live-checked (`tmux list-panes -a`, `ls /home/`): no pane currently
+matches the foreign-home shape. Decision: keep the mechanism (cheap when
+idle, already generic, 373 lines of tests, mirrors the established
+`_FOREIGN_TMUX_USERS` precedent) — comment-only reword of 4 docstrings to
+past tense, matching the wording already used at the `_FOREIGN_TMUX_USERS`
+definition. Commit `87c31c2`. No test change (no behavior change).
+Approach: issues/34#issuecomment-5095518248.
+
+**#43 — cost measurement report, closed as superseded by automation.**
+Not a code-change ticket — a one-time 2026-07-25 measurement report. Every
+substantive item is already actioned by later work: #37 (closed) trimmed
+the always-on prefix (current `wc -w modules/*/*.md` = 33,978, on target);
+job 13/16/19 (already shipped) now write a continuous hourly burn
+snapshot -> fleet merge -> budget alert, replacing the one-off report's
+whole purpose going forward (confirmed live: 56 real rows in
+`~/.claude/burn-history/snapshots.jsonl` since 2026-07-25); the
+message.id-grouping methodological lesson is already the exact algorithm
+in `transcript_current_context` (same date); the frozen-statusline lesson
+is already a playbook bullet. Closed with evidence, no commit needed.
+Approach: issues/43#issuecomment-5095529090.
+
+**#106 — A/B experiment (#94) power follow-up: n=1 does not replicate.**
+Harness extended (`scripts/rules_ab_experiment.py`, commit `14b004f`):
+`slot_name(issue, cond, rep)` (rep=1 stays unsuffixed for round-1
+compat), `--rep` CLI flag, `summarise_by_task()` (never pools different
+tickets into one A-vs-B total). Tests: 8 new cases, all green.
+
+Ran 6 new replicate sessions (task #86 rep=1 both conditions — the
+missing 3rd task; tasks #88/#96 rep=2 both conditions, same $4 budget as
+round 1) via detached `setsid nohup` background processes against the
+scratch `CLAUDE_CONFIG_DIR` profiles, polled to completion (~25 min
+wall). Graded objectively (RED test from the real shipped fix) and via a
+blind soft grade (fresh `general-purpose` subagent, anonymized diffs,
+rubric stated up front, condition revealed only after —
+`audits/ab94/blind-grade-106.md`).
+
+Result: round 1's clean 2/2-vs-1/2 oracle split does NOT replicate —
+pooled n=5/condition reads full=2/5, minimal=1/5, with BOTH original
+results individually flipping on their own replicate. The blind grade
+disagrees with the oracle numbers on the SAME round-2 data (minimal wins
+2/3 pairs on the grader's own correctness/robustness read). Verdict:
+ruleset token cost remains proven and quantified; behavioural effect
+remains genuinely unmeasured (not measured-and-small) — every axis tried
+flips or disagrees under replication. Also found (documented, NOT
+shipped as a fix): `count_hook_blocks()`'s bracket-regex essentially
+never matches real hook feedback, but a naive JSON-text-grep "fix"
+over-counts by 20-50x on a hook-fix ticket (the model reads the hook's
+own source, which contains that JSON shape in comments) — flagged as a
+genuine gap needing a structural parse, not patched blind.
+
+Evidence: `audits/ab94/report-combined-106.json`, `blind-grade-106.md`,
+`blind-mapping-106.json`, `runs106/`. Commits `14b004f` (harness),
+`f9f83cc` (result + evidence). Approach: issues/106#issuecomment-5095589629.
+
+Gate: 2269 tests pass (2261 baseline + 8 new), `ruff check .` clean,
+`airuleset.py validate` OK. All three issues auto-closed by GitHub on
+push (direct-to-main, `Closes #N` in the commit messages — no PR
+involved).
