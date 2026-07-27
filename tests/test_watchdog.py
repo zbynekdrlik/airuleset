@@ -4238,5 +4238,88 @@ class RunOnceCompactHardCeilingWiring(unittest.TestCase):
         self.assertEqual(wd.load_compact_requests(reqs_path), {})
 
 
+class TestStaleExecMarkerCleanup(unittest.TestCase):
+    """Job 22 (#97): block-main-implementation.sh's one-shot bypass markers
+    (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) are consumed
+    on use, but a session that ends without another guarded call never
+    consumes its own marker -- it just sits in /tmp forever (a real one
+    found on gk: 0 bytes, ~21h old, no matching session anywhere). Cleanup
+    must require BOTH: old enough, AND no live pane's transcript stem still
+    matches the session id -- a live session's marker must survive no
+    matter how old the file looks (it may be a long-running deliberate
+    exception), and a dead session's marker must go once past the age
+    threshold."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_dir = tmp.name
+        proj_tmp = TemporaryDirectory()
+        self.addCleanup(proj_tmp.cleanup)
+        self.projects_dir = proj_tmp.name
+
+    def _marker(self, sid, age_s, legacy=False, tmp_dir=None):
+        name = ("airuleset-fable-exec-ok-%s" if legacy
+                else "airuleset-main-exec-ok-%s") % sid
+        p = Path(tmp_dir or self.tmp_dir, name)
+        p.write_text("")
+        mtime = time.time() - age_s
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_old_marker_with_no_live_session_is_removed(self):
+        sid = "dead-" + os.urandom(4).hex()
+        marker = self._marker(sid, age_s=7 * 3600)
+        logs = wd.cleanup_stale_exec_markers(
+            time.time(), run=RestartFakeTmux([], "n/a"),
+            projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
+        self.assertFalse(marker.exists(), "an orphaned marker must be removed")
+        self.assertTrue(any("exec-marker-cleanup" in ln for ln in logs), logs)
+
+    def test_fresh_marker_is_left_alone(self):
+        sid = "fresh-" + os.urandom(4).hex()
+        marker = self._marker(sid, age_s=60)
+        wd.cleanup_stale_exec_markers(
+            time.time(), run=RestartFakeTmux([], "n/a"),
+            projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
+        self.assertTrue(marker.exists(), "too fresh to be an orphan yet")
+
+    def test_old_marker_of_a_still_live_session_is_never_removed(self):
+        sid = "live-" + os.urandom(4).hex()
+        cwd = str(Path(self.tmp_dir) / "devel" / "proj")
+        Path(cwd).mkdir(parents=True)
+        proj = Path(self.projects_dir) / wd.encode_project_dir(cwd)
+        proj.mkdir(parents=True)
+        (proj / (sid + ".jsonl")).write_text(
+            json.dumps({"type": "assistant", "message": {"content": "hi"}}) + "\n")
+        marker = self._marker(sid, age_s=7 * 3600)     # old, but session is LIVE
+        tmux = RestartFakeTmux([("%1", "claude", cwd)], "n/a")
+        logs = wd.cleanup_stale_exec_markers(
+            time.time(), run=tmux, projects_dir=self.projects_dir,
+            tmp_dir=self.tmp_dir)
+        self.assertTrue(marker.exists(),
+                        "a live session's marker must never be revoked "
+                        "mid-work, no matter its age")
+        self.assertFalse(logs, logs)
+
+    def test_legacy_fable_marker_name_is_also_cleaned(self):
+        sid = "dead2-" + os.urandom(4).hex()
+        marker = self._marker(sid, age_s=7 * 3600, legacy=True)
+        wd.cleanup_stale_exec_markers(
+            time.time(), run=RestartFakeTmux([], "n/a"),
+            projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
+        self.assertFalse(marker.exists())
+
+    def test_unrelated_tmp_files_are_untouched(self):
+        other = Path(self.tmp_dir, "airuleset-main-exec-block.log")
+        other.write_text("unrelated log\n")
+        mtime = time.time() - 7 * 3600
+        os.utime(other, (mtime, mtime))
+        wd.cleanup_stale_exec_markers(
+            time.time(), run=RestartFakeTmux([], "n/a"),
+            projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
+        self.assertTrue(other.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
