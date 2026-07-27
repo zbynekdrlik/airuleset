@@ -76,7 +76,9 @@ flowing. The loop **NEVER idles while ANY lane has work**.
 - **LANE 1 REVIEW** — `ready-for-review` present for any stream (or a re-handoff after
   a bounce)? Run the `process-subdev` pipeline for that stream (its steps 2–6: pin the
   slice, cold diff-first review, own CI, verdict CLEAN → feeds LANE 2 / FINDINGS →
-  bounce lane). One stream's hand-off per pass; re-check the queue next pass.
+  bounce lane). One stream's hand-off per pass; re-check the queue next pass. **A CLEAN
+  verdict that ships fires the per-ticket run-card for EVERY ticket in the slice**
+  (`process-subdev` step 5.4, `airuleset.py notify --run-card`) — never silent (#47).
 - **LANE 2 RELEASE** — release debt (a CLEAN slice not yet contained in origin/main, or
   a staged prod deploy)? Release PREP runs ANYTIME — no window gates preflight,
   integration→staging shadow verification, or staging→main. Only the PROD deploy step
@@ -101,10 +103,13 @@ flowing. The loop **NEVER idles while ANY lane has work**.
   repo currently running? Assemble the next batch per the `autopilot` skill Step 3
   (ticket-validator gate per member, bundling gate, ONE background `autopilot-worker`
   dispatch — **serial per repo**, never a second worker while one runs; a running
-  worker does NOT block lanes 1/2/4, only re-dispatch on this lane). A completed batch
-  in this lane ends with a FULL completion report + `✅ DONE` (never `⏳` — 2026-07-25
-  revision, `autopilot` skill Step 3 item 5); the MASTER `/goal` still re-fires the next
-  turn regardless, so the scheduler simply re-evaluates all lanes fresh.
+  worker does NOT block lanes 1/2/4, only re-dispatch on this lane). **Each merged
+  ticket fires its own run-card** (the `autopilot-worker` agent does this itself, per
+  `agents/autopilot-worker.md`, once per merged+deploy-verified issue) — never silent
+  (#47). A completed batch in this lane ends with a FULL completion report + `✅ DONE`
+  (never `⏳` — 2026-07-25 revision, `autopilot` skill Step 3 item 5); the MASTER
+  `/goal` still re-fires the next turn regardless, so the scheduler simply
+  re-evaluates all lanes fresh.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via

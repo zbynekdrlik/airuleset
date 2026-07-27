@@ -129,8 +129,15 @@ queue is empty).
      approval (`❓ NEEDS YOU`) before ITS deploy; others deploy autonomously. Never
      gate on prod-usage/events beyond these user-set parameters (`approval-scope.md`).
   4. Post-deploy verification per `post-deploy-verification.md` + the repo's release
-     tail (declared in its CLAUDE.md), then close the stream's tickets with merge
-     evidence and remove `ready-for-review`.
+     tail (declared in its CLAUDE.md). **Fire the per-ticket Discord run-card for
+     EVERY ticket in the released slice** — this is the sub-dev review lane's ONLY
+     phone-visible completion signal, and it went silent on gk for a whole day
+     because nothing in this pipeline ever called it (#47): `python3
+     ~/devel/airuleset/airuleset.py notify --run-card --repo <owner/name> --issue <N>
+     --goal "<plain Slovak>" --achieved "<plain Slovak>" --version "<version read from
+     the live DOM>" --url "<Label=URL>"` — one call per ticket, same mechanism
+     `agents/autopilot-worker.md` uses, never a hand-fired `reply`/`PushNotification`.
+     THEN close the stream's tickets with merge evidence and remove `ready-for-review`.
 - **FINDINGS → the bounce lane** (`## Cross-stream protocol` in the autopilot skill is
   canonical): post the findings as a precise comment on each affected ticket (file:line,
   what is wrong, what evidence is missing — the ticket carries the FULL content),
