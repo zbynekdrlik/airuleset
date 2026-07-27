@@ -74,7 +74,7 @@ class TestBounceBackstop(unittest.TestCase):
                         captured)
         logs = wd.bounce_backstop(
             now or time.time(), tmux, state, self._send, home=self.home,
-            gh_fetch=lambda root: tickets)
+            gh_fetch=lambda root: tickets, cross_stream_repos={"demo"})
         return logs, tmux
 
     def test_nudges_idle_pane_with_ticket_numbers(self):
@@ -137,7 +137,7 @@ class TestBounceBackstop(unittest.TestCase):
         now = time.time()
         for _ in range(2):
             wd.bounce_backstop(now, FakeTmux([]), state, self._send,
-                               home=self.home,
+                               home=self.home, cross_stream_repos={"demo"},
                                gh_fetch=lambda root: calls.append(root) or [])
         self.assertEqual(len(calls), 1)
 
@@ -177,6 +177,68 @@ class TestBounceQuals(unittest.TestCase):
         self.assertEqual(len(quals), 1)
         for u in ("david", "marek", "montalu"):
             self.assertIn("-label:stream:%s" % u, quals[0])
+
+
+class TestCrossStreamRepoScope(unittest.TestCase):
+    """#89: live incident (restreamer, 2026-07-26) — a restreamer session
+    added `prio:bounce` to its OWN ticket #337 as a generic priority marker
+    (author + label both zbynekdrlik, nothing to do with the gatekeeper<->
+    sub-dev flow). Job 8's `_bounce_quals` scopes WHO the query excludes
+    (sub-dev streams) but never WHICH REPOS the label can even mean anything
+    in — a bare `prio:bounce` on any repo the box has ever worked matched.
+    `prio:bounce` only has protocol meaning inside repos that actually
+    PARTICIPATE in the cross-stream flow (`## Cross-stream protocol`,
+    skills/autopilot/SKILL.md) — job 8 must never even query, let alone
+    nudge, a repo that isn't one of them."""
+
+    def test_repo_in_cross_stream_flow_helper(self):
+        self.assertTrue(wd._repo_in_cross_stream_flow(
+            "/home/newlevel/devel/odoo-erp"))
+        self.assertFalse(wd._repo_in_cross_stream_flow(
+            "/home/newlevel/devel/restreamer"))
+
+    def test_helper_respects_explicit_override(self):
+        self.assertTrue(wd._repo_in_cross_stream_flow(
+            "/home/newlevel/devel/demo", cross_stream_repos={"demo"}))
+        self.assertFalse(wd._repo_in_cross_stream_flow(
+            "/home/newlevel/devel/odoo-erp", cross_stream_repos={"demo"}))
+
+    def test_non_cross_stream_repo_is_never_nudged(self):
+        # the exact restreamer #337 shape: a genuine open ticket carrying
+        # the bare label, in a repo that has NOTHING to do with the
+        # cross-stream flow. gh_fetch stands in for a real GitHub query
+        # that WOULD return it — job 8 must not even ask, let alone nudge.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "restreamer")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "restreamer")
+            pings = []
+            fetch_calls = []
+            logs = wd.bounce_backstop(
+                time.time(), FakeTmux([("%1", root)], IDLE), {},
+                lambda b, **kw: pings.append(b), home=home,
+                gh_fetch=lambda r: fetch_calls.append(r) or [337])
+            self.assertFalse(fetch_calls, "must never even query a "
+                             "non-cross-stream repo")
+            self.assertFalse(pings)
+            self.assertTrue(
+                any("not-cross-stream" in ln or "skip" in ln for ln in logs),
+                logs)
+
+    def test_cross_stream_repo_still_nudges_with_real_registry(self):
+        # the genuine odoo-erp case must be UNCHANGED — no override needed,
+        # the real default registry covers it.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "odoo-erp")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "odoo-erp")
+            tmux = FakeTmux([("%1", root)], IDLE)
+            logs = wd.bounce_backstop(
+                time.time(), tmux, {}, lambda b, **kw: None, home=home,
+                gh_fetch=lambda r: [1705])
+            self.assertTrue(tmux.typed(), "a genuine cross-stream repo must "
+                            "still nudge with no override")
+            self.assertTrue(any("bounce-nudge" in ln for ln in logs), logs)
 
 
 class TestGhEnvTokenFallback(unittest.TestCase):
@@ -236,7 +298,8 @@ class TestNeverTypeIntoWorkingSession(unittest.TestCase):
         tmux = FakeTmux([("%1", self.root)], captured)
         wd.bounce_backstop(time.time(), tmux, state if state is not None else {},
                            lambda body, **kw: self.pings.append(body),
-                           home=self.home, gh_fetch=lambda root: [1705])
+                           home=self.home, gh_fetch=lambda root: [1705],
+                           cross_stream_repos={"demo"})
         return tmux
 
     def test_background_workflow_wait_is_not_typed_into(self):
@@ -261,7 +324,8 @@ class TestNeverTypeIntoWorkingSession(unittest.TestCase):
         wd.bounce_backstop(time.time(), tmux, {},
                            lambda body, **kw: self.pings.append(body),
                            home=self.home, gh_fetch=lambda root: [1705],
-                           projects_dir=str(Path(self.home, ".claude", "projects")))
+                           projects_dir=str(Path(self.home, ".claude", "projects")),
+                           cross_stream_repos={"demo"})
         self.assertFalse(tmux.typed())
 
     def test_truly_resting_session_is_nudged(self):
@@ -295,7 +359,8 @@ class TestStatePersistedBeforeTyping(unittest.TestCase):
                 return real_call(argv, timeout)
             wd.bounce_backstop(time.time(), spy, {}, lambda b, **k: None,
                                home=home, gh_fetch=lambda r: [7],
-                               persist=lambda: order.append("persist"))
+                               persist=lambda: order.append("persist"),
+                               cross_stream_repos={"demo"})
             self.assertIn("persist", order)
             self.assertIn("send", order)
             self.assertLess(order.index("persist"), order.index("send"))
@@ -326,7 +391,8 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
     def _go(self, captured):
         tmux = FakeTmux([("%1", self.root)], captured)
         wd.bounce_backstop(time.time(), tmux, {}, lambda b, **k: None,
-                           home=self.home, gh_fetch=lambda r: [1528])
+                           home=self.home, gh_fetch=lambda r: [1528],
+                           cross_stream_repos={"demo"})
         return tmux
 
     def test_done_parked_goal_session_gets_the_nudge(self):
@@ -387,7 +453,8 @@ class TestForeignTmuxUserNeverPings(unittest.TestCase):
             logs = wd.bounce_backstop(
                 time.time(), FakeTmux([]), {},
                 lambda b, **k: pings.append(b), home=home,
-                gh_fetch=lambda r: [1727], user="montalu")
+                gh_fetch=lambda r: [1727], user="montalu",
+                cross_stream_repos={"demo"})
             self.assertTrue(pings, "montalu is no longer foreign-tmux — "
                             "job 8 must run normally, not no-op")
             self.assertTrue(any("bounce-ping" in ln for ln in logs), logs)
