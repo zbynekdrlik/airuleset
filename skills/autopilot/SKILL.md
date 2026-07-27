@@ -576,7 +576,13 @@ re-review and no pickup).
    the insertion.
 2. **Priority = labels, picked up between tasks.** `prio:bounce` (+ `stream:<name>`) jumps the
    queue at the NEXT batch seed (Step 3.1) — never preempts a running batch. High-priority work is
-   inserted by labeling, never by interrupting.
+   inserted by labeling, never by interrupting. **`prio:bounce` is a PROTOCOL label, never a generic
+   "priority" marker** — it means exactly one thing: the gatekeeper returned this ticket with
+   findings that need a fix. Never add it to a ticket outside this flow to mean "do this first"
+   (the restreamer #337 incident, 2026-07-26: the label alone on an unrelated repo's own ticket
+   fired a confusing cross-project nudge — the api-watchdog's bounce backstop (job 8) now also
+   scopes to repos that actually participate in this flow, but the label itself must still never be
+   repurposed).
 3. **Label lifecycle — who removes `prio:bounce`:** the sub-dev's worker clears it at its
    done-point (merge / re-ready hand-off comment), best-effort — but david's **read-only role cannot remove labels**, so the REPO automation (the `subdev-handoff-label.yml` workflow) must
    auto-remove `prio:bounce` when the re-ready comment lands, and the gatekeeper clears any
