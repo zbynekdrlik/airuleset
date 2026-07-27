@@ -166,9 +166,9 @@ issue at any time — in `/autopilot` or normal chat — by telling Claude `clos
 `gh issue close <N> --comment "<reason>"` + ping. Closing an issue is non-destructive tracking and never
 needs extra approval.)
 
-## Step 2 — Start the engine (the one manual paste)
+## Step 2 — Start the engine (the one manual paste, auto-armed as a backstop)
 
-The agent cannot type `/goal` — print the ONE line matching the resolved authority profile for the user to paste once.
+The agent itself cannot type `/goal` into its own input — print the ONE line matching the resolved authority profile for the user to paste once, exactly as before. In practice the user rarely has to: the watchdog's job 9 (`goal_autoarm`, always on, no wiring needed) recognizes THIS exact printed arm question + `/goal` line and pastes + submits it on its own within the next sweep — including when the pane holds a draft (job 9 stashes it around the delivery via the same `deliver_with_stash` primitive job 20 uses, never overwriting it — #100). This is a background SAFETY NET, not something this skill calls or depends on — if it doesn't fire (no watchdog on this box, or the user genuinely wants to type it themselves), the printed line is still there to paste by hand, exactly as documented below. Never claim the loop is armed until the `/goal` line has actually been submitted (`Goal set:` in the transcript, or `◎ /goal` in the footer) — printing the line is not arming it.
 
 **AUTHORITY: full** (default — merge to main + deploy):
 
