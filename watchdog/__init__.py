@@ -696,7 +696,7 @@ _WAITING_RX = re.compile(
     r"Tab/Arrow keys to navigate|Enter to select|Do you want to proceed", re.I)
 # A menu SELECTION pointer: `❯ 1. Yes` (CC numbers its options). Distinguishes an OPEN
 # numbered menu (still waiting) from a FREE `❯ <typed text>` input prompt (not waiting).
-_MENU_POINTER_RX = re.compile(r"❯ \d+\.")
+_MENU_POINTER_RX = re.compile(r"❯[ \xa0]\d+\.")
 
 
 def _is_border_rule(s):
@@ -849,13 +849,24 @@ def _has_free_prompt(captured, bare_only=False):
     bare_only=True (the TYPING gate, `pane_at_idle_prompt`): require a BARE `❯` (empty input
     box). If the user has typed text (`❯ blah`) we must NOT type over it. bare_only=False
     (the inverse used by `pane_waiting_on_user`): `❯ <typed text>` still counts as "at a
-    prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog)."""
+    prompt, not blocked". A menu pointer `❯ <digit>.` is never a free prompt (open dialog).
+
+    LIVE-VERIFIED (a real CC v2.1.220 scratch session, #100/#101 live proof): CC renders the
+    separator between `❯` and any typed text as a NON-BREAKING SPACE (`\xa0`), never a plain
+    ASCII space — a BARE box captures as the literal single glyph `'❯'` (nothing to separate),
+    but the instant there is text it is `'❯\xa0<text>'`. A check anchored on a plain `"❯ "`
+    therefore NEVER matches a real held draft, which made `deliver_with_stash`'s own
+    idle-with-draft precondition refuse EVERY real delivery with "not idle-with-draft" — the
+    exact #101 incident signature — regardless of how genuinely idle the pane was. Both
+    characters are accepted below; `_input_line_text` already worked correctly throughout
+    (`str.strip()` treats `\xa0` as whitespace)."""
     s = _find_boundary_line(captured)
     if s is None:
         return False
     if s == "❯":
         return True
-    if not bare_only and s.startswith("❯ ") and not _MENU_POINTER_RX.match(s):
+    if (not bare_only and len(s) > 1 and s[0] == "❯" and s[1] in " \xa0"
+            and not _MENU_POINTER_RX.match(s)):
         return True
     return False
 
