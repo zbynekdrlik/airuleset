@@ -6092,6 +6092,37 @@ GOAL_REARM_MAX_ATTEMPTS = 2         # deliveries per streak window (the
 GOAL_REARM_STREAK_S = 2 * 3600      # streak window; resets by TIME only
 GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
 
+# --- the FOURTH shape (same job, refining the FIRST): #101 -----------------
+# Two gaps in the original bounded-retry design, both from the same live
+# incident (dev2, 2026-07-27): (a) `deliver_with_stash` can refuse BEFORE
+# sending a single keystroke — the pane still holds a foreign draft, is
+# mid-turn, or another stash is already in flight — and that refusal used to
+# count exactly like a real, verified delivery failure. Two such refusals (the
+# draft simply hadn't been submitted yet) permanently gave up the whole
+# streak window even though nothing was ever actually attempted. Only a
+# refusal that happens AFTER `deliver_with_stash` starts touching the pane
+# (stash didn't verify bare, the type didn't land, the submit wasn't
+# recovered) counts toward the cap now — a pre-send refusal is retried next
+# sweep for free. (b) the revival path had no bound on how OLD the last
+# `Goal set:` marker it trusts can be: a goal that finished (or died) days ago
+# and was never explicitly cleared stays "set" forever, and the natural-
+# completion viewport check (`GOAL_ACHIEVED_MARKER in _above_input_box`) only
+# protects a RECENT death — days of normal conversation scroll the
+# `✔ Goal achieved` line out of the visible viewport. Live: a marker from
+# `2026-07-25T20:07:21Z`, three days old, from an already-closed run, was
+# still the only one on record and got typed at as if it were current.
+_GOAL_REARM_TRANSIENT_STASH_REASONS = frozenset((
+    "stash-abort: slot occupied",
+    "stash-abort: not idle-with-draft",
+    "stash-abort: live turn",
+))
+GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
+                                    # actually saw `◎ /goal` lit, whichever is
+                                    # newer) older than this is presumed
+                                    # already resolved and is never revived —
+                                    # generous past any normal watchdog-state
+                                    # gap, far short of the incident's 3 days
+
 # --- the SECOND shape (same job, opposite reading of the indicator) --------
 # The 2026-07-26 forensics (montalu + gatekeeper transcripts and journals,
 # read side by side) does NOT support "a /compact disarms the goal". It
@@ -6733,6 +6764,10 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         _save()
         loc = _pane_location(pid, run) or pid
         if armed:
+            rec["last_armed"] = now        # #101 — the freshest proof this
+                                            # goal was genuinely alive; the
+                                            # revival path trusts THIS over an
+                                            # old `mts` when it's available
             if rec.get("queued_at"):
                 rec["queued_at"] = None
                 logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
@@ -6753,6 +6788,20 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         if rec.get("mark") != "set":
             continue                       # never armed here, or the user
                                            # deliberately cleared it
+        last_seen_alive = rec.get("last_armed")
+        if last_seen_alive is None:
+            last_seen_alive = rec.get("mts")
+        if (last_seen_alive is not None
+                and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S):
+            # #101 — this job never saw the goal actually lit recently (or at
+            # all), and the viewport-based achieved check just below only
+            # protects a RECENT death (days of normal conversation scroll the
+            # `✔ Goal achieved` line out of view). A marker this old is
+            # presumed already resolved, one way or another; never type its
+            # payload into whatever the pane is being used for now.
+            logs.append("skip stale-goal (goal-rearm) %s (%d s since last "
+                        "confirmed armed)" % (loc, int(now - last_seen_alive)))
+            continue
         if GOAL_ACHIEVED_MARKER in _above_input_box(captured):
             # CC writes NO marker for a NATURAL resolution either (live:
             # `/goal` -> `✔ Goal achieved (3s · 1 turn)` -> indicator gone,
@@ -6850,6 +6899,16 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             ok = _send_goal_verified(pid, text, run, captured=captured,
                                      sleep_fn=sleep_fn)
             tag = "goal-rearm"
+        if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_STASH_REASONS:
+            # #101 — deliver_with_stash bailed BEFORE sending a single
+            # keystroke (still holding the foreign draft, mid-turn, or
+            # another stash already in flight): the pane is alive and well,
+            # it simply wasn't deliverable at THIS instant. Never count it
+            # toward the permanent give-up cap — retried next sweep, same as
+            # every other pre-send skip above, no different from "not-idle".
+            logs.append("SKIP-TRANSIENT (%s) %s -> %s, retrying next sweep"
+                        % (tag, loc, dlogs[-1]))
+            continue
         rec["n"] = rec.get("n", 0) + 1
         if ok:
             rec["queued_at"] = now
@@ -7425,11 +7484,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           proven mismatch with the marker's EXACT bytes, verified
           keystroke by keystroke into a free prompt (goal_rearm). Bounded
           (a self-resolving goal must not spin a turn per sweep) with ONE
-          Discord ping on give-up; a `Goal cleared:` newer than the last
-          `Goal set:` is a deliberate shutdown and is never touched. Runs
-          LAST so jobs 14/15/17 get first crack at the same pane, and
-          skips any sid they compacted this sweep (`handled`) or that
-          holds an outstanding shared claim (#78).
+          Discord ping on give-up — only a refusal that actually touched the
+          pane counts toward that cap, a PRE-send refusal (still holding a
+          foreign draft, mid-turn) is retried next sweep for free, and a
+          `Goal set:` marker older than `GOAL_REARM_MAX_DARK_S` since it was
+          last confirmed lit is never revived at all (#101); a `Goal cleared:`
+          newer than the last `Goal set:` is a deliberate shutdown and is
+          never touched. Runs LAST so jobs 14/15/17 get first crack at the
+          same pane, and skips any sid they compacted this sweep (`handled`)
+          or that holds an outstanding shared claim (#78).
           When `goal_templates_path` is ALSO given, the same job carries a
           THIRD shape — STALE TEMPLATE (#64): `/goal` reads the autopilot
           template once, at arm time, so a template change pushed to the
