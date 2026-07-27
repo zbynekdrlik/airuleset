@@ -6679,6 +6679,48 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("NUDGE", r.stdout + r.stderr)
 
+    def test_heredoc_that_merely_mentions_a_poll_loop_is_not_nudged(self):
+        # #111: the detector used two INDEPENDENT token greps (`sleep`
+        # anywhere AND `done` anywhere), so a command that merely WRITES
+        # ABOUT a poll loop -- documentation, a note, a rule file whose
+        # whole subject IS this shape -- took the full ~150-token nudge.
+        # Writing prose is not polling.
+        r = self._run("cat >> notes.md <<'EOF'\n"
+                      "the loop does: sleep 30; done\n"
+                      "EOF")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_grepping_the_poll_loop_doc_is_not_nudged(self):
+        # #111: grepping ci-monitoring.md -- the very rule that documents
+        # the poll shape -- carries both tokens as SEARCH TEXT and nudged.
+        # This fired repeatedly during #110 purely because that ticket
+        # edited and grepped this file.
+        r = self._run("grep -n 'sleep 30' modules/core/ci-monitoring.md "
+                      "| grep done")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_settle_sleep_before_an_unrelated_loop_is_not_nudged(self):
+        # #111: `sleep` and `done` present but in unrelated statements --
+        # a one-shot settle, then a fan-out loop with no wait in its body.
+        # Nothing here polls; the call is over in seconds.
+        r = self._run("sleep 10 && for h in a b; do curl -s $h; done")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
+    def test_nested_poll_loop_is_still_nudged(self):
+        # #111 guard on the OTHER direction: a real retry poll whose body
+        # holds an inner loop must KEEP nudging. Pins the rejected
+        # "sleep must precede the NEXT done" containment variant, which
+        # silently stopped nudging this shape (a real 135s poll in the
+        # corpus) -- tightening must not buy quiet by dropping true
+        # positives.
+        r = self._run("for t in 1 2 3; do for i in 1 2; do "
+                      "ssh h$i systemctl is-active x; done; sleep 20; done")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("timeout", r.stdout + r.stderr)
+
     def test_backgrounded_poll_loop_is_not_nudged(self):
         # #107: ci-monitoring.md now sanctions ONE `run_in_background: true`
         # waiter for a LONG wait -- it detaches immediately, so the Bash
