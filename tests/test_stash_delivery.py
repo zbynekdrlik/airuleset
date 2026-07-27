@@ -32,6 +32,12 @@ import watchdog as wd
 STASH_MARKER = "› stashed"          # "› stashed"
 
 DRAFT_IDLE = "● turn done\n❯ nechaj tak\n  ctx ░░\n"
+# LIVE-VERIFIED (a real CC v2.1.220 scratch session, #100/#101): CC actually
+# renders the separator between `❯` and typed text as a NON-BREAKING SPACE
+# (`\xa0`), never the plain ASCII space every fixture above assumes. A bare
+# box (nothing typed) has no separator at all (`'❯'` alone), so that half of
+# every existing fixture is unaffected — only a HELD DRAFT differs.
+DRAFT_IDLE_NBSP = "● turn done\n❯\xa0nechaj tak\n  ctx ░░\n"
 STASHED_BARE = "● turn done\n❯\xa0\n  ctx ░░  › stashed\n"
 BARE_AFTER_SUBMIT = "● turn done\n❯\xa0\n  ctx ░░\n"
 BUSY = "● Validate issue\n  ⎿ running…\n✳ Baking… (2m · esc to interrupt)\n"
@@ -139,6 +145,37 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertFalse(any("Enter" in a for a in run.sent),
                          "must never submit text that failed its own verify: %r" % run.sent)
         self.assertTrue(logs)
+
+
+class DeliverWithStashRecognizesTheRealNbspSeparator(unittest.TestCase):
+    """#100/#101 live incident (dev2, 2026-07-27): a real CC pane's separator
+    after `❯` is `\xa0` (non-breaking space), never a plain space. Every
+    caller of `deliver_with_stash` against a REAL draft — job 7's Discord
+    reply, job 9's goal auto-arm, job 20's goal revival — hit
+    `stash-abort: not idle-with-draft` on a pane that was genuinely idle with
+    a genuine draft, because `_has_free_prompt(bare_only=False)` only ever
+    matched a literal `"❯ "`. This is the exact #101 incident signature."""
+
+    def test_nbsp_draft_is_recognized_as_idle_with_a_free_prompt(self):
+        self.assertTrue(wd._has_free_prompt(DRAFT_IDLE_NBSP, bare_only=False),
+                        "a real (nbsp-separated) draft must read as a free "
+                        "prompt holding text, not as blocked/busy")
+
+    def test_full_delivery_succeeds_against_a_real_nbsp_draft(self):
+        run = _Recorder([STASHED_BARE, TYPED_BOUNDARY, BARE_AFTER_SUBMIT])
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE_NBSP)
+        self.assertTrue(ok, run.sent)
+        tails = run.tails()
+        self.assertIn("C-s", tails, run.sent)
+        self.assertTrue(any("-l" in a for a in run.sent), run.sent)
+        self.assertIn("Enter", tails, run.sent)
+
+    def test_nbsp_menu_pointer_is_still_never_a_free_prompt(self):
+        # the dialog-open exclusion (`❯ <digit>.`) must keep working for the
+        # REAL separator too, or a real numbered dialog would be misread as
+        # a plain draft and its stash-around would collide with the dialog
+        menu = "● pick one\n❯\xa02.\n  ctx ░░\n"
+        self.assertFalse(wd._has_free_prompt(menu, bare_only=False))
 
 
 class DeliverWithStashSwallowedSubmit(unittest.TestCase):
