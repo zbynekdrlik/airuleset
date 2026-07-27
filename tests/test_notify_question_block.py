@@ -18,6 +18,8 @@ Two independent causes:
    `Otázka — projekt` briefing head is included.
 """
 
+import json
+import os
 import re
 import subprocess
 import sys
@@ -192,6 +194,84 @@ class TestStructuredLongQuestion(TestCase):
             for f in ("/tmp/airuleset-question-quality-block-" + sid,):
                 if os.path.exists(f):
                     os.remove(f)
+
+
+# #45 — an unanswered question referenced by allusion instead of restated in
+# full (after an intervening conversation) must be HARD-blocked; a properly
+# restated full question, and a byte-identical VERBATIM repeat of the SAME
+# still-blocked question, must both pass.
+REFERENCE_MSG = """\
+**Otázka — projekt airuleset (nástroj na správu Claude Code pravidiel):** Ako som sa \
+už pýtal skôr, jediné otvorené rozhodnutie je ultracode pre tento beh.
+
+• Použiť ultracode (odporúčam) — spustí sa paralelný workflow
+• Zostať pri sekvenčnom postupe — pomalšie, ale jednoduchšie
+
+❓ NEEDS YOU: mám zapnúť ultracode pre tento beh?
+"""
+
+FULL_REASK_MSG = """\
+**Otázka — projekt airuleset (nástroj na správu Claude Code pravidiel):** Pracujem \
+na tickete #45 (opravuje sa, ako sa kladú nezodpovedané otázky) a potrebujem \
+rozhodnutie: má tento konkrétny beh použiť ultracode na paralelizáciu práce?
+
+• Použiť ultracode (odporúčam) — spustí sa paralelný workflow, rýchlejšie
+• Zostať pri sekvenčnom postupe — pomalšie, ale jednoduchšie na sledovanie
+
+❓ NEEDS YOU: mám zapnúť ultracode pre tento beh?
+"""
+
+
+class TestHistoryAllusionBlocked(TestCase):
+    def _run_gate(self, msg, sid):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(GATE)], input=payload,
+                              capture_output=True, text=True)
+
+    def _cleanup(self, sid):
+        for f in (
+            "/tmp/airuleset-question-quality-block-" + sid,
+            "/tmp/claude-discord-lastq-" + sid,
+            "/tmp/claude-user-active-" + sid,
+        ):
+            if os.path.exists(f):
+                os.remove(f)
+
+    def test_allusion_to_an_old_question_is_hard_blocked(self):
+        sid = "test-qq-reference-%d" % os.getpid()
+        try:
+            r = self._run_gate(REFERENCE_MSG, sid)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('"block"', r.stdout, r.stdout)
+            self.assertIn("allusion", r.stdout.lower())
+        finally:
+            self._cleanup(sid)
+
+    def test_full_self_contained_reask_passes(self):
+        sid = "test-qq-reask-%d" % os.getpid()
+        try:
+            r = self._run_gate(FULL_REASK_MSG, sid)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn('"block"', r.stdout, r.stdout)
+        finally:
+            self._cleanup(sid)
+
+    def test_verbatim_repeat_of_the_same_blocked_question_still_passes(self):
+        # First ask: the reference-shaped message would normally block, so
+        # use the full re-ask message as the FIRST delivered question, then
+        # simulate the dedup state notify-discord-pending.sh would have
+        # written (lastq file) and repeat the SAME marker line byte-identical
+        # — the VERBATIM-repeat bypass must still short-circuit before Check 5.
+        sid = "test-qq-verbatim-%d" % os.getpid()
+        try:
+            marker_line = "NEEDS YOU: mám zapnúť ultracode pre tento beh?"
+            with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
+                f.write(marker_line)
+            r = self._run_gate(FULL_REASK_MSG, sid)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn('"block"', r.stdout, r.stdout)
+        finally:
+            self._cleanup(sid)
 
 
 if __name__ == "__main__":

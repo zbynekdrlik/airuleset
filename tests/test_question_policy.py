@@ -156,3 +156,38 @@ class TestSleepWindowNecessaryQuestion(TestCase):
         t = read("modules/core/milestone-notifications.md")
         self.assertIn("ONLY while other answer-independent work exists", t)
         self.assertIn("even at night", t)
+
+
+class TestUnansweredQuestionReaskedFull(TestCase):
+    """#45 (user, 2026-07-25): an unanswered question must never be referenced
+    by allusion after an intervening conversation ("pýtal som sa skôr") — it
+    is asked NANOVO A CELÁ (the full self-contained block again). This is a
+    DIFFERENT branch from the pre-existing VERBATIM-repeat re-poke exception
+    (no user input since the last ask) documented in message-status-marker.md
+    — the two must never be confused."""
+
+    def test_marker_documents_the_reask_branch_distinct_from_verbatim(self):
+        t = read("modules/core/message-status-marker.md")
+        self.assertIn("Any OTHER conversation happened since the question was last asked", t)
+        self.assertIn("NANOVO A CELÁ", t)
+        # The pre-existing VERBATIM clause must be untouched (still there).
+        self.assertIn("STILL blocked on the SAME unanswered", t)
+
+    def test_user_questions_slovak_has_the_dedicated_section(self):
+        t = read("modules/core/user-questions-slovak.md")
+        self.assertIn("NANOVO a CELÁ", t)
+        self.assertIn("zákaz odvolávok do histórie", t)
+        # Both branches spelled out.
+        self.assertIn("VERBATIM, byte-identical", t)
+        self.assertIn("ANY conversation happened in between", t)
+        # Banned formulations from the ticket, verbatim.
+        self.assertIn("pýtal som sa skôr", t)
+        self.assertIn("jediné otvorené rozhodnutie je X", t)
+        # Cites the hook enforcement so the two stay in sync.
+        self.assertIn("stop-check-question-quality.sh", t)
+
+    def test_hook_documents_and_implements_the_reference_check(self):
+        h = read("hooks/stop-check-question-quality.sh")
+        self.assertIn("HISTORY ALLUSION", h)
+        self.assertIn('VIOLATION="reference"', h)
+        self.assertIn("pýtal som sa skôr", h)
