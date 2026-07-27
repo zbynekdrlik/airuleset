@@ -777,3 +777,47 @@ stops nudging nested retry polls; heredoc-body stripping — 71 fewer nudges but
 
 Gate: 2316 tests pass (2311 baseline + 5 new), `ruff check .` clean,
 `airuleset.py validate` OK.
+
+## 2026-07-28 — #113 flaky readiness sleep, #112 heredoc residual
+
+**#113** (`tests/test_upload_url.py` raced a fixed 0.6s startup sleep):
+`d6f4752` [red] → `6cad00d` (test correction) → `c6d37dd` [green], closed.
+RED tests `test_readiness_wait_survives_a_slow_server_start`,
+`test_a_server_that_can_bind_nothing_fails_fast_with_its_stderr`,
+`test_no_fixed_startup_sleep_survives_in_this_module`, plus
+`test_readiness_timeout_reports_the_servers_own_stderr` added with the fix.
+`_serve()` now polls the endpoint and exits three ways — answered, child
+already dead (`proc.poll()`), budget spent (reported WITH the child's
+stderr) — and takes its port from `_free_port()`, so the hardcoded
+8794/8796/8797/8798 are gone too.
+
+Evidence under 8 CPU spinners + 2 fork storms, 360 reps per side:
+before (`34e10a5`) 350 pass / **10 fail** (2.8%, every one `[Errno 111]
+Connection refused`); after **360 / 0**, at **half** the wall clock
+(0.31s vs 0.62s per rep). The speedup is the tell that the race is gone
+rather than padded — every banned band-aid moves that number the other way.
+60 reps alone could not have settled it (a clean 60 at a 1-in-60 rate is
+luck ~37% of the time); 360 puts it at ~4e-5.
+
+The RED commit's own lock had to be corrected first: it asserted the literal
+`time.sleep(0.6)` was absent from the whole source, which this module's own
+docstrings necessarily contain — red for the wrong reason, ungreenable. Now
+matches the bare STATEMENT plus "exactly one `x = subprocess.Popen(`". That
+second assertion first counted its own message: a lock that names what it
+forbids must match a form its own prose cannot take.
+
+Found and filed, not folded in: **#114** — `upload_server.py`'s non-daemon TTL
+timer blocks `sys.exit`, so a total bind failure lingers the whole TTL and
+exits **0** (20.06s/rc=0 vs 0.07s/rc=1 at ttl=0).
+
+**#112** (heredoc prose tripping the do/sleep/done shape): closed **won't-fix**
+with numbers, `6e4563a` records the verdict in the hook's own comment block.
+Replayed all 77,433 Bash calls (mirror diffed against the shipped hook, 0
+mismatches on 2,349 candidates): stripping bodies drops 75 nudges, but only ~6
+are prose — **49** are `cat > poll.sh <<'EOF'` + run (one ran 120s) and **15**
+are `ssh 'bash -s'`/`python3 -` bodies (up to 152s). Kill-recall is 37 → 37
+either way. The proposed executor-aware discriminator is wrong on its dominant
+class by construction, since `cat` is not an interpreter yet its body runs.
+
+Gate: 2320 tests pass (2316 baseline + 3 red + 1), `ruff check .` clean,
+`airuleset.py validate` OK.
