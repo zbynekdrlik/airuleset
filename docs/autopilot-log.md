@@ -354,3 +354,68 @@ tickets closed with live/static evidence, no RED/GREEN pairs.
   montalu/marek/david@subdev). Production `api-watchdog.service`
   observed running the fixed code error-free (journalctl, dev1) before
   and after the push.
+
+2026-07-27 #102: compact: eliminate ALL non-agreed triggers, deliver ONLY
+after a completed ticket, never on a ❓ turn. Original ticket body's "hard
+ceiling" reasoning was withdrawn by the user's own CORRECTION comment
+("tvoja extrémne zlá implementácia strká compact všade a nie ako sme sa
+dohodli že keď sa dokončí ticket") -- only the correction's scope is valid.
+test:3e9f36a[red]->fix:e9ac917[green]: `_compact_blocked_by_question(cwd,
+sid, projects_dir)` -- True iff transcript_last_marker(session) == "❓" at
+CALL time; unmeasurable never blocks (matches #48/#99's philosophy). Wired
+as a delivery-time re-check (not just record-time) into BOTH surviving
+senders: compact_ticket_boundary (job 14's poll, skip+retry semantics) and
+deliver_compact_now (the synchronous #65 path, falls back to job 14).
+Closes the race notify-compact-request.sh's own record-time ❓/⏳ gate
+cannot: a request recorded at an earlier ✅ boundary can still be pending
+once the session moved on to a NEW ❓ turn (CC drains its type-ahead queue
+only at an ACCEPTED Stop, so a queued /compact can land exactly as the
+next turn asks its question).
+feat:71ff67a: removed jobs 15 (compact_stale_context, #39/#43) and 17
+(compact_hard_ceiling, #69/#72) ENTIRELY -- both fired /compact off
+context-size/idle heuristics alone, no regard for the session's status
+marker, which is exactly the unauthorized machinery the correction
+withdraws. Removed with them: `_wait_for_compact_return`, COMPACT_
+CONTEXT_THRESHOLD/COMPACT_MIN_IDLE_S/COMPACT_STALE_*/COMPACT_HARD_CEILING/
+COMPACT_CEILING_* (all private to their own delivery). KEPT (still used by
+job 14/sync/18/20/21): `_pane_compacting`/COMPACTING_MARKER,
+`_reconcile_candidate_panes`, `_pane_has_queued_compact`/`_above_box_scan`/
+`pane_turn_elapsed`, `_proc_fingerprint_alive`/`_pane_claude_proc_
+fingerprint`, the shared `/compact` claim, `transcript_current_context`
+(job 14's own #48 gate). Job numbers 15/17 retained as REMOVED markers in
+run_once's own docstring -- never renumbered, so the dozens of existing
+comments/logs addressing them by number stay valid pointers. Full suite
+2220->2153 (9 new #102 tests, 76 job-15/17-only tests removed with them).
+ruff clean, validate clean throughout.
+CORPUS REPLAY (real, not hypothesized -- this repo has failed a
+hypothesis-only fix 5 times per the ticket's own warning): scanned the
+WHOLE local `~/.claude/projects/` corpus (58 projects, 7975 transcripts,
+5GB) for `compact_boundary` events (641 total, all history) and replayed
+EVERY real historical `/compact` SEND since job 14 shipped (2026-07-25)
+against `journalctl --user -u api-watchdog.service` + `~/.claude/compact-
+sync.log`, reconstructing each session's status marker AS OF THE SEND
+TIMESTAMP (not today's marker -- a small variant of transcript_last_marker
+that walks backward with a `timestamp<=cutoff` filter). Job 14 (surviving,
+now gated): 14 real sends, marker-at-send was ✅ (or blank/pre-convention)
+every time, 0 were ❓ -- the new gate changes NOTHING for real historical
+job-14 behavior, matching the "every survivor from the ticket boundary"
+expectation exactly. Synchronous path (surviving, now gated): 7 real sends
+via compact-sync.log, all ✅, 0 blocked. Job 15 (removed): 0 real sends
+ever recorded on this box -- nothing lost. Job 17 (removed): 8 real sends,
+markers at send time '', '', '⏳', '⏳' (4 measurable) plus 3 that never
+landed a matching boundary within 10 min (queued behind a long busy turn)
+-- 0 were ❓, but the ⏳/blank sends are direct proof job 17 WAS firing on
+non-ticket-boundary turns, exactly the machinery the correction forbids,
+even though it never happened to catch a ❓ specifically in this box's
+log window. The 2 ❓-preceded `compact_boundary` events in the whole
+post-#39 corpus (camera-box sid=90bc51f3, forestshop sid=328ac7ba) have
+ZERO matching watchdog log lines within a wide window around them -- one
+(camera-box) has a "question answered in-session" line ~1 minute later,
+consistent with a HUMAN typing /compact manually at the terminal while
+thinking about the answer, not our automation. Stated honestly: the one
+reported live incident could not be forensically pinned on any specific
+automated sender in this box's available history -- the fix stands on the
+user's own corrected agreement regardless, not on incident attribution.
+Closed with the full evidence posted as an issue comment (no PR/CI in
+this repo -- commits went direct to `main` per its own flow;
+`airuleset.py push` confirms both dev1+dev2+4 remote targets in sync).
