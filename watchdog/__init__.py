@@ -1750,8 +1750,14 @@ def _gh_comment(cwd, num, text, user=None):
 
 def _foreign_user(cwd):
     """Unix user owning `cwd` when it lives under ANOTHER user's /home — the
-    sudo-hosted stream shape (montalu claude inside newlevel's tmux). None for
-    the current user's own paths and non-home paths."""
+    generic sudo-hosted stream shape (a claude pane launched via `sudo su -
+    <user>` inside a DIFFERENT user's tmux, so that user's own watchdog has
+    no tmux server to see it from). Historical worked example: montalu ran
+    this way inside newlevel's tmux on dev1 until the 2026-07-24 subdev
+    migration (#33) gave it its own tmux — no live pane currently matches
+    (#34). Kept generic + tested for the next shared-tmux stream that needs
+    it, not deleted. None for the current user's own paths and non-home
+    paths."""
     import getpass
     m = re.match(r"/home/([a-z0-9_-]+)/", str(cwd) + "/")
     if not m:
@@ -2188,9 +2194,11 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
-    # Merge HOSTED users' question maps (2026-07-21: montalu's claude runs in
-    # THIS tmux, but its ❓ map lives under /home/montalu — the session was
-    # invisible to both watchdogs). `q_owner` remembers which foreign user owns
+    # Merge HOSTED users' question maps (2026-07-21: montalu's claude used to
+    # run in THIS tmux, its ❓ map living under /home/montalu — the session was
+    # invisible to both watchdogs; historical since the 2026-07-24 subdev
+    # migration gave montalu its own tmux, #33/#34 — kept generic for the next
+    # shared-tmux stream). `q_owner` remembers which foreign user owns
     # a merged question so delivery drops it from THEIR map.
     hosted_users = hosted_users or {}
     f_load = foreign_questions or _foreign_questions
@@ -3117,10 +3125,13 @@ def _transcript_goal_line(path, max_lines=400):
 
 def _foreign_transcript_goal(cwd):
     """Full `/goal ` line from ANOTHER user's newest transcript for `cwd` —
-    the sudo-hosted stream case (montalu claude in newlevel's tmux): the pane
-    is visible here but the transcript lives under the foreign HOME. Uses
-    `sudo -n -u <user>` (passwordless on the boxes where this shape exists);
-    every failure returns None (the caller then refuses to arm a fragment)."""
+    the generic sudo-hosted stream case: a live pane visible here whose
+    transcript lives under a foreign HOME (historical example: montalu
+    inside newlevel's tmux on dev1, until the 2026-07-24 subdev migration
+    gave it its own tmux, #33/#34 — no live pane matches this today, kept
+    generic for the next shared-tmux stream). Uses `sudo -n -u <user>`
+    (passwordless on the boxes where this shape exists); every failure
+    returns None (the caller then refuses to arm a fragment)."""
     import getpass
     import subprocess
     m2 = re.match(r"/home/([a-z0-9_-]+)/", str(cwd) + "/")
@@ -7670,12 +7681,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs.append("skip error %s: %r" % (err_key, e))
             continue
 
-    # Sudo-hosted stream panes (montalu claude in THIS tmux): the transcript
-    # lives under the FOREIGN home, so the pane fell out of the loop above —
-    # yet it is reachable ONLY from here (the hosted user's own watchdog has
-    # no tmux server at all; 2026-07-21: the montalu Discord answer starved
-    # invisible to both sides). Bind each to its foreign session id so job 7
-    # delivers replies into it and job 10 catches wedged prompts.
+    # Sudo-hosted stream panes (generic: a claude pane whose transcript lives
+    # under a FOREIGN home falls out of the loop above) — yet it is reachable
+    # ONLY from here, since the hosted user's own watchdog has no tmux server
+    # at all (2026-07-21 incident: a montalu Discord answer starved, invisible
+    # to both sides — montalu ran this way until the 2026-07-24 subdev
+    # migration gave it its own tmux, #33/#34; no live pane matches this shape
+    # today, kept generic for the next shared-tmux stream). Bind each to its
+    # foreign session id so job 7 delivers replies into it and job 10 catches
+    # wedged prompts.
     hosted_users = {}                   # session id -> foreign unix user
     for pid, cwd, fu in hosted_panes:
         try:
