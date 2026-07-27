@@ -6679,6 +6679,25 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("NUDGE", r.stdout + r.stderr)
 
+    def test_backgrounded_poll_loop_is_not_nudged(self):
+        # #107: ci-monitoring.md now sanctions ONE `run_in_background: true`
+        # waiter for a LONG wait -- it detaches immediately, so the Bash
+        # tool's own `timeout` parameter (which only bounds the FOREGROUND
+        # call) is irrelevant to it. Nudging "raise your timeout near
+        # 600000ms" on a backgrounded loop is wrong advice; only a
+        # FOREGROUND sleep/poll loop needs that nudge.
+        tool_input = {
+            "command": "while :; do gh run view 1 --json status; "
+                       "sleep 60; done",
+            "run_in_background": True,
+        }
+        payload = json.dumps({"tool_input": tool_input})
+        r = subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("NUDGE", r.stdout + r.stderr)
+
     def test_wired_into_pretooluse_bash(self):
         cfg = json.loads((airuleset.REPO_DIR / "settings" / "hooks.json").read_text())
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
