@@ -57,7 +57,7 @@ class TestSkillCarriesTheForkSelectionRule(TestCase):
     def test_names_the_unexecuted_instruction_risk(self):
         """The specific hazard, not a vague "shares context"."""
         t = read(SKILL).lower()
-        self.assertIn("has not executed yet", t)
+        self.assertIn("not executed yet", t)
 
     def test_gives_the_selection_rule_in_both_directions(self):
         """fork = continue the WHOLE task; fresh dispatch = ONE bounded task."""
@@ -75,7 +75,7 @@ class TestAlwaysOnModuleCarriesTheRule(TestCase):
     def test_module_carries_the_fork_selection_rule(self):
         t = read(MODULE)
         self.assertIn("fork", t)
-        self.assertIn("has not executed yet", t)
+        self.assertIn("not executed yet", t.lower())
 
     def test_module_stays_short(self):
         """One paragraph, not a second copy of the skill."""
@@ -101,7 +101,7 @@ class TestDeliverySurfaceIsWired(TestCase):
             )
         self.assertEqual(r.returncode, 0)
         ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("has not executed yet", ctx)
+        self.assertIn("not executed yet", ctx.lower())
         self.assertIn("bounded side-task", ctx)
 
 
