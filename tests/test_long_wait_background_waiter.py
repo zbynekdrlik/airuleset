@@ -78,11 +78,14 @@ class TestCiMonitoringDurationSplit(TestCase):
 
     def test_citation_corrected_away_from_the_two_that_do_not_hold_up(self):
         # #43944 was cited backwards (it's the OPPOSITE failure mode --
-        # orphaned/leaking processes, not killed ones) -- drop it. #29193
-        # is the actually-relevant, reproduced mechanism.
+        # orphaned/leaking processes, not killed ones) -- it may still be
+        # MENTIONED for transparency (why it was dropped), but must no
+        # longer be presented as CORROBORATING evidence. #29193 is the
+        # actually-relevant, reproduced mechanism, and must be present.
         t = read("modules/core/ci-monitoring.md")
-        self.assertNotIn("#43944", t)
+        self.assertNotIn("corroborated by", t)
         self.assertIn("#29193", t)
+        self.assertIn("OPPOSITE failure mode", t)
 
     def test_does_not_overclaim_confirmed_when_not_live_reproduced(self):
         # The old text asserted "This is confirmed CC behavior" outright.

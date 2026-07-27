@@ -41,6 +41,15 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "
 echo "$CMD" | grep -qE '(^|[^A-Za-z0-9_])sleep[[:space:]]' || exit 0
 echo "$CMD" | grep -qE '(^|[^A-Za-z0-9_])done([^A-Za-z0-9_]|$)' || exit 0
 
+# #107: a `run_in_background: true` call detaches immediately -- the Bash
+# tool's own `timeout` parameter only bounds the FOREGROUND call and is
+# irrelevant to a backgrounded loop's own internal runtime. Nudging "raise
+# your timeout" on one is wrong advice (ci-monitoring.md now sanctions a
+# background waiter as the LONG-wait mechanism, with its own death/budget
+# self-bound, not the tool timeout).
+BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null || echo "false")
+[ "$BG" = "true" ] && exit 0
+
 TIMEOUT_MS=$(echo "$INPUT" | jq -r '.tool_input.timeout // empty' 2>/dev/null || echo "")
 MIN_MS="${AIRULESET_POLL_NUDGE_MIN_MS:-400000}"
 case "$MIN_MS" in ''|*[!0-9]*) MIN_MS=400000 ;; esac
