@@ -45,10 +45,10 @@ set -euo pipefail
 # subagent's payload carries `agent_id`; execution is exactly what belongs
 # there.
 #
-# Fable-model detection (unchanged from #32): the LAST real assistant
-# entry's `"model"` in the transcript tail (the /model choice can change
-# mid-session; see the KNOWN caveat below). Fail-open: unreadable transcript
-# / unknown model / no jq → allow.
+# Fable-model detection (#32, staleness fixed by #38): the LAST top-level
+# assistant entry's `"model"`, overridden by a later `/model` switch marker
+# when one exists (see the detailed comment at the parser below). Fail-open:
+# unreadable transcript / unknown model / no jq / no python3 → allow.
 #
 # Goal-armed detection (#54): reads the SESSION TRANSCRIPT, never a pane
 # capture — a hook has no reliable pane access, only the payload's
@@ -65,13 +65,15 @@ set -euo pipefail
 # transcript is scanned (grep/jq are fast; correctness matters more than
 # shaving a full-file scan here).
 #
-# KNOWN, NOT fixed here (#38): the Fable-model detection above can read a
-# STALE model off the transcript tail right after a `/model` switch,
-# causing a false Fable-block. The goal-armed path added by #54 is fully
-# INDEPENDENT of model detection — it never reads or depends on `MODEL` — so
-# it neither triggers nor worsens #38; a stale-model false-block is exactly
-# as likely (no more, no less) as it was before this change. Same applies
-# to the #66 Bash classification below — it reads only `.tool_input.command`.
+# FIXED (#38): the Fable-model detection above used to read a STALE model
+# off the raw transcript tail right after a `/model` switch (the switch
+# marker lands before the first new-model assistant entry is flushed),
+# causing a false Fable-block in one direction and a missed Fable-block in
+# the other. See the parser comment below for the fix and its residual gap.
+# The goal-armed path added by #54 stays fully INDEPENDENT of model
+# detection — it never reads or depends on `MODEL` — so it neither
+# triggered nor worsened #38 in either state. Same applies to the #66 Bash
+# classification below — it reads only `.tool_input.command`.
 #
 # Bash classification failure mode (#66): if python3 is unavailable or the
 # classifier itself errors, the hook FAILS OPEN (allow) rather than
@@ -241,11 +243,85 @@ fi
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
 [ -n "$TRANSCRIPT" ] && [ -r "$TRANSCRIPT" ] || exit 0
 
-# ---- condition 1: Fable-model main (#32) ----
-# newest claude-* model in the transcript tail = the session's CURRENT model
-MODEL=$(tail -c 400000 "$TRANSCRIPT" 2>/dev/null \
-    | grep -oE '"model"[[:space:]]*:[[:space:]]*"claude-[a-z0-9.-]+"' \
-    | tail -1 | grep -oE 'claude-[a-z0-9.-]+' || echo "")
+# ---- condition 1: Fable-model main (#32, staleness fixed by #38) ----
+# The transcript LAGS the live turn: at PreToolUse the CURRENT turn's
+# assistant entry is not flushed yet, so the newest model in the file is the
+# PREVIOUS turn's. Replaying the real 2026-07-25 incident prefix (session
+# 2d02a127, lines 38913-38935) pins the window exactly — the /model switch
+# marker landed at 38915, the first Opus assistant entry only at 38932, and
+# the Write blocked at 38934 read `claude-fable-5` off the tail.
+#
+# So the tail's newest model is NOT authoritative on its own. Two corrections:
+#   a) take the model from a PARSED top-level assistant entry (`.message.model`
+#      on `.type == "assistant"`), never a raw grep — the same structural
+#      discipline the goal-armed detector below already uses, and it keeps a
+#      nested/quoted foreign transcript out of the decision by construction;
+#   b) if CC's own `/model` stdout marker (`Set model to <X>`, a top-level
+#      user/system string) appears AFTER that entry, THAT marker decides:
+#      it names Fable -> Fable, anything else -> not Fable.
+# Fail-open is unchanged in every unreadable/undecidable case.
+#
+# Residual, NOT fixable from the transcript: a session RESUMED onto a different
+# model writes no marker at all (observed 2026-07-26, 19:04 in the same file),
+# so its first turn still reads the pre-resume model. The hook payload cannot
+# help — CC 2.1.220 builds it as {session_id, transcript_path, cwd, prompt_id,
+# permission_mode, agent_id, agent_type, effort} with NO model field (the
+# `model` object in the bundle's schema docs belongs to the STATUSLINE input,
+# not to hooks), which is why #38's suggested payload-first fix is not
+# available. The one-shot bypass marker covers that residual case.
+MODEL=$(python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null || echo ""
+import json
+import re
+import sys
+
+TAIL = 2_000_000
+
+try:
+    with open(sys.argv[1], "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - TAIL))
+        blob = fh.read()
+except Exception:
+    sys.exit(0)
+
+lines = blob.split(b"\n")
+if size > TAIL and lines:
+    lines = lines[1:]          # drop the partial first line of the window
+
+model = ""
+for raw in lines:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        d = json.loads(raw)
+    except Exception:
+        continue
+    if not isinstance(d, dict) or d.get("isSidechain"):
+        continue
+    t = d.get("type")
+    if t == "assistant":
+        msg = d.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("model"), str):
+            model = msg["model"]
+        continue
+    # CC's own `/model` stdout, top-level string content only (a tool_result's
+    # content is always an array, so a quoted foreign marker cannot reach here)
+    if t == "user":
+        c = (d.get("message") or {}).get("content")
+    elif t == "system":
+        c = d.get("content")
+    else:
+        continue
+    if not isinstance(c, str) or "Set model to" not in c:
+        continue
+    picked = re.sub(r"\x1b\[[0-9;]*m", "", c).split("Set model to", 1)[1]
+    model = "claude-fable-5" if re.search(r"fable", picked, re.I) else ""
+
+print(model)
+PYEOF
+)
 IS_FABLE=0
 case "$MODEL" in
     claude-fable-*) IS_FABLE=1 ;;
