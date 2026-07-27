@@ -196,3 +196,42 @@
   clean throughout. `airuleset.py push` run twice after the final commit —
   second run showed `Already up to date.` on all 5 remotes (dev2, gatekeeper,
   montalu@subdev, marek@subdev, david@subdev).
+
+## Batch #96 #88 #89 #97 (2026-07-27)
+
+- #88 (`block-main-implementation.sh` classifier blind to line-continuations
+  before a pipe reducer): the ticket's own `$( … )`-nesting hypothesis did NOT
+  reproduce after 144+ systematic variants; the real trigger is a bash `|\`
+  + newline continuation, misclassified by `STATEMENTS_RE`'s bare-`\n` split.
+  `test_bare_top_level_continued_pipe_allowed` /
+  `test_health_check_version_extraction_inside_substitution_allowed`
+  `8a298b3` red → `501c4be` green (`join_line_continuations`, quote-aware).
+  Corpus replay (80,981 real Bash commands, all local transcripts): block
+  rate 27.72% → 27.72% (22446→22444), 2 flip blocked→allowed, 0 regressions.
+  Closed with evidence (no PR — direct commits).
+- #89 (watchdog job 8 bounce backstop nudged an unrelated repo on a bare
+  `prio:bounce` label): `_bounce_quals` scoped WHO the query excludes but
+  never WHICH REPOS the label means anything in. `TestCrossStreamRepoScope`
+  `817ff36` red → `f630cdb` green (`_repo_in_cross_stream_flow`,
+  `_CROSS_STREAM_REPOS` opt-in registry) + `7d800cc` (skill clarification).
+  Closed with evidence.
+- #97 (orphaned `/tmp/airuleset-main-exec-ok-*` bypass markers, no TTL):
+  new always-on watchdog job 22, `cleanup_stale_exec_markers` —
+  age-gated AND live-session-gated (never touches a marker whose session id
+  still resolves to a live pane). `TestStaleExecMarkerCleanup` `225c1e1` red
+  → `cae67dc` green + `c448140` (docs, job count 21→22). Closed with evidence.
+- #96 (`stop-check-prose-violations.sh` blocked a message merely REFERRING to
+  banned phrases — third occurrence of the use-vs-mention class after #80/
+  #91): `strip_mentions()` strips fenced code / backticks / double-quotes
+  before the 5 HARD phrase-matching checks (deliberately NOT single quotes —
+  English contractions like "won't" made a naive strip eat a genuine offer,
+  caught in review). `TestMentionOfBannedPhrasesDoesNotBlock` `f5a65e0` red →
+  `72b1442` green. Corpus replay (4000 random unique historical assistant
+  messages): block rate 1.93%→1.75% (77→70/4000), all 7 newly-allowed
+  messages verified genuine mentions, 0 previously-allowed newly blocked, all
+  10 `TestUnambiguousBypassIsHardBlocked` cases still hard-block. Closed with
+  evidence.
+- Full local suite: 2182 passed, `ruff check .` clean, `airuleset.py validate`
+  clean throughout. `airuleset.py push` run twice after the final commit —
+  second run showed `Already up to date.` on all 5 remotes (dev2, gatekeeper,
+  montalu@subdev, marek@subdev, david@subdev).
