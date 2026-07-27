@@ -327,6 +327,111 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(statusbar.tickets_segment(nonrepo, home=home,
                                                        spawn=False), "")
 
+    def test_refresh_falls_back_to_git_credentials_token_when_gh_unauthenticated(self):
+        # #25: david (and every sub-dev stream) never runs `gh auth login` —
+        # CLAUDE.md's External Developer Workflow extracts a token from
+        # ~/.git-credentials per-command instead. Without a fallback, `gh` in
+        # that shell fails every call and the cache is stuck at open=None.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ -z "$GH_TOKEN" ]; then echo "gh: not authenticated" >&2; exit 1; fi\n'
+                'if [ "$1" = repo ]; then echo "kvaskodev/odoo-erp"; else echo 5; fi\n')
+            fake_gh.chmod(0o755)
+            Path(home, ".git-credentials").write_text(
+                "https://kvaskodev:ghp_faketoken123@github.com\n")
+            env = {**os.environ, "HOME": home,
+                   "PATH": f"{bindir}:{os.environ['PATH']}"}
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_TOKEN", None)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("open=5", r.stdout)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 5)
+
+    def test_refresh_prefers_real_gh_token_over_git_credentials(self):
+        # A box that IS gh-authenticated must never be overridden by a stale
+        # ~/.git-credentials token.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "$GH_TOKEN" != "real-token" ]; then '
+                'echo "wrong token" >&2; exit 1; fi\n'
+                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else echo 9; fi\n')
+            fake_gh.chmod(0o755)
+            Path(home, ".git-credentials").write_text(
+                "https://someone:stale-token@github.com\n")
+            env = {**os.environ, "HOME": home,
+                   "PATH": f"{bindir}:{os.environ['PATH']}",
+                   "GH_TOKEN": "real-token"}
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("open=9", r.stdout)
+
+    def test_refresh_descends_one_level_when_cwd_is_above_the_repo(self):
+        # #61: montalu's session cwd (~/devel/odoo) is the PARENT of the real
+        # repo (~/devel/odoo/odoo-slovnormal) — git rev-parse only walks UP,
+        # so it never finds a repo BELOW cwd unless we look for one.
+        with TemporaryDirectory() as home, TemporaryDirectory() as parent, \
+                TemporaryDirectory() as bindir:
+            repo = Path(parent) / "odoo-slovnormal"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = repo ]; then echo "zbynekdrlik/odoo-slovnormal"; '
+                'else echo 12; fi\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", parent],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("open=12", r.stdout)
+            # cached under the ORIGINAL cwd (the session's actual cwd), not the
+            # descended repo path — so the statusline (keyed by session cwd)
+            # finds it.
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(parent) + ".json")).read_text())
+            self.assertEqual(cache["open"], 12)
+            self.assertEqual(cache["name"], "odoo-slovnormal")
+            self.assertIn("Issues 12", statusbar.tickets_segment(parent, home=home,
+                                                                 spawn=False))
+
+    def test_refresh_stays_null_when_multiple_subdir_repos_are_ambiguous(self):
+        # Two candidate repos below cwd → never guess which one.
+        with TemporaryDirectory() as home, TemporaryDirectory() as parent:
+            for name in ("repo-a", "repo-b"):
+                d = Path(parent) / name
+                d.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", parent],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(parent) + ".json")).read_text())
+            self.assertIsNone(cache["open"])
+
 
 class SkippedBucket(unittest.TestCase):
     """User ask (2026-07-16): the statusline should also show how many tickets
