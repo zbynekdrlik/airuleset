@@ -154,3 +154,45 @@
 - Measured prefix (real `usage`, fresh isolated-profile session, this repo):
   **134,994 → 129,504 tokens (−5,490)**. Portable part (modules only, every
   project): 220,303 → 214,098 B.
+
+## 2026-07-27 — batch #38 #41 #86 #90 (resumed from a usage-limit kill mid-#38)
+
+- **#38 fable-model false-block after /model switch** — RESUMED from `93b6dc9`
+  [red] (a prior worker's uncommitted GREEN attempt was read + judged, mostly
+  correct, comment prose stale). Model now parsed from the last top-level
+  `assistant` entry's `.message.model`, overridden by a later top-level
+  `/model` switch marker. Corpus replay against the REAL incident session
+  transcript (2d02a127, 43769 lines) at all 41 real `/model` switch points:
+  72 disagreements old-vs-new, all within the immediate post-switch window,
+  zero outside it — 30 fix the reported stale-Fable-block, 42 close the
+  symmetric stale-allow. `93b6dc9` red → `d83e4e0` green. Closed.
+- **#41 pre-push-test-check.sh `it\(` false positive** — `it\(` had no word
+  boundary, matching inside `sys.exit(1)`/`.split(`/`.init(`, silently
+  defeating Gate 2's RED-before-GREEN check. Fixed to `\bit\(['"]`. Corpus
+  replay over this repo's own tracked files: 250 old matches (48 files) → 1
+  new match, and that one IS a genuine `it(...)` test literal. Sub-issue 2
+  (CI-YAML self-check not recognized) deliberately NOT turned into a 4th
+  classifier surface (#80/#91/#96 already shipped 3 wrong ones) — documented
+  as a sanctioned `[no-test: ci-yaml conditional logic, ...]` category
+  instead. `d37f59d` red → `ca65a7a` green → `45f9c87` docs. Closed.
+- **#86 block-test-skips.sh false-blocks in a 3-branch repo** — diff base was
+  hardcoded `origin/<default>`, correct only for 2-branch dev/main; on
+  develop→staging→main it re-flagged an already-merged sanctioned skip on
+  every push. Ported the SAME PR-target base resolution
+  `pre-push-test-check.sh` already had. Verified with a REAL 3-branch git
+  repo (real `git init`/commit/update-ref, not hand-typed diffs). `5edf056`
+  red → `c5a1bb4` green. Closed.
+- **#90 ci-monitoring poll loop dies on default tool timeout** — two
+  mechanisms: (1) the sample loop now self-bounds via bash `SECONDS`
+  (`AIRULESET_POLL_BUDGET_S`, default 100 < the harness's observed 120s
+  default) so a forgotten `timeout` param ends the loop cleanly instead of a
+  silent SIGTERM; verified by EXECUTING the snippet extracted verbatim from
+  the `.md` against a stubbed `gh`, under a real external `timeout` wrapper.
+  (2) new `hooks/nudge-poll-loop-timeout.sh` (PreToolUse Bash, never blocks)
+  injects a corrective reminder via `additionalContext` when a sleep+done
+  loop's own `timeout` param is missing/low — fired live on this very session
+  immediately after deploy. `d10ae36` red → `b295a57` green. Closed.
+- Full local suite: 2164 passed, `ruff check .` clean, `airuleset.py validate`
+  clean throughout. `airuleset.py push` run twice after the final commit —
+  second run showed `Already up to date.` on all 5 remotes (dev2, gatekeeper,
+  montalu@subdev, marek@subdev, david@subdev).
