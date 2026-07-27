@@ -555,3 +555,30 @@ Gate: 2222 tests pass, `ruff check .` clean, `airuleset.py validate` OK.
 Deployed with `python3 airuleset.py push`; the second run showed
 `Already up to date.` for all five remotes (dev2, gatekeeper, montalu@subdev,
 marek@subdev, david@subdev).
+
+#25/#61/#98 (2026-07-27, batch): #25 tickets-status --refresh returned
+open=None for david (gh calls inherit the shell env, david never runs
+`gh auth login`) — added `_gh_env()`, falls back to a token extracted from
+~/.git-credentials when GH_TOKEN/GITHUB_TOKEN isn't set, a real token always
+wins. #61 statusline showed nothing when session cwd is the PARENT of the
+git repo (montalu@subdev ~/devel/odoo vs. odoo-slovnormal one level down) —
+when `git rev-parse --show-toplevel` fails at cwd, scan cwd's immediate
+subdirectories for exactly one `.git` and descend into it; 0 or >1 stays
+ambiguous (open=None), never guesses. #98 sshpass was used by airuleset's
+ssh helpers but never in RUNTIME_DEPS (verified empirically: 3 occurrences,
+0 in the tuple) — added it; extended autonomous-verification.md's
+"No sudo on a restricted box" bullet to name the working path (file a
+gk-request naming the package; fulfilling it = add to RUNTIME_DEPS + push) —
+module bodies (unlike skill bodies) reach a dispatched sub-dev worker
+(#104/#105). Commits: `e407222` [red] (#25/#61) → `3c77f9a` [green];
+`46d3d1e` [red] (#98) → `f499815` [green]; `e963231` docs. Tests
+`tests/test_statusbar.py` (git-credentials fallback, real-token-wins,
+descend-one-level, ambiguous-stays-null), `tests/test_runtime_deps.py`
+(sshpass tracked, sudo-less branch mentions gk-request + RUNTIME_DEPS).
+Approach comments: issues/25#issuecomment-5094666672,
+issues/61#issuecomment-5094668190, issues/98#issuecomment-5094670446.
+
+Gate: 2228 tests pass, `ruff check .` clean, `airuleset.py validate` OK.
+Deployed with `python3 airuleset.py push`; the second run showed
+`Already up to date.` for all five remotes (dev2, gatekeeper, montalu@subdev,
+marek@subdev, david@subdev).
