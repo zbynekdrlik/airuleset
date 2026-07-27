@@ -77,6 +77,29 @@ class RuntimeDepsCheck(unittest.TestCase):
         i = src.index("def cmd_install")
         self.assertIn("check_runtime_deps()", src[i:i + 600])
 
+    def test_sshpass_is_a_tracked_dependency(self):
+        # #98: sshpass is used by airuleset's own ssh helpers (_burn_remote_cmd
+        # and its sibling) but was never added to RUNTIME_DEPS — so install/push
+        # never provisioned or verified it on any target.
+        self.assertIn("sshpass", airuleset.RUNTIME_DEPS)
+
+
+class SudoLessToolRequestPath(unittest.TestCase):
+    """#98: a sub-dev box (david/marek/montalu) has NO sudo, so
+    autonomous-verification.md's 'install it yourself' instruction is
+    unfollowable there. The module must give it a working alternative: file a
+    gk-request naming the package, which lands in RUNTIME_DEPS on fulfilment."""
+
+    MODULE = (airuleset.REPO_DIR / "modules" / "core" /
+              "autonomous-verification.md")
+
+    def test_sudo_less_branch_points_at_gk_request(self):
+        text = self.MODULE.read_text()
+        i = text.index("No sudo on a restricted box")
+        chunk = text[i:i + 700]
+        self.assertIn("gk-request", chunk)
+        self.assertIn("RUNTIME_DEPS", chunk)
+
 
 if __name__ == "__main__":
     unittest.main()
