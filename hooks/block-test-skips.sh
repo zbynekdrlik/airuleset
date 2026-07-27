@@ -19,6 +19,16 @@ set -euo pipefail
 # (checked the same way pre-push-test-check.sh honors `[no-test: reason]`).
 # Every bypass is logged to audits/test-skip-bypasses.log.
 #
+# "Pre-existing" (#86, odoo-erp 2026-07-26): the diff BASE decides what
+# counts as pre-existing vs added by THIS push, and it must be the PR
+# TARGET (origin/develop for a feature branch on a 3-branch
+# develop->staging->main repo), never a hardcoded origin/<default-branch>
+# — the default lags develop by every already-MERGED PR, so a
+# default-branch base re-flagged a SANCTIONED, already-landed
+# `pytest.mark.skip`/`test.skip()` as if this push had just added it, on
+# every single push of any branch. Same PR-target resolution
+# pre-push-test-check.sh ships.
+#
 # Exit code 2 = block the tool call.
 
 # Read the tool payload from STDIN (current CC contract; $TOOL_INPUT is the dead
@@ -46,6 +56,34 @@ fi
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
 PROJECT=$(basename "$(git rev-parse --show-toplevel)")
 
+# BASE for the diff below = the PR TARGET (the branch this work merges
+# into), NOT the default branch (#86, odoo-erp 2026-07-26). On a
+# multi-branch repo (develop->staging->main) origin/<default> lags develop
+# by every MERGED, green-CI PR, so a default-branch base re-flagged an
+# already-merged, SANCTIONED test.skip() as if it were added by THIS push
+# on every push of any branch. Same PR-target resolution
+# pre-push-test-check.sh already ships: a feature branch off develop
+# targets origin/develop; develop itself promotes to origin/staging;
+# staging/default/detached keep the default base (2-branch dev->main is
+# unchanged — the whole open PR is still the range).
+CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+BASE_REF="origin/${DEFAULT_BRANCH}"
+case "$CUR_BRANCH" in
+    HEAD|"$DEFAULT_BRANCH"|staging) ;;
+    develop)
+        git rev-parse -q --verify origin/staging >/dev/null && BASE_REF="origin/staging" ;;
+    *)
+        for CAND in develop dev; do
+            if [ "$CAND" != "$CUR_BRANCH" ] && \
+               git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                BASE_REF="origin/${CAND}"
+                break
+            fi
+        done ;;
+esac
+# The base ref may not exist at all (fresh repo, no origin) — the diffs
+# below already fall back on error, so BASE_REF is used as-is.
+
 AUDIT_LOG="$HOME/devel/airuleset/audits/test-skip-bypasses.log"
 mkdir -p "$(dirname "$AUDIT_LOG")"
 
@@ -67,7 +105,7 @@ fi
 # substring match also matched non-code paths like "docs/xspec.md" ("xspec"
 # contains "spec"), false-blocking a push whose ONLY change is prose in a
 # doc that merely mentions a banned pattern as an example.
-CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
+CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null || echo "")
 TEST_CHANGES=$(echo "$CHANGED_FILES" | grep -iE '(test|spec|e2e|playwright)' \
     | grep -iE '\.(rs|py|ts|tsx|js|jsx|mjs|cjs|go|rb|java|kt|kts|cs|cpp|cc|c|swift|scala)$' \
     || echo "")
@@ -90,12 +128,12 @@ mapfile -t TEST_FILES_ARR <<< "$TEST_CHANGES"
 # (before RC=$? can even run) — the `|| RC=$?` keeps this in a tested
 # context so set -e does not fire, and lets the block message print below.
 RC=0
-VIOLATIONS=$(python3 - "$DEFAULT_BRANCH" "${TEST_FILES_ARR[@]}" <<'PYEOF'
+VIOLATIONS=$(python3 - "$BASE_REF" "${TEST_FILES_ARR[@]}" <<'PYEOF'
 import re
 import subprocess
 import sys
 
-default_branch = sys.argv[1]
+base_ref = sys.argv[1]
 test_files = sys.argv[2:]
 
 PATTERNS = [
@@ -128,7 +166,7 @@ for tf in test_files:
         continue
     try:
         out = subprocess.run(
-            ["git", "diff", "-U0", f"origin/{default_branch}...HEAD", "--", tf],
+            ["git", "diff", "-U0", f"{base_ref}...HEAD", "--", tf],
             capture_output=True, text=True,
         ).stdout
     except Exception:
