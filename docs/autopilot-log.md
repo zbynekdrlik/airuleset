@@ -235,3 +235,40 @@
   clean throughout. `airuleset.py push` run twice after the final commit —
   second run showed `Already up to date.` on all 5 remotes (dev2, gatekeeper,
   montalu@subdev, marek@subdev, david@subdev).
+- #99 (`/compact` fired on every `✅ DONE`-shaped turn once a session's
+  context passed the #48 200K floor — including a one-line answer or a
+  single filed ticket with zero code change; live: "sprav ticket" → #602
+  filed → immediate compact, nothing committed): added a SUBSTANTIALITY
+  gate, `compact_boundary_substantial(cwd, sid)` — counts commits in the
+  session's own repo since a persisted per-repo anchor
+  (`compact-substantiality.json`, reset by `mark_compact_boundary` on every
+  real send; falls back to the session's own transcript start on the first
+  boundary ever seen for a repo). A confirmed zero drops the request before
+  the context check, in both `deliver_compact_now` (sync) and
+  `compact_ticket_boundary` (job 14 poll); unmeasurable (no git repo, no
+  anchor) falls through unchanged. `test_compact_request.py`
+  `TestCompactBoundarySubstantial`/`TestSubstantialityGateInDeliverCompactNow`/
+  `TestSubstantialityGateInJob14` `60dafa7` red (13 failures, confirmed via
+  `git stash` of the implementation) → `22175a7` green. Corpus replay (268
+  real `✅ DONE`-boundary turns from this repo's own transcripts + its own
+  real git history): OLD fires all 268, NEW fires 187, drops 81 (30%) —
+  Q&A/single-ticket turns with no commit; the 187 remaining prove real work
+  still triggers. Closed with evidence.
+- #27 (drag-drop upload endpoint only ever sent `files[0]` — dropping
+  several files silently uploaded just the first; reported live 2026-07-23
+  and again 2026-07-27, Marek/Montalu): server side (`do_PUT`) was already
+  per-request-independent (own save + own "SAVED" log line + own atomic
+  `.part`→rename, one failure can't affect another) — the whole bug was the
+  client JS. Added `<input type=file multiple>` + `sendAll(fileList)`
+  driving `Array.from(fileList)` through a sequential per-file `uploadOne`,
+  always advancing from BOTH `onload`/`onerror`. `test_upload_url.py`
+  `TestMultiFileUpload` `14128d6` red (2/4 new tests genuinely fail against
+  old JS, confirmed via `git stash`) → `ece0ef2` green. Verified live
+  end-to-end through a REAL browser (Playwright): opened the served page,
+  selected 3 real files (40000/65000/22000 bytes) via the actual file
+  chooser, all landed byte-exact with 3 separate SAVED log lines and 3
+  individual ✅ rows in the DOM. Closed with evidence.
+- Full local suite: 2199 passed, `ruff check .` clean, `airuleset.py
+  validate` clean throughout. `airuleset.py push` run twice after the final
+  commit — second run showed `Already up to date.` on all 5 remotes (dev2,
+  gatekeeper, montalu@subdev, marek@subdev, david@subdev).
