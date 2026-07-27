@@ -705,3 +705,42 @@ Gate: 2269 tests pass (2261 baseline + 8 new), `ruff check .` clean,
 `airuleset.py validate` OK. All three issues auto-closed by GitHub on
 push (direct-to-main, `Closes #N` in the commit messages — no PR
 involved).
+
+## 2026-07-28 — #109 compact is not atomic w.r.t. completion
+
+`50d4a01` [red] → `1320e72` [green]. Root cause traced in code AND measured,
+not inherited from the ticket: `deliver_compact_now` (#65) types `/compact`
+DURING the Stop-hook batch, i.e. before that Stop's verdict exists — a message
+an earlier gate refuses still enqueues, CC never drains its type-ahead queue
+(#84), and the keystrokes execute at a later accepted Stop in a changed state.
+
+Measurement (12 real sync-path sends, `~/.claude/compact-sync.log`, 2026-07-27;
+compaction START = `compact_boundary` ts minus `compactMetadata.durationMs` —
+without that subtraction every send looks 2 min late): 9 sends with no pending
+rejection started within ~6 s (atomic); all 3 made while a `Stop hook feedback:`
+entry already sat in the transcript started +24 s / +77 s / +98 s later, each
+with the marker moved to `⏳`. One of the three is the reported shape exactly
+(rejected for missing audit lines), so the incident reproduced outside presenter.
+
+Fix, on existing paths only (#102 had just deleted two triggers): enqueue-time
+gate `_stop_already_rejected`; delivery-time gate `_compact_not_at_boundary`
+(#102's `❓` re-check generalized to `⏳`); `COMPACT_REQUEST_MAX_AGE_S` lapse.
+Tests: `TestStopAlreadyRejected`, `TestDeliverCompactNowRefusesRejectedBoundary`,
+`TestCompactDeliveryTimeBoundaryGate`, `TestCompactRequestExpiry`,
+`TestCompactHookRunsAfterTheStopGates` (the last pins the Stop-chain order the
+enqueue gate depends on).
+
+Corpus replay through the SHIPPED functions (transcript truncated per send):
+3 deferred / all 3 genuinely late, 0 false positives, 8 atomic sends unchanged,
+0 residual misses. Retry replay shows deferred requests held while `⏳` and
+still delivered where the session is genuinely back at `✅`.
+
+Stated plainly rather than invented around: Claude Code has no work-complete
+callback (the Stop hook fires before the verdict; #87 closed the self-signalling
+`/compact` route), and queued keystrokes cannot be recalled — the only key that
+clears the input box is Escape, which interrupts a running turn. Residual: a
+Stop refused by a hook running AFTER ours (the `/goal` hook) is invisible at
+enqueue time and is caught only on the next delivery attempt.
+
+Gate: 2311 tests pass (2298 baseline + 13 new), `ruff check .` clean,
+`airuleset.py validate` OK.
