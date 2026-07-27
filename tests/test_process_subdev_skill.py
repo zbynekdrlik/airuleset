@@ -96,5 +96,34 @@ class TestIndependentReviewFrame(TestCase):
         self.assertNotIn("kvaskodev", t)
 
 
+class TestRunCardFiredOnReleasedSlice(TestCase):
+    """#47: the gatekeeper's review lane completed real releases with ZERO
+    Discord run-cards for a full day — process-subdev never mentioned
+    `run-card` anywhere in its own body, so the ONE place that instruction
+    lives (agents/autopilot-worker.md) was never loaded for this lane, which
+    never dispatches an autopilot-worker subagent at all."""
+
+    def test_run_card_instruction_present(self):
+        t = read(SKILL)
+        self.assertGreater(t.count("run-card"), 0)
+        self.assertIn("notify --run-card", t)
+
+    def test_fires_per_ticket_in_the_released_slice(self):
+        t = read(SKILL)
+        self.assertIn("EVERY ticket in the released slice", t)
+        # one call per ticket, not a single card for the whole slice
+        self.assertIn("one call per ticket", t)
+
+    def test_fires_before_closing_tickets(self):
+        t = read(SKILL)
+        i_card = t.index("Fire the per-ticket Discord run-card")
+        i_close = t.index("close the stream's tickets with merge")
+        self.assertLess(i_card, i_close)
+
+    def test_never_a_hand_fired_reply(self):
+        t = read(SKILL)
+        self.assertIn("never a hand-fired", t)
+
+
 if __name__ == "__main__":
     main()

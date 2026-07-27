@@ -151,6 +151,38 @@ if __name__ == "__main__":
     main()
 
 
+class TestRunCardFiredInEveryLane(TestCase):
+    """#47: on the gatekeeper (24/7, running autopilot-master), per-ticket
+    Discord cards stopped arriving entirely — neither autopilot-master nor
+    process-subdev ever mentioned `run-card` in their own bodies (0 hits vs 4
+    in skills/autopilot/SKILL.md), so a lane that never dispatches an
+    autopilot-worker subagent (LANE 1 REVIEW runs its release inline) had no
+    code path that could ever fire one."""
+
+    def test_run_card_mentioned_in_this_skill(self):
+        self.assertGreater(read(SKILL).count("run-card"), 0)
+
+    def test_lane1_review_fires_run_card_on_clean_verdict(self):
+        # Step 3's lane BULLET list (not the /goal template string in Step 2,
+        # which repeats the lane names too) — anchor from "## Step 3" onward.
+        t = read(SKILL)
+        i_step3 = t.index("## Step 3")
+        i_lane1 = t.index("LANE 1 REVIEW", i_step3)
+        i_lane2 = t.index("LANE 2 RELEASE", i_step3)
+        lane1_block = t[i_lane1:i_lane2]
+        self.assertIn("run-card", lane1_block)
+        self.assertIn("EVERY ticket in the slice", lane1_block)
+
+    def test_lane3_core_fires_run_card_per_merged_ticket(self):
+        t = read(SKILL)
+        i_step3 = t.index("## Step 3")
+        i_lane3 = t.index("LANE 3 CORE", i_step3)
+        i_lane4 = t.index("LANE 4 QUESTIONS", i_step3)
+        lane3_block = t[i_lane3:i_lane4]
+        self.assertIn("run-card", lane3_block)
+        self.assertIn("Each merged", lane3_block)
+
+
 class TestMissedWindowNeverSilent(TestCase):
     def test_blocked_window_raises_notice(self):
         # 2026-07-21 morning: the 22:00-06:00 window passed with the release
