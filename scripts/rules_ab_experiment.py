@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -192,16 +193,157 @@ def parse_run_json(payload: dict) -> dict:
     }
 
 
-HOOK_BLOCK_RE = re.compile(r"\[(block|stop-check|pre-push|pre-write|pre-deploy)-[a-z0-9-]+\]")
+# --------------------------------------------------------------------------
+# hook activity, counted STRUCTURALLY (#108 item 4)
+#
+# The predecessor matched ``\[(block|stop-check|...)-[a-z0-9-]+\]`` against the
+# concatenation of every transcript byte.  Measured against the real corpus
+# (8,058 transcript files / 1,653,949 entries on dev1) it scored ZERO of
+# 1,098 genuine denials and 19 spurious matches, for three separate reasons:
+#
+#   1. Wrong literal.  Claude Code writes ``PreToolUse:<Tool> hook error:
+#      [<command>]: <stderr>``, and <command> is the whole command line
+#      ("bash ~/devel/airuleset/hooks/block-x.sh") -- never a bare hook name.
+#   2. Wrong substrate.  A flat text blob cannot tell a denial from the model
+#      reading the hook's own source, or from the run deliberately EXECUTING
+#      the hook and capturing its ``{"decision": "block"}`` payload as ordinary
+#      stdout (observed verbatim in #106's run-96-A-r2).  Identical bytes,
+#      opposite meaning; only the JSON structure separates them.  This is also
+#      why the "obvious" grep for that JSON shape is not the fix: on the same
+#      corpus it hit 258 lines, NONE of them a denial.
+#   3. Concatenating files with ``+=`` fuses one file's unterminated last line
+#      onto the next file's first line, corrupting an entry per boundary.
+#
+# So: parse each line as JSON and key off structure.  A denial is a tool_result
+# marked ``is_error`` whose text BEGINS with the marker -- the model merely
+# reading a file that contains the same words yields a *successful* tool_result
+# whose text begins with the file body, and is therefore never counted.
+# --------------------------------------------------------------------------
+
+HOOK_DENIAL_RE = re.compile(
+    r"^PreToolUse:(?P<tool>[A-Za-z_]+) hook error: \[(?P<cmd>[^\]]*)\]"
+)
+STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
+STOP_FEEDBACK_RE = re.compile(r"^Stop hook feedback:\s*\[(?P<cmd>[^\]]*)\]")
+SCRIPT_SUFFIXES = (".sh", ".py", ".js", ".ts")
+
+# Claude Code emits bare prose (no hook name) when a Stop hook blocks by
+# RETURNING {"decision": "block"} instead of exiting non-zero -- 478 of 1,688
+# corpus occurrences.  Those are real rejections that simply cannot be
+# attributed, so they aggregate under one honest key rather than being dropped.
+GENERIC_STOP_KEY = "stop-hook-feedback"
 
 
-def count_hook_blocks(transcript_text: str) -> dict[str, int]:
-    """Count hook feedback markers seen in a run transcript, per hook name."""
+def _named_script(command: str) -> str | None:
+    """The script stem named in a reported command line, if it names one."""
+    for token in command.split():
+        stem, ext = os.path.splitext(os.path.basename(token))
+        if ext in SCRIPT_SUFFIXES and stem:
+            return stem
+    return None
+
+
+def _hook_key(command: str) -> str:
+    """The hook's key: its script stem, else the command line itself."""
+    return _named_script(command) or (command.strip() or "unknown")
+
+
+def _tool_result_text(block: dict) -> str:
+    """A tool_result's text, whether it is a bare string or a content list."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            part.get("text", "") for part in content if isinstance(part, dict)
+        )
+    return ""
+
+
+def count_hook_blocks_in_entries(entries: Iterable[dict]) -> dict[str, int]:
+    """Count genuine hook rejections in already-parsed transcript entries.
+
+    Two structural signals, each anchored at position 0 so that text merely
+    QUOTING a rejection can never be counted:
+
+    * a PreToolUse denial -- ``type``/``role`` user, a ``tool_result`` block
+      with ``is_error`` true, text matching :data:`HOOK_DENIAL_RE`;
+    * a Stop-hook rejection -- ``type``/``role`` user whose ``content`` is a
+      plain STRING starting with ``Stop hook feedback:``.
+
+    Deliberately NOT used: ``stop_hook_summary``/``preventedContinuation``.
+    They are routine per-turn fields present on 21,990 corpus entries whether
+    or not anything was rejected, and ``preventedContinuation`` is ``false`` on
+    every one of them -- independently reproducing #109's finding.
+
+    Known limitation, documented rather than filtered: a ``/goal`` evaluator
+    rejection arrives through the same Stop channel (279 of 1,688 corpus
+    occurrences).  It cannot occur in this harness, whose runs arm no ``/goal``,
+    and prose-matching it away would re-introduce the guesswork this replaced.
+    """
     counts: dict[str, int] = {}
-    for match in HOOK_BLOCK_RE.finditer(transcript_text):
-        name = match.group(0).strip("[]")
+
+    def bump(name: str) -> None:
         counts[name] = counts.get(name, 0) + 1
+
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("type") != "user":
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+
+        if isinstance(content, str):
+            text = content.lstrip()
+            if not text.startswith(STOP_FEEDBACK_PREFIX):
+                continue
+            # One rule: a leading bracket naming a script attributes the
+            # rejection to that hook; anything else (bare prose, or a /goal
+            # condition in the bracket) aggregates under the generic key.
+            match = STOP_FEEDBACK_RE.match(text)
+            named = _named_script(match.group("cmd")) if match else None
+            bump(named or GENERIC_STOP_KEY)
+            continue
+
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            if block.get("is_error") is not True:
+                continue
+            match = HOOK_DENIAL_RE.match(_tool_result_text(block))
+            if match:
+                bump(_hook_key(match.group("cmd")))
     return counts
+
+
+def count_hook_blocks(paths: Iterable[Path | str]) -> dict[str, int]:
+    """Count genuine hook rejections across a run's transcript files.
+
+    Takes PATHS rather than one concatenated blob so an unterminated final line
+    can never be fused onto the next file's first line.  A malformed line is
+    skipped individually instead of poisoning the whole file.
+    """
+    entries: list[dict] = []
+    for path in paths:
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"count_hook_blocks: cannot read {path}: {exc}", file=sys.stderr)
+            continue
+        with handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                entries.append(entry)
+    return count_hook_blocks_in_entries(entries)
 
 
 def new_test_functions(diff_text: str) -> list[str]:
@@ -485,14 +627,10 @@ def grade(root: Path, task: Task, cond: str, rep: int = 1) -> dict:
     record["oracle_tail"] = (oracle.stdout or oracle.stderr)[-1500:]
     _run(["git", "checkout", "HEAD", "--", task.oracle_test], cwd=tree)
 
-    # hook activity, from the run's own transcript
-    text = ""
-    for p in (root / f"config-{cond}" / "projects").rglob("*.jsonl"):
-        try:
-            text += p.read_text(errors="replace")
-        except OSError:
-            continue
-    record["hook_blocks"] = count_hook_blocks(text)
+    # hook activity, from the run's own transcript (paths, never a blob: #108)
+    record["hook_blocks"] = count_hook_blocks(
+        sorted((root / f"config-{cond}" / "projects").rglob("*.jsonl"))
+    )
 
     (root / f"graded-{slot}.json").write_text(json.dumps(record, indent=2))
     print(json.dumps({k: v for k, v in record.items() if k != "final_message"}, indent=2))
