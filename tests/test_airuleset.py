@@ -3752,6 +3752,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
+                       backfill_digest=False,
                       record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
@@ -3802,6 +3803,7 @@ class TestDiscordAutopilotNotify(TestCase):
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
+                       backfill_digest=False,
                           record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
