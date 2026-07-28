@@ -1109,3 +1109,96 @@ accept pairs with `DROP no-work` in `compact-sync.log`) — not fixed here becau
 it changes a CLI contract shared with the Stop-hook channel.
 
 Tests: `TestCompactBoundaryDecisionLog`, `TestDecisionLogAssertionsHaveTeeth`.
+
+## #124 — poll-loop detectors read payload as control flow
+
+`f144075` [red] → `ce68f85` [green], closed. The reported nudge (a `gh issue
+comment -F body.md` whose heredoc merely documents poll shapes) fired four more
+times while working the ticket. The non-cosmetic half, reproduced from the
+shipped code: a heredoc write QUOTING the sanctioned waiter, with no
+`gh issue comment` in the call, is a hard `exit 2` from
+`block-ci-poll-repeat.sh` on its second occurrence in a session — the body
+carries `gh run view`, `cat >` is not mutating-exempt, the body carries the
+`do…sleep…done` tokens. Reachable but never yet realised: 0 sessions in the
+corpus have two such writes.
+
+Root cause: both detectors match a normalised token stream of the WHOLE command,
+which cannot tell what the shell RUNS from what it CARRIES. #112 rejected
+blanket stripping with numbers and was right (re-measured: 75 of 147 body-only
+matches are live), and named the thing a correct classifier needs — "follow the
+written PATH to a later execution" — dismissing it as too hard. Within ONE
+command it is neither hard nor a heuristic, and that is the whole fix.
+
+`hooks/lib-poll-payload.sh` is sourced by all three detectors. A body is blanked
+only when its owner names no interpreter, it is a plain redirect to a literal
+path, and every later mention of that path in the SHELL-VISIBLE text is a
+text-file argument; plus a heredoc read straight by a text sink (`git commit
+-F -`, `gh issue comment -F -`) is inert, checked AFTER the interpreter test so
+`ssh host 'bash -s' <<EOF` still wins. Fails open.
+
+The corpus wrote two of those rules, not reasoning. A first draft enumerated
+runners and called `sshpass ssh host 'bash -s' < /tmp/x.sh` inert — three real
+specimens ran 119s, 135s and 183s. Replacing it with reappearance-means-live
+took the changed set from 48 to 8. Replay both directions through the real
+script over 8,107 transcripts / 251,551 commands / 6,188 unique candidates:
+NEWLY SILENT 8, NEWLY FIRING 0, unchanged-fires 5,573, unchanged-silent 607;
+all 8 read by hand and all payload. That lands on #112's own "~6 in 77k are
+prose" estimate without touching any live class it measured.
+
+Also fixed, caught by #118's own `assertEqual(out.stderr.strip(), "")`: a
+heredoc body must live INSIDE the `$( … )`, not after its closing paren.
+
+Known residual, out of contract: a loop quoted inside an interpreter body
+(`python3 - <<PY`) still fires, because that body genuinely executes — it
+hard-blocked a probe in this very session. Telling it apart needs to parse the
+payload's language, which is the #112 trap again.
+
+Tests: `tests/test_poll_payload_not_control_flow.py` (27), including
+`LiveBodiesStillFireTest` pinning #112's measured live classes and
+`StripperTeethTest` mutating the real stripper into the two wrong fixes.
+
+## #119 — the repeated foreground poll #118 structurally cannot see
+
+`24b5e89` [red] → `018f501` [green], closed. `block-ci-poll-repeat.sh` narrows
+on a CI signature BEFORE loop detection, so a loop with no `gh run view|watch|
+list` / `gh pr checks` token exits 0 at line 104. Deliberate and audited — a
+boundary, not a bug — and the remainder was unguarded.
+
+The ticket's own figures do not reproduce. Re-derived over 8,107 transcripts /
+251,551 commands (mirror diffed against the real hook, 0 mismatches on 6,188
+candidates): in the cited 24h window the population is 335 across SIX projects
+(camera-box 81, airuleset 80, restreamer 76, forestshop 58, eft5000 36, tvdole
+4), not 118 across two, and only 41 (12%) poll a subagent-result-shaped path.
+Corpus-wide the non-CI remainder is 2,104 of 4,430 — remote/process 814,
+subagent-result 746, other 191, local-log 185, endpoint 106, file 62 — so a
+guard keyed on `result.json` misses two thirds of its family.
+
+`hooks/block-local-poll-repeat.sh` exits on a CI signature before writing state,
+keys on session + a digit-blind hash of the normalised loop SHAPE, and branches
+its message three ways: a real Claude Code task artefact is told the
+notification already exists (+ ONE `stat -Lc` re-derive for the orphaned-handle
+case, #29193); a log line / ssh state / file / user-invented `result.json` is
+told explicitly that NOTHING will wake it, and given one background waiter; a
+subagent is told to raise this call's own timeout, since it can neither
+background a wait nor end its turn on a pending task.
+
+Replay in session order, own state dir per session: 297 blocks of 7,036
+candidates (0.118% of all Bash calls) across 38 sessions, branch task 167 /
+generic 130; 3,000 random NON-candidates → 0; the 8 commands #124's stripper
+calls payload, 4x each in one session → 0. Wrong-block hunt by hand: fan-out
+0, `git add` 0, file-write-shaped 1 — and that one writes a real 30-minute curl
+poller, so it is correct.
+
+No prose was added anywhere. The ticket rejects the accretion answer, the intake
+gate says a mechanically checkable rule belongs in a hook, and the block message
+is delivered at the action, which is the surface that actually reaches a
+session.
+
+Filed #127: #118's CI signature misses `gh pr view … statusCheckRollup` polls
+(a real chain of nine `poll #436 CI`…`#444` turns), so they land in the generic
+guard — widening an audited hook's contract needs its own replay.
+
+Tests: `tests/test_local_poll_repeat_block.py` (31), including
+`MessageBranchesByWhatIsWaitedOnTest` (each branch's claim asserted absent from
+the other) and `TeethTest` mutating the real script into a no-free-first-loop
+guard, a dropped CI exemption, and a single message for both branches.
