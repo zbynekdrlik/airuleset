@@ -2827,7 +2827,13 @@ def cmd_watchdog(args):
                     # multi-hour turn starves compaction, question delivery
                     # and the keystroke queue of THAT session, wherever it
                     # runs. Detection only, so it never types into a pane.
-                    long_turn_enabled=True)
+                    long_turn_enabled=True,
+                    # Job 26 (#140) runs on EVERY managed box: a session that
+                    # asked for compaction and never got it is a per-session
+                    # failure, and both measured incidents were on DIFFERENT
+                    # boxes (forestshop@dev1, montalu@subdev) on the same day.
+                    # Detection only, so it never types into a pane.
+                    compact_stall_enabled=True)
     for line in logs:
         print(line)
 

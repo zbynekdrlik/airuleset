@@ -3904,8 +3904,9 @@ def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
 #            -- `/compact` was typed once and is awaiting resolution. EVERY
 #               sender must skip entirely while this is true — never a
 #               resend "just this once" for its own reason. Resolves via
-#               EXACTLY two paths, never a timer (the #72 lesson,
-#               generalized):
+#               three EVIDENCE paths (the #72 lesson, generalized) plus a
+#               TTL backstop for the case none of them can reach (#140,
+#               EXPIRED — below):
 #                 CONSUMED -- the claimed session's OWN transcript carries a
 #                   `compact_boundary` system entry (Claude Code's own
 #                   durable "a real compaction landed" record — verified
@@ -3922,8 +3923,14 @@ def compact_boundary_substantial(cwd, sid, projects_dir=None, path=None,
 #                   NEWER session id than the one the claim was queued
 #                   under (the pane went through a restart — `/exit` +
 #                   relaunch always mints a fresh session id, so the old
-#                   process holding the queued keystrokes is gone). A
-#                   resend is legitimate ONLY here.
+#                   process holding the queued keystrokes is gone).
+#                 EXPIRED (#140) -- none of the above can EVER fire for
+#                   this claim and it is older than COMPACT_CLAIM_TTL_S.
+#                   Live 2026-07-28, two boxes: process alive, session id
+#                   unchanged (`claude -c`), and the queued `/compact`
+#                   never drained (#84) so no boundary was ever written —
+#                   21h26m of refused boundaries on montalu@subdev, ended
+#                   by the USER hand-compacting, not by the mechanism.
 #
 # Deliberately did NOT replace job 15's `compact_stale` / job 17's
 # `compact_ceiling` state machines (both REMOVED, #102) — those decided
@@ -4011,7 +4018,21 @@ def _transcript_compact_boundary_ts(path, tail_bytes=4_000_000):
     return best
 
 
-def compact_claim_active(sid, cwd, path=None, projects_dir=None):
+COMPACT_CLAIM_TTL_S = 1800       # 30 min; env AIRULESET_COMPACT_CLAIM_TTL_S
+
+
+def _compact_claim_ttl(ttl=None):
+    if ttl is not None:
+        return ttl
+    try:
+        return int(os.environ.get("AIRULESET_COMPACT_CLAIM_TTL_S",
+                                  COMPACT_CLAIM_TTL_S))
+    except ValueError:
+        return COMPACT_CLAIM_TTL_S
+
+
+def compact_claim_active(sid, cwd, path=None, projects_dir=None, now=None,
+                         ttl=None):
     """#78 — the SINGLE shared gate every `/compact` sender (the
     synchronous #65 path, job 14 — jobs 15/17, once also senders, REMOVED
     #102) MUST consult BEFORE typing `/compact` into `sid`'s pane, and
@@ -4020,13 +4041,16 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
     an outstanding, UNRESOLVED claim — a send is FORBIDDEN.
 
     Reconciles the stored claim against reality on every call (never
-    trusts a stale entry blindly), resolving it via EXACTLY the two paths
-    the section comment above describes — CONSUMED (a `compact_boundary`
-    transcript entry newer than the send time) or FAILED (the claim's cwd
-    now belongs to a different, newer session — a demonstrated delivery
-    loss). NEVER resolves on elapsed time alone — a claim with no
-    matching transcript evidence stays queued no matter how long ago it
-    was set."""
+    trusts a stale entry blindly), resolving it via the paths the section
+    comment above describes — CONSUMED (a `compact_boundary` transcript
+    entry newer than the send time), FAILED (the claim's process is gone,
+    or the claim's cwd now belongs to a different, newer session — a
+    demonstrated delivery loss), and, since #140, EXPIRED (older than
+    `COMPACT_CLAIM_TTL_S`). Elapsed time is still never EVIDENCE: the
+    three evidence paths are evaluated first and a claim inside the TTL
+    stays queued however long it has been waiting. The TTL exists only so
+    that a claim NONE of them can ever resolve cannot disable compaction
+    for that session forever — the live 2026-07-28 wedge."""
     sid = str(sid or "").strip()
     if not sid:
         return False
@@ -4076,18 +4100,56 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
         return False                      # FAILED — eligible for a fresh send
     # CONSUMED — the CLAIMED session's own transcript shows a real
     # compact_boundary newer than the send time.
+    send_ts = entry.get("ts")
     tpath = _transcript_for_session(projects_dir, sid, claimed_cwd)
     if tpath is not None:
         boundary_ts = _transcript_compact_boundary_ts(tpath)
-        send_ts = entry.get("ts")
         if (boundary_ts is not None and send_ts is not None
                 and boundary_ts > send_ts):
             claims.pop(sid, None)
             _save_compact_claims(claims, path)
             return False                  # CONSUMED — eligible again
-    return True                           # still genuinely queued — NEVER
-                                           # resend here, no matter how much
-                                           # time has passed
+    # EXPIRED (#140) — the fourth resolution, and the ONLY one that can end a
+    # claim nothing will ever be able to prove. Live wedge, two boxes, two
+    # users, 2026-07-28: the claim's `claude` process stayed ALIVE (montalu
+    # pid 3489717, up since 07-26 23:14), the session id never changed
+    # (`claude -c` continues the same transcript), and the queued `/compact`
+    # never drained — CC drains type-ahead only at an ACCEPTED Stop, and an
+    # armed `/goal` loop keeps rejecting Stops (#84) — so no boundary was
+    # ever written. All three checks above were structurally unavailable and
+    # the claim refused every later ticket boundary `SKIP claim-queued` for
+    # 21h26m (context 346,944) until the USER hand-compacted; forestshop@dev1
+    # showed the identical signature at ~500K.
+    #
+    # #72's "never a timer" rule is right about what counts as PROOF and
+    # wrong to conclude an unprovable claim may be held forever. The window
+    # is generous by construction: #109 timed 11 real sends, 9 of which
+    # started within ~6s of the keystroke and the worst parked +98s, so 30
+    # min is ~18x the worst HEALTHY delivery and cannot fire on one.
+    # Releasing is also nearly free, because a second guard already exists —
+    # both send points (job 14, `deliver_compact_now`) check
+    # `_pane_has_queued_compact` first, so a `/compact` genuinely still
+    # parked in that pane is skipped as `SKIP queued-compact` rather than
+    # typed twice. Worst case is ONE redundant `/compact`; the alternative,
+    # measured, is a whole session that can never compact again.
+    #
+    # A claim whose `ts` cannot be read is treated the same way — it can
+    # neither age out nor be proven, which is exactly the shape #83 already
+    # drops for a missing "proc", and the failure direction is the same one
+    # this ticket mandates: fail toward RELEASING.
+    now = time.time() if now is None else now
+    ttl = _compact_claim_ttl(ttl)
+    try:
+        expired = (now - float(send_ts)) > ttl
+    except (TypeError, ValueError):
+        expired = True                    # unusable ts — unprovable, release
+    if ttl > 0 and expired:
+        claims.pop(sid, None)
+        _save_compact_claims(claims, path)
+        return False                      # EXPIRED — eligible for a fresh send
+    return True                           # still genuinely queued — inside the
+                                           # TTL, elapsed time alone is still
+                                           # not evidence (#72)
 
 
 def compact_claim_set(sid, cwd, now=None, path=None, pane_id=None, run=None,
@@ -5399,6 +5461,115 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
         # drop repos with no live pane this sweep, so the state file cannot
         # grow without bound across a long-lived watchdog (job 21's shape).
         state["delivery_stall"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Job 26 — COMPACT-STALL WATCH (#140, 2026-07-28).
+#
+# The second half of #140, and the ticket is explicit that it is a defect in
+# its own right: two sessions on two boxes sat wedged — forestshop@dev1 at
+# ~500K, montalu@subdev at 400K — and NOTHING noticed. The user did, by
+# looking at two screens, and had to hand-compact both. The TTL above stops
+# THIS cause; a compaction that was asked for and never landed has others (a
+# pane whose type-ahead queue never drains, a boundary that scrolled out of
+# the bounded transcript tail), and all of them look identical from outside:
+# the context simply keeps growing and costing money on every later turn.
+#
+# The condition is read from the ARTIFACT, never from intent (#134's lesson —
+# a guard that defers to an unenforced action is a silence generator): a claim
+# STILL ON FILE, for a session that STILL HAS A LIVE PANE, older than the
+# stall window, with no `compact_boundary` in that session's own transcript
+# newer than the claim. That is precisely the measured state of both boxes.
+#
+# Job 24 could not carry this — it is REPO-keyed and measures git delivery,
+# this is SESSION-keyed and measures compaction; one job with two unrelated
+# subjects would be worse than two jobs. What IS reused, deliberately and
+# verbatim, is job 24's shape: detection logged every sweep (#36), the ping
+# deduped per re-ping window rather than per sweep, `send_fn is None` never
+# marking anything as pinged, state pruned to sessions with a live pane, and
+# DETECTION ONLY — it never types into a pane and never touches a claim (the
+# next send attempt is what releases an expired one, via the TTL above).
+#
+# Known residual, stated rather than hidden: `_transcript_compact_boundary_ts`
+# reads a bounded 4 MB tail, so on a very busy session (forestshop writes
+# ~80 MB/day) a boundary that has scrolled out of that window reads as "never
+# landed" and can produce a false ping. That direction is deliberate — a
+# spurious reminder costs a glance, and the failure this job exists for cost
+# two hand-compactions and several hundred thousand tokens.
+# --------------------------------------------------------------------------- #
+
+COMPACT_STALL_S = 3600           # 1h since the claim; env AIRULESET_COMPACT_STALL_S
+COMPACT_STALL_REPING_S = 21600   # re-ping every 6h while it persists
+
+
+def compact_stall_watch(now, state, cwd_by_sid, send_fn=None, dry_run=False,
+                        projects_dir=None, claims_path=None, owner_by_sid=None,
+                        project_by_sid=None, stall=None, reping=None):
+    """Job 26 — see the section comment. Detection only; never a keystroke."""
+    projects_dir = projects_dir or PROJECTS_DIR
+    owner_by_sid = owner_by_sid or {}
+    project_by_sid = project_by_sid or {}
+    if stall is None:
+        try:
+            stall = int(os.environ.get("AIRULESET_COMPACT_STALL_S",
+                                       COMPACT_STALL_S))
+        except ValueError:
+            stall = COMPACT_STALL_S
+    reping = COMPACT_STALL_REPING_S if reping is None else reping
+    seen = dict(state.get("compact_stall") or {})
+    logs = []
+    live = set()
+
+    for sid, entry in sorted(_load_compact_claims(claims_path).items()):
+        cwd = (cwd_by_sid or {}).get(sid)
+        if not cwd or not isinstance(entry, dict):
+            continue                      # no live pane — nothing to tell
+        live.add(sid)
+        try:
+            age = now - float(entry.get("ts"))
+        except (TypeError, ValueError):
+            # unusable ts — the TTL above releases it on the next send
+            # attempt; this job says nothing it cannot measure.
+            seen.pop(sid, None)
+            continue
+        if age < stall:
+            seen.pop(sid, None)
+            continue
+        claimed_cwd = entry.get("cwd") or cwd
+        tpath = _transcript_for_session(projects_dir, sid, claimed_cwd)
+        boundary = _transcript_compact_boundary_ts(tpath) if tpath else None
+        if boundary is not None and boundary > float(entry.get("ts")):
+            seen.pop(sid, None)           # it landed after all — healthy
+            continue
+
+        label = (project_by_sid.get(sid) or os.path.basename(
+            str(claimed_cwd).rstrip("/")) or "session")
+        hours = int(age // 3600)
+        logs.append("compact-stall /%s sid=%s age=%ds cwd=%s"
+                    % (label, sid[:8], int(age), claimed_cwd))
+        prev = seen.get(sid) or {}
+        pinged = prev.get("pinged_ts")
+        if dry_run or send_fn is None or (
+                pinged is not None and now - float(pinged) < reping):
+            # `send_fn is None` must NOT mark this as pinged — nothing was
+            # delivered, so a later sweep with a real notify path still owes
+            # the user this alert (job 21/24's contract, reused verbatim).
+            continue
+        status = send_fn(
+            "\U0001f9f9 **%s** — kontext sa už %d h nezmenšil\n"
+            "> Sedenie si pred %d h vyžiadalo upratanie kontextu, ale k nemu "
+            "doteraz nedošlo, takže kontext ďalej rastie a každý ďalší krok "
+            "je drahší. Ak to tak ostane, pomôže ručné `/compact`."
+            % (label, hours, hours),
+            owner=owner_by_sid.get(sid) or None,
+            dedup_key="compact-stall:%s:%d" % (sid, int(now // reping)),
+            dry_run=dry_run)
+        logs.append("compact-stall PING %s -> %s" % (label, status))
+        seen[sid] = {"pinged_ts": now}
+
+    if not dry_run:
+        state["compact_stall"] = {k: v for k, v in seen.items() if k in live}
     return logs
 
 
@@ -6946,8 +7117,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
-             closed_fetch=None):
-    """Scan every `claude` pane once. 25 numbered jobs per poll — 20 LIVE and 5
+             closed_fetch=None, compact_stall_enabled=False):
+    """Scan every `claude` pane once. 26 numbered jobs per poll — 21 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
@@ -7194,6 +7365,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           contract): the probe fetches the base ref, the measurement follows
           it. DETECTION ONLY — one deduped ping per repo per day, never a
           keystroke (card_reconcile).
+      (26) (only when `compact_stall_enabled`) COMPACT-STALL WATCH (#140) —
+          the companion to the claim TTL in `compact_claim_active`. Two
+          sessions on two boxes sat unable to compact — forestshop@dev1 at
+          ~500K, montalu@subdev at 400K for 21h26m — and NOTHING noticed;
+          the user did, from two screens, and hand-compacted both. Per
+          session with a live pane this reads the ARTIFACT, never intent
+          (#134's lesson): a `/compact` claim still on file, older than
+          `COMPACT_STALL_S`, with no `compact_boundary` in that session's
+          own transcript newer than the claim — i.e. a compaction that was
+          asked for and never landed, whatever the cause (a pane whose
+          type-ahead never drained, a boundary scrolled out of the bounded
+          tail read). Job 24 could not carry it: that one is REPO-keyed and
+          measures git delivery, this is SESSION-keyed and measures
+          compaction — what is reused is its shape. DETECTION ONLY: logged
+          every sweep, ONE deduped ping per session per
+          `COMPACT_STALL_REPING_S`, never a keystroke and never a write to
+          the claim (the TTL releases it on the next send attempt)
+          (compact_stall_watch).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -8024,6 +8213,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                    owner_by_sid=owner_by_sid)
         except Exception as e:
             logs.append("card-reconcile error: %r" % (e,))
+
+    # Job 26 — COMPACT-STALL WATCH (#140): only when `compact_stall_enabled`
+    # is truthy (cmd_watchdog passes True) — the "wired = on" convention of
+    # jobs 13/14/16/19/20/21, and here it also keeps an existing caller of
+    # run_once() (every pre-#140 test) from ever reading the REAL
+    # ~/.claude/compact-claims.json, which the live systemd watchdog on this
+    # box writes every 60s. Detection only, no tmux round-trip: it reads the
+    # claims file and the transcripts, and the cwd map came from the pane
+    # sweep above. Best-effort — a failure here must never cost a sweep.
+    if compact_stall_enabled:
+        try:
+            logs += compact_stall_watch(now, state, cwd_by_sid,
+                                        send_fn=send_fn, dry_run=dry_run,
+                                        projects_dir=projects_dir,
+                                        owner_by_sid=owner_by_sid,
+                                        project_by_sid=project_by_sid)
+        except Exception as e:
+            logs.append("compact-stall error: %r" % (e,))
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
