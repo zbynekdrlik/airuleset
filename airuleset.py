@@ -2585,6 +2585,38 @@ def _watchdog_card_probe(root, base):
     return None
 
 
+def _watchdog_closed_fetch(root, since_ts):
+    """Job 25's fallback for a repo that never writes `Closes #N` trailers.
+
+    Wired HERE, like every other network call, so run_once's unit tests stay
+    network-free. Job 25 asks for this ONLY when the local read found no
+    trailers at all yet the base branch did take fresh merges — the exact
+    signature of a repo whose issues close from the PR body instead. tvdole
+    is that repo (20 commits in 48h, zero trailers in its last 200 commits),
+    and it is one of the two in #134's evidence, so without this the backstop
+    would have been blind to half the incident it was written for.
+
+    Cost stays where the design intended: a repo that answers locally never
+    reaches this, so it is roughly one call per trailer-less repo per sweep
+    rather than one per repo — and returning None on any failure degrades to
+    the local-only answer rather than to silence.
+    """
+    import subprocess
+    import time
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since_ts))
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "closed", "--limit", "100",
+             "--json", "number,closedAt"],
+            cwd=root, capture_output=True, text=True, timeout=45)
+        if r.returncode != 0:
+            return None
+        return [i["number"] for i in json.loads(r.stdout or "[]")
+                if (i.get("closedAt") or "") >= since]
+    except Exception:
+        return None
+
+
 def _watchdog_delivery_probe(root, base):
     """Job 24's confirming fetch + best-effort blocker lookup (#138).
 
@@ -2703,6 +2735,7 @@ def cmd_watchdog(args):
                     # per-repo failure, and the box hosting the loop holds
                     # the checkout that proves it.
                     card_probe=_watchdog_card_probe,
+                    closed_fetch=_watchdog_closed_fetch,
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,

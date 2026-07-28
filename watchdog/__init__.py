@@ -5465,9 +5465,19 @@ def merged_closes(root, base, since_ts, git_run=None):
     return sorted(nums)
 
 
+def _commits_in_window(root, base, since_ts, git_run=None):
+    out = _git_first_line(root, ["rev-list", "--count",
+                                 "--since=@%d" % int(since_ts), base], git_run)
+    try:
+        return int(out)
+    except (TypeError, ValueError):
+        return 0
+
+
 def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                    git_run=None, card_probe=None, marker_ok=None,
-                   owner_by_sid=None, window=None, reping=None):
+                   owner_by_sid=None, window=None, reping=None,
+                   closed_fetch=None):
     """Job 25 — see the section comment.
 
     Gated on `card_probe` (the "wired = on" convention of jobs 8/11/16/24):
@@ -5507,6 +5517,22 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         except Exception as e:
             logs.append("card-reconcile probe-failed %s: %r" % (root, e))
         closed = merged_closes(root, base, now - window, git_run)
+        if not closed and closed_fetch is not None:
+            # A repo that never writes `Closes #N` trailers is invisible to
+            # the local read — its issues close from the PR body, which is a
+            # GitHub-side fact. tvdole is exactly that repo, and it is one of
+            # the two in #134's own evidence, so the local-only design would
+            # have been blind to half the incident. The fallback is bounded
+            # to precisely that signature — fresh merges on the base branch,
+            # yet zero trailers — so a repo that answers locally never costs
+            # an API call, and a parked repo never costs one either.
+            if _commits_in_window(root, base, now - window, git_run) > 0:
+                try:
+                    closed = sorted(set(closed_fetch(root, now - window) or []))
+                except Exception as e:
+                    logs.append("card-reconcile closed-fetch-failed %s: %r"
+                                % (root, e))
+                    closed = []
         if not closed:
             seen.pop(root, None)
             continue
@@ -6919,7 +6945,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
-             goal_templates_path=None, delivery_probe=None, card_probe=None):
+             goal_templates_path=None, delivery_probe=None, card_probe=None,
+             closed_fetch=None):
     """Scan every `claude` pane once. 25 numbered jobs per poll — 20 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -7993,6 +8020,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += card_reconcile(now, run, state, cwd_by_sid,
                                    send_fn=send_fn, dry_run=dry_run,
                                    card_probe=card_probe,
+                                   closed_fetch=closed_fetch,
                                    owner_by_sid=owner_by_sid)
         except Exception as e:
             logs.append("card-reconcile error: %r" % (e,))
