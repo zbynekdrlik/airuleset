@@ -651,6 +651,51 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
 # 4. the evidence block gains the field the gate reads
 # --------------------------------------------------------------------------- #
 
+class TestBackfillDigest(unittest.TestCase):
+    """ONE catch-up message per repo, never one card per ticket. The silent
+    window held ~103 closed issues across two repos; firing a retroactive
+    card per ticket would put a hundred pings on the user's phone to
+    apologise for having sent none."""
+
+    def compose(self, n, extra=""):
+        import airuleset
+        return airuleset.compose_backfill_digest(
+            "parovanie-produktov",
+            [{"number": i, "title": "ticket %d%s" % (i, extra)}
+             for i in range(1, n + 1)], "2026-07-23")
+
+    def test_it_names_the_repo_the_count_and_the_window(self):
+        body = self.compose(4)
+        self.assertIn("parovanie-produktov", body)
+        self.assertIn("**4**", body)
+        self.assertIn("2026-07-23", body)
+
+    def test_it_is_one_message_not_one_per_ticket(self):
+        self.assertEqual(self.compose(60).count("dobiehacie hlásenie"), 1)
+
+    def test_a_long_list_is_bounded(self):
+        body = self.compose(60)
+        self.assertLess(body.count("• #"), 15, body)
+        self.assertIn("a ďalších 50", body)
+
+    def test_a_long_title_is_clipped(self):
+        body = self.compose(1, extra=" " + "x" * 300)
+        self.assertTrue(all(len(ln) < 200 for ln in body.splitlines()), body)
+
+    def test_it_says_the_gap_is_now_watched(self):
+        self.assertIn("kontroluje", self.compose(2))
+
+    def test_slovak_plural_agrees_with_the_count(self):
+        self.assertIn("**1** ticket,", self.compose(1))
+        self.assertIn("**3** tickety,", self.compose(3))
+        self.assertIn("**9** ticketov,", self.compose(9))
+
+    def test_it_does_not_claim_a_deploy_it_never_verified(self):
+        # a catch-up message that overclaims is a worse repair than the
+        # silence it apologises for — nothing here checked a deploy.
+        self.assertNotIn("nasaden", self.compose(5))
+
+
 class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):
 
     def test_full_authority_block_has_a_cards_fired_line(self):

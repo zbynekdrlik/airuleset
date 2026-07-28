@@ -1942,6 +1942,10 @@ def cmd_notify(args):
             sys.stdout.write(repr(ts))
         return
 
+    if getattr(args, "backfill_digest", False):
+        _notify_backfill_digest(args, send)
+        return
+
     if getattr(args, "run_card", False):
         _notify_run_card(args, compose_autopilot_card, send)
         return
@@ -2269,6 +2273,74 @@ def cmd_gk_request(args):
     print("gk-request FAILED: %s / %s"
           % (r.stderr.strip(), r2.stderr.strip()))
     return 1
+
+
+def compose_backfill_digest(repo_name, tickets, since_label):
+    """ONE catch-up message per repo for a window that went unreported (#134).
+
+    Deliberately a DIGEST and not N cards: the silent window held ~103 closed
+    issues across two repos, and firing a retroactive card per ticket would
+    put a hundred pings on the user's phone to apologise for having sent
+    none. Plain Slovak, phone-readable, bounded — the numbers plus a few
+    titles, never a wall."""
+    shown = tickets[:10]
+    n = len(tickets)
+    # Slovak plural: 1 ticket / 2-4 tickety / 5+ ticketov.
+    word = "ticket" if n == 1 else ("tickety" if 2 <= n <= 4 else "ticketov")
+    lines = ["\U0001f4ec **%s** — dobiehacie hlásenie" % repo_name,
+             # NOT "a nasadená": these closures were never verified as
+             # deployed by anything here, and a catch-up message that
+             # overclaims is a worse repair than the silence it apologises
+             # for.
+             "> Od %s sa uzavrelo **%d** %s, ale správa o nich neprišla na "
+             "telefón. Práca je hotová — chýbalo len hlásenie o nej."
+             % (since_label, n, word)]
+    for t in shown:
+        title = (t.get("title") or "").strip()
+        if len(title) > 90:
+            title = title[:87] + "…"
+        lines.append("> • #%s %s" % (t.get("number"), title))
+    if len(tickets) > len(shown):
+        lines.append("> • …a ďalších %d" % (len(tickets) - len(shown)))
+    lines.append("> Odteraz sa hlásenie posiela automaticky a jeho vynechanie "
+                 "sa kontroluje.")
+    return "\n".join(lines)
+
+
+def _notify_backfill_digest(args, send):
+    """One catch-up digest for a repo whose completion cards never fired.
+
+    Reads the closed issues in the window from gh, drops any that DID get a
+    delivered card, and sends a single message. Idempotent through the same
+    dedup path as every other notification."""
+    from notify import marker_delivered
+    repo = getattr(args, "repo", None)
+    since = getattr(args, "since", None)
+    if not repo or not since:
+        print("notify --backfill-digest needs --repo owner/name and --since",
+              file=sys.stderr)
+        sys.exit(1)
+    name = str(repo).rstrip("/").split("/")[-1]
+    raw = _gh_out("issue", "list", "-R", repo, "--state", "closed", "-L", "200",
+                  "--json", "number,title,closedAt", timeout=60)
+    try:
+        issues = json.loads(raw or "[]")
+    except ValueError:
+        issues = []
+    tickets = [i for i in issues
+               if (i.get("closedAt") or "") >= since
+               and not marker_delivered("%s#%s" % (name, i.get("number")))]
+    tickets.sort(key=lambda i: i.get("number") or 0)
+    if not tickets:
+        print("backfill: nothing unreported for %s since %s" % (name, since))
+        return
+    body = compose_backfill_digest(name, tickets, since[:10])
+    status = send(body, owner=getattr(args, "owner_name", None) or None,
+                  dedup_key="backfill:%s:%s" % (name, since[:10]),
+                  dry_run=getattr(args, "dry_run", False))
+    print("%s (%d tickets)" % (status, len(tickets)))
+    if status not in ("sent", "dedup", "dry-run"):
+        sys.exit(1)
 
 
 def _notify_run_card(args, compose_autopilot_card, send):
@@ -3636,6 +3708,14 @@ def main():
                           help="Send a per-ticket card (requires --repo + --issue), "
                                "gathering goal/progress from gh — fired by the "
                                "autopilot worker directly at merge")
+    p_notify.add_argument("--backfill-digest", dest="backfill_digest",
+                          action="store_true",
+                          help="ONE catch-up digest for --repo covering the "
+                               "tickets closed since --since that never got a "
+                               "delivered card (never one card per ticket)")
+    p_notify.add_argument("--since", help="ISO8601 window start (--backfill-digest)")
+    p_notify.add_argument("--owner-name", dest="owner_name",
+                          help="Deliver to this owner's thread (--backfill-digest)")
     p_notify.add_argument("--repo-name", dest="repo_name", action="store_true",
                           help="Print the GitHub repo NAME for --cwd, from its "
                                "origin remote (never the directory basename)")
