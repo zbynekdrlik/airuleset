@@ -7098,6 +7098,245 @@ def cleanup_stale_exec_markers(now, run=None, projects_dir=None,
 
 
 # --------------------------------------------------------------------------- #
+# Jobs 27/28 (#137, 2026-07-28). Both close the SAME observation gap: camera-
+# box's +101 net-open drift ran two weeks before the user noticed by feel, and
+# the merge deadlock behind most of it (origin/main frozen 2026-07-11) ran 15
+# days before job 24 (#138) existed to catch it. Job 24 needed a LIVE PANE in
+# the repo to fire at all — these two sweep EVERY locally-cloned repo on the
+# box on a bounded cadence, independent of whether any session happens to be
+# open in it right now, so a repo nobody is actively looking at still gets
+# checked. #138's own corrected lesson applies here from the start: the
+# corpus is `$HOME`, never a guessed project directory, and any age-only
+# window is bounded on BOTH ends (a repo abandoned in 2019 is not a "stopped
+# receiving" repo, it never was a delivery target at all).
+#
+# Repo discovery is INJECTED (`repo_roots`), never done by the jobs
+# themselves — same "wired = on" convention as `delivery_probe`/`fleet_fetch`
+# and the same reason: a unit test controls its own repo set explicitly, and
+# `cmd_watchdog` (airuleset.py) owns the real `find $HOME -maxdepth N -name
+# .git` sweep, gated by cadence so it costs the network once an hour, not
+# once a minute.
+# --------------------------------------------------------------------------- #
+
+MANAGED_SWEEP_INTERVAL_S = 3600      # run at most once an hour; env AIRULESET_MANAGED_SWEEP_S
+
+
+def discover_managed_repos(home=None, max_depth=4, run=None):
+    """Every `.git` directory under `home` (default `$HOME`), `max_depth`
+    levels deep, EXCLUDING dependency/build noise -- the real corpus for any
+    job that must sweep "every repo on this box", per #138's own correction
+    (the intuitive `~/devel` guess silently missed a real repo). Returns a
+    sorted list of repo ROOT paths (parent of `.git`), deduped. Best-effort:
+    an unreadable subtree is skipped, never raised."""
+    home = home or os.environ.get("HOME") or os.path.expanduser("~")
+    skip_names = {"node_modules", ".cache", ".local", "venv", ".venv",
+                  "__pycache__", ".npm", ".cargo", "target", "dist", "build"}
+    roots = set()
+    base_depth = str(home).rstrip("/").count("/")
+    for dirpath, dirnames, _filenames in os.walk(home, topdown=True):
+        depth = dirpath.rstrip("/").count("/") - base_depth
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in skip_names]
+        if ".git" in dirnames:
+            roots.add(dirpath)
+            dirnames.remove(".git")   # never descend into .git itself
+    return sorted(roots)
+
+
+def _repo_label(root, git_run=None):
+    """The repo's canonical NAME for logging/dedup -- from `origin`, never
+    the directory basename (a checkout can be renamed locally; #134's own
+    lesson, reused here)."""
+    url = _git_first_line(root, ["remote", "get-url", "origin"], git_run)
+    if url:
+        m = re.search(r'[:/]([^/]+/[^/]+?)(\.git)?$', url)
+        if m:
+            return m.group(1)
+    return os.path.basename(str(root).rstrip("/"))
+
+
+def _sweep_due(state, key, now, interval):
+    """True once per `interval`, tracked in `state[key]`. Shared cadence gate
+    for jobs 27/28 -- neither needs to run every 60s poll; both cost a
+    network round trip (gh / git fetch) per repo."""
+    last = state.get(key)
+    elapsed = None
+    if last is not None:
+        try:
+            elapsed = now - float(last)
+        except (TypeError, ValueError):
+            elapsed = None    # unusable stamp -- treat as "due", never crash
+    if elapsed is not None and elapsed < interval:
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Job 27 — NET-ISSUE-DRIFT ALARM (#137). Per managed repo, the trailing-7-day
+# opened-minus-closed count via `gh`. camera-box's own +101 over 21 days is
+# ~+34/week at its worst window -- this would have pinged around 2026-07-14,
+# instead of the user noticing by feel two weeks later. Gated on
+# `issue_counts_fetch` (the "wired = on" convention): the real callable does
+# the `gh issue list --search` round trip; a unit test injects a fake so the
+# job itself never shells out.
+# --------------------------------------------------------------------------- #
+
+NET_DRIFT_WINDOW_S = 7 * 86400
+NET_DRIFT_THRESHOLD = 10          # net > this pings; env AIRULESET_NET_DRIFT_THRESHOLD
+NET_DRIFT_REPING_S = 86400        # once a day while it persists
+
+
+def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
+                    issue_counts_fetch=None, git_run=None, threshold=None,
+                    window=NET_DRIFT_WINDOW_S, reping=NET_DRIFT_REPING_S,
+                    interval=MANAGED_SWEEP_INTERVAL_S):
+    """Job 27 -- see the section comment. `issue_counts_fetch(repo_label,
+    window_s) -> (opened, closed) | None` -- None means unmeasurable (no gh
+    auth, rate-limited, repo not on GitHub) and is never treated as a stall."""
+    if issue_counts_fetch is None:
+        return []
+    if threshold is None:
+        try:
+            threshold = int(os.environ.get("AIRULESET_NET_DRIFT_THRESHOLD",
+                                           NET_DRIFT_THRESHOLD))
+        except ValueError:
+            threshold = NET_DRIFT_THRESHOLD
+    logs = []
+    if not _sweep_due(state, "net_drift_last_sweep", now, interval):
+        return logs
+    if not dry_run:
+        state["net_drift_last_sweep"] = now
+    repos = repo_roots() if callable(repo_roots) else (repo_roots or [])
+    seen = dict(state.get("net_drift") or {})
+    live = set()
+    for root in sorted(set(repos)):
+        label = _repo_label(root, git_run)
+        try:
+            counts = issue_counts_fetch(label, window)
+        except Exception as exc:
+            counts = None
+            logs.append("net-drift fetch-error %s: %r" % (label, exc))
+        if not counts:
+            continue
+        opened, closed = counts
+        net = opened - closed
+        logs.append("net-drift %s opened=%d closed=%d net=%+d"
+                    % (label, opened, closed, net))
+        if net <= threshold:
+            seen.pop(label, None)
+            continue
+        live.add(label)
+        prev = seen.get(label) or {}
+        pinged = prev.get("pinged_ts")
+        if dry_run or send_fn is None or (
+                pinged is not None and now - float(pinged) < reping):
+            continue
+        status = send_fn(
+            "\U0001f4c8 **%s** -- backlog rastie: +%d ticketov za posledny "
+            "tyzden\n"
+            "> Za poslednych 7 dni pribudlo %d novych a zavrelo sa len %d -- "
+            "backlog rastie rychlejsie, ako sa stiha spracovavat."
+            % (label, net, opened, closed),
+            dedup_key="net-drift:%s:%d" % (label, int(now // reping)),
+            dry_run=dry_run)
+        logs.append("net-drift PING %s -> %s" % (label, status))
+        seen[label] = {"pinged_ts": now}
+    if not dry_run:
+        state["net_drift"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Job 28 — STUCK-MAIN SWEEP (#137). Per managed repo, purely local git (no
+# `gh` call, no auth needed): the base branch (`origin/HEAD`, same resolver
+# job 24 uses) has not moved in `age_threshold`, while the checked-out
+# branch carries more than `ahead_threshold` commits not reachable from it.
+# This is job 24's OWN measurement (`delivery_state`/`_delivery_stalled`),
+# reused deliberately rather than reimplemented -- the difference is scope:
+# job 24 only ever sees a repo with a LIVE PANE open in it right now; this
+# sweeps every repo on the box on its own cadence, so a repo nobody has a
+# session open in still gets checked. Bounded on both ends, per #138's own
+# fix (`DELIVERY_STALL_MAX_S`) -- reused here too, so a repo that simply
+# never merges anywhere (an abandoned fork) does not alarm forever.
+# --------------------------------------------------------------------------- #
+
+STUCK_MAIN_AGE_S = 5 * 86400          # env AIRULESET_STUCK_MAIN_AGE_S
+STUCK_MAIN_AHEAD_MIN = 20             # env AIRULESET_STUCK_MAIN_AHEAD
+STUCK_MAIN_REPING_S = 86400
+
+
+def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
+                     git_run=None, git_fetch=None, age_threshold=None,
+                     ahead_threshold=None, reping=STUCK_MAIN_REPING_S,
+                     interval=MANAGED_SWEEP_INTERVAL_S):
+    """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
+    effort, errors logged and ignored) before reading refs, since no live
+    session may have fetched this repo recently -- injected so a test never
+    shells a real network fetch. `git_fetch=None` skips the fetch entirely
+    (a test working with fixture repos that have no real remote)."""
+    if age_threshold is None:
+        try:
+            age_threshold = int(os.environ.get("AIRULESET_STUCK_MAIN_AGE_S",
+                                               STUCK_MAIN_AGE_S))
+        except ValueError:
+            age_threshold = STUCK_MAIN_AGE_S
+    if ahead_threshold is None:
+        try:
+            ahead_threshold = int(os.environ.get("AIRULESET_STUCK_MAIN_AHEAD",
+                                                  STUCK_MAIN_AHEAD_MIN))
+        except ValueError:
+            ahead_threshold = STUCK_MAIN_AHEAD_MIN
+    logs = []
+    if not _sweep_due(state, "stuck_main_last_sweep", now, interval):
+        return logs
+    if not dry_run:
+        state["stuck_main_last_sweep"] = now
+    repos = repo_roots() if callable(repo_roots) else (repo_roots or [])
+    seen = dict(state.get("stuck_main") or {})
+    live = set()
+    for root in sorted(set(repos)):
+        if git_fetch is not None:
+            try:
+                git_fetch(root)
+            except Exception as exc:
+                logs.append("stuck-main git-fetch-error %s: %r" % (root, exc))
+        st = delivery_state(root, now, git_run=git_run)
+        if st is None:
+            continue
+        label = _repo_label(root, git_run)
+        stalled = (st["undelivered"] >= ahead_threshold
+                   and age_threshold <= st["delivery_age"] <= DELIVERY_STALL_MAX_S)
+        logs.append("stuck-main %s undelivered=%d delivery_age=%ds base=%s"
+                    % (label, st["undelivered"], int(st["delivery_age"]),
+                       st["base"]))
+        if not stalled:
+            seen.pop(label, None)
+            continue
+        live.add(label)
+        prev = seen.get(label) or {}
+        pinged = prev.get("pinged_ts")
+        if dry_run or send_fn is None or (
+                pinged is not None and now - float(pinged) < reping):
+            continue
+        days = int(st["delivery_age"] // 86400)
+        status = send_fn(
+            "\U0001f512 **%s** -- vetva %s stoji %d dni, %d commitov caka na zluenie\n"
+            "> Praca sa hromadi na pracovnej vetve, ale do %s sa uz %d dni nic "
+            "nezluilo -- skontroluj, ci nie je zablokovany merge/PR."
+            % (label, st["base"].split("/")[-1], days, st["undelivered"],
+               st["base"].split("/")[-1], days),
+            dedup_key="stuck-main:%s:%d" % (label, int(now // reping)),
+            dry_run=dry_run)
+        logs.append("stuck-main PING %s -> %s" % (label, status))
+        seen[label] = {"pinged_ts": now}
+    if not dry_run:
+        state["stuck_main"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # One poll cycle
 # --------------------------------------------------------------------------- #
 
@@ -7117,8 +7356,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
-             closed_fetch=None, compact_stall_enabled=False):
-    """Scan every `claude` pane once. 26 numbered jobs per poll — 21 LIVE and 5
+             closed_fetch=None, compact_stall_enabled=False,
+             repo_roots=None, issue_counts_fetch=None, git_fetch=None):
+    """Scan every `claude` pane once. 28 numbered jobs per poll — 23 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
@@ -7383,6 +7623,30 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `COMPACT_STALL_REPING_S`, never a keystroke and never a write to
           the claim (the TTL releases it on the next send attempt)
           (compact_stall_watch).
+      (27) (only when `issue_counts_fetch` is given) NET-ISSUE-DRIFT ALARM
+          (#137) — per repo discovered by `repo_roots` (a list or a callable
+          returning one — cmd_watchdog wires the real `find $HOME -maxdepth
+          N -name .git` sweep), the trailing-7-day opened-minus-closed
+          issue count via the injected `gh` fetch. camera-box's own
+          measured +101 over 21 days ran at roughly +34/week at its worst
+          window — this would have pinged around the point the drift
+          started, instead of the user noticing by feel two weeks later.
+          Runs at most once an hour (`MANAGED_SWEEP_INTERVAL_S`, its own
+          cadence gate — a `gh` round trip per repo is too costly for a
+          60s poll), one deduped ping per repo per day while the net stays
+          above `NET_DRIFT_THRESHOLD` (net_drift_alarm).
+      (28) (only when `repo_roots` is given) STUCK-MAIN SWEEP (#137) — the
+          NON-pane-gated sibling of job 24: same measurement
+          (`delivery_state`/the base-branch-frozen-while-work-piles-up
+          verdict, bounded on both ends per #138's own fix), but swept
+          across EVERY repo `repo_roots` discovers rather than only a repo
+          with a currently open pane — the gap that let camera-box's own
+          15-day merge deadlock (#138's origin story) run undetected for as
+          long as it did whenever no session happened to be open there.
+          `git_fetch(root)` (best-effort, errors logged) runs before
+          reading refs, since no live session may have fetched recently.
+          Same hourly cadence gate as job 27, one deduped ping per repo per
+          day (stuck_main_sweep).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -8231,6 +8495,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                         project_by_sid=project_by_sid)
         except Exception as e:
             logs.append("compact-stall error: %r" % (e,))
+
+    # Job 27 — NET-ISSUE-DRIFT ALARM (#137): only when `issue_counts_fetch`
+    # is given (cmd_watchdog wires the real gh round trip) — the "wired = on"
+    # convention. Self-gated on an hourly cadence internally; best-effort.
+    if issue_counts_fetch is not None:
+        try:
+            logs += net_drift_alarm(now, state, send_fn=send_fn,
+                                    dry_run=dry_run, repo_roots=repo_roots,
+                                    issue_counts_fetch=issue_counts_fetch)
+        except Exception as e:
+            logs.append("net-drift error: %r" % (e,))
+
+    # Job 28 — STUCK-MAIN SWEEP (#137): only when `repo_roots` is given —
+    # the "wired = on" convention. Self-gated on an hourly cadence
+    # internally; best-effort. Independent of job 27's own gate (a repo
+    # sweep with no gh access can still measure this locally).
+    if repo_roots is not None:
+        try:
+            logs += stuck_main_sweep(now, state, send_fn=send_fn,
+                                     dry_run=dry_run, repo_roots=repo_roots,
+                                     git_fetch=git_fetch)
+        except Exception as e:
+            logs.append("stuck-main error: %r" % (e,))
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on

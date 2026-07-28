@@ -158,7 +158,7 @@ class TestNetDriftAlarm(unittest.TestCase):
                                   issue_counts_fetch=fetch)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("+35", self.sent[0]["msg"])
-        self.assertTrue(any("PING" in l for l in logs))
+        self.assertTrue(any("PING" in line for line in logs))
 
     def test_below_threshold_does_not_ping(self):
         def fetch(label, window_s):
@@ -220,7 +220,7 @@ class TestStuckMainSweep(unittest.TestCase):
                                    repo_roots=[str(r)])
         self.assertEqual(len(self.sent), 1)
         self.assertIn("camera-box", self.sent[0]["msg"])
-        self.assertTrue(any("stuck-main PING" in l for l in logs))
+        self.assertTrue(any("stuck-main PING" in line for line in logs))
 
     def test_fresh_base_does_not_ping_despite_many_commits(self):
         r = _make_repo(self.tmp, "active", base_ts=NOW - 3600,
@@ -265,7 +265,7 @@ class TestStuckMainSweep(unittest.TestCase):
             raise RuntimeError("network down")
         logs = wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
                                    repo_roots=[str(r)], git_fetch=boom)
-        self.assertTrue(any("git-fetch-error" in l for l in logs))
+        self.assertTrue(any("git-fetch-error" in line for line in logs))
         # the job still measures + pings despite the fetch failure --
         # degrades to the local-only heuristic rather than going silent.
         self.assertEqual(len(self.sent), 1)
@@ -302,20 +302,20 @@ class TestRunOnceWiring(unittest.TestCase):
 
     def test_jobs_are_silent_when_ungated(self):
         logs = self._run()
-        self.assertFalse(any(l.startswith("net-drift") for l in logs))
-        self.assertFalse(any(l.startswith("stuck-main") for l in logs))
+        self.assertFalse(any(line.startswith("net-drift") for line in logs))
+        self.assertFalse(any(line.startswith("stuck-main") for line in logs))
 
     def test_job_27_fires_through_run_once(self):
         logs = self._run(repo_roots=["/repos/x"],
                          issue_counts_fetch=lambda label, w: (40, 5))
-        self.assertTrue(any(l.startswith("net-drift") for l in logs))
+        self.assertTrue(any(line.startswith("net-drift") for line in logs))
         self.assertEqual(len(self.sent), 1)
 
     def test_job_28_fires_through_run_once(self):
         r = _make_repo(self.tmp, "camera-box", base_ts=NOW - 6 * DAY,
                        undelivered=25)
         logs = self._run(repo_roots=[str(r)])
-        self.assertTrue(any(l.startswith("stuck-main") for l in logs))
+        self.assertTrue(any(line.startswith("stuck-main") for line in logs))
         self.assertEqual(len(self.sent), 1)
 
 

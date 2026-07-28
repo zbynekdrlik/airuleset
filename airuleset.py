@@ -2739,6 +2739,55 @@ def _watchdog_delivery_probe(root, base):
     return None
 
 
+def _watchdog_repo_roots():
+    """Jobs 27/28's repo enumeration (#137) — every `.git` this box hosts,
+    per #138's own corrected lesson that the corpus is `$HOME`, never a
+    guessed project directory. `discover_managed_repos` does the actual
+    `os.walk`; this is just the injection point so run_once's unit tests
+    never touch the real filesystem."""
+    from watchdog import discover_managed_repos
+    return discover_managed_repos()
+
+
+def _watchdog_git_fetch(root):
+    """Job 28's best-effort ref refresh — same shape as job 24's own probe
+    fetch, minus the enrichment half (job 28 needs no blocker lookup, only
+    fresh refs). Errors are swallowed by the caller (logged, never raised)."""
+    import subprocess
+    subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                    "origin"], capture_output=True, timeout=90, check=True)
+
+
+def _watchdog_issue_counts_fetch(repo_label, window_s):
+    """Job 27's trailing-window opened/closed count via `gh` (#137).
+
+    Wired HERE, like every other network call, so run_once's unit tests stay
+    network-free. `repo_label` is `owner/name` (from `_repo_label`, i.e. the
+    remote, never a directory basename). Returns `(opened, closed)` or None
+    on any failure — never treated as a stall, per the "never block on
+    don't-know" contract every other fetch in this file already follows."""
+    import subprocess
+    import time
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - window_s))
+    try:
+        opened = subprocess.run(
+            ["gh", "issue", "list", "-R", repo_label, "--state", "all",
+             "--search", "created:>=%s" % since[:10], "--limit", "1000",
+             "--json", "number"],
+            capture_output=True, text=True, timeout=45)
+        closed = subprocess.run(
+            ["gh", "issue", "list", "-R", repo_label, "--state", "closed",
+             "--search", "closed:>=%s" % since[:10], "--limit", "1000",
+             "--json", "number"],
+            capture_output=True, text=True, timeout=45)
+        if opened.returncode != 0 or closed.returncode != 0:
+            return None
+        return (len(json.loads(opened.stdout or "[]")),
+                len(json.loads(closed.stdout or "[]")))
+    except Exception:
+        return None
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -2833,7 +2882,15 @@ def cmd_watchdog(args):
                     # failure, and both measured incidents were on DIFFERENT
                     # boxes (forestshop@dev1, montalu@subdev) on the same day.
                     # Detection only, so it never types into a pane.
-                    compact_stall_enabled=True)
+                    compact_stall_enabled=True,
+                    # Jobs 27/28 (#137) run on EVERY managed box — both are
+                    # per-repo local/gh reads, and each box holds the
+                    # checkouts it can actually measure. Self-gated hourly
+                    # internally, so wiring them costs nothing on the 59
+                    # sweeps out of 60 that skip.
+                    repo_roots=_watchdog_repo_roots,
+                    issue_counts_fetch=_watchdog_issue_counts_fetch,
+                    git_fetch=_watchdog_git_fetch)
     for line in logs:
         print(line)
 
