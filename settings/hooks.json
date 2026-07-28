@@ -53,6 +53,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-ungated-issue-filing.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-deploy-clean-tree.sh",
             "timeout": 10
           },
