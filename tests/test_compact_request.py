@@ -2849,13 +2849,19 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
                          cwd="/nonexistent/i123-acc")
 
     def test_the_record_line_carries_the_cli_outcome_word(self):
-        # cmd_compact_request already prints recorded/delivered/dup/skip and
-        # the hook used to throw it away with `>/dev/null 2>&1` — an accepted
-        # boundary dropped downstream was untraceable from the hook's side.
+        # #125 — cmd_compact_request now prints a reason-specific word per
+        # disposition (sent / claim-queued / queued-compact /
+        # dropped-no-work / dropped-small-context / recorded / dup / skip)
+        # instead of one generic "delivered" for every handled case, and
+        # the hook used to throw the whole thing away with `>/dev/null
+        # 2>&1` — an accepted boundary dropped downstream was untraceable
+        # from the hook's side.
         _, home = self._run(sid="sup-word", agent_id="agt-word")
         f = self._expect_one(home, "RECORD")
-        self.assertIn(f.get("result"), ("recorded", "delivered", "dup", "skip"),
-                      f)
+        self.assertIn(f.get("result"),
+                      ("recorded", "sent", "claim-queued", "queued-compact",
+                       "dropped-no-work", "dropped-small-context", "dup",
+                       "skip"), f)
 
     def test_an_empty_registry_is_also_an_accepted_boundary(self):
         _, home = self._run(sid="sup-empty", tasks="empty")

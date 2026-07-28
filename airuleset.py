@@ -2951,7 +2951,14 @@ def cmd_compact_request(args):
     own task registry. That is the durable ticket boundary for a supervisor
     whose work is done by dispatched workers — its own turn ALWAYS ends `⏳`
     (it reports batch N and dispatches batch N+1 in the same turn), so the
-    Stop-shaped boundary is structurally unreachable for it."""
+    Stop-shaped boundary is structurally unreachable for it.
+
+    #125 (2026-07-28): the printed word on a HANDLED request is whatever
+    `deliver_compact_now` itself returns (see its own docstring) --
+    "sent"/"claim-queued"/"queued-compact"/"dropped-no-work"/
+    "dropped-small-context" -- never the single generic "delivered" this
+    command used to print for all five dispositions regardless of what
+    actually happened downstream."""
     from watchdog import (record_compact_request, deliver_compact_now,
                           clear_compact_request, compact_already_delivered,
                           mark_compact_delivered)
@@ -2969,12 +2976,21 @@ def cmd_compact_request(args):
         try:
             delivered = deliver_compact_now(args.session, args.cwd, origin=origin)
         except Exception:
-            delivered = False
+            delivered = ""
         if delivered:
             clear_compact_request(args.session)
             if msg_hash:
                 mark_compact_delivered(args.session, msg_hash)
-            sys.stdout.write("delivered")
+            # #125 -- `deliver_compact_now` now returns the REASON word
+            # itself (e.g. "sent"/"claim-queued"/"queued-compact"/
+            # "dropped-no-work"/"dropped-small-context") instead of a bare
+            # `True` that this command used to collapse into one generic
+            # "delivered" for every disposition -- print it verbatim. A
+            # caller (or test double) that still returns a bare truthy
+            # non-string value is treated as the legacy generic "sent",
+            # never a crash.
+            word = delivered if isinstance(delivered, str) else "sent"
+            sys.stdout.write(word)
         else:
             sys.stdout.write("recorded")
         return

@@ -39,9 +39,16 @@ set -euo pipefail
 # window. See `compact_already_delivered`/`mark_compact_delivered`
 # (watchdog/__init__.py).
 #
-# Silent + non-blocking: never writes to stdout, always exits 0 — must
-# never interfere with the Stop decision pipeline (the other
-# stop-check-*.sh gates).
+# #125 (2026-07-28): this channel used to throw the `compact-request --record`
+# outcome away ENTIRELY (`>/dev/null 2>&1`), so this Stop-hook channel was
+# completely unobservable — unlike notify-compact-subagent-boundary.sh (#123),
+# which already logs its own outcome. The outcome word is now captured and
+# appended to the SAME decision log that hook writes
+# (`~/.claude/compact-decisions.log`), tagged `type=stop-hook` so the two
+# channels' lines are readable side by side without being confused for one
+# another. Still silent + non-blocking on stdout — only the log FILE gains
+# a line; nothing here can interfere with the Stop decision pipeline (the
+# other stop-check-*.sh gates).
 
 INPUT=$(cat)
 
@@ -75,7 +82,27 @@ printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*✅[[:spac
 MSG_HASH=$(printf '%s' "$MSG" | sha256sum 2>/dev/null | cut -d' ' -f1) || MSG_HASH=""
 
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
-python3 "$AIRULESET_PY" compact-request --record --session "$SID" --cwd "$CWD" \
-    --msg-hash "$MSG_HASH" >/dev/null 2>&1 || true
+RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" --cwd "$CWD" \
+    --msg-hash "$MSG_HASH" 2>/dev/null) || RESULT=""
+case "$RESULT" in
+    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip) ;;
+    *) RESULT="error" ;;
+esac
+
+# #125 -- same decision log notify-compact-subagent-boundary.sh (#123)
+# already writes, same bounded-rotate shape, so a read-only $HOME can never
+# turn this into a blocked Stop and the log can never grow unbounded.
+DECISION_LOG="$HOME/.claude/compact-decisions.log"
+DECISION_CAP=512000
+mkdir -p "$(dirname "$DECISION_LOG")" 2>/dev/null || true
+SIZE=$(stat -c %s "$DECISION_LOG" 2>/dev/null || echo 0)
+case "$SIZE" in ''|*[!0-9]*) SIZE=0 ;; esac
+if [ "$SIZE" -gt "$DECISION_CAP" ]; then
+    mv -f "$DECISION_LOG" "$DECISION_LOG.1" 2>/dev/null || true
+fi
+{
+    printf '%s RECORD result=%s type=stop-hook agent=- sid=%s cwd=%s\n' \
+        "$(date -Iseconds 2>/dev/null || echo '?')" "$RESULT" "$SID" "$CWD"
+} >>"$DECISION_LOG" 2>/dev/null || true
 
 exit 0

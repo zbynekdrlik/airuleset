@@ -4807,11 +4807,19 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
 
-    Returns True when this session is FULLY HANDLED (either `/compact` was
-    actually typed, or an existing claim / the #48 context-threshold gate
-    confirms nothing more needs to happen here) — the caller
+    Returns a non-empty STRING word when this session is FULLY HANDLED
+    (either `/compact` was actually typed, or an existing claim / the #99 /
+    #48 gates confirm nothing more needs to happen here) — the caller
     (`cmd_compact_request`) must NOT leave a pending request behind in
-    either case. Returns False when the caller should fall back to
+    either case, and (#125) now prints the word itself, verbatim, instead
+    of a single generic "delivered" that could not distinguish a real send
+    from a downstream drop. The word names the disposition:
+    `"sent"` — `/compact` was actually typed.
+    `"claim-queued"` — another sender already has an outstanding claim.
+    `"queued-compact"` — the pane already holds an unexecuted `/compact`.
+    `"dropped-no-work"` — the #99 gate: zero commits since the anchor.
+    `"dropped-small-context"` — the #48 gate: context too small to bother.
+    Returns `""` (falsy) when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
@@ -4838,25 +4846,25 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     projects_dir = projects_dir or PROJECTS_DIR
     if compact_claim_active(sid, cwd, projects_dir=projects_dir):
         _log_compact_sync("SKIP claim-queued sid=%s cwd=%s" % (sid, cwd))
-        return True   # another sender already has this queued — handled
+        return "claim-queued"   # another sender already has this queued
     pid = _find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
         _log_compact_sync("SKIP no-pane sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     if pane_in_mode(pid, run):
         _log_compact_sync("SKIP in-mode sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     captured = capture_pane(pid, run, lines=40)
     if pane_waiting_on_user(captured):
         _log_compact_sync("SKIP dialog-open sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     # #102 -- never deliver while the session's CURRENT last turn is a ❓
     # block (see `_compact_blocked_by_question`'s docstring). Falls back to
     # job 14's polled retry, exactly like every other "unsafe right now"
     # state this function refuses on.
     if _compact_blocked_by_question(cwd, sid, projects_dir=projects_dir):
         _log_compact_sync("SKIP blocked-question sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     # #109 -- the general form of the gate above: never deliver while the
     # session's CURRENT last turn positively says "not a boundary" (`⏳` too,
     # not just `❓`). #121 -- unless the request carries its OWN proof of a
@@ -4864,7 +4872,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir,
                                 origin=origin):
         _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident
     # is still preventable: this function runs INSIDE the Stop-hook batch, so
     # the boundary it is acting on may ALREADY have been refused by an earlier
@@ -4874,51 +4882,56 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # retry, which re-checks the session's then-current state.
     if _stop_already_rejected(cwd, sid, projects_dir=projects_dir):
         _log_compact_sync("SKIP stop-rejected sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     kind, draft = _classify_boundary(captured)
     if kind == "no-input-line":
         _log_compact_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     if draft:
         _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
-        return False
+        return ""
     if _pane_has_queued_compact(captured):
         # #84 — the pane already holds an unexecuted `/compact`; a second one
         # would only answer "Not enough messages to compact" when the queue
         # finally drains. The queued one IS the handling.
         _log_compact_sync("SKIP queued-compact sid=%s cwd=%s" % (sid, cwd))
-        return True
-    # #99 — did REAL work (>=1 commit) actually happen since the last
-    # genuine boundary for this repo? A positively-confirmed zero drops the
-    # request outright — a bare Q&A turn or a single filed ticket is not a
-    # safe/worthwhile compaction boundary, no matter how large the context
-    # has grown. Unmeasurable (not a git repo, no anchor) falls through to
-    # the pre-#99 behavior below, unchanged.
-    substantial = compact_boundary_substantial(cwd, sid, projects_dir=projects_dir,
-                                                git_run=git_run)
-    if substantial is False:
-        _log_compact_sync("DROP no-work sid=%s cwd=%s" % (sid, cwd))
-        return True   # #99 gate: nothing durable happened — handled, drop it
+        return "queued-compact"
+    # #126 origin-exemption lands in its own RED/GREEN pair right after
+    # this -- #125 only widens the RETURN VALUES, so this stays False here.
+    proven_boundary = False
+    if not proven_boundary:
+        # #99 — did REAL work (>=1 commit) actually happen since the last
+        # genuine boundary for this repo? A positively-confirmed zero drops
+        # the request outright — a bare Q&A turn or a single filed ticket is
+        # not a safe/worthwhile compaction boundary, no matter how large the
+        # context has grown. Unmeasurable (not a git repo, no anchor) falls
+        # through to the pre-#99 behavior below, unchanged.
+        substantial = compact_boundary_substantial(cwd, sid, projects_dir=projects_dir,
+                                                    git_run=git_run)
+        if substantial is False:
+            _log_compact_sync("DROP no-work sid=%s cwd=%s" % (sid, cwd))
+            return "dropped-no-work"   # #99 gate: nothing durable happened
     # kind is "input" (bare, or the queued-messages placeholder already
     # normalized to bare) or "busy" — BOTH are safe to send into here (see
     # the section comment: a short send-keys queues reliably even on a busy
     # pane), so there is no `pane_at_idle_prompt` gate on this path.
-    if min_context is None:
-        try:
-            min_context = int(os.environ.get(
-                "AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT",
-                COMPACT_BOUNDARY_MIN_CONTEXT))
-        except ValueError:
-            min_context = COMPACT_BOUNDARY_MIN_CONTEXT
-    tpath = _transcript_for_session(projects_dir, sid, cwd)
-    if tpath is not None and transcript_current_context(tpath) < min_context:
-        _log_compact_sync("DROP small-context sid=%s cwd=%s" % (sid, cwd))
-        return True   # #48 gate: nothing worth compacting — handled, drop it
+    if not proven_boundary:
+        if min_context is None:
+            try:
+                min_context = int(os.environ.get(
+                    "AIRULESET_COMPACT_BOUNDARY_MIN_CONTEXT",
+                    COMPACT_BOUNDARY_MIN_CONTEXT))
+            except ValueError:
+                min_context = COMPACT_BOUNDARY_MIN_CONTEXT
+        tpath = _transcript_for_session(projects_dir, sid, cwd)
+        if tpath is not None and transcript_current_context(tpath) < min_context:
+            _log_compact_sync("DROP small-context sid=%s cwd=%s" % (sid, cwd))
+            return "dropped-small-context"   # #48 gate: nothing worth compacting
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
     _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
-    return True
+    return "sent"
 
 
 # --------------------------------------------------------------------------- #

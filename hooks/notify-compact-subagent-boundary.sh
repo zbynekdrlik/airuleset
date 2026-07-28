@@ -79,11 +79,17 @@ set -euo pipefail
 # in a session started 36 h earlier. No operator restart is needed for #121.)
 #
 # Every decision now appends ONE line naming the predicate that failed:
-#   <iso8601> RECORD  result=<recorded|delivered|dup|skip|error> type=… agent=… sid=… cwd=…
+#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip|error> type=… agent=… sid=… cwd=…
 #   <iso8601> DECLINE reason=<predicate> [n=<live>] type=… agent=… sid=… cwd=…
 # `result=` is the word `cmd_compact_request` already printed and this hook
 # used to discard with `>/dev/null 2>&1` — an accepted boundary that was then
-# dropped downstream used to be untraceable from here too.
+# dropped downstream used to be untraceable from here too. #125 (2026-07-28):
+# `result=` used to collapse FIVE different dispositions (a real send, both
+# #78 SKIP branches, and both the #99/#48 DROP branches) onto one generic
+# "delivered" word, so this log's own `result=` field could not tell a real
+# send from a downstream drop either — it had to be read side-by-side with
+# `compact-sync.log`'s SEND/DROP/SKIP lines at the same timestamp. The word
+# vocabulary below is the SAME set `cmd_compact_request` now prints.
 #
 # BOUNDED, because an unbounded log on every SubagentStop of every session is
 # a new problem, not a fix. The two populations differ by orders of magnitude:
@@ -212,7 +218,7 @@ RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" \
     --cwd "$CWD" --msg-hash "$MSG_HASH" --origin "subagent-stop" 2>/dev/null) \
     || RESULT=""
 case "$RESULT" in
-    recorded|delivered|dup|skip) ;;
+    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip) ;;
     *) RESULT="error" ;;
 esac
 _decide_log RECORD "result=$RESULT"
