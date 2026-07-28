@@ -3942,7 +3942,8 @@ def _save_compact_requests(d, path=None):
         return False
 
 
-def record_compact_request(session, cwd, now=None, path=None, msg_hash=None):
+def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
+                           origin=None):
     """Record that `session` (transcript stem = CC session id) just reported
     a completed ticket — a /compact request for job 14 to action once the
     pane goes genuinely idle. Overwrites any earlier pending request for the
@@ -3956,7 +3957,15 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None):
     ends up delivering (the synchronous #65 path, or job 14's poll) can mark
     `compact_already_delivered` for THIS exact reported completion, below.
     Omitted by every pre-#71 caller — those requests simply carry no hash
-    and never participate in the delivered-dedup check."""
+    and never participate in the delivered-dedup check.
+
+    `origin` (#121, optional): WHAT proved this is a ticket boundary.
+    `"subagent-stop"` means an autopilot-worker concluded with zero other
+    live tasks in the session's own task registry — evidence the DELIVERY
+    gate (`_compact_not_at_boundary`) consults so a supervisor's `⏳` last
+    line, which refers to the NEXT batch, stops vetoing the boundary of the
+    ticket that just landed. Absent/blank = the Stop-hook origin, gated
+    exactly as before."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -3965,6 +3974,8 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None):
     entry = {"cwd": str(cwd or ""), "ts": int(now)}
     if msg_hash:
         entry["msg_hash"] = str(msg_hash)
+    if origin:
+        entry["origin"] = str(origin)
     d[session] = entry
     return _save_compact_requests(d, path)
 
@@ -4665,6 +4676,36 @@ def _compact_blocked_by_question(cwd, sid, projects_dir=None):
 # blocks, exactly like #48/#99/#102.
 _COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
 
+# #121 — the ORIGIN that carries its own proof of a ticket boundary, and the
+# reduced marker set that applies to it.
+#
+# A supervisor whose work is performed by DISPATCHED workers can never reach
+# the Stop-shaped boundary above: it reports batch N and dispatches batch N+1
+# in the SAME turn, so the turn carrying the completed-ticket report always
+# has a live worker and therefore always ends `⏳`. Measured
+# (forestshop/parovanie_produktov, 2026-07-27/28): 19 hours with no
+# compaction at 375K context, five turns carrying a `## ✅ Work Complete`
+# heading inside a `⏳`-terminated message, and `compact-requests.json` empty
+# — no request was ever even created.
+#
+# For such a session the durable boundary is a property of the TICKET, not of
+# the supervisor's message: the `SubagentStop` of an `autopilot-worker` with
+# ZERO other live tasks in the session's own task registry
+# (`notify-compact-subagent-boundary.sh`). At THAT instant the worker's
+# completion is already durable in git / GitHub / the issue — which is the
+# entire justification for compacting at a ticket boundary — and the
+# supervisor's `⏳` refers to the NEXT batch, not to the ticket that landed.
+# `⏳ WORKING: next batch dispatched` is not evidence that anything undurable
+# is in flight for the ticket that just completed; "a task this session owns
+# is still running" is, and THAT is proven from the payload's
+# `background_tasks` before the request is ever recorded.
+#
+# `❓` is deliberately NOT relaxed: a pending question is genuinely undurable
+# state (the #102 camera-box incident compacted a `❓ NEEDS YOU` turn before
+# the user could answer), and no worker's completion makes it durable.
+_COMPACT_PROVEN_BOUNDARY_ORIGIN = "subagent-stop"
+_COMPACT_NON_BOUNDARY_MARKERS_PROVEN = ("❓",)
+
 # The `user` entry Claude Code writes when a Stop hook REFUSES a turn's final
 # message — verified against this box's own transcripts (2026-07-27): every
 # rejection appears as a top-level `user` entry whose string content starts
@@ -4674,7 +4715,7 @@ _COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
 _STOP_FEEDBACK_PREFIX = "Stop hook feedback:"
 
 
-def _compact_not_at_boundary(cwd, sid, projects_dir=None):
+def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     """#109 — the DELIVERY-time half of #102's gate. True when the session's
     CURRENT last real turn carries a marker that POSITIVELY says "this is not
     a completed-ticket boundary" (`❓` blocked on the user, `⏳` still working
@@ -4687,12 +4728,21 @@ def _compact_not_at_boundary(cwd, sid, projects_dir=None):
     `/compact` sender consults this right before its own send point; a
     request it blocks is LEFT IN PLACE (never consumed) so the next sweep
     retries once the session genuinely returns to a boundary — or the entry
-    expires (`COMPACT_REQUEST_MAX_AGE_S`). Unmeasurable never blocks."""
+    expires (`COMPACT_REQUEST_MAX_AGE_S`). Unmeasurable never blocks.
+
+    #121 — `origin` is the request's own PROOF of a boundary. For
+    `subagent-stop` (an autopilot-worker concluded with zero other live tasks
+    in this session's task registry) only `❓` still blocks; `⏳` does not,
+    because for a supervisor it refers to the NEXT batch and can never clear.
+    Every other origin keeps #109's gate exactly as written."""
     pdir = projects_dir or PROJECTS_DIR
     tpath = _transcript_for_session(pdir, sid, cwd)
     if tpath is None:
         return False
-    return transcript_last_marker(tpath) in _COMPACT_NON_BOUNDARY_MARKERS
+    markers = (_COMPACT_NON_BOUNDARY_MARKERS_PROVEN
+               if origin == _COMPACT_PROVEN_BOUNDARY_ORIGIN
+               else _COMPACT_NON_BOUNDARY_MARKERS)
+    return transcript_last_marker(tpath) in markers
 
 
 def _stop_already_rejected(cwd, sid, projects_dir=None):
@@ -4888,8 +4938,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # only in context) is NOT a boundary, and the ❓-only gate above waved
         # exactly that case through. Left in place, never consumed -- the next
         # sweep retries once the session is genuinely back at a boundary, or
-        # the entry expires.
-        if _compact_not_at_boundary(cwd, sid, projects_dir=pdir):
+        # the entry expires. #121 — a request that carries its OWN boundary
+        # proof (`origin="subagent-stop"`) is exempt from the `⏳` half; `❓`
+        # still holds it, here and in `_compact_blocked_by_question` above.
+        if _compact_not_at_boundary(cwd, sid, projects_dir=pdir,
+                                    origin=str(entry.get("origin") or "")):
             logs.append("skip not-a-boundary (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
@@ -5072,7 +5125,7 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
 
 
 def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
-                        git_run=None):
+                        git_run=None, origin=None):
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
 
@@ -5128,8 +5181,10 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         return False
     # #109 -- the general form of the gate above: never deliver while the
     # session's CURRENT last turn positively says "not a boundary" (`⏳` too,
-    # not just `❓`).
-    if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir):
+    # not just `❓`). #121 -- unless the request carries its OWN proof of a
+    # boundary (`origin="subagent-stop"`), for which `⏳` says nothing.
+    if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir,
+                                origin=origin):
         _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
         return False
     # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident

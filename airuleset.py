@@ -2630,21 +2630,32 @@ def cmd_compact_request(args):
     delivery, `mark_compact_delivered` records the hash so any LATER repeat
     (from this same synchronous path, or from job 14) is recognized. A
     blank/absent `--msg-hash` (every pre-#71 caller) never dedupes this
-    way — the check and the mark are both no-ops on a blank hash."""
+    way — the check and the mark are both no-ops on a blank hash.
+
+    #121 (2026-07-28): `--origin` records WHAT proved the boundary. The Stop
+    hook passes nothing (unchanged behavior); the SubagentStop hook
+    `notify-compact-subagent-boundary.sh` passes `subagent-stop`, meaning an
+    autopilot-worker concluded with zero other live tasks in the session's
+    own task registry. That is the durable ticket boundary for a supervisor
+    whose work is done by dispatched workers — its own turn ALWAYS ends `⏳`
+    (it reports batch N and dispatches batch N+1 in the same turn), so the
+    Stop-shaped boundary is structurally unreachable for it."""
     from watchdog import (record_compact_request, deliver_compact_now,
                           clear_compact_request, compact_already_delivered,
                           mark_compact_delivered)
     if getattr(args, "record", False):
         msg_hash = (getattr(args, "msg_hash", "") or "").strip()
+        origin = (getattr(args, "origin", "") or "").strip()
         if compact_already_delivered(args.session, msg_hash):
             sys.stdout.write("dup")
             return
-        ok = record_compact_request(args.session, args.cwd, msg_hash=msg_hash)
+        ok = record_compact_request(args.session, args.cwd, msg_hash=msg_hash,
+                                    origin=origin)
         if not ok:
             sys.stdout.write("skip")
             return
         try:
-            delivered = deliver_compact_now(args.session, args.cwd)
+            delivered = deliver_compact_now(args.session, args.cwd, origin=origin)
         except Exception:
             delivered = False
         if delivered:
@@ -3508,6 +3519,14 @@ def main():
                              "last_assistant_message (#71 delivered-dedup — "
                              "a repeat with the SAME hash after a delivered "
                              "compact is a no-op)")
+    p_creq.add_argument("--origin", default="",
+                        help="What PROVED this is a ticket boundary (#121). "
+                             "'subagent-stop' = an autopilot-worker concluded "
+                             "with zero other live tasks in the session's task "
+                             "registry; for such a request a `⏳` last line is "
+                             "not evidence of anything and never holds the "
+                             "delivery (a `❓` still does). Empty = the Stop-hook "
+                             "origin, whose gate is unchanged.")
 
     p_tickets = sub.add_parser(
         "tickets-status",

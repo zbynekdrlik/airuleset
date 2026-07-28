@@ -1787,7 +1787,10 @@ class TestCompactRequestCli(unittest.TestCase):
         with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(Args())
-        dcn.assert_called_once_with("sid-cli", "/x")
+        # #121 — the request's own boundary PROOF is threaded to the sender on
+        # every call; a blank origin (this Stop-hook-shaped caller) keeps
+        # #109's gate exactly as it was.
+        dcn.assert_called_once_with("sid-cli", "/x", origin="")
         reqfile = fake_home / ".claude" / "compact-requests.json"
         d2 = json.loads(reqfile.read_text())
         self.assertNotIn("sid-cli", d2)
