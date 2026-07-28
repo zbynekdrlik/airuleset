@@ -52,6 +52,7 @@ import airuleset
 REPO = Path(airuleset.__file__).resolve().parent
 HOOKS = REPO / "hooks"
 LIB = HOOKS / "lib-poll-payload.sh"
+LIBPY = HOOKS / "lib_poll_payload.py"
 NUDGE = HOOKS / "nudge-poll-loop-timeout.sh"
 CIBLOCK = HOOKS / "block-ci-poll-repeat.sh"
 
@@ -104,6 +105,11 @@ class _HookRunner(unittest.TestCase):
             ["bash", str(hook or NUDGE)], input=payload(command, **kw),
             text=True, capture_output=True, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
+        # the library's own header credits exactly this assertion with catching
+        # the unterminated-heredoc-in-$() bug, and this file exercises the
+        # library hardest — a hook that pollutes stderr while exiting 0 is
+        # otherwise invisible
+        self.assertEqual(out.stderr.strip(), "", "hook must be silent on stderr")
         return "additionalContext" in out.stdout
 
     def ci_rc(self, command, hook=None, **kw):
@@ -272,6 +278,88 @@ class CiBlockNoLongerBlocksDocumentationTest(_HookRunner):
                          "the real wait's first loop must still be free")
 
 
+class EditsArePositionalNotByValueTest(_HookRunner):
+    """Four ways a value-based edit deleted LIVE control flow. Every one was
+    found by adversarial review of the first green implementation, not by the
+    suite above — each is reproduced here so it cannot come back. All four fail
+    in the same direction: a real, executing loop goes silent, which is the
+    worst outcome this classifier can produce."""
+
+    def test_a_flag_value_that_is_also_a_loop_token_keeps_the_loop(self):
+        """`grep -F "done"` is the most idiomatic wait-for-a-marker poll there
+        is. A global replace of the flag's VALUE deleted the loop's own `done`
+        keyword along with it."""
+        cmd = 'until grep -F "done" /tmp/build.log; do sleep 30; done'
+        self.assertTrue(self.nudges(cmd))
+
+    def test_a_body_flag_value_does_not_delete_the_same_word_elsewhere(self):
+        cmd = ('gh pr comment 7 --body "done"; '
+               'until curl -sf http://x; do sleep 30; done')
+        self.assertTrue(self.nudges(cmd))
+
+    def test_ssh_dash_t_is_not_stripped_because_git_appears_elsewhere(self):
+        """`ssh -t '<script>'` EXECUTES its argument remotely. Gating the
+        message-flag strip on a WHOLE-COMMAND git/gh test let any unrelated
+        `git status` license stripping it — and remote/process waits are the
+        LARGEST class this family is meant to catch."""
+        cmd = ('git status --short; '
+               'ssh dev2 -t "until [ -f /tmp/x ]; do sleep 30; done"')
+        self.assertTrue(self.nudges(cmd))
+        self.assertTrue(self.nudges(
+            'ssh dev2 -t "until [ -f /tmp/x ]; do sleep 30; done"'))
+
+    def test_a_git_commit_message_is_still_stripped(self):
+        """Control pin for the case above: the scoping must not disable the
+        strip where it is genuinely a message."""
+        self.assertFalse(self.nudges(
+            "git commit -m 'ran until [ -f x ]; do sleep 30; done'"))
+
+    def test_two_identical_bodies_are_judged_independently(self):
+        """Document the script, then write and run it — a natural shape. A
+        value-based body strip blanked BOTH from the inert one's verdict."""
+        body = BARE_LOCAL
+        cmd = (heredoc("cat > /tmp/doc.md", body, "A") + "\n"
+               + heredoc("cat > /tmp/run.sh", body, "B") + "\nbash /tmp/run.sh")
+        self.assertTrue(self.nudges(cmd),
+                        "the second body genuinely runs")
+
+    def test_a_here_string_does_not_swallow_the_rest_of_the_command(self):
+        """`<<<'x'` matches the heredoc pattern at offset 1 of `<<<`; no line
+        ever equals that delimiter, so the 'body' ran to end of command."""
+        cmd = ('cat > out.txt <<<"hello"\n'
+               'until curl -sf http://x; do sleep 30; done')
+        self.assertTrue(self.nudges(cmd))
+
+
+class FailOpenWithoutTheLibraryTest(_HookRunner):
+    """Under `set -e` a failed `source` exits the hook non-zero, which the
+    harness reports as a hook ERROR on every Bash tool call across six boxes.
+    Every other dependency here (jq, python3, md5sum, the state dir) is
+    fail-open; the library must be too."""
+
+    def test_all_three_hooks_exit_zero_when_the_library_is_missing(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (d / "hooks").mkdir()
+        for f in list(HOOKS.glob("*.sh")) + list(HOOKS.glob("*.py")):
+            if f.name in (LIB.name, LIBPY.name):
+                continue                       # the library is NOT copied
+            shutil.copy2(f, d / "hooks" / f.name)
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        env["AIRULESET_LOCALPOLL_STATE_DIR"] = self.state
+        for name in ("nudge-poll-loop-timeout.sh", "block-ci-poll-repeat.sh",
+                     "block-local-poll-repeat.sh"):
+            out = subprocess.run(
+                ["bash", str(d / "hooks" / name)],
+                input=payload(BARE_LOCAL), text=True, env=env,
+                capture_output=True, timeout=60)
+            self.assertIn(out.returncode, (0, 2),
+                          "%s must not ERROR without the library: rc=%s %s"
+                          % (name, out.returncode, out.stderr[:200]))
+            self.assertNotIn("No such file", out.stderr, name)
+
+
 class StripperTeethTest(_HookRunner):
     """These assertions can only be trusted if they FAIL on the tempting wrong
     fixes. Both mutants are built by mutating the REAL shipped stripper, so a
@@ -281,10 +369,10 @@ class StripperTeethTest(_HookRunner):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
         (d / "hooks").mkdir()
-        for f in HOOKS.glob("*.sh"):
+        for f in list(HOOKS.glob("*.sh")) + list(HOOKS.glob("*.py")):
             shutil.copy2(f, d / "hooks" / f.name)
-        lib = d / "hooks" / LIB.name
-        src = LIB.read_text()
+        lib = d / "hooks" / LIBPY.name
+        src = LIBPY.read_text()
         out = transform(src)
         self.assertNotEqual(
             out, src, "the mutation did not apply to the shipped stripper "
@@ -300,7 +388,7 @@ class StripperTeethTest(_HookRunner):
         # stripper's shape changes, _mutant_tree fails loudly rather than
         # certifying teeth it no longer has.
         mut = self._mutant_tree(lambda s: s.replace(
-            "if is_live(owner, visible):", "if False:", 1))
+            "if not is_live(lines[owner_i],", "if True:  #", 1))
         cmd = (heredoc("cat > /tmp/poll.sh", BARE_LOCAL, "EOF")
                + "\nbash /tmp/poll.sh")
         self.assertTrue(self.nudges(cmd), "shipped stripper keeps this")
@@ -309,8 +397,13 @@ class StripperTeethTest(_HookRunner):
                          "shipped narrowing is what keeps it")
 
     def test_a_stripper_that_strips_nothing_fails_the_payload_assertions(self):
+        # a GENUINE no-op stripper, not the fail-open path: renaming `strip`
+        # would only prove that a Python NameError falls back to the original
+        # command, which is a different property
         mut = self._mutant_tree(lambda s: s.replace(
-            "def strip(", "def _unused_strip(", 1) + "\n")
+            "    for a, b in sorted(flag_spans(res), reverse=True):",
+            "    return text\n    for a, b in sorted(flag_spans(res), reverse=True):",
+            1))
         doc = heredoc("cat > /tmp/body.md", BARE_WAITER, "DEOF")
         self.assertFalse(self.nudges(doc), "shipped stripper drops this")
         self.assertTrue(self.nudges(doc, hook=mut),

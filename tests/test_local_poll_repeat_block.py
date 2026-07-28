@@ -185,11 +185,22 @@ class OutOfContractTest(_Runner):
                 self.run_hook(waiter, background=True).returncode, 0)
 
     def test_a_mutating_command_is_exempt_even_after_a_block(self):
+        """The `git push` prefix necessarily changes the normalised shape, so
+        `rc == 0` alone proves only that the KEY differs — the #118 lesson
+        ("make the specimen collide with the blocked key on purpose") has no
+        clean analogue here. The teeth are therefore in the EXEMPT LOG: the
+        exemption must be the reason, recorded before the key is even read."""
         self.run_hook(obs_loop())
         self.assertEqual(self.run_hook(obs_loop()).returncode, 2)
         cmd = ("git push origin main && " + obs_loop())
         self.assertEqual(self.run_hook(cmd).returncode, 0,
                          "blocking this would block the PUSH, not a poll")
+        for _ in range(3):
+            self.assertEqual(self.run_hook(cmd).returncode, 0,
+                             "and it stays exempt however often it repeats")
+        log = Path(self.state) / "airuleset-localpoll-exempt.log"
+        self.assertTrue(log.exists(), "the exemption must be the recorded reason")
+        self.assertGreaterEqual(log.read_text().count("mutating"), 4)
 
     def test_a_tight_retry_loop_is_not_a_long_wait(self):
         tight = ('for i in $(seq 1 5); do curl -sf http://x/ && break; '
@@ -219,6 +230,47 @@ class OutOfContractTest(_Runner):
         # control pin: the same body as bare control flow DOES block on repeat
         self.assertEqual(self.run_hook(obs_loop()).returncode, 0)
         self.assertEqual(self.run_hook(obs_loop()).returncode, 2)
+
+
+class NeverBothBlockTest(_Runner):
+    """The two hooks must never both block ONE command — that would hand the
+    model two different corrective commands for one mistake. Asserted against
+    the REAL pair, feeding each payload to both scripts; the teeth test below
+    only ever exercised a mutated local hook, i.e. one side of the invariant."""
+
+    CI = HOOKS / "block-ci-poll-repeat.sh"
+
+    def _both(self, cmd, n=4):
+        seen = []
+        for _ in range(n):
+            local = self.run_hook(cmd).returncode
+            env = dict(os.environ)
+            env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+            ci = subprocess.run(
+                ["bash", str(self.CI)], input=payload(cmd), text=True,
+                env=env, capture_output=True, timeout=60).returncode
+            seen.append((local, ci))
+        return seen
+
+    def test_no_command_is_ever_blocked_by_both_hooks(self):
+        for cmd in (ci_loop(), obs_loop(), task_loop(), ssh_loop(),
+                    "gh run list --limit 3", "ls -la /tmp"):
+            for local, ci in self._both(cmd):
+                self.assertFalse(
+                    local == 2 and ci == 2,
+                    "both hooks blocked %r — two corrective commands for one "
+                    "mistake" % cmd[:60])
+
+    def test_a_ci_loop_is_blocked_by_the_CI_hook_only(self):
+        outcomes = self._both(ci_loop())
+        self.assertTrue(any(ci == 2 for _, ci in outcomes),
+                        "#118 must still own and block the CI repeat")
+        self.assertTrue(all(local == 0 for local, _ in outcomes))
+
+    def test_a_local_loop_is_blocked_by_the_LOCAL_hook_only(self):
+        outcomes = self._both(obs_loop())
+        self.assertTrue(any(local == 2 for local, _ in outcomes))
+        self.assertTrue(all(ci == 0 for _, ci in outcomes))
 
 
 class MessageBranchesByWhatIsWaitedOnTest(_Runner):
@@ -276,16 +328,18 @@ class MessageBranchesByWhatIsWaitedOnTest(_Runner):
         self.assertIn(self.GENERIC_CLAIM, err)
 
     def test_no_branch_ever_hands_out_118s_ci_waiter(self):
-        for cmd in (task_loop(), obs_loop()):
-            err = self._blocked_stderr(cmd, session="s-" + cmd[:12])
+        # explicit distinct labels: `task_loop()[:12]` and `obs_loop()[:12]`
+        # are both "for i in $(s", which `tr -cd` collapses to one session
+        for name, cmd in (("task", task_loop()), ("obs", obs_loop())):
+            err = self._blocked_stderr(cmd, session="branch-" + name)
             self.assertNotIn("gh run view", err,
                              "this is not a CI wait; #118's command is wrong "
                              "advice here")
 
     def test_a_subagent_is_never_offered_a_background_waiter(self):
-        for cmd in (task_loop(), obs_loop()):
+        for name, cmd in (("task", task_loop()), ("obs", obs_loop())):
             err = self._blocked_stderr(cmd, agent_id="a1b2c3",
-                                       session="sub-" + cmd[:12])
+                                       session="sub-" + name)
             self.assertNotIn("run_in_background", err,
                              "a subagent that backgrounds a wait TERMINATES")
             self.assertIn("timeout", err)

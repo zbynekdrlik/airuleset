@@ -100,8 +100,14 @@ printf ' %s ' "$CMD" | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
 # tool call would be a real cost for nothing. The stripper is deliberately
 # narrow (it keeps write-then-run, interpreter bodies and quoted `bash -c`
 # loops) and fails OPEN, so at worst this stays exactly as loud as before.
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
-if poll_payload_carrier "$CMD"; then
+# Sourced DEFENSIVELY: under `set -e` a failed source exits the hook non-zero,
+# which the harness reports as a hook ERROR on every Bash tool call across all
+# managed boxes. Every other dependency here (jq, python3, md5sum, the state
+# dir) is fail-open; this must be too.
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
+if [ -r "$_LIB" ]; then . "$_LIB" 2>/dev/null || true; fi
+if command -v poll_payload_strip >/dev/null 2>&1 \
+        && poll_payload_carrier "$CMD"; then
     printf ' %s ' "$(poll_payload_strip "$CMD")" \
         | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
         | grep -qE ' do( .*)? sleep( .*)? done ' || exit 0

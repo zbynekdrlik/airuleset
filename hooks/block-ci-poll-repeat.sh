@@ -102,8 +102,14 @@ BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null 
 # allowing it: an allowed doc write would still consume the one free loop a
 # real wait is owed. The stripper is narrow (write-then-run, interpreter
 # bodies and quoted `bash -c` loops all survive) and fails open.
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
-if poll_payload_carrier "$CMD"; then
+# Sourced DEFENSIVELY: under `set -e` a failed source exits the hook non-zero,
+# which the harness reports as a hook ERROR on every Bash tool call across all
+# managed boxes. Every other dependency here (jq, python3, md5sum, the state
+# dir) is fail-open; this must be too.
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
+if [ -r "$_LIB" ]; then . "$_LIB" 2>/dev/null || true; fi
+if command -v poll_payload_strip >/dev/null 2>&1 \
+        && poll_payload_carrier "$CMD"; then
     CMD=$(poll_payload_strip "$CMD")
 fi
 

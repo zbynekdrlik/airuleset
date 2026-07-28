@@ -95,20 +95,38 @@ BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null 
 # A doc write QUOTING a poll loop polls nothing. Stripping here, before any
 # other gate, is what keeps this guard from inheriting #124 on day one — the
 # ticket's own constraint 3.
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
-if poll_payload_carrier "$CMD"; then
+# Sourced DEFENSIVELY: under `set -e` a failed source exits the hook non-zero,
+# which the harness reports as a hook ERROR on every Bash tool call across all
+# managed boxes. Every other dependency here (jq, python3, md5sum, the state
+# dir) is fail-open; this must be too.
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
+if [ -r "$_LIB" ]; then . "$_LIB" 2>/dev/null || true; fi
+RAW_CMD="$CMD"
+if command -v poll_payload_strip >/dev/null 2>&1 \
+        && poll_payload_carrier "$CMD"; then
     CMD=$(poll_payload_strip "$CMD")
 fi
 
+# The logs carry the first 160 bytes of real commands, which routinely
+# include secrets (`sshpass -p …`, tokens in URLs), and /tmp is shared with
+# the other managed users on these boxes. Owner-only, always.
+umask 077
 STATE_DIR="${AIRULESET_LOCALPOLL_STATE_DIR:-/tmp}"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
 FLAT=$(printf '%s' "$CMD" | tr '\n' ' ')
+RAW_FLAT=$(printf '%s' "$RAW_CMD" | tr '\n' ' ')
 
 # ---- #118 owns CI, alone -----------------------------------------------
 # Exits BEFORE any state is written, so a CI loop does not even consume a slot.
-if printf '%s' "$FLAT" \
-        | grep -qE 'gh[[:space:]]+run[[:space:]]+(view|watch|list)|gh[[:space:]]+pr[[:space:]]+checks'; then
+# Tested on BOTH the stripped and the RAW text. The complement with #118 is
+# exact only while both processes strip identically; if this one's strip fails
+# (OOM, fork failure) and #118's does not, a raw-text miss here would let both
+# hooks block one command. Checking both can only ever make this hook more
+# permissive, which is the safe direction.
+CI_RX='gh[[:space:]]+run[[:space:]]+(view|watch|list)|gh[[:space:]]+pr[[:space:]]+checks'
+if printf '%s' "$FLAT" | grep -qE "$CI_RX" \
+        || printf '%s' "$RAW_FLAT" | grep -qE "$CI_RX"; then
     exit 0   # airuleset:ci-owned-by-118
 fi
 
@@ -120,7 +138,7 @@ AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
 BLOCK_LOG="$STATE_DIR/airuleset-localpoll-block.log"
 BYPASS_LOG="$STATE_DIR/airuleset-localpoll-bypass.log"
 EXEMPT_LOG="$STATE_DIR/airuleset-localpoll-exempt.log"
-SNIPPET=$(printf '%s' "$FLAT" | cut -c1-160)
+SNIPPET=$(printf '%s' "$FLAT" | jq -Rrs '.[0:160]' 2>/dev/null || echo "?")
 
 log_exempt() {
     printf '%s localpoll EXEMPT session=%s why=%s cmd=%s\n' \
@@ -129,7 +147,7 @@ log_exempt() {
 
 # ---- logged escape hatch (never a dead end) ----------------------------
 if printf '%s' "$FLAT" | grep -qE '#[[:space:]]*airuleset:poll-ok'; then
-    REASON=$(printf '%s' "$FLAT" | sed -n 's/.*#[[:space:]]*airuleset:poll-ok[[:space:]]*//p' | cut -c1-160)
+    REASON=$(printf '%s' "$FLAT" | sed -n 's/.*#[[:space:]]*airuleset:poll-ok[[:space:]]*//p' | jq -Rrs '.[0:160]' 2>/dev/null || echo "?")
     printf '%s localpoll BYPASS session=%s reason=%s\n' \
         "$(date -Is)" "$SID" "$REASON" >> "$BYPASS_LOG" 2>/dev/null || true
     exit 0
