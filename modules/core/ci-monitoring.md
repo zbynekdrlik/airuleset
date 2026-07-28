@@ -29,7 +29,7 @@
   done
   ```
 
-  Raise the Bash tool's own `timeout` near its 600000 ms cap so one call covers ~9 minutes, and raise `AIRULESET_POLL_BUDGET_S` to match (e.g. `AIRULESET_POLL_BUDGET_S=540`). The loop self-bounds on `SECONDS` because that `timeout` parameter is easy to forget: unset, the harness SIGTERMs the call at its own ~120 s default mid-poll with NO output (#90), and a graceful "not yet terminal" beats a silent kill. `nudge-poll-loop-timeout.sh` reminds you; it never blocks. Nothing is detached, so nothing needs recovery.
+  Raise the Bash tool's own `timeout` near its 600000 ms cap so one call covers ~9 minutes, and raise `AIRULESET_POLL_BUDGET_S` to match (e.g. `AIRULESET_POLL_BUDGET_S=540`). The loop self-bounds on `SECONDS` because that `timeout` parameter is easy to forget: unset, the harness SIGTERMs the call at its own ~120 s default mid-poll with NO output (#90), and a graceful "not yet terminal" beats a silent kill. `nudge-poll-loop-timeout.sh` reminds you; it never blocks. Nothing is detached, so nothing needs recovery. Hook-enforced (#118): the FIRST such loop per run is free, but `block-ci-poll-repeat.sh` HARD-BLOCKS the 2nd and later one for the same run — a loop that came back non-terminal is proof the wait is long — and hands you the background waiter below, run-id already substituted.
 
 - **Long wait — ONE background waiter (`run_in_background: true`), then RECOVER.** It must BLOCK to a terminal state (never a trailing `&` or `nohup`, which returns immediately and fires the notification at once), self-bound on its own budget the way the foreground loop does, and print nothing along the way — so the harness wakes you with exactly ONE task-notification for the whole wait instead of once per ~9-minute chunk:
 
