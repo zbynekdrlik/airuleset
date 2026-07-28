@@ -1,0 +1,156 @@
+"""Behaviour test for hooks/subagent-stop-check-design.sh (#136, half 3/3).
+
+Mirrors subagent-stop-check-run-card.sh's own shape exactly (same family,
+same bound-by-construction reasoning): a worker that claims a real merge AND
+closed issues, with no design marker for one of them, is blocked ONCE per
+(session, repo#issue) and told to post the comment now. This is the
+BACKSTOP for when hooks/block-commit-without-design.sh missed (not
+installed on some box yet, a commit made outside the Bash tool, an
+unjustified direct git operation) -- the ticket explicitly says NOT to add
+a watchdog job for this (hook-shaped, not timer-shaped), so this is the
+whole second line of defense.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from unittest import TestCase, main
+
+ROOT = Path(__file__).resolve().parent.parent
+HOOK = ROOT / "hooks" / "subagent-stop-check-design.sh"
+
+sys.path.insert(0, str(ROOT))
+import design_gate as dg                                   # noqa: E402
+
+# Split across two halves so the source carries no literal 40-char hex RUN
+# -- block-sensitive-staging.sh flags any such run as a possible key/token
+# (same reason test_run_card_enforcement.py's own SHA constants are split).
+SHA40 = ("014e9159ade4c55fb02a"
+         "5eca823771bee26da677")
+
+MERGED = ("issues: #41 x\nmerge_sha: " + SHA40 + "\n"
+          "issue_state: #41=closed")
+
+
+def _git(repo, *args):
+    env = dict(os.environ)
+    env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+    return subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
+                          capture_output=True, text=True, env=env)
+
+
+class _GateBase(TestCase):
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="airuleset-designstop-home-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        (self.home / ".claude").mkdir(parents=True)
+        self.repo = Path(tempfile.mkdtemp(prefix="airuleset-designstop-repo-"))
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        _git(self.repo, "init", "-q", "-b", "main")
+        _git(self.repo, "remote", "add", "origin",
+             "https://github.com/zbynekdrlik/airuleset.git")
+        self.sid = "designstop-%d" % os.getpid()
+        self.addCleanup(lambda: [
+            os.remove(f) for f in
+            Path("/tmp").glob("airuleset-designgate-designstop-*")
+            if os.path.exists(f)])
+
+    def mark(self, issue, repo="airuleset"):
+        os.environ["HOME"] = str(self.home)
+        dg.write_marker(repo, issue, "https://x/issues/%s#issuecomment-1" % issue)
+
+    def run_gate(self, msg, agent_type="autopilot-worker", cwd=None, sid=None):
+        payload = {"session_id": sid or self.sid, "agent_id": "aG1",
+                   "hook_event_name": "SubagentStop", "agent_type": agent_type,
+                   "cwd": str(self.repo if cwd is None else cwd),
+                   "last_assistant_message": msg}
+        env = {**os.environ, "HOME": str(self.home)}
+        return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def blocked(self, r):
+        if r.returncode != 0:
+            return False
+        try:
+            return json.loads(r.stdout or "{}").get("decision") == "block"
+        except ValueError:
+            return False
+
+
+class TestGateBlocksAMissingDesignComment(_GateBase):
+
+    def test_a_merged_closed_ticket_with_no_marker_is_blocked(self):
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.returncode, r.stdout, r.stderr))
+        self.assertIn("41", r.stdout + r.stderr)
+
+    def test_a_marker_lets_the_worker_stop(self):
+        self.mark(41)
+        r = self.run_gate(MERGED)
+        self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
+
+    def test_only_one_block_per_session_and_issue(self):
+        first = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(first))
+        second = self.run_gate(MERGED)
+        self.assertFalse(self.blocked(second),
+                         "a second block would wedge a worker that genuinely "
+                         "cannot post the comment")
+
+    def test_a_different_issue_in_the_same_session_still_blocks(self):
+        self.run_gate(MERGED)
+        other = MERGED.replace("#41", "#42")
+        self.assertTrue(self.blocked(self.run_gate(other)))
+
+
+class TestGateStaysOutOfTheWay(_GateBase):
+
+    def test_a_non_worker_subagent_is_ignored(self):
+        r = self.run_gate(MERGED, agent_type="general-purpose")
+        self.assertFalse(self.blocked(r))
+
+    def test_an_unmerged_worker_is_ignored(self):
+        r = self.run_gate("merge_sha: NOT MERGED — supervisor merges\n"
+                          "issue_state: #41=OPEN")
+        self.assertFalse(self.blocked(r))
+
+    def test_a_worker_that_closed_nothing_is_ignored(self):
+        r = self.run_gate("merge_sha: " + SHA40 + "\n"
+                          "issue_state: #41=OPEN (auto-closes on merge)")
+        self.assertFalse(self.blocked(r))
+
+    def test_a_cwd_that_is_not_a_git_repo_is_ignored(self):
+        d = Path(tempfile.mkdtemp(prefix="airuleset-designstop-nogit-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        r = self.run_gate(MERGED, cwd=d)
+        self.assertFalse(self.blocked(r))
+
+    def test_garbage_stdin_is_ignored(self):
+        env = {**os.environ, "HOME": str(self.home)}
+        r = subprocess.run(["bash", str(HOOK)], input="not json at all",
+                           capture_output=True, text=True, env=env)
+        self.assertFalse(self.blocked(r))
+
+    def test_empty_stdin_is_ignored(self):
+        env = {**os.environ, "HOME": str(self.home)}
+        r = subprocess.run(["bash", str(HOOK)], input="",
+                           capture_output=True, text=True, env=env)
+        self.assertFalse(self.blocked(r))
+
+    def test_a_null_last_assistant_message_is_ignored(self):
+        payload = {"session_id": self.sid, "agent_type": "autopilot-worker",
+                   "cwd": str(self.repo), "last_assistant_message": None}
+        env = {**os.environ, "HOME": str(self.home)}
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env)
+        self.assertFalse(self.blocked(r))
+
+
+if __name__ == "__main__":
+    main()
