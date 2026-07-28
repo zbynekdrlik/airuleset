@@ -2512,6 +2512,56 @@ def _watchdog_gkreq_fetch(root):
     return _fetch_gkreq_tickets(root)
 
 
+def _watchdog_delivery_probe(root, base):
+    """Job 24's confirming fetch + best-effort blocker lookup (#138).
+
+    Wired HERE, like jobs 8/11/16, so run_once's unit tests stay network-free.
+    Two halves with very different standing:
+
+      * The FETCH is load-bearing. Job 24 RE-MEASURES its verdict after this
+        call returns, so an `origin/<base>` ref that had merely gone stale in
+        the local checkout is corrected here and the "stall" disappears
+        instead of paging anyone. It writes ONLY the remote-tracking ref —
+        never the worktree, index or a local branch — which matters because
+        every repo this touches belongs to somebody else.
+      * The gh lookup is pure ENRICHMENT: it names the open PR that is
+        BLOCKED and the check that is red, so the ping says *why* nothing is
+        landing. Any failure (no gh, no network, a repo with no PRs) costs
+        that one sentence and nothing else.
+    """
+    import subprocess
+    remote, _, branch = (base or "origin/main").partition("/")
+    try:
+        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                        remote or "origin", branch or "main"],
+                       capture_output=True, timeout=90)
+    except Exception as e:
+        # No fetch means no confirmation: job 24 then re-reads the SAME local
+        # refs, so its verdict simply stands and the job degrades to the
+        # local-only heuristic rather than going quiet. Deliberate — a MISSED
+        # delivery stall is the failure this job exists to prevent, and the
+        # price of the alternative is at most one extra ping a day.
+        return {"fetch_error": repr(e)}
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--limit", "5", "--json",
+             "number,mergeStateStatus,statusCheckRollup"],
+            cwd=root, capture_output=True, text=True, timeout=45)
+        if r.returncode != 0:
+            return None
+        for pr in json.loads(r.stdout or "[]"):
+            if pr.get("mergeStateStatus") != "BLOCKED":
+                continue
+            red = [c.get("name") or c.get("context")
+                   for c in (pr.get("statusCheckRollup") or [])
+                   if (c.get("conclusion") or c.get("state")) in
+                   ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")]
+            return {"pr": pr.get("number"), "check": red[0] if red else None}
+    except Exception as e:
+        return {"probe_error": repr(e)}
+    return None
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -2570,6 +2620,11 @@ def cmd_watchdog(args):
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
+                    # Job 24 (#138) runs on EVERY managed box — a loop whose
+                    # merges have stopped is a per-repo failure, not a
+                    # coordinator-only one, and the box that hosts the loop
+                    # is the one holding the checkout it has to read.
+                    delivery_probe=_watchdog_delivery_probe,
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,

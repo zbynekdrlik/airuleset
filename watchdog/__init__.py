@@ -5148,6 +5148,249 @@ def long_turn_watch(now, run, state, panes_by_sid, send_fn=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# Job 24 — DELIVERY-STALL WATCH (#138, camera-box 2026-07-11 → 2026-07-28).
+#
+# Measured, from camera-box's own git + GitHub state:
+#
+#   * PR #704 (dev -> main) OPEN since 2026-07-11T20:57Z — 17 days.
+#     `mergeable: MERGEABLE`, `mergeStateStatus: BLOCKED`. Eleven of twelve
+#     checks green; the one red is `Full-path E2E (rig zero-loss gate)`.
+#   * That gate's last SUCCESS on dev was 2026-07-13T04:53Z. Since then:
+#     105 failures, 31 cancelled, 0 successes. The failure is a rig
+#     precondition ("GATE FAILED: 1 node(s) DRIFTED or PTP-DEGRADED"), not a
+#     defect in any diff, so no amount of code work could clear it.
+#   * `origin/main` frozen at 2026-07-11; `origin/dev` 422 commits ahead.
+#   * Issue closures/day: 21, 21, 12, 15, 6, 4 (07-10..07-15) then ZERO until
+#     a single one on 07-27 — because closure there is merge-driven, so a
+#     blocked merge makes closure structurally zero no matter how much lands.
+#
+# The loop meanwhile kept spending: on 07-27/28 alone, 33 dispatches across
+# ~15 distinct tickets and 85 commits, for zero merges.
+#
+# WHY NOTHING NOTICED, AND WHY THAT IS THE ACTUAL DEFECT. Every signal this
+# repo owns is merge-TRIGGERED: the per-ticket run-card fires AFTER a merge,
+# `autopilot-progress/<repo>.json` is fed by that card, the statusline shows
+# an open-issue count that only ever grows. A loop that cannot merge is
+# therefore silent BY CONSTRUCTION — silence and health are the same
+# observation — which is how 17 days passed unremarked.
+#
+# WHAT THIS JOB MEASURES, and why it is git and not turns. Two purely LOCAL
+# facts per repo hosting a live pane:
+#   SPEND    = the newest commit on the checked-out branch (local HEAD; always
+#              current, needs no fetch).
+#   DELIVERY = the newest commit on the base branch (`origin/HEAD`, falling
+#              back to origin/main / origin/master), plus the count of commits
+#              on HEAD not reachable from it.
+# Fresh SPEND with a frozen DELIVERY and a real backlog is the stall.
+#
+# A re-poke / no-dispatch detector was the obvious alternative and the
+# evidence rejects it: it would have been silent on BOTH halves of this
+# incident. Through 07-16..07-26 there were no turns to count (0 Agent
+# dispatches, 0-153 transcript lines/day, `/goal` unarmed since 07-13 — a
+# deliberate live-event pause, not a stuck agent, and not this repo's bug).
+# Through 07-27..07-28 the loop dispatched CORRECTLY across ~15 distinct
+# tickets with real commits, so a dispatch-liveness detector would have read
+# perfectly healthy while zero work shipped. Dispatch is not delivery.
+#
+# Three properties keep it quiet where it should be quiet:
+#   * HEAD == base (this repo, which pushes straight to main) yields 0
+#     undelivered — silent STRUCTURALLY, not by threshold.
+#   * A parked repo with no fresh commits is silent: nothing is being spent,
+#     so there is nothing to warn about.
+#   * A candidate is CONFIRMED before it is announced. The injected probe
+#     fetches the base ref and the verdict is RE-MEASURED after it, so a
+#     remote-tracking ref that had merely gone stale locally can never on its
+#     own raise an alarm. The probe's other half (naming the blocking PR and
+#     its red check) is pure enrichment — losing it costs the detail, never
+#     the alert.
+#
+# Detection only, exactly like job 21: it never types into a pane and never
+# touches the repo's worktree, index or local branches (a fetch writes only
+# remote-tracking refs). Deciding what to do about a blocked merge — fix the
+# gate, park the PR, split the batch — is the user's call, and this repo is
+# not the owner of any repo it watches.
+# --------------------------------------------------------------------------- #
+
+DELIVERY_STALL_S = 172800        # 48h with no delivery; env AIRULESET_DELIVERY_STALL_S
+DELIVERY_WORK_FRESH_S = 86400    # 24h — the work branch must be actively moving
+DELIVERY_MIN_UNDELIVERED = 3     # a stray commit or two is not a stalled batch
+DELIVERY_REPING_S = 86400        # re-ping daily while it persists, not per sweep
+
+
+def _git_first_line(cwd, argv, git_run=None):
+    """One `git -C <cwd> …` call, stripped. None on any failure OR empty
+    output — never a partial guess."""
+    out = (git_run or _default_git_run)(["git", "-C", str(cwd)] + list(argv))
+    if out is None:
+        return None
+    return out.strip() or None
+
+
+def _git_base_ref(cwd, git_run=None):
+    """The repo's DELIVERY ref — the branch a merge lands on. `origin/HEAD`
+    is authoritative when the checkout has it; the explicit fallbacks cover a
+    clone that never resolved it. None when neither exists (then the repo is
+    unmeasurable and job 24 stays silent about it)."""
+    ref = _git_first_line(cwd, ["symbolic-ref", "--quiet",
+                                "refs/remotes/origin/HEAD"], git_run)
+    if ref and ref.startswith("refs/remotes/"):
+        return ref[len("refs/remotes/"):]
+    for cand in ("origin/main", "origin/master"):
+        if _git_first_line(cwd, ["rev-parse", "--verify", "--quiet",
+                                 cand + "^{commit}"], git_run):
+            return cand
+    return None
+
+
+def _git_commit_ts(cwd, ref, git_run=None):
+    out = _git_first_line(cwd, ["log", "-1", "--format=%ct", ref], git_run)
+    try:
+        return int(out)
+    except (TypeError, ValueError):
+        return None
+
+
+def delivery_state(cwd, now, git_run=None):
+    """SPEND vs DELIVERY for `cwd`'s repo (see the section comment).
+
+    Returns a dict — `root`, `base`, `undelivered`, `work_age`,
+    `delivery_age`, `base_ts` — or None when the answer is UNMEASURABLE (not
+    a git repo, no resolvable base ref, `git` unavailable, a count that did
+    not parse). None is never a stall: a repo this cannot read is a repo this
+    says nothing about, the same "never block on don't-know" contract
+    `compact_boundary_substantial` uses."""
+    if not cwd:
+        return None
+    root = _git_first_line(cwd, ["rev-parse", "--show-toplevel"], git_run)
+    if not root:
+        return None
+    base = _git_base_ref(root, git_run)
+    if not base:
+        return None
+    head_ts = _git_commit_ts(root, "HEAD", git_run)
+    base_ts = _git_commit_ts(root, base, git_run)
+    if head_ts is None or base_ts is None:
+        return None
+    raw = _git_first_line(root, ["rev-list", "--count", base + "..HEAD"],
+                          git_run)
+    try:
+        undelivered = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return {"root": root, "base": base, "undelivered": undelivered,
+            "base_ts": base_ts,
+            "work_age": now - head_ts, "delivery_age": now - base_ts}
+
+
+def _delivery_stalled(st, stall, work_fresh, min_undelivered):
+    """The verdict, in one place so the pre-probe and post-probe reads can
+    never drift apart."""
+    return (st is not None
+            and st["undelivered"] >= min_undelivered
+            and st["work_age"] <= work_fresh
+            and st["delivery_age"] >= stall)
+
+
+def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
+                         dry_run=False, git_run=None, delivery_probe=None,
+                         owner_by_sid=None, project_by_sid=None,
+                         stall=None, work_fresh=None, min_undelivered=None,
+                         reping=None):
+    """Job 24 — see the section comment.
+
+    Gated on `delivery_probe` (the "wired = on" convention of jobs 8/11/16):
+    the probe carries the confirming fetch, and a verdict that was never
+    confirmed must not reach the user's phone.
+
+    One repo is examined once per sweep however many panes sit in it, the
+    DETECTION is logged every sweep (issue #36's print-always convention) and
+    the PING is deduped per repo per `reping` window, so a stall that lasts
+    weeks produces a daily reminder rather than one forgotten alert or 1,440
+    a day. State is dropped the moment the base advances, so a later stall in
+    the same repo pings again on its own."""
+    if delivery_probe is None:
+        return []
+    if stall is None:
+        try:
+            stall = int(os.environ.get("AIRULESET_DELIVERY_STALL_S",
+                                       DELIVERY_STALL_S))
+        except ValueError:
+            stall = DELIVERY_STALL_S
+    work_fresh = DELIVERY_WORK_FRESH_S if work_fresh is None else work_fresh
+    if min_undelivered is None:
+        min_undelivered = DELIVERY_MIN_UNDELIVERED
+    reping = DELIVERY_REPING_S if reping is None else reping
+    owner_by_sid = owner_by_sid or {}
+    seen = dict(state.get("delivery_stall") or {})
+    logs = []
+    live = set()
+    examined = set()
+
+    for sid, cwd in sorted((cwd_by_sid or {}).items()):
+        st = delivery_state(cwd, now, git_run=git_run)
+        if st is None or st["root"] in examined:
+            continue
+        root = st["root"]
+        examined.add(root)
+        live.add(root)
+        if not _delivery_stalled(st, stall, work_fresh, min_undelivered):
+            seen.pop(root, None)
+            continue
+
+        # CONFIRM, then announce. The probe fetches the base ref; the verdict
+        # is re-read afterwards so a locally-stale remote-tracking ref cannot
+        # by itself produce a ping. Enrichment is best-effort by design.
+        try:
+            info = delivery_probe(root, st["base"])
+        except Exception:
+            info = None
+        confirmed = delivery_state(cwd, now, git_run=git_run) or st
+        if not _delivery_stalled(confirmed, stall, work_fresh, min_undelivered):
+            seen.pop(root, None)
+            logs.append("delivery-stall confirmed-clear %s" % root)
+            continue
+        st = confirmed
+
+        label = os.path.basename(root)
+        days = int(st["delivery_age"] // 86400)
+        logs.append("delivery-stall %s undelivered=%d delivery_age=%ds base=%s"
+                    % (label, st["undelivered"], int(st["delivery_age"]),
+                       st["base"]))
+        prev = seen.get(root) or {}
+        pinged = prev.get("pinged_ts")
+        if dry_run or send_fn is None or (
+                pinged is not None and now - float(pinged) < reping):
+            # `send_fn is None` must NOT mark this as pinged — nothing was
+            # delivered, so a later sweep with a real notify path still owes
+            # the user this alert (job 21's contract, reused verbatim).
+            continue
+        blocker = ""
+        if isinstance(info, dict) and info.get("pr"):
+            blocker = "\n> Blokuje to PR #%s%s." % (
+                info["pr"],
+                (" — neprejde kontrola `%s`" % info["check"])
+                if info.get("check") else "")
+        status = send_fn(
+            "\U0001f4e6 **%s** — %d dní sa nič nedoručilo\n"
+            "> Na pracovnej vetve čaká %d commitov hotovej práce, ale do "
+            "vetvy `%s` sa už %d dní nič nezlúčilo, takže sa nezatvára ani "
+            "jeden ticket.%s"
+            % (label, days, st["undelivered"], st["base"].split("/")[-1],
+               days, blocker),
+            owner=owner_by_sid.get(sid) or None,
+            dedup_key="delivery-stall:%s:%d" % (label, int(now // reping)),
+            dry_run=dry_run)
+        logs.append("delivery-stall PING %s -> %s" % (label, status))
+        seen[root] = {"pinged_ts": now, "base_ts": st["base_ts"]}
+
+    if not dry_run:
+        # drop repos with no live pane this sweep, so the state file cannot
+        # grow without bound across a long-lived watchdog (job 21's shape).
+        state["delivery_stall"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Job 20 — GOAL RE-ARM BACKSTOP (#76, 2026-07-26 live incident, montalu@subdev).
 #
 # An armed `/goal` dies SILENTLY. Not (only) on a restart, as #76 originally
@@ -6508,8 +6751,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
-             goal_templates_path=None):
-    """Scan every `claude` pane once. 23 numbered jobs per poll — 18 LIVE and 5
+             goal_templates_path=None, delivery_probe=None):
+    """Scan every `claude` pane once. 24 numbered jobs per poll — 19 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
@@ -6701,6 +6944,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           unbounded restart engine. It restarted a pz-server session the user
           was working in, 3 minutes after job 18 had already restarted it.
           Number retained, never reused.
+      (24) (only when `delivery_probe` is given) DELIVERY-STALL WATCH (#138)
+          — a loop that cannot MERGE produces nothing while spending at full
+          rate, and every other signal here is merge-TRIGGERED (the run-card
+          fires AFTER a merge, autopilot-progress is fed by that card, the
+          Issues segment only ever grows), so that state is silent BY
+          CONSTRUCTION. camera-box ran 17 days that way: PR #704 BLOCKED on
+          one permanently-red rig gate (105 failures, 0 successes since
+          2026-07-13), origin/main frozen at 2026-07-11, 422 commits
+          stranded on dev, and issue closure — merge-driven there — at
+          exactly zero, while the loop kept dispatching and committing. Per
+          repo hosting a live pane this compares two purely LOCAL git facts:
+          the newest commit on the checked-out branch (SPEND) against the
+          newest commit on the base branch plus the count of commits not
+          reachable from it (DELIVERY). Fresh work over a frozen base with a
+          real backlog is the stall. A candidate is CONFIRMED before it is
+          announced — the probe fetches the base ref and the verdict is
+          RE-MEASURED, so a locally stale remote-tracking ref can never on
+          its own raise an alarm; the probe's other half names the blocking
+          PR and its red check and is pure best-effort enrichment. Silent
+          where it should be: HEAD == base (this repo, which pushes straight
+          to main) yields 0 undelivered — structurally, not by threshold —
+          and a parked repo with no fresh commits says nothing, because
+          nothing is being spent. DETECTION ONLY (job 21's discipline): one
+          deduped ping per repo per day while it lasts, never a keystroke —
+          what to do about a blocked merge is the user's call, and this
+          module owns none of the repos it watches (delivery_stall_watch).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -6713,6 +6982,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     project_by_sid = {}                 # session id -> project label, for job 21's ping
+    cwd_by_sid = {}                     # session id -> pane cwd, for job 24's repo read
     panes_by_sid = {}                   # session id -> (pane_id, captured), for job 7 reply routing
     account_owner = ""                  # owner to @mention on the account-wide usage alert
 
@@ -6745,6 +7015,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             project = project_label(cwd)
             key = tpath.stem                   # session id (stable across grouped panes)
             project_by_sid[key] = project      # job 21: a human label for the ping
+            cwd_by_sid[key] = cwd              # job 24: which REPO this loop spends in
             owner = pane_owner(pid, run)       # @mention the right person for THIS pane
             if owner:
                 owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
@@ -7497,6 +7768,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                     owner_by_sid=owner_by_sid)
         except Exception as e:
             logs.append("long-turn error: %r" % (e,))
+
+    # Job 24 — DELIVERY-STALL WATCH (#138): only when `delivery_probe` is
+    # given (cmd_watchdog wires the real fetch + gh lookup) — same
+    # "wired = on" convention as jobs 8/11/16, and here it is also the
+    # correctness gate: the probe carries the confirming fetch, and a verdict
+    # that was never confirmed must not reach the user's phone. Detection
+    # only, so it is safe alongside job 21 at the end; it takes no tmux
+    # round-trip at all (the cwd map was built during the pane sweep above)
+    # and never types anything. Best-effort.
+    if delivery_probe is not None:
+        try:
+            logs += delivery_stall_watch(now, run, state, cwd_by_sid,
+                                         send_fn=send_fn, dry_run=dry_run,
+                                         delivery_probe=delivery_probe,
+                                         owner_by_sid=owner_by_sid,
+                                         project_by_sid=project_by_sid)
+        except Exception as e:
+            logs.append("delivery-stall error: %r" % (e,))
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
