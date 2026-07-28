@@ -245,6 +245,22 @@ class TestRunOnceWiring(unittest.TestCase):
         self.assertIn("compact_stall_enabled", sig.parameters)
         self.assertIn("(26)", wd.run_once.__doc__)
 
+    def test_run_once_calls_the_job_when_it_is_wired(self):
+        # the companion to the negative below — "off unless wired" passes
+        # vacuously if the job is never called at all.
+        with m.patch.object(wd, "compact_stall_watch",
+                            return_value=[]) as fake:
+            wd.run_once(now=NOW, dry_run=True, run=lambda *a, **k: "",
+                        send_fn=lambda *a, **k: None,
+                        projects_dir="/nonexistent-projects",
+                        state_path="/nonexistent-state.json",
+                        compact_stall_enabled=True)
+        fake.assert_called_once()
+
+    def test_airuleset_wires_the_job_on_every_box(self):
+        src = Path(__file__).resolve().parent.parent / "airuleset.py"
+        self.assertIn("compact_stall_enabled=True", src.read_text())
+
     def test_the_job_is_off_unless_wired(self):
         # the "wired = on" convention (jobs 13/14/16/19/20/21): an existing
         # caller that knows nothing about this job must see no change — and
