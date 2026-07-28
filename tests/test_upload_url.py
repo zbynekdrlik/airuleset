@@ -89,6 +89,23 @@ def _wait_until_serving(test, proc, url, deadline_s):
               % (url, deadline_s, last, _drain(proc)))
 
 
+def _spawn(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None):
+    """Launch upload_server.py on a free port — the ONE start in this module.
+
+    Split out of `_serve` for #114, whose subject is a server that can bind
+    NOTHING: waiting for it to serve is meaningless (it never will), but its
+    exit code and how long it takes to get there are the whole contract. Every
+    start that DOES expect to serve still goes through `_serve`, which adds the
+    #113 readiness poll on top of this.
+    """
+    port = _free_port()
+    argv = list(launcher or [sys.executable, str(SERVER)]) + [
+        token, str(port), ips, str(dest), str(ttl)]
+    proc = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
+    test.addCleanup(proc.kill)
+    return proc, port
+
+
 def _serve(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None,
            deadline_s=10.0):
     """Start upload_server.py on a free port and return (proc, port) once it
@@ -102,11 +119,7 @@ def _serve(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None,
     port answers, typically well under the old 0.6s) and does not lose on a
     loaded one.
     """
-    port = _free_port()
-    argv = list(launcher or [sys.executable, str(SERVER)]) + [
-        token, str(port), ips, str(dest), str(ttl)]
-    proc = subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
-    test.addCleanup(proc.kill)
+    proc, port = _spawn(test, token, dest, ips=ips, ttl=ttl, launcher=launcher)
     _wait_until_serving(test, proc, "http://127.0.0.1:%d/%s/" % (port, token),
                         deadline_s)
     return proc, port
@@ -262,8 +275,9 @@ class TestMultiInterfaceUrls(TestCase):
         #       NAMING the old literal in its own prose, which the docstrings
         #       above and these comments necessarily do;
         #   (b) exactly one Popen exists in the whole module, so every server
-        #       start goes through _serve() and inherits its poll — a sixth
-        #       call site cannot grow a private start-and-guess of its own.
+        #       start goes through _spawn() — and every start that expects to
+        #       SERVE goes through _serve(), inheriting its poll. A new call
+        #       site cannot grow a private start-and-guess of its own.
         src = Path(__file__).read_text(encoding="utf-8")
         guesses = [n for n, ln in enumerate(src.splitlines(), 1)
                    if ln.split("#", 1)[0].strip() == "time.sleep(0.6)"]
@@ -275,7 +289,7 @@ class TestMultiInterfaceUrls(TestCase):
         # count itself — the same self-reference trap the sleep lock above hit.
         starts = re.findall(r"^\s*\w+\s*=\s*subprocess\.Popen\(", src, re.M)
         self.assertEqual(1, len(starts),
-                         "every upload_server start must go through _serve() "
+                         "every upload_server start must go through _spawn() "
                          "(#113); a second Popen is a new un-polled call site")
 
     def test_cmd_upload_prints_a_url_per_interface(self):
@@ -331,6 +345,81 @@ class TestMultiInterfaceUrls(TestCase):
             out = buf.getvalue()
         self.assertIn("http://100.90.94.41:8788/tok/f.bin", out)
         self.assertIn("http://10.77.9.21:8788/tok/f.bin", out)
+
+
+class TestTotalBindFailureIsFatal(TestCase):
+    """#114 (measured while fixing #113): a server that can bind NOTHING must
+    end as a FAILURE, immediately.
+
+    `upload_server.py` arms its TTL self-shutdown timer before the bind loop,
+    and `threading.Timer` inherits `Thread.daemon = False` — so the interpreter
+    joins it before shutting down, `sys.exit("upload: no address …")` is parked
+    for the whole TTL, and the timer's own `os._exit(0)` is what finally ends
+    the process. A total bind failure therefore reports SUCCESS to its caller
+    (measured at HEAD 6ef01bc: 6.06s / rc=0 at ttl=6 vs 0.10s / rc=1 at ttl=0),
+    which is the worst possible shape for the tool the user hands files through.
+
+    Both directions are asserted here, because a fix that simply removed the
+    TTL would satisfy the first test alone.
+    """
+
+    TTL = 6
+    DEAD_IP = "203.0.113.9"     # TEST-NET-3: never local → bind always fails
+
+    def _run_to_exit(self, proc, budget_s):
+        """(stderr, elapsed) — or fail naming what the process was still doing."""
+        t0 = time.monotonic()
+        try:
+            err = proc.communicate(timeout=budget_s)[1] or ""
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self.fail("upload server never exited within %.1fs" % budget_s)
+        return err, time.monotonic() - t0
+
+    def test_a_server_that_binds_nothing_exits_nonzero_well_before_its_ttl(self):
+        # The observable contract, not the internals: a caller sees a FAILING
+        # status, gets it FAST (so a readiness poll can give up on the child's
+        # death instead of burning its budget — #113's `_wait_until_serving`),
+        # and finds the diagnosis on stderr.
+        dest = Path(tempfile.mkdtemp())
+        t0 = time.monotonic()
+        proc, _ = _spawn(self, "tok114dead", dest, ips=self.DEAD_IP, ttl=self.TTL)
+        err, _ = self._run_to_exit(proc, self.TTL + 20)
+        took = time.monotonic() - t0
+
+        self.assertIn("no address", err)            # diagnosis reached stderr
+        self.assertNotEqual(
+            0, proc.returncode,
+            "a server that bound nothing reported SUCCESS (rc=0) — the parked "
+            "SystemExit was overtaken by the TTL timer's os._exit(0) (#114); "
+            "stderr was:\n%s" % err)
+        self.assertLess(
+            took, self.TTL / 3.0,
+            "the failure took %.2fs of a %ds TTL — the non-daemon timer thread "
+            "is holding the interpreter open through its own exit (#114)"
+            % (took, self.TTL))
+
+    def test_a_bound_server_still_serves_and_still_expires_at_its_ttl(self):
+        # The other direction: the fix must not buy a fast failure by breaking
+        # the self-shutdown that keeps detached endpoints from orphaning. This
+        # server binds, answers, and then must die AT its TTL — not before it
+        # (no premature exit) and not never (no orphan).
+        dest = Path(tempfile.mkdtemp())
+        t0 = time.monotonic()
+        proc, port = _serve(self, "tok114ttl", dest, ttl=self.TTL)
+        page = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/tok114ttl/", timeout=5).read()
+        self.assertIn(b"Upload", page)
+
+        self._run_to_exit(proc, self.TTL + 30)
+        lived = time.monotonic() - t0
+        self.assertGreater(lived, self.TTL - 2.0,
+                           "expired after %.2fs, well before its %ds TTL"
+                           % (lived, self.TTL))
+        self.assertLess(lived, self.TTL + 20.0,
+                        "still alive %.2fs past its %ds TTL" % (lived, self.TTL))
+        self.assertEqual(0, proc.returncode,
+                         "a TTL expiry is a normal shutdown (os._exit(0))")
 
 
 class TestMultiFileUpload(TestCase):
