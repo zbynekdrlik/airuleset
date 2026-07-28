@@ -909,3 +909,68 @@ Gate: 2330 tests pass (2322 baseline + 8), `ruff check .` clean,
 and 8800 (never the same port twice), `--port 8811` no longer crashes on the
 foreign log, a 3 MB PUT round-tripped SHA256-identical, and every endpoint
 self-expired at its TTL leaving no listener, no process and no /tmp file.
+
+## 2026-07-28 — #116 the saved upload filename kept its percent-escapes
+
+`a0a8d9d` [red] -> `110b888` [green], direct to main (no PR, no CI — local gate only).
+
+Root cause traced in the source before any code (design comment
+`#issuecomment-5098562856`, posted 40 min before the first commit): the served
+page sends `encodeURIComponent(file.name)` at `upload_server.py:113` — it has to,
+because a raw filename cannot go into an HTTP request line at all — and
+`BaseHTTPRequestHandler` stores `self.path` verbatim, so `do_PUT` handed the
+still-encoded segment to `_SAFE.sub("_", ...)` whose class `[^A-Za-z0-9._-]`
+excludes `%`. Every escape therefore survived with its `%` turned into `_`:
+`nahr%C3%A1vka%20test%20(1).bin` -> `nahr_C3_A1vka_20test_20_1_.bin`.
+
+`unquote()` is applied to the FILENAME segment only, deliberately NOT inside
+`_parts()`: the token segment is this endpoint's only auth, and decoding it too
+would let `%74ok…` authenticate as `tok…`. A test locks that.
+
+Decoding is what makes the sanitizer a security boundary for the first time —
+`/`, `..`, NUL, C0/C1 controls, a leading `-` and a 4000-char name only become
+reachable once the escapes resolve — so `_SAFE` was replaced rather than merely
+fed a decoded string. `safe_name()` normalises NFC (a macOS-origin name arrives
+decomposed) then KEEPS Unicode letters/marks/numbers plus `" ._-()"`: a
+keep-list, so separators, NUL, controls and the whole Cf class (U+202E
+extension spoofing) are excluded by construction rather than by a blacklist that
+can be incomplete. Residual cases a character filter cannot see got their own
+guards — empty/dots-only -> `upload.bin` (`os.path.join(DEST, "..")` is DEST's
+parent), leading `-` prefixed, length clipped to 200 UTF-8 BYTES keeping the
+extension (400 Slovak chars are 800 bytes; ext4 caps a name at 255 and `.part`
+must fit). A `realpath` dirname check at the write site enforces containment
+independently of all of it.
+
+Rejected: the ticket's own suggested fix (unquote + keep the ASCII `_SAFE`) —
+it satisfies the old doc sentence but still lands `nahr_vka_test__1_.bin`, a
+milder spelling of the same complaint; reusing `filedrop.share.safe_name` —
+`filedrop/server.py:20` pins the download URL alphabet to that function's ASCII
+output, and `upload_server.py` is launched by PATH so `import filedrop` raises
+ModuleNotFoundError (verified, not assumed); `os.path.basename` before
+sanitizing — it silently rewrites `../../etc/passwd` to a plausible `passwd`,
+where mapping the separators keeps the hostile name visible in the listing.
+
+Tests: RED reproduced the ticket's observed string verbatim in its own failure
+message (`the endpoint saved ['nahr_C3_A1vka_20test_20_1_.bin'] instead`) — not
+a construction artefact. Two of the nine new tests PASS at HEAD (an un-decoded
+`..%2F` is inert; the token is matched raw) and the class docstring says so
+rather than dressing them up as reproductions.
+
+Docs: `skills/meeting-analysis/SKILL.md` promised "spaces / accents / parens
+become `_`" — true neither before the fix (percent-escapes spelled out) nor
+after it (they are preserved). Rewritten to the real behaviour, and its
+`VIDEO=$HOME/...` assignment quoted, since spaces reach the path now.
+
+Gate: 2339 tests pass (2330 baseline at 08c9afa + 9), `ruff check .` clean,
+`airuleset.py validate` OK. Live after deploy, through a REAL Chromium
+drag-drop against the live endpoint (so the page's own `encodeURIComponent`
+is what produced the request): `nahrávka test (1).bin` landed under exactly
+that name, SHA256-identical, and the SAVED log line carried the real name.
+Twelve hostile names fired at the same endpoint (traversal, absolute, backslash,
+NUL, CR/LF, tilde, dots-only, leading dash, RTL override, 800-byte name) all
+landed flattened INSIDE the destination — nothing in /tmp, nothing in $HOME, no
+stray `.part`; the raw un-encoded `../../../tmp/ESCAPED116` 404s on the segment
+count. Endpoint killed, fixtures and temp dirs removed, port free.
+
+Filed #117 while verifying: the upload page declares no icon, so every browser
+that opens it logs a `GET /favicon.ico` 404 console error.
