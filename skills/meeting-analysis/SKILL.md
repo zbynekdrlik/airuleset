@@ -71,7 +71,7 @@ WORK=$HOME/uploads/acme-call/work          # <- pick a real topic
 mkdir -p "$WORK"
 python3 ~/devel/airuleset/airuleset.py upload --dir "$(dirname "$WORK")" --ttl 14400
 # (the upload server is the shared filedrop/upload_server.py — CLI spawns it detached,
-#  prints the live-checked URL; log = /tmp/airuleset-upload-<port>.log)
+#  prints the live-checked URL and the log path = ~/.claude/upload-logs/upload-<port>.log)
 curl -s -o /dev/null -w "liveness: %{http_code}\n" "http://$IP:$PORT/$TOK/"   # must be 200
 echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 ```
@@ -80,7 +80,7 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
   may reach it on a Tailscale/other IP, not 100.104.8.125). A local 200 does NOT prove the user can
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path (the filename is sanitized — spaces /
-  accents / parens become `_`, so you cannot guess it): `grep SAVED /tmp/airuleset-upload-<port>.log` →
+  accents / parens become `_`, so you cannot guess it): `grep SAVED ~/.claude/upload-logs/upload-<port>.log` →
   `$HOME/uploads/acme-call/<sanitized-name>`. Confirm the byte count matches the user's
   file size, then stop the server: `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.

@@ -2763,6 +2763,65 @@ def cmd_authority(args):
               f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
 
 
+UPLOAD_LOG_DIR_ENV = "AIRULESET_UPLOAD_LOG_DIR"
+
+
+def _upload_log_path(port):
+    """Where `upload` writes an endpoint's log — under the USER'S OWN tree.
+
+    It used to be `/tmp/airuleset-upload-<port>.log`: a world-shared directory
+    with the port as the only key, so the FIRST user to run on a port owned that
+    filename for every other user on the box. dev1 still carries
+    `-rw-rw-r-- montalu /tmp/airuleset-upload-8811.log`, and `--port 8811` as
+    anyone else died with an unhandled `PermissionError` instead of a diagnosis
+    (#115) — from the one CLI whose whole job is to be reachable the moment
+    someone needs to hand a file over. Two users have two $HOMEs, so this cannot
+    collide by construction rather than by luck of the port. AIRULESET_UPLOAD_LOG_DIR
+    relocates it (tests — the same escape hatch filedrop gives itself with
+    FILEDROP_DIR); the name stays port-keyed over a 21-port range, so the file set
+    is bounded and reused by append, never accumulating."""
+    base = os.environ.get(UPLOAD_LOG_DIR_ENV) or (Path.home() / ".claude" / "upload-logs")
+    return Path(base) / f"upload-{port}.log"
+
+
+def _pick_free_port(ips, ports):
+    """The first port in `ports` that `ips` can actually BIND — None if none can.
+
+    The pre-#115 scan probed `connect_ex(("127.0.0.1", cand))`, but
+    `filedrop._is_private` EXCLUDES loopback and `upload_server.py` binds exactly
+    `bind_ips()`, deliberately never 0.0.0.0 (a WRITE endpoint on a box that may
+    have a public IP). The probe's address and the server's addresses were
+    therefore disjoint BY CONSTRUCTION: a live endpoint answers on none of the
+    addresses the scan asked about, so the scan handed out an occupied port
+    (observed on dev1: five listeners on :8799, scan picked 8799, and the second
+    endpoint then failed to bind anything).
+
+    Binding the very addresses the server is about to bind asks the server's own
+    question. Only EADDRINUSE rejects a candidate — any other error
+    (EADDRNOTAVAIL from a stale or departed interface) is tolerated, because
+    upload_server.py SKIPS such an address rather than dying on it and needs only
+    one success; treating that as "occupied" would let one stale IP reject every
+    candidate on a box that serves fine. SO_REUSEADDR mirrors
+    HTTPServer.allow_reuse_address, so the probe's verdict is the server's."""
+    import errno
+    import socket
+
+    for port in ports:
+        for ip in ips:
+            s = socket.socket()
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((ip, port))
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    break
+            finally:
+                s.close()
+        else:
+            return port
+    return None
+
+
 def cmd_upload(args):
     """Stand up a web UPLOAD endpoint the user opens in their own browser.
 
@@ -2776,7 +2835,6 @@ def cmd_upload(args):
     URL is verified to answer 200 BEFORE printing (no-localhost-urls); the endpoint
     self-expires after --ttl seconds."""
     import secrets as _secrets
-    import socket
     import subprocess
     import time
     import urllib.request
@@ -2793,18 +2851,22 @@ def cmd_upload(args):
 
     port = int(getattr(args, "port", None) or 0) or None
     if port is None:
-        for cand in range(8799, 8820):
-            with socket.socket() as s:
-                if s.connect_ex(("127.0.0.1", cand)) != 0:
-                    port = cand
-                    break
-        else:
+        # Probe the addresses the server is ABOUT TO BIND, not loopback (#115).
+        port = _pick_free_port(ips, range(8799, 8820))
+        if port is None:
             print("upload: no free port in 8799-8819", file=sys.stderr)
             sys.exit(1)
 
     token = _secrets.token_urlsafe(12)
-    log = Path(f"/tmp/airuleset-upload-{port}.log")
-    with open(log, "ab") as lf:
+    log = _upload_log_path(port)
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        lf = open(log, "ab")
+    except OSError as e:
+        # A diagnosis, never the bare traceback #115 was filed for.
+        print(f"upload: cannot open log {log}: {e}", file=sys.stderr)
+        sys.exit(1)
+    with lf:
         subprocess.Popen(
             [sys.executable, str(REPO_DIR / "filedrop" / "upload_server.py"),
              token, str(port), ",".join(ips), str(dest), str(ttl)],
