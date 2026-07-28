@@ -1035,3 +1035,26 @@ appear-loops, and `gh run view`-density catching post-mortems); each became its
 own RED→GREEN pair. Verified live end-to-end through the real harness on this
 box: loop 1 ran, loop 2 blocked with the subagent branch, single status check
 still allowed.
+
+## #121 — /compact at every completed ticket, keyed to the worker (2026-07-28)
+
+`618f9d0` [red] → `8510d94` [green]. An autopilot supervisor reports batch N and
+dispatches batch N+1 in the SAME turn, so its message always ends `⏳` — and the
+`⏳` last-line veto in `notify-compact-request.sh` runs BEFORE the
+`## ✅ Work Complete` scan, so the request was never even created. Measured on
+forestshop/parovanie_produktov: 19 h, 375K context, five completed tickets, zero
+compactions, `compact-requests.json` empty. Fix: a second channel keyed to the
+TICKET — new SubagentStop hook `notify-compact-subagent-boundary.sh` records the
+request when an `autopilot-worker` concludes with zero non-self entries in the
+payload's `background_tasks` (this session's own task registry — a fact, not a
+marker; absent field ⇒ unprovable ⇒ never compact, matching
+`subagent-stop-check-bg-work.sh`'s fail-direction so the two cannot disagree).
+The request carries `origin=subagent-stop` through to `_compact_not_at_boundary`,
+which stops letting the supervisor's `⏳` decide. RED was behavioral
+(`skip not-a-boundary` on a request that already proved its boundary), not a
+missing kwarg; the four controls that pin #109's gate for every other origin,
+#102's `❓` gate WITH the proof, and the Stop hook's own veto passed before and
+after. Suite verified to REJECT both tempting wrong fixes: dropping the `⏳` veto
+for everyone (2 failures) and recording on every SubagentStop (6 failures).
+Tests: `TestCompactSubagentBoundaryHook`, `TestWorkingMarkerNoLongerVetoesAProvenBoundary`,
+`TestProvenBoundaryOriginIsStored`, `TestSupervisorStopVetoIsNoLongerTheOnlyChannel`.
