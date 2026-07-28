@@ -431,6 +431,48 @@ class TeethTest(_Runner):
                       "branch — which the shipped hook must not")
 
 
+class Issue127LocalSideGapTest(_Runner):
+    """#127: the paired half of Issue127CiSideGapTest in
+    test_ci_poll_repeat_block.py. A `gh pr view <N> --json …statusCheckRollup…`
+    loop carries no #118 token, so it must fall all the way through to THIS
+    hook and be treated as a normal generic wait — keyed on the digit-blind
+    loop shape, blocked on its repeat, exactly like any other non-CI loop.
+
+    Measured (2026-07-29): 52 such loops in the corpus, replayed in real
+    session order through the shipped hook — 36 first-free, 14 already
+    blocked (camera-box's own `poll #436…#446` chain among them), 1 exempt
+    (mutating), 1 exempt (short-wait). So this hook already correctly owns
+    the gap #127 named; #118's signature does not need to widen (see the
+    sibling test file for the measured reason widening would be worse: a
+    wrong-run waiter via unscoped `gh run list -L 1`, plus a decaying TTL
+    replacing this hook's persistent per-shape key).
+    """
+
+    # verbatim shape from the ticket's own specimen (camera-box, poll #436-444)
+    PR_VIEW_LOOP = (
+        'for i in 1 2 3; do\n'
+        '  r=$(gh pr view %d --json mergeable,mergeStateStatus,'
+        'statusCheckRollup --jq \'.\')\n'
+        '  echo "$r"\n'
+        '  sleep 250\n'
+        'done')
+
+    def test_first_gh_pr_view_loop_is_free(self):
+        self.assertEqual(self.run_hook(self.PR_VIEW_LOOP % 436).returncode, 0)
+
+    def test_second_repeat_is_blocked_here_not_at_118(self):
+        self.run_hook(self.PR_VIEW_LOOP % 436)
+        out = self.run_hook(self.PR_VIEW_LOOP % 436)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#119", out.stderr)
+
+    def test_a_different_pr_number_is_the_same_shape_digit_blind(self):
+        """`gh pr view 436` -> `gh pr view 704`: same wait, still collides."""
+        self.run_hook(self.PR_VIEW_LOOP % 436)
+        out = self.run_hook(self.PR_VIEW_LOOP % 704)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class FailOpenTest(_Runner):
     def test_unparseable_payload_fails_open(self):
         env = dict(os.environ)

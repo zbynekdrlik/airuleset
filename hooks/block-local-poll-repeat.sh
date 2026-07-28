@@ -80,6 +80,19 @@ set -euo pipefail
 # a single status check, a mutating command with a wait bolted on the tail, a
 # sub-5s tight retry, a loop whose sleep interval is unmeasurable, and the logged
 # inline escape hatch `# airuleset:poll-ok <reason>`.
+#
+# #127 (closed, no code change): #118's own token set misses `gh pr view <N>
+# --json …statusCheckRollup…` loops entirely, so they fall all the way through
+# to THIS hook — correctly. Measured (2026-07-29): 52 such loops in the
+# corpus, replayed in real session order through the shipped hook — 36
+# first-free, 14 already blocked here (camera-box's own `poll #436…#446`
+# chain among them), 1 exempt-mutating, 1 exempt-short-wait. Widening #118 to
+# swallow this shape was tested and rejected on #127: PR numbers never reach
+# #118's 8-digit RUN_ID floor, so it would hand out a waiter keyed to `gh run
+# list -L 1` — the most recent run in the whole repo, not the polled PR — and
+# would trade this hook's persistent per-shape key for #118's 1800s-TTL
+# generic bucket, which would intermittently stop blocking these
+# slower-cadence repeats. This hook keeps owning the shape.
 
 command -v jq &>/dev/null || exit 0
 

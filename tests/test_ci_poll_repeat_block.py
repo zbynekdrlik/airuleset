@@ -374,6 +374,64 @@ class CorpusFoundWrongBlockTest(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class Issue127CiSideGapTest(unittest.TestCase):
+    """#127: `gh pr view <N> --json …statusCheckRollup…` loops carry no
+    `gh run view|watch|list` / `gh pr checks` token, so they must NEVER match
+    this hook's CI-wait signature — that boundary is deliberate (#118 owns a
+    narrow, run-id-keyed token set), and #119's sibling hook already covers
+    the gap correctly (see the paired test in test_local_poll_repeat_block.py).
+
+    Measured (2026-07-29, 8,231 transcripts / 258,724 commands): 52 such
+    loops exist in the corpus, 14 of which repeat and are already blocked —
+    by #119, not here. Tested empirically that WIDENING this hook's signature
+    to swallow the shape is the wrong fix, not merely asserted: PR numbers in
+    the corpus never reach the 8-digit RUN_ID floor, so every one would fall
+    into this hook's `generic` bucket, whose compliant command is `RID=$(gh
+    run list -L 1 --json databaseId …)` — the single most recent run in the
+    WHOLE repo, not the run behind the polled PR. That is a wrong-run waiter,
+    strictly worse than #119's honestly-scoped generic message. The generic
+    bucket's 1800s TTL would also intermittently let these (naturally
+    slower-cadence) `gh pr view` waits reset to "first loop free" and stop
+    blocking real repeats — #119's per-(session, shape) key never decays.
+    Decision recorded on #127: the split stands, #118's signature stays
+    exactly as-is.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    # verbatim shape from the ticket's own specimen (camera-box, poll #436-444)
+    PR_VIEW_LOOP = (
+        'for i in 1 2 3; do\n'
+        '  r=$(gh pr view %d --json mergeable,mergeStateStatus,'
+        'statusCheckRollup --jq \'.\')\n'
+        '  echo "$r"\n'
+        '  sleep 250\n'
+        'done')
+
+    def test_a_gh_pr_view_statuscheckrollup_loop_never_matches_here(self):
+        for _ in range(4):
+            out = self.run_hook(self.PR_VIEW_LOOP % 436)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_still_unmatched_even_after_many_repeats_of_the_same_pr(self):
+        cmd = self.PR_VIEW_LOOP % 704
+        for _ in range(6):
+            out = self.run_hook(cmd)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout, "")
+
+
 class ModulePointerTest(unittest.TestCase):
     """The ONLY prose change permitted: one line on the foreground bullet."""
 

@@ -80,6 +80,21 @@ set -euo pipefail
 # review — bypass-log-first diagnosis, per this repo's playbook. The observed
 # failure mode is defaulting, not adversarial circumvention, and a blocked
 # model has already been handed the correct command.
+#
+# #127 (closed, signature UNCHANGED): does `gh pr view <N> --json …
+# statusCheckRollup…` belong in this signature too? Measured (2026-07-29,
+# 8,231 transcripts / 258,724 commands): 52 such loops exist, none of which
+# match the token set above, so they never reach this hook — and 14 of them
+# already repeat and are already blocked, correctly, by block-local-poll-
+# repeat.sh's generic bucket. Tested widening THIS regex empirically, not by
+# inspection: PR numbers here (112-704) never reach the 8-digit RUN_ID floor,
+# so every one would fall into the GENERIC bucket below, whose compliant
+# command (`RID=$(gh run list -L 1 --json databaseId …)`) picks the single
+# most recent run in the WHOLE repo — not the run behind the polled PR. That
+# is a wrong-run waiter, worse than the sibling hook's honestly-scoped
+# message. The generic bucket's 1800s TTL would also intermittently reset
+# "first loop free" for these naturally slower-cadence waits, weakening a
+# guard that today never decays. Split stands; see #127 for the full replay.
 
 command -v jq &>/dev/null || exit 0
 
