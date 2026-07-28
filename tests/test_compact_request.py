@@ -2221,5 +2221,284 @@ class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
         self.assertGreater(compact[0], max(gates), cmds)
 
 
+# --------------------------------------------------------------------------- #
+# 5. #121 — the boundary is the completed TICKET, not the supervisor's message
+#
+# Measured (forestshop/parovanie_produktov, 2026-07-27/28): 19 hours with NO
+# compaction at 375K context across FIVE completed tickets, and
+# `compact-requests.json` empty — no request was ever even created. An
+# autopilot supervisor reports batch N and dispatches batch N+1 in the SAME
+# turn, so its turn ALWAYS ends `⏳`; the `⏳` veto on the Stop hook's last
+# line therefore discards every ticket boundary this session class will ever
+# have. The user's binding requirement (2026-07-28): "autopilot ide ticket za
+# ticketom a po kazdom tickete ma prebehnut compact" — ticket done, compact
+# runs, always; the ONLY thing that may defer it is that the session still has
+# one of its OWN workers running.
+#
+# So the request is created by a SubagentStop hook keyed to the worker
+# returning (the ticket), and the supervisor's `⏳` stops deciding anything.
+# --------------------------------------------------------------------------- #
+
+_PROVEN = "subagent-stop"
+
+
+def _write_request(path, sid, cwd, origin=None, now=None):
+    """Write a pending compact request DIRECTLY, exactly as the hook does.
+
+    Deliberately not `record_compact_request(..., origin=...)`: these tests
+    must be RED for a BEHAVIORAL reason (job 14 ignores the stored proof and
+    holds the request on a `⏳` turn), never merely because a keyword
+    argument does not exist yet."""
+    entry = {"cwd": cwd, "ts": int(now if now is not None else time.time())}
+    if origin:
+        entry["origin"] = origin
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({sid: entry}))
+    return path
+
+
+class TestCompactSubagentBoundaryHook(unittest.TestCase):
+    """`hooks/notify-compact-subagent-boundary.sh` — records a compact request
+    the moment an `autopilot-worker` concludes with no other live task in the
+    session's own registry. `background_tasks` is that registry; a non-self
+    entry (`id != agent_id`) is the ONE fact allowed to defer the compact."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
+
+    def _run(self, sid="sup-1", agent_id="agt-1",
+             agent_type="autopilot-worker", cwd="/x", tasks="self"):
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        payload = {"session_id": sid, "agent_id": agent_id,
+                   "agent_type": agent_type, "cwd": cwd,
+                   "hook_event_name": "SubagentStop", "stop_hook_active": False}
+        me = {"id": agent_id, "type": "subagent", "status": "running"}
+        if tasks == "self":
+            payload["background_tasks"] = [me]
+        elif tasks == "empty":
+            payload["background_tasks"] = []
+        elif tasks == "sibling":
+            payload["background_tasks"] = [
+                me, {"id": "agt-2", "type": "subagent", "status": "running"}]
+        elif tasks == "pending-sibling":
+            payload["background_tasks"] = [
+                me, {"id": "agt-2", "type": "subagent", "status": "pending"}]
+        elif tasks == "shell":
+            payload["background_tasks"] = [
+                me, {"id": "bash-9", "type": "shell", "status": "running"}]
+        # "absent" — no background_tasks key at all
+        env = {**os.environ, "HOME": home}
+        r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
+                           text=True, capture_output=True, env=env,
+                           cwd=str(airuleset.REPO_DIR))
+        return r, Path(home) / ".claude" / "compact-requests.json"
+
+    def test_hook_exists(self):
+        self.assertTrue(self.HOOK.exists())
+
+    def test_worker_returning_alone_records_a_proven_boundary_request(self):
+        r, reqfile = self._run(sid="sup-a", cwd="/repo/a")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(reqfile.exists(), r.stderr)
+        d = json.loads(reqfile.read_text())
+        self.assertIn("sup-a", d)
+        self.assertEqual(d["sup-a"]["cwd"], "/repo/a")
+        self.assertEqual(d["sup-a"].get("origin"), _PROVEN)
+
+    def test_an_empty_registry_is_also_zero_live_workers(self):
+        r, reqfile = self._run(sid="sup-b", tasks="empty")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(reqfile.exists(), r.stderr)
+
+    def test_another_live_worker_of_this_session_defers(self):
+        # the ONE allowed deferral: the next ticket is genuinely in flight
+        r, reqfile = self._run(sid="sup-c", tasks="sibling")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_a_pending_task_counts_as_live(self):
+        r, reqfile = self._run(sid="sup-d", tasks="pending-sibling")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_a_live_shell_task_of_this_session_also_defers(self):
+        r, reqfile = self._run(sid="sup-e", tasks="shell")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_no_background_tasks_field_can_never_prove_zero(self):
+        # cannot PROVE nothing is live -> never compact (same fail-direction
+        # subagent-stop-check-bg-work.sh uses, so the two gates cannot disagree)
+        r, reqfile = self._run(sid="sup-f", tasks="absent")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_a_non_autopilot_worker_subagent_is_not_a_ticket_boundary(self):
+        for at in ("Explore", "general-purpose", "ticket-validator"):
+            with self.subTest(agent_type=at):
+                r, reqfile = self._run(sid="sup-g", agent_type=at)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertFalse(reqfile.exists(), at)
+
+    def test_missing_agent_type_never_records(self):
+        r, reqfile = self._run(sid="sup-h", agent_type="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_missing_session_id_never_records(self):
+        r, reqfile = self._run(sid="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_silent_stdout_and_never_blocks_the_subagent_stop(self):
+        r, _ = self._run(sid="sup-i")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_dedup_key_is_the_worker_agent_id(self):
+        # #71's delivered-dedup channel: a REPEATED SubagentStop for the SAME
+        # worker is a no-op, while each ticket keeps its own slot.
+        _, f1 = self._run(sid="sup-j", agent_id="agt-aaa")
+        _, f2 = self._run(sid="sup-j", agent_id="agt-aaa")
+        _, f3 = self._run(sid="sup-j", agent_id="agt-bbb")
+        h1 = json.loads(f1.read_text())["sup-j"]["msg_hash"]
+        h2 = json.loads(f2.read_text())["sup-j"]["msg_hash"]
+        h3 = json.loads(f3.read_text())["sup-j"]["msg_hash"]
+        self.assertTrue(h1)
+        self.assertEqual(h1, h2)
+        self.assertNotEqual(h1, h3)
+
+    def test_wired_into_subagent_stop_hooks_json(self):
+        cfg = airuleset.load_hooks_json()
+        cmds = [h.get("command", "")
+                for entry in cfg.get("hooks", {}).get("SubagentStop", [])
+                for h in entry.get("hooks", [])]
+        self.assertTrue(
+            any("notify-compact-subagent-boundary.sh" in c for c in cmds), cmds)
+
+
+class TestProvenBoundaryOriginIsStored(unittest.TestCase):
+    """`record_compact_request` carries the request's own boundary PROOF."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_origin_is_stored_on_the_entry(self):
+        p = self._p()
+        wd.record_compact_request("s1", "/c", path=p, origin=_PROVEN)
+        self.assertEqual(wd.load_compact_requests(p)["s1"]["origin"], _PROVEN)
+
+    def test_no_origin_stores_no_key_at_all(self):
+        p = self._p()
+        wd.record_compact_request("s2", "/c", path=p)
+        self.assertNotIn("origin", wd.load_compact_requests(p)["s2"])
+
+
+class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
+    """THE regression this ticket is about. A supervisor's `⏳` refers to the
+    NEXT batch, never to the ticket that just landed — so it must not hold a
+    request whose own origin already proved the boundary. #109's gate is
+    UNCHANGED for every other origin, and #102's `❓` gate
+    (`_compact_blocked_by_question`, which runs first at both send points) is
+    not touched at all."""
+
+    SID = "sess-121"
+    CWD = "/home/x/proj121"
+    PANE = "%11"
+    WORKING = "⏳ WORKING: worker robí #43 + #47"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _job14(self, marker, origin):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, marker)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=origin)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        return tmux, logs
+
+    def test_job14_delivers_on_a_working_turn_when_the_entry_proves_it(self):
+        tmux, logs = self._job14(self.WORKING, _PROVEN)
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+
+    def test_job14_still_holds_a_working_turn_without_that_proof(self):
+        # the control — #109's gate must NOT be weakened for its own path
+        tmux, logs = self._job14(self.WORKING, None)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
+
+    def test_job14_still_holds_a_question_turn_even_with_the_proof(self):
+        # #102's camera-box gate is untouched: a pending question is genuinely
+        # undurable, and no worker's completion makes it durable
+        tmux, logs = self._job14("❓ NEEDS YOU: schváliš merge PR #5?", _PROVEN)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("blocked-question" in ln for ln in logs), logs)
+
+    def test_sync_path_delivers_on_a_working_turn_for_a_proven_boundary(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         origin=_PROVEN)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(handled)
+
+    def test_sync_path_still_holds_a_working_turn_without_the_proof(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
+
+
+class TestSupervisorStopVetoIsNoLongerTheOnlyChannel(unittest.TestCase):
+    """The Stop hook's `⏳` veto stays (removing it reinstates #109 for every
+    NON-autopilot session, which has no worker-registry evidence to stand on)
+    — it simply stops being the only way a request can ever be created."""
+
+    def test_stop_hook_still_refuses_a_working_turn(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        hook = airuleset.REPO_DIR / "hooks" / "notify-compact-request.sh"
+        payload = json.dumps({"session_id": "sv-1", "cwd": "/x",
+                              "last_assistant_message":
+                                  "## ✅ Work Complete\n⏳ WORKING: ďalší ticket"})
+        subprocess.run(["bash", str(hook)], input=payload, text=True,
+                       capture_output=True, env={**os.environ, "HOME": home},
+                       cwd=str(airuleset.REPO_DIR))
+        self.assertFalse((Path(home) / ".claude" / "compact-requests.json").exists())
+
+    def test_the_subagent_stop_channel_exists_alongside_it(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent
+                          / "settings" / "hooks.json").read_text())
+        stop = [h.get("command", "") for e in cfg["hooks"]["Stop"]
+                for h in e.get("hooks", [])]
+        sub = [h.get("command", "") for e in cfg["hooks"]["SubagentStop"]
+               for h in e.get("hooks", [])]
+        self.assertTrue(any("notify-compact-request.sh" in c for c in stop))
+        self.assertTrue(
+            any("notify-compact-subagent-boundary.sh" in c for c in sub))
+
+
 if __name__ == "__main__":
     unittest.main()
