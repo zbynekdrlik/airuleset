@@ -131,6 +131,7 @@ class TestForkNoMergeHandoffCard(TestCase):
     def test_cmd_notify_passes_handoff_through(self):
         import unittest.mock as mk
         args = mk.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
                        record_question=False, edit_question=False, channel_id=False,
                        owner=False, mirror_owners=False, body=None, run=None,
                        repo="kvaskodev/odoo-erp", issue=1408, pr=None,
@@ -305,6 +306,7 @@ class TestRunCardRemainingScopedToStream(TestCase):
     def _args(self, **over):
         import unittest.mock as mk
         base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
                     record_question=False, edit_question=False, channel_id=False,
                     owner=False, mirror_owners=False, body=None, run=None,
                     repo="kvaskodev/odoo-erp", issue=1408, pr=None,

@@ -89,6 +89,52 @@ goal_armed() {
     printf '%s' "$cap" | grep -qF "◎ /goal"
 }
 
+# Checkpoint of the PREVIOUS ✅ boundary in this session — the anchor the card
+# check measures against. First ✅ ever seen for a session bootstraps to a
+# lookback window (the same 6h `statusbar.AUTOPILOT_RUN_WINDOW_S` treats as
+# "an active autopilot run").
+CARDCHK="/tmp/claude-discord-cardchk-${SID}"
+CARD_LOOKBACK_S=21600
+
+card_delivered_since_last_boundary() {
+    # #134: the ✅ is suppressed because a card was DELIVERED for THIS ticket,
+    # never merely because a `/goal` is armed.
+    #
+    # The armed-goal premise was the design error. It assumed the per-ticket
+    # run-card covers the ticket, but nothing enforced the card — and marek's
+    # pane has had a goal armed continuously for 18h+ across 7 re-arms with
+    # zero `Goal cleared:`, so "armed" is a near-permanent state there and the
+    # suppression was TOTAL rather than occasional. A suppression that defers
+    # to an unenforced action is a silence generator.
+    #
+    # DELIVERED, not merely claimed: `_dedup_claim` writes the marker BEFORE
+    # the POST, so presence alone proves nothing (#135). `marker_delivered`
+    # is the distinction.
+    #
+    # Anything unprovable — no cwd, not a git repo, no `origin`, no python —
+    # means the ping GOES THROUGH. Never suppress on "don't know": the cost of
+    # a spurious ping is one extra line on a phone, the cost of a wrong
+    # suppression is the five-day silence this ticket exists to end.
+    local since repo newest
+    command -v python3 >/dev/null 2>&1 || return 1
+    [ -n "$CWD" ] || return 1
+    since=$(cat "$CARDCHK" 2>/dev/null || echo "")
+    case "$since" in ''|*[!0-9.]*) since="" ;; esac
+    repo=$(python3 "$AIRULESET_PY" notify --repo-name --cwd "$CWD" 2>/dev/null \
+           || echo "")
+    [ -n "$repo" ] || return 1
+    newest=$(python3 "$AIRULESET_PY" notify --newest-card --repo "$repo" \
+             2>/dev/null || echo "")
+    case "$newest" in ''|*[!0-9.]*) return 1 ;; esac
+    if [ -z "$since" ]; then
+        since=$(python3 -c "import time,sys; print(time.time()-float(sys.argv[1]))" \
+                "$CARD_LOOKBACK_S" 2>/dev/null || echo "")
+        [ -n "$since" ] || return 1
+    fi
+    python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)" \
+        "$newest" "$since" 2>/dev/null
+}
+
 emit() {
     # $1 = emoji, $2 = raw content; clean + truncate to keep the device line
     # short. ✅ stays ONE short line (only the ❓ question carries a full block);
@@ -365,16 +411,23 @@ elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*⏳';
     # line-START anchoring as the ❓ branch — a ⏳ mid-sentence is prose.
     rm -f "$PENDING" 2>/dev/null || true
 elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'; then
-    # Fully-done state. A per-ticket/per-batch ✅ DONE inside a STILL-ARMED
-    # /goal loop (2026-07-25 revision — message-status-marker.md,
-    # milestone-notifications.md) must NOT queue a SECOND idle ping here —
-    # the sanctioned per-ticket run-card already gave phone visibility for
-    # THIS ticket, and this is exactly the per-phase noise the user
-    # removed. Only a ✅ DONE with NO goal armed (a normal non-loop session,
-    # or the true end of a run once /goal has resolved) queues the ping.
-    if goal_armed; then
+    # Fully-done state. A per-ticket/per-batch ✅ DONE inside an autopilot
+    # loop must not queue a SECOND idle ping when the sanctioned per-ticket
+    # run-card ALREADY gave phone visibility for THIS ticket — that second
+    # ping is the per-phase noise the user removed (2026-07-25 revision,
+    # message-status-marker.md / milestone-notifications.md).
+    #
+    # But the condition is DELIVERY, not an armed goal (#134). The armed-goal
+    # premise deferred to something nothing enforced, and when the card
+    # stopped firing it removed the only remaining signal — five days, ~85
+    # merged PRs, zero reports. Card delivered for this repo since the
+    # previous ✅ boundary → suppress as designed. No card → the ping goes
+    # through, exactly as it did before the guard existed.
+    if goal_armed && card_delivered_since_last_boundary; then
+        SUPPRESSED=1
         rm -f "$PENDING" 2>/dev/null || true
     else
+        SUPPRESSED=0
         # Prefer an explicit "✅ DONE: <outcome>" line; else the report's
         # "What changed" / "Goal" one-liner; else a generic Slovak fallback.
         DLINE=$(printf '%s\n' "$MSG" | grep -iE '✅[[:space:]]*DONE:' | tail -1 || true)
@@ -387,6 +440,17 @@ elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:sp
         fi
         emit "✅" "$C"
     fi
+    # Move the boundary anchor forward whichever way it went, so THIS ticket's
+    # card can never be counted again for the NEXT ticket. Without it, one
+    # delivered card would suppress every later ✅ inside its lookback window
+    # — the same "a stale artifact stands in for a fresh one" mistake in
+    # miniature.
+    # Sub-second precision on purpose: marker mtimes carry fractions, so an
+    # integer checkpoint reads as up to a second EARLIER than it is and a
+    # card delivered in the same second as the previous boundary would still
+    # count for the next ticket.
+    date +%s.%N > "$CARDCHK" 2>/dev/null || date +%s > "$CARDCHK" 2>/dev/null || true
+    : "$SUPPRESSED"
 else
     # No marker → nothing to notify. Clear any stale pending.
     rm -f "$PENDING" 2>/dev/null || true

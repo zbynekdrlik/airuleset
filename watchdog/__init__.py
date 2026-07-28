@@ -5403,6 +5403,162 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 25 — CARD RECONCILIATION (#134, marek's stream 2026-07-23 → 2026-07-28).
+#
+# Measured: the `claude-marek` thread received ZERO per-ticket completion
+# cards for five days while tvdole closed 6 issues / merged 5 PRs and
+# parovanie-produktov closed 97 / merged 80. The last dedup marker for that
+# repo is `#192` at 2026-07-23 19:05; issues #193–#295 produced none, and
+# tvdole has never produced one at any point. Nothing was broken — the
+# mechanism is healthy and zbynek-owned repos card through today. The card is
+# simply an ACTION WITH NO ARTIFACT ANYONE CHECKS, so workers drifted out of
+# the habit and nothing pushed back.
+#
+# WHY THIS EXISTS ALONGSIDE THE SubagentStop GATE. The gate
+# (`hooks/subagent-stop-check-run-card.sh`) is the in-band half and it is the
+# one that restores a REAL card, with the worker's own plain-Slovak goal and
+# achieved text. But it is structurally blind to two of the ways this fails:
+# a worker that DIES mid-run never reaches SubagentStop at all, and a
+# delivery that fails AFTER the worker returned happens when no hook is
+# looking. Both collapse to one observable — an issue closed by a merge with
+# no delivered card — which is what this job measures.
+#
+# WHAT IT READS, AND WHY NOT `gh`. Purely LOCAL git, per repo hosting a live
+# pane: the merge commits that landed on the base branch inside the window,
+# and the `Closes/Fixes/Resolves #N` they carry. That is the same fact a `gh`
+# query would return, for free, without spending an API call per repo per
+# sweep against a 5,000/h budget and without needing auth in every checkout.
+#
+# RELATION TO JOB 24 (#138), checked before adding rather than after. They do
+# not overlap and in the common case are mutually exclusive BY CONSTRUCTION:
+# job 24 fires when the base branch is FROZEN (merges stopped); job 25 fires
+# when the base branch MOVED (merges happened) and the reports did not. They
+# share no state key and answer different questions.
+#
+# Detection only, exactly like jobs 21 and 24: it never types into a pane and
+# never touches a worktree, index or local branch. Deciding what to do about
+# an unreported ticket is the user's call.
+# --------------------------------------------------------------------------- #
+
+CARD_WINDOW_S = 172800            # merges older than 48h are history, not a gap
+CARD_REPING_S = 86400             # a daily reminder, never one per 60s sweep
+CARD_MAX_LISTED = 8               # the phone gets numbers, not a wall
+
+_CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
+                        re.I)
+
+
+def merged_closes(root, base, since_ts, git_run=None):
+    """Issue numbers closed by commits on `base` since `since_ts`.
+
+    GitHub closes an issue from a `Closes #N` in a commit reachable from the
+    default branch, so this is the delivery event itself, read locally."""
+    text = (git_run or _default_git_run)(
+        ["git", "-C", str(root), "log", base,
+         "--since=@%d" % int(since_ts), "--format=%s%n%b"])
+    nums, seen = [], set()
+    for m in _CLOSES_RE.finditer(text or ""):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.add(n)
+            nums.append(n)
+    return sorted(nums)
+
+
+def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
+                   git_run=None, card_probe=None, marker_ok=None,
+                   owner_by_sid=None, window=None, reping=None):
+    """Job 25 — see the section comment.
+
+    Gated on `card_probe` (the "wired = on" convention of jobs 8/11/16/24):
+    the probe carries the confirming fetch, so a base ref that had merely
+    gone stale locally cannot on its own claim a ticket went unreported.
+
+    One repo is examined once per sweep however many panes sit in it, the
+    DETECTION is logged every sweep (issue #36's print-always convention),
+    and the PING is deduped per repo per `reping` window."""
+    if card_probe is None:
+        return []
+    window = CARD_WINDOW_S if window is None else window
+    reping = CARD_REPING_S if reping is None else reping
+    if marker_ok is None:
+        try:
+            from notify import marker_delivered as marker_ok
+        except ImportError:
+            return []
+    owner_by_sid = owner_by_sid or {}
+    seen = dict(state.get("card_unreported") or {})
+    logs, live, examined = [], set(), set()
+
+    for sid, cwd in sorted((cwd_by_sid or {}).items()):
+        root = _git_first_line(cwd, ["rev-parse", "--show-toplevel"], git_run)
+        if not root or root in examined:
+            continue
+        examined.add(root)
+        base = _git_base_ref(root, git_run)
+        if not base:
+            continue                      # unmeasurable — never a finding
+        live.add(root)
+
+        # CONFIRM, then announce (job 24's contract, reused verbatim): the
+        # probe fetches the base ref, and the measurement happens after it.
+        try:
+            card_probe(root, base)
+        except Exception as e:
+            logs.append("card-reconcile probe-failed %s: %r" % (root, e))
+        closed = merged_closes(root, base, now - window, git_run)
+        if not closed:
+            seen.pop(root, None)
+            continue
+
+        # The repo NAME comes from `origin`, never the directory basename:
+        # the checkout is `parovanie_produktov` while every marker is keyed
+        # `parovanie-produktov`, so a directory-derived key matches nothing
+        # and would report every ticket as unreported.
+        try:
+            from notify import repo_name_for
+            name = repo_name_for(root)
+        except ImportError:
+            name = ""
+        if not name:
+            continue
+        missing = [n for n in closed if not marker_ok("%s#%d" % (name, n))]
+        if not missing:
+            seen.pop(root, None)
+            continue
+
+        logs.append("card-unreported %s n=%d issues=%s"
+                    % (name, len(missing),
+                       ",".join(str(n) for n in missing[:CARD_MAX_LISTED])))
+        prev = seen.get(root) or {}
+        pinged = prev.get("pinged_ts")
+        if dry_run or send_fn is None or (
+                pinged is not None and now - float(pinged) < reping):
+            # `send_fn is None` must NOT mark this pinged — nothing was
+            # delivered, so a later sweep still owes the user the alert
+            # (jobs 21/24's contract).
+            continue
+        shown = ", ".join("#%d" % n for n in missing[:CARD_MAX_LISTED])
+        more = ("" if len(missing) <= CARD_MAX_LISTED
+                else " a ďalších %d" % (len(missing) - CARD_MAX_LISTED))
+        status = send_fn(
+            "\U0001f4ee **%s** — %d hotových ticketov bez hlásenia\n"
+            "> Tieto tickety sa dokončili a zavreli, ale na telefón o nich "
+            "neprišla žiadna správa: %s%s.\n"
+            "> Práca je hotová — chýba len hlásenie o nej."
+            % (name, len(missing), shown, more),
+            owner=owner_by_sid.get(sid) or None,
+            dedup_key="card-unreported:%s:%d" % (name, int(now // reping)),
+            dry_run=dry_run)
+        logs.append("card-unreported PING %s -> %s" % (name, status))
+        seen[root] = {"pinged_ts": now, "n": len(missing)}
+
+    if not dry_run:
+        state["card_unreported"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # Job 20 — GOAL RE-ARM BACKSTOP (#76, 2026-07-26 live incident, montalu@subdev).
 #
 # An armed `/goal` dies SILENTLY. Not (only) on a restart, as #76 originally
@@ -6763,8 +6919,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
-             goal_templates_path=None, delivery_probe=None):
-    """Scan every `claude` pane once. 24 numbered jobs per poll — 19 LIVE and 5
+             goal_templates_path=None, delivery_probe=None, card_probe=None):
+    """Scan every `claude` pane once. 25 numbered jobs per poll — 20 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
@@ -6987,6 +7143,30 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           deduped ping per repo per day while it lasts, never a keystroke —
           what to do about a blocked merge is the user's call, and this
           module owns none of the repos it watches (delivery_stall_watch).
+      (25) (only when `card_probe` is given) CARD RECONCILIATION (#134) — the
+          MIRROR of job 24: that one fires when the base branch FROZE, this
+          one when the base branch MOVED and the reports did not. marek's
+          Discord thread got ZERO per-ticket completion cards for five days
+          while parovanie-produktov closed 97 issues / merged 80 PRs and
+          tvdole closed 6 / merged 5; the last marker for that repo is #192
+          at 2026-07-23 19:05 and tvdole has never produced one at all. The
+          mechanism was healthy throughout — the card is simply an action
+          with no artifact anyone checks, so workers drifted out of the
+          habit. The SubagentStop gate is the in-band half and restores a
+          REAL card, but it is structurally blind to a worker that DIED
+          mid-run (it never reaches SubagentStop) and to a delivery that
+          failed after the worker returned; both collapse to the observable
+          this job measures. Per repo hosting a live pane, purely LOCAL git:
+          the `Closes/Fixes/Resolves #N` carried by commits that landed on
+          the base branch inside `CARD_WINDOW_S`, against the DELIVERED card
+          markers (`notify.marker_delivered` — a marker is written BEFORE
+          the POST, so presence alone is a claim, never a delivery, #135).
+          The repo NAME comes from `origin`, never the directory basename:
+          the checkout is `parovanie_produktov` while every marker is keyed
+          `parovanie-produktov`. Confirmed before announced (job 24's
+          contract): the probe fetches the base ref, the measurement follows
+          it. DETECTION ONLY — one deduped ping per repo per day, never a
+          keystroke (card_reconcile).
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -7803,6 +7983,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                          project_by_sid=project_by_sid)
         except Exception as e:
             logs.append("delivery-stall error: %r" % (e,))
+
+    # Job 25 — CARD RECONCILIATION (#134): the mirror of job 24, same
+    # "wired = on" convention and the same confirm-then-announce contract.
+    # Detection only, no tmux round-trip (the cwd map came from the pane
+    # sweep above). Best-effort — a failure here must never cost a sweep.
+    if card_probe is not None:
+        try:
+            logs += card_reconcile(now, run, state, cwd_by_sid,
+                                   send_fn=send_fn, dry_run=dry_run,
+                                   card_probe=card_probe,
+                                   owner_by_sid=owner_by_sid)
+        except Exception as e:
+            logs.append("card-reconcile error: %r" % (e,))
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on

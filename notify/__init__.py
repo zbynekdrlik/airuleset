@@ -461,6 +461,122 @@ def marker_delivered(key):
     return parts[1] == "sent"
 
 
+# --- the autopilot worker's evidence block (#134) --------------------------
+# Two facts below come from reading 339 REAL evidence blocks (extracted from
+# 5,180 subagent transcripts), not from the template in
+# `agents/autopilot-worker.md` — a parser written against the template alone
+# is wrong on both:
+#
+#   * `merge_sha:` is frequently NOT a sha. Real values include
+#     "NOT MERGED — dispatch = STOP-at-green-PR (autorita FULL, ...)" and
+#     "STOPPED: DYNAX eshop in maintenance (HTTP 503) — hard blocker".
+#     Requiring the value to START with hex is what keeps every downstream
+#     check off a worker that correctly did not merge.
+#   * `issue_state:` mixes closed and open in one line, with or without the
+#     `=`, in either case, and its parentheticals mention OTHER issue
+#     numbers: "#109=closed (auto-closed by Closes #109 at 15:18:14Z on the
+#     #133 merge)". A scan for "any #N near the word closed" claims #133,
+#     which this worker never closed. The state word must sit directly
+#     against its own #N.
+# A merge is claimed when the value STARTS with a sha, or when a sha sits
+# right behind an issue number — the batch shape, which the corpus replay
+# caught the first rule missing on 6 real merges:
+#     merge_sha: #133 = 2223f12 (feature) ; #134 = 4d56813 (docs)
+#     merge_sha: #82 test:3c280b2[red]→fix:246dc57[green]; #81 …
+# Measured over all 339 blocks: 213/213 genuine merges detected, 0 false
+# positives. The rejected alternative scored identically but decided by the
+# ABSENCE of a negative-marker list ("NOT MERGED", "n/a", "STOPPED", …) —
+# safety resting on an enumeration, so a new phrasing that happened to carry
+# a sha would make the gate demand a card for a ticket that never merged.
+# Requiring a sha ATTACHED TO AN ISSUE NUMBER is positive evidence instead,
+# and needs no list to stay correct.
+_MERGE_SHA_LINE_RE = re.compile(r"^\s*merge_sha\s*:(.*)$", re.I | re.M)
+_SHA_HEAD_RE = re.compile(r"^\s*[0-9a-f]{7,40}(?![0-9a-z])")
+_SHA_PER_ISSUE_RE = re.compile(r"#\d+.{0,12}?\b[0-9a-f]{7,40}\b")
+_ISSUE_STATE_LINE_RE = re.compile(r"^\s*issue_state\s*:(.*)$", re.I | re.M)
+_CLOSED_RE = re.compile(r"#(\d+)\s*=?\s*(closed|open)\b", re.I)
+
+
+def parse_worker_evidence(text):
+    """What an autopilot worker's FINAL MESSAGE claims.
+
+    Returns `{"merged": bool, "closed": [int, ...]}` — the issues it says it
+    CLOSED via a real merge. Never raises; anything unrecognised yields the
+    inert answer, because every consumer of this treats "cannot tell" as
+    "say nothing" rather than as a finding."""
+    if not isinstance(text, str) or not text:
+        return {"merged": False, "closed": []}
+    merged = any(_SHA_HEAD_RE.match(m.group(1))
+                 or _SHA_PER_ISSUE_RE.search(m.group(1))
+                 for m in _MERGE_SHA_LINE_RE.finditer(text))
+    closed, seen = [], set()
+    for m in _ISSUE_STATE_LINE_RE.finditer(text):
+        for num, state in _CLOSED_RE.findall(m.group(1)):
+            if state.lower() != "closed":
+                continue
+            n = int(num)
+            if n not in seen:
+                seen.add(n)
+                closed.append(n)
+    return {"merged": merged, "closed": closed}
+
+
+def repo_name_for(cwd, run=None):
+    """The GitHub repo NAME for `cwd`, from its `origin` remote — never the
+    directory basename.
+
+    The live trap this exists for: marek's checkout is
+    `~/devel/forestshop/parovanie_produktov` (underscore) while every card
+    marker is keyed `parovanie-produktov` (hyphen), because
+    `_notify_run_card` keys on the `--repo` argument. A directory-derived key
+    matches nothing and would make every ticket look unreported.
+
+    Returns "" when it cannot be determined — unmeasurable, never a guess."""
+    import subprocess
+    argv = ["git", "-C", str(cwd), "remote", "get-url", "origin"]
+    try:
+        if run is not None:
+            out = run(argv)
+        else:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=6)
+            out = r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not out:
+        return ""
+    url = out.strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url.replace(":", "/").split("/")[-1]
+
+
+def newest_delivered_card(repo_name):
+    """mtime of the newest DELIVERED per-ticket card marker for `repo_name`,
+    or None. The marker key is `<repo-name>#<issue>` (`_notify_run_card`), so
+    the prefix scan is exact rather than a guess."""
+    if not repo_name:
+        return None
+    prefix = re.sub(r"[^A-Za-z0-9._#-]", "_", str(repo_name)) + "#"
+    d = _dedup_dir()
+    newest = None
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith(prefix) or not name[len(prefix):].isdigit():
+            continue
+        if not marker_delivered(name):
+            continue
+        try:
+            ts = os.path.getmtime(os.path.join(d, name))
+        except OSError:
+            continue
+        if newest is None or ts > newest:
+            newest = ts
+    return newest
+
+
 def _dedup_release(key):
     """Drop a claim so a FAILED send can be retried (a network error must not
     permanently suppress the user's requested card)."""

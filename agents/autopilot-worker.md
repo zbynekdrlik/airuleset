@@ -133,10 +133,19 @@ fails the #567 Money Gate even with hardened importer retries (#698 follow-up)"*
 `--achieved "Money Gate už pri krátkom výpadku tunela nepadá — spojenie sa samo obnoví"`.
 **`--version` is the deployed version you READ from the live
 dashboard DOM during post-deploy verification** (per `post-deploy-verification.md` / `version-on-dashboard.md`) — it is the card's 📦 line, the one fact the user wants ("which version went live?"). Always pass it; omit only if the project genuinely has no version label. (The PR number was removed from the card — do NOT bother passing `--pr`.) For a BATCH, fire one card per member after the shared PR merges (loop over the
-members with each member's own `--issue` + `--goal` + `--achieved`). It always exits 0 and is deduped on
-repo-name#issue — if it fails, IGNORE it and continue. Firing the card must NEVER delay or interrupt
+members with each member's own `--issue` + `--goal` + `--achieved`). It is deduped on
+repo-name#issue, so a re-dispatch cannot double-post. Firing the card must NEVER delay or interrupt
 the work or asking the user. The shared PR's body (`Closes #41`, `Closes #43`, `Closes #47`) closes
 every member on merge.
+**THE CARD IS ENFORCED, NOT ADVISORY (#134).** It used to say "if it fails, IGNORE it and continue",
+and workers drifted out of the habit entirely: ~85 merged PRs and ~103 closed issues over five days
+produced ZERO reports on the user's phone, because nothing checked. Now three things do.
+(1) `notify --run-card` **exits non-zero when Discord never received the card** — a failure is no
+longer silent, so do not treat a failed card as done. (2) A **SubagentStop gate**
+(`hooks/subagent-stop-check-run-card.sh`) blocks your stop once per issue if you claim a real
+`merge_sha` and `issue_state: #N=closed` with no DELIVERED card for `#N`. (3) A watchdog job
+reconciles merged-but-unreported tickets independently, so a card you skip surfaces on the user's
+phone as a gap with your ticket number on it. Fire the card, then put it on the `cards_fired:` line.
 
 ## READ FIRST (durable context — never skip)
 
@@ -284,6 +293,7 @@ pr: #<M> <url>  (body Closes #A #B …)
 merge_sha: <sha | "NOT MERGED (manual marker)" | "STOPPED: <reason>">
 main_ci: <run-id> <conclusion>
 deployed_version: <string read from DOM | "no deploy pipeline">
+cards_fired: <#A ✓, #B ✓ — one `notify --run-card` per merged member, each CONFIRMED delivered (the command exits non-zero if Discord never got it). NEVER omit this line: a merged ticket with no delivered card is a ticket the user never hears about, which is exactly the five-day silence of #134.>
 issue_state: <#A=closed, #B=closed, … (each member)>
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">

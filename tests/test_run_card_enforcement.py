@@ -162,6 +162,30 @@ class TestWorkerEvidenceParser(unittest.TestCase):
         self.assertTrue(r["merged"])
         self.assertEqual(r["closed"], [5])
 
+    def test_a_batch_that_lists_one_sha_PER_ISSUE_is_a_merge(self):
+        # Found by the corpus replay, not by reading the template: 6 real
+        # merges write the shas per issue instead of one merge commit, and
+        # the first rule (sha must START the value) missed every one.
+        r = self.p("merge_sha: #133 = 2223f12 (feature, v0.51.0) ; "
+                   "#134 = 4d56813 (docs, v0.52.0)\n"
+                   "issue_state: #133=closed, #134=closed")
+        self.assertTrue(r["merged"])
+        self.assertEqual(r["closed"], [133, 134])
+
+    def test_a_batch_with_red_green_shas_per_issue_is_a_merge(self):
+        r = self.p("merge_sha: #82 test:3c280b2[red]→fix:246dc57[green]; "
+                   "#81 test:0b34762[red]→feat:6a733ce[green]\n"
+                   "issue_state: #82=closed")
+        self.assertTrue(r["merged"])
+
+    def test_a_refusal_that_merely_MENTIONS_issue_numbers_is_not_a_merge(self):
+        # The shape the widening had to stay off: a NOT-MERGED value dense
+        # with issue references, none of them carrying a sha.
+        r = self.p("merge_sha: NOT MERGED — required Full-path E2E gate still "
+                   "red on unrelated pre-existing blockers "
+                   "(#707/#689/#726/#741)\nissue_state: #740=closed")
+        self.assertFalse(r["merged"])
+
     def test_a_message_with_neither_field_is_inert(self):
         r = self.p("⏳ WORKING: monitoring CI run 123")
         self.assertFalse(r["merged"])
@@ -377,7 +401,7 @@ class TestCardReconcile(unittest.TestCase):
         _git(r, "remote", "set-head", "origin", base)
         return r
 
-    def run(self, cwds, **kw):
+    def reconcile(self, cwds, **kw):
         kw.setdefault("card_probe", lambda root, base: None)
         kw.setdefault("marker_ok", lambda key: key in self.delivered)
         kw.setdefault("send_fn", self.send)
@@ -387,7 +411,7 @@ class TestCardReconcile(unittest.TestCase):
 
     def test_an_unreported_merged_ticket_pings(self):
         r = self.repo(closes=(3, 4))
-        logs = self.run([r])
+        logs = self.reconcile([r])
         self.assertTrue(self.sent, logs)
         self.assertIn("#3", self.sent[0]["msg"])
         self.assertIn("#4", self.sent[0]["msg"])
@@ -395,44 +419,44 @@ class TestCardReconcile(unittest.TestCase):
     def test_a_reported_ticket_is_silent(self):
         r = self.repo(closes=(3,))
         self.delivered.add("proj#3")
-        self.run([r])
+        self.reconcile([r])
         self.assertEqual(self.sent, [])
 
     def test_a_claimed_but_undelivered_card_still_counts_as_unreported(self):
         r = self.repo(closes=(3,))
         # marker_ok is `notify.marker_delivered` in production; an 'error'
         # marker reads False, so the ticket is still unreported.
-        self.run([r])
+        self.reconcile([r])
         self.assertTrue(self.sent)
 
     def test_a_merge_older_than_the_window_is_ignored(self):
         r = self.repo(closes=(3,), age=10 * DAY)
-        self.run([r])
+        self.reconcile([r])
         self.assertEqual(self.sent, [],
                          "an old merge is history, not an actionable gap")
 
     def test_a_repo_with_no_closing_merges_is_silent(self):
         r = self.repo(closes=())
-        self.run([r])
+        self.reconcile([r])
         self.assertEqual(self.sent, [])
 
     def test_a_non_git_cwd_is_silent(self):
         d = self.tmp / "plain"
         d.mkdir()
-        self.run([d])
+        self.reconcile([d])
         self.assertEqual(self.sent, [])
 
     def test_the_ping_is_deduped_per_repo_per_window(self):
         r = self.repo(closes=(3,))
-        self.run([r])
-        self.run([r])
+        self.reconcile([r])
+        self.reconcile([r])
         self.assertEqual(len(self.sent), 1,
                          "a daily reminder, not one per 60s sweep")
 
     def test_detection_is_logged_every_sweep_even_when_the_ping_is_deduped(self):
         r = self.repo(closes=(3,))
-        self.run([r])
-        logs = self.run([r])
+        self.reconcile([r])
+        logs = self.reconcile([r])
         self.assertTrue(any("card-unreported" in ln for ln in logs), logs)
 
     def test_it_is_off_unless_the_probe_is_wired(self):
@@ -445,19 +469,19 @@ class TestCardReconcile(unittest.TestCase):
 
     def test_one_repo_is_examined_once_however_many_panes_sit_in_it(self):
         r = self.repo(closes=(3,))
-        self.run([r, r, r])
+        self.reconcile([r, r, r])
         self.assertEqual(len(self.sent), 1)
 
     def test_a_missing_send_fn_never_marks_it_pinged(self):
         r = self.repo(closes=(3,))
-        self.run([r], send_fn=None)
-        self.run([r])
+        self.reconcile([r], send_fn=None)
+        self.reconcile([r])
         self.assertEqual(len(self.sent), 1,
                          "nothing was delivered, so the user is still owed it")
 
     def test_dry_run_delivers_nothing_and_records_nothing(self):
         r = self.repo(closes=(3,))
-        self.run([r], dry_run=True)
+        self.reconcile([r], dry_run=True)
         self.assertEqual(self.sent, [])
         self.assertEqual(self.state.get("card_unreported"), None)
 

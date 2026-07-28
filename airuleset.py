@@ -1922,6 +1922,26 @@ def cmd_notify(args):
         sys.stdout.write(" ".join(mirror_owners()))
         return
 
+    if getattr(args, "repo_name", False):
+        # The GitHub repo NAME for a cwd, from its `origin` remote — never the
+        # directory basename (marek's checkout is `parovanie_produktov` while
+        # every marker is keyed `parovanie-produktov`). Used by
+        # notify-discord-pending.sh's delivery-conditional suppression (#134).
+        from notify import repo_name_for
+        sys.stdout.write(repo_name_for(getattr(args, "cwd", "") or "."))
+        return
+
+    if getattr(args, "newest_card", False):
+        # mtime of the newest DELIVERED card marker for a repo, or nothing.
+        # "Delivered", not "claimed" — the marker is written before the POST
+        # (#135), so presence alone would let a FAILED card suppress the
+        # fallback ping, which is precisely the hole being closed.
+        from notify import newest_delivered_card
+        ts = newest_delivered_card(getattr(args, "repo", "") or "")
+        if ts is not None:
+            sys.stdout.write(repr(ts))
+        return
+
     if getattr(args, "run_card", False):
         _notify_run_card(args, compose_autopilot_card, send)
         return
@@ -2538,6 +2558,33 @@ def _watchdog_gkreq_fetch(root):
     return _fetch_gkreq_tickets(root)
 
 
+def _watchdog_card_probe(root, base):
+    """Job 25's confirming fetch (#134).
+
+    Wired HERE, like jobs 8/11/16/24, so run_once's unit tests stay
+    network-free. Job 25 measures which issues a merge on the base branch
+    closed, so a base ref that has merely gone stale in the local checkout
+    would under-report — the opposite of job 24's failure mode, and the
+    reason the same fetch is required before the measurement rather than
+    after it. Writes ONLY the remote-tracking ref; every repo this touches
+    belongs to somebody else. No `gh` half at all: the `Closes #N` in the
+    merge commit is the whole fact this job needs, for free.
+    """
+    import subprocess
+    remote, _, branch = (base or "origin/main").partition("/")
+    try:
+        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                        remote or "origin", branch or "main"],
+                       capture_output=True, timeout=90)
+    except Exception as e:
+        # Degrade to the local-only read rather than going quiet: an
+        # unreported ticket the user never hears about is the failure this
+        # job exists to prevent, and the worst case of a stale base ref is
+        # that the ping arrives a sweep later.
+        return {"fetch_error": repr(e)}
+    return None
+
+
 def _watchdog_delivery_probe(root, base):
     """Job 24's confirming fetch + best-effort blocker lookup (#138).
 
@@ -2651,6 +2698,11 @@ def cmd_watchdog(args):
                     # coordinator-only one, and the box that hosts the loop
                     # is the one holding the checkout it has to read.
                     delivery_probe=_watchdog_delivery_probe,
+                    # Job 25 (#134) runs on EVERY managed box for the same
+                    # reason: a ticket that merged without a report is a
+                    # per-repo failure, and the box hosting the loop holds
+                    # the checkout that proves it.
+                    card_probe=_watchdog_card_probe,
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
@@ -3551,6 +3603,16 @@ def main():
                           help="Send a per-ticket card (requires --repo + --issue), "
                                "gathering goal/progress from gh — fired by the "
                                "autopilot worker directly at merge")
+    p_notify.add_argument("--repo-name", dest="repo_name", action="store_true",
+                          help="Print the GitHub repo NAME for --cwd, from its "
+                               "origin remote (never the directory basename)")
+    p_notify.add_argument("--newest-card", dest="newest_card",
+                          action="store_true",
+                          help="Print the mtime of the newest DELIVERED "
+                               "per-ticket card marker for --repo")
+    # NOTE: `--cwd` already exists further down (--record-question) and is
+    # reused by --repo-name; re-declaring it raises ArgumentError at import
+    # and breaks EVERY `notify` subcommand.
     p_notify.add_argument("--api-error", dest="api_error", action="store_true",
                           help="Ping IF --text is a real Claude Code API error "
                                "(used by the notify-api-error.sh Stop hook)")

@@ -971,16 +971,24 @@ class TestDiscordNotifyHooks(TestCase):
 
 
 class TestGoalArmedSuppressesIdlePing(TestCase):
-    """Per-ticket ✅ DONE inside an autopilot loop must NOT queue a SECOND
-    idle Discord ping while the `/goal` loop stays ARMED — the sanctioned
-    per-ticket run-card already gives phone visibility for that ticket, and a
-    second idle ping per ticket is exactly the per-phase noise the user
-    removed (milestone-notifications.md, 2026-07-25 revision). Detected via
-    the SAME `◎ /goal` signal the watchdog's own goal jobs key on
-    (`_safe_to_bounce_nudge` / `goal_autoarm`, watchdog/__init__.py) —
-    captured from THIS session's own tmux pane (`$TMUX_PANE`), never a
-    second, invented detector. Only the ROUTINE ✅ ping is goal-guarded — a
-    genuine ❓ question is untouched and always pings."""
+    """A per-ticket ✅ DONE must not queue a SECOND idle Discord ping when the
+    sanctioned per-ticket run-card ALREADY gave phone visibility for that
+    ticket — that second ping is the per-phase noise the user removed
+    (milestone-notifications.md, 2026-07-25 revision). An armed `/goal` is
+    detected via the SAME `◎ /goal` signal the watchdog's own goal jobs key
+    on (`_safe_to_bounce_nudge` / `goal_autoarm`), captured from THIS
+    session's own pane — never a second, invented detector. Only the ROUTINE
+    ✅ is guarded; a genuine ❓ question always pings.
+
+    #134 CORRECTED THE CONDITION and these tests were rewritten with it. The
+    armed goal alone is NOT sufficient: nothing enforced the card it defers
+    to, and when workers drifted out of firing it the suppression removed the
+    only remaining signal — five days, ~85 merged PRs, zero reports. A ✅ is
+    now dropped only when a card was actually DELIVERED for this repo since
+    the previous ✅ boundary. The delivery-conditional behaviour is covered in
+    full by `tests/test_run_card_enforcement.py`
+    (TestSuppressionIsConditionalOnDelivery); what remains here is the arm
+    that never changed — no armed goal, always ping — plus the ❓ carve-out."""
 
     PENDING = airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh"
     _n = 0
@@ -1002,13 +1010,18 @@ class TestGoalArmedSuppressesIdlePing(TestCase):
         return subprocess.run(["bash", str(self.PENDING)], input=payload, text=True,
                               capture_output=True, env=env)
 
-    def test_armed_goal_suppresses_the_pending_ping(self):
+    def test_armed_goal_alone_no_longer_suppresses_the_pending_ping(self):
+        # Was `test_armed_goal_suppresses_the_pending_ping`, asserting the
+        # premise #134 identifies as the design error. With no resolvable
+        # repo (cwd="") delivery cannot be PROVEN, and an unprovable
+        # suppression is what produced five days of silence — so the ping
+        # goes through. The suppress-when-delivered arm lives in
+        # test_run_card_enforcement.py against a real repo + real marker.
         sid, p = self._sid()
         self._stop(sid, "## ✅ Work Complete\n\n✅ DONE: #42 zmergnuté -> v1.2.3",
                    pane_capture="◎ /goal   ctx 50K\n")
-        self.assertFalse(os.path.exists(p),
-                         "a per-ticket ✅ DONE with an ARMED goal must not "
-                         "queue an idle ping — the run-card already covers it")
+        self.assertTrue(os.path.exists(p),
+                        "an armed goal is not evidence a card was delivered")
 
     def test_no_armed_goal_still_queues_the_ping(self):
         sid, p = self._sid()
@@ -3738,6 +3751,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # autopilot_done) MUST be pinned False here — a new flag left unpinned hijacks
         # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
                       record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
@@ -3787,6 +3801,7 @@ class TestDiscordAutopilotNotify(TestCase):
 
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
                           record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
