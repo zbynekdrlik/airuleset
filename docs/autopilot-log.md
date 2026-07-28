@@ -1010,3 +1010,28 @@ Also re-verified #116 independently against the same live endpoint (real
 browser drop + 18 hostile names over a raw socket): every claim holds, nothing
 escaped `DEST`, `$HOME`/`/tmp`/DEST's parent all gained zero entries. Evidence
 on #116.
+
+## 2026-07-28 — #118 repeated foreground CI poll loops (hook, not prose)
+
+`d2fa59b` [red] → `190e425` [green] → `c47c7ce` [red] → `173801e` [green,
+Closes #118]. New `hooks/block-ci-poll-repeat.sh` (PreToolUse/Bash): the FIRST
+foreground CI poll loop per (session, run-id) stays free, every repeat is
+hard-blocked with the ready-to-paste background waiter, run-id substituted; in
+subagent context the message carries ONLY the hand-back branch and never
+`run_in_background`, because a subagent that backgrounds a wait terminates.
+Detector reused verbatim from #111, gated by a CI-wait signature. One sentence
+appended to `ci-monitoring.md`'s foreground bullet — no rewrite (#107/#110
+were the two that already failed).
+
+Corpus replay through the real hook, 8,079 transcript files (recursive — a
+`projects/*/*.jsonl` glob sees ~94), 250,201 Bash commands: **940 blocked
+(0.38%)**, worth **89.0 measured hours** of foreground wall-clock, median poll
+375 s, 56% over 5 minutes. Zero first loops, zero non-CI wait loops (2,754),
+zero background waiters (1,903), zero of 4,394 diagnostic `gh run view` calls,
+and zero of a 4,000-command fresh-session sample were blocked. Characterising
+the blocked set item by item — not the delta count — is what found the three
+wrong-block classes (compound `gh pr merge && wait`, generic short
+appear-loops, and `gh run view`-density catching post-mortems); each became its
+own RED→GREEN pair. Verified live end-to-end through the real harness on this
+box: loop 1 ran, loop 2 blocked with the subagent branch, single status check
+still allowed.
