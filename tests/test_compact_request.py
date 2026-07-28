@@ -2788,7 +2788,7 @@ class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
         # "widen until something appears" — the other wrong fix. The live-task
         # gate is neutralised, so a deferral is reported as a boundary.
         mut = self._mutant(lambda s: s.replace(
-            '[ "$OTHERS" = "0" ] || exit 0', 'OTHERS=0', 1))
+            '[ "$OTHERS" = "0" ] ||', 'true ||', 1))
         (_, home), probe = self._probe(mut, sid="sup-t2", agent_id="agt-t2",
                                        tasks="sibling")
         with self.assertRaises(AssertionError):

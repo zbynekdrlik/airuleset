@@ -59,6 +59,48 @@ set -euo pipefail
 # Silent + non-blocking: never writes to stdout, always exits 0 — a
 # SubagentStop hook that emitted anything could interfere with the worker's
 # own stop decision (subagent-stop-check-bg-work.sh owns that).
+#
+# ---------------------------------------------------------------------------
+# THE DECISION LOG (#123, 2026-07-28) — why a silent guard had to grow one.
+#
+# As shipped by #121 this hook wrote NOTHING on a decline, and its only
+# success artefact — an entry in `compact-requests.json` — is DELETED again
+# the instant `deliver_compact_now` succeeds. So three completely different
+# states produced one identical observation: the hook never ran, the hook ran
+# and declined, or the hook ran, fired and delivered perfectly. A guard whose
+# correct operation is indistinguishable from its total absence can only be
+# checked in replay, never in the field — which is exactly the failure class
+# #121 itself was filed to fix.
+#
+# (For the record, "never ran" was never the answer: a hook added to
+# settings.json mid-session DOES take effect in that already-running session
+# — proven live on 2026-07-28 by appending a capture hook to this very
+# SubagentStop block at 09:54:58 and catching a subagent's stop at 09:55:08,
+# in a session started 36 h earlier. No operator restart is needed for #121.)
+#
+# Every decision now appends ONE line naming the predicate that failed:
+#   <iso8601> RECORD  result=<recorded|delivered|dup|skip|error> type=… agent=… sid=… cwd=…
+#   <iso8601> DECLINE reason=<predicate> [n=<live>] type=… agent=… sid=… cwd=…
+# `result=` is the word `cmd_compact_request` already printed and this hook
+# used to discard with `>/dev/null 2>&1` — an accepted boundary that was then
+# dropped downstream used to be untraceable from here too.
+#
+# BOUNDED, because an unbounded log on every SubagentStop of every session is
+# a new problem, not a fix. The two populations differ by orders of magnitude:
+# SubagentStop fires once per parallel tool-call branch as well as per
+# dispatched subagent (live-captured: four `agent_type: ""` payloads inside
+# three minutes), so `not-autopilot-worker` runs to thousands a day while the
+# decisions this ticket cares about run to a few dozen. Therefore every
+# `autopilot-worker` decision is logged unconditionally, and the non-worker
+# class is a THROTTLED heartbeat — at most one line per minute, gated on the
+# mtime of a marker file, so liveness stays provable without flushing the
+# signal away. A `stat`-size check rotates the log to `.log.1` at 512 KB
+# (ceiling ≈ 1 MB, two generations, no cron).
+#
+# Logging is diagnostics: every write is `|| true`-guarded so a read-only
+# $HOME can never turn it into a blocked subagent stop. The ACCEPT CONDITION
+# is untouched by all of this — only observability changed.
+# ---------------------------------------------------------------------------
 
 command -v jq &>/dev/null || exit 0
 command -v python3 &>/dev/null || exit 0
@@ -66,29 +108,86 @@ command -v python3 &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 [ -n "$INPUT" ] || exit 0
 
+DECISION_LOG="$HOME/.claude/compact-decisions.log"
+DECISION_HB="$HOME/.claude/.compact-decisions-hb"
+DECISION_CAP=512000
+DECISION_THROTTLE_S=60
+
+# `_decide_log <OUTCOME> [extra k=v tokens]` — one line, never fatal.
+_decide_log() {
+    local outcome="$1"
+    local extra="${2:-}"
+    local size
+    mkdir -p "$(dirname "$DECISION_LOG")" 2>/dev/null || true
+    size=$(stat -c %s "$DECISION_LOG" 2>/dev/null || echo 0)
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    if [ "$size" -gt "$DECISION_CAP" ]; then
+        mv -f "$DECISION_LOG" "$DECISION_LOG.1" 2>/dev/null || true
+    fi
+    {
+        printf '%s %s %stype=%s agent=%s sid=%s cwd=%s\n' \
+            "$(date -Iseconds 2>/dev/null || echo '?')" "$outcome" \
+            "${extra:+$extra }" "${AGENT_TYPE:--}" "${AGENT_ID:--}" \
+            "${SID:--}" "${CWD_LOG:--}" >>"$DECISION_LOG"
+    } 2>/dev/null || true
+}
+
+# The high-volume class: keep it provable, keep it cheap. O(1) — one `stat`,
+# no read-modify-write, so concurrent stops cannot corrupt anything (the worst
+# case is two heartbeats in the same second, which is harmless).
+_decide_log_throttled() {
+    local now hb
+    now=$(date +%s 2>/dev/null || echo 0)
+    hb=$(stat -c %Y "$DECISION_HB" 2>/dev/null || echo 0)
+    case "$hb" in ''|*[!0-9]*) hb=0 ;; esac
+    if [ "$((now - hb))" -lt "$DECISION_THROTTLE_S" ]; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$DECISION_HB")" 2>/dev/null || true
+    touch "$DECISION_HB" 2>/dev/null || true
+    _decide_log "$@"
+}
+
 _field() {
     printf '%s' "$INPUT" | jq -r "$1" 2>/dev/null || echo ""
 }
 
 AGENT_TYPE=$(_field '.agent_type // empty')
-[ "$AGENT_TYPE" = "autopilot-worker" ] || exit 0
-
 SID=$(_field '.session_id // empty')
-[ -n "$SID" ] || exit 0
-
 # the RAW agent_id — it must match what the payload's background_tasks self
 # entry carries, so it is never sanitized here (unlike the /tmp path copies
 # subagent-stop-check-bg-work.sh builds)
 AGENT_ID=$(_field '.agent_id // empty')
-[ -n "$AGENT_ID" ] || exit 0
+CWD=$(_field '.cwd // empty')
+# the log is whitespace-delimited, so only the logged COPY is squeezed
+CWD_LOG=${CWD// /_}
+
+[ "$AGENT_TYPE" = "autopilot-worker" ] || {
+    _decide_log_throttled DECLINE "reason=not-autopilot-worker"
+    exit 0
+}
+
+[ -n "$SID" ] || { _decide_log DECLINE "reason=no-session-id"; exit 0; }
+[ -n "$AGENT_ID" ] || { _decide_log DECLINE "reason=no-agent-id"; exit 0; }
 
 # Absent field ⇒ unprovable ⇒ never compact (see the header). It must be an
 # actual ARRAY, not merely PRESENT: `has("background_tasks")` is true for an
 # explicit `null`, and iterating null (or any non-array) yields nothing, which
 # would read as "zero live workers" and fire the compact on a payload that
-# proved nothing at all.
+# proved nothing at all. `type` alone cannot tell an absent field from an
+# explicit null (both report "null"), and those are different diagnoses — the
+# first means an older Claude Code, the second a malformed payload — so the
+# reason is built from `has()` as well.
+BG_HAS=$(printf '%s' "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo "false")
 BG_TYPE=$(printf '%s' "$INPUT" | jq -r '.background_tasks | type' 2>/dev/null || echo "null")
-[ "$BG_TYPE" = "array" ] || exit 0
+if [ "$BG_TYPE" != "array" ]; then
+    if [ "$BG_HAS" = "true" ]; then
+        _decide_log DECLINE "reason=registry-$BG_TYPE"
+    else
+        _decide_log DECLINE "reason=registry-absent"
+    fi
+    exit 0
+fi
 
 # Every entry that is not the self entry counts as live, whatever its status
 # or type — the harness has already filtered the array to in-flight work. An
@@ -97,9 +196,10 @@ BG_TYPE=$(printf '%s' "$INPUT" | jq -r '.background_tasks | type' 2>/dev/null ||
 OTHERS=$(printf '%s' "$INPUT" | jq -r --arg a "$AGENT_ID" \
     '[.background_tasks[]? | select(((.id // "") | tostring) != $a)] | length' \
     2>/dev/null || echo "1")
-[ "$OTHERS" = "0" ] || exit 0
-
-CWD=$(_field '.cwd // empty')
+[ "$OTHERS" = "0" ] || {
+    _decide_log DECLINE "reason=live-tasks n=$OTHERS"
+    exit 0
+}
 
 # #71 dedup key = this worker, so a repeat SubagentStop for the SAME worker is
 # a no-op. Never let a failing sha256sum kill this `set -e` script (the repo's
@@ -108,7 +208,13 @@ MSG_HASH=$(printf 'subagent:%s' "$AGENT_ID" | sha256sum 2>/dev/null | cut -d' ' 
     || MSG_HASH=""
 
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
-python3 "$AIRULESET_PY" compact-request --record --session "$SID" --cwd "$CWD" \
-    --msg-hash "$MSG_HASH" --origin "subagent-stop" >/dev/null 2>&1 || true
+RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" \
+    --cwd "$CWD" --msg-hash "$MSG_HASH" --origin "subagent-stop" 2>/dev/null) \
+    || RESULT=""
+case "$RESULT" in
+    recorded|delivered|dup|skip) ;;
+    *) RESULT="error" ;;
+esac
+_decide_log RECORD "result=$RESULT"
 
 exit 0
