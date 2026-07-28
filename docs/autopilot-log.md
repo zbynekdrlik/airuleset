@@ -1058,3 +1058,54 @@ after. Suite verified to REJECT both tempting wrong fixes: dropping the `⏳` ve
 for everyone (2 failures) and recording on every SubagentStop (6 failures).
 Tests: `TestCompactSubagentBoundaryHook`, `TestWorkingMarkerNoLongerVetoesAProvenBoundary`,
 `TestProvenBoundaryOriginIsStored`, `TestSupervisorStopVetoIsNoLongerTheOnlyChannel`.
+
+## #123 — the boundary hook's decision log (2026-07-28)
+
+`e4806f6` [red] → `1376c1c` [green]. #121 shipped a hook that was silent on
+decline, and whose only success artefact is DELETED again when
+`deliver_compact_now` succeeds — so "never ran", "ran and declined" and "ran,
+fired and delivered" produced one identical observation.
+
+Q1 settled EMPIRICALLY first, before any code: a hook added to `settings.json`
+mid-session **does** take effect in that already-running session. Probe P (a new
+hook entry appended to `~/.claude/settings.json`) fired on 2/2 subsequent Bash
+calls in a session started 36 h earlier, with control C (a new line inside an
+already-registered hook script) firing 3/3 to prove the event itself fires;
+probe S repeated it on `SubagentStop` itself, catching a subagent's stop 10 s
+after the hook was appended — which also captured this repo's first real
+SubagentStop payload. So #121 was never inert and needs no operator restart.
+The deployed log then confirmed it in the field, carrying lines from three
+long-running sessions including the forestshop one whose drought motivated #121.
+
+Every decision now appends one line naming the failed predicate
+(`not-autopilot-worker` / `no-session-id` / `no-agent-id` / `registry-absent` /
+`registry-<type>` / `live-tasks n=N`), and an accept records the outcome word
+the hook used to discard with `>/dev/null 2>&1`. `type` alone cannot separate an
+absent registry from an explicit null (both report `"null"`), so `has()` is
+consulted too — different diagnoses. Bounded because SubagentStop fires once per
+parallel tool-call branch as well as per dispatched subagent: worker decisions
+unconditional, the non-worker class a ≤1/min heartbeat gated on a marker mtime,
+log rotated at 512 KB.
+
+Both outcomes observed live 8 s apart: `DECLINE reason=live-tasks n=1` on a real
+`autopilot-worker` probe (deferring to this worker), and `RECORD
+result=delivered` on an unrelated camera-box ticket boundary — the first field
+evidence that #121's mechanism fires at all.
+
+Corpus replay reused #121's reconstruction method, extended to background shells
+and non-worker subagents (#121 tracked only `autopilot-worker` launches, so its
+outstanding set was a strict subset of reality): 8,098 transcripts → 9,892
+reconstructed completions → 4/4 fire at zero outstanding, 0/604 with work in
+flight, 0/9,284 on other types, 0 mismatches, 0 stdout. It deliberately does NOT
+claim a field accept RATE: 33.8% of registry ids never complete, and the raw vs
+de-leaked bracket is 0.7%–94.1%.
+
+`TestDecisionLogAssertionsHaveTeeth` mutates the real shipped script into the two
+wrong fixes the ticket names (log unconditionally / widen the accept) plus a
+strip-the-logging mutant, and asserts the checkers reject all three.
+
+Filed #125: `result=delivered` also covers a downstream `DROP` (the camera-box
+accept pairs with `DROP no-work` in `compact-sync.log`) — not fixed here because
+it changes a CLI contract shared with the Stop-hook channel.
+
+Tests: `TestCompactBoundaryDecisionLog`, `TestDecisionLogAssertionsHaveTeeth`.
