@@ -156,6 +156,28 @@ class TestDeliveryStallWatch(_Base):
         self.watch([r])
         self.assertEqual(self.sent, [])
 
+    def test_a_base_branch_dead_for_years_is_not_a_delivery_target(self):
+        """`~/varos/eft5000`, found by the LIVE watchdog within six minutes of
+        job 24 going up — and missed by a 29-repo replay that only walked
+        `~/devel`. It is a GitLab repo whose `origin/master` last moved on
+        2019-09-07 while real delivery goes to `develop-50` (which took a
+        merge that same day). "3,248 commits undelivered to a branch nobody
+        has merged into for 6.9 years" is not a stalled loop; that branch is
+        not a delivery target at all, and no bound on the LOWER end can tell
+        the two apart."""
+        r = self.repo(name="eft5000", base_ts=NOW - 2515 * DAY,
+                      work_ts=NOW - 600, undelivered=12)
+        self.watch([r])
+        self.assertEqual(self.sent, [])
+
+    def test_a_stall_just_inside_the_liveness_bound_still_fires(self):
+        """The upper bound must not swallow a real stall. It costs nothing
+        either: a genuine one has already pinged every day on the way there."""
+        r = self.repo(base_ts=NOW - (wd.DELIVERY_STALL_MAX_S - DAY),
+                      work_ts=NOW - 600, undelivered=12)
+        self.watch([r])
+        self.assertEqual(len(self.sent), 1)
+
     def test_an_unmeasurable_repo_is_silent(self):
         d = self.tmp / "plain"
         d.mkdir()
