@@ -2289,6 +2289,10 @@ class TestCompactSubagentBoundaryHook(unittest.TestCase):
         elif tasks == "shell":
             payload["background_tasks"] = [
                 me, {"id": "bash-9", "type": "shell", "status": "running"}]
+        elif tasks == "null":
+            payload["background_tasks"] = None
+        elif tasks == "malformed":
+            payload["background_tasks"] = "notalist"
         # "absent" — no background_tasks key at all
         env = {**os.environ, "HOME": home}
         r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
@@ -2333,6 +2337,21 @@ class TestCompactSubagentBoundaryHook(unittest.TestCase):
         # cannot PROVE nothing is live -> never compact (same fail-direction
         # subagent-stop-check-bg-work.sh uses, so the two gates cannot disagree)
         r, reqfile = self._run(sid="sup-f", tasks="absent")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_a_null_background_tasks_field_can_never_prove_zero(self):
+        # `has("background_tasks")` is TRUE for an explicit null, and an
+        # iteration over null yields nothing — which reads as "zero live
+        # workers" and fires. It is not evidence of anything.
+        r, reqfile = self._run(sid="sup-null", tasks="null")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
+
+    def test_a_malformed_background_tasks_field_can_never_prove_zero(self):
+        # same shape: iterating a non-array yields nothing, so a corrupt or
+        # unexpected payload would silently read as a boundary
+        r, reqfile = self._run(sid="sup-bad", tasks="malformed")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(reqfile.exists())
 
