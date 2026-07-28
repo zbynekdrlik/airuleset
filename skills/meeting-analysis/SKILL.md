@@ -79,10 +79,14 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 - The advertised `IP` must be the address the remote user's VPN actually routes to dev1 (they
   may reach it on a Tailscale/other IP, not 100.104.8.125). A local 200 does NOT prove the user can
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
-- After the user drops the file, read the real saved path (the filename is sanitized — spaces /
-  accents / parens become `_`, so you cannot guess it): `grep SAVED ~/.claude/upload-logs/upload-<port>.log` →
-  `$HOME/uploads/acme-call/<sanitized-name>`. Confirm the byte count matches the user's
-  file size, then stop the server: `kill <PID>`.
+- After the user drops the file, read the real saved path out of the endpoint's own log:
+  `grep SAVED ~/.claude/upload-logs/upload-<port>.log` → `$HOME/uploads/acme-call/<saved-name>`.
+  The name is PRESERVED, not stripped (#116): Slovak diacritics, spaces and parentheses all
+  survive, so `nahrávka test (1).mp4` lands under exactly that name. Only characters that
+  cannot safely be a filename (path separators, control characters, format characters) become
+  `_`, and an absurdly long name is clipped to 200 bytes with its extension kept. Still read
+  the SAVED line rather than guessing — and always QUOTE the path, since it can contain spaces.
+  Confirm the byte count matches the user's file size, then stop the server: `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.
 
 ## Phase 1 — Extract the three channels (dev1, ffmpeg)
@@ -91,7 +95,8 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 SKILL=$HOME/devel/airuleset/skills/meeting-analysis
 WORK=$HOME/uploads/acme-call/work
 ls -la "$(dirname "$WORK")"                          # resolve the real uploaded filename
-VIDEO=$HOME/uploads/acme-call/<sanitized-name>   # from the ls above / upload.log
+VIDEO="$HOME/uploads/acme-call/<saved-name>"   # from the ls above / the SAVED log line
+                                               # QUOTED: the real name keeps its spaces (#116)
 bash "$SKILL/scripts/extract.sh" "$VIDEO" "$WORK"
 ```
 

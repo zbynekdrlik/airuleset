@@ -16,7 +16,12 @@ Usage:
                             sends one PUT per file, sequentially)
   PUT  /<token>/<name>   -> streams the bytes to <dest_dir>/<name> (each PUT
                             is its own independent request/save/log line —
-                            one file failing never affects another)
+                            one file failing never affects another). <name> is
+                            percent-ENCODED by the page and decoded here by
+                            safe_name(), which keeps the real name (diacritics,
+                            spaces, parentheses) and replaces only what cannot
+                            safely be a filename. The TOKEN segment is never
+                            decoded — it is the only auth this endpoint has.
 
 <bind_ips_csv> is a comma-separated list of the PRIVATE addresses to listen on
 (tailscale + LAN — filedrop.bind_ips()), so the user reaches the endpoint whether
@@ -29,10 +34,11 @@ Print the URL(s) to the user; they open one and drop the file. Verify the saved
 size matches before proceeding.
 """
 import os
-import re
 import sys
 import threading
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 if len(sys.argv) < 5:
     sys.exit("usage: upload_server.py <token> <port> <bind_ips_csv> <dest_dir> [ttl_seconds]")
@@ -59,7 +65,68 @@ if TTL > 0:
     _ttl_timer.daemon = True
     _ttl_timer.start()
 
-_SAFE = re.compile(r"[^A-Za-z0-9._-]")
+# The served PAGE sends `encodeURIComponent(file.name)` — it has to, because a
+# raw filename cannot go into an HTTP request line at all (a space terminates
+# the target, `#` truncates the path, `?` starts a query). So the SERVER is what
+# must decode, and #116 is what happened while it did not: `%` fell outside the
+# old `[^A-Za-z0-9._-]` sanitizer's class, so every escape survived with its `%`
+# turned into `_` and a dropped `nahrávka test (1).bin` landed as
+# `nahr_C3_A1vka_20test_20_1_.bin`.
+#
+# Decoding is also what makes this the SECURITY boundary for the first time:
+# `/`, `..`, NUL, control characters, a leading `-` and a 4000-character name
+# only become reachable once the escapes are resolved. Hence a KEEP-list rather
+# than a blacklist — anything that is not a letter, combining mark, digit or one
+# of a few punctuation characters becomes `_`, so path separators, C0/C1
+# controls and the entire Cf class (U+202E RIGHT-TO-LEFT OVERRIDE and friends,
+# the classic extension-spoofing trick) are excluded by construction instead of
+# by a list that can be incomplete. Non-ASCII letters are KEPT: the user's files
+# are Slovak, and ASCII-stripping `nahrávka` to `nahr_vka` is a milder spelling
+# of the same complaint #116 was filed for.
+_KEEP_CATEGORIES = ("L", "M", "N")      # letters, combining marks, numbers
+_KEEP_PUNCT = " ._-()"
+# ext4 caps a NAME at 255 BYTES and the upload is streamed to `<name>.part`
+# before the rename, so the clip counts BYTES and leaves room for that suffix
+# (400 Slovak characters are 800 bytes — clipping on characters would not do).
+_MAX_NAME_BYTES = 200
+_MAX_EXT_BYTES = 20
+
+
+def _clip(name):
+    """Bound `name` to _MAX_NAME_BYTES, keeping a plausible extension."""
+    if len(name.encode("utf-8")) <= _MAX_NAME_BYTES:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext.encode("utf-8")) > _MAX_EXT_BYTES:
+        stem, dot, ext = name, "", ""       # no extension worth preserving
+    budget = _MAX_NAME_BYTES - len((dot + ext).encode("utf-8"))
+    # errors="ignore" drops a multi-byte character the byte cut split in half.
+    stem = stem.encode("utf-8")[:max(budget, 1)].decode("utf-8", "ignore")
+    return (stem + dot + ext) or "upload.bin"
+
+
+def safe_name(segment):
+    """Decode ONE url path segment into a filename that cannot leave DEST.
+
+    Called with the FILENAME segment only — deliberately NEVER with the token
+    segment, which is this endpoint's only auth (see the module docstring):
+    decoding that one too would let `%74ok…` authenticate as `tok…`.
+    """
+    # NFC first — a macOS-origin name arrives decomposed, and without the
+    # normalisation its combining accent is a separate codepoint.
+    name = unicodedata.normalize("NFC", unquote(segment, errors="replace"))
+    name = "".join(
+        ch if (unicodedata.category(ch)[0] in _KEEP_CATEGORIES
+               or ch in _KEEP_PUNCT) else "_"
+        for ch in name
+    ).strip(" ")
+    # Dots are legal in a filename, so the character filter above leaves `..`
+    # untouched — and `os.path.join(DEST, "..")` is DEST's PARENT.
+    if not name.strip("."):
+        return "upload.bin"
+    if name.startswith("-"):
+        name = "_" + name       # never hand a later CLI something read as a flag
+    return _clip(name)
 
 PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -159,8 +226,14 @@ class H(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length <= 0:
             return self._txt(411, "Content-Length required (got none/zero)")
-        name = _SAFE.sub("_", os.path.basename(p[1])) or "upload.bin"
+        name = safe_name(p[1])
         dest = os.path.join(DEST, name)
+        # Defence in depth, independent of safe_name: the write must land
+        # DIRECTLY inside DEST. This still holds if a later edit weakens the
+        # sanitizer, and it also catches a pre-existing symlink in the upload
+        # directory pointing somewhere else.
+        if os.path.dirname(os.path.realpath(dest)) != os.path.realpath(DEST):
+            return self._txt(400, "unsafe filename")
         part = dest + ".part"   # stream to .part, rename only when complete (atomic)
         got = 0
         try:
