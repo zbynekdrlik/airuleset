@@ -485,6 +485,52 @@ class TestCardReconcile(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.state.get("card_unreported"), None)
 
+    def test_a_repo_that_never_uses_closes_trailers_falls_back_to_the_probe(self):
+        # LIVE-FOUND, and it invalidated this job's original "no gh needed"
+        # reasoning: tvdole — one of the two repos in #134's own evidence, and
+        # the one that has NEVER produced a card — had 20 commits in 48h and
+        # ZERO `Closes #N` trailers in its last 200 commits. Its issues close
+        # from the PR body, a GitHub-side fact no local read can see. Local
+        # git alone is therefore structurally blind to a whole repo.
+        r = self.repo(closes=(), age=3600)
+        # give it fresh commits with no trailer at all
+        (r / "f").write_text("x")
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "feat: no trailer here", ts=NOW - 3600)
+        _git(r, "push", "-q", "origin", "main")
+        _git(r, "fetch", "-q", "origin")
+        self.reconcile([r], closed_fetch=lambda root, since: [77, 78])
+        self.assertTrue(self.sent, "the probe's answer must be used")
+        self.assertIn("#77", self.sent[0]["msg"])
+
+    def test_the_probe_is_not_consulted_when_trailers_already_answered(self):
+        # the expensive path must stay off for a repo that answers locally
+        calls = []
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: calls.append(root))
+        self.assertEqual(calls, [], "one gh call per repo per sweep is the "
+                                    "cost this job was designed to avoid")
+
+    def test_the_probe_is_not_consulted_for_a_parked_repo(self):
+        calls = []
+        r = self.repo(closes=(), age=10 * DAY)
+        self.reconcile([r], closed_fetch=lambda root, since: calls.append(root))
+        self.assertEqual(calls, [],
+                         "no fresh merges means nothing to report on")
+
+    def test_a_failing_probe_is_silent_not_fatal(self):
+        def boom(root, since):
+            raise RuntimeError("no gh")
+        r = self.repo(closes=(), age=3600)
+        (r / "f").write_text("x")
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "feat: no trailer", ts=NOW - 3600)
+        _git(r, "push", "-q", "origin", "main")
+        _git(r, "fetch", "-q", "origin")
+        logs = self.reconcile([r], closed_fetch=boom)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(any("closed-fetch" in ln for ln in logs), logs)
+
     def test_it_never_sends_keystrokes(self):
         import inspect
         src = inspect.getsource(wd.card_reconcile)
