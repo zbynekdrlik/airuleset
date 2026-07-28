@@ -23,10 +23,17 @@ sys.path.insert(0, str(ROOT))
 import design_gate as dg                                   # noqa: E402
 
 _FAKE_GH = """#!/usr/bin/env bash
+# NB: a `${VAR:-default}` whose default TEXT itself contains unescaped
+# braces breaks bash's own brace-matching for the substitution -- even when
+# VAR *is* set, the parser mis-scans where the expansion ends and appends
+# stray characters (reproduced live while writing this fixture). Avoid the
+# pitfall entirely: resolve the default in a separate statement.
 echo "$@" >> "${FAKE_GH_LOG:-/dev/null}"
 [ "${FAKE_GH_FAIL:-0}" = "1" ] && exit 1
+JSON="${FAKE_GH_COMMENTS_JSON:-}"
+[ -z "$JSON" ] && JSON='{"comments":[]}'
 case "$1 $2" in
-  "issue view") echo "${FAKE_GH_COMMENTS_JSON:-{\\"comments\\":[]}}";;
+  "issue view") echo "$JSON";;
   *) exit 1;;
 esac
 """
