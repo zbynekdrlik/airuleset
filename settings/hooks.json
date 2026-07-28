@@ -112,6 +112,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-commit-without-design.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
@@ -226,6 +231,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/post-record-subagent-bg-launch.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-record-design-comment.sh",
+            "timeout": 15
           }
         ]
       },
@@ -352,6 +362,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/subagent-stop-check-run-card.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/subagent-stop-check-design.sh",
             "timeout": 15
           },
           {
