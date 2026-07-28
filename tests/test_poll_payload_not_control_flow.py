@@ -154,6 +154,25 @@ class PayloadIsNotControlFlowTest(_HookRunner):
             BARE_LOCAL.replace('"', "'").replace("\n", " "))
         self.assertFalse(self.nudges(cmd))
 
+    def test_a_heredoc_read_straight_by_a_text_sink_is_not_a_loop(self):
+        """`gh-cli-recipes.md`'s own mandated recipe (`-F -` reads the body
+        from stdin). None of these commands executes its stdin — unlike
+        `ssh host 'bash -s' <<EOF`, which the interpreter check catches
+        first."""
+        for owner in ("git commit -q -F -",
+                      "gh issue comment 119 -F -",
+                      "gh pr create -B main --body-file -"):
+            cmd = heredoc(owner, BARE_LOCAL, "EOF")
+            self.assertTrue(self.nudges(BARE_LOCAL), "control pin")
+            self.assertFalse(self.nudges(cmd), owner)
+
+    def test_a_remote_shell_reading_stdin_is_still_live(self):
+        """The sink rule must not swallow this: `bash -s` DOES execute its
+        stdin, and the interpreter check has to win."""
+        self.assertTrue(self.nudges(heredoc("ssh host 'bash -s'",
+                                            BARE_LOCAL, "EOF")))
+        self.assertTrue(self.nudges(heredoc("psql -f -", BARE_LOCAL, "EOF")))
+
     def test_a_commit_message_quoting_a_loop_is_not_a_loop(self):
         cmd = ("git commit -m 'fix(hook): a poll loop is `sleep` in a "
                "do..done BODY — %s'" % BARE_LOCAL.replace("\n", " "))
@@ -174,6 +193,35 @@ class LiveBodiesStillFireTest(_HookRunner):
         cmd = (heredoc("cat > /tmp/poll.sh", BARE_LOCAL, "EOF")
                + "\nchmod +x /tmp/poll.sh && /tmp/poll.sh")
         self.assertTrue(self.nudges(cmd))
+
+    def test_write_then_feed_to_a_remote_shell_on_stdin_still_fires(self):
+        """Found by the corpus replay, not by hand: this shape names no
+        interpreter next to the path and never uses `bash <path>` — it feeds
+        the file to a remote shell's STDIN. Three real specimens ran 119s,
+        135s and 183s, so treating them as inert would delete the very
+        detections the nudge exists for."""
+        cmd = (heredoc("cat > /tmp/petromin.sh", BARE_LOCAL, "EOF")
+               + "\nsshpass -p x ssh -o ConnectTimeout=600 host 'bash -s'"
+                 " < /tmp/petromin.sh 2>&1 | grep -v added")
+        self.assertTrue(self.nudges(cmd))
+
+    def test_write_then_scp_and_run_still_fires(self):
+        cmd = (heredoc("cat > /tmp/deploy.sh", BARE_LOCAL, "EOF")
+               + "\nscp /tmp/deploy.sh host:/tmp/ && ssh host /tmp/deploy.sh")
+        self.assertTrue(self.nudges(cmd))
+
+    def test_the_target_reappearing_anywhere_but_a_text_sink_means_live(self):
+        """The general rule the three specimens forced: a written file is
+        inert only if every LATER mention of it in the shell-visible text is
+        the argument of an unambiguous text-file flag."""
+        cmd = (heredoc("cat > /tmp/w.sh", BARE_LOCAL, "EOF")
+               + "\nnohup /tmp/w.sh &")
+        self.assertTrue(self.nudges(cmd))
+
+    def test_a_text_sink_reference_keeps_it_inert(self):
+        cmd = (heredoc("cat > /tmp/body.md", BARE_LOCAL, "EOF")
+               + "\ngh issue comment 119 --body-file /tmp/body.md")
+        self.assertFalse(self.nudges(cmd))
 
     def test_an_interpreter_heredoc_still_fires(self):
         self.assertTrue(self.nudges(heredoc("python3 -", BARE_LOCAL, "PY")))
@@ -247,8 +295,12 @@ class StripperTeethTest(_HookRunner):
     def test_stripping_every_heredoc_body_lets_a_real_loop_through(self):
         """#112's own rejected proposal, and the broad-exemption failure the
         ticket names: wrap a real loop in a heredoc and it vanishes."""
+        # Pinned to the GATE's semantics, not its formatting: the shortest
+        # stable fragment that IS the live/inert decision. If the shipped
+        # stripper's shape changes, _mutant_tree fails loudly rather than
+        # certifying teeth it no longer has.
         mut = self._mutant_tree(lambda s: s.replace(
-            "airuleset:strip-gate", "airuleset:strip-gate-disabled", 1))
+            "if is_live(owner, visible):", "if False:", 1))
         cmd = (heredoc("cat > /tmp/poll.sh", BARE_LOCAL, "EOF")
                + "\nbash /tmp/poll.sh")
         self.assertTrue(self.nudges(cmd), "shipped stripper keeps this")

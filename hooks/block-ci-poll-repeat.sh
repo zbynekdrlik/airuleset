@@ -91,6 +91,22 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "
 BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null || echo "false")
 [ "$BG" = "true" ] && exit 0
 
+# ---- #124: payload is not control flow ---------------------------------
+# Everything below reads $CMD as if every byte of it were something the shell
+# RUNS. It is not: a heredoc body or a quoted --body argument is cargo. Left
+# unstripped, a doc write QUOTING the sanctioned waiter carries `gh run view`
+# (CI signature), is not mutating-exempt (`cat >` is not in the list) and
+# carries `do … sleep … done` — so the SECOND such write in a session was a
+# hard exit 2 on a command that polls nothing. Stripping HERE, before the
+# signature gate, is what puts it out of contract entirely rather than merely
+# allowing it: an allowed doc write would still consume the one free loop a
+# real wait is owed. The stripper is narrow (write-then-run, interpreter
+# bodies and quoted `bash -c` loops all survive) and fails open.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
+if poll_payload_carrier "$CMD"; then
+    CMD=$(poll_payload_strip "$CMD")
+fi
+
 STATE_DIR="${AIRULESET_CIPOLL_STATE_DIR:-/tmp}"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 

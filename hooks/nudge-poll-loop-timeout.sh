@@ -92,6 +92,21 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "
 printf ' %s ' "$CMD" | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
     | grep -qE ' do( .*)? sleep( .*)? done ' || exit 0
 
+# #124: the match above is over the WHOLE command, which cannot tell control
+# flow from bytes the command merely CARRIES — so a ticket body or playbook
+# entry QUOTING a poll loop reads as one (hit four times while working #124).
+# Re-check on the payload-stripped text, but only when the command actually
+# carries something payload-shaped: an unconditional python3 fork on every Bash
+# tool call would be a real cost for nothing. The stripper is deliberately
+# narrow (it keeps write-then-run, interpreter bodies and quoted `bash -c`
+# loops) and fails OPEN, so at worst this stays exactly as loud as before.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-poll-payload.sh"
+if poll_payload_carrier "$CMD"; then
+    printf ' %s ' "$(poll_payload_strip "$CMD")" \
+        | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
+        | grep -qE ' do( .*)? sleep( .*)? done ' || exit 0
+fi
+
 # #107: a `run_in_background: true` call detaches immediately -- the Bash
 # tool's own `timeout` parameter only bounds the FOREGROUND call and is
 # irrelevant to a backgrounded loop's own internal runtime. Nudging "raise
