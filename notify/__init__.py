@@ -36,6 +36,17 @@ _ENV_REL = "channels/discord/.env"
 _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
 
+# --- delivery log (#135) ---------------------------------------------------
+# A delivery that never happened used to leave NO trace anywhere: the shell
+# `emit_one()` set DELIVERY_FAILED=1 and returned silently, and this module
+# returned 'no-config'/'error' as a string nobody was obliged to consume. So
+# "sent and rejected", "never sent" and "nothing to send" were one
+# observation — which is how #134's five-day silence stayed invisible.
+# ONE durable log, written by BOTH send paths (the shell hook appends to the
+# same file), size-capped and never fatal.
+_DELIVERY_LOG_REL = "notify-delivery.log"
+_DELIVERY_LOG_CAP = 512000
+
 # Redact anything that smells like a credential before it reaches Discord.
 _SECRET_RE = re.compile(
     r"(ghp_[A-Za-z0-9]+"
@@ -52,6 +63,42 @@ def _claude_dir():
 
 def _env_path():
     return os.path.join(_claude_dir(), _ENV_REL)
+
+
+def delivery_log_path():
+    return os.path.join(_claude_dir(), _DELIVERY_LOG_REL)
+
+
+def _log_field(value, cap=120):
+    """One log FIELD: single-line and bounded, always.
+
+    A caller can hand this an arbitrary string — a status that turned out to
+    be a whole multi-line card body is not hypothetical, it happened live
+    while building this (a test fake returned the body as its status). One
+    such value turns the log into something no `grep`/`tail` can read, which
+    defeats the entire point of having it."""
+    s = " ".join(str(value or "-").split()) or "-"
+    return s[:cap]
+
+
+def log_delivery(status, kind="", key="", reason=""):
+    """Append ONE line about a delivery decision. Diagnostics only: every write
+    is guarded, so a read-only $HOME can never turn logging into a failed
+    notification. Rotated at the cap like `compact-decisions.log`."""
+    path = delivery_log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # absent / unstat-able → 0 → nothing to rotate (never an exception path)
+        if os.path.isfile(path) and os.path.getsize(path) > _DELIVERY_LOG_CAP:
+            os.replace(path, path + ".1")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("%s %s kind=%s key=%s reason=%s\n"
+                     % (stamp, _log_field(status, 40), _log_field(kind, 24),
+                        _log_field(key, 120), _log_field(reason, 120)))
+    except OSError:
+        return False                 # never fatal — the notification matters more
+    return True
 
 
 def _read_env():
@@ -370,6 +417,50 @@ def _dedup_claim(key):
         return True
 
 
+def _dedup_mark_status(key, status):
+    """Record the TERMINAL delivery status in the marker (#135).
+
+    `_dedup_claim` writes the marker BEFORE the POST — it has to, or a racing
+    duplicate could double-post — so marker PRESENCE proves a claim, never a
+    delivery. Writing the outcome afterwards is what turns the marker into an
+    artifact the #134 gate / backstop / suppression can key on. Best-effort:
+    a marker that cannot be updated keeps its claim and simply reads as
+    legacy (see `marker_delivered`)."""
+    if not key:
+        return
+    try:
+        with open(_dedup_path(key), "w", encoding="utf-8") as fh:
+            fh.write("%s %s" % (time.time(), status))
+    except OSError:
+        return
+
+
+def marker_delivered(key):
+    """True when `key`'s marker records a message that actually REACHED
+    Discord.
+
+    Three states, deliberately distinguished:
+      * no marker              → False (nothing was ever claimed)
+      * marker says 'sent'     → True
+      * marker says anything else that is a KNOWN failure → False
+
+    A LEGACY marker (a bare timestamp, written before #135) reads as
+    DELIVERED. Every marker on every managed box predates this change, and
+    reading them as undelivered would make the whole existing history look
+    failed and flood the user with false alerts on the first deploy."""
+    if not key:
+        return False
+    try:
+        with open(_dedup_path(key), encoding="utf-8") as fh:
+            body = fh.read(200).strip()
+    except OSError:
+        return False
+    parts = body.split()
+    if len(parts) < 2:
+        return True                  # legacy: timestamp only
+    return parts[1] == "sent"
+
+
 def _dedup_release(key):
     """Drop a claim so a FAILED send can be retried (a network error must not
     permanently suppress the user's requested card)."""
@@ -656,6 +747,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     primary_owner, primary_channel = targets[0]
     if not token or not primary_channel:
         _dedup_release(dedup_key)
+        log_delivery("no-config", kind="python", key=dedup_key,
+                     reason="no-token" if not token else "no-channel")
         return "no-config"
 
     # Primary send determines the return status; mirror sends are best-effort (a
@@ -665,4 +758,9 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         (mention_prefix(env, primary_owner) + (body or ""))[:_MAX_CONTENT]) else "error"
     for t, ch in targets[1:]:
         _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
+    # Record the OUTCOME on the claim (#135) and log anything that is not a
+    # delivery — silence is what made #134 invisible for five days.
+    _dedup_mark_status(dedup_key, status)
+    if status != "sent":
+        log_delivery(status, kind="python", key=dedup_key, reason="post-failed")
     return status

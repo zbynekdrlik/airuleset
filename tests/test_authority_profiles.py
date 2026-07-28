@@ -142,7 +142,13 @@ class TestForkNoMergeHandoffCard(TestCase):
         with mk.patch.object(airuleset, "_gh_out",
                              side_effect=lambda *a, **k: "T" if "view" in a else "3"):
             with mk.patch("notify.send",
-                          side_effect=lambda body, **k: captured.setdefault("b", body) or "sent"):
+                          # `setdefault` RETURNS the (truthy) body, so a
+                          # trailing `or "sent"` never fires — the fake used
+                          # to hand back the card text as its status. Harmless
+                          # until #135 made a non-'sent' status a real failure;
+                          # return the status explicitly.
+                          side_effect=lambda body, **k: (
+                              captured.setdefault("b", body), "sent")[1]):
                 airuleset.cmd_notify(args)
         self.assertIn("Odovzdané na review", captured["b"])
         self.assertNotIn("📦", captured["b"])
@@ -330,8 +336,9 @@ class TestRunCardRemainingScopedToStream(TestCase):
                 with mk.patch.object(airuleset, "_gh_login",
                                      return_value="kvaskodev"):
                     with mk.patch("notify.send",
-                                  side_effect=lambda body, **k:
-                                  captured.setdefault("b", body) or "sent"):
+                                  side_effect=lambda body, **k: (
+                                      captured.setdefault("b", body),
+                                      "sent")[1]):
                         airuleset.cmd_notify(self._args())
         import re
         m = re.search(r"ostáva (\d+)", captured["b"])

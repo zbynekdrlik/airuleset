@@ -103,6 +103,34 @@ fi
 # channel) is skipped, so a misconfig can't double-post into one thread. The same
 # de-dup applies in dry-run, so the preview matches real delivery.
 POSTED_CHANNELS=" "            # space-delimited set of channels already emitted to
+
+# --- delivery log (#135) ---------------------------------------------------
+# Before this, a non-delivery on the NON-confirm path (the idle ✅) set
+# DELIVERY_FAILED=1 and returned with no log line and nothing on stderr — so a
+# notification that never even attempted its curl left zero trace anywhere,
+# and "sent but rejected" / "never sent" / "nothing to send" were one
+# observation. Now every non-delivery says WHY, in the SAME durable file the
+# Python path writes (notify.log_delivery). Diagnostics only: every write is
+# `|| true`-guarded, so a read-only $HOME can never turn logging into a
+# dropped ping, and stderr stays clean on the allowed path (#124).
+DELIVERY_LOG="$HOME/.claude/notify-delivery.log"
+DELIVERY_LOG_CAP=512000
+_delivery_log() {
+    # $1 = status, $2 = reason
+    local size
+    mkdir -p "$(dirname "$DELIVERY_LOG")" 2>/dev/null || true
+    size=$(stat -c %s "$DELIVERY_LOG" 2>/dev/null || echo 0)
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    if [ "$size" -gt "$DELIVERY_LOG_CAP" ]; then
+        mv -f "$DELIVERY_LOG" "$DELIVERY_LOG.1" 2>/dev/null || true
+    fi
+    {
+        printf '%s %s kind=shell key=%s reason=%s\n' \
+            "$(date -Iseconds 2>/dev/null || echo '?')" "$1" \
+            "${EMOJI}:${PROJECT}" "$2" >>"$DELIVERY_LOG"
+    } 2>/dev/null || true
+}
+
 emit_one() {
     # $1 = owner (may be empty for the primary). Forces AIRULESET_NOTIFY_OWNER onto
     # both resolver calls so mention+thread ALWAYS agree (the Python send() invariant).
@@ -146,6 +174,14 @@ emit_one() {
     # Real delivery. Skip when we can't post — in confirm mode a skip IS a
     # failed delivery (the caller must be able to retry later).
     if [ -z "$BOT_TOKEN" ] || [ -z "$CH" ] || ! command -v jq &>/dev/null; then
+        # Name the SPECIFIC missing prerequisite — the difference between a
+        # five-minute diagnosis and a five-day one (#135).
+        local why="unknown"
+        if   [ -z "$BOT_TOKEN" ];            then why="no-token"
+        elif [ -z "$CH" ];                   then why="no-channel"
+        elif ! command -v jq &>/dev/null;    then why="no-jq"
+        fi
+        _delivery_log "not-delivered" "$why"
         DELIVERY_FAILED=1
         return 0
     fi
@@ -190,7 +226,8 @@ emit_one() {
                     fi
                 fi
                 ;;
-            *)   DELIVERY_FAILED=1 ;;
+            *)   _delivery_log "not-delivered" "http-${code:-none}"
+                 DELIVERY_FAILED=1 ;;
         esac
         return 0
     fi

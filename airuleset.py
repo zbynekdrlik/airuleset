@@ -2320,8 +2320,34 @@ def _notify_run_card(args, compose_autopilot_card, send):
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             _write_autopilot_progress(name, remaining)
-    except Exception:
-        pass
+        elif status not in ("dedup", "dry-run"):
+            # #135: a card that never reached Discord must NOT report success.
+            # It still never raises and never blocks the work — but the
+            # worker's own Bash call now SEES the failure instead of being
+            # told to ignore it, and the reason is durable.
+            from notify import log_delivery
+            log_delivery(status, kind="run-card", key=dedup,
+                         reason="send-returned-%s" % status)
+            print("notify --run-card: NOT delivered (%s) for %s — the ticket "
+                  "has no completion card. Re-run it, or report it in the "
+                  "evidence block." % (status, dedup), file=sys.stderr)
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # Never raise into the worker, but never vanish either (#135).
+        try:
+            from notify import log_delivery
+            log_delivery("error", kind="run-card",
+                         key="%s#%s" % (getattr(args, "repo", "-"),
+                                        getattr(args, "issue", "-")),
+                         reason=type(exc).__name__)
+        except Exception as log_exc:              # logging must not mask `exc`
+            print("notify --run-card: logging failed (%r)" % log_exc,
+                  file=sys.stderr)
+        print("notify --run-card: FAILED (%r) — no completion card was sent."
+              % exc, file=sys.stderr)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

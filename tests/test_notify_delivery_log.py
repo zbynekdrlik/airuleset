@@ -204,6 +204,15 @@ class TestDedupMarkerRecordsDeliveryOutcome(_HomeIsolated):
         self.assertTrue(any("no-config" in ln for ln in self.log_lines()),
                         self.log_lines())
 
+    def test_a_log_line_is_always_exactly_one_line(self):
+        # Found live, not hypothesised: a test fake returned the whole
+        # multi-line card BODY as its status, which landed verbatim in the
+        # real log and made it ungreppable. Every field is squeezed + capped.
+        notify.log_delivery("a\nb\nc", kind="k\nk", key="x\ny",
+                            reason="r" * 500)
+        self.assertEqual(len(self.log_lines()), 1, self.log_lines())
+        self.assertLess(len(self.log_lines()[0]), 400)
+
     def test_marker_delivered_is_false_for_an_absent_marker(self):
         self.assertFalse(notify.marker_delivered("repo#404"))
 
