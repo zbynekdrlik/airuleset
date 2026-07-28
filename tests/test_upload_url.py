@@ -162,6 +162,51 @@ class TestUploadCli(TestCase):
         self.assertNotIn("{{", html)            # no escaped-brace leak
         self.assertIn("body{font", html)        # real CSS rule survived
 
+    def test_served_page_declares_an_inline_icon(self):
+        # #117: a document that declares no icon makes every browser auto-fire
+        # GET /favicon.ico at the ORIGIN ROOT. That path is not /<token>/, so
+        # do_GET refuses it (correctly — a favicon request carries no token, and
+        # the token is this write endpoint's only auth) and the browser logs a
+        # console error. browser-console-zero-errors.md treats that as a bug.
+        #
+        # The declaration must be INLINE — a data: URI — on two counts: the page
+        # is served raw from one string with no asset pipeline behind it, and
+        # upload_server.py is launched BY PATH, so any runtime file lookup would
+        # be install-location dependent. Asserted against the bytes a live
+        # server actually SERVES, never the source string.
+        dest = Path(tempfile.mkdtemp())
+        _, port = _serve(self, "toktoktoktoktok117", dest)
+        html = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/toktoktoktoktok117/", timeout=5).read().decode()
+        link = re.search(r"<link[^>]*\brel=[\"']?icon\b[^>]*>", html, re.I)
+        self.assertIsNotNone(
+            link, "the served page declares no rel=icon link, so a browser "
+                  "auto-requests /favicon.ico and gets a 404 it logs as a "
+                  "console error")
+        href = re.search(r"href=[\"']([^\"']+)[\"']", link.group(0))
+        self.assertIsNotNone(href, "the icon link carries no href: %r" % link.group(0))
+        self.assertTrue(
+            href.group(1).startswith("data:"),
+            "icon href %r is not an inline data: URI — a page served by a "
+            "stdlib server with no asset pipeline must not depend on a file "
+            "found at runtime" % href.group(1)[:80])
+
+    def test_favicon_path_is_still_refused_by_the_token_gate(self):
+        # The #117 companion lock: the fix declares an icon INLINE, it does not
+        # open a route. /favicon.ico is unauthenticated by construction (a
+        # browser sends no token with it), so it must keep 404-ing exactly like
+        # any other non-token path — the console error is removed by never
+        # making the request, never by answering it.
+        dest = Path(tempfile.mkdtemp())
+        _, port = _serve(self, "toktoktoktoktok117b", dest)
+        for path in ("favicon.ico", "apple-touch-icon.png"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/{path}", timeout=5)
+            self.assertEqual(caught.exception.code, 404,
+                             "/%s must stay refused by the token gate" % path)
+            caught.exception.close()
+
     def test_server_saves_a_put_and_respects_ttl(self):
         dest = Path(tempfile.mkdtemp())
         _, port = _serve(self, "tok123", dest, ttl=30)
