@@ -9,8 +9,10 @@ skill, invisible to every other session. Promoted to a first-class CLI
 """
 
 import contextlib
+import glob
 import http.client
 import io
+import os
 import re
 import socket
 import subprocess
@@ -87,6 +89,21 @@ def _wait_until_serving(test, proc, url, deadline_s):
     proc.kill()
     test.fail("upload server never served %s within %.1fs (last: %r)\nstderr:\n%s"
               % (url, deadline_s, last, _drain(proc)))
+
+
+def _log_dir(test):
+    """Point `upload`'s endpoint log at a throwaway dir for ONE test (#115).
+
+    The cmd_upload tests pass ephemeral ports, so every suite run used to leave a
+    NEW never-reused `/tmp/airuleset-upload-<port>.log` behind — 1183 of them on
+    dev1 the day #115 was filed, 1180 of them this user's. The env override is
+    the same escape hatch filedrop already gives itself with FILEDROP_DIR.
+    """
+    d = Path(tempfile.mkdtemp())
+    patch = m.patch.dict(os.environ, {"AIRULESET_UPLOAD_LOG_DIR": str(d)})
+    patch.start()
+    test.addCleanup(patch.stop)
+    return d
 
 
 def _spawn(test, token, dest, ips="127.0.0.1", ttl=20, launcher=None):
@@ -298,6 +315,7 @@ class TestMultiInterfaceUrls(TestCase):
         port = sk.getsockname()[1]
         sk.close()
         dest = Path(tempfile.mkdtemp())
+        _log_dir(self)                       # #115: keep the log out of /tmp
         # two loopback addresses both bind on Linux → two advertised URLs
         with m.patch.object(filedrop, "bind_ips",
                             return_value=["127.0.0.1", "127.0.0.2"]):
@@ -320,6 +338,7 @@ class TestMultiInterfaceUrls(TestCase):
         port = sk.getsockname()[1]
         sk.close()
         dest = Path(tempfile.mkdtemp())
+        _log_dir(self)                       # #115: keep the log out of /tmp
         with m.patch.object(filedrop, "bind_ips",
                             return_value=["203.0.113.9", "127.0.0.1"]):
             buf = io.StringIO()
@@ -504,6 +523,172 @@ class TestMultiFileUpload(TestCase):
         self.assertEqual(r.status, 200)
         self.assertTrue((dest / "good.bin").exists())
         self.assertEqual((dest / "good.bin").stat().st_size, 200)
+
+
+class TestFreePortScanSeesTheServersOwnBinds(TestCase):
+    """#115 defect 1: the scan handed out a port its OWN endpoint already held.
+
+    `cmd_upload` probed `connect_ex(("127.0.0.1", cand))`, but `filedrop._is_private`
+    EXCLUDES loopback and `upload_server.py` binds exactly `bind_ips()`, never
+    `0.0.0.0` (it is a WRITE endpoint on a box that may have a public IP). The
+    probe's address and the server's addresses are therefore disjoint BY
+    CONSTRUCTION — the blind spot is total, not occasional. Observed live on dev1
+    2026-07-28: five listeners on :8799 and the scan still picked 8799, after
+    which a second `airuleset.py upload` died with `endpoint failed to come up`
+    while its readiness probes hit the FIRST server (`"GET /<new-token>/" 404`
+    twenty times, in a log belonging to the other endpoint).
+    """
+
+    def _hold(self, ip):
+        """Listen on an ephemeral port of `ip` for the test's lifetime."""
+        sk = socket.socket()
+        sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sk.bind((ip, 0))
+        sk.listen(5)
+        self.addCleanup(sk.close)
+        return sk.getsockname()[1]
+
+    def test_a_port_held_on_a_bind_address_is_never_handed_out(self):
+        # 127.0.0.2 stands in for a real bind_ips() address: bindable, and NOT
+        # the one address the old scan probed. The premise is asserted, not
+        # assumed — the connect probe really is blind to the held port, so a
+        # picker that still returns it is reproducing the live defect and not an
+        # artefact of how this test is built.
+        held = self._hold("127.0.0.2")
+        probe = socket.socket()
+        self.addCleanup(probe.close)
+        self.assertNotEqual(
+            0, probe.connect_ex(("127.0.0.1", held)),
+            "premise broken: a connect probe on 127.0.0.1 was supposed to be "
+            "blind to a listener held on 127.0.0.2")
+        free = _free_port()
+        self.assertEqual(
+            free, airuleset._pick_free_port(["127.0.0.2"], [held, free]),
+            "the scan handed out a port the endpoint's own bind address is "
+            "already listening on (#115)")
+
+    def test_an_unbindable_address_does_not_veto_every_port(self):
+        # upload_server.py SKIPS an address it cannot bind (a stale LAN IP) and
+        # requires only one success — so EADDRNOTAVAIL must not read as "port
+        # occupied", or one departed interface rejects all 21 candidates on a
+        # box that serves perfectly well.
+        free = _free_port()
+        self.assertEqual(
+            free,
+            airuleset._pick_free_port(["203.0.113.9", "127.0.0.1"], [free]))
+
+    def test_no_candidate_left_returns_none(self):
+        held = self._hold("127.0.0.2")
+        self.assertIsNone(airuleset._pick_free_port(["127.0.0.2"], [held]))
+
+    def test_cmd_upload_scans_the_very_addresses_it_will_bind(self):
+        # The root cause in one assertion: the set of addresses probed must be
+        # the set of addresses the server is about to bind. Anything else is the
+        # #115 blind spot in a new spelling.
+        import filedrop
+        ips = ["127.0.0.2", "127.0.0.3"]
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        port = _free_port()
+        with m.patch.object(filedrop, "bind_ips", return_value=ips), \
+             m.patch.object(airuleset, "_pick_free_port",
+                            return_value=port) as pick:
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=None))
+        self.assertEqual(ips, list(pick.call_args[0][0]))
+
+
+class TestUploadLogPathIsPerUser(TestCase):
+    """#115 defect 2: a world-shared /tmp path keyed on the port alone.
+
+    The FIRST user to run on a port owned that filename for every other user on
+    the box. dev1 still carries `-rw-rw-r-- montalu /tmp/airuleset-upload-8811.log`,
+    so `--port 8811` as anyone else died with an unhandled
+    `PermissionError: [Errno 13] ... '/tmp/airuleset-upload-8811.log'` — a
+    traceback instead of a diagnosis, from the one CLI whose whole job is to be
+    reachable the moment someone needs to hand over a file.
+    """
+
+    def _default_path(self, home, port):
+        env = m.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AIRULESET_UPLOAD_LOG_DIR", None)
+        with m.patch.object(Path, "home", return_value=Path(home)):
+            return airuleset._upload_log_path(port)
+
+    def test_two_users_on_one_port_cannot_collide(self):
+        a = self._default_path("/home/userA", 8811)
+        b = self._default_path("/home/userB", 8811)
+        self.assertNotEqual(a, b, "same log path for two different users (#115)")
+        for p in (a, b):
+            self.assertNotIn("/tmp/airuleset-upload-", str(p),
+                             "still in the world-shared /tmp namespace (#115)")
+
+    def test_the_dir_is_overridable_so_tests_need_not_touch_home(self):
+        d = Path(tempfile.mkdtemp())
+        with m.patch.dict(os.environ, {"AIRULESET_UPLOAD_LOG_DIR": str(d)}):
+            self.assertEqual(d, airuleset._upload_log_path(8799).parent)
+
+    def test_an_unappendable_log_gives_a_diagnosis_not_a_traceback(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the mode bits this case depends on")
+        import filedrop
+        d = _log_dir(self)
+        dest = Path(tempfile.mkdtemp())
+        port = _free_port()
+        # Stands in for montalu's file: a log this user cannot append to. chmod 0
+        # reproduces the exact PermissionError without touching anyone else's file
+        # (never delete or chmod another user's /tmp entries).
+        log = airuleset._upload_log_path(port)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("stale\n")
+        log.chmod(0o000)
+        self.addCleanup(lambda: log.chmod(0o600))
+        self.assertEqual(d, log.parent)
+        err = io.StringIO()
+        with m.patch.object(filedrop, "bind_ips", return_value=["127.0.0.1"]), \
+             contextlib.redirect_stderr(err), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+        self.assertNotEqual(0, ctx.exception.code)
+        self.assertIn(str(log), err.getvalue(),
+                      "the failure must name the log it could not open")
+
+
+class TestUploadLogsDoNotLitterTmp(TestCase):
+    """#115 defect 3: 1183 leftover `/tmp/airuleset-upload-*.log` on dev1."""
+
+    def test_a_cmd_upload_run_leaves_no_new_tmp_log(self):
+        import filedrop
+        pattern = "/tmp/airuleset-upload-*.log"
+        # A set difference ALONE passes for the wrong reason whenever the
+        # ephemeral port happens to match one of the leftovers already there
+        # (observed once against the 1186 on dev1) — the litter hides itself.
+        # So pick a port whose legacy path does not exist yet, and assert on
+        # that exact path as well.
+        for _ in range(20):
+            port = _free_port()
+            legacy = Path("/tmp/airuleset-upload-%d.log" % port)
+            if not legacy.exists():
+                break
+        else:                                           # pragma: no cover
+            self.fail("no ephemeral port left without a leftover /tmp log")
+        before = set(glob.glob(pattern))
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        with m.patch.object(filedrop, "bind_ips", return_value=["127.0.0.1"]):
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+        self.assertFalse(
+            legacy.exists(),
+            "the run wrote %s — a world-shared /tmp log keyed on the port "
+            "(#115)" % legacy)
+        self.assertEqual(
+            set(), set(glob.glob(pattern)) - before,
+            "a suite run still accumulates one shared-/tmp log per ephemeral "
+            "port (#115) — 1183 had piled up on dev1")
 
 
 if __name__ == "__main__":
