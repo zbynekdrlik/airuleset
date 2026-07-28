@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest import TestCase, main
@@ -523,6 +524,184 @@ class TestMultiFileUpload(TestCase):
         self.assertEqual(r.status, 200)
         self.assertTrue((dest / "good.bin").exists())
         self.assertEqual((dest / "good.bin").stat().st_size, 200)
+
+
+class TestUploadedFilenameIsDecodedThenContained(TestCase):
+    """#116: the page URL-encodes the filename and the server never decoded it.
+
+    `upload_server.py`'s own JS sends `encodeURIComponent(file.name)` (it has to
+    — a raw space terminates the HTTP request-line target), but `do_PUT` handed
+    the still-encoded segment straight to `_SAFE.sub("_", ...)`, whose class
+    `[^A-Za-z0-9._-]` excludes `%`. So every escape survived with its `%` turned
+    into `_`. Observed live on dev1 2026-07-28 while verifying #115:
+
+        PUT .../nahr%C3%A1vka%20test%20(1).bin  ->  200
+        saved as: nahr_C3_A1vka_20test_20_1_.bin
+
+    Decoding is the fix, and decoding is also what makes the sanitizer a
+    security boundary for the first time: `/`, `..`, NUL, control characters and
+    a 4000-char name only become reachable once the escapes are resolved. The
+    traversal cases below therefore pass at HEAD by accident (an un-decoded
+    `..%2F` is inert) — they are guards for the fix, not reproductions of it.
+    """
+
+    TOK = "toktoktoktoktok116"
+
+    def _dest(self):
+        """(root, dest) — the sentinel parent is how an escape becomes visible."""
+        root = Path(tempfile.mkdtemp())
+        dest = root / "up"
+        dest.mkdir()
+        return root, dest
+
+    def _put(self, port, encoded_name, body=b"x"):
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/%s/%s" % (port, self.TOK, encoded_name),
+            data=body, method="PUT")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                r.read()
+                return r.status
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code
+
+    # ---------------- the ticket's own case, end to end ---------------- #
+
+    def test_a_percent_encoded_slovak_name_lands_decoded_and_intact(self):
+        # Exactly the bytes the page sends for `nahrávka test (1).bin`:
+        # encodeURIComponent escapes the accent and the spaces, leaves the
+        # parentheses alone. The user's files are Slovak, so a faithful name is
+        # the whole point — ASCII-stripping this to `nahr_vka_test__1_.bin`
+        # would be a milder spelling of the same complaint.
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        body = os.urandom(4096)
+        self.assertEqual(
+            200, self._put(port, "nahr%C3%A1vka%20test%20(1).bin", body))
+        saved = dest / "nahrávka test (1).bin"
+        self.assertTrue(
+            saved.exists(),
+            "the decoded name never landed — the endpoint saved %r instead "
+            "(#116: the page sends encodeURIComponent(file.name) and do_PUT "
+            "never unquoted it, so every escape's %% became _)"
+            % sorted(p.name for p in dest.iterdir()))
+        self.assertEqual(body, saved.read_bytes(), "content must be byte-identical")
+        self.assertFalse((dest / "nahr_C3_A1vka_20test_20_1_.bin").exists())
+
+    def test_the_token_segment_is_still_matched_raw(self):
+        # The decode is deliberately scoped to the FILENAME segment. The
+        # unguessable token is this endpoint's ONLY auth (upload_server.py
+        # module docstring), so unquoting `_parts()` wholesale would let
+        # `%74ok…` authenticate as `tok…` — widening the one boundary the
+        # endpoint has, in a commit whose subject is a cosmetic filename bug.
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/%s/x.bin" % (port, "%74" + self.TOK[1:]),
+            data=b"x", method="PUT")
+        try:
+            urllib.request.urlopen(req, timeout=5).close()
+            self.fail("a percent-encoded spelling of the token authenticated")
+        except urllib.error.HTTPError as e:
+            e.close()
+            self.assertEqual(404, e.code)
+        self.assertEqual([], list(dest.iterdir()))
+
+    # ------------- what decoding newly exposes: containment ------------- #
+
+    HOSTILE = [
+        ("..%2F..%2F..%2Fetc%2Fpasswd", "relative traversal"),
+        ("%2Fetc%2Fpasswd", "an absolute path"),
+        ("..%5C..%5Cwindows%5Csystem32", "windows separators"),
+        ("%2E%2E%2F%2E%2E%2Fescape.bin", "fully-escaped dots and slashes"),
+        ("~%2F.ssh%2Fauthorized_keys", "a leading tilde"),
+        ("evil%00.bin", "an embedded NUL"),
+        ("a%0D%0Ab.bin", "embedded CR/LF"),
+        ("%2E%2E", "the parent directory itself"),
+        ("%2E%2E%2E%2E", "nothing but dots"),
+        ("-rf", "a name a later CLI would read as a flag"),
+        ("%E2%80%AEcod.exe", "an RTL override (extension spoofing)"),
+    ]
+
+    def test_no_hostile_name_can_write_outside_the_destination(self):
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        for encoded, why in self.HOSTILE:
+            with self.subTest(name=encoded, why=why):
+                self.assertIn(self._put(port, encoded, b"pwned"), (200, 400), why)
+        # Nothing may exist beside the destination directory itself — including
+        # a stray `<name>.part`, which is where the streaming write lands first.
+        self.assertEqual(
+            ["up"], sorted(p.name for p in root.iterdir()),
+            "a hostile filename wrote outside the upload directory (#116)")
+        for p in dest.iterdir():
+            self.assertTrue(p.is_file(), "%s is not a regular file" % p)
+            self.assertEqual(dest.resolve(), p.resolve().parent,
+                             "%s resolved outside the destination" % p)
+
+    def test_a_traversal_name_lands_flattened_rather_than_silently_renamed(self):
+        # `os.path.basename` would turn this into a plausible-looking
+        # `passwd`; mapping the separators keeps the hostile name visible in
+        # the listing and in the SAVED log line.
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        self.assertEqual(200, self._put(port, "..%2F..%2F..%2Fetc%2Fpasswd"))
+        self.assertEqual([".._.._.._etc_passwd"],
+                         sorted(p.name for p in dest.iterdir()))
+
+    def test_a_name_with_nothing_safe_left_still_saves_under_a_fallback(self):
+        # `..` survives a character filter untouched (dots are legal in a
+        # filename) and `os.path.join(DEST, "..")` is the upload directory's
+        # PARENT — so the empty/dots-only case needs its own guard.
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        self.assertEqual(200, self._put(port, "%2E%2E", b"dots"))
+        self.assertEqual(["upload.bin"], sorted(p.name for p in dest.iterdir()))
+        self.assertEqual(b"dots", (dest / "upload.bin").read_bytes())
+
+    def test_an_absurdly_long_name_is_clipped_to_a_filesystem_safe_length(self):
+        # 400 Slovak characters are 800 UTF-8 BYTES, and ext4 caps a name at
+        # 255 bytes — so the clip has to count bytes, and has to leave room for
+        # the `.part` suffix the stream is written under before the rename.
+        root, dest = self._dest()
+        _, port = _serve(self, self.TOK, dest, ttl=30)
+        self.assertEqual(
+            200, self._put(port, urllib.parse.quote("á" * 400 + ".bin"), b"ok"))
+        landed = list(dest.iterdir())
+        self.assertEqual(1, len(landed), landed)
+        self.assertLessEqual(len((landed[0].name + ".part").encode("utf-8")), 255)
+        self.assertTrue(landed[0].name.endswith(".bin"),
+                        "the extension must survive the clip: %r" % landed[0].name)
+        self.assertEqual(b"ok", landed[0].read_bytes())
+
+
+class TestUploadDocsMatchTheSanitizer(TestCase):
+    """#116's other half: the docs described a third behaviour, true neither
+    before the fix nor after it."""
+
+    SKILL = "skills/meeting-analysis/SKILL.md"
+
+    def test_the_skill_no_longer_promises_ascii_stripping(self):
+        t = read(self.SKILL)
+        self.assertNotIn(
+            "accents / parens become", t,
+            "the skill promised `spaces / accents / parens become _`, which "
+            "described neither the old behaviour (percent-escapes spelled out "
+            "as _C3_A1) nor the new one (they are preserved) — #116")
+
+    def test_the_skill_documents_that_the_real_name_is_preserved(self):
+        # The reader's actual question is "what will the file be called", so the
+        # doc has to answer it with a worked example rather than a rule of thumb.
+        t = read(self.SKILL)
+        self.assertIn("nahrávka test (1).mp4", t)
+
+    def test_the_skill_snippet_quotes_a_path_that_can_contain_spaces(self):
+        # Spaces survive now, so an unquoted `VIDEO=$HOME/uploads/...` would
+        # word-split the moment a real recording name reaches it.
+        t = read(self.SKILL)
+        self.assertNotIn("\nVIDEO=$HOME/uploads/", t,
+                         "the uploaded-path assignment must be quoted (#116)")
 
 
 class TestFreePortScanSeesTheServersOwnBinds(TestCase):
