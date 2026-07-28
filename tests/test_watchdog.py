@@ -1543,45 +1543,16 @@ def _isolate_compact_claims(testcase):
 
 
 # --------------------------------------------------------------------------- #
-# #42 rework — Job 12: MODEL RECONCILE, restart-based. The managed default
-# (MANAGED_MODEL in airuleset.py) only binds a NEW Claude Code session;
-# several long-lived sessions were still parked on Fable/Opus-4 — the single
-# biggest cost line. The ORIGINAL #37 version typed `/model <target>` into
-# the stale session — but a live incident (gatekeeper, 2026-07-25) proved
-# that is structurally futile: a running session's available-model list is
-# fixed at its own start, so a model released after that can never be
-# selected via `/model`, no matter how many retries. This job now RESTARTS
-# the session instead: `/exit`, wait for the shell, relaunch `claude` (the
-# managed bashrc function bakes `--model` into every launch — this job never
-# passes one), accept the "Resume from summary" dialog for a large prior
-# session (or proceed directly when none appears). Never touches a busy
-# pane, an open dialog, an unsent draft, a copy-mode pane, or one running a
-# BACKGROUND AGENT (a restart would kill it); never sends two consecutive
-# Escapes; dedups per session id; bounded attempts, then gives up for good.
+# Shared single-pane fixtures. These were introduced for job 12 (MODEL
+# RECONCILE, #42); that job and its two siblings — 18 and 23 — were REMOVED in
+# #132 after their restart helper typed `/exit` into a session the user was
+# working in. What survives here is only what other jobs still use: the idle
+# capture, the transcript seeder, and the fake tmux. Every fixture that existed
+# solely to drive a restart (busy/dialog/draft/bg-agent/strip-selected/resume
+# captures, the target-model and settings-hash helpers) went with the jobs.
 # --------------------------------------------------------------------------- #
 
 MR_IDLE_CAP = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
-MR_BUSY_CAP = ("● Baking…\n✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
-              "  ctx ███░  caveman:lite\n")
-MR_DIALOG_CAP = ("● Claude asked:\n  · Ktorá možnosť?\n     1. A\n     2. B\n"
-                 "  Tab/Arrow keys to navigate · Enter to select\n")
-MR_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
-# A live background agent — must NEVER be restarted (issue #42 item 2/#36).
-MR_BG_AGENT_CAP = ("● main\n◯ autopilot-worker  Waiting for deploy-prod.yml jobs\n"
-                   "❯ \n  ctx ███░  caveman:lite\n")
-MR_BG_WAIT_CAP = "✻ Waiting for 2 background agents to finish\n❯ \n  ctx ███░\n"
-# The agent-strip SELECTOR holding focus (issue #36) while otherwise idle —
-# the ONE Escape a keystroke sender must send before typing (#36).
-MR_STRIP_SELECTED_IDLE_CAP = "❯ ● main\n❯ \n  ctx ███░  caveman:lite\n"
-MR_TARGET = "claude-opus-5[1m]"
-# Claude Code's large-prior-session resume dialog (verified live, gk 2026-07-25).
-MR_RESUME_DIALOG_CAP = (
-    "This session is 1h 21m old and 701.9k tokens.\n"
-    "Resuming the full session will consume a substantial portion of your "
-    "usage limits. We recommend resuming from a summary.\n"
-    "❯ 1. Resume from summary (recommended)\n"
-    "  2. Resume full session as-is\n"
-    "  3. Don't ask me again\n")
 
 
 def _seed_transcript(projects_dir, cwd, sid, model):
@@ -1662,30 +1633,6 @@ class RestartFakeTmux:
         self.sent = []
         self._cap_calls = 0
         self._cmd_polls = 0
-
-
-class TestTranscriptLastModel(unittest.TestCase):
-    def test_returns_last_assistant_model(self):
-        tmp = tempfile_mkdtemp_cleanup(self)
-        p = Path(tmp) / "s1.jsonl"
-        _write_jsonl(p, [
-            {"type": "assistant",
-             "message": {"model": "claude-fable-5",
-                        "content": [{"type": "text", "text": "hi"}]}},
-            {"type": "assistant",
-             "message": {"model": "claude-opus-5[1m]",
-                        "content": [{"type": "text", "text": "bye"}]}},
-        ])
-        self.assertEqual(wd.transcript_last_model(p), "claude-opus-5[1m]")
-
-    def test_missing_model_field_returns_empty(self):
-        tmp = tempfile_mkdtemp_cleanup(self)
-        p = Path(tmp) / "s1.jsonl"
-        _write_jsonl(p, [{"type": "user", "message": {"content": "hi"}}])
-        self.assertEqual(wd.transcript_last_model(p), "")
-
-    def test_nonexistent_file_returns_empty(self):
-        self.assertEqual(wd.transcript_last_model(Path("/nonexistent/x.jsonl")), "")
 
 
 class TestTranscriptCurrentContext(unittest.TestCase):
@@ -1807,32 +1754,6 @@ class TestReconcileCandidatePanes(unittest.TestCase):
             ])
         panes = wd._reconcile_candidate_panes(fake_run)
         self.assertEqual(len(panes), 1, panes)
-
-
-def _write_settings(path, hooks_block):
-    Path(path).write_text(json.dumps({"hooks": hooks_block}))
-
-
-HR_HOOKS_A = {"PreToolUse": [{"matcher": "Bash",
-                              "hooks": [{"type": "command", "command": "a.sh"}]}]}
-HR_HOOKS_B = {"PreToolUse": [{"matcher": "Bash",
-                              "hooks": [{"type": "command", "command": "b.sh"}]}]}
-
-
-MGR_TARGET = "claude-sonnet-6"
-
-
-def _seed_gen_transcript(projects_dir, cwd, sid, launch_model, last_model=None):
-    d = Path(projects_dir) / wd.encode_project_dir(cwd)
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / (sid + ".jsonl")
-    entries = [{"type": "assistant", "message": {"model": launch_model,
-                                                  "content": [{"type": "text", "text": "hi"}]}}]
-    if last_model is not None and last_model != launch_model:
-        entries.append({"type": "assistant", "message": {"model": last_model,
-                                                          "content": [{"type": "text", "text": "later"}]}})
-    _write_jsonl(p, entries)
-    return p
 
 
 class TestBurnSnapshotJob(unittest.TestCase):

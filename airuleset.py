@@ -3390,10 +3390,17 @@ def setup_watchdog_service():
               f"  Run manually:\n{manual}", file=sys.stderr)
         return False
     if watchdog_disable_marker().exists():
-        print(f"  api-watchdog timer left AS-IS — disable marker present "
-              f"({watchdog_disable_marker()}).\n"
-              f"  Units refreshed; delete the marker and run "
-              f"`systemctl --user enable --now api-watchdog.timer` to re-arm.")
+        # ENFORCE the stop, don't merely decline to start it. A timer that is
+        # stopped but still ENABLED comes back at the next boot or linger
+        # restart, so "skip enable --now" alone would let the mitigation expire
+        # on its own (#132). Both calls are idempotent, so a box that is
+        # already stopped+disabled just no-ops.
+        _run_systemctl(["stop", "api-watchdog.timer"])
+        _run_systemctl(["disable", "api-watchdog.timer"])
+        print(f"  api-watchdog timer STOPPED + DISABLED — disable marker "
+              f"present ({watchdog_disable_marker()}).\n"
+              f"  Units refreshed. To re-arm: delete the marker and run "
+              f"`systemctl --user enable --now api-watchdog.timer`.")
         return True
     rc, _o, err = _run_systemctl(["enable", "--now", "api-watchdog.timer"])
     if rc != 0:

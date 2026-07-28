@@ -346,26 +346,6 @@ def transcript_last_error(path):
     return ""
 
 
-def transcript_last_model(path, max_lines=200):
-    """`message.model` of the session's most recent assistant entry that
-    carries one (e.g. `claude-fable-5`, `claude-opus-5[1m]`), or '' if none /
-    unreadable. (Fed job 12 (MODEL RECONCILE) until #132 removed it; still
-    read by the burn/report paths that attribute spend per model.) Widens the
-    tail window past
-    `_iter_jsonl_tail`'s default 60 (a `model` field sits only on assistant
-    entries — a run of tool-result/system entries after the last real reply
-    can push it further back than 60 lines)."""
-    for entry in reversed(_iter_jsonl_tail(path, max_lines=max_lines)):
-        if not isinstance(entry, dict):
-            continue
-        msg = entry.get("message")
-        if isinstance(msg, dict):
-            model = msg.get("model")
-            if model:
-                return model
-    return ""
-
-
 def transcript_current_context(path, max_lines=200):
     """The session's CURRENT context size — cache_read_input_tokens +
     cache_creation_input_tokens off the newest assistant usage entry.
@@ -3259,9 +3239,10 @@ def _reconcile_candidate_panes(run):
     linked under, so `tmux list-panes -a` lists the SAME pane_id once per
     session name — confirmed live on dev1 (marek's grouped sessions each
     re-list every shared window). Without the dedup, a single live pane
-    would be visited twice per sweep (harmless — the second visit's dedup
-    check on `state['modelswitch']` always sees the first visit's claim —
-    but wasteful and noisy in the logs)."""
+    would be visited twice per sweep (harmless — the consuming job's own
+    per-session dedup sees the first visit's claim — but wasteful and noisy
+    in the logs). Job 20 (goal re-arm) is the only consumer since #132
+    removed jobs 12/18/23."""
     run = run or _default_run
     out = run(["tmux", "list-panes", "-a", "-F",
                "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"])
@@ -5204,7 +5185,7 @@ def long_turn_watch(now, run, state, panes_by_sid, send_fn=None, dry_run=False,
 # INTENT says armed + REALITY says dark = this exact failure -> re-arm.
 #
 # This ALSO covers #76's original restart case with no per-job patching: a
-# a watchdog restart (jobs 12/18, removed in #132) relaunched via `claude -c`, which CONTINUES
+# a watchdog restart (jobs 12/18, removed in #132) relaunched via `claude -c`, which CONTINUED
 # the same transcript, so the marker still says `set` while the fresh process
 # has no goal — precisely the mismatch above, healed on the next sweep.
 #
@@ -6528,8 +6509,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
              goal_templates_path=None):
-    """Scan every `claude` pane once. 23 jobs per poll (5 of them REMOVED — 12, 15, 17, 18, 23 —
-    with their numbers retained so historical log lines still resolve):
+    """Scan every `claude` pane once. 23 numbered jobs per poll — 18 LIVE and 5
+    RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
+    kept addressable so historical log lines and code comments still resolve.
+    The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
@@ -6564,6 +6547,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
           gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
           never over user text, never when a goal is already armed);
+      (10) QUEUED-PROMPT-WEDGE (#20, reworked #35) — text sitting in a pane's
+          input box (a submitted-but-stuck queued prompt, or an abandoned
+          draft) blocks every keystroke delivery and can park a session for
+          hours. Byte-identical box text across >= PWEDGE_SWEEPS sweeps with a
+          stale transcript and no live-work signal → PING FIRST, never a blind
+          keystroke into text the user may still want (prompt_wedge_check).
       (12) MODEL RECONCILE — REMOVED (#132, 2026-07-28). Restarted a session
           parked on an expensive tier by typing `/exit` into its pane and
           relaunching. Two independent reasons it is gone: the remedy
@@ -7268,6 +7257,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                        waiting=True)
         except Exception as e:
             logs.append("skip hosted pane %s: %r" % (pid, e))
+
+    # One-shot cleanup of the REMOVED restart jobs' state (#132). These eight
+    # named stores are on every managed box's state file with no writer and no
+    # reader left; the generic cleanup below deliberately refuses to touch a
+    # NAMED job store (deleting one starved the ticket-fallback, 2026-07-21),
+    # so they would otherwise persist forever and read as live tracking to the
+    # next person opening the file. Harmless but confusing — drop them once.
+    for k in ("modelswitch", "modelswitch_pending", "modelswitch_attempts",
+              "hooks_session_hash", "hooks_restarted", "hooks_restart_attempts",
+              "modelgen_restarted", "modelgen_restart_attempts"):
+        if k in state and not dry_run:
+            del state[k]
 
     # Cleanup. api-error keys (no prefix): drop the moment the session recovers.
     # wait: keys: drop only after the footer has been absent for WAIT_CLEAR seconds
