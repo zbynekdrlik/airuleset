@@ -5103,7 +5103,9 @@ class TestRemoteHosts(TestCase):
     box, and every managed user is present exactly once."""
 
     GK_HOST = "100.90.94.41"
-    SUBDEV_USERS = {"marek", "david"}
+    # simap shares marek/david's identity requirement (airuleset#143 — same
+    # operator keys as marek, registered on the same subdev box).
+    SUBDEV_USERS = {"marek", "david", "simap"}
 
     def _subdev_entries(self):
         return [r for r in airuleset.REMOTE_HOSTS
@@ -5113,7 +5115,7 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu@subdev",
-                         "marek@subdev", "david@subdev"):
+                         "marek@subdev", "david@subdev", "simap@subdev"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
@@ -5136,6 +5138,21 @@ class TestRemoteHosts(TestCase):
                          "montalu authorizes the DEFAULT newlevel key, not "
                          "gatekeeper_access (unlike marek/david) — "
                          "live-verified at the swap")
+
+    def test_simap_subdev_target_shape(self):
+        # simap (airuleset#143, 2026-07-28): 4th sub-dev stream, built by
+        # gatekeeper on the SAME subdev box as marek/david, authorized_keys =
+        # the SAME operator keys as marek — so it shares marek/david's
+        # gatekeeper_access identity requirement, never montalu's
+        # default-key path.
+        entries = [r for r in airuleset.REMOTE_HOSTS
+                   if r["name"] == "simap@subdev"]
+        self.assertEqual(len(entries), 1, "simap@subdev target missing")
+        s = entries[0]
+        self.assertEqual(s["host"], "100.118.174.27")
+        self.assertEqual(s["user"], "simap")
+        self.assertEqual(s.get("identity"),
+                         "~/.secrets/gatekeeper_access_ed25519")
 
     def test_subdev_users_share_one_host_and_identity(self):
         entries = self._subdev_entries()
@@ -5961,6 +5978,16 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run('ssh -i ~/.ssh/id_rsa marek@subdev "ls"')
         self.assertEqual(r.returncode, 2, r.stdout)
 
+    def test_blocks_simap_without_identity(self):
+        # simap (airuleset#143) shares marek/david's identity requirement.
+        r = self._run('ssh simap@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("simap", r.stderr)
+
+    def test_blocks_simap_with_wrong_identity(self):
+        r = self._run('ssh -i ~/.ssh/id_rsa simap@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
     def test_blocks_scp_wrong_user(self):
         r = self._run("scp file.txt newlevel@subdev:/tmp/")
         self.assertEqual(r.returncode, 2, r.stdout)
@@ -5992,6 +6019,11 @@ class TestBlockSubdevSshMisuseHook(TestCase):
     def test_allows_david_with_gatekeeper_identity(self):
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 david@subdev.newlevel.media "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_simap_with_gatekeeper_identity(self):
+        r = self._run(
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 simap@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_fused_identity_flag(self):

@@ -28,6 +28,13 @@ class TestAuthorityResolution(TestCase):
         self.assertEqual(airuleset.AUTHORITY_BY_USER["david"], "fork-no-merge")
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
         self.assertEqual(airuleset.AUTHORITY_BY_USER["montalu"], "branch-merge")
+        # simap (airuleset#143): phase-1 demo stream that merges NOWHERE —
+        # fork-no-merge is the existing lowest profile, already correct.
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["simap"], "fork-no-merge")
+
+    def test_resolve_uses_the_map_for_simap(self):
+        with m.patch.object(airuleset, "_current_user", return_value="simap"):
+            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_resolve_defaults_to_full_for_unknown_user(self):
         with m.patch.object(airuleset, "_current_user", return_value="newlevel"):
