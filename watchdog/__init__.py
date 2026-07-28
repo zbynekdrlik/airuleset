@@ -5216,6 +5216,18 @@ DELIVERY_WORK_FRESH_S = 86400    # 24h — the work branch must be actively movi
 DELIVERY_MIN_UNDELIVERED = 3     # a stray commit or two is not a stalled batch
 DELIVERY_REPING_S = 86400        # re-ping daily while it persists, not per sweep
 
+# The stall window is bounded on BOTH ends. Past this, the base branch is not
+# a delivery target that stopped receiving — it is a branch nobody delivers to
+# at all, and the difference is invisible from the lower bound alone. Found
+# live six minutes after job 24 shipped: `~/varos/eft5000`, a GitLab repo
+# whose `origin/master` last moved on 2019-09-07 (2515 days) while real work
+# merges into `develop-50` — which took a merge the same day the alert fired.
+# `origin/HEAD` is unset there, so the fallback picks a branch abandoned in
+# 2019 and correctly reports 3,248 commits "undelivered" to it, forever.
+# The upper bound costs a genuine stall nothing: one that ever reached it has
+# already pinged every single day for three months on the way.
+DELIVERY_STALL_MAX_S = 90 * 86400
+
 
 def _git_first_line(cwd, argv, git_run=None):
     """One `git -C <cwd> …` call, stripped. None on any failure OR empty
@@ -5288,7 +5300,7 @@ def _delivery_stalled(st, stall, work_fresh, min_undelivered):
     return (st is not None
             and st["undelivered"] >= min_undelivered
             and st["work_age"] <= work_fresh
-            and st["delivery_age"] >= stall)
+            and stall <= st["delivery_age"] <= DELIVERY_STALL_MAX_S)
 
 
 def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
@@ -6962,8 +6974,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           announced — the probe fetches the base ref and the verdict is
           RE-MEASURED, so a locally stale remote-tracking ref can never on
           its own raise an alarm; the probe's other half names the blocking
-          PR and its red check and is pure best-effort enrichment. Silent
-          where it should be: HEAD == base (this repo, which pushes straight
+          PR and its red check and is pure best-effort enrichment. The stall
+          window is bounded on BOTH ends — past `DELIVERY_STALL_MAX_S` the
+          base is not a delivery target that stopped receiving but one
+          nobody delivers to at all (a legacy `origin/master` abandoned in
+          2019 while real work merges elsewhere), which no lower bound can
+          tell apart. Silent where it should be: HEAD == base (this repo,
+          which pushes straight
           to main) yields 0 undelivered — structurally, not by threshold —
           and a parked repo with no fresh commits says nothing, because
           nothing is being spent. DETECTION ONLY (job 21's discipline): one
