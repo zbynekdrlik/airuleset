@@ -349,9 +349,9 @@ def transcript_last_error(path):
 def transcript_last_model(path, max_lines=200):
     """`message.model` of the session's most recent assistant entry that
     carries one (e.g. `claude-fable-5`, `claude-opus-5[1m]`), or '' if none /
-    unreadable. Feeds job 12 (MODEL RECONCILE) — a long-lived session keeps
-    whatever model it started on; this is how that job tells which sessions
-    are still parked on an expensive tier. Widens the tail window past
+    unreadable. (Fed job 12 (MODEL RECONCILE) until #132 removed it; still
+    read by the burn/report paths that attribute spend per model.) Widens the
+    tail window past
     `_iter_jsonl_tail`'s default 60 (a `model` field sits only on assistant
     entries — a run of tool-result/system entries after the last real reply
     can push it further back than 60 lines)."""
@@ -364,49 +364,6 @@ def transcript_last_model(path, max_lines=200):
             if model:
                 return model
     return ""
-
-
-def transcript_first_model(path, max_lines=2000):
-    """`message.model` of the session's FIRST assistant entry that carries
-    one — the LAUNCH-time model this session actually started under (the
-    managed bashrc bakes `--model MANAGED_MODEL` into every launch,
-    airuleset.py, so this is exactly what MANAGED_MODEL resolved to at
-    session start). Feeds job 23 (#44, MODEL GENERATION RECONCILE): unlike
-    `transcript_last_model` above (the CURRENT model, moved by a live `/model`
-    switch — job 12's comparison target), this is the session's ORIGIN,
-    used to detect a session that started under an OLDER `MANAGED_MODEL`
-    value than what is configured now, with no hardcoded tier substrings.
-
-    Reads the file FORWARD (opposite direction from `_iter_jsonl_tail`) and
-    stops at the FIRST match — a huge transcript is never read past its
-    first assistant reply, which is always near the front; `max_lines` is
-    just a fail-safe cap for a pathological file. '' if none found /
-    unreadable."""
-    try:
-        f = open(path, encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    try:
-        for i, line in enumerate(f):
-            if i >= max_lines:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            msg = entry.get("message")
-            if isinstance(msg, dict):
-                model = msg.get("model")
-                if model:
-                    return model
-        return ""
-    finally:
-        f.close()
 
 
 def transcript_current_context(path, max_lines=200):
@@ -809,7 +766,7 @@ def _find_boundary_line(captured):
        lines in the capture and take the line immediately above the second
        (bottom) one. This is immune to whatever Claude Code renders BELOW
        the box — the agent strip, the statusline, or any UI element never
-       seen before (the live `⧉  <project>` row that made job 12/14/15 and
+       seen before (the live `⧉  <project>` row that made job 14 and
        Discord-reply delivery mislabel a drafting pane "busy", 2026-07-25,
        dev2 marek-1:5.0 — the second occurrence of this class after #36). A
        multi-row WRAPPED draft still resolves correctly: the last content
@@ -3280,77 +3237,6 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
     return logs
 
 
-# --------------------------------------------------------------------------- #
-# Job 12 — MODEL RECONCILE, restart-based (#42 rework, 2026-07-25). The
-# managed default (`MANAGED_MODEL` in airuleset.py) only binds a NEW Claude
-# Code session — a long-lived session keeps whatever model it started on.
-#
-# The ORIGINAL version of this job (#37) tried to fix that by typing
-# `/model <target>` into the stale session — but a LIVE incident
-# (gatekeeper, 2026-07-25) proved that is structurally futile: a running
-# session's AVAILABLE-MODEL LIST is fixed at its own start, so a model
-# released AFTER that start is simply absent from the list and `/model` can
-# never select it, no matter how many times it's retried (every attempt
-# just burned a prompt-cache-invalidating context re-read for nothing). The
-# gk box ran CC 2.1.220 (which DOES offer the newer model) with
-# `settings.json` requesting it, yet a resumed (`-c`) session stayed on the
-# stale model; opening `/model` by hand there confirmed the newer model was
-# not even LISTED. Only a session RESTART fixed it.
-#
-# So this job no longer types `/model` at all. Instead, for every live
-# claude/node/bun pane whose newest transcript's last model is still
-# fable/opus-4, and ONLY when the pane is genuinely SAFE-TO-RESTART (idle at
-# a bare prompt, no draft, no open dialog, not in copy-mode, AND no
-# in-flight background agent — a restart would KILL a running worker), it
-# restarts the session: `/exit`, wait for the shell to come back, relaunch
-# `claude` (the managed bashrc function bakes `--model MANAGED_MODEL` into
-# EVERY launch, airuleset.py — this job never passes a model itself), then
-# accept Claude Code's "Resume from summary" dialog for a large prior
-# session (verified live: 701.9k tokens -> 175k) or simply proceed when no
-# dialog appears (a small/absent prior session). A pane that is NOT safe is
-# left untouched and recorded as "needs restart" for a later sweep — never
-# forced, never nudged past a live worker.
-#
-# Reuses the SAME pane helpers every other keystroke-sending job here uses
-# (`pane_in_mode`, `pane_waiting_on_user`, `_input_line_text`,
-# `pane_at_idle_prompt`, `_pane_location`, `_strip_selected`) rather than a
-# parallel chrome-detector, plus the module's own agent-strip / "Waiting for
-# N background agents" detection (`_BG_AGENTS_WAIT_RX`, job 9) for the NEW
-# in-flight-agent guard this rework adds.
-# --------------------------------------------------------------------------- #
-
-MODEL_RECONCILE_MAX_ATTEMPTS = 3     # cap retries per session — a live incident (gk,
-                                     # 2026-07-25) showed the SAME pane FAIL every ~60s
-                                     # sweep forever — each FAIL released the dedup
-                                     # claim, so every sweep retried, burning a full
-                                     # context re-read (prompt-cache invalidation) on
-                                     # every attempt. Bounded, then GIVE UP for good.
-
-# `/exit` hands the pane back to its shell — poll (bounded) for the
-# foreground process to leave claude/node/bun.
-MODEL_RESTART_EXIT_POLL_S = 1
-MODEL_RESTART_EXIT_MAX_POLLS = 10
-# After the `claude` relaunch, poll (bounded) for EITHER the resume-from-
-# summary dialog or a bare idle prompt with no dialog (nothing to resume).
-MODEL_RESTART_LAUNCH_POLL_S = 1
-MODEL_RESTART_LAUNCH_MAX_POLLS = 15
-# After accepting the resume dialog, poll (bounded) for the resumed session
-# to settle at an idle prompt.
-MODEL_RESTART_VERIFY_POLL_S = 1
-MODEL_RESTART_VERIFY_MAX_POLLS = 10
-
-# Claude Code's large-prior-session resume dialog (verified live, gk
-# 2026-07-25):
-#   This session is 1h 21m old and 701.9k tokens.
-#   Resuming the full session will consume a substantial portion of your
-#   usage limits. We recommend resuming from a summary.
-#   ❯ 1. Resume from summary (recommended)
-#     2. Resume full session as-is
-#     3. Don't ask me again
-# Option 1 is pre-selected — a single Enter accepts it. A small/absent
-# prior session shows no such dialog at all; the caller proceeds directly.
-_RESUME_DIALOG_RX = re.compile(r"Resume from summary", re.I)
-
 # An agent-strip row for an OTHER (non-main) agent — `◯ <agent>` or its
 # SELECTED form `❯ ◯ <agent>` (issue #36). Deliberately excludes the bare
 # `● main` row: that renders even with zero subagents running, so it alone
@@ -3400,9 +3286,9 @@ def _pane_has_bg_agent(captured):
     `◯ <agent>` agent-strip row (or its SELECTED form `❯ ◯ <agent>`, issue
     #36), or the ambient "Waiting for N background agents to finish" line
     CC prints while one runs. A restart (`/exit`) would KILL any in-flight
-    worker — this is the one guard job 12 needs that no OTHER
-    keystroke-sending job in this file needs, since none of them ever kill
-    the pane's process (#42)."""
+    worker. Added for job 12 (#42), which #132 removed; job 20 (goal re-arm)
+    is the remaining consumer — it must not paste a `/goal` into a pane whose
+    background worker is mid-flight."""
     if not captured:
         return False
     if _BG_AGENTS_WAIT_RX.search(captured):
@@ -3411,257 +3297,6 @@ def _pane_has_bg_agent(captured):
         if _AGENT_STRIP_ROW_RX.match(ln.strip()):
             return True
     return False
-
-
-def _mark_modelswitch_pending(state, sid, loc, model, reason, now):
-    """Persist that `sid` still needs a restart but the pane isn't safe to
-    attempt it on YET (#42 item 4: 'record the session as needs-restart in
-    state and log it; re-evaluate on later sweeps'). Overwritten every
-    sweep the pane stays unsafe; cleared the moment it becomes safe."""
-    pending = state.get("modelswitch_pending") or {}
-    pending[sid] = {"loc": loc, "model": model, "reason": reason,
-                    "last_seen": int(now)}
-    state["modelswitch_pending"] = pending
-
-
-def _clear_modelswitch_pending(state, sid):
-    pending = state.get("modelswitch_pending") or {}
-    if sid in pending:
-        pending.pop(sid, None)
-        state["modelswitch_pending"] = pending
-
-
-def _wait_for_shell_returns(pid, run, sleep_fn):
-    """Poll (bounded) for `/exit` to hand the pane back to its shell — the
-    foreground process leaves claude/node/bun. Never an unbounded wait
-    (`no-timeout-band-aids.md`): `MODEL_RESTART_EXIT_MAX_POLLS` caps it."""
-    for _ in range(MODEL_RESTART_EXIT_MAX_POLLS):
-        sleep_fn(MODEL_RESTART_EXIT_POLL_S)
-        cmd = (run(["tmux", "display-message", "-p", "-t", pid,
-                    "#{pane_current_command}"]) or "").strip()
-        if cmd and cmd not in ("claude", "node", "bun"):
-            return True
-    return False
-
-
-def _wait_for_relaunch(pid, run, sleep_fn):
-    """Poll (bounded) after the `claude` relaunch keystrokes for EITHER the
-    "Resume from summary" dialog or a bare idle `❯` with no dialog text (a
-    small/absent prior session — nothing to resume). Returns
-    `("dialog"|"idle", last_captured)` on success, `(None, last_captured)`
-    once `MODEL_RESTART_LAUNCH_MAX_POLLS` is exceeded."""
-    captured = ""
-    for _ in range(MODEL_RESTART_LAUNCH_MAX_POLLS):
-        sleep_fn(MODEL_RESTART_LAUNCH_POLL_S)
-        captured = capture_pane(pid, run, lines=40) or ""
-        if _RESUME_DIALOG_RX.search(captured):
-            return "dialog", captured
-        if pane_at_idle_prompt(captured):
-            return "idle", captured
-    return None, captured
-
-
-def _wait_for_idle_after_dialog(pid, run, sleep_fn):
-    """Poll (bounded) for the resumed session to settle at a bare idle `❯`
-    after accepting the "Resume from summary" dialog."""
-    for _ in range(MODEL_RESTART_VERIFY_MAX_POLLS):
-        sleep_fn(MODEL_RESTART_VERIFY_POLL_S)
-        captured = capture_pane(pid, run, lines=40) or ""
-        if pane_at_idle_prompt(captured):
-            return True
-    return False
-
-
-# #79 (2026-07-26 live incident) -- a bare `claude` typed into a shell OLDER
-# than #77's launcher rewrite resolves to whatever `.bashrc` that shell
-# already had loaded at ITS OWN start; bash reads `.bashrc` exactly once,
-# at shell start, and never again. A shell started before #77 shipped still
-# holds the OLD fat `claude()` function with `--settings
-# '{"ultracode":true}'` baked in -- live-verified on `david:0.0`@subdev
-# (shell started Jul 22, well before #77): `type claude` showed the frozen
-# old function even after #77's `.bashrc` rewrite had long since deployed.
-# `_restart_pane` is the ONE place that launches `claude` from OUTSIDE an
-# interactive user keystroke (job 12 model-reconcile, job 18
-# hooks-reconcile) -- re-sourcing `.bashrc` in the SAME command guarantees
-# the CURRENT wrapper resolves regardless of how old the target shell is.
-# Any FUTURE mechanism that launches `claude` from a pane must go through
-# this same shape (or call `_restart_pane` itself) -- there must never be a
-# second place typing a bare `claude`.
-RELAUNCH_CMD = "source ~/.bashrc && claude"
-
-
-def _restart_pane(pid, run, sleep_fn, captured):
-    """Perform the restart sequence for a pane the caller already proved
-    SAFE-TO-RESTART (idle, no draft, no open dialog, not in-mode, no
-    in-flight background agent). Returns `(ok, reason)`.
-
-    Keystrokes, in order:
-      1. `/exit` + Enter — escaping the agent-strip selector FIRST (issue
-         #36) if it happens to hold focus in the `captured` frame the
-         caller's guards already read (no extra capture-pane round-trip
-         needed for this step — it's the SAME frame).
-      2. Poll (bounded) for the shell prompt to return.
-      3. `RELAUNCH_CMD` (`source ~/.bashrc && claude`) + Enter — re-sourcing
-         `.bashrc` FIRST guarantees the CURRENT managed wrapper resolves
-         even in a shell that predates the last `.bashrc` deploy (#79) —
-         a bare `claude` would resolve to whatever that shell already had
-         loaded at its own start. The managed bashrc function bakes
-         `--model MANAGED_MODEL` into every launch (airuleset.py); this job
-         never passes a model itself.
-      4. Poll (bounded) for EITHER the "Resume from summary" dialog (a
-         large prior session) or a bare idle `❯` with no dialog (a
-         small/absent prior session).
-      5. If the dialog appeared: ONE more Enter accepts the pre-selected
-         "Resume from summary" option, then poll (bounded) for the resumed
-         session to settle at an idle `❯`.
-
-    NEVER two consecutive Escapes (issue #35) — this sequence sends at most
-    ONE Escape (step 1, only when the strip selector holds focus), and
-    every other keystroke is a real command or a lone Enter."""
-    if _strip_selected(captured):
-        run(["tmux", "send-keys", "-t", pid, "Escape"])
-    run(["tmux", "send-keys", "-t", pid, "-l", "/exit"])
-    run(["tmux", "send-keys", "-t", pid, "Enter"])
-    if not _wait_for_shell_returns(pid, run, sleep_fn):
-        return False, "shell did not return after /exit"
-    run(["tmux", "send-keys", "-t", pid, "-l", RELAUNCH_CMD])
-    run(["tmux", "send-keys", "-t", pid, "Enter"])
-    kind, _cap = _wait_for_relaunch(pid, run, sleep_fn)
-    if kind is None:
-        return False, "relaunch did not render (no resume dialog, no idle prompt)"
-    if kind == "dialog":
-        run(["tmux", "send-keys", "-t", pid, "Enter"])   # accept "Resume from summary"
-        if not _wait_for_idle_after_dialog(pid, run, sleep_fn):
-            return False, "session did not settle idle after the resume dialog"
-    return True, "restarted"
-
-
-def model_reconcile(now, run, state, target_model, dry_run=False,
-                    projects_dir=None, sleep_fn=None, handled=None):
-    """Job 12 — see the section comment. `target_model` MUST be passed in —
-    cmd_watchdog passes `MANAGED_MODEL`; this module never hardcodes a model
-    literal. A falsy `target_model` disables the job entirely (mirrors the
-    other optional-fetch-gated jobs: usage_fetch=None skips job 3, etc.).
-
-    `handled` (#70, optional): a mutable set run_once passes so job 18
-    (hooks-reconcile, below) can see — within the SAME sweep — that this
-    session is ALREADY being restarted here for a MODEL change, and skip
-    firing a SECOND restart for a hooks-config change landing in the same
-    sweep. Populated ONLY at the real restart CLAIM (never in `dry_run` —
-    nothing is actually happening then, so there is nothing to coalesce
-    against — and never for a session that was merely SKIPPED this sweep).
-
-    Dedup: `state['modelswitch'][<session id>]` is CLAIMED right before the
-    restart keystrokes are sent and is only ever DELETED again on a FAILED
-    restart BELOW the attempt cap — so a real success is never retried, and
-    a failed attempt (shell didn't return, relaunch never rendered, …) is
-    retried on a later sweep instead of being stuck forever either way.
-    `state['modelswitch_attempts'][<session id>]` counts failures; once it
-    reaches `MODEL_RECONCILE_MAX_ATTEMPTS` the session GIVES UP for good
-    (the claim is kept, never released again) — a live incident (gk,
-    2026-07-25) showed a FAILing pane retried on EVERY ~60s sweep forever,
-    each attempt burning a full context re-read (prompt-cache invalidation)
-    for nothing.
-
-    `state['modelswitch_pending'][<session id>]` records a session that
-    still needs a restart but wasn't SAFE-TO-RESTART this sweep (busy,
-    drafting, dialog open, in copy-mode, or a background agent in flight) —
-    never forced, never nudged past live work; re-evaluated next sweep.
-
-    Never restarts a pane that is in copy-mode, showing an open dialog,
-    mid-turn/busy, holding an unsent draft, or running a background agent
-    (a restart would KILL it) — `_classify_boundary` distinguishes
-    busy (a real boundary, not `❯`-shaped) vs no-input-line (no boundary
-    locatable at all, issue #46) vs draft (non-empty) vs safe-to-type (empty
-    bare `❯`), the same boundary-line discipline every other keystroke-sending
-    job here relies on; `_pane_has_bg_agent` is the NEW guard this rework
-    adds. Best-effort: exceptions are the caller's (run_once's)
-    responsibility to catch, same as every other job."""
-    if not target_model:
-        return []
-    run = run or _default_run
-    sleep_fn = sleep_fn or time.sleep
-    projects_dir = projects_dir or PROJECTS_DIR
-    reconciled = state.get("modelswitch") or {}
-    attempts_map = state.get("modelswitch_attempts") or {}
-    logs = []
-    for pid, cwd, cmd in _reconcile_candidate_panes(run):
-        tinfo = find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, _tmtime = tinfo
-        sid = tpath.stem
-        model = transcript_last_model(tpath)
-        ml = model.lower()
-        if not model or ("fable" not in ml and "opus-4" not in ml):
-            continue                      # already-on-target / not a tracked tier
-        if reconciled.get(sid):
-            continue                      # already restarted this session — never retry
-        loc = _pane_location(pid, run) or pid
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "in-mode", now)
-            continue
-        captured = capture_pane(pid, run, lines=40)
-        if pane_waiting_on_user(captured):
-            logs.append("skip dialog-open (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "dialog-open", now)
-            continue
-        kind, draft = _classify_boundary(captured)
-        if kind == "no-input-line":
-            logs.append("skip no-input-line (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "no-input-line", now)
-            continue
-        if kind == "busy":
-            logs.append("skip busy (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "busy", now)
-            continue
-        if draft:
-            logs.append("skip draft (model-reconcile) %s %s: %r"
-                        % (loc, model, draft[:40]))
-            _mark_modelswitch_pending(state, sid, loc, model, "draft", now)
-            continue
-        if not pane_at_idle_prompt(captured):
-            logs.append("skip not-idle (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "not-idle", now)
-            continue
-        if _pane_has_bg_agent(captured):
-            logs.append("skip bg-agent (model-reconcile) %s %s" % (loc, model))
-            _mark_modelswitch_pending(state, sid, loc, model, "bg-agent", now)
-            continue
-        _clear_modelswitch_pending(state, sid)
-        if dry_run:
-            logs.append("READY (model-reconcile) %s %s -> %s (restart)"
-                        % (loc, model, target_model))
-            continue
-        reconciled[sid] = True
-        state["modelswitch"] = reconciled
-        if handled is not None:
-            handled.add(sid)
-        ok, reason = _restart_pane(pid, run, sleep_fn, captured)
-        if ok:
-            logs.append("OK (model-reconcile) %s %s -> %s (restarted)"
-                        % (loc, model, target_model))
-            attempts_map.pop(sid, None)
-            state["modelswitch_attempts"] = attempts_map
-        else:
-            attempts = attempts_map.get(sid, 0) + 1
-            attempts_map[sid] = attempts
-            state["modelswitch_attempts"] = attempts_map
-            if attempts >= MODEL_RECONCILE_MAX_ATTEMPTS:
-                # Bounded — never retry this session again. Keep `reconciled[sid]`
-                # claimed (same as a real OK) so the dedup check at the top of the
-                # loop skips it forever, instead of releasing it for yet another
-                # doomed retry.
-                logs.append("GAVE UP (model-reconcile) %s %s -> %s after %d attempts (%s)"
-                            % (loc, model, target_model, attempts, reason))
-            else:
-                del reconciled[sid]
-                state["modelswitch"] = reconciled
-                logs.append("FAIL (model-reconcile) %s %s -> %s (%s, attempt %d/%d)"
-                            % (loc, model, target_model, reason, attempts,
-                               MODEL_RECONCILE_MAX_ATTEMPTS))
-    return logs
 
 
 # --------------------------------------------------------------------------- #
@@ -4422,7 +4057,7 @@ def compact_claim_active(sid, cwd, path=None, projects_dir=None):
     # #83 — a claim with NO "proc" key at ALL (written before #82, or whose
     # owning pane could not be fingerprinted at queue time) has NOTHING that
     # can ever prove delivery loss for the exact case that matters most: a
-    # watchdog-driven restart (jobs 12/18, `_restart_pane`) relaunches via
+    # a restart (jobs 12/18's `_restart_pane`, removed in #132) relaunched via
     # `claude -c`, which CONTINUES the SAME transcript — the process-death
     # check below is a no-op (no fingerprint to check), the session never
     # changes id (the cwd/session-id FAILED check below can never fire
@@ -4554,8 +4189,8 @@ def _log_compact_sync(line, path=None):
 
 # --------------------------------------------------------------------------- #
 # Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c, 2026-07-25). See the
-# section comment above. Reuses the EXACT idle guards job 12 (MODEL
-# RECONCILE) already uses: never busy, never mid-dialog, never with a draft
+# section comment above. Reuses the EXACT idle guards job 12 (MODEL RECONCILE,
+# removed in #132) used: never busy, never mid-dialog, never with a draft
 # present, never in copy-mode — plus the SAME strip-select discipline as
 # every other keystroke-sending job here (send_continue: escape the
 # agent-strip selector ONLY when it holds focus, never a second Escape into
@@ -4847,7 +4482,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     A request is REMOVED from the requests file (dedup — never retried) the
     MOMENT `/compact` is actually typed into an idle pane — sending the
     keystrokes IS the observable success here, the same fire-and-forget
-    shape job 9's goal_autoarm uses (unlike job 12, `/compact` has no
+    shape job 9's goal_autoarm uses (`/compact` has no
     reliable confirmation text to poll for). A request is LEFT IN PLACE
     (retried next sweep) whenever the pane is busy / mid-dialog / in
     copy-mode / holding a draft whose STASH SLOT is already occupied by
@@ -5532,315 +5167,6 @@ def long_turn_watch(now, run, state, panes_by_sid, send_fn=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
-# Job 18 — HOOKS RECONCILE, restart-based (#70, 2026-07-26 live incident). CC
-# snapshots its hook set ONCE at process START — `rCu()` / the telemetry event
-# `setup_hooks_captured`, read directly out of the CC 2.1.220 binary — and
-# NEVER re-reads it. There is no code path that calls `rCu()` a second time.
-# So a hook merged into `settings.json` while a session is ALREADY RUNNING
-# has ZERO effect on that session for its ENTIRE remaining lifetime, no
-# matter how many new hooks get deployed afterward — silently nullifying
-# every hook this repo has ever shipped into a long-lived loop (concretely,
-# #66's Bash-guard hook landed at `ed83955` but the gatekeeper master loop,
-# running since before that commit, never picked it up).
-#
-# This job is job 12's EXACT restart machinery (`_restart_pane`,
-# `_pane_has_bg_agent`, the boundary-classification guards) driven by a
-# DIFFERENT staleness signal: the CONTENT hash (never mtime — a touch/rewrite
-# with identical bytes must never trigger a restart) of the effective
-# settings.json `"hooks"` block, rather than a target-model string read out
-# of the transcript. Unlike job 12, there is no way to introspect from a
-# transcript what hook set a running process currently has loaded in memory
-# — hooks are never recorded per-message — so this job tracks its OWN
-# baseline per session id (`state['hooks_session_hash']`), bootstrapped on
-# the FIRST sweep it ever observes a given sid (there is no way to know
-# retroactively what hash a session ALREADY RUNNING at this job's own deploy
-# time actually started with, so the first observation is treated as the
-# baseline — this only ever matters once, at this job's own rollout; every
-# hooks change from then on is caught exactly, because the baseline was
-# recorded before that change landed). A LATER sweep where the CURRENT hash
-# no longer matches the stored baseline is what proves the session is
-# genuinely stale, and only then does it restart.
-#
-# Dedup / never-retry-a-success, mirroring job 12's shape exactly:
-# `state['hooks_restarted'][sid]` is CLAIMED right before the restart
-# keystrokes are sent and is only ever DELETED again on a FAILED restart
-# BELOW the attempt cap — a real success is never retried, a failed attempt
-# is retried on a later sweep instead of being stuck forever either way.
-# `state['hooks_restart_attempts'][sid]` counts failures; once it reaches
-# `HOOKS_RECONCILE_MAX_ATTEMPTS` the session GIVES UP for good (never
-# retried again), the exact same bounded-retry shape job 12/15/17 use.
-#
-# Coalescing with job 12 (#70's own explicit ask: "one restart, not two"):
-# run_once threads a SHARED per-sweep `handled` set into BOTH job 12 and this
-# job — a sid job 12 already restarted (or attempted to restart) THIS sweep
-# for a MODEL change is skipped outright here, so a hooks change landing in
-# the same sweep as a model change coalesces into the ONE restart job 12
-# already performs.
-#
-# Fails CLOSED on any uncertainty (#70 hard constraint: "make the restart
-# path fail CLOSED on any uncertainty"): an unreadable/missing/invalid
-# settings.json returns `None` from `_hooks_config_hash` and disables the
-# WHOLE job for that sweep — it never guesses "hash changed" from a read
-# failure, which would restart every live session on the box for no real
-# reason.
-# --------------------------------------------------------------------------- #
-
-HOOKS_RECONCILE_MAX_ATTEMPTS = 3   # same cap shape as job 12/15/17
-
-
-def hooks_settings_path():
-    """`~/.claude/settings.json` — the EFFECTIVE settings file Claude Code
-    reads its hook set from at its own process start, resolved at CALL time
-    (never a frozen module-level constant — mirrors `compact_requests_path()`'s
-    own documented reasoning: `Path.home()` must be read at call time, not at
-    import time)."""
-    return Path.home() / ".claude" / "settings.json"
-
-
-def _hooks_config_hash(settings_path=None):
-    """Content hash (NEVER mtime — #70) of the `"hooks"` block inside the
-    effective settings.json. `sort_keys=True` so key REORDERING with
-    otherwise-identical content never looks like a change. Returns `None` on
-    ANY read/parse failure (missing file, bad JSON, not even a dict) — the
-    caller (`hooks_reconcile`) treats `None` as "disable this sweep", never
-    as "hash changed"; see the section comment's fail-closed rationale."""
-    path = settings_path or hooks_settings_path()
-    try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(d, dict):
-        return None
-    hooks = d.get("hooks") or {}
-    return _hash(json.dumps(hooks, sort_keys=True))
-
-
-def hooks_reconcile(now, run, state, dry_run=False, projects_dir=None,
-                    sleep_fn=None, settings_path=None, handled=None):
-    """Job 18 — see the section comment above.
-
-    Reuses `_reconcile_candidate_panes` (claude/node/bun, same as job 12) and
-    `_restart_pane` (the identical `/exit` + relaunch + accept-"Resume from
-    summary" sequence) — never a parallel restart implementation. Never
-    restarts a pane that is in copy-mode, showing an open dialog, mid-turn/
-    busy, holding an unsent draft, not at a bare idle prompt, or running a
-    BACKGROUND AGENT (`_pane_has_bg_agent`) — the exact same guards job 12
-    uses, via the exact same helpers. Best-effort: exceptions are the
-    caller's (run_once's) responsibility to catch, same as every other job."""
-    cur_hash = _hooks_config_hash(settings_path)
-    if cur_hash is None:
-        return []                      # fail closed — unreadable settings.json
-    run = run or _default_run
-    sleep_fn = sleep_fn or time.sleep
-    projects_dir = projects_dir or PROJECTS_DIR
-    session_hash = state.get("hooks_session_hash") or {}
-    restarted = state.get("hooks_restarted") or {}
-    attempts_map = state.get("hooks_restart_attempts") or {}
-    logs = []
-    for pid, cwd, cmd in _reconcile_candidate_panes(run):
-        tinfo = find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, _tmtime = tinfo
-        sid = tpath.stem
-        if restarted.get(sid):
-            continue                   # already restarted (or gave up) — never retry
-        known = session_hash.get(sid)
-        if known is None:
-            session_hash[sid] = cur_hash
-            state["hooks_session_hash"] = session_hash
-            continue                   # bootstrap: first sight, assume current hash
-        if known == cur_hash:
-            continue                   # up to date — the common case, no log
-        if handled is not None and sid in handled:
-            continue                   # job 12 already restarting this sid this sweep (#70)
-        loc = _pane_location(pid, run) or pid
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode (hooks-reconcile) %s" % loc)
-            continue
-        captured = capture_pane(pid, run, lines=40)
-        if pane_waiting_on_user(captured):
-            logs.append("skip dialog-open (hooks-reconcile) %s" % loc)
-            continue
-        kind, draft = _classify_boundary(captured)
-        if kind == "no-input-line":
-            logs.append("skip no-input-line (hooks-reconcile) %s" % loc)
-            continue
-        if kind == "busy":
-            logs.append("skip busy (hooks-reconcile) %s" % loc)
-            continue
-        if draft:
-            logs.append("skip draft (hooks-reconcile) %s: %r" % (loc, draft[:40]))
-            continue
-        if not pane_at_idle_prompt(captured):
-            logs.append("skip not-idle (hooks-reconcile) %s" % loc)
-            continue
-        if _pane_has_bg_agent(captured):
-            logs.append("skip bg-agent (hooks-reconcile) %s" % loc)
-            continue
-        if dry_run:
-            logs.append("READY (hooks-reconcile) %s (restart)" % loc)
-            continue
-        restarted[sid] = True
-        state["hooks_restarted"] = restarted
-        ok, reason = _restart_pane(pid, run, sleep_fn, captured)
-        if ok:
-            logs.append("OK restart (hooks changed) %s" % loc)
-            attempts_map.pop(sid, None)
-            state["hooks_restart_attempts"] = attempts_map
-        else:
-            attempts = attempts_map.get(sid, 0) + 1
-            attempts_map[sid] = attempts
-            state["hooks_restart_attempts"] = attempts_map
-            if attempts >= HOOKS_RECONCILE_MAX_ATTEMPTS:
-                logs.append("GAVE UP restart (hooks changed) %s after %d attempts (%s)"
-                            % (loc, attempts, reason))
-            else:
-                del restarted[sid]
-                state["hooks_restarted"] = restarted
-                logs.append("FAIL restart (hooks changed) %s (%s, attempt %d/%d)"
-                            % (loc, reason, attempts, HOOKS_RECONCILE_MAX_ATTEMPTS))
-    return logs
-
-
-# --------------------------------------------------------------------------- #
-# Job 23 — MANAGED_MODEL GENERATION RECONCILE (#44, follow-up to #42/job 12).
-#
-# Job 12 (`model_reconcile`) restarts a session whose CURRENT transcript
-# model still matches the hardcoded `fable`/`opus-4` substrings — the
-# specific tiers #37's cost cleanup cared about. That is a deliberately
-# NARROW, one-off migration scope (pinned by `test_sonnet_session_is_skipped`
-# in tests/test_watchdog.py) — it never notices a session that simply
-# started under some OTHER older `MANAGED_MODEL` value that has since moved
-# on to something else entirely (e.g. an old sonnet tier -> a newer one),
-# because no such generic comparison exists anywhere. This job is that
-# general form: it compares each session's LAUNCH-time model
-# (`transcript_first_model` — what the managed bashrc's `--model
-# MANAGED_MODEL` actually bound at session start) against the CURRENT
-# `target_model`.
-#
-# Respecting a DELIBERATE manual `/model` switch is the hard constraint here
-# (model-awareness.md: "the main session runs whatever the user set via
-# /model ... never auto-downtier it") — unlike job 12's narrow, deliberate
-# cost-migration exception (which this job does not touch or widen), this
-# job ONLY EVER acts on a session whose CURRENT model
-# (`transcript_last_model`) still EQUALS its own launch model — i.e. one the
-# user has NEVER manually repointed with `/model` at all. The moment
-# `last != first` the session shows a deliberate in-session choice and this
-# job leaves it alone FOREVER, regardless of what `MANAGED_MODEL` says now
-# or later. So the only sessions ever restarted here are ones purely
-# coasting on a stale launch default with zero manual intervention — exactly
-# the #42 gk-incident shape (a resumed session sitting on a config value
-# nobody ever touched by hand).
-#
-# No bootstrap-on-first-sight step is needed (unlike job 18's hooks hash,
-# which cannot be known retroactively for a session already running at
-# deploy time) — `launch != target` is a fact recoverable from the
-# transcript on the VERY FIRST sweep that observes it, exactly like job 12.
-#
-# Coalesces with job 12 via the SAME shared `handled` set (a model change
-# job 12 already restarted this sweep is never double-restarted here), and
-# adds its own restarts to `handled` too. Reuses job 12/18's exact restart
-# machinery (`_restart_pane`, `_pane_has_bg_agent`, the boundary-
-# classification guards) — never a parallel implementation.
-# --------------------------------------------------------------------------- #
-
-MODEL_GEN_RECONCILE_MAX_ATTEMPTS = 3   # same bounded-retry shape as job 12/18
-
-
-def model_generation_reconcile(now, run, state, target_model, dry_run=False,
-                               projects_dir=None, sleep_fn=None, handled=None):
-    """Job 23 — see the section comment above. Only when `target_model` is
-    given (same "wired = on" convention as job 12 — cmd_watchdog passes
-    MANAGED_MODEL; this module never hardcodes a model literal).
-
-    Dedup/attempts mirror job 12/18 exactly: `state['modelgen_restarted']`
-    is claimed right before the restart keystrokes are sent and only
-    released again on a FAILED restart below the attempt cap;
-    `state['modelgen_restart_attempts']` counts failures, capped at
-    `MODEL_GEN_RECONCILE_MAX_ATTEMPTS`. Best-effort: exceptions are the
-    caller's (run_once's) responsibility, same as every other job."""
-    if not target_model:
-        return []
-    run = run or _default_run
-    sleep_fn = sleep_fn or time.sleep
-    projects_dir = projects_dir or PROJECTS_DIR
-    restarted = state.get("modelgen_restarted") or {}
-    attempts_map = state.get("modelgen_restart_attempts") or {}
-    logs = []
-    for pid, cwd, cmd in _reconcile_candidate_panes(run):
-        tinfo = find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, _tmtime = tinfo
-        sid = tpath.stem
-        if restarted.get(sid):
-            continue                   # already restarted (or gave up) — never retry
-        launch_model = transcript_first_model(tpath)
-        if not launch_model or launch_model == target_model:
-            continue                   # unknown, or already on target — nothing stale
-        last_model = transcript_last_model(tpath)
-        if last_model != launch_model:
-            continue                   # user manually touched /model — never fight it
-        if handled is not None and sid in handled:
-            continue                   # job 12 already restarting this sid this sweep
-        loc = _pane_location(pid, run) or pid
-        if pane_in_mode(pid, run):
-            logs.append("skip in-mode (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        captured = capture_pane(pid, run, lines=40)
-        if pane_waiting_on_user(captured):
-            logs.append("skip dialog-open (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        kind, draft = _classify_boundary(captured)
-        if kind == "no-input-line":
-            logs.append("skip no-input-line (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        if kind == "busy":
-            logs.append("skip busy (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        if draft:
-            logs.append("skip draft (model-gen-reconcile) %s %s: %r"
-                        % (loc, launch_model, draft[:40]))
-            continue
-        if not pane_at_idle_prompt(captured):
-            logs.append("skip not-idle (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        if _pane_has_bg_agent(captured):
-            logs.append("skip bg-agent (model-gen-reconcile) %s %s" % (loc, launch_model))
-            continue
-        if dry_run:
-            logs.append("READY (model-gen-reconcile) %s %s -> %s (restart)"
-                        % (loc, launch_model, target_model))
-            continue
-        restarted[sid] = True
-        state["modelgen_restarted"] = restarted
-        if handled is not None:
-            handled.add(sid)
-        ok, reason = _restart_pane(pid, run, sleep_fn, captured)
-        if ok:
-            logs.append("OK (model-gen-reconcile) %s %s -> %s (restarted)"
-                        % (loc, launch_model, target_model))
-            attempts_map.pop(sid, None)
-            state["modelgen_restart_attempts"] = attempts_map
-        else:
-            attempts = attempts_map.get(sid, 0) + 1
-            attempts_map[sid] = attempts
-            state["modelgen_restart_attempts"] = attempts_map
-            if attempts >= MODEL_GEN_RECONCILE_MAX_ATTEMPTS:
-                logs.append("GAVE UP (model-gen-reconcile) %s %s -> %s after %d attempts (%s)"
-                            % (loc, launch_model, target_model, attempts, reason))
-            else:
-                del restarted[sid]
-                state["modelgen_restarted"] = restarted
-                logs.append("FAIL (model-gen-reconcile) %s %s -> %s (%s, attempt %d/%d)"
-                            % (loc, launch_model, target_model, reason, attempts,
-                               MODEL_GEN_RECONCILE_MAX_ATTEMPTS))
-    return logs
-
-
-# --------------------------------------------------------------------------- #
 # Job 20 — GOAL RE-ARM BACKSTOP (#76, 2026-07-26 live incident, montalu@subdev).
 #
 # An armed `/goal` dies SILENTLY. Not (only) on a restart, as #76 originally
@@ -5878,7 +5204,7 @@ def model_generation_reconcile(now, run, state, target_model, dry_run=False,
 # INTENT says armed + REALITY says dark = this exact failure -> re-arm.
 #
 # This ALSO covers #76's original restart case with no per-job patching: a
-# watchdog restart (jobs 12/18) relaunches via `claude -c`, which CONTINUES
+# a watchdog restart (jobs 12/18, removed in #132) relaunched via `claude -c`, which CONTINUES
 # the same transcript, so the marker still says `set` while the fresh process
 # has no goal — precisely the mismatch above, healed on the next sweep.
 #
@@ -6056,7 +5382,7 @@ GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
 
 def goal_templates_path():
     """`~/.claude/skills/autopilot/SKILL.md` — the INSTALLED autopilot skill,
-    resolved at CALL time (same reasoning as `hooks_settings_path()`).
+    resolved at CALL time (never a frozen module-level constant).
 
     Deliberately the installed copy, never a repo checkout: the isolated
     sub-dev users (marek / david / montalu) have no `~/devel/airuleset`, and
@@ -6548,7 +5874,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
     typed into a pane whose `/compact` is still draining).
 
     `templates_path` (optional, #64): the installed autopilot SKILL. Wired =
-    on, like jobs 13/14/16/18 — without it the STALE-TEMPLATE branch does not
+    on, like jobs 13/14/16 — without it the STALE-TEMPLATE branch does not
     run at all and this job behaves exactly as it did before."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
@@ -7197,12 +6523,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              max_working_nudges=MAX_WORKING_NUDGES,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
-             target_model=None, sleep_fn=None, burn_snapshot_path=None,
+             sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
-             fleet_path=None, hooks_settings_path=None, burn_alert_enabled=False,
+             fleet_path=None, burn_alert_enabled=False,
              goal_rearm_enabled=False, long_turn_enabled=False,
              goal_templates_path=None):
-    """Scan every `claude` pane once. Jobs:
+    """Scan every `claude` pane once. 23 jobs per poll (5 of them REMOVED — 12, 15, 17, 18, 23 —
+    with their numbers retained so historical log lines still resolve):
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
@@ -7237,15 +6564,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
           gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
           never over user text, never when a goal is already armed);
-      (12) (only when `target_model` is given) MODEL RECONCILE, restart-based
-          (#42) — a live claude/node/bun pane whose newest transcript's last
-          model is still fable/opus-4 gets RESTARTED (`/exit` + relaunch
-          `claude`, accepting CC's "Resume from summary" dialog when one
-          appears) so the managed launcher's `--model target_model` binds it
-          by construction — never `/model` (a running session's model list is
-          fixed at its own start and can't accept one released later); never
-          busy/dialog/draft/in-mode/running-a-background-agent
-          (model_reconcile);
+      (12) MODEL RECONCILE — REMOVED (#132, 2026-07-28). Restarted a session
+          parked on an expensive tier by typing `/exit` into its pane and
+          relaunching. Two independent reasons it is gone: the remedy
+          auto-downtiered a model the user had deliberately chosen with
+          `/model`, which `model-awareness.md` forbids ("their call alone —
+          never auto-downtier it"); and `MANAGED_MODEL` already binds every
+          NEW session, so drift only survives in long-lived sessions the user
+          can move with one `/model` — measured live: a running session
+          launched on `claude-opus-5` can select Opus 5 (1M context) with no
+          restart at all. Number retained, never reused (#102 convention).
       (13) HOURLY BURN SNAPSHOT (#37) — once per hour, append this host's
           $/msgs/avg-context row for the PREVIOUS full hour to
           `burn-history/snapshots.jsonl` (burn_snapshot_job) — the feed
@@ -7291,22 +6619,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           ticket boundary (14). See the removed section comment above
           `_pane_compacting` for the full audit. Number retained for
           historical addressability.
-      (18) (only when `hooks_settings_path` is given) HOOKS RECONCILE,
-          restart-based (#70) — Claude Code snapshots its hook set once at
-          process START and never re-reads it, so a hook deployed into
-          settings.json while a session is already running has zero effect
-          until that session restarts. A live claude/node/bun pane whose
-          settings.json hooks block content hash no longer matches the hash
-          this job first saw that session running under gets RESTARTED via
-          job 12's exact `_restart_pane` machinery — never busy/dialog/
-          draft/in-mode/running-a-background-agent (hooks_reconcile).
-          Coalesces with job 12 via a shared `handled` set so a model change
-          and a hooks change landing in the same sweep produce ONE restart,
-          not two. Same "wired = on" convention as jobs 13/14/16 (a path
-          param gates it — never a bare env/global default) so an existing
-          caller of run_once() that passes nothing sees NO behavior change
-          and never has its own test state polluted by this box's real
-          settings.json.
+      (18) HOOKS RECONCILE — REMOVED (#132, 2026-07-28). Existed on the
+          premise that Claude Code snapshots its hook set at process start and
+          never re-reads it, so only a restart could pick up a newly deployed
+          hook. That premise is measurably FALSE. Measured bidirectionally in
+          an isolated scratch session: a hook ENTRY appended to settings.json
+          mid-session fired on the very next tool call, and the same entry
+          REMOVED mid-session stopped firing immediately, with a control arm
+          (a new line inside an already-registered hook script) proving the
+          event fired on every turn. Hooks are re-read per event; nothing ever
+          needed restarting. Number retained, never reused.
       (19) (only when `burn_alert_enabled` is truthy) HOURLY BURN ALERT
           (#81) — runs right after job 16; reads the LATEST merged
           `fleet.jsonl` row and, at most once per hour bucket, checks it
@@ -7379,17 +6701,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (`cleanup_stale_exec_markers`); a live session's marker is never
           touched no matter its age, since removing it would silently
           revoke a deliberately granted exception mid-work.
-      (23) (only when `target_model` is given) MANAGED_MODEL GENERATION
-          RECONCILE (#44, follow-up to #42/job 12) — job 12 only restarts a
-          session still parked on the hardcoded fable/opus-4 tiers; this
-          job is the GENERAL form, restarting a live claude/node/bun pane
-          whose LAUNCH-time model (`transcript_first_model`) no longer
-          matches the current target, but ONLY when its CURRENT model
-          still equals that launch model too — i.e. the user has NEVER
-          manually touched `/model` in that session, so a deliberate
-          manual choice is never fought (model_generation_reconcile).
-          Coalesces with job 12 via the shared `handled` set; same
-          restart machinery, same safe-boundary guards.
+      (23) MANAGED_MODEL GENERATION RECONCILE — REMOVED (#132, 2026-07-28).
+          Compared the session's LAUNCH-time model — an API model id, always
+          `claude-opus-5` — against `MANAGED_MODEL`, a CLI alias spelled
+          `claude-opus-5[1m]`. The `[1m]` suffix never reaches the API model
+          field (zero occurrences in 119k model entries across every real
+          transcript on dev1), so `launch != target` was permanently true for
+          every session on every box, and each restart minted a NEW session id
+          that defeated the per-sid dedup meant to stop the retry — an
+          unbounded restart engine. It restarted a pz-server session the user
+          was working in, 3 minutes after job 18 had already restarted it.
+          Number retained, never reused.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -8051,54 +7373,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     except Exception as e:
         logs.append("goal-autoarm error: %r" % (e,))
 
-    # #70 — shared per-sweep set: job 12 records every sid it actually
-    # restarts (or attempts to restart) THIS sweep so job 18 (hooks-reconcile,
-    # below) never fires a SECOND restart into the same pane for a hooks
-    # config change that happens to land in the same sweep as a model switch.
-    model_handled_this_sweep = set()
-
-    # Job 12 — MODEL RECONCILE, restart-based (#42): only when `target_model`
-    # is given (cmd_watchdog passes MANAGED_MODEL — this module never
-    # hardcodes a model literal). Best-effort.
-    if target_model:
-        try:
-            logs += model_reconcile(now, run, state, target_model,
-                                    dry_run=dry_run, projects_dir=projects_dir,
-                                    sleep_fn=sleep_fn,
-                                    handled=model_handled_this_sweep)
-        except Exception as e:
-            logs.append("model-reconcile error: %r" % (e,))
-
-    # Job 18 — HOOKS RECONCILE, restart-based (#70): only when
-    # `hooks_settings_path` is given (cmd_watchdog passes
-    # watchdog.hooks_settings_path()) — same "wired = on" convention as jobs
-    # 13/14/16, so an existing caller of run_once() that knows nothing about
-    # this job (and every test that doesn't pass it) sees NO behavior change
-    # and is never polluted by this box's real ~/.claude/settings.json. Runs
-    # right after job 12 so the shared `handled` set above is already
-    # populated before this job checks it. Best-effort.
-    if hooks_settings_path:
-        try:
-            logs += hooks_reconcile(now, run, state, dry_run=dry_run,
-                                    projects_dir=projects_dir, sleep_fn=sleep_fn,
-                                    settings_path=hooks_settings_path,
-                                    handled=model_handled_this_sweep)
-        except Exception as e:
-            logs.append("hooks-reconcile error: %r" % (e,))
-
-    # Job 23 — MANAGED_MODEL GENERATION RECONCILE (#44): only when
-    # `target_model` is given, same gate as job 12 (which this job shares
-    # `target_model` and the `handled` set with — no new cmd_watchdog
-    # plumbing needed). Best-effort.
-    if target_model:
-        try:
-            logs += model_generation_reconcile(now, run, state, target_model,
-                                               dry_run=dry_run,
-                                               projects_dir=projects_dir,
-                                               sleep_fn=sleep_fn,
-                                               handled=model_handled_this_sweep)
-        except Exception as e:
-            logs.append("model-gen-reconcile error: %r" % (e,))
+    # Jobs 12 / 18 / 23 — REMOVED (#132, 2026-07-28). All three drove the
+    # same `_restart_pane` helper, which typed `/exit` into a live pane and
+    # relaunched the session; on 2026-07-28 it did so twice in three minutes
+    # to a session the user was working in. Job 18's premise (CC snapshots
+    # its hook set at process start) is measurably FALSE — hooks are re-read
+    # per event, so nothing needed restarting. Job 23 compared an API model
+    # id against a CLI alias (`claude-opus-5` vs `claude-opus-5[1m]`), a
+    # condition no session can ever satisfy, making it an unbounded restart
+    # engine. Job 12's remedy auto-downtiered a model the user had chosen,
+    # which `model-awareness.md` forbids outright. Nothing in this repo can
+    # end a Claude session any more, and tests/test_no_session_kill.py fails
+    # if that capability returns.
 
     # Job 13 — HOURLY BURN SNAPSHOT (#37): the automatic before/after
     # feedback loop — nothing for the user to remember to check. Only when
@@ -8180,7 +7466,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
 
     # Job 20 — GOAL RE-ARM BACKSTOP (#76): only when `goal_rearm_enabled` is
     # truthy (cmd_watchdog passes True) — same "wired = on" convention as
-    # jobs 13/14/16/18/19, so an existing caller of run_once() that knows
+    # jobs 13/14/16/19, so an existing caller of run_once() that knows
     # nothing about this job sees NO behavior change and never has a pane's
     # goal re-armed by a test. Runs LAST, after every /compact sender, so the
     # shared `compact_handled_this_sweep` set is fully populated before this

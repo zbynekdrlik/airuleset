@@ -2553,8 +2553,7 @@ def cmd_watchdog(args):
     `--verbose` is kept for any additional debug output a caller wants later."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
-                          compact_requests_path, hooks_settings_path,
-                          goal_templates_path)
+                          compact_requests_path, goal_templates_path)
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only dev1 fans out over ssh to
     # merge them. `os.uname().nodename` is the same "which host am I" check
@@ -2571,12 +2570,10 @@ def cmd_watchdog(args):
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
-                    target_model=MANAGED_MODEL,
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
-                    hooks_settings_path=hooks_settings_path(),
                     burn_alert_enabled=burn_alert_enabled,
                     # Job 20 (#76) runs on EVERY managed box — a silently
                     # dead /goal is a per-session failure, not a
@@ -3341,10 +3338,29 @@ def cmd_autopilot_lock(args):
             os.close(mfd)
 
 
+def watchdog_disable_marker():
+    """`~/.claude/api-watchdog.disabled` — the opt-out that makes a deliberate
+    `systemctl --user stop api-watchdog.timer` SURVIVE a deploy (#132).
+
+    Resolved at CALL time, never frozen at import (same reasoning as
+    `watchdog.compact_requests_path()`).
+
+    Why this exists: on 2026-07-28 the watchdog typed `/exit` into a live
+    session, the timer was stopped fleet-wide as the mitigation — and was found
+    running again on all 6 boxes the next morning, because `install` ends with
+    an unconditional `enable --now` and every `airuleset.py push` runs
+    `install`. A mitigation a routine deploy silently undoes is not a
+    mitigation. Touch this file to keep the timer off across pushes; delete it
+    to hand control back to `install`."""
+    return Path.home() / ".claude" / "api-watchdog.disabled"
+
+
 def setup_watchdog_service():
     """Install + start the api-watchdog systemd --user timer on THIS machine
     (every host — autopilot runs on dev1 and dev2). Mirrors the file-drop setup:
-    write the .service + .timer units, daemon-reload, enable --now the timer."""
+    write the .service + .timer units, daemon-reload, enable --now the timer —
+    unless `watchdog_disable_marker()` exists, in which case the units are still
+    refreshed but the timer is left exactly as the operator set it (#132)."""
     import subprocess
     print("  Installing api-watchdog systemd --user timer")
     for tmpl in (WATCHDOG_SERVICE_TEMPLATE, WATCHDOG_TIMER_TEMPLATE):
@@ -3373,6 +3389,12 @@ def setup_watchdog_service():
         print(f"  systemctl daemon-reload FAILED (rc={rc}): {err.strip()}\n"
               f"  Run manually:\n{manual}", file=sys.stderr)
         return False
+    if watchdog_disable_marker().exists():
+        print(f"  api-watchdog timer left AS-IS — disable marker present "
+              f"({watchdog_disable_marker()}).\n"
+              f"  Units refreshed; delete the marker and run "
+              f"`systemctl --user enable --now api-watchdog.timer` to re-arm.")
+        return True
     rc, _o, err = _run_systemctl(["enable", "--now", "api-watchdog.timer"])
     if rc != 0:
         print(f"  systemctl enable --now FAILED (rc={rc}): {err.strip()}\n"
