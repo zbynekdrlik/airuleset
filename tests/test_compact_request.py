@@ -292,11 +292,11 @@ class TestCompactTicketBoundary(unittest.TestCase):
 
     def _go(self, captured, in_mode=False, dry_run=False, seed=True, path=None,
            cap_seq=(), state=None, send_fn=None, msg_hash=None,
-           delivered_path=None):
+           delivered_path=None, origin=None):
         path = path or self._p()
         if seed:
             wd.record_compact_request(self.SID, "/home/x/proj", path=path,
-                                      msg_hash=msg_hash)
+                                      msg_hash=msg_hash, origin=origin)
         tmux = CompactFakeTmux(captured, in_mode=in_mode, cap_seq=cap_seq)
         panes_by_sid = {self.SID: (self.PANE, captured)}
         state = {} if state is None else state
@@ -329,6 +329,34 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("busy" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    # ------------------------------------------------------------------- #
+    # #122 (2026-07-28) — a request carrying its OWN proof of a boundary
+    # (origin=="subagent-stop") is no longer bounced to job 14's busy-skip
+    # retry loop, where it could keep re-observing "busy" every sweep until
+    # COMPACT_REQUEST_MAX_AGE_S silently lapses it. The same "a short
+    # send-keys reliably queues even into a busy pane" finding #65 already
+    # validated for the synchronous path (deliver_compact_now) applies here
+    # too — job 14 is not running inside a Stop-hook batch, so #109/#84's
+    # parked-keystrokes risk does not apply to a polled job. Every OTHER
+    # origin (the plain Stop-hook channel) keeps the pre-#122 behavior,
+    # locked by test_busy_pane_is_skipped_and_request_kept_for_retry above.
+    # ------------------------------------------------------------------- #
+
+    def test_busy_pane_with_proven_boundary_origin_still_delivers(self):
+        tmux, logs, path, _ = self._go(CB_BUSY_CAP, origin="subagent-stop")
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK (compact-request, busy)")
+                            for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_busy_pane_with_proven_boundary_origin_sets_the_shared_claim(self):
+        # #78/#82 -- the busy exemption must still thread the sending pane
+        # into the shared claim, same as the idle send path.
+        with m.patch.object(wd, "compact_claim_set") as claim_mock:
+            self._go(CB_BUSY_CAP, origin="subagent-stop")
+        self.assertTrue(claim_mock.called)
+        self.assertEqual(claim_mock.call_args.kwargs.get("pane_id"), self.PANE)
 
     # ------------------------------------------------------------------- #
     # #67 (2026-07-26) — a draft-holding pane is no longer a dead end: job 14
@@ -2509,6 +2537,46 @@ class TestCompactRequestExpiry(unittest.TestCase):
                                           {self.SID: (self.PANE, CB_IDLE_CAP)},
                                           path=path)
         self.assertFalse(any("expired" in ln for ln in logs), logs)
+
+    # ------------------------------------------------------------------- #
+    # #122 — "a silent 30-minute lapse with no signal is a defect in its own
+    # right regardless of which branch you pick". A journalctl "skip
+    # expired" line, buried among thousands of no-pane polls, is not a
+    # record anyone actually watches. Every genuine expiry now ALSO writes
+    # to the SAME observable channel deliver_compact_now already uses for
+    # every send/drop decision (compact-sync.log) -- so a future recurrence
+    # is one grep away instead of fresh journalctl archaeology.
+    # ------------------------------------------------------------------- #
+
+    def test_a_stale_request_writes_a_lapse_record_to_the_sync_log(self):
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD,
+                                  now=now - wd.COMPACT_REQUEST_MAX_AGE_S - 60,
+                                  path=path, origin="subagent-stop")
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(now, tmux, {},
+                                   {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                   path=path)
+        sync_log = wd.compact_sync_log_path()
+        text = (Path(sync_log).read_text(encoding="utf-8")
+               if Path(sync_log).exists() else "")
+        self.assertIn("LAPSE", text)
+        self.assertIn(self.SID, text)
+        self.assertIn("subagent-stop", text)
+
+    def test_dry_run_expiry_writes_no_lapse_record(self):
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD,
+                                  now=now - wd.COMPACT_REQUEST_MAX_AGE_S - 60,
+                                  path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(now, tmux, {},
+                                   {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                   path=path, dry_run=True)
+        sync_log = wd.compact_sync_log_path()
+        self.assertFalse(Path(sync_log).exists())
 
 
 class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
