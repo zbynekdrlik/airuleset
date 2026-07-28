@@ -233,13 +233,11 @@ class TestMultiInterfaceUrls(TestCase):
         # budget and then report a bare connection error. Binding only TEST-NET-3
         # makes upload_server.py exit with its own diagnosis — the wait must
         # notice the exit and surface that text.
-        # ttl=0 because a TTL keeps the child ALIVE through its own failure:
-        # upload_server.py arms a NON-daemon threading.Timer before the bind
-        # loop, so `sys.exit("upload: no address …")` cannot end the process —
-        # it lingers the full TTL and then exits 0 via the timer's os._exit
-        # (measured: 20.06s, rc=0, vs 0.07s and rc=1 at ttl=0). Filed as #114;
-        # this test is about the WAIT, so it uses the ttl that lets the child
-        # genuinely die.
+        # ttl=0 dates from when a TTL kept the child ALIVE through its own
+        # failure (the non-daemon timer parked the exit for the full TTL and
+        # then exited 0 — #114, fixed since; TestTotalBindFailureIsFatal owns
+        # that contract now). Kept as-is because this test is about the WAIT,
+        # and ttl=0 keeps it independent of the server's shutdown timing.
         dest = Path(tempfile.mkdtemp())
         t0 = time.monotonic()
         with self.assertRaises(AssertionError) as ctx:

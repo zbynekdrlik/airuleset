@@ -44,10 +44,20 @@ TTL = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 os.makedirs(DEST, exist_ok=True)
 
 if TTL > 0:
-    # self-shutdown so detached upload endpoints never accumulate as orphans
-    import threading
-
-    threading.Timer(TTL, lambda: os._exit(0)).start()
+    # self-shutdown so detached upload endpoints never accumulate as orphans.
+    # DAEMON, always (#114): threading.Timer inherits Thread.daemon = False, and
+    # the interpreter joins every non-daemon thread before it can shut down — so
+    # a non-daemon timer parks any exit the main thread takes (the bind-loop's
+    # `sys.exit` below, a KeyboardInterrupt on a live server) for the rest of the
+    # TTL, and its own os._exit(0) then ends the process INSTEAD, reporting
+    # success. Measured before the fix: rc=0 after 6.06s of a 6s TTL for a server
+    # that bound nothing, and rc=0 after 5.93s for a SIGINT on one that had.
+    # A daemon thread is only killed at interpreter shutdown, which on the happy
+    # path never comes (serve_forever holds the main thread) — so the TTL still
+    # fires and still ends the process exactly as before.
+    _ttl_timer = threading.Timer(TTL, lambda: os._exit(0))
+    _ttl_timer.daemon = True
+    _ttl_timer.start()
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
