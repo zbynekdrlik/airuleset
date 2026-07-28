@@ -260,6 +260,92 @@ class CiPollRepeatBlockTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
 
 
+class CorpusFoundWrongBlockTest(unittest.TestCase):
+    """Two wrong-block classes the corpus replay exposed (#118, 863 blocks over
+    250,201 real commands). A hook that wrongly blocks stops real work, and on
+    these boxes the working tree is production — so both are narrowed out.
+
+    1. COMPOUND commands: 29 of the 863 carried a mutating action with the wait
+       merely bolted on the tail (`gh pr merge 312 --merge && ... until run=...;
+       do sleep 15; done`). Blocking one blocks the MERGE, not a poll. Such a
+       command is also structurally not the burn shape — you merge once, then
+       the repeat polls that follow are pure waits and are still caught.
+    2. GENERIC-bucket SHORT waits: 31 were `gh run list`-driven "wait for the
+       new run to APPEAR" loops (sleep 8-15, seconds to a minute). With no
+       run-id there is nothing to prove two such loops are the SAME wait, and
+       five consecutive ones in one restreamer session were five different PRs.
+       A run-KEYED repeat stays blocked at any sleep interval, because the id
+       proves it is the same run.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    # verbatim corpus specimens (restreamer session 8125adb8, 101 blocks)
+    MERGE_THEN_WAIT = (
+        'gh pr merge %d --merge && gh pr view %d --json state,mergeCommit '
+        '--jq \'{state, sha: .mergeCommit.oid[0:8]}\' && until '
+        'run=$(gh run list -b main -L 1 --json databaseId,headSha '
+        '--jq \'.[0].databaseId\') && [ -n "$run" ]; do sleep 15; done; '
+        'echo "main run: $run"')
+    APPEAR_LOOP = (
+        'until rid=$(gh run list --branch dev --limit 3 --json '
+        'headSha,databaseId -q \'.[0].databaseId\'); [ -n "$rid" ]; do '
+        'sleep 10; done; echo "$rid"')
+
+    def test_merging_two_prs_in_one_session_is_never_blocked(self):
+        for pr in (312, 313, 314):
+            out = self.run_hook(self.MERGE_THEN_WAIT % (pr, pr))
+            self.assertEqual(out.returncode, 0,
+                             "blocking this would block the MERGE: " + out.stderr)
+
+    def test_a_mutating_command_is_exempt_even_after_a_block(self):
+        self.run_hook(poll_loop(RUN_A))
+        self.assertEqual(self.run_hook(poll_loop(RUN_A)).returncode, 2)
+        # SAME run-id as the blocked key, so this can only pass via the
+        # mutating-action exemption — never because the key happens to differ
+        out = self.run_hook(
+            'git push origin dev && until [ "$(gh run view %s --json status '
+            '--jq .status)" = "completed" ]; do sleep 30; done' % RUN_A)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_exemptions_are_logged_for_corpus_review(self):
+        self.run_hook(self.MERGE_THEN_WAIT % (312, 312))
+        self.run_hook(self.MERGE_THEN_WAIT % (313, 313))
+        log = Path(self.state) / "airuleset-cipoll-exempt.log"
+        self.assertTrue(log.exists(), "an exemption must be reviewable later")
+        self.assertIn("mutating", log.read_text())
+
+    def test_generic_short_appear_loops_are_not_blocked(self):
+        for _ in range(4):
+            out = self.run_hook(self.APPEAR_LOOP)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_generic_LONG_poll_loop_still_blocks_on_repeat(self):
+        longer = ('for i in $(seq 1 20); do s=$(gh run list --branch dev '
+                  '--limit 3 --json status --jq \'.[0].status\'); '
+                  'case "$s" in completed*) break;; esac; sleep 60; done')
+        self.assertEqual(self.run_hook(longer).returncode, 0)
+        self.assertEqual(self.run_hook(longer).returncode, 2)
+
+    def test_run_keyed_repeat_blocks_at_ANY_sleep_interval(self):
+        # the id proves it is the same run — a short sleep is no defence
+        short = ('until [ "$(gh run view %s --json status --jq .status)" = '
+                 '"completed" ]; do sleep 10; done' % RUN_A)
+        self.assertEqual(self.run_hook(short).returncode, 0)
+        self.assertEqual(self.run_hook(short).returncode, 2)
+
+
 class ModulePointerTest(unittest.TestCase):
     """The ONLY prose change permitted: one line on the foreground bullet."""
 
