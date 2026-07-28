@@ -46,6 +46,8 @@ gh issue create --title "<concise problem statement>" \
 
 Then surface it: `Filed as #N: <title>`. File BEFORE you stop — not "I'll file it later" (that's a fourth fate, and it doesn't exist). The bundling/follow-up gate (`autonomous-batch-issue-development.md`, `complete-planned-work.md`) decides whether a small cleanup lands in THIS PR instead of a new issue — but the choice is do-now-in-PR vs file-issue, NEVER drop.
 
+**Filing itself is now mechanically gated on naming WHY it's out of scope** (`hooks/block-ungated-issue-filing.sh`, #137 — the enforcement asymmetry this rule used to have with `complete-planned-work.md`'s Follow-up gate): the `--body` must carry a `Scope-gate: <criterion>` line (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`/`planned-work`/`user-request`). This does not weaken the filing mandate above — a legitimate discovery always has a truthful criterion to name in one line — it only stops the SILENT default of filing over fixing.
+
 #### Prepared ≠ filed — RUN `gh issue create`, never ask permission to
 
 Filing a GitHub issue is **non-destructive tracking**. It changes no code, touches no production, costs nothing, and is trivially editable or closeable afterward. Therefore it **NEVER requires the user's approval** — and "should I create the issues?" is a pre-answered YES (see `ask-before-assuming.md`).

@@ -73,6 +73,8 @@ Before filing a follow-up issue, apply the bundling gate (per `autonomous-batch-
 
 If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR, not a follow-up issue. File it, fix it, ship it in the same PR.
 
+**This gate is mechanically enforced, not prose-only, on every `gh issue create` / `gh api .../issues` POST** (`hooks/block-ungated-issue-filing.sh`, #137): the issue body must carry a `Scope-gate: <criterion>` line naming which of the six exemptions above applies (`>300-loc`/`schema-migration`/`api-break`/`security-boundary`/`cross-cutting`/`needs-user-decision`), or one of the two legitimate non-discovery filing modes (`planned-work`/`user-request`). No line, or a fabricated one that doesn't apply → fix it now in the current PR instead of filing.
+
 **Things that DO NOT qualify as "genuinely out of scope" (must be done in current PR):**
 
 - "Migrate string to enum" / "tighten type" / "use typed constant instead of literal" — same file, <50 LoC = DO NOW
