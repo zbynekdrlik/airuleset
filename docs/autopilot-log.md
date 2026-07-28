@@ -868,3 +868,44 @@ the module still holds exactly one `Popen`, which is what that lock protects.
 Gate: 2322 tests pass (2320 baseline + 2), `ruff check .` clean,
 `airuleset.py validate` OK. Live `airuleset.py upload` re-verified end to end
 after deploy.
+
+## #115 — cmd_upload: a port scan blind to its own binds, a /tmp log shared across users (2026-07-28)
+
+Commits `6e23eab` [red] -> `1ac3af8` [green], direct to main. Design comment
+posted first: issues/115#issuecomment-5098345528.
+
+Three defects, each reproduced live before any code. (1) The free-port scan
+probed `connect_ex(("127.0.0.1", cand))` while `upload_server.py` binds exactly
+`filedrop.bind_ips()` — which `_is_private` EXCLUDES loopback from, and which
+never contains 0.0.0.0 because a WRITE endpoint must not listen on a box's public
+IP. Probe set and bind set were therefore disjoint BY CONSTRUCTION: five
+listeners on :8799 and the scan still returned 8799, after which the second
+`airuleset.py upload` failed to bind anything and its readiness probes hit the
+FIRST server (404 x20, logged into that other endpoint's file). Fixed by
+`_pick_free_port(ips, ports)`, which BINDS each candidate on the very addresses
+the server is about to bind. Only EADDRINUSE rejects; EADDRNOTAVAIL is tolerated
+because the server skips an unbindable address rather than dying and needs only
+one success — requiring all of them would let a single stale IP reject all 21
+candidates. (2) `/tmp/airuleset-upload-<port>.log` gave the first user to use a
+port ownership of that name for everyone; reproduced verbatim against montalu's
+real leftover (`PermissionError: [Errno 13] ... 8811.log`, unhandled). Fixed by
+`_upload_log_path()` -> `~/.claude/upload-logs/upload-<port>.log`, plus a wrapped
+open that exits 1 with a diagnosis. (3) 1183 leftover logs in /tmp because the
+cmd_upload tests pass ephemeral ports; the tests now redirect via
+`AIRULESET_UPLOAD_LOG_DIR` and an anti-litter lock asserts the exact legacy path
+is not written. That lock needed both an exact-path assertion AND a set diff: a
+set diff alone passed once for the wrong reason, when the ephemeral port
+collided with one of the 1186 files already there — the litter hid itself.
+
+Cleanup: 1193 leftover logs owned by this user deleted from /tmp; montalu's 3 left
+untouched (not ours to remove — they are harmless now, nothing writes /tmp any
+more). Filed #116 while verifying: the page URL-encodes the filename and the
+server never decodes it, so a dropped "nahrávka test (1).mp4" saves as
+`nahr_C3_A1vka_20test_20_1_.mp4` — which contradicts what the meeting-analysis
+skill documents.
+
+Gate: 2330 tests pass (2322 baseline + 8), `ruff check .` clean,
+`airuleset.py validate` OK. Live after deploy: two concurrent endpoints took 8799
+and 8800 (never the same port twice), `--port 8811` no longer crashes on the
+foreign log, a 3 MB PUT round-tripped SHA256-identical, and every endpoint
+self-expired at its TTL leaving no listener, no process and no /tmp file.
