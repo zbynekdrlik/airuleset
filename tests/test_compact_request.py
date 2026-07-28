@@ -807,17 +807,101 @@ class TestCompactClaimState(unittest.TestCase):
         self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
                                                 projects_dir=self._proj()))
 
-    def test_never_resolves_on_elapsed_time_alone(self):
-        # #72's core lesson, generalized: a claim set LONG ago, with no
-        # transcript evidence either way, must STILL read as queued no
-        # matter how much wall-clock time has passed. #83 -- needs a live
-        # "proc" (see the comment above).
+    def test_elapsed_time_alone_does_not_resolve_it_INSIDE_the_ttl(self):
+        # #72's core lesson, as BOUNDED by #140: elapsed time is still not
+        # evidence, so a claim with no transcript evidence either way must
+        # STILL read as queued while it is inside the TTL window -- this is
+        # the positive control for the TTL backstop below (it passed before
+        # #140 and must keep passing after it). #83 -- needs a live "proc".
         p = self._p()
         proc = _alive_proc_fingerprint(self)
-        wd.compact_claim_set("sid-1", "/x", now=time.time() - 100_000, path=p,
+        wd.compact_claim_set("sid-1", "/x", now=time.time() - 60, path=p,
                              proc=proc)
         self.assertTrue(wd.compact_claim_active("sid-1", "/x", path=p,
                                                 projects_dir=self._proj()))
+
+    # ------------------------------------------------------------------- #
+    # #140 (2026-07-28, montalu@subdev + forestshop@dev1) -- the FOURTH
+    # resolution: a TTL backstop for a claim NOTHING can ever prove.
+    #
+    # Measured on the live wedge: the claim's `claude` process stayed alive
+    # throughout (montalu pid 3489717, up since 2026-07-26 23:14), the
+    # session id never changed (`claude -c` continues the same transcript),
+    # and the queued `/compact` never drained (CC drains type-ahead only at
+    # an ACCEPTED Stop, #84) so no `compact_boundary` was ever written. All
+    # three evidence-based resolutions were structurally unavailable, and
+    # the claim blocked every later boundary for 21h26m while the context
+    # grew to 346,944 tokens -- released only by the USER hand-compacting.
+    #
+    # Fail toward RELEASING: a wrongly-held claim silently disables
+    # compaction for a whole session; a wrongly-released one costs at most
+    # one duplicate `/compact`, and even that is usually caught by the
+    # `_pane_has_queued_compact` guard already sitting at both send points.
+    # ------------------------------------------------------------------- #
+
+    def test_unprovable_claim_past_the_ttl_is_released(self):
+        # the live wedge, reproduced: proc genuinely ALIVE, session id
+        # unchanged, no boundary anywhere -- the three evidence paths can
+        # never fire, so only the TTL can end it.
+        p = self._p()
+        proj = self._proj()
+        cwd = "/home/x/wedged"
+        _write_ctx_transcript(proj, cwd, "sid-1", 400_000)
+        wd.compact_claim_set("sid-1", cwd, path=p,
+                             now=time.time() - (wd.COMPACT_CLAIM_TTL_S + 60),
+                             proc=_alive_proc_fingerprint(self))
+        self.assertFalse(wd.compact_claim_active("sid-1", cwd, path=p,
+                                                 projects_dir=proj))
+        self.assertEqual(wd._load_compact_claims(p), {})
+
+    def test_ttl_release_is_evaluated_against_an_injected_now(self):
+        p = self._p()
+        proj = self._proj()
+        base = 1_700_000_000.0
+        wd.compact_claim_set("sid-1", "/x", now=base, path=p,
+                             proc=_alive_proc_fingerprint(self))
+        self.assertTrue(wd.compact_claim_active(
+            "sid-1", "/x", path=p, projects_dir=proj,
+            now=base + wd.COMPACT_CLAIM_TTL_S - 1))
+        self.assertFalse(wd.compact_claim_active(
+            "sid-1", "/x", path=p, projects_dir=proj,
+            now=base + wd.COMPACT_CLAIM_TTL_S + 1))
+
+    def test_ttl_is_env_overridable(self):
+        p = self._p()
+        proj = self._proj()
+        wd.compact_claim_set("sid-1", "/x", now=time.time() - 120, path=p,
+                             proc=_alive_proc_fingerprint(self))
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_CLAIM_TTL_S": "60"}):
+            self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                     projects_dir=proj))
+
+    def test_a_claim_with_an_unusable_ts_is_released(self):
+        # a malformed entry cannot be aged, so it can never expire and can
+        # never be proven either -- exactly the shape #83 already drops for
+        # a missing "proc". Same direction: releasing is the safe failure.
+        p = self._p()
+        proc = _alive_proc_fingerprint(self)
+        wd.compact_claim_set("sid-1", "/x", path=p, proc=proc)
+        d = wd._load_compact_claims(p)
+        d["sid-1"].pop("ts", None)
+        wd._save_compact_claims(d, p)
+        self.assertFalse(wd.compact_claim_active("sid-1", "/x", path=p,
+                                                 projects_dir=self._proj()))
+
+    def test_a_real_boundary_still_resolves_it_before_the_ttl_matters(self):
+        # the TTL must never become the ONLY resolution -- CONSUMED still
+        # fires first, and still clears the claim, well inside the window.
+        p = self._p()
+        proj = self._proj()
+        cwd = "/home/x/consumed-first"
+        tpath = _write_ctx_transcript(proj, cwd, "sid-1", 1000)
+        send_ts = time.time() - 30
+        wd.compact_claim_set("sid-1", cwd, now=send_ts, path=p,
+                             proc=_alive_proc_fingerprint(self))
+        _append_compact_boundary(tpath, ts=send_ts + 5)
+        self.assertFalse(wd.compact_claim_active("sid-1", cwd, path=p,
+                                                 projects_dir=proj))
 
     def test_consumed_by_a_newer_compact_boundary_clears_the_claim(self):
         # #83 -- needs a live "proc", or the #83 no-proc-key check resolves
