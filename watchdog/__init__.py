@@ -4835,13 +4835,21 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     #78 — checks the SHARED `/compact` claim FIRST, before anything else
     (no pane resolution, no tmux round-trip needed): if another sender
     already has an outstanding, unresolved claim for `sid`, this call sends
-    NOTHING and returns True (handled — the outstanding claim is what will
-    resolve this, not a second send). Every real send below sets the claim
-    via `compact_claim_set`. Every decision this function makes (skip or
-    send) is logged via `_log_compact_sync` — this is the ONLY trace of
-    this path's behavior, since its caller (the Stop hook) throws stdout at
-    /dev/null (#78's own incident was undebuggable from journalctl for
-    exactly this reason)."""
+    NOTHING and returns `"claim-queued"` (handled — the outstanding claim
+    is what will resolve this, not a second send). Every real send below
+    sets the claim via `compact_claim_set`. Every decision this function
+    makes (skip or send) is logged via `_log_compact_sync` — this is the
+    ONLY trace of this path's behavior, since its caller (the Stop hook)
+    used to throw stdout at /dev/null (#78's own incident was undebuggable
+    from journalctl for exactly this reason; #125 finally made the Stop
+    hook's own channel observable too).
+
+    #126 — the #99/#48 substantiality gates below are SKIPPED ENTIRELY
+    when `origin=="subagent-stop"`: that origin is itself the proof of a
+    genuine completed-ticket boundary, so neither heuristic is needed or
+    wanted for it (see the inline comment at the gates for the full
+    reasoning, and the #126 issue comment for why NEITHER gate survives
+    for that origin, not just the small-context one)."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     if compact_claim_active(sid, cwd, projects_dir=projects_dir):
@@ -4896,9 +4904,24 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         # finally drains. The queued one IS the handling.
         _log_compact_sync("SKIP queued-compact sid=%s cwd=%s" % (sid, cwd))
         return "queued-compact"
-    # #126 origin-exemption lands in its own RED/GREEN pair right after
-    # this -- #125 only widens the RETURN VALUES, so this stays False here.
-    proven_boundary = False
+    # #126 -- a request carrying its OWN proof of a boundary
+    # (`origin=="subagent-stop"`) is EXEMPT from BOTH substantiality
+    # heuristics below (#99 and #48). Both exist only to GUESS whether an
+    # anonymous Stop-hook turn was a real, worthwhile boundary --
+    # `origin=="subagent-stop"` already answers that question directly: an
+    # autopilot-worker just concluded with zero other live tasks in the
+    # session's own task registry (notify-compact-subagent-boundary.sh).
+    # Both #99's "zero commits" proxy and #48's "context too small" proxy
+    # can trip on a LEGITIMATE completed ticket that produced no diff at
+    # all (closing an issue as already-fixed, a decision-only turn that
+    # only filed a follow-up) -- and the user's own requirement is
+    # unconditional ("autopilot ide ticket za ticketom a po kazdom tickete
+    # ma prebehnut compact", #121): the boundary is the TICKET, not the
+    # size of its diff. See the #126 issue comment for the full "why
+    # no-work too, not just small-context" reasoning. Every OTHER origin
+    # (the plain Stop-hook channel, and job 14's own separate copy of these
+    # same two gates) is completely untouched by this.
+    proven_boundary = origin == "subagent-stop"
     if not proven_boundary:
         # #99 — did REAL work (>=1 commit) actually happen since the last
         # genuine boundary for this repo? A positively-confirmed zero drops
