@@ -2522,5 +2522,286 @@ class TestSupervisorStopVetoIsNoLongerTheOnlyChannel(unittest.TestCase):
             any("notify-compact-subagent-boundary.sh" in c for c in sub))
 
 
+# --------------------------------------------------------------------------- #
+# #123 (2026-07-28) — the boundary hook's DECISION LOG.
+#
+# #121 shipped a hook that is silent by design, and whose only success
+# artefact (an entry in compact-requests.json) is DELETED again the moment
+# `deliver_compact_now` succeeds. Three states therefore collapsed onto one
+# observation — never ran / ran and declined / ran, fired and delivered — so
+# the guard could not be verified in the field at all, only in replay. It has
+# to leave a durable trace for BOTH outcomes, naming the predicate that
+# failed, without becoming an unbounded log of its own.
+# --------------------------------------------------------------------------- #
+
+_DECISION_LOG = ".claude/compact-decisions.log"
+_DECISION_ROTATED = ".claude/compact-decisions.log.1"
+
+
+def _decision_lines(home):
+    """Every decision line the REAL hook wrote into this scratch $HOME."""
+    p = Path(home) / _DECISION_LOG
+    return [ln for ln in p.read_text().splitlines() if ln.strip()] \
+        if p.exists() else []
+
+
+def _decision_fields(line):
+    """`<ts> <OUTCOME> k=v k=v …` -> {"_outcome": …, "k": "v", …}."""
+    tok = line.split()
+    out = {"_ts": tok[0] if tok else "", "_outcome": tok[1] if len(tok) > 1 else ""}
+    for t in tok[2:]:
+        if "=" in t:
+            k, v = t.split("=", 1)
+            out[k] = v
+    return out
+
+
+class TestCompactBoundaryDecisionLog(unittest.TestCase):
+    """The shipped hook must record WHY it did what it did — one bounded line
+    per decision, both outcomes, predicate named. The accept condition itself
+    is unchanged (that is TestCompactSubagentBoundaryHook's job); only the
+    observability is new."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
+
+    def _home(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        return home
+
+    def _payload(self, sid="sup-1", agent_id="agt-1",
+                 agent_type="autopilot-worker", cwd="/nonexistent/i123",
+                 tasks="self"):
+        p = {"session_id": sid, "agent_id": agent_id, "agent_type": agent_type,
+             "cwd": cwd, "hook_event_name": "SubagentStop",
+             "stop_hook_active": False}
+        me = {"id": agent_id, "type": "subagent", "status": "running"}
+        if tasks == "self":
+            p["background_tasks"] = [me]
+        elif tasks == "empty":
+            p["background_tasks"] = []
+        elif tasks == "sibling":
+            p["background_tasks"] = [
+                me, {"id": "agt-2", "type": "subagent", "status": "running"}]
+        elif tasks == "two-siblings":
+            p["background_tasks"] = [
+                me, {"id": "agt-2", "type": "subagent", "status": "running"},
+                {"id": "bash-9", "type": "shell", "status": "running"}]
+        elif tasks == "null":
+            p["background_tasks"] = None
+        elif tasks == "malformed":
+            p["background_tasks"] = "notalist"
+        # "absent" -> no background_tasks key at all
+        return p
+
+    def _run(self, home=None, hook=None, **kw):
+        home = home or self._home()
+        r = subprocess.run(["bash", str(hook or self.HOOK)],
+                           input=json.dumps(self._payload(**kw)),
+                           text=True, capture_output=True,
+                           env={**os.environ, "HOME": home},
+                           cwd=str(airuleset.REPO_DIR))
+        return r, home
+
+    # -- the checkers the teeth tests below must be able to BREAK ----------- #
+
+    def _expect_one(self, home, outcome, **fields):
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 1,
+                         "exactly one decision line per invocation: %r" % lines)
+        f = _decision_fields(lines[0])
+        self.assertEqual(f["_outcome"], outcome, lines[0])
+        for k, v in fields.items():
+            self.assertEqual(f.get(k), v, "%s=%r in %r" % (k, v, lines[0]))
+        return f
+
+    # -- ACCEPT ------------------------------------------------------------- #
+
+    def test_an_accepted_boundary_is_recorded_with_the_record_outcome(self):
+        r, home = self._run(sid="sup-acc", agent_id="agt-acc",
+                            cwd="/nonexistent/i123-acc")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # the request really was recorded — the log is not a substitute for it
+        req = Path(home) / ".claude" / "compact-requests.json"
+        self.assertTrue(req.exists(), r.stderr)
+        self.assertIn("sup-acc", json.loads(req.read_text()))
+        self._expect_one(home, "RECORD", type="autopilot-worker",
+                         agent="agt-acc", sid="sup-acc",
+                         cwd="/nonexistent/i123-acc")
+
+    def test_the_record_line_carries_the_cli_outcome_word(self):
+        # cmd_compact_request already prints recorded/delivered/dup/skip and
+        # the hook used to throw it away with `>/dev/null 2>&1` — an accepted
+        # boundary dropped downstream was untraceable from the hook's side.
+        _, home = self._run(sid="sup-word", agent_id="agt-word")
+        f = self._expect_one(home, "RECORD")
+        self.assertIn(f.get("result"), ("recorded", "delivered", "dup", "skip"),
+                      f)
+
+    def test_an_empty_registry_is_also_an_accepted_boundary(self):
+        _, home = self._run(sid="sup-empty", tasks="empty")
+        self._expect_one(home, "RECORD", sid="sup-empty")
+
+    # -- DECLINE, one named predicate each ---------------------------------- #
+
+    def test_a_live_sibling_declines_naming_the_live_task_predicate(self):
+        r, home = self._run(sid="sup-sib", agent_id="agt-sib", tasks="sibling")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((Path(home) / ".claude" / "compact-requests.json").exists())
+        self._expect_one(home, "DECLINE", reason="live-tasks", n="1",
+                         agent="agt-sib", sid="sup-sib")
+
+    def test_the_live_task_count_is_the_non_self_count(self):
+        _, home = self._run(sid="sup-two", tasks="two-siblings")
+        self._expect_one(home, "DECLINE", reason="live-tasks", n="2")
+
+    def test_a_null_registry_declines_naming_the_observed_type(self):
+        _, home = self._run(sid="sup-null", tasks="null")
+        self._expect_one(home, "DECLINE", reason="registry-null")
+
+    def test_a_malformed_registry_declines_naming_the_observed_type(self):
+        _, home = self._run(sid="sup-bad", tasks="malformed")
+        self._expect_one(home, "DECLINE", reason="registry-string")
+
+    def test_an_absent_registry_declines_naming_it_as_absent(self):
+        _, home = self._run(sid="sup-abs", tasks="absent")
+        self._expect_one(home, "DECLINE", reason="registry-absent")
+
+    def test_a_missing_session_id_declines_naming_that_predicate(self):
+        _, home = self._run(sid="")
+        self._expect_one(home, "DECLINE", reason="no-session-id")
+
+    def test_a_missing_agent_id_declines_naming_that_predicate(self):
+        _, home = self._run(sid="sup-noag", agent_id="")
+        self._expect_one(home, "DECLINE", reason="no-agent-id")
+
+    # -- volume asymmetry: the non-worker class is throttled, never dropped -- #
+
+    def test_a_non_worker_subagent_is_logged_so_liveness_stays_provable(self):
+        # this is the population that answers "did the hook run at all" —
+        # SubagentStop fires once per parallel tool branch too (live-captured
+        # 2026-07-28: four payloads with agent_type "" inside three minutes)
+        for at in ("Explore", "general-purpose", ""):
+            with self.subTest(agent_type=at):
+                _, home = self._run(sid="sup-nw", agent_type=at)
+                self._expect_one(home, "DECLINE", reason="not-autopilot-worker",
+                                 type=at or "-")
+
+    def test_the_non_worker_class_is_throttled_to_one_line_per_window(self):
+        home = self._home()
+        for _ in range(5):
+            self._run(home=home, sid="sup-thr", agent_type="Explore")
+        self.assertEqual(len(_decision_lines(home)), 1, _decision_lines(home))
+
+    def test_a_worker_decision_is_never_throttled(self):
+        # the interesting population is a few dozen a day — every one is kept,
+        # or the ticket's own question stays unanswerable
+        home = self._home()
+        self._run(home=home, sid="sup-w1", agent_id="agt-w1", tasks="sibling")
+        self._run(home=home, sid="sup-w2", agent_id="agt-w2", tasks="sibling")
+        self.assertEqual(len(_decision_lines(home)), 2, _decision_lines(home))
+
+    def test_a_worker_decision_is_not_throttled_by_a_non_worker_one(self):
+        home = self._home()
+        self._run(home=home, sid="sup-nw", agent_type="Explore")
+        self._run(home=home, sid="sup-w", agent_id="agt-w", tasks="sibling")
+        outs = [_decision_fields(ln)["reason"] for ln in _decision_lines(home)]
+        self.assertEqual(outs, ["not-autopilot-worker", "live-tasks"], outs)
+
+    # -- bounded, and never able to break a subagent stop -------------------- #
+
+    def test_the_log_is_rotated_at_its_cap(self):
+        home = self._home()
+        (Path(home) / ".claude").mkdir(parents=True, exist_ok=True)
+        log = Path(home) / _DECISION_LOG
+        log.write_text("x" * 520_000 + "\n")
+        self._run(home=home, sid="sup-rot", agent_id="agt-rot", tasks="sibling")
+        self.assertTrue((Path(home) / _DECISION_ROTATED).exists(),
+                        "over-cap log must rotate to one older generation")
+        self.assertEqual(len(_decision_lines(home)), 1, _decision_lines(home))
+
+    def test_stdout_stays_silent_and_exit_zero_while_logging(self):
+        r, _ = self._run(sid="sup-sil", agent_id="agt-sil", tasks="sibling")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_an_unwritable_log_dir_never_blocks_the_subagent_stop(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the mode bits")
+        home = self._home()
+        d = Path(home) / ".claude"
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o500)
+        self.addCleanup(lambda: d.chmod(0o700))
+        r, _ = self._run(home=home, sid="sup-ro", agent_id="agt-ro",
+                         tasks="sibling")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+
+class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
+    """The class above can only be trusted if it FAILS on the obvious wrong
+    fixes. Both are built by mutating the REAL shipped script, so these tests
+    also fail if the script stops being the thing under test.
+
+    The mutants live in a scratch `hooks/` dir so the script's own
+    `dirname/..` resolution finds no airuleset.py — the `--record` call then
+    fails harmlessly, which is irrelevant to what is being asserted here."""
+
+    SRC = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
+
+    def _mutant(self, transform):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (d / "hooks").mkdir()
+        p = d / "hooks" / "mutant.sh"
+        src = self.SRC.read_text()
+        out = transform(src)
+        self.assertTrue(out != src, "the mutation did not apply to the "
+                                    "shipped script (its shape changed?)")
+        p.write_text(out)
+        return p
+
+    def _probe(self, hook, **kw):
+        probe = TestCompactBoundaryDecisionLog("test_stdout_stays_silent_and_exit_zero_while_logging")
+        probe.addCleanup = self.addCleanup
+        return probe._run(hook=hook, **kw), probe
+
+    def test_a_hook_that_logs_unconditionally_fails_the_decline_assertions(self):
+        # "make something appear in the log" — the exact wrong fix #123 warns
+        # about. It writes a RECORD line for every payload, before any
+        # predicate is evaluated.
+        inject = ('mkdir -p "$HOME/.claude" 2>/dev/null || true\n'
+                  'printf "%s RECORD result=recorded type=x agent=x sid=x cwd=x\\n" '
+                  '"$(date -Iseconds)" >> "$HOME/.claude/compact-decisions.log" '
+                  '2>/dev/null || true\nexit 0\n')
+        mut = self._mutant(lambda s: s.replace(
+            '[ -n "$INPUT" ] || exit 0\n', '[ -n "$INPUT" ] || exit 0\n' + inject, 1))
+        (_, home), probe = self._probe(mut, sid="sup-t1", agent_id="agt-t1",
+                                       tasks="sibling")
+        self.assertTrue(_decision_lines(home), "mutant must have logged")
+        with self.assertRaises(AssertionError):
+            probe._expect_one(home, "DECLINE", reason="live-tasks", n="1",
+                              agent="agt-t1", sid="sup-t1")
+
+    def test_a_widened_accept_condition_fails_the_decline_assertions(self):
+        # "widen until something appears" — the other wrong fix. The live-task
+        # gate is neutralised, so a deferral is reported as a boundary.
+        mut = self._mutant(lambda s: s.replace(
+            '[ "$OTHERS" = "0" ] || exit 0', 'OTHERS=0', 1))
+        (_, home), probe = self._probe(mut, sid="sup-t2", agent_id="agt-t2",
+                                       tasks="sibling")
+        with self.assertRaises(AssertionError):
+            probe._expect_one(home, "DECLINE", reason="live-tasks", n="1")
+
+    def test_a_hook_that_logs_nothing_fails_the_accept_assertion(self):
+        # the pre-#123 state itself: silent on every path.
+        mut = self._mutant(lambda s: "\n".join(
+            ln for ln in s.splitlines() if "_decide_log " not in ln) + "\n")
+        (_, home), probe = self._probe(mut, sid="sup-t3", agent_id="agt-t3")
+        with self.assertRaises(AssertionError):
+            probe._expect_one(home, "RECORD", sid="sup-t3")
+
+
 if __name__ == "__main__":
     unittest.main()
