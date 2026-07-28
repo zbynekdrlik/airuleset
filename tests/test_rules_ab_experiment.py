@@ -224,17 +224,192 @@ def test_parse_run_json_survives_a_truncated_payload():
     assert got["num_turns"] == 0 and got["cost_usd"] == 0.0
 
 
-def test_count_hook_blocks_groups_by_hook_name():
-    text = (
-        "[block-main-implementation] denied\n"
-        "noise\n"
-        "[block-main-implementation] denied again\n"
-        "[stop-check-status-marker] missing marker\n"
-    )
-    assert ab.count_hook_blocks(text) == {
-        "block-main-implementation": 2,
-        "stop-check-status-marker": 1,
+# ---------------------------------------------------------------------------
+# count_hook_blocks: structural parse, not a text-blob regex (#108 item 4)
+#
+# Every fixture below is a shape OBSERVED in the real transcript corpus
+# (8,058 files / 1,653,949 entries under ~/.claude/projects), not invented.
+# The decoys matter more than the positives: the bracket regex this replaced
+# scored 0 genuine denials and 19 spurious matches corpus-wide, and the
+# "obvious" `"decision":"block"` grep scored 0 genuine out of 258 hits.
+# ---------------------------------------------------------------------------
+
+DENIAL_PREFIX = "PreToolUse:Bash hook error: "
+STOP_PREFIX = "Stop hook feedback: "
+HOOK_CMD = "bash ~/devel/airuleset/hooks/block-tier0-local-build.sh"
+# assembled, never written as one literal, so this file can never match itself
+JSON_BLOCK_DECOY = '{"decision"' + ': ' + '"block"' + ', "reason": "..."}'
+
+
+def _entry(payload):
+    return json.dumps(payload)
+
+
+def _denial(cmd=HOOK_CMD, stderr="BLOCKED: heavy local build in a Tier-0 project"):
+    """A genuine PreToolUse denial, exactly as Claude Code writes it."""
+    return _entry({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_x",
+                "is_error": True,
+                "content": DENIAL_PREFIX + "[" + cmd + "]: " + stderr,
+            }],
+        },
+    })
+
+
+def _stop(body):
+    return _entry({
+        "type": "user",
+        "message": {"role": "user", "content": STOP_PREFIX + body},
+    })
+
+
+def _model_read_of_hook_source():
+    """DECOY: the model cats the hook's own source, which contains the JSON shape.
+
+    This is the 20-50x over-count the naive grep produces on a hook-fix ticket.
+    Note is_error is absent: the READ SUCCEEDED.
+    """
+    return _entry({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_y",
+                "content": "1\t#!/usr/bin/env bash\n2\techo " + JSON_BLOCK_DECOY,
+            }],
+        },
+    })
+
+
+def _model_ran_the_hook_itself():
+    """DECOY: the run EXECUTES the hook in a repro harness and captures its output.
+
+    Observed verbatim in #106's run-96-A-r2 transcript. The bytes are a real
+    hook block payload; the meaning is not a denial of the model's own call.
+    Only `is_error` separates the two, which is why a repaired regex cannot.
+    """
+    return _entry({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_z",
+                "content": "2686 BLOCKED " + JSON_BLOCK_DECOY,
+            }],
+        },
+    })
+
+
+def _assistant_quoting_a_denial():
+    """DECOY: the model writes the denial text itself, in an assistant turn."""
+    return _entry({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text",
+                         "text": DENIAL_PREFIX + "[" + HOOK_CMD + "]: BLOCKED"}],
+        },
+    })
+
+
+def _task_notification_quoting_stop_feedback():
+    """DECOY: a task-notification whose nested excerpt contains the stop phrase.
+
+    Observed in session 7caa03ad. Excluded by anchoring at position 0.
+    """
+    return _entry({
+        "type": "user",
+        "message": {"role": "user",
+                    "content": "<task-notification> ... " + STOP_PREFIX + "blah"},
+    })
+
+
+def _transcript(tmp_path, *lines, name="session.jsonl"):
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def test_count_hook_blocks_counts_a_real_pretooluse_denial(tmp_path):
+    t = _transcript(tmp_path, _denial())
+    assert ab.count_hook_blocks([t]) == {"block-tier0-local-build": 1}
+
+
+def test_count_hook_blocks_keys_by_hook_name_and_sums_repeats(tmp_path):
+    other = "bash ~/devel/airuleset/hooks/pre-write-script-check.sh"
+    t = _transcript(tmp_path, _denial(), _denial(), _denial(cmd=other))
+    assert ab.count_hook_blocks([t]) == {
+        "block-tier0-local-build": 2,
+        "pre-write-script-check": 1,
     }
+
+
+def test_count_hook_blocks_ignores_the_model_reading_or_running_the_hook(tmp_path):
+    """The whole point: identical bytes, opposite meaning, told apart by structure."""
+    t = _transcript(
+        tmp_path,
+        _model_read_of_hook_source(),
+        _model_ran_the_hook_itself(),
+        _assistant_quoting_a_denial(),
+        _task_notification_quoting_stop_feedback(),
+    )
+    assert ab.count_hook_blocks([t]) == {}
+
+
+def test_count_hook_blocks_finds_the_signal_amongst_the_decoys(tmp_path):
+    t = _transcript(
+        tmp_path,
+        _model_read_of_hook_source(),
+        _denial(),
+        _model_ran_the_hook_itself(),
+        _assistant_quoting_a_denial(),
+    )
+    assert ab.count_hook_blocks([t]) == {"block-tier0-local-build": 1}
+
+
+def test_count_hook_blocks_counts_stop_hook_rejections(tmp_path):
+    """#108 hypothesised this shape was unobservable; it is not (refuted in-ticket)."""
+    t = _transcript(tmp_path, _stop("Hard violations detected in your message"))
+    assert ab.count_hook_blocks([t]) == {"stop-hook-feedback": 1}
+
+
+def test_count_hook_blocks_attributes_a_named_stop_hook(tmp_path):
+    t = _transcript(
+        tmp_path,
+        _stop("[bash ~/devel/airuleset/hooks/stop-check-ci.sh]: STOP BLOCKED: CI red"),
+    )
+    assert ab.count_hook_blocks([t]) == {"stop-check-ci": 1}
+
+
+def test_count_hook_blocks_reads_every_transcript_without_joining_them(tmp_path):
+    """No trailing newline must not fuse two files into one corrupt entry."""
+    a = tmp_path / "a.jsonl"
+    a.write_text(_denial(), encoding="utf-8")          # deliberately unterminated
+    b = tmp_path / "b.jsonl"
+    b.write_text(_denial(), encoding="utf-8")
+    assert ab.count_hook_blocks([a, b]) == {"block-tier0-local-build": 2}
+
+
+def test_count_hook_blocks_survives_a_truncated_or_binary_line(tmp_path):
+    t = _transcript(tmp_path, "{not json", _denial(), "")
+    assert ab.count_hook_blocks([t]) == {"block-tier0-local-build": 1}
+
+
+def test_count_hook_blocks_ignores_the_routine_stop_hook_summary_field(tmp_path):
+    """preventedContinuation is false on all 21,990 corpus occurrences (#109)."""
+    line = _entry({
+        "type": "system",
+        "stop_hook_summary": {"preventedContinuation": False},
+    })
+    t = _transcript(tmp_path, line)
+    assert ab.count_hook_blocks([t]) == {}
 
 
 def test_summarise_aggregates_per_condition():
