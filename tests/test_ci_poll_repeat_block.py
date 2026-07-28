@@ -345,6 +345,34 @@ class CorpusFoundWrongBlockTest(unittest.TestCase):
         self.assertEqual(self.run_hook(short).returncode, 0)
         self.assertEqual(self.run_hook(short).returncode, 2)
 
+    # --- backstop narrowing: a post-mortem diagnostic is not a wait --------
+    # Stage-2 replay (all 56,038 commands of the 185 blocked sessions): the
+    # backstop fired 139 times, but only 27 via a long sleep. The other 112
+    # qualified ONLY through "two or more `gh run view` in one command" — and
+    # every one of those is a post-mortem (`view --json jobs --jq failure`
+    # then `view --log-failed`), i.e. reading WHY CI failed. Blocking that
+    # stops the debugging, so the density criterion is dropped entirely and
+    # the backstop now keys on a long sleep alone.
+    DIAGNOSTIC = (
+        'gh run view %s --json jobs -q \'.jobs[] | select(.conclusion=="failure") '
+        '| .steps[] | select(.conclusion=="failure") | .name\' 2>&1\n'
+        'echo "---log tail---"\n'
+        'gh run view %s --log-failed 2>&1 | tail -30')
+
+    def test_post_mortem_diagnostics_are_never_blocked(self):
+        self.run_hook(poll_loop(RUN_A))
+        self.assertEqual(self.run_hook(poll_loop(RUN_A)).returncode, 2)
+        out = self.run_hook(self.DIAGNOSTIC % (RUN_A, RUN_A))
+        self.assertEqual(out.returncode, 0,
+                         "reading WHY CI failed is the work, not a poll")
+
+    def test_a_long_sleep_before_a_view_still_blocks_after_a_block(self):
+        self.run_hook(poll_loop(RUN_A))
+        self.assertEqual(self.run_hook(poll_loop(RUN_A)).returncode, 2)
+        out = self.run_hook('sleep 300 && gh run view %s --json status,'
+                            'conclusion,jobs 2>&1 | tail -5' % RUN_A)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
 
 class ModulePointerTest(unittest.TestCase):
     """The ONLY prose change permitted: one line on the foreground bullet."""
