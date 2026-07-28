@@ -821,3 +821,50 @@ class by construction, since `cat` is not an interpreter yet its body runs.
 
 Gate: 2320 tests pass (2316 baseline + 3 red + 1), `ruff check .` clean,
 `airuleset.py validate` OK.
+
+---
+
+## 2026-07-28 — #114 upload_server.py: a total bind failure exited 0
+
+`082b473` [red] → `1c537c9` [green], direct to main (no PR, no CI — local gate
+only).
+
+**Root cause, one property away from the symptom.** `filedrop/upload_server.py`
+arms its TTL self-shutdown timer at line 46, 150 lines above the bind loop, and
+`threading.Timer` inherits `Thread.daemon = False`. `sys.exit()` only raises
+`SystemExit` on the main thread; CPython then joins every non-daemon thread
+before it can finish, so the pending exit is parked for the rest of the TTL and
+the timer's own `os._exit(0)` ends the process INSTEAD — status 0 for a server
+that bound nothing and served nothing.
+
+**The measurement that chose the fix.** The ticket describes the bind path only.
+The same join blocks *every* way the main thread can leave, so a SIGINT on a
+successfully-serving endpoint hangs identically:
+
+```
+bind nothing, ttl=6   rc=0 after 6.06s  ->  rc=1 after 0.07s
+SIGINT, serving       rc=0 after 5.93s  ->  rc=-2 after 0.02s
+```
+
+That second row is why the fix is `daemon = True` and not the ticket's other
+two candidates. Arming the timer only after a successful bind fixes the first
+row and leaves the second untouched (that server bound fine). Cancelling the
+timer on the failure path makes a process-wide property the responsibility of
+each individual exit site — which is precisely the discipline that failed here,
+the bind-failure `sys.exit` having been written 150 lines from the arm.
+
+The happy path is unchanged by construction: `serve_forever()` holds the main
+thread, so interpreter shutdown never arrives before the timer, which still
+fires at TTL and still ends the process. Locked by a companion test asserting
+the server serves, then dies AT its TTL (not before, not never) — so the fix
+cannot pass by removing the TTL.
+
+Tests assert the observable contract (exit status, elapsed under the TTL,
+diagnosis on stderr), never the `daemon` flag. `_spawn()` split out of
+`_serve()`: a server that can bind nothing never serves, so #113's readiness
+poll is meaningless for it while its exit code and timing are the whole point —
+the module still holds exactly one `Popen`, which is what that lock protects.
+
+Gate: 2322 tests pass (2320 baseline + 2), `ruff check .` clean,
+`airuleset.py validate` OK. Live `airuleset.py upload` re-verified end to end
+after deploy.
