@@ -2092,6 +2092,93 @@ class TestCompactRequestCliPrintsTheOutcomeWordVerbatim(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #126 (2026-07-28) — a request carrying its OWN proof of a boundary
+# (`origin=="subagent-stop"`) already exempts `_compact_not_at_boundary`'s
+# `⏳` heuristic (#121), but the #99 no-work gate and the #48 small-context
+# gate never received `origin` at all and vetoed unconditionally — so a
+# PROVEN ticket boundary was still silently DROPped. Real corpus proof from
+# this box (compact-decisions.log + compact-sync.log, 2026-07-28): sid
+# 2d02a127… (this session) shows `RECORD result=delivered
+# type=autopilot-worker` paired at the identical second with
+# `DROP small-context`; sid 90bc51f3… (camera-box) shows the same
+# type=autopilot-worker RECORD paired with `DROP no-work`. Both `type=
+# autopilot-worker` RECORD lines are written ONLY via
+# notify-compact-subagent-boundary.sh's `--origin "subagent-stop"` call, so
+# both drops are provably origin="subagent-stop" boundaries dropped anyway.
+# --------------------------------------------------------------------------- #
+
+class TestSubagentStopOriginExemptFromSubstantialityGates(unittest.TestCase):
+    """A request whose ORIGIN is `subagent-stop` already carries its own
+    proof of a genuine ticket boundary (an autopilot-worker concluded with
+    zero other live tasks in the session's own task registry). Neither the
+    #99 no-work heuristic nor the #48 small-context heuristic may still veto
+    that proven boundary — both exist only to GUESS whether an anonymous
+    Stop-hook turn is worth compacting, a question origin=="subagent-stop"
+    already answers directly. Every OTHER origin (blank/Stop-hook) keeps
+    both gates exactly as they were — the negative controls below lock
+    that, and must hold BOTH before and after this fix lands."""
+
+    SID = "sess-origin-1"
+    CWD = "/home/newlevel/devel/originproj"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, ctx_tokens, substantial, origin):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, ctx_tokens)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial",
+                           return_value=substantial):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj, origin=origin)
+        return ok, tmux
+
+    # -- POSITIVE controls: a proven subagent-stop boundary now SENDS ---- #
+
+    def test_small_context_no_longer_vetoes_a_proven_boundary(self):
+        ok, tmux = self._go(ctx_tokens=1_000, substantial=True,
+                            origin="subagent-stop")
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_no_work_no_longer_vetoes_a_proven_boundary(self):
+        ok, tmux = self._go(ctx_tokens=300_000, substantial=False,
+                            origin="subagent-stop")
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_both_gates_together_no_longer_veto_a_proven_boundary(self):
+        ok, tmux = self._go(ctx_tokens=1_000, substantial=False,
+                            origin="subagent-stop")
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    # -- NEGATIVE controls: every OTHER origin is completely unchanged --- #
+
+    def test_small_context_still_vetoes_a_plain_stop_hook_boundary(self):
+        ok, tmux = self._go(ctx_tokens=1_000, substantial=True, origin="")
+        self.assertEqual(ok, "dropped-small-context")
+        self.assertEqual(tmux.sent, [])
+
+    def test_no_work_still_vetoes_a_plain_stop_hook_boundary(self):
+        ok, tmux = self._go(ctx_tokens=300_000, substantial=False, origin="")
+        self.assertEqual(ok, "dropped-no-work")
+        self.assertEqual(tmux.sent, [])
+
+    def test_a_default_blank_origin_is_treated_the_same_as_empty_string(self):
+        ok, tmux = self._go(ctx_tokens=1_000, substantial=True, origin=None)
+        self.assertEqual(ok, "dropped-small-context")
+        self.assertEqual(tmux.sent, [])
+
+
+# --------------------------------------------------------------------------- #
 # 2e. notify-compact-request.sh — the Stop hook that records the request
 # --------------------------------------------------------------------------- #
 
