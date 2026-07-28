@@ -226,6 +226,15 @@ class MessageBranchesByWhatIsWaitedOnTest(_Runner):
     'the harness wakes you' line would be false; handing a task artefact
     #118's CI waiter command would be a different wrong answer."""
 
+    # Assert the CLAIM, never a bare substring: the generic branch legitimately
+    # uses the word "notification" to say there is NOT one, so `assertNotIn
+    # ("notification")` would forbid the very sentence that makes the branch
+    # honest. These two phrases are the branches' load-bearing claims, and each
+    # is asserted absent from the other — which is strictly stronger than a
+    # word check, since a single-message hook fails both directions.
+    TASK_CLAIM = "harness ALREADY wakes you"
+    GENERIC_CLAIM = "Nothing will wake you"
+
     def _blocked_stderr(self, cmd, **kw):
         self.run_hook(cmd, **kw)
         out = self.run_hook(cmd, **kw)
@@ -234,21 +243,24 @@ class MessageBranchesByWhatIsWaitedOnTest(_Runner):
 
     def test_a_task_artefact_wait_is_told_the_notification_already_exists(self):
         err = self._blocked_stderr(task_loop())
-        self.assertIn("notification", err)
+        self.assertIn(self.TASK_CLAIM, err)
+        self.assertNotIn(self.GENERIC_CLAIM, err)
         self.assertIn("stat -L", err,
                       "that path is a symlink — plain stat reads the link")
         self.assertIn("29193", err, "name the orphaned-handle recovery case")
 
     def test_a_local_log_wait_is_NOT_told_a_notification_is_coming(self):
         err = self._blocked_stderr(obs_loop())
-        self.assertNotIn("notification", err,
+        self.assertNotIn(self.TASK_CLAIM, err,
                          "there is no notification for an OBS boot log — "
-                         "saying so would be a lie")
+                         "claiming one would be a lie")
+        self.assertIn(self.GENERIC_CLAIM, err, "say so explicitly")
         self.assertIn("run_in_background", err)
 
     def test_an_ssh_wait_gets_the_generic_branch_too(self):
         err = self._blocked_stderr(ssh_loop())
-        self.assertNotIn("notification", err)
+        self.assertNotIn(self.TASK_CLAIM, err)
+        self.assertIn(self.GENERIC_CLAIM, err)
         self.assertIn("run_in_background", err)
 
     def test_a_user_invented_result_json_is_NOT_the_task_branch(self):
@@ -260,7 +272,8 @@ class MessageBranchesByWhatIsWaitedOnTest(_Runner):
                 '  sleep 15\n'
                 'done')
         err = self._blocked_stderr(loop)
-        self.assertNotIn("notification", err)
+        self.assertNotIn(self.TASK_CLAIM, err)
+        self.assertIn(self.GENERIC_CLAIM, err)
 
     def test_no_branch_ever_hands_out_118s_ci_waiter(self):
         for cmd in (task_loop(), obs_loop()):
@@ -279,7 +292,11 @@ class MessageBranchesByWhatIsWaitedOnTest(_Runner):
 
     def test_a_subagent_is_never_told_to_end_its_turn_on_a_pending_task(self):
         err = self._blocked_stderr(task_loop(), agent_id="a1b2c3")
-        self.assertNotIn("end your turn", err)
+        self.assertNotIn(MessageBranchesByWhatIsWaitedOnTest.TASK_CLAIM, err)
+        self.assertNotIn("end your turn and let", err,
+                         "a subagent that ends its turn on a pending task "
+                         "TERMINATES — the main-context advice is fatal here")
+        self.assertIn("do NOT end your turn", err)
 
 
 class LoggingTest(_Runner):
@@ -337,7 +354,7 @@ class TeethTest(_Runner):
 
     def test_dropping_the_ci_exemption_makes_this_hook_fight_118(self):
         mut = self._mutant(lambda s: s.replace(
-            "|| CI_WAIT=0", "|| CI_WAIT=1", 1))
+            "exit 0   # airuleset:ci-owned-by-118", ":", 1))
         for _ in range(3):
             self.assertEqual(self.run_hook(ci_loop()).returncode, 0)
         self.run_hook(ci_loop(), hook=mut, session="mut2")
@@ -355,7 +372,7 @@ class TeethTest(_Runner):
         self.addCleanup(probe._tmp.cleanup)
         probe.run_hook(obs_loop(), hook=mut)
         err = probe.run_hook(obs_loop(), hook=mut).stderr
-        self.assertIn("notification", err,
+        self.assertIn(MessageBranchesByWhatIsWaitedOnTest.TASK_CLAIM, err,
                       "the single-message mutant hands the log wait the task "
                       "branch — which the shipped hook must not")
 
