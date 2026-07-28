@@ -22,7 +22,9 @@ Context is bounded at TICKET BOUNDARIES instead (piece 2, kept):
      backlog) is a real completion report, so this fires once per batch.
 """
 
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
@@ -1954,6 +1956,139 @@ class TestCompactRequestCli(unittest.TestCase):
             airuleset.cmd_compact_request(Args())
             airuleset.cmd_compact_request(Args())
         self.assertEqual(dcn.call_count, 2)
+
+
+# --------------------------------------------------------------------------- #
+# #125 (2026-07-28) — `deliver_compact_now` used to return a bare `True` for
+# FIVE structurally different dispositions (a real SEND, both #78 SKIP
+# branches, and both the #99/#48 DROP branches), so `cmd_compact_request`
+# could only ever print the single generic word "delivered" for all five.
+# `~/.claude/compact-decisions.log` could then show `RECORD result=delivered`
+# at the IDENTICAL second `compact-sync.log` shows `DROP no-work` — the
+# CLI's own word never carried the disposition. Each handled disposition
+# must now be individually distinguishable, both in `deliver_compact_now`'s
+# own return value and in what the CLI prints.
+# --------------------------------------------------------------------------- #
+
+class TestDeliverCompactNowOutcomeWordsAreDistinguishable(unittest.TestCase):
+    """Real calls into `deliver_compact_now` (never mocked itself) driving
+    each disposition, proving the return values are no longer collapsed
+    onto one bare `True`."""
+
+    SID = "sess-word-1"
+    CWD = "/home/newlevel/devel/wordproj"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_a_real_send_and_a_dropped_no_work_boundary_are_not_the_same_word(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux_send = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=True):
+            sent = wd.deliver_compact_now(self.SID, self.CWD, run=tmux_send,
+                                          projects_dir=proj)
+        tmux_drop = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=False):
+            dropped = wd.deliver_compact_now(self.SID, self.CWD, run=tmux_drop,
+                                             projects_dir=proj)
+        self.assertTrue(sent)
+        self.assertTrue(dropped)
+        self.assertNotEqual(sent, dropped,
+                            "a real SEND and a #99 DROP must be distinguishable")
+
+    def test_a_dropped_no_work_boundary_and_a_dropped_small_context_boundary_differ(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1_000)   # tiny context
+        tmux_ctx = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ctx_dropped = wd.deliver_compact_now(self.SID, self.CWD, run=tmux_ctx,
+                                             projects_dir=proj)
+        proj2 = self._dir()
+        _write_ctx_transcript(proj2, self.CWD, self.SID, 300_000)
+        tmux_nw = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=False):
+            nw_dropped = wd.deliver_compact_now(self.SID, self.CWD, run=tmux_nw,
+                                                projects_dir=proj2)
+        self.assertTrue(ctx_dropped)
+        self.assertTrue(nw_dropped)
+        self.assertNotEqual(ctx_dropped, nw_dropped)
+
+    def test_the_send_outcome_is_the_word_sent(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=True):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertEqual(ok, "sent")
+
+    def test_the_no_work_drop_outcome_names_its_own_reason(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "compact_boundary_substantial", return_value=False):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertEqual(ok, "dropped-no-work")
+
+    def test_the_small_context_drop_outcome_names_its_own_reason(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux, projects_dir=proj)
+        self.assertEqual(ok, "dropped-small-context")
+
+
+class TestCompactRequestCliPrintsTheOutcomeWordVerbatim(unittest.TestCase):
+    """#125 — the CLI must print whatever `deliver_compact_now` returns, not
+    a hardcoded "delivered" literal that discards the distinction."""
+
+    def _home(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fake_home = Path(d.name)
+        (fake_home / ".claude").mkdir()
+        return fake_home
+
+    def _run(self, return_value):
+        fake_home = self._home()
+        buf = io.StringIO()
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("watchdog.deliver_compact_now", return_value=return_value), \
+             contextlib.redirect_stdout(buf):
+            airuleset.cmd_compact_request(Args())
+        return buf.getvalue()
+
+    def test_a_dropped_no_work_boundary_prints_its_own_reason(self):
+        self.assertEqual(self._run("dropped-no-work"), "dropped-no-work")
+
+    def test_a_dropped_small_context_boundary_prints_its_own_reason(self):
+        self.assertEqual(self._run("dropped-small-context"), "dropped-small-context")
+
+    def test_a_real_send_prints_sent(self):
+        self.assertEqual(self._run("sent"), "sent")
+
+    def test_a_claim_queued_skip_prints_its_own_reason(self):
+        self.assertEqual(self._run("claim-queued"), "claim-queued")
+
+    def test_a_queued_compact_skip_prints_its_own_reason(self):
+        self.assertEqual(self._run("queued-compact"), "queued-compact")
+
+    def test_a_legacy_bare_true_still_prints_a_word_not_a_crash(self):
+        # backward-compat: a caller/test-double that still returns the bare
+        # `True` of the pre-#125 contract must not crash `sys.stdout.write`
+        # (which requires a str) -- it maps to the generic legacy word.
+        self.assertEqual(self._run(True), "sent")
 
 
 # --------------------------------------------------------------------------- #
