@@ -4527,17 +4527,47 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     keystrokes IS the observable success here, the same fire-and-forget
     shape job 9's goal_autoarm uses (`/compact` has no
     reliable confirmation text to poll for). A request is LEFT IN PLACE
-    (retried next sweep) whenever the pane is busy / mid-dialog / in
-    copy-mode / holding a draft whose STASH SLOT is already occupied by
-    something else, or when no live pane maps to that session yet —
-    "release the claim on failure so it retries" per the spec: there is no
-    separate claim step to release, because nothing is ever claimed until
-    the keystrokes are actually sent. A draft whose stash slot is FREE is no
-    longer a dead end (#67): `_compact_stash_attempt` parks it, delivers
-    `/compact`, and the request IS consumed on that success — the draft
-    auto-restores itself once the delivered turn completes. Best-effort:
-    exceptions are the caller's (run_once's) responsibility to catch, same
-    as every other job."""
+    (retried next sweep) whenever the pane is busy (see the #122 exemption
+    below) / mid-dialog / in copy-mode / holding a draft whose STASH SLOT is
+    already occupied by something else, or when no live pane maps to that
+    session yet — "release the claim on failure so it retries" per the
+    spec: there is no separate claim step to release, because nothing is
+    ever claimed until the keystrokes are actually sent. A draft whose
+    stash slot is FREE is no longer a dead end (#67): `_compact_stash_attempt`
+    parks it, delivers `/compact`, and the request IS consumed on that
+    success — the draft auto-restores itself once the delivered turn
+    completes. Best-effort: exceptions are the caller's (run_once's)
+    responsibility to catch, same as every other job.
+
+    #122 (2026-07-28): a BUSY pane is no longer an unconditional skip. A
+    request whose `origin` is the proven-boundary one
+    (`_COMPACT_PROVEN_BOUNDARY_ORIGIN`, i.e. `"subagent-stop"` — #121's own
+    proof of a completed-ticket boundary) falls THROUGH the busy
+    classification into the same chain every other kind already goes
+    through (the #99/#48 substantiality gates, `_pane_has_queued_compact`
+    dedup, then a send that skips only the final `pane_at_idle_prompt`
+    gate a busy pane can never pass) — reusing the SAME "a short send-keys
+    reliably queues even into a busy pane" finding #65 already validated
+    for `deliver_compact_now`. This is safe here in a way it is NOT inside
+    a live Stop-hook batch (#109/#84's own caution, which is about parked
+    keystrokes firing at some arbitrary LATER accepted Stop when typed
+    DURING a Stop hook's own execution): job 14 is an independent ~60s
+    poll, never running inside a Stop-hook batch, and
+    `_compact_not_at_boundary` above has already re-confirmed at delivery
+    time that the session isn't `❓`-blocked. Every OTHER origin (the plain
+    Stop-hook channel) keeps the unconditional busy-skip unchanged. Job
+    14's own separate copies of the #99/#48 gates are deliberately left
+    untouched by this — #126 already scoped that parity gap out
+    explicitly ("job 14's own separate copy of these same two gates is
+    untouched"); this ticket does not fold it back in.
+
+    #122 also fixes the OTHER half of the same ticket: a request that
+    lapses via `COMPACT_REQUEST_MAX_AGE_S` (below) with no delivery, of
+    ANY origin, now also writes a `"LAPSE"` line to `compact-sync.log` via
+    `_log_compact_sync` — the same observable channel
+    `deliver_compact_now` already uses for every send/drop decision —
+    instead of only the pre-#122 journalctl `"skip expired"` line, buried
+    among thousands of no-pane polls that nobody actually watches."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -4565,6 +4595,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if entry.get("ts") and age > COMPACT_REQUEST_MAX_AGE_S:
             logs.append("skip expired (compact-request) %s age=%ds" % (sid, int(age)))
             if not dry_run:
+                # #122 — a silent 30-minute lapse is a defect regardless of
+                # which delivery branch a request fell through: write it to
+                # the SAME observable channel deliver_compact_now already
+                # uses for every send/drop decision
+                # (compact-sync.log), not just a journalctl line buried
+                # among thousands of no-pane polls that nobody watches.
+                _log_compact_sync(
+                    "LAPSE expired sid=%s cwd=%s age=%ds origin=%s"
+                    % (sid, cwd, int(age), entry.get("origin") or "-"))
                 reqs.pop(sid, None)
                 changed = True
             continue
@@ -4627,7 +4666,23 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if kind == "no-input-line":
             logs.append("skip no-input-line (compact-request) %s" % loc)
             continue
-        if kind == "busy":
+        # #122 — a request carrying its OWN proof of a boundary
+        # (origin=="subagent-stop") is no longer bounced on "busy": the same
+        # "a short send-keys reliably queues even into a busy pane" finding
+        # #65 already validated for the synchronous path (deliver_compact_now)
+        # applies here too. It is SAFE here in a way it would NOT be inside a
+        # live Stop-hook batch (#109/#84's own caution): that risk is about
+        # typing DURING a Stop hook's own execution, before that turn's
+        # accept/reject verdict exists so parked keystrokes fire at some
+        # arbitrary LATER accepted Stop. Job 14 is an independent ~60s poll,
+        # never running inside a Stop-hook batch — by the time it reaches
+        # here, `_compact_not_at_boundary` above has ALREADY re-confirmed
+        # (moments ago, at delivery time) that this session's current last
+        # turn is not blocked by `❓`. Every OTHER origin keeps the
+        # unconditional busy-skip unchanged (see the #122 issue comment).
+        proven_boundary = (str(entry.get("origin") or "")
+                           == _COMPACT_PROVEN_BOUNDARY_ORIGIN)
+        if kind == "busy" and not proven_boundary:
             logs.append("skip busy (compact-request) %s" % loc)
             continue
         # #99 — did REAL work (>=1 commit) happen since the last genuine
@@ -4701,11 +4756,17 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 logs.append("skip draft (stash occupied) %s: %r"
                             % (loc, draft[:40]))
             continue
-        if not pane_at_idle_prompt(captured):
+        # #122 — kind=="busy" only reaches here when proven_boundary is True
+        # (the non-proven case already `continue`d above); the idle-prompt
+        # gate is deliberately skipped for it, mirroring
+        # deliver_compact_now's own "no pane_at_idle_prompt gate on this
+        # path" reasoning — a busy pane can never pass it.
+        if kind != "busy" and not pane_at_idle_prompt(captured):
             logs.append("skip not-idle (compact-request) %s" % loc)
             continue
+        busy_tag = ", busy" if kind == "busy" else ""
         if dry_run:
-            logs.append("READY (compact-request) %s" % loc)
+            logs.append("READY (compact-request%s) %s" % (busy_tag, loc))
             continue
         send_continue(pid, COMPACT_TEXT, run)
         reqs.pop(sid, None)
@@ -4716,7 +4777,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
-        logs.append("OK (compact-request) %s" % loc)
+        logs.append("OK (compact-request%s) %s" % (busy_tag, loc))
     if changed:
         _save_compact_requests(reqs, path)
     return logs

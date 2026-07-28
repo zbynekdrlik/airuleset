@@ -2537,6 +2537,10 @@ class TestCompactRequestExpiry(unittest.TestCase):
                                           {self.SID: (self.PANE, CB_IDLE_CAP)},
                                           path=path)
         self.assertFalse(any("expired" in ln for ln in logs), logs)
+        # #122 negative control — a fresh (never-expired) request must NOT
+        # produce a LAPSE record; the sync log stays untouched by this run.
+        sync_log = wd.compact_sync_log_path()
+        self.assertFalse(Path(sync_log).exists())
 
     # ------------------------------------------------------------------- #
     # #122 — "a silent 30-minute lapse with no signal is a defect in its own
