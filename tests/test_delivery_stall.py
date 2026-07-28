@@ -177,10 +177,25 @@ class TestDedupAndRecovery(_Base):
         self.assertEqual(len(self.sent), 1)
 
     def test_it_repings_once_the_window_passes(self):
+        # A short explicit window: the DEFAULT one is a day, and a fixture
+        # advanced a whole day would also age its work branch past
+        # DELIVERY_WORK_FRESH_S — which correctly makes it a non-candidate
+        # and would test the freshness gate instead of the re-ping window.
+        r = self.stalled()
+        self.watch([r], now=NOW, reping=600)
+        self.watch([r], now=NOW + 60, reping=600)      # inside the window
+        self.assertEqual(len(self.sent), 1)
+        self.watch([r], now=NOW + 660, reping=600)     # past it
+        self.assertEqual(len(self.sent), 2)
+
+    def test_work_that_goes_stale_ends_the_alerting(self):
+        """The parked-repo transition, seen from the other side: once the loop
+        stops committing, nothing is being spent and the job goes quiet."""
         r = self.stalled()
         self.watch([r], now=NOW)
-        self.watch([r], now=NOW + wd.DELIVERY_REPING_S + 60)
-        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(len(self.sent), 1)
+        self.watch([r], now=NOW + wd.DELIVERY_WORK_FRESH_S + 7200)
+        self.assertEqual(len(self.sent), 1)
 
     def test_a_delivery_clears_the_state_so_a_later_stall_pings_again(self):
         r = self.stalled()
@@ -296,9 +311,11 @@ class TestDetectionOnly(unittest.TestCase):
     def test_the_job_never_sends_a_keystroke(self):
         """Job 21's discipline: deciding to interrupt is the user's call. A
         `run` proxy that refuses everything must never be asked to act."""
-        src = Path(wd.__file__).read_text()
-        start = src.index("def delivery_stall_watch(")
-        body = src[start:src.index("\ndef ", start + 10)]
+        import inspect
+        # inspect.getsource, never a hand-rolled slice to the next `\ndef ` —
+        # the module-level block that follows carries job 20's section comment,
+        # which legitimately discusses keystroke delivery.
+        body = inspect.getsource(wd.delivery_stall_watch)
         for banned in ("send-keys", "send_continue", "deliver_with_stash",
                        "_restart_pane"):
             self.assertNotIn(banned, body,
