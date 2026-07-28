@@ -286,6 +286,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-working-liveness.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-question-quality.sh",
             "timeout": 5
           },
