@@ -128,9 +128,25 @@ def safe_name(segment):
         name = "_" + name       # never hand a later CLI something read as a flag
     return _clip(name)
 
+# The icon is declared INLINE as a data: URI, and that is the whole fix for
+# #117: a document that declares none makes every browser auto-request
+# /favicon.ico at the ORIGIN ROOT, which is not /<token>/ — so do_GET refuses it
+# and the browser logs a console error on the one page the user personally opens
+# to hand a file over (browser-console-zero-errors.md treats that as a bug).
+# The refusal is correct and stays: a favicon request carries no token, and the
+# token is this write endpoint's only auth — so the error is removed by never
+# making the request, never by opening an unauthenticated route.
+#
+# Inline rather than a file on disk because PAGE is served RAW from this one
+# string with no asset pipeline behind it, and upload_server.py is launched BY
+# PATH (sys.path[0] is filedrop/ itself), so any runtime asset lookup would be
+# install-location dependent. Percent-encoded and ASCII-only: a data: URI with
+# no explicit charset defaults to US-ASCII, and raw `#`/`<`/`>` would be read as
+# a URL fragment / markup inside the attribute.
 PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Upload — airuleset file-drop</title>
+<link rel=icon href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Crect%20width='16'%20height='16'%20rx='3'%20fill='%230f172a'/%3E%3Cpath%20d='M8%203.2%2012%207.6h-2.4V11H6.4V7.6H4z'%20fill='%2338bdf8'/%3E%3C/svg%3E">
 <style>
  body{font:16px system-ui;margin:0;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;min-height:100vh}
  .card{background:#1e293b;padding:32px;border-radius:14px;width:min(560px,92vw);box-shadow:0 10px 40px #0006}
