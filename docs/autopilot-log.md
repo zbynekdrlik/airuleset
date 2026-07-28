@@ -974,3 +974,39 @@ count. Endpoint killed, fixtures and temp dirs removed, port free.
 
 Filed #117 while verifying: the upload page declares no icon, so every browser
 that opens it logs a `GET /favicon.ico` 404 console error.
+
+## 2026-07-28 — #117 upload page: no favicon, so every open logs a 404 console error
+
+`13cdd60` [red] → `a713d95` [green], direct to main (this repo has no dev
+branch / no PR / no CI — the local gate is the only gate: 2341 passed, ruff
+clean, validate OK).
+
+Root cause traced rather than restated: a document declaring no `rel=icon`
+makes the browser auto-request `/favicon.ico` at the ORIGIN ROOT, which is not
+`/<token>/`, so `do_GET` refuses it and the browser logs the 404. The refusal
+is correct and stays — a favicon request carries no token, and the token is
+this write endpoint's only auth.
+
+Chosen: declare the icon INLINE in `PAGE` as a 244-char percent-encoded SVG
+`data:` URI, so the request is never made. Rejected: answering `/favicon.ico`
+from `do_GET` (an unauthenticated route on a write endpoint, plus a runtime
+asset lookup that would be install-location dependent — this module is
+launched by path); `href="data:,"` suppress-only (no icon, and leans on
+per-browser handling of an undecodable empty resource for the same one line).
+Design posted to the ticket before the first code commit.
+
+RED test `test_served_page_declares_an_inline_icon` asserts on the bytes a LIVE
+server serves (never the source string); companion lock
+`test_favicon_path_is_still_refused_by_the_token_gate` pins that no
+unauthenticated route was opened.
+
+Real-browser proof, since curl cannot observe a console error: before, exactly
+one error (`favicon.ico` 404) plus the matching server log line; after, ZERO
+console messages, ZERO favicon requests in the log, the icon decoding as a real
+image, and a 64 KB Slovak-named file still dropping through the page
+byte-identical.
+
+Also re-verified #116 independently against the same live endpoint (real
+browser drop + 18 hostile names over a raw socket): every claim holds, nothing
+escaped `DEST`, `$HOME`/`/tmp`/DEST's parent all gained zero entries. Evidence
+on #116.
