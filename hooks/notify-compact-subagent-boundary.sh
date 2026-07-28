@@ -82,9 +82,13 @@ SID=$(_field '.session_id // empty')
 AGENT_ID=$(_field '.agent_id // empty')
 [ -n "$AGENT_ID" ] || exit 0
 
-# Absent field ⇒ unprovable ⇒ never compact (see the header).
-HAS_BG=$(printf '%s' "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo "false")
-[ "$HAS_BG" = "true" ] || exit 0
+# Absent field ⇒ unprovable ⇒ never compact (see the header). It must be an
+# actual ARRAY, not merely PRESENT: `has("background_tasks")` is true for an
+# explicit `null`, and iterating null (or any non-array) yields nothing, which
+# would read as "zero live workers" and fire the compact on a payload that
+# proved nothing at all.
+BG_TYPE=$(printf '%s' "$INPUT" | jq -r '.background_tasks | type' 2>/dev/null || echo "null")
+[ "$BG_TYPE" = "array" ] || exit 0
 
 # Every entry that is not the self entry counts as live, whatever its status
 # or type — the harness has already filtered the array to in-flight work. An
