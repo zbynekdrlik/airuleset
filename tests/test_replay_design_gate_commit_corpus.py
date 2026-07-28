@@ -42,10 +42,25 @@ class TestReplayScriptAgreesOnARealSlice(TestCase):
 class TestNoOutOfRangeOrMissedReferences(TestCase):
     """Bidirectional false-positive/false-negative spot-check (#136): a
     matched number that exceeds the repo's real max issue number is a
-    classifier FALSE POSITIVE; a commit mentioning an issue-shaped pattern
-    (`#N`, `issue N`, `GH-N`) that issue_refs() extracts NOTHING from is a
-    FALSE NEGATIVE. Locks both at zero against this repo's real, full
-    history (cheap -- pure-Python regex work, no subprocess per commit)."""
+    classifier FALSE POSITIVE; a commit mentioning a `#N`-shaped pattern
+    that issue_refs() extracts NOTHING from is a FALSE NEGATIVE. Locks both
+    at zero against this repo's real, full history (cheap -- pure-Python
+    regex work, no subprocess per commit).
+
+    #122 (2026-07-29) narrowed the FALSE-NEGATIVE half's own definition of
+    "issue-shaped" from `#N` / `issue N` / `GH-N` down to `#N` alone.
+    `design_gate.ISSUE_REF_RE` is deliberately `#`-anchored (see its own
+    comment in design_gate.py) -- and the #137-era playbook convention
+    (`.claude/rules/airuleset-internals.md`) established "issue N" prose as
+    the SANCTIONED way to mention a historical/context ticket in a commit
+    message WITHOUT triggering block-commit-without-design.sh's marker
+    requirement for it. Flagging "issue N" here as a missed reference
+    directly contradicts that convention -- the first real commit to use
+    the sanctioned phrasing (issue #122's own playbook entry) failed this
+    test for using it correctly, not for a genuine classifier gap. See
+    `TestIssueRefs.test_prose_issue_n_is_deliberately_not_a_ref` /
+    `test_gh_dash_n_is_deliberately_not_a_ref` (test_design_gate.py) for the
+    same decision locked at the unit level."""
 
     def test_no_out_of_range_or_zero_refs_extracted(self):
         r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
@@ -81,9 +96,11 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
             seen.add(line)
             if dg.issue_refs(line):
                 continue
-            if (re.search(r'#\d', line) or
-                    re.search(r'\bissue\s+\d+\b', line, re.I) or
-                    re.search(r'\bGH-\d+\b', line)):
+            # #122 -- only the SAME `#`-anchored family ISSUE_REF_RE itself
+            # targets; "issue N" / "GH-N" are the sanctioned non-triggering
+            # prose forms (see the class docstring) and must never land
+            # back in this check.
+            if re.search(r'#\d', line):
                 missed.append(line)
         self.assertEqual(missed, [], "issue-shaped mention with zero extracted refs")
 

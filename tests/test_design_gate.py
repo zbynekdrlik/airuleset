@@ -162,6 +162,22 @@ class TestIssueRefs(unittest.TestCase):
     def test_none_text_is_empty(self):
         self.assertEqual(dg.issue_refs(None), [])
 
+    def test_prose_issue_n_is_deliberately_not_a_ref(self):
+        # #122 -- "issue N" prose (no `#`) is the SANCTIONED way to mention a
+        # historical/context ticket in a commit message WITHOUT triggering
+        # block-commit-without-design.sh's marker requirement for it (the
+        # #137-era playbook convention: reserve bare `#N` for the issue(s) a
+        # commit's own `Closes #N` trailer names, describe everything else
+        # in prose). ISSUE_REF_RE is `#`-anchored by design (see its own
+        # comment) -- this locks that "issue N" staying unmatched is
+        # INTENTIONAL, not a coverage gap to widen.
+        self.assertEqual(dg.issue_refs("docs: notes for issue 122"), [])
+
+    def test_gh_dash_n_is_deliberately_not_a_ref(self):
+        # Same family as test_prose_issue_n_is_deliberately_not_a_ref --
+        # ISSUE_REF_RE never anchors on "GH-", so this is not a gap either.
+        self.assertEqual(dg.issue_refs("see GH-122 for context"), [])
+
 
 # --------------------------------------------------------------------------- #
 # marker I/O
