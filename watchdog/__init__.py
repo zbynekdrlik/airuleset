@@ -7168,7 +7168,8 @@ def _bg_monitor_in_cwd(cwd, run=None):
 def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
                          account_owner="", dry_run=False,
                          done_grace=PENDING_DONE_GRACE, max_stale=PENDING_DONE_MAX_STALE,
-                         pending_prefix=PENDING_PREFIX, bg_check=None):
+                         pending_prefix=PENDING_PREFIX, bg_check=None,
+                         owner_by_cwd=None, owners_seen=None):
     """Sweep /tmp/claude-discord-pending-* and deliver a ✅ DONE ping the unreliable
     idle_prompt event failed to deliver. Delivers ONLY when the session is genuinely,
     still done: the pending exists AND the session's CURRENT last marker is STILL ✅
@@ -7176,9 +7177,23 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
     background task re-invoked it → last marker now ⏳, or it moved on) has its stale
     ✅ CLEARED without pinging — so the device is never told "done" for work that kept
     going (the exact confusion to avoid). PING ONLY; claim-then-send (rm before send)
-    so it can't double-fire with the idle hook. Best-effort; returns log lines."""
+    so it can't double-fire with the idle hook. Best-effort; returns log lines.
+
+    OWNER resolution is three-step, and the last step is deliberately allowed to
+    yield nothing. `owner_by_sid` is authoritative but only covers sessions the
+    caller's pane loop registered THIS sweep; `owner_by_cwd` recovers the rest
+    from the session's own working directory. `account_owner` — "the first owner
+    seen" — is a legitimate answer only on a box where every pane belongs to one
+    person; where several do, it is a coin flip, and a ✅ landing in the wrong
+    person's thread is worse than one with no @mention: the real owner never
+    sees it and someone else gets the noise. dev2 (david + marek + zbynek panes)
+    delivered zbynek's presenter ✅ into david's thread that way on 2026-07-29."""
     import glob as _glob
     owner_by_sid = owner_by_sid or {}
+    owner_by_cwd = owner_by_cwd or {}
+    # An EMPTY owners_seen means the caller did not measure — keep the fallback
+    # (every pre-existing caller and test relies on it).
+    ambiguous = len(set(owners_seen or ())) > 1
     bg_check = bg_check if bg_check is not None else _bg_monitor_in_cwd
     logs = []
     plen = len(os.path.basename(pending_prefix))
@@ -7226,7 +7241,10 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         if not dry_run:
             _safe_unlink(pf)                    # claim first so a concurrent idle hook can't double-send
         project = project_label(cwd) if cwd else "unknown"
-        owner = owner_by_sid.get(sid) or account_owner or None
+        owner = (owner_by_sid.get(sid)
+                 or (owner_by_cwd.get(cwd) if cwd else None)
+                 or ("" if ambiguous else account_owner)
+                 or None)
         send_fn("✅ **%s** — hotovo\n> %s" % (project, text[:250]),
                 owner=owner, dedup_key="done:%s" % sid, dry_run=dry_run)
         logs.append("delivered ✅ sid=%s [%s] idle=%dm" % (sid[:8], project, int(idle // 60)))
@@ -7878,6 +7896,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     logs = []
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
+    owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
+    owners_seen = set()                 # every owner with a pane here — >1 = multi-owner box
     project_by_sid = {}                 # session id -> project label, for job 21's ping
     cwd_by_sid = {}                     # session id -> pane cwd, for job 24's repo read
     panes_by_sid = {}                   # session id -> (pane_id, captured), for job 7 reply routing
@@ -7916,6 +7936,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             owner = pane_owner(pid, run)       # @mention the right person for THIS pane
             if owner:
                 owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
+                owner_by_cwd[cwd] = owner      # job 5: recover the owner when the sid is missing
+                owners_seen.add(owner)         # >1 → account_owner is a coin flip, not an answer
                 if not account_owner:
                     account_owner = owner      # first owner seen → the account/usage owner
 
@@ -8487,7 +8509,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         logs += deliver_pending_done(now, send_fn, projects_dir,
                                      owner_by_sid=owner_by_sid, account_owner=account_owner,
                                      dry_run=dry_run, done_grace=done_grace,
-                                     pending_prefix=pending_prefix)
+                                     pending_prefix=pending_prefix,
+                                     owner_by_cwd=owner_by_cwd, owners_seen=owners_seen)
     except Exception:
         pass
 
