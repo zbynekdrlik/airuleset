@@ -399,6 +399,79 @@ class TestCliBehaviour(_StoreCase):
         self.assertEqual(self._cli("purge").returncode, 0)
 
 
+class TestExecDoesNotHandTheChildTheTranscript(_StoreCase):
+    """Adversarial-review finding #1 (CRITICAL).
+
+    `subprocess.run(cmd, env=env)` with no `stdout=`/`stderr=` gives the child
+    the CLI's OWN fd 1 and 2 — which are the transcript, the one place the value
+    must never reach. `cmd` is argv the AGENT chose, so
+    `secret exec DB_PASS -- env` printed the credential into
+    `~/.claude/projects/**/*.jsonl` permanently, in one call, with no guard —
+    and any verbose or failing child (`curl -v`, `bash -x`, a tool that echoes
+    its config on error) did it by accident.
+    """
+
+    def _cli(self, *argv):
+        env = dict(os.environ)
+        env.update(self._env)
+        return subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", *argv],
+            capture_output=True, text=True, timeout=90, env=env)
+
+    def _exec_printing(self, snippet):
+        st.store_value("DB_PASS", VAL.encode(), keep_s=600)
+        return self._cli("exec", "DB_PASS", "--", sys.executable, "-c", snippet)
+
+    def test_a_child_that_echoes_the_environment_leaks_nothing(self):
+        out = self._exec_printing("import os;print(os.environ['DB_PASS'])")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn(VAL, out.stdout + out.stderr)
+        self.assertIn("REDACTED", out.stdout)
+
+    def test_a_child_that_writes_it_to_stderr_leaks_nothing(self):
+        out = self._exec_printing(
+            "import os,sys;sys.stderr.write(os.environ['DB_PASS'])")
+        self.assertNotIn(VAL, out.stdout + out.stderr)
+        self.assertIn("REDACTED", out.stderr)
+
+    def test_the_obvious_encodings_are_redacted_too(self):
+        out = self._exec_printing(
+            "import os,base64,urllib.parse as u;v=os.environ['DB_PASS'];"
+            "print(base64.b64encode(v.encode()).decode());"
+            "print(u.quote(v));print(v.encode().hex())")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        import base64
+        import urllib.parse
+        for form in (base64.b64encode(VAL.encode()).decode(),
+                     urllib.parse.quote(VAL), VAL.encode().hex()):
+            self.assertNotIn(form, out.stdout, form[:16])
+
+    def test_the_childs_own_output_still_comes_through(self):
+        out = self._exec_printing("print('hello from the child')")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("hello from the child", out.stdout)
+
+    def test_undecodable_child_output_does_not_crash_the_wrapper(self):
+        out = self._exec_printing(
+            "import sys;sys.stdout.buffer.write(bytes(range(256)))")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_the_stdin_form_is_filtered_as_well(self):
+        st.store_value("DB_PASS", VAL.encode(), keep_s=600)
+        out = self._cli("exec", "DB_PASS", "--stdin", "--", sys.executable, "-c",
+                        "import sys;print(sys.stdin.read())")
+        self.assertNotIn(VAL, out.stdout + out.stderr)
+        self.assertIn("REDACTED", out.stdout)
+
+    def test_the_redactor_leaves_ordinary_output_alone(self):
+        self.assertEqual(airuleset._secret_redact(b"plain text", b"pw"),
+                         b"plain text")
+
+    def test_the_redactor_never_treats_a_tiny_fragment_as_the_value(self):
+        # A 1-3 byte "value" would otherwise blank out unrelated text.
+        self.assertEqual(airuleset._secret_redact(b"a b a", b"a"), b"a b a")
+
+
 def _post(url, body, timeout=10):
     req = urllib.request.Request(url, data=body, method="POST")
     try:
