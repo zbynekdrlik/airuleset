@@ -763,6 +763,111 @@ class TestExecDoesNotHandTheChildTheTranscript(_StoreCase):
         self.assertEqual(airuleset._secret_redact(b"a b a", b"a"), b"a b a")
 
 
+# A value whose METACHARACTERS are what ordinary escaping rewrites: a quote, a
+# backslash, a newline, the XML/HTML trio, and a percent. Nothing here is a
+# real credential; the point is the shape, not the bytes.
+ESCAPY = 'pw"x\\y\nz<&>100%q'
+
+
+class OrdinaryEscapingIsAlsoARendering(TestCase):
+    """#153 finding 2 — the form set covered ENCODINGS but not ESCAPING.
+
+    Every member of the original set (b64, hex, percent, urlsafe) re-encodes
+    the value WHOLE. Escaping is different: the value's own bytes survive and
+    only its metacharacters are rewritten in place, so a substring search for
+    the raw value misses it completely. `json.dumps({"pw": v})` and `repr(v)`
+    both passed through unredacted — and a child dumping its config as JSON or
+    a traceback printing a dict is the ACCIDENTAL class the filter says it is
+    for, not the deliberate transformation its docstring disclaims.
+    """
+
+    def assertRedacted(self, rendering, value=ESCAPY, label=""):
+        blob = ("prefix " + rendering + " suffix").encode()
+        out = airuleset._secret_redact(blob, value.encode())
+        self.assertNotIn(rendering.encode(), out,
+                         "unredacted %s rendering" % (label or "this"))
+        self.assertIn(b"REDACTED", out)
+        # The surrounding output must survive — a filter that eats the child's
+        # own text is a different bug, not a fix.
+        self.assertIn(b"prefix ", out)
+        self.assertIn(b" suffix", out)
+
+    def test_json_escaped(self):
+        self.assertRedacted(json.dumps(ESCAPY)[1:-1], label="json")
+
+    def test_json_dumped_inside_a_dict(self):
+        # The literal shape from the ticket: a child dumping its own config.
+        blob = json.dumps({"pw": ESCAPY, "host": "db1"}).encode()
+        out = airuleset._secret_redact(blob, ESCAPY.encode())
+        self.assertNotIn(json.dumps(ESCAPY)[1:-1].encode(), out)
+        self.assertIn(b"db1", out)          # the rest of the config survives
+
+    def test_repr_of_a_str(self):
+        self.assertRedacted(repr(ESCAPY)[1:-1], label="repr(str)")
+
+    def test_repr_of_bytes(self):
+        self.assertRedacted(repr(ESCAPY.encode())[2:-1], label="repr(bytes)")
+
+    def test_a_traceback_printing_a_dict(self):
+        # The other shape the ticket names, end to end through repr().
+        blob = ("KeyError: " + repr({"pw": ESCAPY})).encode()
+        out = airuleset._secret_redact(blob, ESCAPY.encode())
+        self.assertNotIn(repr(ESCAPY)[1:-1].encode(), out)
+
+    def test_unicode_escape(self):
+        self.assertRedacted(ESCAPY.encode("unicode_escape").decode("latin-1"),
+                            label="unicode_escape")
+
+    def test_html_and_xml_escape(self):
+        import html
+        self.assertRedacted(html.escape(ESCAPY), label="html/xml")
+
+    def test_shell_quoted(self):
+        # `bash -x`, or any child echoing the command it is about to run.
+        import shlex
+        self.assertRedacted(shlex.quote(ESCAPY), label="shlex.quote")
+
+    def test_configparser_percent_doubling(self):
+        # configparser.write() doubles `%`; the value's other bytes survive.
+        self.assertRedacted(ESCAPY.replace("%", "%%"), label="configparser")
+
+    def test_the_original_encodings_still_hold(self):
+        # Regression guard: adding escaped forms must not disturb the set #144
+        # already got right.
+        import base64
+        import urllib.parse
+        v = ESCAPY.encode()
+        for rendering, label in (
+                (base64.b64encode(v).decode(), "b64"),
+                (base64.b64encode(v).decode().rstrip("="), "b64-nopad"),
+                (base64.urlsafe_b64encode(v).decode().rstrip("="), "urlsafe"),
+                (v.hex(), "hex"),
+                (urllib.parse.quote(ESCAPY), "percent"),
+                (urllib.parse.quote_plus(ESCAPY), "percent-plus"),
+                (ESCAPY, "raw")):
+            with self.subTest(form=label):
+                self.assertRedacted(rendering, label=label)
+
+    def test_a_plain_value_with_no_metacharacters_is_unaffected(self):
+        # Every escaped form of "hunter2-fixture-value-144" IS the raw value;
+        # the set must dedup rather than produce a redundant pass.
+        out = airuleset._secret_redact(b"x hunter2-fixture-value-144 y",
+                                       b"hunter2-fixture-value-144")
+        self.assertEqual(out, b"x <<REDACTED>> y")
+
+    def test_short_values_are_still_not_redacted_in_any_form(self):
+        # The >=4-byte floor must survive the larger form set, or a 2-char
+        # value's escaped renderings would shred a child's output.
+        blob = b'they said "ok" and left'
+        self.assertEqual(airuleset._secret_redact(blob, b'"'), blob)
+
+    def test_the_docstring_states_the_residual_honestly(self):
+        # The old text disclaimed only DELIBERATE transformation, which made
+        # the escaping gap both real and undisclosed.
+        doc = airuleset._secret_redact.__doc__
+        self.assertRegex(doc.lower(), r"escap")
+
+
 def _post(url, body, timeout=10):
     req = urllib.request.Request(url, data=body, method="POST")
     try:
