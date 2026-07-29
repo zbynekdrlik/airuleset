@@ -183,6 +183,21 @@ class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
         wd.goal_autoarm(time.time(), tmux, {}, projects_dir=Path(tmp.name))
         self.assertTrue(tmux.typed())
 
+    def test_re_arming_drops_the_bookkeeping(self):
+        """The state file is long-lived; a key per cleared session would only
+        ever grow. Once the session is armed again the entry goes."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"))
+        state, now = {}, time.time()
+        wd.goal_autoarm(now, FakeTmux(ARM_PANE), state, projects_dir=pd)
+        self.assertIn("sess-170", state.get("goalarm_cleared", {}))
+
+        tr = pd / wd.encode_project_dir(cwd) / "sess-170.jsonl"
+        tr.write_text(self._marker("set") + "\n", encoding="utf-8")
+        wd.goal_autoarm(now + wd.GOAL_ARM_WINDOW_S + 5, FakeTmux(ARM_PANE),
+                        state, projects_dir=pd)
+        self.assertNotIn("sess-170", state.get("goalarm_cleared", {}))
+
     def test_the_skip_is_logged_once_not_every_sweep(self):
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"))

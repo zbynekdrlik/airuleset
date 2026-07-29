@@ -3206,24 +3206,27 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         # exact bytes when available; the fragment only when provably whole.
         full = None
         tr = find_active_transcript(projects_dir, cwd)
-        if tr and _goal_was_cleared_by_user(tr[0]):
-            # #170 — the user turned this loop OFF. Leave it alone until they
-            # arm it again themselves, which flips the newest marker back to
-            # `set` and re-enables this pane with no further bookkeeping.
-            # Logged ONCE per session: a cleared session is otherwise a
-            # permanent resident and would print this every sweep, forever
-            # (the `untracked_logged` precedent in _goal_template_drift).
-            cl = state.setdefault("goalarm_cleared", {})
+        if tr:
             sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
-            logs_once = []
-            if not cl.get(sid):
-                cl[sid] = True
-                logs_once.append(
-                    "skip cleared (goal-autoarm) %s (%s) -> the user cleared "
-                    "this goal; not re-arming until they arm it again"
-                    % (pid, os.path.basename(cwd.rstrip("/"))))
-            logs += logs_once
-            continue
+            cl = state.setdefault("goalarm_cleared", {})
+            if _goal_was_cleared_by_user(tr[0]):
+                # #170 — the user turned this loop OFF. Leave it alone until
+                # they arm it again themselves, which flips the newest marker
+                # back to `set` and re-enables this pane on the next sweep.
+                # Logged ONCE per session: a cleared session is otherwise a
+                # permanent resident and would print this every sweep, forever
+                # (the `untracked_logged` precedent in _goal_template_drift).
+                if not cl.get(sid):
+                    cl[sid] = True
+                    logs.append(
+                        "skip cleared (goal-autoarm) %s (%s) -> the user "
+                        "cleared this goal; not re-arming until they arm it "
+                        "again" % (pid, os.path.basename(cwd.rstrip("/"))))
+                continue
+            # No longer cleared — drop the bookkeeping rather than leaving a
+            # key per session forever. The state file is long-lived and this
+            # dict would otherwise only ever grow.
+            cl.pop(sid, None)
         if tr:
             full = _transcript_goal_line(tr[0])
         if full is None:
