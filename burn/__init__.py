@@ -1526,6 +1526,17 @@ def read_dispatch(path):
             u = msg.get("usage") or {}
             if not u:
                 continue
+            # A `<synthetic>` placeholder (interrupt / error) carries a usage
+            # block of four zeros and a UUID where a requestId would be. It is
+            # not an API request: counted as one it becomes the dispatch's LAST
+            # request and reports a context of 0 — observed live as a growth of
+            # -117,959 on 1 of 301 real dispatches. Keyed on the zero USAGE
+            # rather than the model string, so a placeholder written without
+            # that marker is dropped too.
+            if not any(int(u.get(k) or 0) for k in
+                       ("input_tokens", "cache_creation_input_tokens",
+                        "cache_read_input_tokens", "output_tokens")):
+                continue
             rid = e.get("requestId") or msg.get("id")
             if rid is None:
                 rid = "line:%d" % len(order)
