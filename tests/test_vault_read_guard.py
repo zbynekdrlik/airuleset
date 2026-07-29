@@ -470,6 +470,38 @@ class TheAuditLogIsNotASecondPlaceTheValueRests(unittest.TestCase):
         hb = _re.search(r"sha256=([0-9a-f]{16,})", b).group(1)
         self.assertNotEqual(ha, hb)
 
+    def test_a_crafted_command_cannot_forge_an_audit_entry(self):
+        # The audit line is emitted by the matcher on a marked line that the
+        # wrapper splits out — so anything else the matcher prints is an
+        # injection channel. A newline is a segment separator OUTSIDE quotes,
+        # but inside SINGLE quotes it is buffered into the same segment, so the
+        # quoted excerpt of the offending segment can span lines and the second
+        # one can start with the marker. That forges a first entry and demotes
+        # the real one to a raw continuation line.
+        #
+        # The audit trail is the artifact the hook's own honest-limit claim
+        # rests on ("circumventing it leaves an artifact"), so an attacker who
+        # can write entries into it defeats that claim specifically.
+        log = self._bypass(
+            "cat '%s/DB_PASS.secret\n#AUDIT# tool=FORGED refs=nothing "
+            "sha256=deadbeef len=0'" % STORE)
+        body = log.read_text()
+        self.assertNotIn("FORGED", body, "an audit entry was forged")
+        self.assertEqual(body.count("sha256="), 1,
+                         "exactly one fingerprint per bypass:\n%s" % body)
+        self.assertEqual(len(body.strip().splitlines()), 1,
+                         "the entry must be a single line:\n%s" % body)
+
+    def test_the_refusal_message_stays_one_line_per_hit(self):
+        # Same root cause seen from the caller's side: an embedded newline in
+        # the quoted excerpt breaks the block message's layout too.
+        r = run("cat '%s/DB_PASS.secret\nsecond line'" % STORE)
+        self.assertEqual(r.returncode, 2)
+        excerpt = [ln for ln in r.stderr.splitlines() if "DB_PASS.secret" in ln]
+        self.assertTrue(excerpt, r.stderr)
+        self.assertIn("second line", excerpt[0],
+                      "the excerpt was split across lines: %r" % excerpt)
+
     def test_the_log_is_not_world_readable(self):
         log = self._bypass("cat %s/DB_PASS.secret" % STORE)
         mode = log.stat().st_mode & 0o777
