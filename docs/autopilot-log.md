@@ -1328,3 +1328,43 @@ log first still blocks.
 
 Gate: 2802 tests pass (2763 baseline + 39 new), `ruff check .` clean,
 `airuleset.py validate` OK.
+
+## 2026-07-29 — #130 standing MAIN-vs-SUBAGENT cost meter
+
+Root cause was sharper than the ticket's framing: `burn.scan()` globs
+`<projects>/*/*.jsonl`, one directory level above where Claude Code writes
+subagent transcripts (`<proj>/<sid>/subagents/agent-*.jsonl`), which is also the
+only place `isSidechain` appears — so `main_vs_sidechain` reported a FALSE
+100%-MAIN split, not an incomplete one (dev1: 100 files / 2.2 GB reachable,
+5,281 files / 2.4 GB invisible). Design comment posted before the first code
+commit (`#issuecomment-5111463217`).
+
+Additive by choice: `scan()` untouched, because it feeds the watchdog's hourly
+snapshots, the fleet feed, `--compare` and `hourly_burn_alert`'s live
+thresholds — folding subagents in would double every hourly figure against a
+history recorded without them and re-fire the alerts on the discontinuity, a
+threshold change this ticket excludes. Reconciliation filed separately.
+
+- `b867fcf` [red] 38 failing — `tests/test_delegation_meter.py`
+- `d2a31e5` [green] `burn.scan_split/split_report/merge_splits/render_split`,
+  `cost_units`, `ctx_per_turn`, `units_per_ticket`, `repo_of_cwd`;
+  `airuleset.py delegation [--hours --host --tickets --json --root]`;
+  `_remote_ssh_prefix` shared with `_burn_remote_cmd`; working cycle documented
+  in `.claude/rules/airuleset-internals.md`
+- `4285b57` [red] / `d2c2b58` [green] — live-caught on the first real
+  `--host all`: a remote box returns the already-merged JSON shape, so every
+  remote parsed cleanly and contributed nothing with no WARN; the coordinator
+  printed a dev1-only table under a fleet heading. `_split_rows_of` now accepts
+  both shapes and keeps the row's own host.
+
+First fleet run (12h, 7 boxes, 186 transcripts): MAIN 3,849 turns / 144.6M
+units (17.8%) / 232,757 ctx per turn; SUB 19,621 turns / 669.6M units (82.2%) /
+242,735 ctx per turn. Subagent turns are no longer even individually cheaper —
+cache read is 96–97% of input context in BOTH rows, and the subagent fleet
+spends 5.31x the input context to produce 1.81x the output. Conclusion is
+invariant across the weighting range (SUB 78.1%–84.0%). Cost per closed ticket
+computed for the first time; 225.9M units (27.7%) closed no ticket at all.
+Tension with #128 reported on the ticket; no hook, guard or threshold changed.
+
+Gate: 2845 tests pass (2802 baseline + 43 new), `ruff check .` clean,
+`airuleset.py validate` OK, deployed to all 7 targets via `airuleset.py push`.
