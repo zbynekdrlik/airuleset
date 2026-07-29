@@ -116,7 +116,10 @@ def check_name(name):
     """The name, or raise. Never returns a repaired/sanitised variant — a name
     that is not exactly right is a caller bug, and silently rewriting it is how
     two callers end up disagreeing about which file a value is in."""
-    if not isinstance(name, str) or not NAME_RE.match(name):
+    # fullmatch, never match: `$` also matches BEFORE a final newline, so
+    # "DB_PASS\n" passed — carrying the newline into the log as a blank line,
+    # into the filename, and into the env key handed to the child.
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         raise SecretError(
             "invalid name %r — must match %s (letters, digits, underscore; "
             "also a valid env-var name)" % (name, NAME_RE.pattern))
@@ -390,17 +393,34 @@ def forget(name):
     """Delete the value and its metadata. True when something was removed."""
     check_name(name)
     stop_endpoint(name)          # revoke the URL too, not only the value
+    removed = _unlink_entry(name)
+    if value_path(name).exists():
+        # NEVER report a revocation that did not happen: "forgotten" is the
+        # agent's proof the credential is gone, and a false one is worse than
+        # a loud failure.
+        raise SecretError(
+            "%s: the value could not be removed (%s still exists)"
+            % (name, value_path(name)))
+    if removed:
+        log_event("forget", name)
+    return removed
+
+
+def _unlink_entry(name):
+    """Remove a name's files. True when anything was actually removed.
+
+    Reports per-path reality rather than "either one worked" — the caller has
+    to be able to tell a real deletion from a partial one.
+    """
     removed = False
     for p in (value_path(name), meta_path(name)):
         try:
             p.unlink()
             removed = True
-        except OSError:
-            # airuleset:script-ok forget must remove whatever IS there; a file
-            # that is already gone is the desired end state, not an error.
-            pass
-    if removed:
-        log_event("forget", name)
+        except FileNotFoundError:
+            continue                     # already gone is the desired end state
+        except OSError as e:
+            sys.stderr.write("vault: could not remove %s: %s\n" % (p, e))
     return removed
 
 
@@ -410,7 +430,7 @@ def _entry_names():
         return []
     names = set()
     for p in d.iterdir():
-        if p.suffix in (".secret", ".meta") and NAME_RE.match(p.stem):
+        if p.suffix in (".secret", ".meta") and NAME_RE.fullmatch(p.stem):
             names.add(p.stem)
     return sorted(names)
 
@@ -429,14 +449,15 @@ def purge(now=None):
         exp = meta.get("expires_at")
         if not isinstance(exp, (int, float)) or ts >= exp:
             stop_endpoint(name)
-            for p in (value_path(name), meta_path(name)):
-                try:
-                    p.unlink()
-                except OSError:
-                    # airuleset:script-ok already gone / unreadable — the entry
-                    # still counts as purged, and one bad entry must not stop
-                    # the sweep from removing the rest.
-                    pass
+            _unlink_entry(name)
+            if value_path(name).exists():
+                # Report only what really went. A sweep that claims a deletion
+                # it could not perform is how a credential outlives its TTL
+                # with nobody the wiser; one bad entry still must not stop the
+                # rest of the sweep.
+                sys.stderr.write(
+                    "vault: %s is past its TTL but could not be removed\n" % name)
+                continue
             log_event("expired", name)
             gone.append(name)
     return gone

@@ -400,40 +400,35 @@ class TestRevocationReportsHonestly(_StoreCase):
     success is the worst possible output.
     """
 
-    def _freeze_dir(self):
-        d = st.ensure_dir()
-        os.chmod(str(d), 0o500)
-        self.addCleanup(os.chmod, str(d), 0o700)
+    def _undeletable_value(self):
+        """Make the VALUE file refuse to unlink, the metadata still succeed.
+
+        A chmod on the store directory does not work: `ensure_dir()` re-tightens
+        it to 0700 on every path lookup and hands the write bit straight back.
+        """
+        real = Path.unlink
+
+        def refuse(self_path, *a, **kw):
+            if str(self_path).endswith(".secret"):
+                raise PermissionError(13, "Permission denied", str(self_path))
+            return real(self_path, *a, **kw)
+        patcher = m.patch.object(Path, "unlink", refuse)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_forget_refuses_to_claim_success_when_the_value_survives(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores the directory write bit")
         st.store_value("DB_PASS", VAL.encode(), keep_s=60)
-        self._freeze_dir()
+        self._undeletable_value()
         with self.assertRaises(st.SecretError):
             st.forget("DB_PASS")
         self.assertTrue(st.value_path("DB_PASS").exists())
 
     def test_purge_does_not_report_a_value_it_could_not_delete(self):
-        if os.geteuid() == 0:
-            self.skipTest("root ignores the directory write bit")
         now = 1_000_000.0
         st.store_value("DB_PASS", VAL.encode(), keep_s=10, now=now)
-        self._freeze_dir()
+        self._undeletable_value()
         self.assertEqual(st.purge(now=now + 1000), [])
         self.assertTrue(st.value_path("DB_PASS").exists())
-
-
-class TestProbeIgnoresProxyEnvironment(TestCase):
-    """Adversarial-review finding #8 (LOW). The default urllib opener reads
-    $http_proxy, so the probe URL went to a proxy host and a proxy error page
-    returning 200 made a dead endpoint look live."""
-
-    def test_the_opener_has_no_proxy_handler(self):
-        opener = airuleset._secret_opener()
-        self.assertTrue(any(type(h).__name__ == "ProxyHandler"
-                            and not h.proxies for h in opener.handlers),
-                        "the probe opener must carry an EMPTY ProxyHandler")
 
 
 class TestBindPolicy(TestCase):
@@ -882,6 +877,40 @@ class TestSecretServerLive(_ServerCase):
         proc, _port = self._spawn(ttl="1")
         proc.wait(timeout=30)
         self.assertEqual(proc.returncode, 0)
+
+
+class TestProbeIgnoresProxyEnvironment(_ServerCase):
+    """Adversarial-review finding #8 (LOW). The default urllib opener reads
+    $http_proxy, so the probe URL went to a proxy host — and a proxy error
+    page returning 200 made a dead endpoint look live.
+
+    Asserted BEHAVIOURALLY, not structurally: `build_opener` legitimately
+    drops a ProxyHandler whose proxies dict is empty (it registers no
+    `*_open` methods), so inspecting `opener.handlers` for one proves
+    nothing either way.
+    """
+
+    @staticmethod
+    def _proxies(opener):
+        return [h.proxies for h in opener.handlers
+                if type(h).__name__ == "ProxyHandler" and h.proxies]
+
+    def test_the_probe_opener_does_not_pick_up_a_proxy_variable(self):
+        # Bidirectional: the CONTROL proves the variable really is picked up by
+        # a default opener in this same environment, so the negative below is
+        # about our opener rather than about the variable being ignored anyway.
+        # (A live request cannot serve as the control: urllib bypasses proxies
+        # for loopback, which is the only address the test endpoint binds.)
+        with m.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1/"}):
+            self.assertTrue(self._proxies(urllib.request.build_opener()))
+            self.assertFalse(self._proxies(airuleset._secret_opener()))
+
+    def test_the_probe_still_reaches_a_live_endpoint(self):
+        _proc, port, _url = self._serve()
+        health = airuleset._secret_health_url("127.0.0.1", port)
+        with m.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1/"}):
+            self.assertEqual(
+                airuleset._secret_opener().open(health, timeout=3).status, 204)
 
 
 class TestTokenIsNotInArgv(_StoreCase):

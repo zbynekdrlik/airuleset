@@ -3433,6 +3433,18 @@ def _secret_iface_for(ip):
     return None
 
 
+def _secret_opener():
+    """A urllib opener with proxies DISABLED.
+
+    The default opener reads $http_proxy/$https_proxy, so the liveness probe
+    was sending its URL to a proxy host — and a proxy error page returning 200
+    made a dead endpoint look live. This probe only ever targets an address on
+    this very machine; a proxy is never right for it.
+    """
+    import urllib.request as _u
+    return _u.build_opener(_u.ProxyHandler({}))
+
+
 def _secret_health_url(ip, port):
     """The liveness probe's URL — deliberately token-free.
 
@@ -3628,7 +3640,6 @@ def cmd_secret(args):
     import secrets as _secrets
     import subprocess
     import time
-    import urllib.request
 
     from filedrop import bind_ips
     from filedrop import vault as st
@@ -3679,7 +3690,12 @@ def cmd_secret(args):
 
     if action == "forget":
         nm = _need_name()
-        print("%s %s" % (nm, "forgotten" if st.forget(nm) else "was not stored"))
+        try:
+            done = st.forget(nm)
+        except st.SecretError as e:
+            print("secret forget: %s" % e, file=sys.stderr)
+            sys.exit(1)
+        print("%s %s" % (nm, "forgotten" if done else "was not stored"))
         return
 
     if action == "exec":
@@ -3705,8 +3721,20 @@ def cmd_secret(args):
             res = subprocess.run(cmd, input=value, capture_output=True)
         else:
             env = dict(os.environ)
+            given = getattr(args, "env", None)
+            # `is not None`, not `or`: an explicitly EMPTY --env is a caller
+            # error, not a request for the default.
+            key = nm if given is None else given
             try:
-                env[getattr(args, "env", None) or nm] = value.decode("utf-8")
+                # The same grammar as a secret name, and for the same reason:
+                # an unchecked key is an injection point (`BASH_FUNC_x%%` makes
+                # a bash child EXECUTE the value; `A=B` splits into two).
+                st.check_name(key)
+            except st.SecretError as e:
+                print("secret exec: bad --env key: %s" % e, file=sys.stderr)
+                sys.exit(2)
+            try:
+                env[key] = value.decode("utf-8")
             except UnicodeDecodeError:
                 print("secret exec: %s is not UTF-8 — use --stdin" % nm,
                       file=sys.stderr)
@@ -3786,11 +3814,13 @@ def cmd_secret(args):
 
     probes = _secret_probe_urls(ips, port)
 
+    opener = _secret_opener()
+
     def _live(u):
         try:
             # /healthz answers 204. Accepting only 200 made every probe read
             # "dead" and `request` printed no URL at all — see the tests.
-            return urllib.request.urlopen(u, timeout=2).status in (200, 204)
+            return opener.open(u, timeout=2).status in (200, 204)
         except OSError:
             return False
 
