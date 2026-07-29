@@ -1272,3 +1272,59 @@ well-meaning widen of #118 is caught before it ships.
 
 Gate: 2763 tests pass (2758 baseline + 5 new), `ruff check .` clean,
 `airuleset.py validate` OK.
+
+---
+
+## 2026-07-29 — #128 block-main-implementation: engagement condition + bypass audit
+
+Commits: `4d5a7fc` [red], `8346529` [green], `8502213` [docs].
+Design comments on the ticket: 5111090897 (measurement + decision),
+5111106850 (the classifier change WITHDRAWN), 5111132651 (shape restated) —
+all three posted before `4d5a7fc`.
+
+**Ask 1 (who armed the 193 bypasses):** the MODEL itself, and 186 of the 193
+lines are an artifact of the era before one-shot consumption. Splitting the
+log on `7bcbafe` (2026-07-26T20:25:17, the one-shot fix) gives 186 before /
+7 after; the 7 are 4 arms + 3 consumes, paired 1:1. Nothing automated arms
+it — watchdog job 22 only ever unlinks — and grepping the session transcript
+for the actual `touch` calls shows all six were emitted inline by the
+assistant right after a block, because the block message advertises the
+escape. The "still growing at 01:45" entries the validator saw are the
+hook's OWN test suite (`t-mg-*` synthetic sids); the last real-session line
+is 2026-07-28T20:49:38.
+
+**Ask 2 (engagement condition):** decided on a full-day measurement, dev1,
+2026-07-28, top-level entries of all 11 real transcripts — guarded sessions
+853 main tool calls / 87 dispatches, inert sessions 1339 / 82, worst session
+(varos-eft5000) 650 / 0 with 52 oversize writes, and inert. Shipped a THIRD
+condition, `USER_AWAY` (presence marker older than
+`AIRULESET_MAIN_GUARD_AWAY_S`, default 900s; no marker = allow), OR'd with
+the other two and removing neither. "Engage always" was measured and
+REFUSED: 348 newly blocked, 164 within five minutes of a live human prompt.
+
+**Ask 3 (bypass):** already single-use in fact, so the fix is auditability —
+the marker must CARRY its reason, logged on the arm and the consume; empty
+or throwaway markers are refused and cleared.
+
+**Ask 4 (both directions, shipped hook):** replayed every guardable main
+event of 2026-07-28 with each event's presence marker aged by the real gap
+since that session's last human prompt — 1590 events, 154 blocked before,
+257 after, 103 newly blocked, 0 newly allowed, smallest gap in the
+newly-blocked set 15.0 min (so zero attended calls). By shape: 43 `grep -n`
+/ `grep -rn` / `sed -n` of source files, plus test-log scrapes, `head -c`
+dumps and `cargo test`.
+
+**Withdrawn:** a proposed "a pipeline bounded by its last stage is not a
+bulk read" classifier change. It contradicts three deliberate, test-locked
+decisions from the earlier pipe-reducer pass (`cat file | grep | head -20`,
+`grep -rn . | head -20`, `journalctl | tail -50` all block on purpose), so
+the shapes it would have un-blocked are not false positives on this repo's
+settled terms.
+
+**Found in passing, fixed here:** the count/quiet assertion exemption
+matched only whole tokens, so the combined form real commands use
+(`grep -cE`, `grep -rc`) blocked. Now recognised; a compound that scrapes a
+log first still blocks.
+
+Gate: 2802 tests pass (2763 baseline + 39 new), `ruff check .` clean,
+`airuleset.py validate` OK.
