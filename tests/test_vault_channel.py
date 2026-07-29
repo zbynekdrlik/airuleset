@@ -460,6 +460,60 @@ class TestTransportLabelUsesTheInterface(TestCase):
                           airuleset._secret_url_line("10.77.9.100", 8830, TOK))
 
 
+class TestPlainHttpIsOptIn(_StoreCase):
+    """Adversarial-review finding #7 (MEDIUM).
+
+    A LAN URL carries the token in the request line and the credential in the
+    POST body, both in cleartext; shared wifi is in scope for this fleet. The
+    label was right, but the unsafe option was still offered by default and a
+    user picks what is in front of them.
+    """
+
+    IFACES = [("100.104.8.125", "tailscale0"), ("10.77.9.100", "enp1s0"),
+              ("10.88.1.112", "wg0"), ("127.0.0.1", "lo")]
+
+    def test_the_partition_puts_only_real_cleartext_in_the_plain_half(self):
+        with m.patch("filedrop._iface_ips", return_value=self.IFACES):
+            enc, plain = airuleset._secret_partition_ips(
+                [ip for ip, _i in self.IFACES])
+        self.assertEqual(plain, ["10.77.9.100"])
+        self.assertEqual(set(enc), {"100.104.8.125", "10.88.1.112", "127.0.0.1"})
+
+    def test_plain_addresses_are_dropped_unless_asked_for(self):
+        with m.patch("filedrop._iface_ips", return_value=self.IFACES):
+            chosen, dropped = airuleset._secret_select_ips(
+                [ip for ip, _i in self.IFACES], allow_plain=False)
+        self.assertNotIn("10.77.9.100", chosen)
+        self.assertEqual(dropped, ["10.77.9.100"])
+
+    def test_allow_plain_puts_them_back(self):
+        with m.patch("filedrop._iface_ips", return_value=self.IFACES):
+            chosen, dropped = airuleset._secret_select_ips(
+                [ip for ip, _i in self.IFACES], allow_plain=True)
+        self.assertIn("10.77.9.100", chosen)
+        self.assertEqual(dropped, [])
+
+    def test_a_box_with_only_cleartext_yields_nothing_rather_than_a_default(self):
+        with m.patch("filedrop._iface_ips", return_value=[("10.77.9.100", "eth0")]):
+            chosen, dropped = airuleset._secret_select_ips(
+                ["10.77.9.100"], allow_plain=False)
+        self.assertEqual(chosen, [])
+        self.assertEqual(dropped, ["10.77.9.100"])
+
+    def test_a_real_request_advertises_no_cleartext_url_by_default(self):
+        env = dict(os.environ)
+        env.update(self._env)
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
+             "PLAIN_CHECK", "--ttl", "30", "--keep", "60"],
+            capture_output=True, text=True, timeout=120, env=env)
+        self.addCleanup(TestHealthProbeCarriesNoToken._stop_named, "PLAIN_CHECK")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("NEŠIFROVANÉ", out.stdout)
+        self.assertTrue([ln for ln in out.stdout.splitlines()
+                         if ln.startswith("http://")], out.stdout)
+
+
 class TestCliSurface(TestCase):
     def test_secret_is_registered(self):
         self.assertIn("secret", airuleset.SUBCOMMANDS)
