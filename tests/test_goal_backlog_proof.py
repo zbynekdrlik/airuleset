@@ -56,31 +56,49 @@ def goal_lines():
 
 MARKER = "🏁 BACKLOG EMPTY:"
 
+# What each authority profile must prove, as (stable command prefix, the exact
+# token its output must print). This is a SPECIFICATION, deliberately stated
+# here rather than scraped: the profiles differ in what they are even able to
+# prove. A fork-no-merge stream owns no branch CI, so demanding a `gh run list`
+# from it would be incoherent — its second proof is that its merged work has
+# actually reached origin/main.
+#
+# The prefix is what locates the command in a real turn; the template must
+# declare the full command (verified separately), but the branch-merge one
+# carries an `<integration>` placeholder the worker substitutes, so an exact
+# match against the template text could never find it in the transcript.
+FULL, BRANCH_MERGE, FORK_NO_MERGE = 0, 1, 2
 
-def commands_of(template):
-    """The two `gh` proof commands the template names, in backticks."""
+PROOF_SPEC = {
+    FULL: [("gh issue list", "0"), ("gh run list", "success")],
+    BRANCH_MERGE: [("gh issue list", "0"), ("gh run list", "success"),
+                   ("git merge-base", "RELEASED")],
+    FORK_NO_MERGE: [("gh issue list", "0"), ("git merge-base", "RELEASED")],
+}
+
+
+def declared_commands(template, prefix):
+    """Backtick-quoted commands the template names, matching `prefix`."""
     spans = re.findall(r"`([^`]+)`", template)
-    issue = [s for s in spans if s.startswith("gh issue list")]
-    run = [s for s in spans if s.startswith("gh run list")]
-    return issue, run
+    return [s for s in spans if s.startswith(prefix)]
 
 
-def _output_after(message, command):
-    """The first non-blank line following a line that quotes `command`.
+def _output_after(message, prefix):
+    """The first non-blank line following a line that quotes the command.
 
     This is exactly what a transcript-only evaluator can do: find the command
     in the turn and read what it printed.
     """
     lines = message.splitlines()
     for i, line in enumerate(lines):
-        if command in line:
+        if prefix in line:
             for nxt in lines[i + 1:]:
                 if nxt.strip():
                     return nxt.strip().strip("`")
     return None
 
 
-def backlog_empty_holds(message, template):
+def backlog_empty_holds(message, profile=FULL):
     """Decide (B) the way the shipped template instructs.
 
     Returns (holds, reason). Every ambiguity returns False — CONTINUE is the
@@ -89,21 +107,12 @@ def backlog_empty_holds(message, template):
     if not any(ln.strip().startswith(MARKER) for ln in message.splitlines()):
         return False, "no %s line in the turn" % MARKER
 
-    issue_cmds, run_cmds = commands_of(template)
-    if not issue_cmds or not run_cmds:
-        return False, "the template names no proof commands"
-
-    count = _output_after(message, issue_cmds[0])
-    if count is None:
-        return False, "no pasted output for the open-issue count"
-    if count != "0":
-        return False, "open-issue count reads %r, not 0" % count
-
-    conclusion = _output_after(message, run_cmds[0])
-    if conclusion is None:
-        return False, "no pasted output for the branch CI conclusion"
-    if conclusion != "success":
-        return False, "CI conclusion reads %r, not success" % conclusion
+    for prefix, expected in PROOF_SPEC[profile]:
+        got = _output_after(message, prefix)
+        if got is None:
+            return False, "no pasted output for %r" % prefix
+        if got != expected:
+            return False, "%r printed %r, not %r" % (prefix, got, expected)
 
     return True, "proven in this turn"
 
@@ -158,10 +167,14 @@ https://github.com/o/r/pull/77 — merged abc1234
 """
 
 
-def _proof_block(count="0", conclusion="success", template=None):
-    issue_cmds, run_cmds = commands_of(template)
-    return "```\n$ %s\n%s\n$ %s\n%s\n```\n" % (
-        issue_cmds[0], count, run_cmds[0], conclusion)
+def _proof_block(profile=FULL, **override):
+    """A turn's evidence block, built from the profile's own proof spec."""
+    out = ["```"]
+    for prefix, expected in PROOF_SPEC[profile]:
+        out.append("$ %s ..." % prefix)
+        out.append(override.get(prefix, expected))
+    out.append("```")
+    return "\n".join(out) + "\n"
 
 
 class TestTemplatesRequireProofNotProse(TestCase):
@@ -196,68 +209,72 @@ class TestTemplatesRequireProofNotProse(TestCase):
         for line in goal_lines():
             self.assertIn("PRODUCE THE PROOF", line)
 
-    def test_proof_commands_print_a_single_unmistakable_token(self):
+    def test_every_profile_declares_the_commands_its_proof_spec_needs(self):
+        for profile, line in enumerate(goal_lines()):
+            for prefix, _ in PROOF_SPEC[profile]:
+                self.assertTrue(
+                    declared_commands(line, prefix),
+                    "profile %d names no %r command" % (profile, prefix))
+
+    def test_gh_proof_commands_print_a_single_unmistakable_token(self):
         """A bare `gh issue list` prints NOTHING when the backlog is empty —
-        an empty result is not pasteable evidence. The counted form prints a
-        literal 0, which is."""
-        for line in goal_lines():
-            issue_cmds, run_cmds = commands_of(line)
-            self.assertTrue(issue_cmds, "no gh issue list command named")
-            self.assertTrue(run_cmds, "no gh run list command named")
-            self.assertIn("--jq", issue_cmds[0])
-            self.assertIn("--jq", run_cmds[0])
+        an empty result is not pasteable evidence, which is precisely how a
+        blank turn could pass for a proof. The counted `--jq` form prints a
+        literal 0, which IS evidence."""
+        for profile, line in enumerate(goal_lines()):
+            for prefix, _ in PROOF_SPEC[profile]:
+                if not prefix.startswith("gh"):
+                    continue
+                for cmd in declared_commands(line, prefix):
+                    self.assertIn("--jq", cmd)
 
 
 class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
     """Acceptance: demonstrated against the real message, not argued."""
 
-    def setUp(self):
-        self.full = goal_lines()[0]
-
     def test_the_real_camera_box_turn_does_not_satisfy_backlog_empty(self):
-        holds, reason = backlog_empty_holds(CAMERA_BOX_TURN, self.full)
+        holds, reason = backlog_empty_holds(CAMERA_BOX_TURN)
         self.assertFalse(holds, "the turn that lost 6 hours would stop again")
         self.assertIn(MARKER, reason)
 
     def test_an_ordinary_per_ticket_done_turn_means_continue(self):
-        holds, _ = backlog_empty_holds(PER_TICKET_DONE_TURN, self.full)
+        holds, _ = backlog_empty_holds(PER_TICKET_DONE_TURN)
         self.assertFalse(holds)
 
     def test_a_genuinely_empty_backlog_does_satisfy_it(self):
-        turn = (_proof_block(template=self.full)
+        turn = (_proof_block()
                 + MARKER + " 0 open, main green\n"
                 + "✅ DONE: backlog prázdny\n")
-        holds, reason = backlog_empty_holds(turn, self.full)
+        holds, reason = backlog_empty_holds(turn)
         self.assertTrue(holds, reason)
 
     def test_the_marker_without_any_pasted_output_means_continue(self):
         """Claiming the new marker is no better than claiming the old one."""
         turn = MARKER + " 0 open\n✅ DONE: hotovo\n"
-        holds, reason = backlog_empty_holds(turn, self.full)
+        holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)
         self.assertIn("no pasted output", reason)
 
     def test_a_nonzero_open_count_means_continue(self):
-        turn = (_proof_block(count="7", template=self.full)
+        turn = (_proof_block(**{"gh issue list": "7"})
                 + MARKER + " 0 open\n✅ DONE: hotovo\n")
-        holds, reason = backlog_empty_holds(turn, self.full)
+        holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)
-        self.assertIn("not 0", reason)
+        self.assertIn("'7'", reason)
 
     def test_a_red_main_ci_means_continue(self):
-        turn = (_proof_block(conclusion="failure", template=self.full)
+        turn = (_proof_block(**{"gh run list": "failure"})
                 + MARKER + " 0 open\n✅ DONE: hotovo\n")
-        holds, reason = backlog_empty_holds(turn, self.full)
+        holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)
-        self.assertIn("not success", reason)
+        self.assertIn("'failure'", reason)
 
     def test_the_issue_count_alone_is_not_enough(self):
-        issue_cmds, _ = commands_of(self.full)
-        turn = ("```\n$ %s\n0\n```\n" % issue_cmds[0]
+        turn = ("```\n$ gh issue list ...\n0\n```\n"
                 + MARKER + " 0 open\n✅ DONE: hotovo\n")
-        holds, reason = backlog_empty_holds(turn, self.full)
+        holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)
-        self.assertIn("branch CI", reason)
+        self.assertIn("gh run list", reason)
 
 
 class TestReducedAuthorityTemplatesToo(TestCase):
@@ -268,15 +285,25 @@ class TestReducedAuthorityTemplatesToo(TestCase):
             self.assertIn(MARKER, line)
 
     def test_the_camera_box_shape_fails_under_every_profile(self):
-        for line in goal_lines():
-            holds, _ = backlog_empty_holds(CAMERA_BOX_TURN, line)
+        for profile in PROOF_SPEC:
+            holds, _ = backlog_empty_holds(CAMERA_BOX_TURN, profile)
             self.assertFalse(holds)
 
     def test_reduced_templates_still_scope_the_count_to_my_own_slice(self):
-        for line in goal_lines()[1:]:
-            issue_cmds, _ = commands_of(line)
-            self.assertTrue(issue_cmds)
-            self.assertIn("--assignee @me", issue_cmds[0])
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            cmds = declared_commands(goal_lines()[profile], "gh issue list")
+            self.assertTrue(cmds)
+            self.assertIn("--assignee @me", cmds[0])
+
+    def test_a_reduced_stream_must_also_prove_the_work_was_RELEASED(self):
+        """The 2026-07-20 incident: tickets closed, prod got nothing. An empty
+        slice with the release still pending is review-watch, not done."""
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            turn = (_proof_block(profile, **{"git merge-base": ""})
+                    + MARKER + " 0 open\n✅ DONE: hotovo\n")
+            holds, reason = backlog_empty_holds(turn, profile)
+            self.assertFalse(holds)
+            self.assertIn("git merge-base", reason)
 
 
 if __name__ == "__main__":
