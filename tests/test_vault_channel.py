@@ -491,8 +491,8 @@ def _post(url, body, timeout=10):
         return e.code, e.read()
 
 
-class TestSecretServerLive(_StoreCase):
-    """The endpoint itself — spawned exactly as `secret request` spawns it."""
+class _ServerCase(_StoreCase):
+    """Spawns the endpoint exactly as `secret request` spawns it."""
 
     def _spawn(self, ips="127.0.0.1", name="DB_PASS", ttl="30", keep="600",
                port=None):
@@ -526,6 +526,10 @@ class TestSecretServerLive(_StoreCase):
             except OSError:
                 time.sleep(0.1)
         self.fail("secret server never served %s" % url)
+
+
+class TestSecretServerLive(_ServerCase):
+    """The endpoint's own contract."""
 
     def test_a_posted_value_lands_0600_and_the_endpoint_is_one_shot(self):
         proc, port, url = self._serve()
@@ -595,6 +599,99 @@ class TestSecretServerLive(_StoreCase):
         proc, _port = self._spawn(ttl="1")
         proc.wait(timeout=30)
         self.assertEqual(proc.returncode, 0)
+
+
+class TestTokenIsNotInArgv(_StoreCase):
+    """Adversarial-review finding #2 (HIGH).
+
+    `/proc/<pid>/cmdline` is mode 0444 — readable by EVERY uid on the box —
+    while `/proc/<pid>/environ` is 0400, owner only. These boxes deliberately
+    host foreign uids (marek, david, montalu on subdev; two more on the VPS),
+    and the path token is stated to be the endpoint's ONLY authentication. A
+    token in argv therefore lets any local account POST its own value and
+    substitute the credential the agent is about to feed to ssh/psql/a deploy.
+    """
+
+    def _request(self, name, ttl="20"):
+        env = dict(os.environ)
+        env.update(self._env)
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
+             name, "--ttl", ttl, "--keep", "60"],
+            capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        url = out.stdout.splitlines()[0].split()[0]
+        self.addCleanup(self._reap, name)
+        return url, url.rstrip("/").rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _cmdlines():
+        found = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                raw = Path("/proc", pid, "cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"vault_server.py" in raw:
+                found.append((int(pid), raw.replace(b"\0", b" ")
+                              .decode("utf-8", "replace")))
+        return found
+
+    @staticmethod
+    def _kill(pid):
+        """Sentinel return rather than a swallowed exception: a cleanup that
+        cannot kill a process must say so, not go quiet."""
+        try:
+            os.kill(pid, 15)
+            return "killed"
+        except OSError as e:
+            return "kill failed: %r" % (e,)
+
+    def _reap(self, name):
+        for pid, text in self._cmdlines():
+            if name in text:
+                self._kill(pid)
+
+    def test_the_token_is_not_visible_in_the_endpoints_command_line(self):
+        _url, token = self._request("PROC_CHECK")
+        lines = [t for _p, t in self._cmdlines() if "PROC_CHECK" in t]
+        self.assertTrue(lines, "the endpoint process was not found")
+        for line in lines:
+            self.assertNotIn(token, line)
+
+    def test_the_endpoint_refuses_to_start_without_a_token(self):
+        env = dict(os.environ)
+        env.update(self._env)
+        env.pop("AIRULESET_VAULT_TOKEN", None)
+        proc = subprocess.run(
+            [sys.executable, str(SERVER), str(_free_port()), "127.0.0.1",
+             "DB_PASS", "30", "60"],
+            capture_output=True, text=True, timeout=30, env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        # Names the ENV var specifically: a usage string that merely contains
+        # the word "token" would pass here while the token was still argv.
+        self.assertIn("AIRULESET_VAULT_TOKEN", proc.stderr)
+
+
+class TestHealthProbeCarriesNoToken(_ServerCase):
+    """The CLI's own liveness probe used to GET the token URL, which hands the
+    token to whatever is listening — including another local user's process
+    that won the pick-a-port race. A probe needs to answer "is it up", nothing
+    more."""
+
+    def test_health_url_contains_no_token_and_no_name(self):
+        url = airuleset._secret_health_url("127.0.0.1", 8830)
+        self.assertNotIn(TOK, url)
+        self.assertTrue(url.endswith("/healthz"))
+
+    def test_healthz_answers_without_the_token_and_reveals_nothing(self):
+        _proc, port, _url = self._serve()
+        with urllib.request.urlopen(
+                airuleset._secret_health_url("127.0.0.1", port), timeout=5) as r:
+            self.assertEqual(r.status, 204)
+            self.assertEqual(r.read(), b"")
 
 
 class TestStoredSecretsAreNeverGitTracked(TestCase):
