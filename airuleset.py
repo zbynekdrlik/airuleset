@@ -3443,6 +3443,16 @@ def _secret_health_url(ip, port):
     return "http://%s:%d/healthz" % (ip, port)
 
 
+def _secret_probe_urls(ips, port):
+    """Every address's liveness URL — the list the readiness loop consumes.
+
+    A named helper rather than an inline comprehension because the inline one
+    is exactly what silently kept probing the TOKEN urls after the health route
+    was added: nothing could assert on it.
+    """
+    return [_secret_health_url(ip, port) for ip in ips]
+
+
 def _secret_url_line(ip, port, token, iface=None):
     """One advertised URL plus its TRANSPORT, spelled out.
 
@@ -3538,8 +3548,8 @@ def _secret_apply_remainder(args):
         if tok == "--":
             rest.pop(0)
             break
-        if tok == "--stdin":
-            args.stdin = True
+        if tok in ("--stdin", "--replace"):
+            setattr(args, tok[2:], True)
             rest.pop(0)
             continue
         key, eq, inline = tok.partition("=")
@@ -3675,6 +3685,16 @@ def cmd_secret(args):
         print("%s is already stored — `secret forget %s` first" % (nm, nm),
               file=sys.stderr)
         sys.exit(1)
+    if state == "pending":
+        # A second endpoint for the same name means two live tokens, neither
+        # invalidating the other. Replacing is fine, but it must be asked for.
+        if not getattr(args, "replace", False):
+            print("%s already has a pending request — finish it, or re-run "
+                  "with --replace to cancel it and issue a new URL" % nm,
+                  file=sys.stderr)
+            sys.exit(1)
+        print("cancelling the previous request: %s" % st.stop_endpoint(nm))
+        st.forget(nm)
     ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
     keep = _secret_clamp_keep(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
 
@@ -3691,7 +3711,7 @@ def cmd_secret(args):
         sys.exit(1)
 
     token = _secrets.token_urlsafe(24)
-    st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep)
+    nonce = st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep)
     # The endpoint's own diagnostics (bind failures) — NOT the value log, and
     # the server deliberately never writes the token or the body here.
     endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
@@ -3703,23 +3723,29 @@ def cmd_secret(args):
     # auth would be readable by every local account for the whole TTL.
     child_env = dict(os.environ)
     child_env["AIRULESET_VAULT_TOKEN"] = token
+    child_env["AIRULESET_VAULT_NONCE"] = nonce
     with os.fdopen(fd, "ab") as lf:
-        subprocess.Popen(
+        child = subprocess.Popen(
             [sys.executable, str(REPO_DIR / "filedrop" / "vault_server.py"),
              str(port), ",".join(ips), nm, str(ttl), str(keep)],
             stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
             env=child_env, start_new_session=True)
+    # Recorded so `forget` and the TTL sweep can actually STOP the endpoint,
+    # rather than deleting the value while its URL stays open.
+    st.record_endpoint(nm, child.pid)
 
-    urls = ["http://%s:%d/%s/" % (ip, port, token) for ip in ips]
+    probes = _secret_probe_urls(ips, port)
 
     def _live(u):
         try:
-            return urllib.request.urlopen(u, timeout=2).status == 200
+            # /healthz answers 204. Accepting only 200 made every probe read
+            # "dead" and `request` printed no URL at all — see the tests.
+            return urllib.request.urlopen(u, timeout=2).status in (200, 204)
         except OSError:
             return False
 
     for _ in range(20):
-        if any(_live(u) for u in urls):
+        if any(_live(u) for u in probes):
             break
         time.sleep(0.25)
     else:
@@ -4700,6 +4726,9 @@ def main():
                        help="Port (default: first free in 8830-8849)")
     p_sec.add_argument("--env", default=None,
                        help="exec: environment variable to set (default: NAME)")
+    p_sec.add_argument("--replace", action="store_true",
+                       help="request: cancel an existing pending request for "
+                            "this name (stopping its endpoint) and issue a new URL")
     p_sec.add_argument("--stdin", action="store_true",
                        help="exec: feed the value on the child's stdin instead "
                             "of through the environment")
