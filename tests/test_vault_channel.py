@@ -499,8 +499,9 @@ class _ServerCase(_StoreCase):
         port = port or _free_port()
         env = dict(os.environ)
         env.update(self._env)
+        env["AIRULESET_VAULT_TOKEN"] = TOK
         proc = subprocess.Popen(
-            [sys.executable, str(SERVER), TOK, str(port), ips, name, ttl, keep],
+            [sys.executable, str(SERVER), str(port), ips, name, ttl, keep],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
         self.addCleanup(self._kill, proc)
         return proc, port

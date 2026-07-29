@@ -6,8 +6,17 @@ writes it 0600 under `~/.claude/secrets/` and ends. The session that printed the
 URL never sees the value: it learns only that the NAME is ready.
 
 Usage:
-    python3 vault_server.py <token> <port> <bind_ips_csv> <name> <ttl_s> <keep_s>
+    AIRULESET_VAULT_TOKEN=<token> \
+        python3 vault_server.py <port> <bind_ips_csv> <name> <ttl_s> <keep_s>
 
+The token arrives through the ENVIRONMENT, never argv: `/proc/<pid>/cmdline` is
+mode 0444 and readable by every uid on the box, while `/proc/<pid>/environ` is
+0400, owner only. These boxes host foreign uids on purpose, and the token is
+this endpoint's only auth — in argv it would let any local account POST its own
+value and substitute the credential the agent is about to use.
+
+  GET  /healthz    -> 204, no body. The CLI's liveness probe, so the probe
+                      never has to send the token to whatever is listening.
   GET  /<token>/   -> the form (a password field; a textarea for a key)
   POST /<token>/   -> the raw request BODY is the value, stored byte-exact,
                       after which this process exits. One value, one endpoint.
@@ -43,15 +52,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from filedrop.vault import (MAX_SECRET_BYTES, SecretError,  # noqa: E402
                             check_name, store_value)
 
-if len(sys.argv) < 7:
-    sys.exit("usage: vault_server.py <token> <port> <bind_ips_csv> <name> "
-             "<ttl_s> <keep_s>")
-TOKEN = sys.argv[1]
-PORT = int(sys.argv[2])
-BIND_IPS = [x for x in sys.argv[3].split(",") if x]
-NAME = sys.argv[4]
-TTL = int(sys.argv[5])
-KEEP = int(sys.argv[6])
+if len(sys.argv) < 6:
+    sys.exit("usage: AIRULESET_VAULT_TOKEN=<token> vault_server.py <port> "
+             "<bind_ips_csv> <name> <ttl_s> <keep_s>")
+TOKEN = os.environ.get("AIRULESET_VAULT_TOKEN") or ""
+if not TOKEN:
+    sys.exit("vault: AIRULESET_VAULT_TOKEN is required — the token is passed "
+             "through the environment (0400) and never in argv (0444)")
+PORT = int(sys.argv[1])
+BIND_IPS = [x for x in sys.argv[2].split(",") if x]
+NAME = sys.argv[3]
+TTL = int(sys.argv[4])
+KEEP = int(sys.argv[5])
 
 
 def is_private(ip):
@@ -191,6 +203,15 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self._parts()
+        if p == ["healthz"]:
+            # The ONE unauthenticated route: a fixed 204 with no body, so the
+            # CLI can confirm the endpoint is up without sending the token to
+            # whatever happens to be listening on that port.
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         # The token segment is compared RAW and never percent-decoded — this is
         # the endpoint's only auth, and decoding it would let `%74ok...`
         # authenticate as `tok...` (the #116 lesson, kept on purpose).

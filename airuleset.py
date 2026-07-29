@@ -3354,7 +3354,7 @@ def cmd_upload(args):
 
     def _live(u):
         try:
-            return urllib.request.urlopen(u, timeout=2).status == 200
+            return urllib.request.urlopen(u, timeout=2).status in (200, 204)
         except OSError:
             return False
 
@@ -3363,8 +3363,9 @@ def cmd_upload(args):
     # specifically: the upload_server skips an interface that fails to bind (a
     # transiently-down tailscale while the LAN binds fine), so gating on the first
     # URL alone would abort + orphan a working endpoint on another interface.
+    probes = [_secret_health_url(ip, port) for ip in ips]
     for _ in range(20):
-        if any(_live(u) for u in urls):
+        if any(_live(u) for u in probes):
             break
         time.sleep(0.25)
     else:
@@ -3415,6 +3416,16 @@ def _secret_iface_for(ip):
         if cand == ip:
             return ifname
     return None
+
+
+def _secret_health_url(ip, port):
+    """The liveness probe's URL — deliberately token-free.
+
+    The probe used to GET the token URL, which hands the endpoint's only
+    authentication to whatever is listening on that port. If another local
+    user's process won the pick-a-port race, that is their listener.
+    """
+    return "http://%s:%d/healthz" % (ip, port)
 
 
 def _secret_url_line(ip, port, token, iface=None):
@@ -3671,12 +3682,18 @@ def cmd_secret(args):
     endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
     endpoint_log.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(endpoint_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # The token goes through the ENVIRONMENT, never argv: /proc/<pid>/cmdline is
+    # world-readable (0444) and these boxes host foreign uids, while
+    # /proc/<pid>/environ is owner-only (0400). In argv, the endpoint's only
+    # auth would be readable by every local account for the whole TTL.
+    child_env = dict(os.environ)
+    child_env["AIRULESET_VAULT_TOKEN"] = token
     with os.fdopen(fd, "ab") as lf:
         subprocess.Popen(
             [sys.executable, str(REPO_DIR / "filedrop" / "vault_server.py"),
-             token, str(port), ",".join(ips), nm, str(ttl), str(keep)],
+             str(port), ",".join(ips), nm, str(ttl), str(keep)],
             stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
-            start_new_session=True)
+            env=child_env, start_new_session=True)
 
     urls = ["http://%s:%d/%s/" % (ip, port, token) for ip in ips]
 
@@ -3696,7 +3713,7 @@ def cmd_secret(args):
         sys.exit(1)
 
     for ip in ips:
-        if _live("http://%s:%d/%s/" % (ip, port, token)):
+        if _live(_secret_health_url(ip, port)):
             print(_secret_url_line(ip, port, token))
     print("name=%s  endpoint-ttl=%ds  keep=%ds" % (nm, ttl, keep))
     print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
