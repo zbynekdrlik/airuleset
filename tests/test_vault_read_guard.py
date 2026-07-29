@@ -221,6 +221,98 @@ class BlocksAfterAdversarialReview(unittest.TestCase):
         self.assertBlocked("tar czf /tmp/c.tgz ~/.claude")
 
 
+class GlobbingWalksPastTheSpelling(unittest.TestCase):
+    """#156 hole 1. The path predicate read the command's SPELLING while the
+    shell reads the POST-EXPANSION path, and globbing is an entire expansion
+    layer between the two that the hook had no model of.
+
+    Every command here was measured ALLOW against the first green version, one
+    hook invocation per row, with a fake name. Each one reads a credential.
+    """
+
+    def assertBlocked(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for: %s\nstderr=%s" % (cmd, r.stderr))
+
+    def test_every_literal_component_elided_at_once(self):
+        self.assertBlocked("cat $HOME/.cl*/sec*/*")
+
+    def test_the_dir_and_the_extension_both_truncated(self):
+        self.assertBlocked("cat ~/.claude/secr*/DB_PASS.sec*")
+
+    def test_single_character_wildcards(self):
+        self.assertBlocked("cat ~/.claud?/secret?/DB_PASS.secre?")
+
+    def test_bracket_expressions(self):
+        self.assertBlocked("cat ~/.claud[e]/secret[s]/*")
+
+    def test_find_exec_over_a_globbed_store_dir(self):
+        self.assertBlocked("find ~/.claude/secr* -type f -exec cat {} +")
+
+    def test_archiving_a_globbed_store_dir(self):
+        self.assertBlocked("tar cf - ~/.claude/secr* | base64")
+
+    def test_cd_to_the_parent_then_glob_the_store(self):
+        # Within ONE command the hook can see both halves, so the relative
+        # token is resolved against the cd target. (Across CALLS it cannot —
+        # the cwd persists and this hook is stateless; that stays a stated gap.)
+        self.assertBlocked("cd ~/.claude && cat sec*/*")
+
+
+class TheWideningDoesNotDenyOrdinaryWork(unittest.TestCase):
+    """The other half of hole 1, and the reason it was measured rather than
+    reasoned about.
+
+    This hook runs on every Bash/Read/Grep/Glob call in every session on every
+    managed box, so a careless widening is a fleet-wide denial of ordinary
+    work. Each case below is a real shape drawn from the corpus replay
+    (212,557 unique real commands) that an over-eager anchor rule DID match on
+    the way to this one — regexes and -name patterns are not paths, which is
+    the distinction the guard already makes deliberately for Grep's `pattern`.
+    """
+
+    def assertAllowed(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 0,
+                         "expected ALLOW for: %s\nstderr=%s" % (cmd, r.stderr))
+
+    def test_a_grep_regex_that_merely_looks_like_a_path(self):
+        self.assertAllowed(
+            'grep -niE "password|passphrase|api[_-]?key|secret.*=" notes.md')
+
+    def test_a_grep_regex_whose_tail_looks_like_the_parent_dir(self):
+        self.assertAllowed(
+            "grep -E '^[[:space:]]*//.*[Cc]laude' src/main.rs")
+
+    def test_a_find_name_pattern_for_claude_files_elsewhere(self):
+        self.assertAllowed('find /mnt/backup -name "*.claude*" | head -20')
+
+    def test_a_wildcard_pair_in_an_unrelated_tree(self):
+        self.assertAllowed("cat /tmp/build/*/*")
+
+    def test_a_project_with_its_own_secrets_directory(self):
+        self.assertAllowed("cat secrets/config.json")
+
+    def test_cd_elsewhere_then_a_relative_secrets_directory(self):
+        self.assertAllowed("cd /tmp/proj && cat secrets/config.json")
+
+    def test_an_ordinary_dotfile_after_a_cd_into_the_parent(self):
+        self.assertAllowed("cd ~/.claude && cat settings.json")
+
+    def test_the_transcript_sweeps_this_repo_depends_on(self):
+        self.assertAllowed("grep -rn 'compact_boundary' ~/.claude/projects/*")
+
+    def test_a_size_report_over_the_parent(self):
+        # `du -sh ~/.claude/*` occurs repeatedly in the real corpus and reports
+        # SIZES, never content. Blocking it to close an unanchored-wildcard
+        # spelling nobody types by reflex was the trade this rule declined.
+        self.assertAllowed("du -sh ~/.claude/* 2>/dev/null | sort -rh")
+
+    def test_a_sibling_dotdir_that_merely_starts_the_same_way(self):
+        self.assertAllowed("cat ~/.claude-backup/notes.txt")
+
+
 class Allows(unittest.TestCase):
     def assertAllowed(self, cmd, **kw):
         r = run(cmd, **kw)
