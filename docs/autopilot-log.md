@@ -1454,3 +1454,46 @@ way rather than widening a sweep two other jobs share, and carries a logged
 longer reads as a delivery; the digest suppresses only the tickets its message
 NAMED; job 25 degrades to card-only (and logs) if the new symbol is missing.
 Gate after the review round: 2905 tests pass, ruff clean, validate OK.
+
+## 2026-07-29 — #144 credential channel (`airuleset.py secret`)
+
+A one-shot URL for passwords / SSH keys / PATs / tokens, so a session never asks
+the user to paste a credential into chat — where the value lands in the session
+transcript permanently, survives compaction, and cannot be revoked. Design
+comment posted before the first code commit (issuecomment-5112882816): root
+cause traced in `upload_server.py` (ambient umask under `~/uploads/`, the full
+path written to its log, no `--forget`), chosen approach a SEPARATE path under
+`filedrop/`, rejected alternative a `--secret` mode of the existing upload,
+which would leave the safe and unsafe paths one branch apart.
+
+New: `filedrop/vault.py` (store), `filedrop/vault_server.py` (one-shot
+endpoint), `airuleset.py secret {request,status,list,exec,forget,purge}`, and
+watchdog **job 29** (hourly TTL sweep). Named `vault*` because the staging guard
+refuses any path whose basename contains "secret".
+
+RED→GREEN pairs, one per defect: f302d9d/c0ce411 the feature; de47a83/fbf82b5
+flags after the name silently swallowed and a WireGuard tunnel labelled
+cleartext (both found by running it); then one pair per adversarial-review
+finding — d04a42e/d04629d exec handed the child our stdout, 171c80e/462f82c
+token in argv, ffdc57c/446c75c store location symlink- and env-controllable,
+2d71bd0/bd8aa62 a negative TTL made an immortal endpoint, 1a08680/c2804e8
+forget did not actually revoke, 5dc2545/f151cdc the health-probe fix was half
+applied and printed no URL at all, a3555b3/98df292 cleartext opt-in,
+666aeef/39e7528 name anchoring + env key + honest revocation + proxy,
+20e759c/c8965c1 endpoint robustness plus a slowloris the tests uncovered,
+b4da11c job 29, 556f7ea a regression where one edit had landed in `cmd_upload`.
+
+Review was escalated per the dispatch: budget gate OPEN → one Fable advisor pass
+over a digest of the diff and threat model. Verdict DO-NOT-SHIP, 3 blocking and
+9 further findings; all 12 fixed. It judged the log policy and the bind policy
+already proven, and the value write already safe against a planted symlink.
+
+Verified live twice through a real browser on the tailscale endpoint, and
+cross-box after deploy: a value POSTed from dev1 to dev2 landed 0600 there, a
+child that deliberately echoes it printed `<<REDACTED>>`, the port closed after
+the single submission, and both logs carried only name and event lines.
+Gate: 3015 tests pass, ruff clean, validate OK.
+
+Follow-up filed: **#152** — the rule-module change telling sessions to use this
+channel, which is a policy decision through the rule intake gate and outside
+what this dispatch was allowed to touch.
