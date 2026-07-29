@@ -870,6 +870,48 @@ class TestHealthProbeCarriesNoToken(_ServerCase):
     that won the pick-a-port race. A probe needs to answer "is it up", nothing
     more."""
 
+    def test_the_readiness_probe_list_is_token_free(self):
+        # The token-free probe existed but the CLI never used it: the readiness
+        # loop still GET'd the token URLs, so finding #2's fix was only half
+        # applied. Only the live print test below actually caught it.
+        probes = airuleset._secret_probe_urls(["127.0.0.1", "10.77.9.100"], 8830)
+        self.assertEqual(len(probes), 2)
+        for u in probes:
+            self.assertTrue(u.endswith("/healthz"), u)
+
+    def test_a_real_request_prints_at_least_one_url(self):
+        # End-to-end: `_live` accepted only 200 while /healthz answers 204, so
+        # `secret request` came up cleanly and printed NO URL at all — the one
+        # output the whole command exists to produce.
+        env = dict(os.environ)
+        env.update(self._env)
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
+             "URL_PRINT", "--ttl", "30", "--keep", "60"],
+            capture_output=True, text=True, timeout=120, env=env)
+        self.addCleanup(self._stop_named, "URL_PRINT")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        urls = [ln for ln in out.stdout.splitlines() if ln.startswith("http://")]
+        self.assertTrue(urls, "no URL printed:\n%s" % out.stdout)
+        for line in urls:
+            # <ip>:<port>/<token>/ plus a bracketed transport label
+            self.assertRegex(line, r"^http://[\d.]+:\d+/[A-Za-z0-9_-]{20,}/\s+\[")
+
+    @staticmethod
+    def _stop_named(name):
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                raw = Path("/proc", pid, "cmdline").read_bytes()
+            except OSError:
+                continue
+            if b"vault_server.py" in raw and name.encode() in raw:
+                try:
+                    os.kill(int(pid), 15)
+                except OSError as e:
+                    print("cleanup could not stop %s: %r" % (pid, e))
+
     def test_health_url_contains_no_token_and_no_name(self):
         url = airuleset._secret_health_url("127.0.0.1", 8830)
         self.assertNotIn(TOK, url)
