@@ -73,25 +73,67 @@ class VaultPurgeJob(unittest.TestCase):
         self.assertEqual(len(self.calls), 1, "a dry run must not eat the hour")
 
 
+def assert_unwired_caller_did_not_sweep(case, module, tmpdir, **kw):
+    """THE GUARD — a caller that knows nothing about job 29 must not sweep.
+
+    Written as a free function taking the module under test so the SAME
+    assertions can be pointed at a mutated `watchdog` (TheUnwiredGuardHasTeeth
+    below). A guard that cannot be aimed at the regression it exists to catch
+    cannot be shown to catch it.
+
+    #153 finding 5 asserted `calls == []` on a list local to the test and never
+    wired in, so it could not fail. #156 finding 4: the replacement read
+    run_once's LOG, and the job is silent when nothing expired (`if not gone:
+    return []`), so a REAL sweep against an empty store looked identical to no
+    sweep at all — precisely the two states it exists to tell apart. The
+    observable is now the artifact a sweep leaves WHATEVER it finds: the hour
+    it claims in the persisted state.
+    """
+    import json
+    proj = Path(tmpdir) / "projects"
+    proj.mkdir(exist_ok=True)
+    state_path = Path(tmpdir) / "state.json"
+    logs = module.run_once(now=1_000_000.0, run=lambda argv, timeout=8: "",
+                           send_fn=lambda *a, **k: None, projects_dir=proj,
+                           state_path=state_path,
+                           pending_prefix=str(Path(tmpdir) / "pending-"),
+                           dry_run=False, **kw)
+    case.assertEqual([ln for ln in logs if "vault-purge" in ln], [], logs)
+    state = (json.loads(state_path.read_text())
+             if state_path.exists() else {})
+    _ = state   # SHIPPED observable only: the log (strengthened next commit)
+
+
 class RunOnceVaultWiring(unittest.TestCase):
-    def _run(self, **kw):
+    def _tmp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        proj = Path(tmp.name) / "projects"
+        return tmp.name
+
+    def _run(self, **kw):
+        tmp = self._tmp()
+        proj = Path(tmp) / "projects"
         proj.mkdir()
+        self.state_path = Path(tmp) / "state.json"
         return wd.run_once(now=1_000_000.0, run=lambda argv, timeout=8: "",
                            send_fn=lambda *a, **k: None, projects_dir=proj,
-                           state_path=Path(tmp.name) / "state.json",
-                           pending_prefix=str(Path(tmp.name) / "pending-"), **kw)
+                           state_path=self.state_path,
+                           pending_prefix=str(Path(tmp) / "pending-"), **kw)
 
     def test_an_unwired_caller_sees_no_sweep(self):
-        # #153 finding 5. This asserted `calls == []` on a list that was local
-        # to the test and never wired into `_run` — it could not fail, and so
-        # verified nothing. The observable it should have been reading is
-        # run_once's OWN log output, which does change if an unwired caller
-        # ever starts sweeping.
-        logs = self._run(dry_run=False)
-        self.assertEqual([ln for ln in logs if "vault-purge" in ln], [], logs)
+        assert_unwired_caller_did_not_sweep(self, wd, self._tmp())
+
+    def test_a_wired_sweep_that_finds_nothing_is_still_observable(self):
+        # The positive control. Without it, "no artifact" is
+        # indistinguishable from "the artifact is never written at all".
+        import json
+        swept = []
+        self._run(dry_run=False, vault_purge=lambda: (swept.append(1) or []))
+        self.assertEqual(len(swept), 1)
+        self.assertIn("vault_purge_hour",
+                      json.loads(self.state_path.read_text()),
+                      "a real sweep must be observable even when the store is "
+                      "empty, or the guard above has nothing to catch")
 
     def test_the_job_runs_when_the_purge_callable_is_given(self):
         calls = []
@@ -108,6 +150,58 @@ class RunOnceVaultWiring(unittest.TestCase):
             raise OSError("store unreadable")
         logs = self._run(dry_run=False, vault_purge=purge)
         self.assertTrue(any("vault-purge error" in ln for ln in logs), logs)
+
+
+class TheUnwiredGuardHasTeeth(unittest.TestCase):
+    """#156 finding 4 — the mutation the guard above must actually catch.
+
+    "Someone hands `run_once` a live default" is the realistic regression: the
+    store then gets swept on every poll on every box regardless of what the
+    caller asked for. Against an EMPTY store that sweep produces no log line,
+    so the shipped log-based assertion passed while it happened.
+
+    This applies the mutation for real — `vault_purge=None` in run_once's own
+    signature rewritten to a live sweep — and requires the guard to fail.
+    """
+
+    def _mutant(self):
+        """`watchdog` re-imported with the live-default mutation applied."""
+        import importlib.util
+        import sys as _sys
+        src_path = Path(wd.__file__)
+        src = src_path.read_text()
+        old = "             vault_purge=None):"
+        self.assertIn(old, src, "the mutation target moved; re-pin it")
+        mutated = src.replace(
+            old, "             vault_purge=lambda: []):", 1)
+        self.assertNotEqual(mutated, src, "the mutation did not apply")
+
+        name = "watchdog_live_default_mutant"
+        spec = importlib.util.spec_from_loader(name, loader=None)
+        mod = importlib.util.module_from_spec(spec)
+        mod.__file__ = str(src_path)
+        mod.__package__ = name
+        _sys.modules[name] = mod
+        self.addCleanup(_sys.modules.pop, name, None)
+        exec(compile(mutated, str(src_path), "exec"), mod.__dict__)
+        return mod
+
+    def test_the_guard_fails_against_a_live_default(self):
+        mod = self._mutant()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with self.assertRaises(AssertionError,
+                               msg="the guard passed against a watchdog whose "
+                                   "default sweeps the store on every poll — "
+                                   "it has no teeth"):
+            assert_unwired_caller_did_not_sweep(self, mod, tmp.name)
+
+    def test_the_mutant_is_otherwise_a_working_watchdog(self):
+        # Guards the mutation itself: a mutant that crashed on import would
+        # make the test above pass for entirely the wrong reason.
+        mod = self._mutant()
+        self.assertTrue(callable(mod.run_once))
+        self.assertEqual(mod.vault_purge_job(1_000_000.0, {}), [])
 
 
 class CliInjection(unittest.TestCase):
