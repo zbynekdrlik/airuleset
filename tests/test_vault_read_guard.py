@@ -42,6 +42,15 @@ def run_payload(payload_obj, env_extra=None):
                           capture_output=True, text=True, env=env)
 
 
+def run_payload_text(text, env_extra=None):
+    """Feed RAW bytes — the malformed-payload cases are not JSON at all."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/home/newlevel")}
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(["/bin/bash", str(HOOK)], input=text,
+                          capture_output=True, text=True, env=env)
+
+
 def run(cmd, env_extra=None):
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd},
                           "cwd": "/home/newlevel/devel/airuleset"})
@@ -398,6 +407,60 @@ class BypassIsForTheUserNotTheAgent(unittest.TestCase):
             logged = (Path(td) / "a.log").read_text()
             self.assertIn("env-bypass", logged)
             self.assertIn("DB_PASS.secret", logged)
+
+
+class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
+    """#156 hole 2. Claim (e) of the shipping ticket was "fail-closed"; for the
+    payload path it was false.
+
+    `except Exception: payload = {}` assigned a DICT, and the raw-text fallback
+    below it then tested `not isinstance(payload, dict)` — statically always
+    False on the very path it was written for. So a payload the hook could not
+    parse produced no command, no tool fields, and exit 0.
+    """
+
+    def assertFailsClosed(self, payload_text, label):
+        r = run_payload_text(payload_text)
+        self.assertEqual(r.returncode, 2,
+                         "a payload the guard cannot parse must not open the "
+                         "store (%s)\nstdout=%s\nstderr=%s"
+                         % (label, r.stdout, r.stderr))
+        self.assertIn("fail-closed", r.stderr)
+
+    def test_unparseable_text(self):
+        self.assertFailsClosed("cat ~/.claude/secrets/DB_PASS.secret",
+                               "raw text, not JSON")
+
+    def test_truncated_json(self):
+        self.assertFailsClosed(
+            '{"tool_name":"Bash","tool_input":{"command":"cat ~/.cl',
+            "truncated mid-string")
+
+    def test_a_json_scalar_is_not_a_payload(self):
+        self.assertFailsClosed("5", "parses, but is not an object")
+
+    def test_a_json_list_is_not_a_payload(self):
+        self.assertFailsClosed('["tool_input"]', "parses, but is not an object")
+
+    def test_a_string_tool_input_is_still_inspected(self):
+        # This one is understandable input in an unexpected SHAPE, not
+        # unparseable input — so it is scanned rather than failed closed.
+        # Failing closed on an unknown-but-valid tool would deny every call
+        # to it; allowing it unscanned is what the ticket measured.
+        r = run_payload({"tool_name": "Bash",
+                         "tool_input": "cat ~/.claude/secrets/DB_PASS.secret"})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_string_tool_input_with_nothing_to_hide_is_allowed(self):
+        r = run_payload({"tool_name": "Bash", "tool_input": "git status"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_dead_fallback_is_gone(self):
+        # The bug was a condition that could never be true. Its shape must not
+        # come back: nothing may re-derive "did the parse fail?" from the type
+        # of a variable the failure handler itself assigned.
+        text = HOOK.read_text()
+        self.assertNotIn("not isinstance(payload, dict)", text)
 
 
 class RefusalQuality(unittest.TestCase):
