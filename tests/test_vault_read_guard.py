@@ -33,8 +33,17 @@ STORE = "~/.claude/secrets"
 ABS = "/home/newlevel/.claude/secrets"
 
 
+def run_payload(payload_obj, env_extra=None):
+    """Feed an arbitrary PreToolUse payload — for the non-Bash tools."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/home/newlevel")}
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(["/bin/bash", str(HOOK)], input=json.dumps(payload_obj),
+                          capture_output=True, text=True, env=env)
+
+
 def run(cmd, env_extra=None):
-    payload = json.dumps({"tool_input": {"command": cmd},
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd},
                           "cwd": "/home/newlevel/devel/airuleset"})
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/home/newlevel")}
     if env_extra:
@@ -140,6 +149,78 @@ class Blocks(unittest.TestCase):
         self.assertBlocked("printf x >> %s/DB_PASS.secret" % STORE)
 
 
+class BlocksAfterAdversarialReview(unittest.TestCase):
+    """Bypasses the Fable adversarial review found in the first green version.
+
+    Each of these READ a credential and were ALLOWED. They are grouped so the
+    reason each allowlist entry was removed stays attached to the command that
+    defeated it.
+    """
+
+    def assertBlocked(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for: %s\nstderr=%s" % (cmd, r.stderr))
+
+    # F4 — `cd` was allowlisted, so the store could be entered and then read
+    # with a bare glob carrying no store reference at all.
+    def test_cd_into_the_store_then_read_by_glob(self):
+        self.assertBlocked("cd %s && cat *" % STORE)
+
+    def test_cd_into_the_store_at_all(self):
+        # Blocked even alone: the Bash tool's cwd PERSISTS across calls, so an
+        # allowed `cd` in one call makes `cat *` in the NEXT call invisible to
+        # a stateless hook. Refusing the `cd` is what closes that.
+        self.assertBlocked("cd %s" % STORE)
+
+    # F5 — an allowlisted head piped into a reader.
+    def test_allowlisted_head_piped_into_a_reader(self):
+        self.assertBlocked("ls %s/* | xargs cat" % STORE)
+
+    def test_allowlisted_head_piped_at_all(self):
+        self.assertBlocked("ls %s | while read f; do cat $f; done" % STORE)
+
+    # F6 — `file` and `du` ingest a file as a NAME LIST and echo its content
+    # back in their own error text, defeating "provably metadata-only".
+    def test_file_reads_content_via_a_name_list(self):
+        self.assertBlocked("file -f %s/DB_PASS.secret" % STORE)
+
+    def test_du_reads_content_via_files0_from(self):
+        self.assertBlocked("du --files0-from=%s/DB_PASS.secret" % STORE)
+
+    # F7 — mutations are not metadata. Handing a 0600 credential to another
+    # uid on a box that hosts foreign uids by design is not a read, but it is
+    # not something an allowlist called "metadata only" may permit.
+    def test_chown_to_another_uid(self):
+        self.assertBlocked("sudo chown otheruser %s/DB_PASS.secret" % STORE)
+
+    def test_chmod_world_readable(self):
+        self.assertBlocked("chmod 644 %s/DB_PASS.secret" % STORE)
+
+    def test_rm_is_not_the_sanctioned_deletion_path(self):
+        # `secret forget` exists and reports honestly; a bare rm destroys the
+        # user's store silently.
+        self.assertBlocked("rm -f %s/DB_PASS.secret" % STORE)
+
+    # F3 — a GLOB filename evaded the `<stem>.secret` pattern, and the
+    # containing dir was named only as the ancestor.
+    def test_find_by_glob_name_then_exec_cat(self):
+        self.assertBlocked("find ~/.claude -name '*.secret' -exec cat {} +")
+
+    def test_a_bare_glob_value_filename(self):
+        self.assertBlocked("cat /some/dir/*.secret")
+
+    # F2 — a recursive sweep of the store's PARENT never named the store.
+    def test_recursive_sweep_of_the_parent_dir(self):
+        self.assertBlocked("grep -r password ~/.claude")
+
+    def test_recursive_sweep_of_the_parent_dir_absolute(self):
+        self.assertBlocked("grep -rn '' /home/newlevel/.claude")
+
+    def test_archiving_the_parent_dir(self):
+        self.assertBlocked("tar czf /tmp/c.tgz ~/.claude")
+
+
 class Allows(unittest.TestCase):
     def assertAllowed(self, cmd, **kw):
         r = run(cmd, **kw)
@@ -161,11 +242,18 @@ class Allows(unittest.TestCase):
         self.assertAllowed("ls -l %s/" % STORE)
         self.assertAllowed("ls %s" % STORE)
 
-    def test_stat_and_test_and_rm(self):
+    def test_stat_and_test(self):
+        # The allowlist is now exactly the heads that are PROVABLY content-free
+        # AND non-mutating: ls, stat, test/[. `rm`, `chmod`, `chown`, `touch`,
+        # `shred`, `file`, `du`, `cd` and `pushd` were removed after the
+        # adversarial review (F4/F6/F7) — see BlocksAfterAdversarialReview.
         self.assertAllowed("stat %s/DB_PASS.secret" % STORE)
         self.assertAllowed("test -f %s/DB_PASS.secret && echo present" % STORE)
-        self.assertAllowed("rm -f %s/DB_PASS.secret" % STORE)
-        self.assertAllowed("chmod 600 %s/DB_PASS.secret" % STORE)
+
+    def test_searching_this_repo_for_unrelated_claude_subdirs(self):
+        # The ancestor-sweep rule (F2) must not block the transcript greps this
+        # repo's own work depends on — a sibling subdir cannot reach the store.
+        self.assertAllowed("grep -rn 'compact_boundary' ~/.claude/projects/")
 
     # --- unrelated traffic must not be caught -------------------------------
     def test_the_unrelated_ssh_key_dir(self):
@@ -258,16 +346,97 @@ class DocumentedGaps(unittest.TestCase):
                 self.assertIn(gap, text)
 
 
+class ToolsOtherThanBash(unittest.TestCase):
+    """Adversarial review finding F1 (CRITICAL) — Bash was never the most
+    reflexive route to the store.
+
+    An agent asked what is in the store reaches for the `Read` TOOL long before
+    it reaches for `cat`, and a prompt-injected one has a route that no
+    Bash-matched hook can see. The original hook header called this "outside
+    its reach by construction", which was a design choice presented as a law:
+    Claude Code matches PreToolUse per tool name, so Read/Grep/Glob can be
+    matched exactly as Bash is.
+    """
+
+    def assertBlocked(self, obj):
+        r = run_payload(obj)
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for payload: %s\nstderr=%s" % (obj, r.stderr))
+
+    def assertAllowed(self, obj):
+        r = run_payload(obj)
+        self.assertEqual(r.returncode, 0,
+                         "expected ALLOW for payload: %s\nstderr=%s" % (obj, r.stderr))
+
+    # --- Read ---------------------------------------------------------------
+    def test_read_tool_on_a_value_file(self):
+        self.assertBlocked({"tool_name": "Read",
+                            "tool_input": {"file_path": "%s/DB_PASS.secret" % ABS}})
+
+    def test_read_tool_on_the_store_dir(self):
+        self.assertBlocked({"tool_name": "Read",
+                            "tool_input": {"file_path": "%s/anything" % ABS}})
+
+    def test_read_tool_on_an_ordinary_file(self):
+        self.assertAllowed({"tool_name": "Read",
+                            "tool_input": {"file_path": "/home/newlevel/.claude/settings.json"}})
+
+    # --- Grep ---------------------------------------------------------------
+    def test_grep_tool_pointed_at_the_store(self):
+        self.assertBlocked({"tool_name": "Grep",
+                            "tool_input": {"pattern": ".", "path": ABS,
+                                           "output_mode": "content"}})
+
+    def test_grep_tool_with_a_secret_glob(self):
+        self.assertBlocked({"tool_name": "Grep",
+                            "tool_input": {"pattern": ".", "path": "/home/newlevel/.claude",
+                                           "glob": "*.secret"}})
+
+    def test_grep_SEARCHING_FOR_the_path_is_not_a_read(self):
+        # The search PATTERN is not a path. Blocking on it would make the guard
+        # unusable in the very repo that maintains it.
+        self.assertAllowed({"tool_name": "Grep",
+                            "tool_input": {"pattern": "\\.claude/secrets",
+                                           "path": "/home/newlevel/devel/airuleset/hooks"}})
+
+    # --- Glob ---------------------------------------------------------------
+    def test_glob_tool_enumerating_value_files(self):
+        # Here the PATTERN genuinely is a path pattern.
+        self.assertBlocked({"tool_name": "Glob",
+                            "tool_input": {"pattern": "**/*.secret",
+                                           "path": "/home/newlevel/.claude"}})
+
+    def test_glob_tool_on_an_unrelated_tree(self):
+        self.assertAllowed({"tool_name": "Glob",
+                            "tool_input": {"pattern": "**/*.py",
+                                           "path": "/home/newlevel/devel/airuleset"}})
+
+
 class Registered(unittest.TestCase):
-    def test_it_is_wired_into_the_pretooluse_bash_chain(self):
+    def _pretooluse(self, matcher):
         cfg = json.loads((Path(__file__).resolve().parent.parent
                           / "settings" / "hooks.json").read_text())
-        bash_hooks = [h["command"]
-                      for entry in cfg["hooks"]["PreToolUse"]
-                      if entry.get("matcher") == "Bash"
-                      for h in entry["hooks"]]
+        return [h["command"]
+                for entry in cfg["hooks"]["PreToolUse"]
+                if entry.get("matcher") == matcher
+                for h in entry["hooks"]]
+
+    def test_it_is_wired_into_the_pretooluse_bash_chain(self):
+        bash_hooks = self._pretooluse("Bash")
         self.assertTrue(any("block-vault-store-read.sh" in c for c in bash_hooks),
                         "a hook nothing runs is not an artifact: %s" % bash_hooks)
+
+    def test_it_is_wired_for_the_file_reading_tools_too(self):
+        # EXACT tool-name matchers, one entry each — this repo registers Write
+        # and Edit separately for the same reason: an alternation regex has
+        # been observed to silently never match, and a guard that never runs
+        # is worse than no guard because it reads as coverage.
+        for matcher in ("Read", "Grep", "Glob"):
+            with self.subTest(matcher=matcher):
+                cmds = self._pretooluse(matcher)
+                self.assertTrue(
+                    any("block-vault-store-read.sh" in c for c in cmds),
+                    "no vault guard registered for %s: %s" % (matcher, cmds))
 
 
 if __name__ == "__main__":

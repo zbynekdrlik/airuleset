@@ -861,6 +861,42 @@ class OrdinaryEscapingIsAlsoARendering(TestCase):
         blob = b'they said "ok" and left'
         self.assertEqual(airuleset._secret_redact(blob, b'"'), blob)
 
+    def test_a_short_value_is_not_redacted_through_an_EXPANDED_form(self):
+        # Adversarial review F10 — a bug the escaped forms INTRODUCED. The
+        # >=4-byte floor was applied to each FORM, not to the VALUE, and
+        # escaping EXPANDS: value `"` renders as `&quot;` (6 bytes, clears the
+        # floor), so every `&quot;` in a child's HTML output became
+        # <<REDACTED>> while the docstring promised short values are left
+        # alone. Same for `<` -> `&lt;` and `'` -> `&#x27;`.
+        for value, blob in ((b'"', b'they said &quot;ok&quot; and left'),
+                            (b'<', b'a &lt;b&gt; tag'),
+                            (b"'", b"it&#x27;s fine"),
+                            (b'%', b'progress 50%% done')):
+            with self.subTest(value=value):
+                self.assertEqual(airuleset._secret_redact(blob, value), blob)
+
+    def test_a_short_value_is_not_redacted_through_its_base64_either(self):
+        # The same floor bug pre-dated the escaped forms: b64 of a 1-byte
+        # value is 4 characters, which cleared a per-FORM floor.
+        self.assertEqual(airuleset._secret_redact(b"token YQ== here", b"a"),
+                         b"token YQ== here")
+
+    def test_padded_urlsafe_base64(self):
+        import base64
+        self.assertRedacted(base64.urlsafe_b64encode(ESCAPY.encode()).decode(),
+                            label="urlsafe-padded")
+
+    def test_uppercase_hex(self):
+        # Plenty of tools print hex in caps.
+        self.assertRedacted(ESCAPY.encode().hex().upper(), label="HEX")
+
+    def test_json_without_ascii_escaping(self):
+        # json.dumps(..., ensure_ascii=False) is an ordinary dump option and
+        # renders a non-ASCII value differently from the default.
+        value = 'heslo-ľščťž"x'
+        self.assertRedacted(json.dumps(value, ensure_ascii=False)[1:-1],
+                            value=value, label="json-unicode")
+
     def test_the_docstring_states_the_residual_honestly(self):
         # The old text disclaimed only DELIBERATE transformation, which made
         # the escaping gap both real and undisclosed.
