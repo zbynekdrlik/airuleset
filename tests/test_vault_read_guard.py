@@ -312,8 +312,26 @@ class OtherLayersBetweenTheSpellingAndThePath(unittest.TestCase):
     def test_find_over_the_parent_execing_a_reader(self):
         self.assertBlocked("find ~/.claude -type f -exec cat {} +")
 
-    def test_find_over_the_parent_piped_into_a_reader(self):
-        self.assertBlocked("find ~/.claude -type f | xargs cat")
+    def test_a_bare_find_listing_names_is_not_a_sweep(self):
+        # `find <parent> -name x` prints NAMES, exactly like the `ls -R` the
+        # allowlist already permits. Requiring the reading action costs 5 real
+        # commands; treating any find over the parent as a sweep costs 104
+        # more that only ever listed names.
+        r = run("find ~/.claude -maxdepth 3 -name '*.json'")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_piped_find_is_admitted_rather_than_closed(self):
+        # `find <parent> -type f | xargs cat` DOES read every credential and is
+        # NOT blocked — the consumer is a separate segment, and deciding it
+        # would mean enumerating reader commands, which this guard rejects on
+        # principle. It falls under the xargs-fed-a-name-list gap the header
+        # already carries; the header must name this shape specifically, since
+        # it has now been measured leaking rather than merely suspected.
+        r = run("find ~/.claude -type f | xargs cat")
+        self.assertEqual(r.returncode, 0,
+                         "if this now blocks, the header's admission is stale")
+        self.assertIn("xargs", HOOK.read_text())
+        self.assertIn("find <parent> -type f | xargs cat", HOOK.read_text())
 
 
 class TheWideningDoesNotDenyOrdinaryWork(unittest.TestCase):
@@ -549,6 +567,26 @@ class TheAuditLogIsNotASecondPlaceTheValueRests(unittest.TestCase):
         self.assertIn("second line", excerpt[0],
                       "the excerpt was split across lines: %r" % excerpt)
 
+    def test_a_value_shaped_like_a_store_filename_is_not_logged(self):
+        # "safe by construction — always a path fragment, never the argument
+        # carrying a value" was too strong: the reference is whatever the
+        # pattern matched, and a VALUE that happens to look like a store
+        # filename matches it too. Only a match sitting in a PATH context
+        # (a token with a separator, or one resolved against a cd) is logged.
+        log = self._bypass("echo 'topsecret.secret' > %s/X.secret" % STORE)
+        body = log.read_text()
+        self.assertNotIn("topsecret.secret", body,
+                         "a value shaped like a store filename reached the "
+                         "log:\n%s" % body)
+        self.assertIn("X.secret", body, "the real item name is still recorded")
+
+    def test_the_line_does_not_narrow_the_search_space(self):
+        # The digest is over the whole command, so anything that pins the
+        # command's shape helps an offline guess. A length was recorded and
+        # bought nothing the digest does not already give for correlation.
+        log = self._bypass("cat %s/DB_PASS.secret" % STORE)
+        self.assertNotIn("len=", log.read_text())
+
     def test_the_log_is_not_world_readable(self):
         log = self._bypass("cat %s/DB_PASS.secret" % STORE)
         mode = log.stat().st_mode & 0o777
@@ -601,6 +639,23 @@ class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
 
     def test_a_string_tool_input_with_nothing_to_hide_is_allowed(self):
         r = run_payload({"tool_name": "Bash", "tool_input": "git status"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_list_shaped_tool_input_is_still_inspected(self):
+        # The string branch is inspected; a LIST fell through to `tin = {}`,
+        # `cmd = ""` and exited 0 having looked at nothing. Same class of
+        # unexpected-but-understandable shape, opposite treatment.
+        r = run_payload({"tool_name": "Bash",
+                         "tool_input": ["cat %s/DB_PASS.secret" % STORE]})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_nested_list_payload_is_still_inspected(self):
+        r = run_payload({"tool_name": "Read",
+                         "tool_input": {"file_path": ["%s/DB_PASS.secret" % ABS]}})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a_list_shaped_tool_input_with_nothing_to_hide_is_allowed(self):
+        r = run_payload({"tool_name": "Bash", "tool_input": ["git status"]})
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_the_dead_fallback_is_gone(self):
