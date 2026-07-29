@@ -347,6 +347,39 @@ class TestMergeAcrossHosts(unittest.TestCase):
         merged = burn.merge_splits([{"host": "x"}, self._rep("dev1", "a", 1, 1)])
         self.assertEqual(merged["totals"]["main"]["turns"], 1)
 
+    def test_absorbs_an_already_merged_report_from_a_remote_box(self):
+        """A remote box is collected by running ITS OWN `delegation --json`,
+        which prints the MERGED shape (`by_project`), not the raw
+        `split_report` shape (`projects`). Live-caught: the coordinator
+        silently dropped every remote box and reported a dev1-only total as a
+        fleet total."""
+        remote = burn.merge_splits([self._rep("gatekeeper", "odoo-erp", 733, 3504)])
+        merged = burn.merge_splits([self._rep("dev1", "airuleset", 347, 3141),
+                                    remote])
+        self.assertIn("gatekeeper:odoo-erp", merged["by_project"])
+        self.assertEqual(
+            merged["by_project"]["gatekeeper:odoo-erp"]["main"]["turns"], 733)
+        self.assertEqual(
+            merged["by_project"]["gatekeeper:odoo-erp"]["sub"]["turns"], 3504)
+        self.assertEqual(merged["totals"]["main"]["turns"], 347 + 733)
+        self.assertEqual(merged["totals"]["sub"]["turns"], 3141 + 3504)
+
+    def test_an_already_merged_report_keeps_its_own_host_not_the_collectors(self):
+        remote = burn.merge_splits([self._rep("dev2", "codex-bridge", 192, 40)])
+        merged = burn.merge_splits([remote])
+        self.assertIn("dev2:codex-bridge", merged["by_project"])
+        self.assertNotIn("?:codex-bridge", merged["by_project"])
+        self.assertEqual(
+            merged["by_project"]["dev2:codex-bridge"]["host"], "dev2")
+
+    def test_an_already_merged_report_carries_its_repo_through(self):
+        rep = self._rep("dev2", "codex-bridge", 1, 1)
+        rep["projects"]["codex-bridge"]["repo"] = "zbynekdrlik/codex-bridge"
+        merged = burn.merge_splits([burn.merge_splits([rep])])
+        self.assertEqual(
+            merged["by_project"]["dev2:codex-bridge"]["repo"],
+            "zbynekdrlik/codex-bridge")
+
 
 class TestSplitReport(unittest.TestCase):
     def test_tags_host_and_user(self):
