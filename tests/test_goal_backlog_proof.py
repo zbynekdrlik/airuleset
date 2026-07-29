@@ -220,13 +220,26 @@ class TestTemplatesRequireProofNotProse(TestCase):
         """A bare `gh issue list` prints NOTHING when the backlog is empty —
         an empty result is not pasteable evidence, which is precisely how a
         blank turn could pass for a proof. The counted `--jq` form prints a
-        literal 0, which IS evidence."""
+        literal 0, which IS evidence.
+
+        Only that a COUNTED form is declared is required; the templates also
+        MENTION the bare form to explain why it is unusable, and a mention is
+        not a declaration.
+        """
         for profile, line in enumerate(goal_lines()):
             for prefix, _ in PROOF_SPEC[profile]:
                 if not prefix.startswith("gh"):
                     continue
-                for cmd in declared_commands(line, prefix):
-                    self.assertIn("--jq", cmd)
+                self.assertTrue(
+                    any("--jq" in c for c in declared_commands(line, prefix)),
+                    "profile %d declares no counted %r" % (profile, prefix))
+
+    def test_the_template_states_the_exact_token_each_proof_must_print(self):
+        """Binds the tokens the decision procedure compares against to the
+        shipped text, so the two cannot drift apart."""
+        for profile, line in enumerate(goal_lines()):
+            for _, expected in PROOF_SPEC[profile]:
+                self.assertIn("printing exactly `%s`" % expected, line)
 
 
 class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
