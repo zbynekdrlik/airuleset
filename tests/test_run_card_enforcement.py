@@ -48,8 +48,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -80,6 +82,13 @@ SHA40_8153 = ("8153549c5fa670a58555"
               "b6d50d3ddd6963379ba2")
 SHA40_edee = ("edee6619fb4b604f0a44"
               "99546cb5ba22908acc11")
+
+
+class _Args(types.SimpleNamespace):
+    """A stand-in for argparse's Namespace — deliberately NOT `Mock`, which
+    auto-creates every attribute as a truthy Mock and so silently arms
+    unrelated `--flag` branches in a `cmd_*` dispatcher (this repo's own
+    documented trap)."""
 
 
 def _git(repo, *args, ts=None):
@@ -694,6 +703,104 @@ class TestBackfillDigest(unittest.TestCase):
         # a catch-up message that overclaims is a worse repair than the
         # silence it apologises for — nothing here checked a deploy.
         self.assertNotIn("nasaden", self.compose(5))
+
+
+class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
+    """#141 half 1 — the digest is computed from THIS box's card markers,
+    and those markers are machine-local (`notify._dedup_dir()` resolves
+    against the running box's own `$HOME`).
+
+    Job 25 is safe from this by construction: it only ever examines
+    checkouts a live pane sits in, so the markers it reads are always the
+    ones belonging to that checkout. `--backfill-digest` is operator-driven
+    and takes a bare `owner/name`, so nothing correlates the repo with the
+    box — point it at a repo whose checkout lives elsewhere and every ticket
+    reads as unreported, producing a digest that apologises for reports
+    which were in fact delivered on another box. A false statement on the
+    user's phone is worse than no statement, so this refuses rather than
+    under-reports."""
+
+    def setUp(self):
+        import airuleset
+        self.a = airuleset
+        self.sent = []
+
+    def send(self, body, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append(body)
+        return "dry-run" if dry_run else "sent"
+
+    def args(self, **kw):
+        d = {"repo": "owner/proj", "since": "2026-07-20T00:00:00Z",
+             "owner_name": None, "dry_run": False}
+        d.update(kw)
+        return _Args(**d)
+
+    # --- the resolver -----------------------------------------------------
+    def test_the_resolver_matches_on_the_ORIGIN_name_not_the_directory(self):
+        # the live trap `repo_name_for` exists for: marek's checkout is
+        # `parovanie_produktov` while every marker is keyed
+        # `parovanie-produktov`.
+        root = "/home/x/devel/forestshop/parovanie_produktov"
+        self.assertEqual(
+            self.a._local_checkout_for_repo(
+                "parovanie-produktov", roots=[root],
+                name_of=lambda r: "parovanie-produktov"),
+            root)
+
+    def test_the_resolver_returns_None_when_no_checkout_matches(self):
+        self.assertIsNone(self.a._local_checkout_for_repo(
+            "odoo-erp", roots=["/home/x/devel/airuleset"],
+            name_of=lambda r: "airuleset"))
+
+    def test_the_resolver_never_raises_on_an_unreadable_tree(self):
+        def boom(root):
+            raise OSError("gone")
+        self.assertIsNone(self.a._local_checkout_for_repo(
+            "proj", roots=["/nope"], name_of=boom))
+
+    # --- the refusal ------------------------------------------------------
+    def test_a_repo_with_no_local_checkout_is_refused_loudly(self):
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: None):
+            with self.assertRaises(SystemExit) as cm:
+                self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(self.sent, [],
+                         "a digest computed from the wrong marker store must "
+                         "never reach the phone")
+
+    def test_the_refusal_happens_before_any_gh_call(self):
+        calls = []
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: None), \
+             m.patch.object(self.a, "_gh_out",
+                            lambda *a, **k: calls.append(a) or "[]"):
+            with self.assertRaises(SystemExit):
+                self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertEqual(calls, [])
+
+    def test_a_local_checkout_lets_the_digest_run(self):
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_the_help_states_the_machine_local_constraint(self):
+        r = subprocess.run([sys.executable, str(ROOT / "airuleset.py"),
+                            "notify", "--help"],
+                           capture_output=True, text=True, timeout=60)
+        # argparse hard-wraps, so compare against a whitespace-normalised
+        # form — never the rendered line breaks.
+        h = " ".join(r.stdout.split())
+        self.assertIn("--backfill-digest", h)
+        self.assertIn("machine-local", h,
+                      "the constraint must be visible where the operator "
+                      "reads the command, not only in the source")
+        self.assertIn("checkout", h)
 
 
 class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):
