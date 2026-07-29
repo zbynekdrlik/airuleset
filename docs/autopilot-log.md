@@ -1558,3 +1558,43 @@ Filed: **#162** — the hook TIMES OUT gap. Not closeable from inside a hook ("a
 timed-out hook does not block" is a harness property); measured median 33 ms
 against a 5000 ms budget, so it is a claim-honesty defect rather than a live
 risk, and its real resolution belongs to the permissions-layer decision.
+
+### The adversarial review (Fable, fresh context, digest-only) — what it changed
+
+Dispatched after the five holes were closed, and it is the reason this shipped
+in the state it did rather than the state it was in.
+
+- **CRITICAL, introduced by the #157 fix itself** (`44ffe27` [red] ->
+  `cb479eb` [green]): the audit call unpacked `fields`' 2-tuples as triples, so
+  the ENTIRE Read/Grep/Glob branch — #153's own critical addition — threw on
+  every violation. It still exited 2, because `fail_closed` does too, so all
+  four block tests passed and the 3,148-test suite was green. Lost while it
+  lasted: the real refusal text, the audit line, and the user's env bypass for
+  those three tools. `assertBlocked` now asserts the DECISION, not the code.
+- **Three bypass classes the corpus replay could not see**, each verified twice
+  (ALLOW verdict, then a sandbox HOME proving a real read) — `a7eb354` [red] ->
+  the rule-D rewrite: brace expansion, an interposed `.`/`..` component (which
+  spells both names in full and defeated even the literal adjacency regex), and
+  `find <parent> -exec cat {} +`.
+- **Two over-strong claims** (`9be63ce` [red] -> `87d2ede` [green]): a
+  list-shaped `tool_input` exited 0 having inspected nothing, and an audit
+  "reference" is not a path fragment by construction — a value shaped like a
+  store filename reached the log. Refs are now restricted to matches in a path
+  context, and the recorded length is gone as a guessing oracle.
+- **Audit forgery** (`72b1fe4` [red] -> `bc1f196` [green]): a newline inside
+  single quotes let a crafted command forge the `#AUDIT#` line and demote the
+  real one — found by probing the change rather than reported.
+
+`find` was measured rather than argued: the `-exec` family costs 5 commands (3
+of them this session's probes), any-`find` costs 104 more that only listed
+names. The action form is blocked; the piped form is admitted under the
+existing xargs gap, now naming the shape.
+
+Final authoritative replay, real hook before vs after over 18,062 prefiltered
+candidates of a 212,852-command corpus: **4 newly blocked, all four this
+session's own probe commands; 0 no-longer-blocked.**
+
+Also filed: **#165** — the value-file pattern matches an INFIX, so an ordinary
+`config.<ext>.json`-style local config is refused. Pre-existing, outside the
+four holes, and a real trade (the same tightening stops covering a `.bak` copy
+of a value file), so it is a decision ticket rather than a reflex fix.
