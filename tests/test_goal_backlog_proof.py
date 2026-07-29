@@ -319,5 +319,36 @@ class TestReducedAuthorityTemplatesToo(TestCase):
             self.assertIn("git merge-base", reason)
 
 
+class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
+    """A template Claude Code REFUSES protects nothing (#169).
+
+    `/goal` caps its condition at 4000 characters and rejects anything longer
+    outright — the loop is never armed, so every stop condition above is moot.
+    #159 added the counted proof, the 🏁 line and the release-containment
+    command to all three variants and pushed each of them past the cap in one
+    commit (3158/3355/3738 -> 4903/4943/5435), which took the whole mechanism
+    down on every box until a human tried to arm one and read the refusal.
+
+    The failure is SILENT by construction: nothing in this repo issues the
+    arm, so no test, hook or sweep observes the rejection. That is why the cap
+    is asserted here rather than left to review — it is the only thing standing
+    between a future edit and the same outage.
+    """
+
+    CAP = 4000
+
+    def test_every_template_is_within_the_cap(self):
+        over = [(i, len(line)) for i, line in enumerate(goal_lines())
+                if len(line) > self.CAP]
+        self.assertEqual(
+            over, [],
+            "templates over Claude Code's %d-char /goal cap (index, length): %r"
+            % (self.CAP, over))
+
+    def test_there_are_still_three_templates_to_check(self):
+        """Guards the assertion above against silently measuring nothing."""
+        self.assertEqual(len(goal_lines()), 3)
+
+
 if __name__ == "__main__":
     main()
