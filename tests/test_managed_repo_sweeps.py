@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -317,6 +318,195 @@ class TestRunOnceWiring(unittest.TestCase):
         logs = self._run(repo_roots=[str(r)])
         self.assertTrue(any(line.startswith("stuck-main") for line in logs))
         self.assertEqual(len(self.sent), 1)
+
+
+class TestCadencePersistedBeforeKill_172(unittest.TestCase):
+    """#172 regression: jobs 27/28 must persist their cadence marker to DISK
+    BEFORE the expensive per-repo loop. A real systemd `TimeoutStartSec=120`
+    kill is an uncaught PROCESS TERMINATION, not a catchable Python
+    exception -- modeled here with a fetch that raises `SystemExit`, which
+    propagates straight past every `except Exception` in this module
+    (job 27/28's own per-repo try/except AND run_once's own per-job
+    try/except), exactly like a real SIGTERM aborts the process before
+    run_once's own trailing `save_state()` ever runs.
+
+    BEFORE the fix: the cadence marker lived only in run_once's in-memory
+    `state` dict until the very end -- so a kill mid-sweep loses it
+    entirely, and the very next 60s tick re-attempts the SAME repos,
+    forever (the livelock #172 diagnoses, confirmed live: 236 kills on one
+    day, zero before).
+
+    AFTER the fix: `persist()` (the caller's save-state closure) runs
+    immediately after the cadence marker is set in memory and BEFORE any
+    per-repo network call, so the marker is already on disk by the time a
+    kill can happen."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-killcadence-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_path = self.tmp / "state.json"
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        return "sent"
+
+    def test_job27_net_drift_marker_survives_a_kill_mid_sweep(self):
+        calls = []
+
+        def killed_fetch(label, window_s):
+            calls.append(label)
+            raise SystemExit("simulated systemd TimeoutStartSec kill")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path,
+                       repo_roots=["/repos/a", "/repos/b"],
+                       issue_counts_fetch=killed_fetch)
+        self.assertEqual(len(calls), 1)   # aborted at the FIRST repo
+        # "next 60s tick" = a fresh process reloading state from DISK
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "net_drift_last_sweep", on_disk,
+            "cadence marker must reach DISK before the per-repo loop, not "
+            "only run_once()'s own in-memory state (lost on a kill)")
+        wd.run_once(now=NOW + 10, run=lambda *a, **k: "", send_fn=self.send,
+                   state_path=self.state_path,
+                   repo_roots=["/repos/a", "/repos/b"],
+                   issue_counts_fetch=killed_fetch)
+        self.assertEqual(
+            len(calls), 1,
+            "second sweep (10s later, well under the hourly interval) must "
+            "NOT re-attempt the fetch -- the persisted marker already shows "
+            "this hour as swept")
+
+    def test_job28_stuck_main_marker_survives_a_kill_mid_sweep(self):
+        r = _make_repo(self.tmp, "x", base_ts=NOW - 6 * DAY, undelivered=25)
+        calls = []
+
+        def killed_git_fetch(root):
+            calls.append(root)
+            raise SystemExit("simulated systemd TimeoutStartSec kill")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path, repo_roots=[str(r)],
+                       git_fetch=killed_git_fetch)
+        self.assertEqual(len(calls), 1)
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "stuck_main_last_sweep", on_disk,
+            "cadence marker must reach DISK before the per-repo loop, not "
+            "only run_once()'s own in-memory state (lost on a kill)")
+        wd.run_once(now=NOW + 10, run=lambda *a, **k: "", send_fn=self.send,
+                   state_path=self.state_path, repo_roots=[str(r)],
+                   git_fetch=killed_git_fetch)
+        self.assertEqual(
+            len(calls), 1,
+            "second sweep must NOT re-attempt git_fetch -- the persisted "
+            "marker already shows this hour as swept")
+
+
+class TestRepoSweepBatch172(unittest.TestCase):
+    """#172 fix (2): bound how many repos ONE sweep touches, with a
+    round-robin cursor in state so coverage still rotates over successive
+    sweeps instead of either sweeping ALL repos (the original 40-repo
+    livelock trigger) or arbitrarily few forever."""
+
+    def test_small_repo_list_is_untouched(self):
+        repos = ["/r/a", "/r/b"]
+        state = {}
+        batch = wd._repo_sweep_batch(repos, state, "k", max_repos=5)
+        self.assertEqual(batch, repos)
+
+    def test_large_repo_list_is_bounded(self):
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        batch = wd._repo_sweep_batch(repos, state, "k", max_repos=3)
+        self.assertEqual(len(batch), 3)
+
+    def test_cursor_rotates_across_successive_calls(self):
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        seen = []
+        for _ in range(4):
+            seen.extend(wd._repo_sweep_batch(repos, state, "k", max_repos=3))
+        # 4 batches of 3 = 12 slots over 10 repos -- every repo reached at
+        # least once, and the first two repeat (wrap-around).
+        self.assertEqual(set(seen), set(repos))
+        self.assertEqual(seen[:3], repos[0:3])
+        self.assertEqual(seen[3:6], repos[3:6])
+        self.assertEqual(seen[6:9], repos[6:9])
+        self.assertEqual(seen[9:12], repos[9:10] + repos[0:2])
+
+    def test_env_override(self):
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        with unittest.mock.patch.dict(os.environ,
+                                      {"AIRULESET_REPO_SWEEP_BATCH": "2"}):
+            batch = wd._repo_sweep_batch(repos, state, "k")
+        self.assertEqual(len(batch), 2)
+
+
+class TestBatchingPreservesUntouchedDedup_172(unittest.TestCase):
+    """#172: when a sweep only touches a ROUND-ROBIN BATCH of the full repo
+    list, a repo sitting OUT this sweep must keep its existing dedup memory
+    -- the original pruning rule (`seen if k in live`) silently assumed
+    every repo was re-measured every sweep, which stopped being true once
+    batching was added."""
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        return "sent"
+
+    def test_net_drift_untouched_repo_keeps_its_pinged_state(self):
+        state = {"net_drift": {"o/untouched": {"pinged_ts": NOW - 10}}}
+
+        def fetch(label, window_s):
+            return (40, 5)   # net well above threshold -> would re-ping
+
+        # batch of exactly 1, repo list has 2 -- "o/untouched" sits out.
+        wd.net_drift_alarm(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/x"],
+                           issue_counts_fetch=fetch, max_repos=1)
+        # A repo never even in repo_roots this call can't be "touched" by
+        # definition -- assert its prior dedup entry survived untouched.
+        self.assertIn("o/untouched", state.get("net_drift", {}))
+
+
+class TestIncrementalLogFlush172(unittest.TestCase):
+    """#172 fix (3): job decision lines must reach `log_fn` AS THEY HAPPEN,
+    not only via the list run_once() RETURNS -- a sweep killed mid-way
+    (systemd TimeoutStartSec) never returns at all, so the old "print the
+    returned list" path in cmd_watchdog showed NOTHING for the whole 14h
+    the #172 incident recurred, even though job 27 runs (and logs) BEFORE
+    job 28's hung `git fetch` could have eaten the rest of the budget."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-flush172-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_path = self.tmp / "state.json"
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        return "sent"
+
+    def test_job27_line_is_flushed_before_job28_kills_the_sweep(self):
+        seen = []
+
+        def net_fetch(label, window_s):
+            return (40, 5)          # job 27 succeeds and logs "net-drift ..."
+
+        def killed_git_fetch(root):
+            raise SystemExit("simulated kill during job 28")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path, log_fn=seen.append,
+                       repo_roots=["/repos/x"],
+                       issue_counts_fetch=net_fetch,
+                       git_fetch=killed_git_fetch)
+        self.assertTrue(
+            any(line.startswith("net-drift") for line in seen),
+            "job 27's decision line must be visible via log_fn even though "
+            "run_once() itself never returned (job 28 killed the sweep) -- "
+            "the OLD 'print only the returned list' path would show nothing")
 
 
 if __name__ == "__main__":

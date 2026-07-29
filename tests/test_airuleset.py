@@ -9,6 +9,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from unittest import TestCase
+from unittest import mock as m
 
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -5075,6 +5076,42 @@ class TestApiWatchdog(TestCase):
         svc = (airuleset.REPO_DIR / "settings" / "api-watchdog.service.template").read_text()
         self.assertIn("watchdog --once", svc)
         self.assertIn("{{REPO_DIR}}", svc)
+
+
+class TestWatchdogRepoSweepTimeouts_172(TestCase):
+    """#172: jobs 27/28's per-repo network calls used to time out at 90s
+    (git fetch) / 45s (each of two `gh issue list` calls) -- with
+    `TimeoutStartSec=120` on the systemd unit, ONE hung call could already
+    eat most of the whole sweep's budget, and with 40 repos in scope the
+    livelock was near-guaranteed. Cut to 15s / 10s so a single hang costs a
+    bounded slice of the budget, never most of it."""
+
+    def test_git_fetch_timeout_is_15s_not_90s(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(kw)
+            import subprocess as sp
+            return sp.CompletedProcess(argv, 0)
+
+        with m.patch("subprocess.run", side_effect=fake_run):
+            airuleset._watchdog_git_fetch("/some/repo")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].get("timeout"), 15)
+
+    def test_issue_counts_fetch_timeout_is_10s_per_call_not_45s(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(kw)
+            import subprocess as sp
+            return sp.CompletedProcess(argv, 0, stdout="[]")
+
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_issue_counts_fetch("o/r", 7 * 86400)
+        self.assertEqual(result, (0, 0))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(kw.get("timeout") == 10 for kw in calls))
 
 
 class TestTier0BuildBlock(TestCase):
