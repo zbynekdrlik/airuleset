@@ -1713,6 +1713,21 @@ lines either run. Full suite 3236 passed, ruff clean.
 Fired `notify --run-card` for #172 (rc=0, sent). No dropped work; nothing
 filed (job 1's gating was verified intact, no second gate found).
 
+**CORRECTION (#176, 2026-07-30):** the claims above that the dev1 livelock
+"starved job 1's 529 continue-nudge of wall-clock" and that "job 1's gating
+was verified intact" are both **wrong**. Job 1 runs inside the SAME per-pane
+loop as every other job, long before jobs 27/28 are dispatched, so a sweep
+killed inside jobs 27/28 had already run job 1 on every tick -- it was never
+starved. On the box that actually stalled (gatekeeper), the journal shows
+1140 completed sweeps for 07-29 including 367 inside the window claimed to
+have "no completed sweep at all" (that was dev1's own -- and unrelated --
+livelock). "Verified intact" also does not hold: `pane_at_idle_prompt()`'s
+bare-only gate silently misread a pane idle at `❯` holding a foreign draft
+as busy, for 32 consecutive polls (36 minutes), with zero keystrokes and
+zero pings -- the actual root cause of the user's original complaint, fixed
+in #176. The "4h 28m" figure quoted for the stall is also uncorroborated;
+the demonstrable dead-with-zero-nudges window is 36m10s.
+
 📔 Playbook: `.claude/rules/airuleset-internals.md` -- a cadence marker set
 only in an in-memory dict and saved once at the very end of a long function
 is not durable against an uncaught process kill (SIGTERM), which is not a
