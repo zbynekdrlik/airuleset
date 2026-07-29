@@ -540,6 +540,37 @@ class TestCardReconcile(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertTrue(any("closed-fetch" in ln for ln in logs), logs)
 
+    # --- #141 half 2: a DELIVERED digest is a report too ------------------
+    # The two mechanisms used disjoint key namespaces: the digest writes one
+    # marker for `backfill:<repo>:<since>` while job 25 asks about
+    # `<repo>#<n>`, so no digest — however successfully delivered — could
+    # ever affect this verdict, and its tickets stayed flagged for the full
+    # 48h window. Both tests below drive the REAL notify primitives on both
+    # sides, against an isolated marker store.
+
+    def _home(self):
+        h = self.tmp / "home"
+        h.mkdir(exist_ok=True)
+        return str(h)
+
+    def test_a_DELIVERED_digest_stops_job_25_re_flagging_its_tickets(self):
+        r = self.repo(closes=(3,))
+        with m.patch.object(notify, "_claude_dir", self._home):
+            notify.mark_backfill_reported("proj", [3], "sent")
+            self.reconcile([r], marker_ok=notify.marker_delivered)
+        self.assertEqual(self.sent, [],
+                         "the user was already told about this ticket, in "
+                         "digest form — re-flagging it is a FALSE alert")
+
+    def test_a_digest_that_never_reached_discord_silences_nothing(self):
+        # THE constraint (#134): the marker records the POST's outcome, so a
+        # digest that failed to send cannot suppress a real report.
+        r = self.repo(closes=(3,))
+        with m.patch.object(notify, "_claude_dir", self._home):
+            notify.mark_backfill_reported("proj", [3], "error")
+            self.reconcile([r], marker_ok=notify.marker_delivered)
+        self.assertTrue(self.sent, "a failed digest must leave the gap open")
+
     def test_it_never_sends_keystrokes(self):
         import inspect
         src = inspect.getsource(wd.card_reconcile)
@@ -805,6 +836,126 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
                       "reads the command, not only in the source")
         self.assertIn("checkout", h)
         self.assertIn("refuses", h)
+
+
+class TestBackfillMarkerIsWrittenOnlyOnPROVENDelivery(unittest.TestCase):
+    """#141 half 2 — the digest records what it reported, in its OWN
+    namespace, and only when the message provably reached Discord.
+
+    The #134 hard constraint, restated as an invariant: a marker that
+    suppresses a later signal must be written from the ARTIFACT the action
+    leaves behind (here `send()`'s post-POST return value), never from the
+    intent to act. The rule lives inside `mark_backfill_reported` rather
+    than at the call site, so no caller can lose it by forgetting a
+    branch."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-bfmark-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = m.patch.object(notify, "_claude_dir", lambda: str(self.tmp))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def key(self, n):
+        return notify.backfill_marker_key("proj", n)
+
+    def test_a_delivered_digest_records_one_marker_per_ticket(self):
+        self.assertEqual(notify.mark_backfill_reported("proj", [3, 4], "sent"),
+                         2)
+        self.assertTrue(notify.marker_delivered(self.key(3)))
+        self.assertTrue(notify.marker_delivered(self.key(4)))
+
+    def test_no_status_other_than_sent_records_anything(self):
+        for status in ("error", "no-config", "dedup", "dry-run", "", None):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    notify.mark_backfill_reported("proj", [3], status), 0)
+                self.assertFalse(notify.marker_delivered(self.key(3)))
+
+    def test_it_never_writes_the_per_ticket_CARD_namespace(self):
+        notify.mark_backfill_reported("proj", [3], "sent")
+        self.assertFalse(
+            notify.marker_delivered("proj#3"),
+            "a digest is not a card: `<repo>#<n>` means 'this ticket got its "
+            "OWN delivered card' and is read by the SubagentStop gate — "
+            "writing it here would let a genuinely missing card pass")
+
+    def test_the_two_namespaces_cannot_collide(self):
+        # `#` cannot occur in a repo name, so no repo can produce a card key
+        # equal to a backfill key after _dedup_path's sanitisation.
+        self.assertNotEqual(self.key(3), "proj#3")
+        self.assertNotIn(":", self.key(3),
+                         "a separator _dedup_path rewrites would collapse "
+                         "distinct keys onto one file")
+
+    def test_it_works_on_a_box_that_has_never_sent_anything(self):
+        # no marker directory exists yet — the write must create it rather
+        # than silently no-op, which would look exactly like the bug.
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        self.assertEqual(notify.mark_backfill_reported("proj", [9], "sent"), 1)
+        self.assertTrue(notify.marker_delivered(self.key(9)))
+
+
+class TestBackfillDigestRecordsWhatItReported(unittest.TestCase):
+    """The same invariant end to end, through the real CLI entry point."""
+
+    def setUp(self):
+        import airuleset
+        self.a = airuleset
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-bfrun-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = m.patch.object(notify, "_claude_dir", lambda: str(self.tmp))
+        p.start()
+        self.addCleanup(p.stop)
+        self.status = "sent"
+        self.sent = []
+
+    def send(self, body, owner=None, dedup_key=None, dry_run=False):
+        if dry_run:
+            return "dry-run"
+        self.sent.append(body)
+        return self.status
+
+    def run_digest(self, since="2026-07-20T00:00:00Z", dry_run=False):
+        issues = json.dumps(
+            [{"number": 7, "title": "a", "closedAt": "2026-07-24T00:00:00Z"},
+             {"number": 8, "title": "b", "closedAt": "2026-07-25T00:00:00Z"}])
+        args = _Args(repo="owner/proj", since=since, owner_name=None,
+                     dry_run=dry_run)
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues):
+            try:
+                self.a._notify_backfill_digest(args, self.send)
+            except SystemExit as e:
+                return e.code
+        return 0
+
+    def key(self, n):
+        return notify.backfill_marker_key("proj", n)
+
+    def test_a_delivered_digest_marks_every_ticket_it_accounted_for(self):
+        self.run_digest()
+        self.assertEqual(len(self.sent), 1, "still ONE message, not N cards")
+        self.assertTrue(notify.marker_delivered(self.key(7)))
+        self.assertTrue(notify.marker_delivered(self.key(8)))
+
+    def test_a_digest_that_failed_to_send_marks_nothing(self):
+        self.status = "error"
+        self.assertNotEqual(self.run_digest(), 0)
+        self.assertFalse(notify.marker_delivered(self.key(7)))
+
+    def test_dry_run_records_nothing(self):
+        self.run_digest(dry_run=True)
+        self.assertFalse(notify.marker_delivered(self.key(7)))
+
+    def test_a_ticket_a_delivered_digest_covered_is_not_re_listed(self):
+        self.run_digest()
+        self.sent = []
+        self.run_digest(since="2026-07-01T00:00:00Z")   # a wider window
+        self.assertEqual(self.sent, [],
+                         "a second digest must not re-report tickets an "
+                         "earlier delivered one already accounted for")
 
 
 class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):
