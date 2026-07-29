@@ -52,6 +52,12 @@ HOOK = REPO / "hooks" / "block-main-implementation.sh"
 BIG = "x = 1\n" * 300          # way over any threshold
 SMALL = "x = 1\n"
 
+# #128: arming the bypass now means WRITING A REASON into the marker, not
+# `touch`ing an empty file — so every test that arms one arms it the way a
+# session must. The one-shot semantics (#80) are unchanged; only the shape
+# of a valid marker is.
+BYPASS_REASON = "authoring the policy text itself — the content IS the judgment"
+
 
 def _entry(role_type, content, **extra):
     d = {"type": role_type}
@@ -112,7 +118,8 @@ def goal_armed_transcript(model="claude-opus-4-8"):
 class MainImplementationGuard(unittest.TestCase):
     def _run(self, tool="Edit", content=BIG, model="claude-fable-5",
              agent_id=None, transcript_text=None, sid=None, bypass=None,
-             command=None):
+             command=None, bypass_reason=None, presence_age=None,
+             extra_env=None):
         sid = sid or ("t-mg-" + uuid.uuid4().hex[:8])
         with TemporaryDirectory() as d:
             tp = str(Path(d) / "sess.jsonl")
@@ -122,8 +129,18 @@ class MainImplementationGuard(unittest.TestCase):
             if bypass:
                 marker = ("/tmp/airuleset-main-exec-ok-%s" % sid if bypass == "new"
                           else "/tmp/airuleset-fable-exec-ok-%s" % sid)
-                Path(marker).write_text("")
+                Path(marker).write_text(BYPASS_REASON if bypass_reason is None
+                                        else bypass_reason)
                 self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
+            # #128: the presence marker clear-question-dedup.sh stamps on
+            # UserPromptSubmit. `presence_age` = seconds since the user last
+            # typed a REAL prompt; None = no marker at all (unprovable).
+            if presence_age is not None:
+                active = Path("/tmp/claude-user-active-%s" % sid)
+                active.write_text("")
+                stamp = int(__import__("time").time()) - int(presence_age)
+                os.utime(active, (stamp, stamp))
+                self.addCleanup(lambda: active.unlink(missing_ok=True))
             if tool == "Bash":
                 ti = {"command": command if command is not None else content}
             elif tool == "Edit":
@@ -136,8 +153,11 @@ class MainImplementationGuard(unittest.TestCase):
                        "transcript_path": tp}
             if agent_id:
                 payload["agent_id"] = agent_id
+            env = dict(os.environ)
+            if extra_env:
+                env.update(extra_env)
             return subprocess.run(["bash", str(HOOK)],
-                                  input=json.dumps(payload),
+                                  input=json.dumps(payload), env=env,
                                   capture_output=True, text=True)
 
     # ---- existing Fable-model behavior (#32) — unchanged ----
@@ -917,7 +937,7 @@ class OneShotBypass80(unittest.TestCase):
     def test_marker_is_consumed_after_one_use(self):
         sid = "t-mg-oneshot-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         first = self._run(sid)
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -926,7 +946,7 @@ class OneShotBypass80(unittest.TestCase):
     def test_second_call_after_the_marker_was_used_is_blocked_again(self):
         sid = "t-mg-oneshot2-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self.assertEqual(self._run(sid).returncode, 0)
         second = self._run(sid)
@@ -936,7 +956,7 @@ class OneShotBypass80(unittest.TestCase):
     def test_legacy_marker_is_also_consumed(self):
         sid = "t-mg-oneshot3-" + uuid.uuid4().hex[:8]
         m = self._marker(sid, legacy=True)
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self.assertEqual(self._run(sid).returncode, 0)
         self.assertFalse(m.exists())
@@ -945,17 +965,17 @@ class OneShotBypass80(unittest.TestCase):
         sid = "t-mg-oneshot4-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.assertEqual(self._run(sid).returncode, 0)
         self.assertEqual(self._run(sid).returncode, 2)
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.assertEqual(self._run(sid).returncode, 0,
                          "the escape hatch must never dead-end")
 
     def test_bypass_is_still_logged(self):
         sid = "t-mg-oneshot5-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        m.write_text("")
+        m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self._run(sid)
         log = Path("/tmp/airuleset-main-exec-bypass.log")
@@ -1163,6 +1183,336 @@ class BlockLogging73(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertFalse(self._lines_for(sid),
                          "allowed command must not appear in the BLOCK log")
+
+
+class AwayEngagement128(unittest.TestCase):
+    """#128 — the engagement condition was wrong, decided on measurement.
+
+    The guard used to engage on Fable-main OR an armed /goal. Both are
+    PROXIES for "this session is running autonomously"; neither is the cost
+    driver, because every main turn re-sends the whole context whether or
+    not a goal is armed. Measured on dev1, 2026-07-28, top-level entries of
+    all 11 real transcripts: the sessions the guard engages on ran 853 main
+    tool calls against 87 dispatches, while the sessions it is INERT on ran
+    1339 against 82 — and the single worst session (varos-eft5000: 650 main
+    calls, ZERO dispatches, 52 Edit/Writes over the threshold) is one of the
+    inert ones.
+
+    But "engage always" is refused on the same measurement: replaying every
+    real main Bash command of that day through this hook, it newly blocks
+    348 calls, 164 of them within 5 minutes of a live human prompt — the
+    attended-session regression the ticket's constraint forbids. Gating on
+    "the user is AWAY" instead newly blocks 103 and touches ZERO attended
+    calls, because the burn is concentrated in away time (190 of
+    varos-eft5000's 497 guardable calls are >15 min after any human prompt).
+
+    So: a THIRD condition, OR'd with the other two, never replacing them —
+    the presence marker `/tmp/claude-user-active-<sid>` (stamped by
+    clear-question-dedup.sh on UserPromptSubmit, which goal re-pokes and
+    hook feedback do NOT fire) older than AIRULESET_MAIN_GUARD_AWAY_S
+    (default 900 s). No marker = not provably away = allow (fail-open,
+    unchanged behaviour)."""
+
+    SWEEP = "grep -rn 'TODO' ."
+
+    def _plain(self, **kw):
+        # ordinary main: not Fable, no goal armed — inert before #128
+        helper = MainImplementationGuard()
+        kw.setdefault("transcript_text", transcript("claude-opus-5"))
+        return helper._run(**kw)
+
+    # ---- the hard constraint: an ATTENDED session is untouched ----
+
+    def test_attended_plain_main_bulk_read_still_passes(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=60)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_attended_plain_main_big_write_still_passes(self):
+        out = self._plain(tool="Write", presence_age=60)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_presence_marker_fails_open(self):
+        # unprovable presence must never start blocking a session that was
+        # never guarded before
+        out = self._plain(tool="Bash", command=self.SWEEP)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- the widening itself ----
+
+    def test_away_plain_main_bulk_read_blocked(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=1800)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("AWAY", out.stderr.upper())
+
+    def test_away_plain_main_big_write_blocked(self):
+        out = self._plain(tool="Write", presence_age=1800)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_away_main_still_allows_coordination_calls(self):
+        # non-negotiable: the allow-list is what keeps a running loop alive
+        for cmd in ("gh pr view 42", "git status --porcelain",
+                    "gh issue list --json number", "tmux list-panes",
+                    "git log --oneline -3"):
+            out = self._plain(tool="Bash", command=cmd, presence_age=3600)
+            self.assertEqual(out.returncode, 0,
+                             "%s must pass while away: %s" % (cmd, out.stderr))
+
+    def test_away_main_small_edit_still_passes(self):
+        out = self._plain(tool="Edit", content=SMALL, presence_age=3600)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_away_subagent_never_blocked(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=3600,
+                          agent_id="aWORKER128")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_away_bypass_marker_still_works(self):
+        sid = "t-mg-away-bp-" + uuid.uuid4().hex[:6]
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=3600,
+                          sid=sid, bypass="new")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- threshold is tunable, and switchable off ----
+
+    def test_away_threshold_env_tunable(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=400,
+                          extra_env={"AIRULESET_MAIN_GUARD_AWAY_S": "300"})
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_under_the_threshold_passes(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=400)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_zero_disables_the_away_condition(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=99999,
+                          extra_env={"AIRULESET_MAIN_GUARD_AWAY_S": "0"})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_garbage_threshold_falls_back_to_the_default(self):
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=1800,
+                          extra_env={"AIRULESET_MAIN_GUARD_AWAY_S": "abc"})
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- nothing is removed: the two existing conditions are unchanged ----
+
+    def test_goal_armed_attended_session_still_blocks(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command=self.SWEEP, presence_age=30,
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_fable_attended_session_still_blocks(self):
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Write", presence_age=30,
+                          transcript_text=transcript("claude-fable-5"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- the block log must say WHICH rule engaged ----
+
+    def test_away_block_is_tagged_in_the_block_log(self):
+        sid = "t-mg-awaylog-" + uuid.uuid4().hex[:8]
+        self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid)
+        log = Path("/tmp/airuleset-main-exec-block.log")
+        lines = [ln for ln in log.read_text().splitlines() if sid in ln]
+        self.assertTrue(lines, "away block was not logged")
+        self.assertIn("USER_AWAY", lines[-1])
+
+
+class BypassCarriesAReason128(unittest.TestCase):
+    """#128 ask 3 — the bypass must be auditable, not merely one-shot.
+
+    What the ticket read as abuse ("187 bypasses in one session") is a
+    PRE-#80 artifact: 186 of those 193 log lines predate `7bcbafe`
+    (2026-07-26T20:25:17), when one `touch` disabled the hook for the rest
+    of the session. After it the same session armed the marker 4 times in
+    2.5 days, each paired 1:1 with a consume. Nothing automated arms it
+    either — watchdog job 22 only ever DELETES a stale marker — the six
+    real arms were all emitted by the MODEL itself, inline, right after a
+    block, because the block message advertises the escape.
+
+    The real remaining gap is that the arm recorded NO REASON (it lived in
+    the tool description and an `echo`, never in the log), so an audit
+    cannot read why any exception was taken. So a marker must now CARRY its
+    reason: `echo "<reason>" > /tmp/airuleset-main-exec-ok-<sid>`. An empty
+    or throwaway marker is refused (and cleared, so it cannot linger), and
+    the reason is logged on both the arm and the consume."""
+
+    MIN = 8          # a reason shorter than this is not a reason
+
+    def _marker(self, sid, legacy=False):
+        return Path("/tmp/airuleset-%s-exec-ok-%s"
+                    % ("fable" if legacy else "main", sid))
+
+    def _run(self, sid, command="grep -rn 'TODO' ."):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command, sid=sid,
+                           transcript_text=goal_armed_transcript())
+
+    def _bypass_lines(self, sid):
+        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        if not log.exists():
+            return []
+        return [ln for ln in log.read_text().splitlines() if sid in ln]
+
+    def test_marker_with_a_reason_is_honored(self):
+        sid = "t-mg-reason-ok-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertFalse(m.exists(), "an honored marker is still consumed")
+
+    def test_empty_marker_is_refused(self):
+        sid = "t-mg-reason-empty-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 2,
+                         "an empty marker must no longer disable the guard")
+
+    def test_whitespace_only_marker_is_refused(self):
+        sid = "t-mg-reason-ws-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("   \n\t\n")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.assertEqual(self._run(sid).returncode, 2)
+
+    def test_throwaway_reason_is_refused(self):
+        sid = "t-mg-reason-short-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("ok")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.assertEqual(self._run(sid).returncode, 2)
+
+    def test_a_refused_marker_is_cleared_not_left_lying_around(self):
+        sid = "t-mg-reason-clear-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid)
+        self.assertFalse(m.exists(),
+                         "a refused marker must not sit in /tmp forever")
+
+    def test_refusal_is_logged_so_the_audit_sees_it(self):
+        sid = "t-mg-reason-log-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid)
+        lines = self._bypass_lines(sid)
+        self.assertTrue(lines, "a refused marker must be logged")
+        self.assertIn("refused", lines[-1])
+
+    def test_the_reason_reaches_the_bypass_log(self):
+        sid = "t-mg-reason-audit-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("terminal driver spike — needs the live rig in main")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid)
+        lines = self._bypass_lines(sid)
+        self.assertTrue(lines)
+        self.assertIn("terminal driver spike", lines[-1],
+                      "the audit must be able to read WHY, from the log alone")
+
+    def test_multiline_reason_does_not_break_the_log_format(self):
+        sid = "t-mg-reason-multi-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("first line of the reason\nsecond line\nthird")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        before = len(Path("/tmp/airuleset-main-exec-bypass.log").read_text()
+                     .splitlines()) if Path(
+                         "/tmp/airuleset-main-exec-bypass.log").exists() else 0
+        self._run(sid)
+        after = Path("/tmp/airuleset-main-exec-bypass.log").read_text().splitlines()
+        self.assertEqual(len(after) - before, 1,
+                         "one bypass = exactly one log line")
+        self.assertIn("first line of the reason", after[-1])
+
+    def test_legacy_marker_needs_a_reason_too(self):
+        sid = "t-mg-reason-legacy-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid, legacy=True)
+        m.write_text("")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.assertEqual(self._run(sid).returncode, 2)
+        m.write_text(BYPASS_REASON)
+        self.assertEqual(self._run(sid).returncode, 0,
+                         "the legacy marker still works when it carries a reason")
+
+    # ---- arming must never be blocked or counted, in EITHER form ----
+
+    def test_arming_by_redirect_is_never_blocked(self):
+        sid = "t-mg-arm-echo-" + uuid.uuid4().hex[:8]
+        cmd = ('echo "reason: the content is the judgment itself" '
+               '> /tmp/airuleset-main-exec-ok-%s' % sid)
+        out = self._run(sid, command=cmd)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_arming_by_redirect_is_logged_as_an_arm(self):
+        sid = "t-mg-arm-echolog-" + uuid.uuid4().hex[:8]
+        cmd = ('printf %%s "reason: policy authoring" '
+               '> /tmp/airuleset-main-exec-ok-%s' % sid)
+        self._run(sid, command=cmd)
+        lines = self._bypass_lines(sid)
+        self.assertTrue(lines, "arming must be logged")
+        self.assertIn("bypass-arm", lines[-1])
+
+    def test_touch_arming_is_still_never_blocked(self):
+        # `touch` no longer produces a USABLE marker, but the command itself
+        # must still pass — the counter must never sit in front of the
+        # escape hatch (#80's acceptance constraint).
+        sid = "t-mg-arm-touch-" + uuid.uuid4().hex[:8]
+        out = self._run(sid,
+                        command="touch /tmp/airuleset-main-exec-ok-%s" % sid)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_the_block_message_states_the_reason_carrying_form(self):
+        sid = "t-mg-arm-msg-" + uuid.uuid4().hex[:8]
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("airuleset-main-exec-ok-", out.stderr)
+        self.assertRegex(out.stderr, r"echo\s+[\"'<]")
+
+
+class CombinedAssertionFlags128(unittest.TestCase):
+    """#128, found while replaying the 2026-07-28 corpus: #80 exempts
+    `grep -c` / `grep -q` as ASSERTIONS ("returns one number / nothing"),
+    but the check compares whole tokens, so the COMBINED short-flag form
+    real commands actually use — `grep -cE '^(FAILED|ERROR)' /tmp/full10.log`
+    — was not recognised and blocked. Faithfulness fix to an already-settled
+    exemption, not a policy change: an unbounded `grep -rn` is untouched."""
+
+    def _armed(self, command):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript())
+
+    def test_combined_count_flag_is_an_assertion(self):
+        out = self._armed("grep -cE '^(FAILED|ERROR)' /tmp/full10.log")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_combined_quiet_flag_is_an_assertion(self):
+        out = self._armed("grep -qE 'panic|fatal' /tmp/run.log")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_combined_count_with_recursive_is_still_a_count(self):
+        out = self._armed("grep -rc 'TODO' src/")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_plain_count_flag_unchanged(self):
+        out = self._armed("grep -c 'TODO' file.py")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_context_flag_is_not_a_count(self):
+        # -C is CONTEXT (dumps matches with surrounding lines) — the
+        # case-sensitivity here is load-bearing, not incidental
+        out = self._armed("grep -C3 'TODO' file.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_ordinary_sweep_still_blocks(self):
+        out = self._armed("grep -rnE 'TODO|FIXME' .")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
 class TestWiringAndSkill(unittest.TestCase):
