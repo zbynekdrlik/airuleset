@@ -144,7 +144,7 @@ set -euo pipefail
 #     start fails open. Not agent-controllable, but real. Measured on dev1 the
 #     whole hook runs in a median 33ms (min 29, max 41) against that 5000ms
 #     budget, and the gap is not closeable from inside a hook — it is tracked
-#     as its own ticket rather than as a bullet in a decision ticket (#156).
+#     as its own ticket (#162) rather than as a bullet in a decision ticket.
 #   - Fail-closed covers a payload that is PRESENT and unparseable, never an
 #     EMPTY one: no payload at all still exits 0. See the comment at the read
 #     loop for why that specific row was left open rather than closed.
