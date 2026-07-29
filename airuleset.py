@@ -3680,8 +3680,38 @@ def cmd_secret(args):
     `request` prints a one-shot URL, the user posts the value from their own
     browser, and the session learns only that the NAME is ready. The value is
     stored 0600 under `~/.claude/secrets/` and is handed to a child process by
-    `exec` — it is never printed by any action here, and there is deliberately
-    no action that could print it.
+    `exec` — no action here prints it, and there is deliberately no action that
+    could.
+
+    WHAT THAT DOES NOT COVER — the residuals, stated here because this is where
+    a reader forms their belief about the channel (#153 finding 3):
+
+      * The store is readable by the AGENT'S OWN UID. "No action here prints
+        it" is a claim about this command, not about the box: `cat` is not one
+        of this command's actions. That path is now closed by an artifact,
+        `hooks/block-vault-store-read.sh` — but it is a GUARDRAIL, not a
+        boundary, because the agent's uid holds NOPASSWD sudo on these boxes,
+        so no store location is out of its reach. It guarantees the unsafe path
+        is refused by default and that circumventing it leaves an artifact.
+      * `exec`'s CHILD is unconstrained on disk. Output redaction covers the
+        captured fd 1/2 only; nothing stops the child WRITING the value
+        anywhere, including a git-tracked file — `secret exec DB -- sh -c
+        'echo "$DB" > config.ini'` is not something any output filter can see.
+        The containment that would close it is #154, blocked on a product
+        decision.
+      * `exec` BUFFERS all child output until the child exits
+        (`capture_output=True`, required in order to filter it). So there is no
+        streaming for a long-running or interactive child, and if the CLI is
+        killed mid-run the child's output is lost entirely.
+      * `request` PRINTS a capability URL into the transcript BY DESIGN — that
+        is how the user receives it. The token in it is live for the endpoint
+        TTL (default 600s, capped at 3600s), so for that window anyone who can
+        read the transcript AND reach a private interface can POST a SUBSTITUTE
+        credential before the user does. The nonce binds the endpoint to the
+        request, not to whoever posts. Keep the TTL short; `secret forget`
+        cancels a pending endpoint.
+      * TTL is swept HOURLY (watchdog job 29), so a value stored with the 60s
+        minimum `keep` can survive up to ~1h past its expiry.
     """
     import secrets as _secrets
     import subprocess

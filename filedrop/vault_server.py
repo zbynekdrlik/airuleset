@@ -38,6 +38,18 @@ THREE THINGS THIS PROCESS MUST NEVER DO, and how each is prevented:
     here by `is_private()`, an implementation deliberately INDEPENDENT of
     `filedrop._is_private`, so a future regression in that one still cannot
     put a credential endpoint on a box's public IP.
+
+AND THE ONE THIS PROCESS CANNOT PREVENT (#153 finding 3). The reasoning above
+is about a local uid reading argv — but the capability URL, token and all, is
+PRINTED INTO THE SESSION TRANSCRIPT by design, because printing it is how the
+user receives it. So for the endpoint's whole TTL (default 600s, capped 3600s)
+anyone who can read the transcript AND reach one of the private bind addresses
+can POST their own value first and SUBSTITUTE the credential the agent is about
+to use. The nonce binds this endpoint to the REQUEST that created it — it does
+not authenticate the poster, and nothing here can: the endpoint's entire threat
+model is "whoever holds the URL is the user". Keep TTLs short, and treat a
+credential whose URL sat in a transcript as one that may have been chosen by
+someone else.
 """
 import hmac
 import ipaddress

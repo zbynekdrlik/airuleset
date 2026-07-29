@@ -3337,6 +3337,15 @@ def vault_purge_job(now, state, purge_fn=None, dry_run=False):
     job never imports a store path in a test, and so an existing caller that
     knows nothing about it sees no behavior change — the same "wired = on"
     convention as jobs 3/7/8/11/13.
+
+    THE GRANULARITY IS THE HONEST TTL (#153 finding 3). The gate is an HOUR
+    bucket, so a value whose `keep` is SHORTER than an hour outlives its own
+    expiry: at the 60s minimum it can sit on disk for up to ~1h before this
+    sweep reaches it. The CLI's opportunistic `purge()` shortens that only when
+    someone happens to run `airuleset.py secret` in the meantime, which for the
+    one-off shape of this feature is usually never. The guarantee is "a value
+    does not lie on disk indefinitely" — never "it is gone the second its TTL
+    passes". Anything needing the stricter property must call `secret forget`.
     """
     if purge_fn is None:
         return []

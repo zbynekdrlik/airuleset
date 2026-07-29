@@ -19,6 +19,34 @@ refuses to `git add` any basename containing "secret"/"credential". Renaming is
 that guard's prescribed remedy; its bypass marker is for content that genuinely
 cannot be renamed, which a new module is not.
 
+WHAT THIS MODULE DOES **NOT** GIVE YOU — read this before trusting the list
+below (#153 finding 1). The properties are about what THIS module's own code
+does. They say nothing about a DIFFERENT process, and the store is 0600 owned
+by the very uid the agent's Bash runs as, so for the life of #144 a single
+`cat ~/.claude/secrets/<NAME>.secret` put the value in the transcript. The read
+path is now closed by an artifact — `hooks/block-vault-store-read.sh`, a
+PreToolUse(Bash) hook that refuses any command reading or writing the store and
+points at `secret exec`. That hook is a GUARDRAIL, not a security boundary:
+the agent's uid holds `NOPASSWD: ALL` sudo on these boxes, so no store location
+is beyond its reach and uid separation (a root-owned store, a service account,
+a setuid helper) buys nothing here — each is one `sudo cat` away. What is
+guaranteed is that the unsafe path is refused by default, so the leak cannot
+happen by reflex, and that circumventing it leaves an artifact.
+
+THE STORE DIR IS SHARED AND PRE-EXISTING. `~/.claude/secrets/` already held
+per-user `*.env` files for the sub-dev boxes before this channel existed. Two
+consequences a reader should know: `ensure_dir()` re-`chmod 0700`s that shared
+dir on EVERY call, so it tightens whatever else lives there; and
+`assert_safe_store_dir()` refuses a SYMLINK, which hard-fails the whole channel
+(not just one value) on any box where that path is a link. Reads stay benign —
+`list_entries` filters on `.secret`/`.meta` with a name check — but the dir is
+not this channel's private property.
+
+TTL IS SWEPT HOURLY, NOT TO THE SECOND. `purge()` runs opportunistically from
+the CLI and from watchdog job 29, whose gate is an hour bucket. A value stored
+with the 60s minimum `keep` therefore survives up to ~1h past its expiry. The
+guarantee is "not indefinitely", never "to the second".
+
 THE THREE NO-LEAK PROPERTIES THIS MODULE IS RESPONSIBLE FOR:
 
   1. Nothing here returns a value except `read_value()`, whose ONE caller is
