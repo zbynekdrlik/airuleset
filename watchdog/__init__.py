@@ -747,7 +747,12 @@ def _is_separator_line(s):
     return len(core) >= 3 and all(c in _SEP_CHARS for c in core)
 
 
-_QUEUED_PLACEHOLDER_TEXT = "press up to edit queued messages"
+# CC also renders a COUNTED form of the same hint once more than one message
+# is queued ("Press up to edit 2 queued messages") — a regex, not the
+# original exact-equality check, so every counted variant normalizes too
+# (#176 item 4: the exact check missed this shape and misread it as a real
+# held draft).
+_QUEUED_PLACEHOLDER_RX = re.compile(r"^press up to edit(?:\s+\d+)?\s+queued messages$")
 
 
 def _find_boundary_line(captured):
@@ -785,8 +790,9 @@ def _find_boundary_line(captured):
 
     A boundary line showing CC's greyed `Press up to edit queued messages`
     HINT (an otherwise-EMPTY box, recallable via the Up arrow — never text
-    the user typed) is normalized to a bare `❯` before returning (#65
-    acceptance: this placeholder is never mistaken for a real draft by any
+    the user typed), singular or a COUNTED variant ("... 2 queued messages"),
+    is normalized to a bare `❯` before returning (#65 acceptance, widened by
+    #176 item 4: this placeholder is never mistaken for a real draft by any
     caller — `_has_free_prompt`, `_input_line_text`, `_classify_boundary`
     all resolve through this one function).
 
@@ -794,7 +800,7 @@ def _find_boundary_line(captured):
     locates one at all (e.g. the whole capture is chrome, or it's empty)."""
     line = _find_boundary_line_raw(captured)
     if line is not None and line.startswith("❯"):
-        if line[1:].strip().lower() == _QUEUED_PLACEHOLDER_TEXT:
+        if _QUEUED_PLACEHOLDER_RX.match(line[1:].strip().lower()):
             return "❯"
     return line
 
@@ -7747,7 +7753,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
           past `max_nudges` it does NOT give up — it keeps nudging forever at a
-          widening interval (#175), with a one-shot "gave up" ping alongside;
+          widening interval (#175), with a one-shot "gave up" ping alongside.
+          #176: a pane idle at `❯` but holding a FOREIGN DRAFT is genuinely idle,
+          not busy — `_classify_boundary` tells it apart from a real foreground
+          turn, and delivery goes through `deliver_with_stash` (never a raw
+          keystroke over the draft; an aborted stash never burns a retry). A
+          pane that IS genuinely busy (or has no locatable boundary at all)
+          gets job 4's busypane shape: zero keystrokes, one deduped ping per
+          episode once the stall runs past 2x grace — a 529 pane can never
+          again go silent with no keystroke and no ping;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
@@ -8277,11 +8291,56 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 # idle at a free `❯`. But if the user MANUALLY resumed within the idle
                 # window, a foreground turn/agent is now running (spinner, no free `❯`) and
                 # its first entry hasn't landed yet — typing `continue` would INTERRUPT it
-                # (the #233 scar). Never inject unless the pane shows a free prompt; skip
-                # WITHOUT burning a retry (the next poll re-checks).
+                # (the #233 scar). Never inject unless the pane shows a free prompt.
+                #
+                # #176 ROOT CAUSE: `pane_at_idle_prompt` alone (bare_only=True) cannot
+                # distinguish "a real foreground turn is running" from "the pane is
+                # genuinely idle at `❯` but its input box holds a FOREIGN DRAFT" — both
+                # read as `not pane_at_idle_prompt`. The gatekeeper incident (2026-07-29)
+                # was the second shape: a stale draft sat in the box for 36 minutes while
+                # job 1 silently skipped 32 consecutive polls, wrote no state and pinged
+                # nobody. `_classify_boundary` (#46) tells the two apart: `kind == "input"`
+                # with a non-empty draft means the session IS idle — never busy — so
+                # deliver via `deliver_with_stash` (the verified idle-with-draft protocol,
+                # already used by jobs 7/9/20) instead of refusing forever. Only
+                # `kind != "input"` (a real spinner/dialog, or no boundary locatable at
+                # all) is genuinely busy and is still NEVER typed into.
+                draft_pending = False
                 if not pane_at_idle_prompt(captured):
-                    logs.append("skip busy-pane (api-error) %s" % (project or pid))
-                    continue
+                    boundary_kind, boundary_txt = _classify_boundary(captured)
+                    if boundary_kind == "input" and boundary_txt:
+                        draft_pending = True
+                    else:
+                        # Genuinely busy (or no boundary at all) → NEVER type. Silence
+                        # must become impossible (#176 item 2): job 4's escalation shape
+                        # (`:8536`) — a state record and exactly ONE ping per episode —
+                        # so a 529 pane can never again go silent with no keystroke and
+                        # no ping. A DEDICATED state prefix ("apierr-busypane:", not job
+                        # 4's own "busypane:") keeps the two independent episodes from
+                        # ever clobbering each other's bookkeeping for the same session.
+                        # Logging the classified kind + a snippet of the offending text
+                        # (item 3) names the shape on every occurrence instead of every
+                        # skip being an indistinguishable "busy-pane".
+                        bkey = "apierr-busypane:" + key
+                        b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
+                        b["last_seen"] = int(now)
+                        state[bkey] = b
+                        snippet = (boundary_txt or "")[:40]
+                        logs.append("skip busy-pane (api-error) %s [%s txt=%r]"
+                                    % (project or pid, boundary_kind, snippet))
+                        if not b["pinged"] and idle > 2 * grace:
+                            b["pinged"] = True
+                            logs.append("busy-pane-wedged (api-error) %s [%s] idle=%dm "
+                                        "— ping only (never type)"
+                                        % (project, key, int(idle // 60)))
+                            send_fn("\U0001f6d1 **%s** — API chyba (529/…) drží pane už "
+                                    "%d min, no pane vyzerá zaneprázdnená (%s) — nepíšem "
+                                    "do nej klávesy, over ju prosím ručne."
+                                    % (project, int(idle // 60), boundary_kind),
+                                    owner=owner,
+                                    dedup_key="apierr-busypane:%s:%s" % (key, b["first_seen"]),
+                                    dry_run=dry_run)
+                        continue
                 stalled.add(key)
                 err_hash = _hash(err_text)
                 # captured BEFORE decide() mutates state — the one-shot give-up ping
@@ -8293,7 +8352,6 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 # when it really began (idle = age of the last transcript write).
                 action, entry = decide(state, key, err_hash, now, grace, interval,
                                        max_nudges, first_seen_seed=now - idle)
-                state[key] = entry
                 # first_seen in the dedup key so a recover→re-stall still pings
                 # (notify's own dedup TTL is 14 days).
                 fs = int(entry.get("first_seen", now))
@@ -8301,7 +8359,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
                     # mark dormant (decide() then returns 'wait' forever for this hash —
                     # #175's widening back-off does NOT apply here: only the external
-                    # reset clock fixes a quota cap, never re-nudging).
+                    # reset clock fixes a quota cap, never re-nudging). No pane interaction
+                    # at all, so draft_pending is irrelevant here.
                     entry["nudges"], entry["escalated"], entry["dormant"] = [], True, True
                     state[key] = entry
                     logs.append("usage-cap %s — ping only, no continue" % project)
@@ -8310,9 +8369,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge":
                     n = len(entry["nudges"])
-                    logs.append("nudge#%d %s [%s]" % (n, project, key))
-                    if not dry_run:
-                        send_continue(pid, NUDGE_TEXT, run)
+                    if draft_pending:
+                        # #176 item 1: idle-with-a-draft delivers via the VERIFIED
+                        # stash protocol, never a raw keystroke over the user's own
+                        # text. An ABORTED stash (#176 item 5) must NOT burn a
+                        # retry — `state[key]` stays untouched (the pre-decide()
+                        # value) and the next poll re-derives from scratch.
+                        delivered = True if dry_run else deliver_with_stash(
+                            pid, NUDGE_TEXT, run, captured=captured, logs=logs)
+                        if not delivered:
+                            logs.append("skip stash-abort (api-error) %s [%s]"
+                                        % (project or pid, key))
+                            continue
+                        state[key] = entry
+                        logs.append("nudge#%d %s [%s] (stash)" % (n, project, key))
+                    else:
+                        state[key] = entry
+                        logs.append("nudge#%d %s [%s]" % (n, project, key))
+                        if not dry_run:
+                            send_continue(pid, NUDGE_TEXT, run)
                     if n == 1:                 # first nudge → tell the user it stalled
                         send_fn(compose_api_error_alert(project, err_text),
                                 owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
@@ -8328,6 +8403,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
                                 dry_run=dry_run)
                 else:
+                    state[key] = entry
                     logs.append("%s %s [%s]" % (action, project, key))
                 continue                       # handled as an api-error stall
 
@@ -8655,6 +8731,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             continue                       # account-wide usage state, not a session
         if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
+                or k.startswith("apierr-busypane:")
                 or k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
                 or k.startswith("subagent-busypane:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
