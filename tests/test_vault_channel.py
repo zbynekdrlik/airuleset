@@ -452,9 +452,19 @@ class TestExecDoesNotHandTheChildTheTranscript(_StoreCase):
         self.assertIn("hello from the child", out.stdout)
 
     def test_undecodable_child_output_does_not_crash_the_wrapper(self):
-        out = self._exec_printing(
-            "import sys;sys.stdout.buffer.write(bytes(range(256)))")
+        # BYTES mode deliberately: the wrapper must pass a child's raw output
+        # through untouched, so a text-mode harness here would be asserting
+        # that Python can decode arbitrary bytes, not anything about the code.
+        st.store_value("DB_PASS", VAL.encode(), keep_s=600)
+        env = dict(os.environ)
+        env.update(self._env)
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", "exec",
+             "DB_PASS", "--", sys.executable, "-c",
+             "import sys;sys.stdout.buffer.write(bytes(range(256)))"],
+            capture_output=True, timeout=90, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, bytes(range(256)))
 
     def test_the_stdin_form_is_filtered_as_well(self):
         st.store_value("DB_PASS", VAL.encode(), keep_s=600)

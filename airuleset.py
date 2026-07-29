@@ -3443,6 +3443,52 @@ def _secret_url_line(ip, port, token, iface=None):
     return "%s   [LAN — NEŠIFROVANÉ (plain HTTP), použi radšej tailscale]" % url
 
 
+def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
+    """`blob` with every anticipated rendering of `value` replaced.
+
+    A child of `secret exec` must not be able to put the credential on the
+    CLI's stdout/stderr, because those are the agent's transcript — the one
+    place this whole channel exists to keep the value out of. The child's argv
+    is chosen by the agent, so `secret exec DB_PASS -- env` was a one-command
+    leak and any verbose or failing child (`curl -v`, `bash -x`, a tool that
+    echoes its config on error) was an accidental one.
+
+    Fragments shorter than 4 bytes are NOT redacted: at that length the value
+    matches ordinary text everywhere and the filter would destroy the child's
+    output instead of protecting anything.
+
+    HONEST LIMIT, stated rather than implied: this stops the value appearing
+    VERBATIM or in an obvious encoding. A child that deliberately transforms it
+    (encrypts it, reverses it, prints it a character per line) still defeats
+    the filter — nothing at this layer can prevent that, because the session
+    genuinely has to be able to USE the credential. The containment that would
+    (resolving the command from a user-written template instead of agent argv)
+    is a product decision, filed separately.
+    """
+    import base64
+    import urllib.parse
+
+    if not value:
+        return blob
+    forms = {value, value.strip()}
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is not None:
+        forms.add(urllib.parse.quote(text).encode())
+        forms.add(urllib.parse.quote_plus(text).encode())
+    forms.add(base64.b64encode(value))
+    forms.add(base64.b64encode(value).rstrip(b"="))
+    forms.add(base64.urlsafe_b64encode(value).rstrip(b"="))
+    forms.add(value.hex().encode())
+    out = blob
+    # Longest first, so a form that contains another does not leave a tail.
+    for form in sorted((f for f in forms if len(f) >= 4), key=len, reverse=True):
+        out = out.replace(form, marker)
+    return out
+
+
 def _secret_apply_remainder(args):
     """Move the flags argparse's REMAINDER swallowed back onto `args`.
 
@@ -3572,11 +3618,15 @@ def cmd_secret(args):
             print("secret exec: %s" % e, file=sys.stderr)
             sys.exit(1)
         st.log_event("used", nm)
+        # NEVER let the child inherit fd 1/2: those are the agent's transcript.
+        # Capture, filter, then re-emit — so a child that echoes its own
+        # environment or config cannot write the credential into a file nobody
+        # can revoke (adversarial review, finding 1).
         if getattr(args, "stdin", False):
             # stdin, so the value is not in the child's environment at all
             # (/proc/<pid>/environ is owner-only, but a child that dumps its own
             # env into a log is a real shape).
-            rc = subprocess.run(cmd, input=value).returncode
+            res = subprocess.run(cmd, input=value, capture_output=True)
         else:
             env = dict(os.environ)
             try:
@@ -3585,8 +3635,12 @@ def cmd_secret(args):
                 print("secret exec: %s is not UTF-8 — use --stdin" % nm,
                       file=sys.stderr)
                 sys.exit(1)
-            rc = subprocess.run(cmd, env=env).returncode
-        sys.exit(rc)
+            res = subprocess.run(cmd, env=env, capture_output=True)
+        for stream, data in ((sys.stdout, res.stdout), (sys.stderr, res.stderr)):
+            if data:
+                stream.buffer.write(_secret_redact(data, value))
+                stream.flush()
+        sys.exit(res.returncode)
 
     # --- request -----------------------------------------------------------
     nm = _need_name()
