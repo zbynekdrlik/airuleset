@@ -120,10 +120,17 @@ ACTION (state machine, see `decide`)
 first sighting -> 'wait' (record first_seen); 'nudge' #1 right away IF already
                  >=GRACE stuck (seeded from now-idle), else after GRACE (+ ONE ping)
 +INTERVAL each      -> 'nudge' #2, #3
-after MAX_NUDGES     -> 'escalate' (ping "gave up", stop — no continue-spam during
-                        a long Anthropic outage)
+past MAX_NUDGES      -> KEEPS 'nudge'-ing forever (#175 — a multi-hour upstream
+                        529 storm used to strand a session after ~15-20 min even
+                        with a healthy watchdog), at a WIDENING interval (300s x3,
+                        then 600/1200/1800/1800/...s, capped). The one-shot "gave
+                        up" Discord ping still fires exactly once, the moment the
+                        attempt past MAX_NUDGES is due (never noop, never spammed
+                        again for the same err_hash).
 USAGE/QUOTA cap      -> ping ONCE, NO `continue` (time-based; only the reset clock
-                        fixes it — CC auto-resumes when the cap resets)
+                        fixes it — CC auto-resumes when the cap resets); this path
+                        alone stays permanently dormant (a quota reset is not
+                        something re-nudging can fix)
 recovered            -> key dropped from state (a future error starts fresh)
 
 A session waiting on a real `❓` is NEVER auto-continued: its last assistant entry
@@ -143,10 +150,16 @@ import time
 from pathlib import Path
 
 # Tunables (the CLI may override; defaults match the user's spec: 5-min grace,
-# `continue`, 3 retries then give up).
+# `continue`, 3 retries at the base cadence, then widen — see BACKOFF_CAP_SECONDS).
 GRACE_SECONDS = 5 * 60
 RETRY_INTERVAL_SECONDS = 5 * 60
 MAX_NUDGES = 3
+# (#175) Past MAX_NUDGES, decide() no longer gives up — it keeps nudging
+# forever, doubling the interval each attempt (300 -> 600 -> 1200 -> 1800),
+# capped here so a multi-hour upstream outage (a 529 storm) is covered
+# cheaply (one `continue` per interval) instead of stranding the session
+# once the fixed 3-strike policy used to run out after ~15-20 min.
+BACKOFF_CAP_SECONDS = 30 * 60
 NUDGE_TEXT = "continue"
 # A session sitting on an interactive prompt (AskUserQuestion / permission /
 # plan-approval) this long with no progress = the user is away → ping (NEVER act).
@@ -1086,10 +1099,11 @@ def _human_clock(epoch):
 
 
 def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
-           interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES, first_seen_seed=None):
+           interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES, first_seen_seed=None,
+           backoff_cap=BACKOFF_CAP_SECONDS):
     """Pure decision for ONE stalled session. Returns (action, entry) where action
-    is 'nudge' | 'wait' | 'escalate' | 'noop'. `entry` is the updated state record
-    (caller persists state[key] = entry).
+    is 'nudge' | 'wait'. `entry` is the updated state record (caller persists
+    state[key] = entry).
 
     The grace is tracked HERE, from `first_seen` (the moment the session's last
     reply became an api-error), NOT from transcript mtime — Claude Code's own
@@ -1099,8 +1113,27 @@ def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
     with `now - idle` so an already-stale stall counts from when it really began);
     if that is already >= grace old the first `continue` goes out NOW, else we
     `wait` and let Claude Code recover on its own for `grace` first. Thereafter a
-    nudge fires every `interval`; after `max_nudges` it escalates once, then noops.
-    A different err_hash (a new error) restarts the cycle."""
+    nudge fires every `interval`, for the first `max_nudges` attempts.
+
+    PAST `max_nudges` the policy no longer gives up (#175 — a multi-hour upstream
+    529 storm used to strand a session after ~15-20 min of silence even with a
+    healthy watchdog, and the hash-stability rule made it worse: a REPEATED
+    identical error is exactly the case that never re-arms). Nudging CONTINUES
+    INDEFINITELY, but the retry interval WIDENS each attempt (doubling from
+    `interval`, capped at `backoff_cap`) so a long outage is covered cheaply
+    (one `continue` per interval) instead of hammering a dead endpoint: attempts
+    #1-#3 at `interval` (300s) spacing, then 600 / 1200 / 1800 / 1800 / ... The
+    one-shot "gave up" Discord ping still fires exactly once — the caller detects
+    it by `entry['escalated']` flipping False -> True on the attempt that FIRST
+    crosses `max_nudges` (the (max_nudges + 1)-th nudge) and fires its own ping
+    then; every later call leaves `escalated` True with no further ping. A
+    different err_hash (a new error) restarts the whole cycle from scratch,
+    including a fresh one-shot escalation.
+
+    A caller-forced `entry['dormant']` (used for a usage/quota cap, where only
+    the external reset clock — not `continue` — can fix it) makes this return
+    'wait' forever regardless of the schedule above; only a new err_hash clears
+    it."""
     e = state.get(key)
     if e is None or e.get("hash") != err_hash:
         fs = int(first_seen_seed) if first_seen_seed is not None else int(now)
@@ -1109,19 +1142,22 @@ def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
             entry["nudges"] = [int(now)]
             return "nudge", entry
         return "wait", entry              # fresh → give Claude Code `grace` to recover
-    if e.get("escalated"):
-        return "noop", e
+    if e.get("dormant"):
+        return "wait", e                 # permanently held (usage cap) until a new hash
     nudges = list(e.get("nudges", []))
     last = nudges[-1] if nudges else e.get("first_seen", now)
-    needed = grace if not nudges else interval
+    n = len(nudges)
+    if n < max_nudges:
+        needed = grace if not nudges else interval
+    else:
+        step = n - max_nudges + 1        # 1, 2, 3, ... widening back-off step
+        needed = min(interval * (2 ** step), backoff_cap)
     if (now - last) < needed:
         return "wait", e
-    if len(nudges) >= max_nudges:
-        e2 = dict(e)
-        e2["escalated"] = True
-        return "escalate", e2
     e2 = dict(e)
     e2["nudges"] = nudges + [int(now)]
+    if n >= max_nudges and not e.get("escalated"):
+        e2["escalated"] = True           # one-shot: caller fires the give-up ping now
     return "nudge", e2
 
 
@@ -7710,6 +7746,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
+          past `max_nudges` it does NOT give up — it keeps nudging forever at a
+          widening interval (#175), with a one-shot "gave up" ping alongside;
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
@@ -8246,6 +8284,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     continue
                 stalled.add(key)
                 err_hash = _hash(err_text)
+                # captured BEFORE decide() mutates state — the one-shot give-up ping
+                # (#175) fires on the False->True transition of entry["escalated"],
+                # never on its raw value (which stays True on every later call).
+                prev = state.get(key) or {}
+                prev_escalated = bool(prev.get("escalated")) if prev.get("hash") == err_hash else False
                 # seed first_seen with now-idle so an already-stale stall counts from
                 # when it really began (idle = age of the last transcript write).
                 action, entry = decide(state, key, err_hash, now, grace, interval,
@@ -8256,8 +8299,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 fs = int(entry.get("first_seen", now))
                 if action == "nudge" and is_usage_cap(err_text):
                     # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
-                    # mark escalated (no nudge, no retries, no false giveup).
-                    entry["nudges"], entry["escalated"] = [], True
+                    # mark dormant (decide() then returns 'wait' forever for this hash —
+                    # #175's widening back-off does NOT apply here: only the external
+                    # reset clock fixes a quota cap, never re-nudging).
+                    entry["nudges"], entry["escalated"], entry["dormant"] = [], True, True
                     state[key] = entry
                     logs.append("usage-cap %s — ping only, no continue" % project)
                     send_fn(compose_api_error_alert(project, err_text)
@@ -8271,12 +8316,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     if n == 1:                 # first nudge → tell the user it stalled
                         send_fn(compose_api_error_alert(project, err_text),
                                 owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
-                elif action == "escalate":
-                    logs.append("escalate %s [%s] — gave up after %d nudges" % (project, key, max_nudges))
-                    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                            "stále nepohlo — treba zásah." % (project, max_nudges))
-                    send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                            dry_run=dry_run)
+                    # (#175) one-shot "gave up" ping the moment the (max_nudges+1)-th
+                    # nudge is due — nudging itself NEVER stops; only this ping is
+                    # one-shot per err_hash.
+                    if entry.get("escalated") and not prev_escalated:
+                        logs.append("escalate %s [%s] — still stuck after %d nudges, "
+                                     "backing off (keeps retrying)" % (project, key, max_nudges))
+                        body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+                                "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
+                                "postupne predlžuje až na 30 min.)" % (project, max_nudges))
+                        send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+                                dry_run=dry_run)
                 else:
                     logs.append("%s %s [%s]" % (action, project, key))
                 continue                       # handled as an api-error stall

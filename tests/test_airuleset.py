@@ -4308,12 +4308,15 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(a, "nudge")
         self.assertEqual(len(e["nudges"]), 3)
         st["k"] = e
-        a, e = self._dec(st, "k", "h", now + 1200, seed=now)   # max → escalate once
-        self.assertEqual(a, "escalate")
-        self.assertTrue(e["escalated"])
+        a, e = self._dec(st, "k", "h", now + 1500, seed=now)   # +600 (widened) → #4
+        self.assertEqual(a, "nudge")                # (#175) still nudges — never gives up
+        self.assertEqual(len(e["nudges"]), 4)
+        self.assertTrue(e["escalated"], "one-shot give-up flag set from nudge #4 on")
         st["k"] = e
-        a, e = self._dec(st, "k", "h", now + 1500, seed=now)   # then noop
-        self.assertEqual(a, "noop")
+        a, e = self._dec(st, "k", "h", now + 2700, seed=now)   # +1200 (widened) → #5
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 5)
+        self.assertTrue(e["escalated"], "escalated stays True, no repeat give-up")
 
     def test_decide_backoff_never_gives_up_on_a_multi_hour_stall(self):
         # #175: a multi-hour upstream 529 storm used to strand a session — the
@@ -4800,20 +4803,25 @@ class TestApiWatchdog(TestCase):
         self._deliver(now, prefix, dry_run=True)
         self.assertTrue(os.path.exists(pf), "dry_run must NOT remove the pending")
 
-    def test_run_once_escalates_then_stops(self):
+    def test_run_once_backs_off_but_never_gives_up(self):
+        # #175: past MAX_NUDGES the watchdog no longer stops sending `continue` —
+        # it widens the interval and keeps going, with exactly ONE "gave up"
+        # ping (never a repeat, never a permanent noop).
         now = 1_000_000
         cwd = "/devel/stuck"
         self._transcript(cwd, [self._ERR], 600, now)
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
                   state_path=self.state, grace=300, interval=300, max_nudges=3)
-        self.w.run_once(now=now, **kw)            # nudge #1 + ping
-        self.w.run_once(now=now + 300, **kw)      # #2
-        self.w.run_once(now=now + 600, **kw)      # #3
-        self.w.run_once(now=now + 900, **kw)      # escalate
-        self.w.run_once(now=now + 1200, **kw)     # noop
-        self.assertEqual(fake.continues_sent(), 3, "exactly 3 continue nudges then stop")
-        # 2 pings: first-nudge stall alert + the give-up alert
+        self.w.run_once(now=now, **kw)             # nudge #1 + stall ping
+        self.w.run_once(now=now + 300, **kw)       # #2
+        self.w.run_once(now=now + 600, **kw)       # #3
+        self.w.run_once(now=now + 900, **kw)       # not due yet (widened to 600s) → wait
+        self.w.run_once(now=now + 1200, **kw)      # #4 → widening kicks in, one-shot give-up ping
+        self.assertEqual(fake.continues_sent(), 4, "backing off, never stopping — #4 still sent")
+        self.w.run_once(now=now + 2400, **kw)      # #5 (+1200, widened again)
+        self.assertEqual(fake.continues_sent(), 5, "keeps nudging well past the old give-up point")
+        # exactly 2 pings total: first-nudge stall alert + the ONE-SHOT give-up alert
         self.assertEqual(len(self.pings), 2)
         self.assertIn("pretrváva", self.pings[1][0])
 
