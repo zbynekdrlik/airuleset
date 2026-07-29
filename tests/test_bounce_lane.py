@@ -90,10 +90,22 @@ class TestReviewWatchLifecycle(TestCase):
         # order in the file: full, branch-merge, fork-no-merge
         return lines[1], lines[2]
 
+    def _asserts_release_containment(self, line):
+        """The release-containment invariant, in the PROVEN form (#159).
+
+        It used to be the prose "contained in origin/main". It is now a proof
+        command whose output must be pasted into the stopping turn — strictly
+        stronger, since the old phrase could be satisfied by the template
+        merely saying so while nothing ever checked it.
+        """
+        self.assertIn("git merge-base --is-ancestor", line)
+        self.assertIn("origin/main", line)
+        self.assertIn("printing exactly `RELEASED`", line)
+
     def test_branch_merge_holds_until_release_and_no_bounce(self):
         bm, _ = self.reduced_goal_lines()
         self.assertIn("REVIEW-WATCH", bm)
-        self.assertIn("contained in origin/main", bm)
+        self._asserts_release_containment(bm)
 
     def test_fork_holds_until_maintainer_closes(self):
         _, fk = self.reduced_goal_lines()
@@ -107,7 +119,7 @@ class TestReviewWatchLifecycle(TestCase):
         # vsetko deploynute do produ a nie skor"). The fork loop holds until
         # the merged work is contained in origin/main, same as branch-merge.
         _, fk = self.reduced_goal_lines()
-        self.assertIn("contained in origin/main", fk)
+        self._asserts_release_containment(fk)
 
     def test_review_watch_cadence_is_hourly_and_working(self):
         for line in self.reduced_goal_lines():
