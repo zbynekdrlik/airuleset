@@ -461,6 +461,50 @@ def marker_delivered(key):
     return parts[1] == "sent"
 
 
+def backfill_marker_key(name, number):
+    """The marker key a DIGEST writes for one ticket it accounted for.
+
+    Deliberately a SEPARATE namespace from the per-ticket card key
+    (`<repo>#<n>`): that one means "this ticket got its OWN delivered card"
+    and is read by `subagent-stop-check-run-card.sh` and
+    `newest_delivered_card`, so writing it here would let a worker's
+    genuinely missing card pass the gate. Two facts, two namespaces.
+
+    `#` cannot occur in a GitHub repo name, so no repo can produce a card
+    key equal to a backfill key — and `#` survives `_dedup_path`'s
+    sanitisation, unlike `:`, which it rewrites to `_` (a repo literally
+    named `backfill_x` would otherwise collide)."""
+    return "backfill#%s#%s" % (name, number)
+
+
+def mark_backfill_reported(name, numbers, status):
+    """Record that a DELIVERED catch-up digest accounted for `numbers`.
+    Returns how many markers were written.
+
+    Writes ONLY when `status` is the literal 'sent' — `send()`'s return
+    value AFTER its POST, i.e. proof the message reached Discord. This is
+    the #134 constraint in code: a suppression must key on the ARTIFACT the
+    action leaves behind, never on the intent to act, or it becomes a
+    silence generator. 'dry-run', 'dedup', 'no-config' and 'error' all write
+    nothing, so a digest that never arrived leaves job 25 flagging every one
+    of its tickets on the next sweep. The rule lives HERE rather than at the
+    call site precisely so no caller can lose it by forgetting a branch.
+
+    Best-effort in the fail-OPEN direction: a marker that cannot be written
+    simply is not written, and the ticket stays reported as missing."""
+    if status != "sent":
+        return 0
+    try:
+        os.makedirs(_dedup_dir(), exist_ok=True)
+    except OSError:
+        return 0
+    written = 0
+    for n in numbers:
+        _dedup_mark_status(backfill_marker_key(name, n), status)
+        written += 1
+    return written
+
+
 # --- the autopilot worker's evidence block (#134) --------------------------
 # Two facts below come from reading 339 REAL evidence blocks (extracted from
 # 5,180 subagent transcripts), not from the template in

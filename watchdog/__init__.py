@@ -5810,13 +5810,19 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # `parovanie-produktov`, so a directory-derived key matches nothing
         # and would report every ticket as unreported.
         try:
-            from notify import repo_name_for
+            from notify import repo_name_for, backfill_marker_key
             name = repo_name_for(root)
         except ImportError:
             name = ""
         if not name:
             continue
-        missing = [n for n in closed if not marker_ok("%s#%d" % (name, n))]
+        # Two ways a ticket can already have been reported: its OWN card, or
+        # a catch-up DIGEST that accounted for it (#141). The digest writes
+        # its own namespace, and only on a delivered POST — so a digest that
+        # never reached Discord suppresses nothing here.
+        missing = [n for n in closed
+                   if not marker_ok("%s#%d" % (name, n))
+                   and not marker_ok(backfill_marker_key(name, n))]
         if not missing:
             seen.pop(root, None)
             continue

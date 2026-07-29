@@ -2348,7 +2348,8 @@ def _notify_backfill_digest(args, send):
     bare `owner/name` from an operator, so it refuses outright when the repo
     has no checkout here — under-reporting would produce a digest
     apologising for reports another box really delivered."""
-    from notify import marker_delivered
+    from notify import (backfill_marker_key, mark_backfill_reported,
+                        marker_delivered)
     repo = getattr(args, "repo", None)
     since = getattr(args, "since", None)
     if not repo or not since:
@@ -2373,9 +2374,14 @@ def _notify_backfill_digest(args, send):
         issues = json.loads(raw or "[]")
     except ValueError:
         issues = []
+    # Unreported = no card of its own AND not already accounted for by an
+    # earlier DELIVERED digest — so a second run over a wider window does
+    # not re-report what the user has already been told.
     tickets = [i for i in issues
                if (i.get("closedAt") or "") >= since
-               and not marker_delivered("%s#%s" % (name, i.get("number")))]
+               and not marker_delivered("%s#%s" % (name, i.get("number")))
+               and not marker_delivered(
+                   backfill_marker_key(name, i.get("number")))]
     tickets.sort(key=lambda i: i.get("number") or 0)
     if not tickets:
         print("backfill: nothing unreported for %s since %s" % (name, since))
@@ -2385,6 +2391,14 @@ def _notify_backfill_digest(args, send):
                   dedup_key="backfill:%s:%s" % (name, since[:10]),
                   dry_run=getattr(args, "dry_run", False))
     print("%s (%d tickets)" % (status, len(tickets)))
+    # Record what this digest reported, so watchdog job 25 stops re-flagging
+    # tickets the user has already heard about. `mark_backfill_reported`
+    # writes ONLY on a proven 'sent' — a digest that never reached Discord
+    # must never silence a real report (#134).
+    marked = mark_backfill_reported(
+        name, [t.get("number") for t in tickets], status)
+    if marked:
+        print("backfill: %d tickets recorded as reported" % marked)
     if status not in ("sent", "dedup", "dry-run"):
         sys.exit(1)
 
