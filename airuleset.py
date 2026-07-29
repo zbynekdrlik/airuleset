@@ -3558,15 +3558,37 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
     matches ordinary text everywhere and the filter would destroy the child's
     output instead of protecting anything.
 
+    TWO KINDS OF RENDERING, and the second was missing (#153 finding 2). An
+    ENCODING re-encodes the value whole (b64, hex, percent) — those were
+    covered from the start. ESCAPING leaves the value's own bytes in place and
+    rewrites only its metacharacters, so a search for the raw value misses it
+    completely: for a value containing a quote, a backslash or a newline,
+    `json.dumps({"pw": v})` and `repr(v)` both passed straight through. That is
+    the ACCIDENTAL class this filter exists for — a child dumping its config as
+    JSON, a traceback printing a dict — not a deliberate transformation, so the
+    gap was real and the old docstring's disclaimer did not cover it. The
+    escaped forms a stdlib dump actually produces are now in the set: JSON,
+    repr() of a str and of bytes, unicode_escape, HTML/XML escaping,
+    shell-quoting, and configparser's %-doubling.
+
     HONEST LIMIT, stated rather than implied: this stops the value appearing
-    VERBATIM or in an obvious encoding. A child that deliberately transforms it
-    (encrypts it, reverses it, prints it a character per line) still defeats
-    the filter — nothing at this layer can prevent that, because the session
-    genuinely has to be able to USE the credential. The containment that would
-    (resolving the command from a user-written template instead of agent argv)
-    is a product decision, filed separately.
+    VERBATIM, in an obvious encoding, or in an ordinary escaped rendering. A
+    child that deliberately transforms it (encrypts it, reverses it, prints it
+    a character per line, base64s it twice) still defeats the filter — nothing
+    at this layer can prevent that, because the session genuinely has to be
+    able to USE the credential. The containment that would (resolving the
+    command from a user-written template instead of agent argv) is a product
+    decision, filed as #154 and blocked on the user's call there.
+
+    THE OTHER RESIDUAL, which redaction cannot touch at all: this filters the
+    child's captured fd 1/2 ONLY. Nothing constrains where the child WRITES —
+    `secret exec DB -- sh -c 'echo "$DB" > config.ini'` puts the value in a
+    git-tracked file, and no output filter can see that happen.
     """
     import base64
+    import html
+    import json
+    import shlex
     import urllib.parse
 
     if not value:
@@ -3579,6 +3601,17 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
     if text is not None:
         forms.add(urllib.parse.quote(text).encode())
         forms.add(urllib.parse.quote_plus(text).encode())
+        # Escaped renderings. Each is sliced to the BODY the dump would embed,
+        # without the quotes the dumper adds around it, so the form matches
+        # wherever it is nested (a dict, a config line, a traceback).
+        forms.add(json.dumps(text)[1:-1].encode())
+        forms.add(repr(text)[1:-1].encode())
+        forms.add(repr(value)[2:-1].encode())
+        forms.add(text.encode("unicode_escape"))
+        forms.add(html.escape(text).encode())
+        forms.add(html.escape(text, quote=False).encode())
+        forms.add(shlex.quote(text).encode())
+        forms.add(text.replace("%", "%%").encode())
     forms.add(base64.b64encode(value))
     forms.add(base64.b64encode(value).rstrip(b"="))
     forms.add(base64.urlsafe_b64encode(value).rstrip(b"="))
