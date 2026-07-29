@@ -1407,3 +1407,486 @@ def render_split(merged, hours=12):
                       _fmt_units(r.get("units", 0)), share,
                       _fmt_int(r.get("ctx_per_turn", 0))))
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# #131 — per-DISPATCH floor vs in-dispatch growth (`delegation --floor`).
+#
+# ROOT CAUSE this exists to fix: #130's `scan_split()` answers "how much does a
+# subagent turn carry on average" and nothing else. Its per-file loop (see
+# above) sums every usage line of a transcript into one accumulator row and
+# discards per-line ordering, and `ctx_per_turn()` is a single MEAN over the
+# whole window — so the split #131 asks for (the fixed prefix a dispatch starts
+# with, vs the growth it accumulates) is not merely hard to read out of #130's
+# output, it has no representation in it.
+#
+# Two counting errors are corrected here, both of which made the earlier hand
+# figures wrong:
+#
+#   1. A transcript LINE IS NOT A TURN. Claude Code writes ONE assistant API
+#      response as several lines — one per content block (`thinking`, then each
+#      `tool_use`) — and every one of those lines carries a COPY of the same
+#      request-level `usage`. Measured on a real transcript
+#      (`agent-a8f4affe3e4d342cb.jsonl`): 236 usage lines, 111 distinct
+#      `requestId`s, with one request spread over 9 lines each restating the
+#      same `cache_read_input_tokens: 118,307`. Counting lines inflates turns
+#      ~2x and multiply-counts identical input tokens, so everything here
+#      dedupes by `requestId` first.
+#
+#   2. A FILE IS NOT AN IN-WINDOW DISPATCH. A dispatch that began before the
+#      window has no floor inside it — its first in-window request is already
+#      carrying accumulated growth. Those straddlers are excluded from every
+#      distribution and reported as their own count, rather than being averaged
+#      in as if they were floors.
+#
+# Additive, exactly as #130 was: `scan_split()` and `scan()` are untouched.
+# Deduping by `requestId` inside `scan_split()` is the correct long-run fix,
+# but it would roughly halve the standing meter's `turns` and cut its `units`
+# against a history recorded line-based — a baseline move of the same class
+# #130 refused for `scan()`, and one #131 excludes. Filed separately.
+# --------------------------------------------------------------------------- #
+
+_DISPATCH_COUNTERS = ("in", "cache_w", "cache_r", "out")
+
+
+def distribution(values):
+    """n / min / p25 / median / p75 / p90 / max / mean over `values`.
+
+    Returns None — never a row of zeros — for an empty input, because #131's
+    whole complaint is that a single fabricated summary number hides the shape
+    of the data. Quantiles use the nearest-rank convention, so every reported
+    value is an OBSERVED one rather than an interpolation between two
+    dispatches that do not exist.
+    """
+    vals = sorted(float(v) for v in values)
+    if not vals:
+        return None
+
+    def q(p):
+        idx = int(round(p * (len(vals) - 1)))
+        return vals[idx]
+
+    return {
+        "n": len(vals),
+        "min": int(vals[0]),
+        "p25": int(q(0.25)),
+        "median": int(q(0.5)),
+        "p75": int(q(0.75)),
+        "p90": int(q(0.9)),
+        "max": int(vals[-1]),
+        "mean": int(round(sum(vals) / len(vals))),
+    }
+
+
+def read_dispatch(path):
+    """One `agent-*.jsonl` transcript reduced to ONE dispatch row.
+
+    Requests are keyed by `requestId` (falling back to `message.id`) in
+    first-appearance order, and each key keeps the LAST usage snapshot seen for
+    it: the trailing content block of a response carries the request's real
+    `output_tokens`, while the earlier blocks carry partial values. The input
+    side is identical on every line of a request, so taking the last is also
+    correct for context.
+
+    Returns None when the file holds no usage line at all.
+    """
+    order = []
+    reqs = {}
+    prompt_chars = None
+    skill_chars = 0
+    tool_names = 0
+    cwd = None
+    model = None
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if cwd is None:
+                cwd = e.get("cwd")
+            etype = e.get("type")
+            if etype == "attachment":
+                a = e.get("attachment") or {}
+                if a.get("type") == "skill_listing":
+                    skill_chars = len(a.get("content") or "")
+                elif a.get("type") == "deferred_tools_delta":
+                    tool_names = len(a.get("addedNames") or [])
+                continue
+            msg = e.get("message") or {}
+            if prompt_chars is None and etype == "user":
+                c = msg.get("content")
+                if c is not None:
+                    prompt_chars = len(c if isinstance(c, str)
+                                       else json.dumps(c))
+            u = msg.get("usage") or {}
+            if not u:
+                continue
+            rid = e.get("requestId") or msg.get("id")
+            if rid is None:
+                rid = "line:%d" % len(order)
+            if rid not in reqs:
+                order.append(rid)
+                reqs[rid] = {}
+            r = reqs[rid]
+            t = _parse_ts(e.get("timestamp") or "")
+            if t is not None and t.tzinfo is None:
+                t = t.replace(tzinfo=datetime.timezone.utc)
+            r["ts"] = t or r.get("ts")
+            r["in"] = int(u.get("input_tokens") or 0)
+            r["cache_w"] = int(u.get("cache_creation_input_tokens") or 0)
+            r["cache_r"] = int(u.get("cache_read_input_tokens") or 0)
+            r["out"] = max(int(r.get("out", 0)),
+                           int(u.get("output_tokens") or 0))
+            model = model or msg.get("model")
+    if not order:
+        return None
+    ctx = lambda r: r["in"] + r["cache_w"] + r["cache_r"]  # noqa: E731
+    first, last = reqs[order[0]], reqs[order[-1]]
+    row = {
+        "path": path,
+        "agent_id": _agent_id_of(path),
+        "cwd": cwd,
+        "model": model,
+        "turns": len(order),
+        "floor": ctx(first),
+        "last": ctx(last),
+        "growth": ctx(last) - ctx(first),
+        "total_ctx": sum(ctx(reqs[k]) for k in order),
+        "started": first.get("ts"),
+        "ended": last.get("ts"),
+        "prompt_chars": prompt_chars or 0,
+        "skill_listing_chars": skill_chars,
+        "deferred_tool_names": tool_names,
+    }
+    for k in _DISPATCH_COUNTERS:
+        row[k] = sum(reqs[j][k] for j in order)
+    row["units"] = round(cost_units(row), 1)
+    return row
+
+
+def _agent_id_of(path):
+    base = os.path.basename(path)
+    if base.startswith("agent-") and base.endswith(".jsonl"):
+        return base[len("agent-"):-len(".jsonl")]
+    return None
+
+
+def agent_types_from_parent(parent_path, agent_ids):
+    """Map `agentId` -> the `subagent_type` its dispatch was launched with.
+
+    The subagent transcript itself never records the type. The PARENT session
+    transcript does, indirectly: the `tool_result` of the `Agent`/`Task` call
+    quotes the new `agentId`, and its `tool_use_id` resolves to the `tool_use`
+    block carrying `input.subagent_type`. This join is worth its cost because
+    the measurement shows the dispatch floor is bimodal by agent TYPE and by
+    almost nothing else.
+
+    An id that cannot be resolved is simply absent from the mapping — callers
+    report None rather than guessing a type.
+    """
+    wanted = set(agent_ids or ())
+    out = {}
+    if not wanted or not os.path.exists(parent_path):
+        return out
+    uses = {}
+    pending = {}
+    try:
+        fh = open(parent_path, "r", errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            if '"tool_use"' not in line and '"tool_result"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            content = (e.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use" and b.get("name") in ("Agent",
+                                                                     "Task"):
+                    inp = b.get("input") or {}
+                    uses[b.get("id")] = inp.get("subagent_type") or "(default)"
+                elif b.get("type") == "tool_result":
+                    blob = json.dumps(b.get("content"))
+                    for aid in wanted:
+                        if aid in blob:
+                            pending[aid] = b.get("tool_use_id")
+    for aid, tid in pending.items():
+        if tid in uses:
+            out[aid] = uses[tid]
+    return out
+
+
+def scan_dispatches(root, hours=12, now=None):
+    """Per-DISPATCH floor / growth / turn rows over a `hours` window.
+
+    Only dispatches whose FIRST request falls inside the window are returned —
+    see the header comment. `straddling` counts the rest, so an unusually large
+    straddler count is visible instead of quietly shrinking the sample.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(hours=hours)
+    rows = []
+    straddling = 0
+    files = 0
+    by_parent = {}
+    for path, proj, kind in _split_transcripts(root):
+        if kind != "sub":
+            continue
+        try:
+            mt = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path), datetime.timezone.utc)
+            if mt < cutoff:
+                continue
+        except OSError:
+            continue
+        files += 1
+        row = read_dispatch(path)
+        if row is None:
+            continue
+        started = row.get("started")
+        if started is None or started < cutoff or started > now:
+            straddling += 1
+            continue
+        row["project"] = proj
+        rows.append(row)
+        # `<root>/<project>/<sid>/subagents/agent-*.jsonl` -> the parent
+        # session transcript is `<root>/<project>/<sid>.jsonl`.
+        session_dir = os.path.dirname(os.path.dirname(path))
+        by_parent.setdefault(session_dir + ".jsonl", set()).add(row["agent_id"])
+    types = {}
+    for parent, ids in by_parent.items():
+        types.update(agent_types_from_parent(parent, ids))
+    for row in rows:
+        row["agent_type"] = types.get(row["agent_id"])
+        row["started"] = row["started"].isoformat() if row["started"] else None
+        row["ended"] = row["ended"].isoformat() if row["ended"] else None
+    rows.sort(key=lambda r: -r["total_ctx"])
+    return {
+        "hours": hours,
+        "window_start": cutoff.isoformat(),
+        "window_end": now.isoformat(),
+        "weights": dict(COST_UNIT_WEIGHTS),
+        "files_scanned": files,
+        "straddling": straddling,
+        "dispatches": rows,
+        "distributions": {
+            "floor": distribution([r["floor"] for r in rows]),
+            "last": distribution([r["last"] for r in rows]),
+            "growth": distribution([r["growth"] for r in rows]),
+            "turns": distribution([r["turns"] for r in rows]),
+        },
+        "accounting": floor_growth_totals(rows),
+        "by_agent_type": by_agent_type(rows),
+    }
+
+
+def floor_growth_totals(rows):
+    """Split total subagent context into the floor re-sent every turn and the
+    growth accumulated inside dispatches — in TOKENS and, separately, in COST.
+
+    The two are very different answers and reporting only the first overstates
+    the lever: the floor is cache-WRITTEN once (weight 1.25) and cache-READ on
+    every later turn (weight 0.1), so its share of spend is far below its share
+    of tokens. The cost figures are a stated MODEL — floor x 1.25 once, then
+    floor x 0.1 x (turns - 1) — not a re-derivation from the raw buckets, since
+    a request's cache_read cannot be split into "floor part" and "growth part"
+    from the transcript alone.
+    """
+    total_ctx = sum(r["total_ctx"] for r in rows)
+    floor_ctx = sum(r["floor"] * r["turns"] for r in rows)
+    units = sum(float(r.get("units", 0) or 0) for r in rows)
+    w = COST_UNIT_WEIGHTS
+    write_units = sum(r["floor"] * w["cache_w"] for r in rows)
+    read_units = sum(r["floor"] * max(0, r["turns"] - 1) * w["cache_r"]
+                     for r in rows)
+    floor_units = write_units + read_units
+    return {
+        "dispatches": len(rows),
+        "context": {
+            "total": total_ctx,
+            "floor": floor_ctx,
+            "growth": total_ctx - floor_ctx,
+            "floor_share": (floor_ctx / total_ctx) if total_ctx else None,
+        },
+        "cost": {
+            "total_units": round(units, 1),
+            "floor_write_units": round(write_units, 1),
+            "floor_read_units": round(read_units, 1),
+            "floor_units": round(floor_units, 1),
+            "floor_share": (floor_units / units) if units else None,
+        },
+    }
+
+
+def by_agent_type(rows):
+    """Floor / turns / spend grouped by `subagent_type`.
+
+    This grouping is the finding, not a convenience: the floor is bimodal by
+    agent type, so a fleet-wide mean of it describes no real dispatch.
+    """
+    groups = {}
+    for r in rows:
+        groups.setdefault(r.get("agent_type") or "(unresolved)", []).append(r)
+    out = {}
+    for name, g in groups.items():
+        acc = floor_growth_totals(g)
+        out[name] = {
+            "n": len(g),
+            "floor": distribution([r["floor"] for r in g]),
+            "turns": distribution([r["turns"] for r in g]),
+            "last": distribution([r["last"] for r in g]),
+            "total_ctx": acc["context"]["total"],
+            "units": acc["cost"]["total_units"],
+            "floor_share_ctx": acc["context"]["floor_share"],
+        }
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["total_ctx"]))
+
+
+def import_closure_chars(path, _seen=None):
+    """Characters in `path` plus every file it pulls in via a leading `@import`.
+
+    This is what "the always-on ruleset" actually costs a dispatch:
+    `~/.claude/CLAUDE.md` is a thin index and its 59 `@`-imported modules are
+    the body. Each file counts ONCE (Claude Code injects it once), and a cycle
+    terminates rather than recursing — both properties are locked by tests.
+    Missing files count 0, so a partially-installed box under-reports instead
+    of raising.
+    """
+    import re
+    seen = _seen if _seen is not None else set()
+    p = os.path.abspath(os.path.expanduser(path))
+    if p in seen or not os.path.isfile(p):
+        return 0
+    seen.add(p)
+    try:
+        text = open(p, "r", errors="replace").read()
+    except OSError:
+        return 0
+    total = len(text)
+    for m in re.finditer(r"^@(\S+)", text, re.M):
+        ref = m.group(1)
+        if not ref.startswith(("/", "~")):
+            ref = os.path.join(os.path.dirname(p), ref)
+        total += import_closure_chars(ref, seen)
+    return total
+
+
+#: Named parts of a dispatch floor, in the order they are reported. Only these
+#: are attributable from the box's own files plus the transcript; everything
+#: else lands in the residual, which is NAMED rather than folded into a part.
+FLOOR_PART_ORDER = ("always_on_ruleset", "project_claude_md",
+                    "agent_definition", "skill_listing", "dispatch_prompt")
+
+RESIDUAL_IS = ("base agent system prompt + loaded tool schemas + MCP server "
+               "instructions — not recoverable from a transcript")
+
+
+def floor_attribution(floor, chars, chars_per_token):
+    """Attribute a measured floor to named parts at a stated chars-per-token.
+
+    `chars` are real sizes: the transcript's own `skill_listing` content and
+    dispatch prompt (exact), and the `@import` closure of the global and
+    project `CLAUDE.md` plus the agent definition (read off disk). The rate is
+    a parameter, not a constant, so the caller states which calibration it
+    used and the number can be re-derived.
+
+    The residual is reported, never absorbed. A NEGATIVE residual means the
+    parts priced above what the dispatch actually carried — that is a real
+    result (the floor did not contain everything assumed), so it is surfaced as
+    `over_attributed` instead of being clamped to zero.
+    """
+    rate = float(chars_per_token or 0)
+    parts = {}
+    for name in FLOOR_PART_ORDER:
+        c = int(chars.get(name, 0) or 0)
+        parts[name] = int(round(c / rate)) if rate else 0
+    attributed = sum(parts.values())
+    residual = int(floor) - attributed
+    return {
+        "floor": int(floor),
+        "chars_per_token": rate,
+        "parts": parts,
+        "attributed": attributed,
+        "residual": residual,
+        "residual_is": RESIDUAL_IS,
+        "over_attributed": residual < 0,
+    }
+
+
+def render_floor(report, hours=12):
+    """Human table for `delegation --floor`. Distributions, never one mean."""
+    d = report.get("distributions") or {}
+    acc = report.get("accounting") or {}
+    ctx = acc.get("context") or {}
+    cost = acc.get("cost") or {}
+    w = report.get("weights") or COST_UNIT_WEIGHTS
+    out = []
+    out.append("airuleset delegation --floor -- per-DISPATCH floor vs "
+               "in-dispatch growth, last %sh" % hours)
+    out.append("  one row per dispatch (agent-*.jsonl); requests deduped by "
+               "requestId, because one API response is written as several "
+               "transcript lines")
+    out.append("  %d dispatches STARTED in window · %d straddling (began "
+               "earlier, no floor inside the window) · %d files read"
+               % (len(report.get("dispatches") or []),
+                  report.get("straddling", 0),
+                  report.get("files_scanned", 0)))
+    out.append("  weighting (relative units, NOT a price): "
+               "input x%.2f + cache_write x%.2f + cache_read x%.2f + "
+               "output x%.2f" % (w.get("in", 0), w.get("cache_w", 0),
+                                 w.get("cache_r", 0), w.get("out", 0)))
+    out.append("")
+    out.append("  %-10s %5s %10s %10s %10s %10s %10s %10s"
+               % ("", "n", "min", "p25", "median", "p75", "p90", "max"))
+    for key, label in (("floor", "FLOOR"), ("last", "last turn"),
+                       ("growth", "growth"), ("turns", "turns")):
+        row = d.get(key)
+        if not row:
+            out.append("  %-10s (no dispatches)" % label)
+            continue
+        out.append("  %-10s %5d %10s %10s %10s %10s %10s %10s"
+                   % (label, row["n"], _fmt_int(row["min"]),
+                      _fmt_int(row["p25"]), _fmt_int(row["median"]),
+                      _fmt_int(row["p75"]), _fmt_int(row["p90"]),
+                      _fmt_int(row["max"])))
+    out.append("")
+    if ctx.get("floor_share") is None:
+        out.append("  no dispatches in window — no floor/growth split")
+    else:
+        out.append("  CONTEXT TOKENS: floor re-sent every turn %s (%.1f%%) · "
+                   "in-dispatch growth %s (%.1f%%)"
+                   % (_fmt_units(ctx["floor"]), 100 * ctx["floor_share"],
+                      _fmt_units(ctx["growth"]),
+                      100 * (1 - ctx["floor_share"])))
+        out.append("  COST UNITS (floor written once x%.2f, then re-read "
+                   "x%.2f): floor %s (%.1f%%) · rest %s"
+                   % (w.get("cache_w", 0), w.get("cache_r", 0),
+                      _fmt_units(cost["floor_units"]),
+                      100 * (cost["floor_share"] or 0),
+                      _fmt_units((cost["total_units"] or 0)
+                                 - cost["floor_units"])))
+    types = report.get("by_agent_type") or {}
+    if types:
+        out.append("")
+        out.append("  %-26s %5s %12s %12s %12s"
+                   % ("subagent_type", "n", "floor med", "turns med",
+                      "units"))
+        for name, row in types.items():
+            fl = (row.get("floor") or {}).get("median", 0)
+            tu = (row.get("turns") or {}).get("median", 0)
+            out.append("  %-26s %5d %12s %12s %12s"
+                       % (name[:26], row["n"], _fmt_int(fl), _fmt_int(tu),
+                          _fmt_units(row["units"])))
+    return "\n".join(out)

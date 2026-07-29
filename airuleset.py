@@ -3606,6 +3606,18 @@ def cmd_delegation(args):
     import burn
     hours = getattr(args, "hours", None) or 12
     root = getattr(args, "root", None)
+    if getattr(args, "floor", False):
+        # #131 — a DIFFERENT question from the standing meter's, so it gets its
+        # own report rather than extra columns on the by-project table: this one
+        # is per dispatch and local-only (a remote box's split is already
+        # folded per project and cannot be decomposed back into dispatches).
+        rep = burn.scan_dispatches(root or os.path.expanduser(
+            "~/.claude/projects"), hours=hours)
+        if getattr(args, "json", False):
+            print(json.dumps(rep, indent=1))
+        else:
+            print(burn.render_floor(rep, hours=hours))
+        return
     reports = [burn.split_report(hours=hours, root=root)]
     host_arg = getattr(args, "host", None)
     if host_arg:
@@ -4149,6 +4161,11 @@ def main():
                             "per completed ticket (needs gh; opt-in)")
     p_del.add_argument("--root", default=None,
                        help="Transcript store to scan (default ~/.claude/projects)")
+    p_del.add_argument("--floor", action="store_true",
+                       help="Per-DISPATCH report (#131): the fixed floor a "
+                            "dispatch starts with vs the growth it "
+                            "accumulates, as distributions, plus turns per "
+                            "dispatch and a per-subagent_type breakdown")
 
     p_up = sub.add_parser(
         "upload",
