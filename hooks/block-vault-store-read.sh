@@ -148,9 +148,17 @@ set -euo pipefail
 #   - Fail-closed covers a payload that is PRESENT and unparseable, never an
 #     EMPTY one: no payload at all still exits 0. See the comment at the read
 #     loop for why that specific row was left open rather than closed.
-#   - The audit line records the full command, so a bypassed WRITE would put
-#     the value in audits/vault-store-reads.log. That path is gitignored
-#     (.gitignore: `audits/*.log`) but is plaintext on disk.
+#   - The bypass audit line is a FINGERPRINT, not the command (#157): tool,
+#     the matched store REFERENCES, a SHA-256 of the command and its length.
+#     It used to record the full text, which meant a bypassed WRITE — whose
+#     value is in its own text — put that value into a plaintext file, making
+#     the guard a second place the credential came to rest. What remains, and
+#     is stated rather than implied: the log is gitignored (`audits/*.log`),
+#     created 0600, and the digest is over the whole command, so against
+#     someone who can already READ that 0600 file it is only as strong as the
+#     value's own entropy. That is the same someone who can read the store
+#     itself, so the digest widens nothing — but the file is not a secret
+#     store and must not be treated as one.
 #
 # Exit code 2 = block the tool call.
 
@@ -194,6 +202,7 @@ command -v python3 >/dev/null 2>&1 || fail_closed "python3 is not available."
 # empty and every check would silently pass.
 VIOLATION=$(python3 - "$PAYLOAD" <<'PYEOF'
 import fnmatch
+import hashlib
 import json
 import re
 import shlex
@@ -438,13 +447,27 @@ def head_of(segment):
     return tk[0].rsplit("/", 1)[-1].lower()
 
 
-def references_store(segment, cwd_hint=None):
-    m = STORE_DIR_RE.search(segment) or VALUE_FILE_RE.search(segment)
-    if m:
-        return m.group(0)
+def store_refs(segment, cwd_hint=None):
+    """EVERY store reference in the segment, for the audit trail.
+
+    Both patterns are collected, not just the first to match: the dir tells you
+    the store was touched, the `<stem>.secret` tells you WHICH item, and an
+    audit line that dropped the item name would not answer the one question it
+    exists for (#157).
+    """
+    found = [m.group(0) for m in (STORE_DIR_RE.search(segment),
+                                  VALUE_FILE_RE.search(segment)) if m]
+    if found:
+        return found
     # Rule D is ADDITIVE, never a replacement: the regexes above still catch
     # shapes the tokenizer cannot see, and D catches the spellings they cannot.
-    return globbed_store_ref(segment, cwd_hint)
+    globbed = globbed_store_ref(segment, cwd_hint)
+    return [globbed] if globbed else []
+
+
+def references_store(segment, cwd_hint=None):
+    found = store_refs(segment, cwd_hint)
+    return found[0] if found else None
 
 
 def sweeps_the_parent(segment, head):
@@ -462,6 +485,25 @@ def sweeps_the_parent(segment, head):
     if head in BULK_HEADS or RECURSIVE_RE.search(segment):
         return "recursive read/archive of the store's parent dir"
     return None
+
+
+def audit(tool_name, refs, subject):
+    """Emit the bypass AUDIT line — a fingerprint, never the raw text (#157).
+
+    The bypass log is a durable file OUTSIDE the transcript, so whatever goes
+    into it is a second place a credential can come to rest; and a command that
+    carries its value in its own text is the ordinary case for an allowed
+    WRITE. What survives is what the trail is actually for: which tool was
+    bypassed, WHICH STORE ITEM it named, and a digest that lets two entries be
+    compared. The refs are safe by construction — they are what the path
+    predicate matched, which is always a path fragment, never the argument
+    carrying a value.
+    """
+    digest = hashlib.sha256(subject.encode("utf-8", "replace")).hexdigest()
+    safe = ",".join(sorted({re.sub(r"[^\w./~*?\[\]-]", "", r)[:60]
+                            for r in refs if r})) or "-"
+    print("#AUDIT# tool=%s refs=%s sha256=%s len=%d"
+          % (tool_name or "Bash", safe, digest, len(subject)))
 
 
 # --- a file-reading TOOL rather than a shell command (review F1) ------------
@@ -482,14 +524,16 @@ if not cmd:
         val = tin.get("pattern")
         if isinstance(val, str) and val:
             fields.append(("pattern", val))
-    bad = [(k, v) for k, v in fields if references_store(v)]
+    bad = [(k, references_store(v), v) for k, v in fields if references_store(v)]
     if bad:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, v[:120])
-                        for k, v in bad))
+                        for k, _ref, v in bad))
+        audit(tool, [ref for _k, ref, _v in bad], " ".join(v for _k, _r, v in fields))
         sys.exit(2)
     sys.exit(0)
 
 hits = []
+refs = []
 # WITHIN one command the hook can see a `cd` and what follows it, so a later
 # relative token is resolved against the cd target — `cd ~/.claude && cat
 # sec*/*` names the store in neither half on its own. ACROSS calls it still
@@ -501,8 +545,10 @@ for seg, term in split_segments(cmd):
     sweep = sweeps_the_parent(seg, head)
     if sweep:
         hits.append("%s  ->  %s (%s)" % (head or "?", seg.strip()[:120], sweep))
+        refs.append(globbed_parent_ref(seg) or ".claude")
         continue
-    if not references_store(seg, cwd_hint):
+    seg_refs = store_refs(seg, cwd_hint)
+    if not seg_refs:
         cwd_hint = cd_target(seg, head) or cwd_hint
         continue
     if head in ALLOW_HEADS and term != "|":
@@ -511,9 +557,11 @@ for seg, term in split_segments(cmd):
         continue
     hits.append("%s  ->  %s" % (head or "(redirection/substitution)",
                                 seg.strip()[:120]))
+    refs.extend(seg_refs)
 
 if hits:
     print("\n".join("  " + h for h in dict.fromkeys(hits)))
+    audit(tool, refs, cmd)
     sys.exit(2)
 sys.exit(0)
 PYEOF
@@ -528,16 +576,25 @@ if [ "$RC" -ne 2 ]; then
 fi
 
 # --- a real hit ------------------------------------------------------------
-CMD_TEXT=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
-raw=sys.stdin.read()
-try: print(json.loads(raw).get("tool_input",{}).get("command","") or "")
-except Exception: print(raw)' 2>/dev/null || echo "")
+# The matcher emits the audit FINGERPRINT as a marked line (#157). It is split
+# off here rather than re-derived: re-parsing the payload a second time is what
+# used to put the whole command — and therefore any value it carries — into the
+# log. The rest of the matcher's output is the message shown to the caller.
+AUDIT_FIELDS=$(printf '%s\n' "$VIOLATION" | grep '^#AUDIT# ' || true)
+AUDIT_FIELDS=${AUDIT_FIELDS#\#AUDIT\# }
+VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# ' || true)
 
 if [ "${AIRULESET_ALLOW_VAULT_READ:-}" = "1" ]; then
     AUDIT_LOG="${AIRULESET_VAULT_READ_AUDIT:-$HOME/devel/airuleset/audits/vault-store-reads.log}"
     mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
+    # A file recording that a credential was touched must not inherit the
+    # ambient umask — these boxes host foreign uids by design.
+    if [ ! -e "$AUDIT_LOG" ]; then
+        (umask 077; : >> "$AUDIT_LOG") 2>/dev/null || true
+    fi
+    chmod 600 "$AUDIT_LOG" 2>/dev/null || true
     {
-        echo "$(date -Iseconds 2>/dev/null || echo unknown)  env-bypass  cmd=${CMD_TEXT}"
+        echo "$(date -Iseconds 2>/dev/null || echo unknown)  env-bypass  ${AUDIT_FIELDS}"
     } >> "$AUDIT_LOG" 2>/dev/null || true
     exit 0
 fi
