@@ -4395,6 +4395,87 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(self.pings, [], "busy pane = not stalled → no ping")
         self.assertTrue(any("skip busy-pane (api-error)" in ln for ln in logs))
 
+    # A pane genuinely IDLE at `❯` (turn ended, safe to type) but whose input box
+    # still holds a FOREIGN DRAFT — the #176 gatekeeper incident shape. NOT bare, so
+    # `pane_at_idle_prompt` (bare_only=True) reads it as "not idle", identically to a
+    # real foreground turn — that misread is the root cause #176 fixes.
+    _DRAFT_PANE = "❯\xa0nechať ako je\n"
+
+    def test_run_once_apierror_revives_idle_with_draft_via_stash(self):
+        # #176 item 1: idle-at-`❯`-with-a-draft must NOT be treated as busy — the
+        # session genuinely IS idle. `_classify_boundary` tells it apart from a real
+        # foreground turn and delivery goes through `deliver_with_stash` (the
+        # verified idle-with-draft protocol) instead of a raw `continue` typed over
+        # the draft. The skip must NOT be logged, and exactly one nudge lands.
+        now = 1_000_000
+        cwd = "/devel/projdraft"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._DRAFT_PANE)
+        calls = []
+
+        def _fake_stash(pid, text, run, captured=None, logs=None):
+            calls.append((pid, text))
+            return True
+        with m.patch.object(self.w, "deliver_with_stash", side_effect=_fake_stash):
+            logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                                   projects_dir=self.projects, state_path=self.state,
+                                   grace=300, interval=300, max_nudges=3)
+        self.assertEqual(len(calls), 1,
+                         "must deliver via the verified stash protocol, not refuse")
+        self.assertEqual(calls[0], ("%5", "continue"))
+        self.assertEqual(fake.continues_sent(), 0,
+                         "never a raw keystroke over the user's draft")
+        self.assertFalse(any("skip busy-pane" in ln for ln in logs), logs)
+        self.assertTrue(any("nudge#1" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, "a first nudge still pings like any stall")
+
+    def test_run_once_apierror_aborted_stash_does_not_burn_a_retry(self):
+        # #176 item 1: an ABORTED stash (deliver_with_stash returns False — the
+        # draft moved, a live turn started, the stash slot was already occupied,
+        # ...) must NOT advance the nudge/backoff state — the next poll retries
+        # from scratch instead of having silently "used up" an attempt.
+        now = 1_000_000
+        cwd = "/devel/projdraftabort"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._DRAFT_PANE)
+        with m.patch.object(self.w, "deliver_with_stash", return_value=False):
+            logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                                   projects_dir=self.projects, state_path=self.state,
+                                   grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [], "an aborted stash must not ping either")
+        self.assertTrue(any("stash-abort" in ln for ln in logs), logs)
+        state = self.w.load_state(self.state)
+        self.assertNotIn(self._SID, state,
+                         "an aborted stash must not persist an advanced nudge count")
+
+    def test_run_once_apierror_busy_pane_pings_once_when_wedged(self):
+        # #176 item 2: silence must become impossible. A genuinely BUSY pane
+        # (real foreground turn, no locatable boundary at all) still NEVER gets
+        # typed into, but now gets job 4's escalation shape: zero keystrokes, one
+        # deduped ping per episode, once the stall runs strictly past 2x grace —
+        # the incident ran 36 minutes with zero keystrokes AND zero pings.
+        now = 1_000_000
+        cwd = "/devel/projwedged"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 1000, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=_BUSY_PANE)
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 0, "must NOT type into a running agent")
+        self.assertEqual(len(self.pings), 1, "exactly one busy-pane-wedged ping")
+        self.assertTrue(self.pings[0][1].startswith("apierr-busypane:"))
+        self.assertTrue(any("busy-pane-wedged (api-error)" in ln for ln in logs), logs)
+        self.assertTrue(any("txt=" in ln for ln in logs),
+                        "the boundary classification must be logged on every skip")
+        # second poll in the same episode → no second ping
+        self.w.run_once(now=now + 60, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3)
+        self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
+
     def test_run_once_ignores_fresh_transcript(self):
         now = 1_000_000
         cwd = "/devel/fresh"

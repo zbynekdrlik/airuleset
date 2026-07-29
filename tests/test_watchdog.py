@@ -610,6 +610,19 @@ class QueuedMessagesPlaceholderNotADraft(unittest.TestCase):
                          "press up later to see queued messages maybe")
         self.assertFalse(wd.pane_at_idle_prompt(cap))
 
+    def test_counted_variant_also_normalizes(self):
+        # #176 item 4: CC also renders a COUNTED form of the same hint
+        # ("Press up to edit 2 queued messages") once more than one message
+        # is queued — the exact-equality check at :796 missed this shape
+        # entirely and misread it as a real held draft (the verdict's own
+        # reproduction table: `_find_boundary_line` returned it un-normalized
+        # while the singular/uncounted form normalized fine).
+        cap = "● hotovo\n❯ Press up to edit 2 queued messages\n  ctx ░\n"
+        self.assertEqual(wd._find_boundary_line(cap), "❯")
+        self.assertEqual(wd._input_line_text(cap), "")
+        self.assertEqual(wd._classify_boundary(cap), ("input", ""))
+        self.assertTrue(wd.pane_at_idle_prompt(cap))
+
 
 class PaneQuestionExcerpt(unittest.TestCase):
     """The job-2 "čaká na teba" ping must CARRY the question + options extracted from
