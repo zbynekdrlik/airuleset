@@ -409,6 +409,75 @@ class BypassIsForTheUserNotTheAgent(unittest.TestCase):
             self.assertIn("DB_PASS.secret", logged)
 
 
+class TheAuditLogIsNotASecondPlaceTheValueRests(unittest.TestCase):
+    """#157. The channel exists so a credential is never written down in the
+    clear, and the guard's own audit log wrote the FULL command text.
+
+    An allowed WRITE carries its value in its own text, so a bypassed
+    `echo <value> > <store>` deposited that value verbatim into a plaintext log
+    inside the repo tree — a second resting place, and unlike the store itself
+    that one had no guard on reading it, no restrictive mode and no TTL.
+
+    No real credential is used here; the value below is a fake.
+    """
+
+    FAKE = "NotARealValue-9f3a7c21b5"
+
+    def _bypass(self, cmd):
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        log = Path(td) / "a.log"
+        r = run(cmd, env_extra={"AIRULESET_ALLOW_VAULT_READ": "1",
+                                "AIRULESET_VAULT_READ_AUDIT": str(log)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return log
+
+    def test_a_written_value_does_not_reach_the_log_in_the_clear(self):
+        log = self._bypass("echo '%s' > %s/DB_PASS.secret" % (self.FAKE, STORE))
+        self.assertNotIn(self.FAKE, log.read_text(),
+                         "the guard's own audit log is now the second place "
+                         "the value comes to rest")
+
+    def test_a_value_passed_as_an_argument_does_not_reach_it_either(self):
+        log = self._bypass("printf %%s '%s' | tee %s/DB_PASS.secret"
+                           % (self.FAKE, STORE))
+        self.assertNotIn(self.FAKE, log.read_text())
+
+    def test_the_trail_still_identifies_what_was_touched(self):
+        # Redaction that destroys the audit trail would trade one defect for
+        # another: the line exists to prove a bypass happened and against what.
+        log = self._bypass("cat %s/DB_PASS.secret" % STORE)
+        body = log.read_text()
+        self.assertIn("env-bypass", body)
+        self.assertIn("DB_PASS.secret", body)      # the NAME, never a value
+        self.assertIn("Bash", body)                 # which tool was bypassed
+
+    def test_the_same_command_fingerprints_the_same_way(self):
+        # Correlating two entries is what the raw text used to be good for.
+        a = self._bypass("cat %s/DB_PASS.secret" % STORE).read_text()
+        b = self._bypass("cat %s/DB_PASS.secret" % STORE).read_text()
+        import re as _re
+        ha = _re.search(r"sha256=([0-9a-f]{16,})", a)
+        hb = _re.search(r"sha256=([0-9a-f]{16,})", b)
+        self.assertIsNotNone(ha, a)
+        self.assertEqual(ha.group(1), hb.group(1))
+
+    def test_a_different_command_fingerprints_differently(self):
+        import re as _re
+        a = self._bypass("cat %s/DB_PASS.secret" % STORE).read_text()
+        b = self._bypass("cat %s/OTHER.secret" % STORE).read_text()
+        ha = _re.search(r"sha256=([0-9a-f]{16,})", a).group(1)
+        hb = _re.search(r"sha256=([0-9a-f]{16,})", b).group(1)
+        self.assertNotEqual(ha, hb)
+
+    def test_the_log_is_not_world_readable(self):
+        log = self._bypass("cat %s/DB_PASS.secret" % STORE)
+        mode = log.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600,
+                         "a file recording that a credential was touched must "
+                         "not inherit the ambient umask, got %o" % mode)
+
+
 class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
     """#156 hole 2. Claim (e) of the shipping ticket was "fail-closed"; for the
     payload path it was false.
