@@ -913,6 +913,85 @@ class TestProbeIgnoresProxyEnvironment(_ServerCase):
                 airuleset._secret_opener().open(health, timeout=3).status, 204)
 
 
+class TestEndpointRobustness(_ServerCase):
+    """Adversarial-review findings #11 and #12.
+
+    A non-numeric Content-Length raised out of `do_POST` into
+    `socketserver.handle_error`, which prints a traceback to the endpoint log —
+    no value in it (CPython tracebacks carry no locals), but any LAN host could
+    fill the file. The token compare was not constant-time, the page carried no
+    CSP or nosniff header, and `is_private` parsed octets with `int()`, which
+    accepts " 10"/"+10" and reads "010" as decimal where inet_aton reads octal.
+    """
+
+    def _raw(self, port, request):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            s.sendall(request)
+            return s.recv(4096).decode("utf-8", "replace")
+        finally:
+            s.close()
+
+    def test_a_non_numeric_content_length_is_a_400_not_a_traceback(self):
+        proc, port, _url = self._serve()
+        head = ("POST /%s/ HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n"
+                "Connection: close\r\n\r\n" % TOK)
+        self.assertIn("400", self._raw(port, head.encode()).splitlines()[0])
+        self.assertIsNone(proc.poll())            # still serving, not crashed
+        self.assertEqual(st.state("DB_PASS"), "absent")
+
+    def test_a_traceback_never_reaches_the_endpoint_log(self):
+        proc, port, _url = self._serve()
+        for header in (b"Content-Length: abc", b"Content-Length: -5",
+                       b"Content-Length: 9999999999999999999999"):
+            self._raw(port, b"POST /" + TOK.encode() + b"/ HTTP/1.1\r\nHost: x\r\n"
+                      + header + b"\r\nConnection: close\r\n\r\n")
+        proc.terminate()
+        _out, err = proc.communicate(timeout=15)
+        self.assertNotIn("Traceback", err)
+
+    def test_the_page_carries_a_content_security_policy_and_nosniff(self):
+        _proc, port, url = self._serve()
+        with urllib.request.urlopen(url, timeout=5) as r:
+            headers = {k.lower(): v for k, v in r.getheaders()}
+        self.assertIn("content-security-policy", headers)
+        self.assertEqual(headers.get("x-content-type-options"), "nosniff")
+
+    def test_the_token_compare_is_constant_time(self):
+        # Line-based, and the failure message is a count — never the file: an
+        # assertIn over a whole source file dumps it into the report.
+        hits = [ln for ln in SERVER.read_text(encoding="utf-8").splitlines()
+                if "compare_digest" in ln]
+        self.assertTrue(hits, "vault_server.py must compare the token with "
+                              "hmac.compare_digest (0 matching lines)")
+
+    def test_odd_address_spellings_are_refused_by_the_endpoint_check(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_vs_probe", SERVER)
+        # The module binds at import, so exercise is_private via a subprocess
+        # instead: each spelling must be refused BEFORE anything is bound.
+        self.assertIsNotNone(spec)
+        for odd in (" 10.0.0.1", "010.0.0.1", "+10.0.0.1", "10.0.0.1 ",
+                    "0x0a.0.0.1", "8.8.8.8"):
+            env = dict(os.environ)
+            env.update(self._env)
+            env["AIRULESET_VAULT_TOKEN"] = TOK
+            proc = subprocess.run(
+                [sys.executable, str(SERVER), str(_free_port()), odd,
+                 "DB_PASS", "30", "60"],
+                capture_output=True, text=True, timeout=30, env=env)
+            self.assertNotEqual(proc.returncode, 0, odd)
+
+
+class TestLogDirectoryIsNotWorldReadable(_StoreCase):
+    """Finding #12: the log directory was created with the ambient umask, so
+    on a multi-uid box the listing exposed which credentials exist."""
+
+    def test_the_log_directory_is_0700(self):
+        st.log_event("request", "DB_PASS")
+        self.assertEqual(stat.S_IMODE(st.log_path().parent.stat().st_mode), 0o700)
+
+
 class TestTokenIsNotInArgv(_StoreCase):
     """Adversarial-review finding #2 (HIGH).
 
