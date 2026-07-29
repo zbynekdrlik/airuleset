@@ -85,9 +85,13 @@ class RunOnceVaultWiring(unittest.TestCase):
                            pending_prefix=str(Path(tmp.name) / "pending-"), **kw)
 
     def test_an_unwired_caller_sees_no_sweep(self):
-        calls = []
-        self._run(dry_run=True)
-        self.assertEqual(calls, [])
+        # #153 finding 5. This asserted `calls == []` on a list that was local
+        # to the test and never wired into `_run` — it could not fail, and so
+        # verified nothing. The observable it should have been reading is
+        # run_once's OWN log output, which does change if an unwired caller
+        # ever starts sweeping.
+        logs = self._run(dry_run=False)
+        self.assertEqual([ln for ln in logs if "vault-purge" in ln], [], logs)
 
     def test_the_job_runs_when_the_purge_callable_is_given(self):
         calls = []
