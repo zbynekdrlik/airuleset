@@ -1157,6 +1157,56 @@ def _split_transcripts(root):
                     yield os.path.join(dirpath, fn), proj, kind
 
 
+def _fold_usage_line(e, order, reqs):
+    """Fold one parsed transcript event's usage into a per-request accumulator.
+
+    Requests are keyed by `requestId` (falling back to `message.id`), and each
+    key keeps the LAST usage snapshot seen for it — Claude Code writes one API
+    response as several transcript lines (one per content block: `thinking`,
+    then each `tool_use`), each carrying a COPY of the same request-level
+    `usage`; the trailing block also carries the response's real
+    `output_tokens`, so keeping the last (max for `out`, since an earlier
+    block can already carry the final count too) is correct for every field
+    (#150 — a request counted per-line inflated turns/tokens ~2.13x on real
+    data).
+
+    A `<synthetic>` placeholder (interrupt / error) carries a usage block of
+    four zeros and a UUID where a requestId would be — dropped on the ZERO
+    USAGE, never on the model string, so a placeholder written without that
+    marker is dropped too (measured live: counting it as a request produced a
+    context of 0 for the dispatch it belonged to).
+
+    `order`/`reqs` are mutated in place, scoped to one file's whole scan.
+    Returns the folded requestId, or None if this event carried no usable
+    usage — a caller checks that to know whether to also capture side data
+    (cwd, model) for the folded request.
+    """
+    msg = e.get("message") or {}
+    u = msg.get("usage") or {}
+    if not u:
+        return None
+    if not any(int(u.get(k) or 0) for k in
+               ("input_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens", "output_tokens")):
+        return None
+    rid = e.get("requestId") or msg.get("id")
+    if rid is None:
+        rid = "line:%d" % len(order)
+    if rid not in reqs:
+        order.append(rid)
+        reqs[rid] = {}
+    r = reqs[rid]
+    t = _parse_ts(e.get("timestamp") or "")
+    if t is not None and t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    r["ts"] = t or r.get("ts")
+    r["in"] = int(u.get("input_tokens") or 0)
+    r["cache_w"] = int(u.get("cache_creation_input_tokens") or 0)
+    r["cache_r"] = int(u.get("cache_read_input_tokens") or 0)
+    r["out"] = max(int(r.get("out", 0)), int(u.get("output_tokens") or 0))
+    return rid
+
+
 def scan_split(root, hours=12, now=None, repo_resolver=None):
     """Per-project MAIN vs SUBAGENT token attribution over a `hours` window.
 
@@ -1191,6 +1241,9 @@ def scan_split(root, hours=12, now=None, repo_resolver=None):
         except OSError:
             continue
         with fh:
+            order = []
+            reqs = {}
+            req_cwd = {}
             for line in fh:
                 if '"usage"' not in line:
                     continue
@@ -1198,25 +1251,25 @@ def scan_split(root, hours=12, now=None, repo_resolver=None):
                     e = json.loads(line)
                 except ValueError:
                     continue
-                msg = e.get("message") or {}
-                u = msg.get("usage") or {}
-                if not u:
-                    continue
-                t = _parse_ts(e.get("timestamp") or "")
-                if t is None:
-                    continue
-                if t.tzinfo is None:
-                    t = t.replace(tzinfo=datetime.timezone.utc)
-                if t < cutoff or t > now:
+                rid = _fold_usage_line(e, order, reqs)
+                if rid is not None:
+                    req_cwd[rid] = e.get("cwd") or req_cwd.get(rid)
+            # One request may span several lines (#150) — dedupe FIRST, then
+            # window-filter and aggregate by the LAST-seen timestamp of each
+            # deduped request, never per raw line.
+            for rid in order:
+                r = reqs[rid]
+                t = r.get("ts")
+                if t is None or t < cutoff or t > now:
                     continue
                 lines += 1
                 row["turns"] += 1
-                row["in"] += int(u.get("input_tokens") or 0)
-                row["cache_w"] += int(u.get("cache_creation_input_tokens") or 0)
-                row["cache_r"] += int(u.get("cache_read_input_tokens") or 0)
-                row["out"] += int(u.get("output_tokens") or 0)
+                row["in"] += r["in"]
+                row["cache_w"] += r["cache_w"]
+                row["cache_r"] += r["cache_r"]
+                row["out"] += r["out"]
                 if cwd is None:
-                    cwd = e.get("cwd")
+                    cwd = req_cwd.get(rid)
         if not row["turns"]:
             continue
         row["sessions"] = 1
@@ -1439,11 +1492,17 @@ def render_split(merged, hours=12):
 #      distribution and reported as their own count, rather than being averaged
 #      in as if they were floors.
 #
-# Additive, exactly as #130 was: `scan_split()` and `scan()` are untouched.
-# Deduping by `requestId` inside `scan_split()` is the correct long-run fix,
-# but it would roughly halve the standing meter's `turns` and cut its `units`
-# against a history recorded line-based — a baseline move of the same class
-# #130 refused for `scan()`, and one #131 excludes. Filed separately.
+# Additive, exactly as #130 was: `scan()` is untouched. `scan_split()` ALSO
+# dedupes by `requestId` now (#150, fixed) — it shares the exact fold used
+# here (`_fold_usage_line`, defined above `scan_split()`) rather than
+# reimplementing it, so this counting error #1 no longer applies to either
+# instrument. That WAS a baseline move (`scan_split()`'s reported `turns` and
+# `units` dropped ~2x against history recorded line-based) — #150 took it
+# deliberately, because unlike `scan()` (which #130 explicitly declined to
+# re-baseline), `scan_split()` has no persisted history and no alert
+# thresholds: it feeds only `split_report()` / `airuleset.py delegation`, so
+# there was no baseline to protect and the reported numbers simply became
+# correct.
 # --------------------------------------------------------------------------- #
 
 _DISPATCH_COUNTERS = ("in", "cache_w", "cache_r", "out")
@@ -1523,37 +1582,11 @@ def read_dispatch(path):
                 if c is not None:
                     prompt_chars = len(c if isinstance(c, str)
                                        else json.dumps(c))
-            u = msg.get("usage") or {}
-            if not u:
-                continue
-            # A `<synthetic>` placeholder (interrupt / error) carries a usage
-            # block of four zeros and a UUID where a requestId would be. It is
-            # not an API request: counted as one it becomes the dispatch's LAST
-            # request and reports a context of 0 — observed live as a growth of
-            # -117,959 on 1 of 301 real dispatches. Keyed on the zero USAGE
-            # rather than the model string, so a placeholder written without
-            # that marker is dropped too.
-            if not any(int(u.get(k) or 0) for k in
-                       ("input_tokens", "cache_creation_input_tokens",
-                        "cache_read_input_tokens", "output_tokens")):
-                continue
-            rid = e.get("requestId") or msg.get("id")
-            if rid is None:
-                rid = "line:%d" % len(order)
-            if rid not in reqs:
-                order.append(rid)
-                reqs[rid] = {}
-            r = reqs[rid]
-            t = _parse_ts(e.get("timestamp") or "")
-            if t is not None and t.tzinfo is None:
-                t = t.replace(tzinfo=datetime.timezone.utc)
-            r["ts"] = t or r.get("ts")
-            r["in"] = int(u.get("input_tokens") or 0)
-            r["cache_w"] = int(u.get("cache_creation_input_tokens") or 0)
-            r["cache_r"] = int(u.get("cache_read_input_tokens") or 0)
-            r["out"] = max(int(r.get("out", 0)),
-                           int(u.get("output_tokens") or 0))
-            model = model or msg.get("model")
+            # Dedup/last-wins/synthetic-placeholder-drop is shared with
+            # scan_split() (#150) — see _fold_usage_line's own docstring.
+            rid = _fold_usage_line(e, order, reqs)
+            if rid is not None:
+                model = model or msg.get("model")
     if not order:
         return None
     ctx = lambda r: r["in"] + r["cache_w"] + r["cache_r"]  # noqa: E731
