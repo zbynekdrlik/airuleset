@@ -1293,6 +1293,21 @@ class AwayEngagement128(unittest.TestCase):
                           extra_env={"AIRULESET_MAIN_GUARD_AWAY_S": "abc"})
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
+    # ---- degenerate presence shapes (found by the pre-push smoke pass) ----
+
+    def test_presence_path_that_is_a_directory_is_ignored(self):
+        sid = "t-mg-away-dir-" + uuid.uuid4().hex[:8]
+        d = Path("/tmp/claude-user-active-%s" % sid)
+        d.mkdir()
+        self.addCleanup(lambda: d.rmdir() if d.is_dir() else None)
+        out = self._plain(tool="Bash", command=self.SWEEP, sid=sid)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_future_presence_mtime_is_not_away(self):
+        # a clock skew must never be read as "the user left"
+        out = self._plain(tool="Bash", command=self.SWEEP, presence_age=-9999)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
     # ---- nothing is removed: the two existing conditions are unchanged ----
 
     def test_goal_armed_attended_session_still_blocks(self):
@@ -1466,6 +1481,33 @@ class BypassCarriesAReason128(unittest.TestCase):
         out = self._run(sid,
                         command="touch /tmp/airuleset-main-exec-ok-%s" % sid)
         self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- degenerate marker shapes (found by the pre-push smoke pass) ----
+
+    def test_marker_with_control_bytes_does_not_pollute_stderr(self):
+        # A NUL in the marker made bash warn ("ignored null byte in input")
+        # on an ALLOWED call — a hook that writes to stderr while exiting 0
+        # is invisible until something asserts on it (#124's lesson).
+        sid = "t-mg-reason-bin-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_bytes(b"\x00\x01 deliberate exception with control bytes")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        out = self._run(sid)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stderr.strip(), "",
+                         "an allowed call must write nothing to stderr")
+
+    def test_non_ascii_reason_survives_to_the_log(self):
+        # the reason is user-facing prose and is routinely Slovak — the
+        # control-byte strip must spare every byte >= 0x80
+        sid = "t-mg-reason-utf8-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("dôvod: písanie politiky — obsah je úsudok")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid)
+        lines = self._bypass_lines(sid)
+        self.assertTrue(lines)
+        self.assertIn("písanie politiky", lines[-1])
 
     def test_the_block_message_states_the_reason_carrying_form(self):
         sid = "t-mg-arm-msg-" + uuid.uuid4().hex[:8]

@@ -202,9 +202,20 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # documented way out of it, which would be exactly the dead end the
     # ticket forbids. Deliberately narrow: the command must START with
     # `touch` and name one of the two marker paths.
-    case "$(printf '%s' "$BASH_CMD" | tr -s ' \t' ' ' | sed 's/^ //')" in
-        touch\ *airuleset-main-exec-ok-*|touch\ *airuleset-fable-exec-ok-*)
-            echo "$(date -Is) main-exec bypass-arm session=$RAW_SID" \
+    # #128: arming now means WRITING A REASON into the marker, so the
+    # redirect forms (`echo "<reason>" > …`, `printf … > …`, `cat > … <<EOF`)
+    # are exempt alongside the historical `touch`. The arm's own command
+    # line carries the reason, so logging its first 120 chars makes the
+    # audit readable from the arm side too, not only from the consume.
+    NORM_CMD=$(printf '%s' "$BASH_CMD" | tr -s ' \t' ' ' | sed 's/^ //')
+    case "$NORM_CMD" in
+        touch\ *airuleset-main-exec-ok-*|touch\ *airuleset-fable-exec-ok-*|\
+        echo\ *airuleset-main-exec-ok-*|echo\ *airuleset-fable-exec-ok-*|\
+        printf\ *airuleset-main-exec-ok-*|printf\ *airuleset-fable-exec-ok-*|\
+        cat\ *airuleset-main-exec-ok-*|cat\ *airuleset-fable-exec-ok-*)
+            ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
+                || echo "")
+            echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
                 >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
             exit 0
             ;;
@@ -233,11 +244,41 @@ elif [ -e "/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}" ]; then
     BYPASS_MARK="fable-exec-ok(legacy)"
     BYPASS_FILE="/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}"
 fi
+# #128: the marker must CARRY its reason. What the ticket read as abuse
+# ("187 bypasses in one session") is a PRE-#80 artifact — 186 of those 193
+# log lines predate 7bcbafe (2026-07-26T20:25:17), when one `touch`
+# disabled the hook for the rest of the session; after it the same session
+# armed the marker 4 times in 2.5 days, each paired 1:1 with a consume, and
+# nothing automated arms it at all (watchdog job 22 only ever DELETES a
+# stale one). So the marker is already exceptional in fact. What it was
+# NOT is auditable: the arm line recorded no reason, and the six real arms
+# had one — it lived in the tool description and an `echo`, never in the
+# log. So a marker with no readable reason is REFUSED (and cleared, so a
+# throwaway one cannot linger and cannot be re-consumed), and the reason
+# reaches the log on both the arm and the consume. Legacy empty markers
+# stop working; that is self-correcting, since the very next block message
+# states the reason-carrying form.
+BYPASS_MIN_REASON="${AIRULESET_MAIN_EXEC_REASON_MIN:-8}"
+case "$BYPASS_MIN_REASON" in ''|*[!0-9]*) BYPASS_MIN_REASON=8 ;; esac
 if [ -n "$BYPASS_MARK" ]; then
+    # one log line per bypass: newlines and CRs flattened, remaining control
+    # bytes DELETED (a NUL would make bash warn on stdout capture, and raw
+    # C0 bytes in an append-only log are unreadable — the delete set spares
+    # every byte >= 0x80, so a Slovak reason survives intact), length bounded
+    # by a UTF-8-safe codepoint slice (never `cut -c`, which counts bytes).
+    BYPASS_REASON=$(tr '\n\r\t' '   ' < "$BYPASS_FILE" 2>/dev/null \
+        | tr -d '\000-\010\013\014\016-\037\177' \
+        | sed 's/  */ /g; s/^ //; s/ $//' \
+        | jq -Rrs '.[0:200]' 2>/dev/null || echo "")
+    BYPASS_REASON=$(printf '%s' "$BYPASS_REASON" | sed 's/^ *//; s/ *$//')
     rm -f "$BYPASS_FILE" 2>/dev/null || true
-    echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed)" \
+    if [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
+        echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed) reason=$BYPASS_REASON" \
+            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+        exit 0
+    fi
+    echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
         >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
-    exit 0
 fi
 
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
@@ -327,6 +368,53 @@ case "$MODEL" in
     claude-fable-*) IS_FABLE=1 ;;
 esac
 
+# ---- condition 3: the user is AWAY (#128) ----
+# Conditions 1 and 2 are both PROXIES for "this session is running
+# autonomously", and neither is the cost driver — every main turn re-sends
+# the whole context whether or not a goal is armed. Measured on dev1 for
+# 2026-07-28, top-level entries of all 11 real transcripts: the sessions
+# this hook engages on ran 853 main tool calls against 87 dispatches, the
+# sessions it was INERT on ran 1339 against 82 — and the worst session of
+# the day (varos-eft5000: 650 main calls, ZERO dispatches, 52 Edit/Writes
+# over the threshold) was one of the inert ones. So the engagement
+# condition was missing the burn.
+#
+# The obvious repair — engage on EVERY main session — is refused on the
+# same measurement. Replaying every real main-agent Bash command of that
+# day through this hook, it newly blocks 348 calls, 164 of them within five
+# minutes of a live human prompt: an attended session losing routine calls
+# mid-conversation, which is a regression, not a fix (same lesson as
+# stop-check-question-quality.sh's presence carve-out — hard-gating a live
+# dialog printed hook errors into the user's chat, camera-box 2026-07-05).
+# Gating on AWAY instead newly blocks 103 and touches ZERO attended calls,
+# because the burn is concentrated in away time (190 of varos-eft5000's 497
+# guardable calls are >15 min after any human prompt).
+#
+# AWAY is read from the presence marker clear-question-dedup.sh stamps on
+# UserPromptSubmit — the same mechanism stop-check-question-quality.sh
+# already uses, and precise where the transcript is not: a goal re-poke or
+# hook feedback does NOT fire UserPromptSubmit, so an autonomous loop never
+# looks present. Fail-open in every unprovable case: NO marker (never
+# stamped, or /tmp cleared under a long-running session) means not provably
+# away, so nothing new engages. AIRULESET_MAIN_GUARD_AWAY_S=0 disables this
+# condition entirely; a garbage value falls back to the default.
+#
+# This condition is OR'd with the two below it and replaces neither: a
+# Fable main and a goal-armed main stay engaged exactly as before, attended
+# or not.
+AWAY=0
+AWAY_S="${AIRULESET_MAIN_GUARD_AWAY_S:-900}"
+case "$AWAY_S" in ''|*[!0-9]*) AWAY_S=900 ;; esac
+ACTIVE_MARK="/tmp/claude-user-active-${SESSION_ID:-unknown}"
+if [ "$AWAY_S" -gt 0 ] && [ -f "$ACTIVE_MARK" ]; then
+    ACTIVE_AT=$(stat -c %Y "$ACTIVE_MARK" 2>/dev/null || echo 0)
+    case "$ACTIVE_AT" in ''|*[!0-9]*) ACTIVE_AT=0 ;; esac
+    if [ "$ACTIVE_AT" -gt 0 ] \
+       && [ "$(( $(date +%s) - ACTIVE_AT ))" -ge "$AWAY_S" ]; then
+        AWAY=1
+    fi
+fi
+
 # ---- condition 2: armed /goal main (#54) ----
 GOAL_MARK=$(jq -r '
     if .type == "user" and (.message.content | type) == "string" then .message.content
@@ -339,20 +427,24 @@ case "$GOAL_MARK" in
     *"Goal set:") GOAL_ARMED=1 ;;
 esac
 
-if [ "$IS_FABLE" != "1" ] && [ "$GOAL_ARMED" != "1" ]; then
-    exit 0                               # neither condition holds — allow
+if [ "$IS_FABLE" != "1" ] && [ "$GOAL_ARMED" != "1" ] && [ "$AWAY" != "1" ]; then
+    exit 0                               # no condition holds — allow
 fi
 
-if [ "$GOAL_ARMED" = "1" ] && [ "$IS_FABLE" = "1" ]; then
-    REASON="this MAIN session runs FABLE *and* has an ARMED /goal"
-    RULE_TAG="FABLE+GOAL_ARMED"
-elif [ "$GOAL_ARMED" = "1" ]; then
-    REASON="this MAIN session has an ARMED /goal"
-    RULE_TAG="GOAL_ARMED"
-else
-    REASON="this MAIN session runs FABLE"
-    RULE_TAG="FABLE"
+# One tag per condition that HOLDS, joined by '+' — a block log line has to
+# say which rule engaged, and now more than one can.
+RULE_TAG=""
+REASON=""
+[ "$IS_FABLE" = "1" ] && { RULE_TAG="FABLE"; REASON="runs FABLE"; }
+if [ "$GOAL_ARMED" = "1" ]; then
+    RULE_TAG="${RULE_TAG:+$RULE_TAG+}GOAL_ARMED"
+    REASON="${REASON:+$REASON and }has an ARMED /goal"
 fi
+if [ "$AWAY" = "1" ]; then
+    RULE_TAG="${RULE_TAG:+$RULE_TAG+}USER_AWAY"
+    REASON="${REASON:+$REASON and }is running unattended (user AWAY — no prompt for ${AWAY_S}s)"
+fi
+REASON="this MAIN session $REASON"
 
 # ---- #73: log EVERY block (not just bypasses) — same style/location as the
 # bypass log, so "did the hook ever fire, on what" is answerable from a log
@@ -701,8 +793,18 @@ def is_blocked_segment(tk):
         # `-c` (count) / `-q` (quiet) return one number / nothing — an
         # ASSERTION ("did my write land"), not a read. Everything else
         # (notably `grep -rn`) really does dump matches.
-        return not any(t in ("-c", "-q", "--count", "--quiet", "--silent")
-                       for t in tk[1:])
+        #
+        # #128: real commands write the COMBINED short-flag form
+        # (`grep -cE '^(FAILED|ERROR)' /tmp/full10.log`, `grep -rc`), which
+        # a whole-token comparison never recognised. A short-flag CLUSTER
+        # (`-[A-Za-z]+`, so `-C3`/`--color` are excluded) containing `c` or
+        # `q` is the same assertion — case matters, since `-C` is CONTEXT
+        # and dumps matches with surrounding lines.
+        return not any(
+            t in ("-c", "-q", "--count", "--quiet", "--silent")
+            or (re.match(r"^-[A-Za-z]+$", t)
+                and ("c" in t[1:] or "q" in t[1:]))
+            for t in tk[1:])
     if head == "find":
         return True
     if head in ("head", "tail"):
@@ -834,7 +936,8 @@ This is a nudge, not a wall: the counter is already reset, so re-running
 this exact command right now will pass. Ignoring the nudge is what the
 measurement will show.
 
-Deliberate exception (one-shot, logged): touch /tmp/airuleset-main-exec-ok-${SESSION_ID}
+Deliberate exception (one-shot, logged, and it must SAY WHY):
+  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
         exit 2
     fi
@@ -855,7 +958,8 @@ hour, each re-sending the whole context — #66):
     dump — main-context-hygiene.md.
   • then act on the conclusion here — that is the coordinator's job.
 
-Deliberate exception (logged): touch /tmp/airuleset-main-exec-ok-<session_id>
+Deliberate exception (one-shot, logged, and it must SAY WHY):
+  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
     exit 2
 fi
@@ -879,6 +983,7 @@ david@subdev inline-354-edits incident):
     use superpowers:subagent-driven-development.
   • then REVIEW the worker's diff here — that is the coordinator's job.
 
-Deliberate exception (logged): touch /tmp/airuleset-main-exec-ok-<session_id>
+Deliberate exception (one-shot, logged, and it must SAY WHY):
+  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
 exit 2
