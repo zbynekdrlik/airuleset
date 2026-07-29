@@ -537,11 +537,17 @@ if not cmd:
         val = tin.get("pattern")
         if isinstance(val, str) and val:
             fields.append(("pattern", val))
-    bad = [(k, references_store(v), v) for k, v in fields if references_store(v)]
+    bad = [(k, store_refs(v), v) for k, v in fields if store_refs(v)]
     if bad:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
-                        for k, _ref, v in bad))
-        audit(tool, [ref for _k, ref, _v in bad], " ".join(v for _k, _r, v in fields))
+                        for k, _refs, v in bad))
+        # `fields` holds (key, value) PAIRS while `bad` holds triples — the
+        # two are not interchangeable, and unpacking one as the other threw
+        # inside this branch. It still exited 2 because fail_closed does too,
+        # so the store stayed shut and every block test passed while the real
+        # refusal, the audit line and the user's env bypass were all gone.
+        audit(tool, [r for _k, rs, _v in bad for r in rs],
+              " ".join(v for _k, v in fields))
         sys.exit(2)
     sys.exit(0)
 
