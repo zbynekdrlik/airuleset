@@ -505,6 +505,35 @@ class DocumentedGaps(unittest.TestCase):
             with self.subTest(gap=gap):
                 self.assertIn(gap, text)
 
+    def test_authoring_then_running_is_declined_in_writing(self):
+        # #156 hole 3. `Write` a reader script, then `bash` it: both halves are
+        # ALLOW and the ticket asked for this to be DECIDED, not left implied.
+        # It is declined — so the header must say so, and say why, rather than
+        # leaving a reader to infer coverage that does not exist.
+        text = HOOK.read_text()
+        self.assertIn("Write", text)
+        for word in ("authoring", "its own tests", "runtime"):
+            with self.subTest(word=word):
+                self.assertIn(word, text)
+
+    def test_the_glob_residual_is_named_not_implied(self):
+        # The specific asymmetry #156 reported: the header admitted runtime
+        # assembly and wrappers while silently omitting globbing. Whatever is
+        # left open must be spelled the way someone would type it.
+        text = HOOK.read_text()
+        for spelling in ("*ecrets", "[s]ecrets"):
+            with self.subTest(spelling=spelling):
+                self.assertIn(spelling, text)
+
+    def test_the_audit_log_gap_matches_what_is_written(self):
+        # The KNOWN GAPS entry used to promise the opposite of the fix (#157).
+        stale = "The audit line records the full command"
+        offenders = [i for i, ln in enumerate(HOOK.read_text().splitlines(), 1)
+                     if stale in ln]
+        self.assertEqual(offenders, [],
+                         "the header still promises the full command at "
+                         "line(s) %s" % offenders)
+
 
 class ToolsOtherThanBash(unittest.TestCase):
     """Adversarial review finding F1 (CRITICAL) — Bash was never the most
