@@ -5,7 +5,8 @@ set -euo pipefail
 # generalized again by #66 to also guard Bash.
 #
 # A MAIN session (no agent_id) is a COORDINATOR, not an implementer — under
-# TWO independent conditions, either one alone is enough to block:
+# THREE independent conditions, any one alone is enough to block (the third
+# is #128; see the USER_AWAY block below for the measurement that added it):
 #
 # 1. FABLE MODEL (#32, unchanged): a main running on Fable re-reads the FULL
 #    conversation at Fable prices every turn — an implementation loop there
@@ -39,8 +40,8 @@ set -euo pipefail
 #
 # So: a MAIN-session Edit/Write whose written content exceeds
 # AIRULESET_FABLE_EDIT_MAX (~800 chars), OR a MAIN-session Bash command that
-# classify_bash() marks BLOCK, is BLOCKED when EITHER Fable-main or
-# goal-armed holds. Small edits and allow-listed/ambiguous Bash commands
+# classify_bash() marks BLOCK, is BLOCKED when ANY of Fable-main, goal-armed
+# or user-away (#128) holds. Small edits and allow-listed/ambiguous Bash commands
 # pass (oversight/coordination is legitimate). Subagents ALWAYS pass — a
 # subagent's payload carries `agent_id`; execution is exactly what belongs
 # there.
@@ -82,8 +83,9 @@ set -euo pipefail
 # gh/git call.
 #
 # Bypass (rare, logged, ONE-SHOT since #80 — honoring the marker DELETES it,
-# so one marker exempts exactly one call): touch
-# /tmp/airuleset-main-exec-ok-<session_id>
+# so one marker exempts exactly one call; and since #128 the marker must
+# CARRY the reason, which is logged, an empty one being refused and cleared):
+#   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-<session_id>
 # (generalized name). The original Fable-only marker
 # /tmp/airuleset-fable-exec-ok-<session_id> is STILL honored for backward
 # compatibility (nothing outside this hook + its own tests referenced the
@@ -94,7 +96,8 @@ set -euo pipefail
 # way to answer "did the hook ever fire, on what" — only bypasses were
 # logged. Every BLOCK (Bash AND Edit/Write) is now ALSO appended to its own
 # log, /tmp/airuleset-main-exec-block.log (timestamp, session, tool, which
-# rule matched — FABLE / GOAL_ARMED / FABLE+GOAL_ARMED, the classifier match
+# rule matched — FABLE / GOAL_ARMED / USER_AWAY, joined by '+' when more
+# than one holds — the classifier match
 # or len=N, and the first ~120 chars of the command/file) — same
 # append-only style as the bypass log, via `log_block()`.
 #
