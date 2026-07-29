@@ -24,7 +24,7 @@ class TestReplayScriptOnThisRepoOwnFiles(TestCase):
 
     def test_runs_clean_and_reports_both_required_numbers(self):
         out = self._run()
-        self.assertIn("=== REPO (git-tracked files) ===", out)
+        self.assertIn("=== REPO (git-tracked files) corpus ===", out)
         self.assertIn("no-longer-blocked (naive mention, careful correctly excludes):", out)
         self.assertIn("newly-blocked (careful flags something naive missed):", out)
 
@@ -45,7 +45,7 @@ class TestReplayScriptOnThisRepoOwnFiles(TestCase):
 
     def test_absent_local_projects_dir_yields_an_empty_local_corpus_not_a_crash(self):
         out = self._run()
-        self.assertIn("=== LOCAL (real Claude Code transcripts, best-effort) ===", out)
+        self.assertIn("=== LOCAL (real Claude Code transcripts, best-effort) corpus ===", out)
         self.assertIn("total items: 0", out)
 
     def test_limit_is_honored_and_stays_deterministic(self):
