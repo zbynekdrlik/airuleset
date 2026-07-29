@@ -24,6 +24,14 @@ set -euo pipefail
 #      (`~/`, `$HOME/`, an absolute path, or bare);
 #   B. any `<stem>.secret` filename — this channel's own extension, so a
 #      relative read after a `cd` into the store is still caught.
+#   D. either of those SPELLED WITH A GLOB (#156). A and B match literal
+#      characters, but the shell expands `~/.claude/secr*/DB_PASS.sec*` to the
+#      store before either of them sees a real path — so the guard was
+#      deny-by-default on the HEAD and a blocklist on the SPELLING, and only
+#      the first half was ever disclosed. D decides per path COMPONENT what the
+#      shell can expand it INTO: `.cl*`, `.claud?`, `.claud[e]` can all be
+#      `.claude`, and `sec*`/`secret[s]` can be `secrets`. It also resolves a
+#      relative token against a `cd` earlier in the SAME command.
 # The command is then split into segments (quote-aware, and command
 # substitutions `$(...)` / backticks become their OWN segments so a read
 # nested inside an allowlisted head — `ls "$(cat …/DB.secret)"` — is still
@@ -81,6 +89,20 @@ set -euo pipefail
 #   - A hook is configuration. Anything that edits settings.json, unregisters
 #     this hook, or reaches the file through a tool with no matcher here is
 #     outside its reach by construction.
+#   - A GLOB THAT DOES NOT BEGIN WITH THE NAME IT STANDS FOR is not matched by
+#     rule D. D anchors on a component's literal PREFIX, so `secr*` is caught
+#     and `*ecrets`, `[s]ecrets`, `??????s` and a bare `*` are NOT: `cat
+#     ~/.claude/*ecrets/*` and `cat ~/.claude/*/*` still read the store. This
+#     is a deliberate trade, measured rather than assumed. Anchoring on any
+#     literal run instead of the prefix matches grep REGEXES and `find -name`
+#     PATTERNS (`secret.*=`, `*.claude*`, `^[[:space:]]*//.*[Cc]laude`), and
+#     exempting wildcards under `~` refuses `du -sh ~/.claude/*`, which occurs
+#     repeatedly in this fleet's real command history and reports sizes, never
+#     content. Both were replayed over 212,557 real commands; the shipped rule
+#     newly matches ZERO of them. What is bought is the spelling a person or a
+#     tab-completion actually produces; what is left open is a spelling nobody
+#     types by accident — which is the exact boundary of this hook's claim,
+#     that the leak cannot happen by REFLEX.
 #   - A path computed at runtime rather than written literally
 #     (`python3 -c "import pathlib; open(pathlib.Path.home()/'.claude'/'secrets'/n)"`,
 #     a variable assembled from parts, a path read out of another file) does
@@ -147,6 +169,7 @@ command -v python3 >/dev/null 2>&1 || fail_closed "python3 is not available."
 # process's stdin (it carries the script), so a piped payload would arrive
 # empty and every check would silently pass.
 VIOLATION=$(python3 - "$PAYLOAD" <<'PYEOF'
+import fnmatch
 import json
 import re
 import shlex
@@ -180,6 +203,98 @@ VALUE_FILE_RE = re.compile(
 CLAUDE_ROOT_RE = re.compile(r"\.claude/?(?![A-Za-z0-9_./-])")
 RECURSIVE_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$)")
 BULK_HEADS = {"tar", "zip", "rsync", "cpio", "pax", "7z", "scp"}
+
+# D. the same three references SPELLED WITH A GLOB (#156 hole 1). A/B/C above
+# match literal characters, but the shell expands `~/.claude/secr*/*` to the
+# store before any of them ever sees the real path — so `cat $HOME/.cl*/sec*/*`
+# read a credential and was ALLOWED. These decide on what a component CAN
+# EXPAND INTO rather than on how it is typed.
+CLAUDE_DIR = ".claude"
+STORE_DIR = "secrets"
+VALUE_EXT = "secret"
+GLOB_META = set("*?[")
+# A token is a maximal run of non-separator, non-quote characters. Quotes are
+# separators so a path inside `open("…")` is still tokenized as a path.
+TOKEN_RE = re.compile(r"[^\s'\"|;&()<>]+")
+LITERAL_HEAD_RE = re.compile(r"^[^*?\[\]]*")
+# How many literal characters a glob component must anchor on. 3 is what
+# separates `.cl*`/`sec*` (a real truncation of the store's own path) from a
+# grep REGEX that merely happens to look like one — see ANCHOR below.
+GLOB_ANCHOR = 3
+
+
+def can_be(component, target):
+    """Could this path component, after SHELL GLOBBING, be exactly `target`?
+
+    The anchor is the component's literal PREFIX — the characters before its
+    first metacharacter — and it must itself be a prefix of `target`. Two
+    weaker rules were measured against 212,557 real commands and rejected:
+    no anchor at all reads every `dir/*/*` in every tree as the store, and an
+    anchor allowed to float anywhere in the component (`*claude*`,
+    `.*[Cc]laude`, `secret.*=`) matches grep REGEXES and `find -name` PATTERNS,
+    which are not paths — the same mention-vs-use distinction this hook already
+    makes deliberately for Grep's own `pattern` field.
+    """
+    component = component.strip()
+    if component == target:
+        return True
+    if not (set(component) & GLOB_META):
+        return False       # a literal that is not the target cannot become it
+    if not fnmatch.fnmatchcase(target, component):
+        return False
+    lit = LITERAL_HEAD_RE.match(component).group(0)
+    return len(lit) >= GLOB_ANCHOR and target.startswith(lit)
+
+
+def ext_can_be_value(component):
+    """A final component whose EXTENSION is a glob truncation of `.secret`."""
+    if "." not in component:
+        return False
+    stem, ext = component.rsplit(".", 1)
+    if not stem:
+        # A bare `.secret` with no stem is a source fragment (`(".secret",`),
+        # not a filename — pattern B declines it for the same reason.
+        return False
+    return ext != VALUE_EXT and can_be(ext, VALUE_EXT)
+
+
+def cd_target(segment, head):
+    """Where an allowed `cd` in an EARLIER segment leaves the later ones."""
+    if head not in ("cd", "pushd"):
+        return None
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        tk = segment.split()
+    for t in tk[1:]:
+        if not t.startswith("-"):
+            return t.rstrip("/")
+    return None
+
+
+def globbed_store_ref(segment, cwd_hint=None):
+    """A store reference whose literals are elided by shell globbing."""
+    for tok in TOKEN_RE.findall(segment):
+        cands = [tok]
+        if cwd_hint and not tok.startswith(("/", "~", "$", "-")):
+            cands.append(cwd_hint + "/" + tok)
+        for t in cands:
+            comps = [c for c in t.split("/") if c]
+            for a, b in zip(comps, comps[1:]):
+                if can_be(a, CLAUDE_DIR) and can_be(b, STORE_DIR):
+                    return t
+            if comps and ext_can_be_value(comps[-1]):
+                return t
+    return None
+
+
+def globbed_parent_ref(segment):
+    """Rule C's own glob spelling — `tar czf x.tgz ~/.cl*`."""
+    for tok in TOKEN_RE.findall(segment):
+        comps = [c for c in tok.split("/") if c]
+        if comps and comps[-1] != CLAUDE_DIR and can_be(comps[-1], CLAUDE_DIR):
+            return tok
+    return None
 
 # Heads that are PROVABLY content-free AND non-mutating. Everything the
 # adversarial review broke is gone: `file -f` and `du --files0-from` read a
@@ -280,9 +395,13 @@ def head_of(segment):
     return tk[0].rsplit("/", 1)[-1].lower()
 
 
-def references_store(segment):
+def references_store(segment, cwd_hint=None):
     m = STORE_DIR_RE.search(segment) or VALUE_FILE_RE.search(segment)
-    return m.group(0) if m else None
+    if m:
+        return m.group(0)
+    # Rule D is ADDITIVE, never a replacement: the regexes above still catch
+    # shapes the tokenizer cannot see, and D catches the spellings they cannot.
+    return globbed_store_ref(segment, cwd_hint)
 
 
 def sweeps_the_parent(segment, head):
@@ -295,7 +414,7 @@ def sweeps_the_parent(segment, head):
     """
     if head in ALLOW_HEADS:
         return None          # `ls -R ~/.claude` lists names, never content
-    if not CLAUDE_ROOT_RE.search(segment):
+    if not (CLAUDE_ROOT_RE.search(segment) or globbed_parent_ref(segment)):
         return None
     if head in BULK_HEADS or RECURSIVE_RE.search(segment):
         return "recursive read/archive of the store's parent dir"
@@ -328,13 +447,20 @@ if not cmd:
     sys.exit(0)
 
 hits = []
+# WITHIN one command the hook can see a `cd` and what follows it, so a later
+# relative token is resolved against the cd target — `cd ~/.claude && cat
+# sec*/*` names the store in neither half on its own. ACROSS calls it still
+# cannot (the Bash tool's cwd persists and this hook is stateless), which is
+# why `cd` INTO the store is refused outright and stays a stated gap.
+cwd_hint = None
 for seg, term in split_segments(cmd):
     head = head_of(seg)
     sweep = sweeps_the_parent(seg, head)
     if sweep:
         hits.append("%s  ->  %s (%s)" % (head or "?", seg.strip()[:120], sweep))
         continue
-    if not references_store(seg):
+    if not references_store(seg, cwd_hint):
+        cwd_hint = cd_target(seg, head) or cwd_hint
         continue
     if head in ALLOW_HEADS and term != "|":
         # Piped, an allowlisted head is just a name source for whatever
