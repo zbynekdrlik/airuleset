@@ -1628,3 +1628,45 @@ push` — both issues auto-closed by GitHub on the `Closes #N` trailers.
 Playbook: `.claude/rules/airuleset-internals.md` (commit 191e383) — the
 requestId-fallback-protects-old-fixtures finding, and the RED-commit-trailer
 premature-close gotcha for this repo's direct-to-main flow.
+
+## 2026-07-29 — #166: measured a Stop hook can only DELAY a false backlog-empty stop, re-scoped
+
+Acceptance bullet 1 (measure before building): read the CC 2.1.220 binary
+directly (offset ~254572200) -- `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` defaults to
+8 and overrides ANY blocking Stop hook (aggregate across hooks, not
+per-hook) after 8 consecutive blocked Stop events, force-ending the turn
+(`{reason:"completed"}`) regardless. Live control-arm proof in an isolated
+scratch session (`CLAUDE_CONFIG_DIR`, no real repo/gh/goal): cap=2 + an
+unconditional-block hook still produced `"terminal_reason":"completed"`
+after 3 invocations, matching a hook-free control run's SAME terminal
+reason. Full evidence: issue comment
+https://github.com/zbynekdrlik/airuleset/issues/166#issuecomment-5122637185.
+
+Re-scoped per the ticket's own pre-written branch ("say so and re-scope --
+the value may belong in the watchdog instead, see #160"): did NOT ship an
+enforcing Stop hook. Shipped `backlog_marker_gate.py`
+(`classify_backlog_empty_claim` -- line-start, fenced-code/backtick-aware
+mention-vs-use classifier for the `🏁 BACKLOG EMPTY:` marker) for issue
+160's watchdog-side "verify before accepting achieved" fix to consume, plus
+`scripts/replay_backlog_marker_corpus.py` (Acceptance bullet 2 -- corpus
+replay, both directions, over this repo's own git-tracked files AND this
+box's real local transcripts). Real replay numbers: REPO corpus 324 items,
+3 no-longer-blocked (SKILL.md's own worked example + two test files
+genuinely mentioning the marker), 0 newly-blocked; LOCAL corpus 77,892 real
+assistant messages, 2 no-longer-blocked, 0 genuine claims yet (the marker is
+brand new), 0 newly-blocked.
+
+Genuine RED/GREEN: test:c3b107c[red] (ImportError, backlog_marker_gate.py
+did not exist) -> feat:3c594ae[green] (16 new tests). Full suite 3209->3225
+passed, ruff clean. Finding recorded permanently in
+`.claude/rules/airuleset-internals.md` (new
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` bullet) so no future ticket re-attempts an
+"absolute" Stop-hook gate on this class of problem. Closed #166 (superseded
+by the measurement; issue 160 keeps ownership of the actual watchdog wiring
+-- commented there pointing at the new classifier module). No dropped work;
+nothing filed (issue 160 already tracks the remaining wiring).
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` -- the
+CLAUDE_CODE_STOP_HOOK_BLOCK_CAP finding (default 8, overrides any blocking
+Stop hook aggregate across hooks, confirmed from the CC binary + a live
+control-arm probe): a Stop hook can delay a stop, never durably prevent one.
