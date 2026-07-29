@@ -1368,3 +1368,38 @@ Tension with #128 reported on the ticket; no hook, guard or threshold changed.
 
 Gate: 2845 tests pass (2802 baseline + 43 new), `ruff check .` clean,
 `airuleset.py validate` OK, deployed to all 7 targets via `airuleset.py push`.
+
+## 2026-07-29 — #131 per-dispatch floor vs in-dispatch growth
+
+Built `burn.scan_dispatches` / `distribution` / `floor_growth_totals` /
+`by_agent_type` / `import_closure_chars` / `floor_attribution` /
+`render_floor`, surfaced as `airuleset.py delegation --floor`. Additive:
+`scan_split()` and `scan()` untouched, so the standing meter's baselines and
+`hourly_burn_alert()` are unmoved.
+
+Commits: 1752316 [red] · b2a6eb4 (two wrong assertions of my own, corrected in
+their own commit) · 5c24d48 [green] · 1fd9744 (ruff) · be335e1 [red] ·
+a7a31c4 [green] (synthetic zero-usage entries).
+
+Design comment posted before the first code commit
+(issuecomment-5111866433), root cause traced to `scan_split()`'s per-file loop
+discarding ordering and counting transcript LINES as turns.
+
+Measured, dev1, 12h (301-dispatch 48h window agrees): floor median 115,636,
+turns median 38 (p25 15, p90 162, max 338 — the earlier ~3 was wrong twice
+over), growth median 112,680. Floor is 43.6% of subagent CONTEXT tokens but
+only 37.0% of subagent COST, because it is cache-written once and cache-read
+thereafter — so growth (63%) is the larger term and the ticket's own premise
+does not hold. The floor is bimodal by AGENT TYPE and nothing else: three
+probes with an identical 22-char prompt gave Explore 10,392, general-purpose
+80,372, cavecrew-investigator 69,993, bracketing the always-on ruleset block
+at ~67k–70k tokens = ~60% of a carrying dispatch's floor, 20.3% of subagent
+spend, ~17% of fleet. Implications written to the ticket; no hook, guard,
+threshold or rule changed.
+
+Filed #150 (scan_split counts lines, not requests — ~2.13x over-count;
+re-baselining the standing meter is its own decision).
+
+Gate: 2875 tests pass (2871 baseline + 4 new after the synthetic-entry pair),
+`ruff check .` clean, `airuleset.py validate` OK, deployed to all 7 targets
+via `airuleset.py push`.
