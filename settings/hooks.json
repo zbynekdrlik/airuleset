@@ -18,6 +18,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-vault-store-read.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-sensitive-staging.sh",
             "timeout": 5
           },
