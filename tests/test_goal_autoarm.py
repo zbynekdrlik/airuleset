@@ -119,6 +119,83 @@ class TestGoalAutoarm(unittest.TestCase):
         self.assertTrue(t2.typed())
 
 
+class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
+    """#170 — job 9 decided purely from what is VISIBLE in the pane.
+
+    A `/goal clear` does not wipe the screen: the arm question and the printed
+    `/goal` line are still there, so the next sweep matched them again and
+    typed the goal straight back in. The user reported it as goals "starting
+    themselves where I had them switched off".
+
+    The discriminator is in the transcript, not the viewport. Claude Code
+    writes a `Goal cleared:` marker ONLY for an explicit clear — an achieved
+    goal prints `✔ Goal achieved` to the screen and persists nothing (measured
+    across 8329 local transcripts: 86 `Goal set:` markers against 32 genuine
+    `Goal cleared:` ones, every one of the latter an explicit clear). So the
+    LATEST goal marker being a clear means the user turned it off, and the
+    session is left alone until they arm it again themselves.
+
+    Deliberately asymmetric: re-enabling costs the user one paste, while
+    re-arming a loop they stopped costs them tokens and control.
+    """
+
+    def _projects(self, cwd, marker_line):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        d = root / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True)
+        (d / "sess-170.jsonl").write_text(marker_line + "\n", encoding="utf-8")
+        return root
+
+    @staticmethod
+    def _marker(state, payload="STOP CONDITIONS — the loop is DONE ..."):
+        return _json.dumps({
+            "type": "system",
+            "timestamp": "2026-07-29T09:55:51.000Z",
+            "content": "<local-command-stdout>Goal %s: %s</local-command-stdout>"
+                       % (state, payload),
+        })
+
+    def test_cleared_goal_is_left_alone(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a goal the user cleared must not be re-armed")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_an_armed_session_still_gets_re_armed(self):
+        """The resolved-cycle case job 9 exists for — must keep working."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("set"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed())
+
+    def test_no_transcript_behaves_exactly_as_before(self):
+        """Fail-open: not provably cleared must never start blocking a pane
+        that used to arm (a sudo-hosted stream reads no markers at all)."""
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=Path(tmp.name))
+        self.assertTrue(tmux.typed())
+
+    def test_the_skip_is_logged_once_not_every_sweep(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"))
+        state, now = {}, time.time()
+        n = []
+        for i in range(3):
+            tmux = FakeTmux(ARM_PANE)
+            logs = wd.goal_autoarm(now + i * (wd.GOAL_ARM_WINDOW_S + 5),
+                                   tmux, state, projects_dir=pd)
+            n.append(sum(1 for ln in logs if "cleared" in ln))
+        self.assertEqual(n, [1, 0, 0], "the skip must be logged once")
+
+
 if __name__ == "__main__":
     unittest.main()
 
