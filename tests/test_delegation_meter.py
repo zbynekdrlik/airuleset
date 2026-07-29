@@ -37,15 +37,18 @@ UTC = datetime.timezone.utc
 
 
 def _usage_line(ts, model="claude-opus-5", i=0, cw=0, cr=0, o=0, sidechain=False,
-                cwd="/home/newlevel/devel/demo"):
-    return json.dumps({
+                cwd="/home/newlevel/devel/demo", rid=None):
+    line = {
         "timestamp": ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         "isSidechain": sidechain,
         "cwd": cwd,
         "message": {"model": model, "usage": {
             "input_tokens": i, "cache_creation_input_tokens": cw,
             "cache_read_input_tokens": cr, "output_tokens": o}},
-    })
+    }
+    if rid is not None:
+        line["requestId"] = rid
+    return json.dumps(line)
 
 
 def _write_main(root, project, session, lines):
@@ -93,6 +96,76 @@ class TestTheBlindnessThisFixes(unittest.TestCase):
         self.assertEqual(row["sub"]["turns"], 1)
         self.assertEqual(row["main"]["cache_r"], 1000)
         self.assertEqual(row["sub"]["cache_r"], 999000)
+
+
+class TestRequestDedup(unittest.TestCase):
+    """#150: Claude Code writes one API response as several transcript lines
+    (one per content block — `thinking`, then each `tool_use`), and every one
+    of those lines carries a COPY of the same request-level `usage`. Counting
+    lines inflated `turns` ~2.13x on a real transcript (236 usage lines, 111
+    distinct requestIds). `scan_split()` must dedupe by `requestId` — the
+    exact request-deduped mechanism `read_dispatch()` already uses (#131) —
+    so one request spread over several lines counts as ONE turn with ONE copy
+    of its usage, never several."""
+
+    def test_one_request_spanning_several_content_blocks_is_one_turn(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_main(root, "proj", "s1", [
+                _usage_line(now, cr=118307, o=0, rid="req-1"),   # thinking
+                _usage_line(now, cr=118307, o=0, rid="req-1"),   # tool_use #1
+                _usage_line(now, cr=118307, o=42, rid="req-1"),  # tool_use #2 (final)
+            ])
+            data = burn.scan_split(root, hours=12, now=now,
+                                   repo_resolver=lambda cwd: None)
+        row = data["projects"]["proj"]["main"]
+        self.assertEqual(row["turns"], 1)
+        self.assertEqual(row["cache_r"], 118307)
+        self.assertEqual(row["out"], 42)
+        self.assertEqual(data["usage_lines"], 1)
+
+    def test_two_distinct_requests_are_two_turns(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_main(root, "proj", "s1", [
+                _usage_line(now, cr=100, rid="req-1"),
+                _usage_line(now, cr=100, rid="req-1"),
+                _usage_line(now, cr=50, rid="req-2"),
+            ])
+            data = burn.scan_split(root, hours=12, now=now,
+                                   repo_resolver=lambda cwd: None)
+        row = data["projects"]["proj"]["main"]
+        self.assertEqual(row["turns"], 2)
+        self.assertEqual(row["cache_r"], 150)
+
+    def test_falls_back_to_message_id_when_no_request_id(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            p = _write_main(root, "proj", "s1", [
+                json.dumps({
+                    "timestamp": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    "isSidechain": False,
+                    "cwd": "/home/newlevel/devel/demo",
+                    "message": {"model": "claude-opus-5", "id": "msg-1", "usage": {
+                        "input_tokens": 0, "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 200, "output_tokens": 0}},
+                }),
+                json.dumps({
+                    "timestamp": now.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    "isSidechain": False,
+                    "cwd": "/home/newlevel/devel/demo",
+                    "message": {"model": "claude-opus-5", "id": "msg-1", "usage": {
+                        "input_tokens": 0, "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 200, "output_tokens": 5}},
+                }),
+            ])
+            del p
+            data = burn.scan_split(root, hours=12, now=now,
+                                   repo_resolver=lambda cwd: None)
+        row = data["projects"]["proj"]["main"]
+        self.assertEqual(row["turns"], 1)
+        self.assertEqual(row["cache_r"], 200)
+        self.assertEqual(row["out"], 5)
 
 
 class TestWindowIsByLineTimestamp(unittest.TestCase):
