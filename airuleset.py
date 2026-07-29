@@ -3453,6 +3453,46 @@ def _secret_probe_urls(ips, port):
     return [_secret_health_url(ip, port) for ip in ips]
 
 
+def _secret_is_encrypted(ip, iface=None):
+    """True when traffic to `ip` is encrypted before it leaves the box.
+
+    Tailscale by CIDR, loopback (it never leaves at all), and any interface
+    whose name starts with a known encrypted-overlay prefix. Everything else is
+    genuine cleartext, whatever its address range says — the ranges do not
+    carry the answer, since wg0 and a zerotier both look like plain LAN.
+    """
+    from filedrop import _is_tailscale
+    if _is_tailscale(ip) or str(ip).startswith("127."):
+        return True
+    if iface is None:
+        iface = _secret_iface_for(ip)
+    return bool(iface and str(iface).lower().startswith(_SECRET_ENCRYPTED_IFACE))
+
+
+def _secret_partition_ips(ips):
+    """(encrypted, cleartext) — the split `request` advertises from."""
+    enc, plain = [], []
+    for ip in ips:
+        (enc if _secret_is_encrypted(ip) else plain).append(ip)
+    return enc, plain
+
+
+def _secret_select_ips(ips, allow_plain=False):
+    """(chosen, dropped) addresses for a credential endpoint.
+
+    Cleartext is OPT-IN. A LAN URL carries the token in the request line and
+    the credential in the POST body with nothing around them, and offering it
+    beside the encrypted one means some of the time it gets picked. A box with
+    only cleartext returns an EMPTY chosen list rather than falling back — the
+    caller then tells the user to re-run with --allow-plain, which is a
+    decision, not a default.
+    """
+    enc, plain = _secret_partition_ips(ips)
+    if allow_plain:
+        return enc + plain, []
+    return enc, plain
+
+
 def _secret_url_line(ip, port, token, iface=None):
     """One advertised URL plus its TRANSPORT, spelled out.
 
@@ -3548,8 +3588,8 @@ def _secret_apply_remainder(args):
         if tok == "--":
             rest.pop(0)
             break
-        if tok in ("--stdin", "--replace"):
-            setattr(args, tok[2:], True)
+        if tok in ("--stdin", "--replace", "--allow-plain"):
+            setattr(args, tok[2:].replace("-", "_"), True)
             rest.pop(0)
             continue
         key, eq, inline = tok.partition("=")
@@ -3698,10 +3738,20 @@ def cmd_secret(args):
     ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
     keep = _secret_clamp_keep(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
 
-    ips = [ip for ip in bind_ips() if _secret_bindable(ip)]
-    if not ips:
+    private = [ip for ip in bind_ips() if _secret_bindable(ip)]
+    if not private:
         print("secret: no private interface to bind (refusing a public bind)",
               file=sys.stderr)
+        sys.exit(1)
+    # Bind only what we advertise: an address the user is not being offered is
+    # pure attack surface.
+    ips, dropped = _secret_select_ips(private,
+                                      allow_plain=getattr(args, "allow_plain", False))
+    if not ips:
+        print("secret: only unencrypted interfaces are available (%s). A "
+              "credential would cross the LAN in cleartext — re-run with "
+              "--allow-plain if that is acceptable here."
+              % ", ".join(dropped), file=sys.stderr)
         sys.exit(1)
 
     port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
@@ -3756,6 +3806,9 @@ def cmd_secret(args):
     for ip in ips:
         if _live(_secret_health_url(ip, port)):
             print(_secret_url_line(ip, port, token))
+    if dropped:
+        print("(skipped %s — cleartext; --allow-plain offers them too)"
+              % ", ".join(dropped))
     print("name=%s  endpoint-ttl=%ds  keep=%ds" % (nm, ttl, keep))
     print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
           "Stav: `airuleset.py secret status %s`." % nm)
@@ -4726,6 +4779,9 @@ def main():
                        help="Port (default: first free in 8830-8849)")
     p_sec.add_argument("--env", default=None,
                        help="exec: environment variable to set (default: NAME)")
+    p_sec.add_argument("--allow-plain", action="store_true",
+                       help="request: also offer UNENCRYPTED LAN URLs (a "
+                            "credential would cross the network in cleartext)")
     p_sec.add_argument("--replace", action="store_true",
                        help="request: cancel an existing pending request for "
                             "this name (stopping its endpoint) and issue a new URL")
