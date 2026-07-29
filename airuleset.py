@@ -3262,14 +3262,23 @@ def _burn_remote_cmd(remote, days):
     module from the ordinary `push` deploy; never scp'd separately, per
     `deploy-from-clean-tree.md`). Split out from `_burn_remote` so the
     command shape is unit-testable without a real network call."""
-    remote_cmd = f"cd {remote['repo_path']} && python3 airuleset.py burn --json --days {days}"
+    return _remote_ssh_prefix(remote) + [
+        f"cd {remote['repo_path']} && python3 airuleset.py burn --json --days {days}"]
+
+
+def _remote_ssh_prefix(remote):
+    """The identity/sshpass selection shared by every remote collection.
+
+    ONE place, so a second collector (`_delegation_remote_cmd`, #130) reuses
+    the sanctioned ssh shape byte-for-byte instead of inventing a parallel one
+    — `hooks/block-subdev-ssh-misuse.sh` guards exactly this."""
     identity = remote.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity),
                 "-o", "StrictHostKeyChecking=no",
-                f"{remote['user']}@{remote['host']}", remote_cmd]
+                f"{remote['user']}@{remote['host']}"]
     return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
-            f"{remote['user']}@{remote['host']}", remote_cmd]
+            f"{remote['user']}@{remote['host']}"]
 
 
 def _burn_remote(remote, days):
@@ -3466,6 +3475,162 @@ def cmd_burn(args):
         print(json.dumps(combined, indent=1))
     else:
         print(burn.render_human(combined, days))
+
+
+# --------------------------------------------------------------------------- #
+# #130 — `airuleset.py delegation`: the standing MAIN vs SUBAGENT cost meter.
+#
+# The ruleset's central move is to push work out of the main agent because a
+# main turn re-sends the whole conversation. That reasoning has never been
+# checked against what the subagents themselves cost, and it could not be:
+# `burn.scan()` is structurally blind to subagent transcripts (see the header
+# comment on `burn.scan_split`). This is the instrument, not a gate — it
+# reports, it never blocks, and it changes no threshold anywhere.
+# --------------------------------------------------------------------------- #
+
+def _delegation_remote_cmd(remote, hours):
+    """Pure ssh-command builder — invokes the remote box's OWN deployed
+    `airuleset.py delegation --json`, exactly as `_burn_remote_cmd` does for
+    `burn`, sharing the same identity/sshpass prefix. READ-ONLY on the remote:
+    it scans that box's transcripts and prints JSON, writes nothing."""
+    return _remote_ssh_prefix(remote) + [
+        f"cd {remote['repo_path']} && python3 airuleset.py delegation "
+        f"--json --hours {hours}"]
+
+
+def _delegation_remote(remote, hours):
+    """Collect one remote box's split report. Fail-safe like `_burn_remote`:
+    any ssh error, non-zero exit or unparsable stdout WARNs and returns None,
+    so one unreachable box never aborts the fleet report."""
+    import subprocess
+    cmd = _delegation_remote_cmd(remote, hours)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        print(f"  WARN: delegation collection failed for {remote['name']}: {e}",
+              file=sys.stderr)
+        return None
+    if result.returncode != 0:
+        print(f"  WARN: delegation collection failed for {remote['name']}: "
+              f"{result.stderr.strip()[:200]}", file=sys.stderr)
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        print("  WARN: delegation collection returned invalid JSON for "
+              f"{remote['name']}", file=sys.stderr)
+        return None
+
+
+def _gh_closed_issues_json(repo):
+    import subprocess
+    r = subprocess.run(
+        ["gh", "issue", "list", "-R", repo, "--state", "closed",
+         "--limit", "500", "--json", "number,closedAt"],
+        capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def _closed_ticket_count(repo, start, end, _runner=None):
+    """Issues on `repo` closed inside [start, end], or None.
+
+    None — never 0 — when `gh` is unavailable or errors: a fabricated
+    zero-ticket denominator would render as "spend with no ticket", which is a
+    real and serious finding, and it must never be manufactured by a missing
+    tool."""
+    import burn
+    import datetime
+    runner = _runner or _gh_closed_issues_json
+    try:
+        raw = runner(repo)
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        rows = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    n = 0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        t = burn._parse_ts(r.get("closedAt"))
+        if t is None:
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        if start <= t <= end:
+            n += 1
+    return n
+
+
+def _attach_ticket_counts(merged, hours, _counter=None):
+    """Join closed-ticket counts onto each project row that resolved a repo.
+
+    Opt-in (`--tickets`) because it needs network + `gh` auth the base
+    measurement must not depend on. A project whose repo did not resolve keeps
+    `closed_tickets: None` and renders no per-ticket line, rather than
+    borrowing someone else's denominator."""
+    import datetime
+    counter = _counter or _closed_ticket_count
+    end = datetime.datetime.now(datetime.timezone.utc)
+    start = end - datetime.timedelta(hours=hours)
+    cache = {}
+    for row in (merged.get("by_project") or {}).values():
+        repo = row.get("repo")
+        if not repo:
+            continue
+        if repo not in cache:
+            cache[repo] = counter(repo, start, end)
+        row["closed_tickets"] = cache[repo]
+        if cache[repo]:
+            import burn
+            total = row["main"]["units"] + row["sub"]["units"]
+            row["units_per_ticket"] = burn.units_per_ticket(total, cache[repo])
+    return merged
+
+
+def cmd_delegation(args):
+    """Per-box, per-project MAIN vs SUBAGENT token attribution over a window.
+
+    Reports turns, the four token sums, a weighted (relative, never a price)
+    cost unit, mean context per turn, and — with `--tickets` — cost per closed
+    ticket, for MAIN and SUBAGENT separately. `--host <name>` / `--host all`
+    also collects the remote fleet over ssh via each box's own deployed copy.
+    """
+    import burn
+    hours = getattr(args, "hours", None) or 12
+    root = getattr(args, "root", None)
+    reports = [burn.split_report(hours=hours, root=root)]
+    host_arg = getattr(args, "host", None)
+    if host_arg:
+        if host_arg == "all":
+            targets = REMOTE_HOSTS
+        else:
+            targets = [h for h in REMOTE_HOSTS if h["name"] == host_arg]
+            if not targets:
+                names = ", ".join(h["name"] for h in REMOTE_HOSTS)
+                print(f"ERROR: unknown --host '{host_arg}' — choices: {names}, all",
+                      file=sys.stderr)
+                sys.exit(1)
+        for remote in targets:
+            print(f"Collecting delegation split from {remote['name']}...",
+                  file=sys.stderr)
+            rep = _delegation_remote(remote, hours)
+            if rep:
+                reports.append(rep)
+    merged = burn.merge_splits(reports)
+    if getattr(args, "tickets", False):
+        _attach_ticket_counts(merged, hours)
+    if getattr(args, "json", False):
+        print(json.dumps(merged, indent=1))
+    else:
+        print(burn.render_split(merged, hours=hours))
 
 
 # ---------------------------------------------------------------------------
@@ -3968,6 +4133,23 @@ def main():
     p_burn.add_argument("--hours", type=int, default=None,
                         help="--fleet lookback window in hours (default 24)")
 
+    p_del = sub.add_parser(
+        "delegation",
+        help="MAIN vs SUBAGENT cost meter — per box, per project: turns, "
+             "token sums, weighted units, mean context per turn")
+    p_del.add_argument("--hours", type=int, default=12,
+                       help="Lookback window in hours (default 12)")
+    p_del.add_argument("--json", action="store_true",
+                       help="Print the raw merged JSON instead of a table")
+    p_del.add_argument("--host", default=None,
+                       help="Also collect a remote box by REMOTE_HOSTS name, "
+                            "or 'all' for every managed remote (read-only, over ssh)")
+    p_del.add_argument("--tickets", action="store_true",
+                       help="Join closed-issue counts per repo and report cost "
+                            "per completed ticket (needs gh; opt-in)")
+    p_del.add_argument("--root", default=None,
+                       help="Transcript store to scan (default ~/.claude/projects)")
+
     p_up = sub.add_parser(
         "upload",
         help="Web upload URL for receiving a file FROM the user (never ask for scp)")
@@ -4022,6 +4204,7 @@ SUBCOMMANDS = {
     "compact-request": cmd_compact_request,
     "fable-gate": cmd_fable_gate,
     "burn": cmd_burn,
+    "delegation": cmd_delegation,
     "authority": cmd_authority,
     "upload": cmd_upload,
     "tickets-status": cmd_tickets_status,

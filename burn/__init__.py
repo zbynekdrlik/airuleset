@@ -1013,3 +1013,365 @@ def render_burn_alert(latest, prev_rows, prev_pct=None, cur_pct=None):
         lines.append("predchadzajuce %d %s: " % (n, unit) + " · ".join(
             "$%.2f" % (r.get("total_usd", 0.0) or 0.0) for r in prev3))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# #130 — the standing MAIN vs SUBAGENT cost meter (`airuleset.py delegation`).
+#
+# ROOT CAUSE this exists to fix: `scan()` above globs `<root>/*/*.jsonl`, which
+# reaches ONLY the top-level session transcript. Claude Code writes subagent
+# transcripts one directory level deeper, at
+# `<root>/<project>/<sid>/subagents/agent-*.jsonl`, and that is also the only
+# place `isSidechain` ever appears — so `scan()`'s `main_vs_sidechain` bucket
+# does not merely under-report the split, it reports a FALSE 100%-MAIN answer
+# (measured on dev1: 100 top-level files / 2.2 GB reachable by that glob,
+# 5,281 subagent files / 2.4 GB invisible to it). That is why the two
+# measurements on the ticket had to be taken by hand.
+#
+# This is deliberately ADDITIVE: `scan()` is left byte-for-byte alone, because
+# it feeds `hourly_snapshot()` -> the watchdog's hourly `snapshots.jsonl` ->
+# `compare_changes()`, the fleet feed, and `hourly_burn_alert()`'s live
+# thresholds. Folding subagents into it would roughly double every hourly
+# figure against a history recorded without them, re-firing the burn alerts on
+# the discontinuity — a threshold change, which #130 explicitly excludes.
+# Reconciling those baselines is filed separately.
+# --------------------------------------------------------------------------- #
+
+# Relative units, NOT a price. This is the Opus row of PRICE divided by 5, i.e.
+# deliberately TIER-NEUTRAL: the unit measures VOLUME and does not silently
+# absorb model-tier drift (tracked separately). Every rendering prints it.
+COST_UNIT_WEIGHTS = {"in": 1.0, "cache_w": 1.25, "cache_r": 0.1, "out": 5.0}
+
+_SPLIT_COUNTERS = ("turns", "in", "cache_w", "cache_r", "out", "sessions")
+
+
+def cost_units(row):
+    """The stated weighting applied to one row. Relative units — never a price."""
+    return sum(float(row.get(k, 0) or 0) * w
+               for k, w in COST_UNIT_WEIGHTS.items())
+
+
+def ctx_per_turn(row):
+    """Mean INPUT context carried per turn = (input + cache_write + cache_read)
+    / turns. Zero turns yields 0 rather than dividing by zero."""
+    turns = row.get("turns", 0) or 0
+    if not turns:
+        return 0
+    ctx = sum(int(row.get(k, 0) or 0) for k in ("in", "cache_w", "cache_r"))
+    return int(round(ctx / turns))
+
+
+def _split_row():
+    return {k: 0 for k in _SPLIT_COUNTERS}
+
+
+def _split_add(dst, src):
+    """Sum RAW counters only. Derived fields (`units`, `ctx_per_turn`) are
+    recomputed by `finalize_split_row` after merging — summing a mean would be
+    wrong, and a remote box's JSON carries both."""
+    for k in _SPLIT_COUNTERS:
+        dst[k] = dst.get(k, 0) + int(src.get(k, 0) or 0)
+
+
+def finalize_split_row(row):
+    out = {k: int(row.get(k, 0) or 0) for k in _SPLIT_COUNTERS}
+    out["units"] = round(cost_units(out), 1)
+    out["ctx_per_turn"] = ctx_per_turn(out)
+    return out
+
+
+def _git_remote_url(cwd):
+    import subprocess
+    r = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
+                       capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def repo_of_cwd(cwd, _runner=None):
+    """`owner/name` for the repo checked out at `cwd`, or None.
+
+    The project DIRECTORY NAME cannot be used for this: Claude Code encodes the
+    cwd by replacing `/` with `-`, and a literal `-` in a path segment encodes
+    identically — `-home-newlevel-devel-forestshop-parovanie-produktov` is
+    ambiguous between two real paths. The `cwd` field recorded on the transcript
+    lines themselves is unambiguous, so that is what this takes.
+
+    Returns None (never a guess) when git is unavailable, the path is not a
+    checkout, or the remote URL does not parse — a project with no resolvable
+    repo simply gets no cost-per-ticket denominator.
+    """
+    if not cwd:
+        return None
+    runner = _runner or _git_remote_url
+    try:
+        url = runner(cwd)
+    except Exception:
+        return None
+    if not url:
+        return None
+    u = str(url).strip()
+    if u.endswith(".git"):
+        u = u[:-4]
+    if "://" in u:
+        parts = u.split("://", 1)[1].split("/")[1:]
+    elif "@" in u and ":" in u:
+        parts = u.split(":", 1)[1].split("/")
+    else:
+        parts = u.split("/")
+    parts = [p for p in parts if p]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:])
+
+
+def _split_transcripts(root):
+    """Yield `(path, project, kind)` for every transcript under `root`.
+
+    `kind` is "main" for a transcript sitting directly in the project dir, and
+    "sub" for one under a `subagents/` component at any depth. Anything else
+    below a project dir is SKIPPED and counted, rather than silently folded into
+    either bucket — if Claude Code grows a new transcript location, that shows
+    up as a non-zero `skipped_other` instead of a quietly wrong split.
+    """
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return
+    for proj in entries:
+        pdir = os.path.join(root, proj)
+        if not os.path.isdir(pdir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(pdir):
+            rel = os.path.relpath(dirpath, pdir)
+            comps = [] if rel == "." else rel.split(os.sep)
+            if not comps:
+                kind = "main"
+            elif "subagents" in comps:
+                kind = "sub"
+            else:
+                kind = "other"
+            for fn in sorted(filenames):
+                if fn.endswith(".jsonl"):
+                    yield os.path.join(dirpath, fn), proj, kind
+
+
+def scan_split(root, hours=12, now=None, repo_resolver=None):
+    """Per-project MAIN vs SUBAGENT token attribution over a `hours` window.
+
+    Every line is bucketed by ITS OWN `timestamp`. File mtime is used ONLY as a
+    cheap skip filter — a file last written before the window cannot contain an
+    in-window line — never as a line's time; #130 is explicit that mtime has
+    produced wrong answers here before.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(hours=hours)
+    resolver = repo_of_cwd if repo_resolver is None else repo_resolver
+    projects = {}
+    files = 0
+    lines = 0
+    skipped_other = 0
+    for path, proj, kind in _split_transcripts(root):
+        if kind == "other":
+            skipped_other += 1
+            continue
+        try:
+            mt = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path), datetime.timezone.utc)
+            if mt < cutoff:
+                continue
+        except OSError:
+            continue
+        files += 1
+        row = _split_row()
+        cwd = None
+        try:
+            fh = open(path, "r", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                msg = e.get("message") or {}
+                u = msg.get("usage") or {}
+                if not u:
+                    continue
+                t = _parse_ts(e.get("timestamp") or "")
+                if t is None:
+                    continue
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=datetime.timezone.utc)
+                if t < cutoff or t > now:
+                    continue
+                lines += 1
+                row["turns"] += 1
+                row["in"] += int(u.get("input_tokens") or 0)
+                row["cache_w"] += int(u.get("cache_creation_input_tokens") or 0)
+                row["cache_r"] += int(u.get("cache_read_input_tokens") or 0)
+                row["out"] += int(u.get("output_tokens") or 0)
+                if cwd is None:
+                    cwd = e.get("cwd")
+        if not row["turns"]:
+            continue
+        row["sessions"] = 1
+        slot = projects.setdefault(
+            proj, {"cwd": None, "main": _split_row(), "sub": _split_row()})
+        if slot["cwd"] is None:
+            slot["cwd"] = cwd
+        _split_add(slot[kind], row)
+    out = {}
+    for proj, slot in sorted(projects.items()):
+        out[proj] = {
+            "cwd": slot["cwd"],
+            "repo": resolver(slot["cwd"]) if slot["cwd"] else None,
+            "main": finalize_split_row(slot["main"]),
+            "sub": finalize_split_row(slot["sub"]),
+        }
+    return {
+        "hours": hours,
+        "window_start": cutoff.isoformat(),
+        "window_end": now.isoformat(),
+        "weights": dict(COST_UNIT_WEIGHTS),
+        "files_scanned": files,
+        "usage_lines": lines,
+        "skipped_other": skipped_other,
+        "projects": out,
+    }
+
+
+def split_report(hours=12, root=None):
+    """`scan_split()` over THIS box's transcript store, tagged host/user so a
+    multi-host `merge_splits()` can attribute per box."""
+    root = root or os.path.expanduser("~/.claude/projects")
+    data = scan_split(root, hours=hours)
+    data["host"] = os.uname().nodename
+    data["user"] = os.environ.get("USER", "?")
+    return data
+
+
+def merge_splits(reports):
+    """Merge N `split_report()`-shaped reports. `by_project` keys are
+    `<host>:<project>` so the same project name on two boxes cannot collide."""
+    by_project = {}
+    totals = {"main": _split_row(), "sub": _split_row()}
+    files = 0
+    usage_lines = 0
+    hours = None
+    for rep in reports:
+        if not isinstance(rep, dict):
+            continue
+        host = rep.get("host") or "?"
+        if rep.get("hours"):
+            hours = rep["hours"]
+        files += int(rep.get("files_scanned", 0) or 0)
+        usage_lines += int(rep.get("usage_lines", 0) or 0)
+        for proj, prow in (rep.get("projects") or {}).items():
+            if not isinstance(prow, dict):
+                continue
+            key = "%s:%s" % (host, proj)
+            dst = by_project.setdefault(key, {
+                "host": host, "project": proj,
+                "cwd": prow.get("cwd"), "repo": prow.get("repo"),
+                "main": _split_row(), "sub": _split_row(),
+                "closed_tickets": None, "units_per_ticket": None,
+            })
+            if dst.get("repo") is None:
+                dst["repo"] = prow.get("repo")
+            for kind in ("main", "sub"):
+                src = prow.get(kind) or {}
+                _split_add(dst[kind], src)
+                _split_add(totals[kind], src)
+    for row in by_project.values():
+        for kind in ("main", "sub"):
+            row[kind] = finalize_split_row(row[kind])
+    ordered = dict(sorted(
+        by_project.items(),
+        key=lambda kv: -(kv[1]["main"]["units"] + kv[1]["sub"]["units"])))
+    return {
+        "hours": hours,
+        "weights": dict(COST_UNIT_WEIGHTS),
+        "files_scanned": files,
+        "usage_lines": usage_lines,
+        "by_project": ordered,
+        "totals": {k: finalize_split_row(v) for k, v in totals.items()},
+    }
+
+
+def units_per_ticket(units, closed):
+    """Cost per completed ticket, or None when nothing closed in the window.
+
+    None, never zero and never infinity: camera-box's real 12h measurement was
+    131.3M units against 0 closed tickets, which is a spend with no ticket — a
+    materially different statement from "cheap per ticket", and the rendering
+    must not be able to blur the two."""
+    if not closed:
+        return None
+    return float(units) / float(closed)
+
+
+def _fmt_units(u):
+    u = float(u or 0)
+    if abs(u) >= 1e6:
+        return "%.1fM" % (u / 1e6)
+    if abs(u) >= 1e3:
+        return "%.1fk" % (u / 1e3)
+    return "%.0f" % u
+
+
+def render_split(merged, hours=12):
+    """Human table. States the weighting on every render and never prints a
+    currency figure — the unit is relative, and #130 requires it not be
+    presented as a price."""
+    w = merged.get("weights") or COST_UNIT_WEIGHTS
+    rows = merged.get("by_project") or {}
+    totals = merged.get("totals") or {}
+    grand = sum((totals.get(k) or {}).get("units", 0) for k in ("main", "sub"))
+    out = []
+    out.append("airuleset delegation -- MAIN vs SUBAGENT, last %sh" % hours)
+    out.append("  weighting (relative units, NOT a price): "
+               "input x%.2f + cache_write x%.2f + cache_read x%.2f + output x%.2f"
+               % (w.get("in", 0), w.get("cache_w", 0),
+                  w.get("cache_r", 0), w.get("out", 0)))
+    out.append("")
+    out.append("  %-34s %-5s %8s %9s %10s %10s %7s"
+               % ("host:project", "row", "turns", "sessions", "units",
+                  "ctx/turn", "share"))
+    for key, row in rows.items():
+        for kind, label in (("main", "MAIN"), ("sub", "SUB")):
+            r = row.get(kind) or {}
+            share = (r.get("units", 0) / grand * 100) if grand else 0.0
+            out.append("  %-34s %-5s %8s %9s %10s %10s %6.1f%%"
+                       % (key if kind == "main" else "", label,
+                          _fmt_int(r.get("turns", 0)),
+                          _fmt_int(r.get("sessions", 0)),
+                          _fmt_units(r.get("units", 0)),
+                          _fmt_int(r.get("ctx_per_turn", 0)),
+                          share))
+        closed = row.get("closed_tickets")
+        if closed is not None:
+            m = (row.get("main") or {}).get("units", 0)
+            s = (row.get("sub") or {}).get("units", 0)
+            pm = units_per_ticket(m, closed)
+            ps = units_per_ticket(s, closed)
+            if pm is None or ps is None:
+                out.append("  %-34s per closed ticket: — (0 closed in window, "
+                           "%s units spent)" % ("", _fmt_units(m + s)))
+            else:
+                out.append("  %-34s per closed ticket (%d closed): "
+                           "MAIN %s · SUB %s"
+                           % ("", closed, _fmt_units(pm), _fmt_units(ps)))
+    out.append("")
+    for kind, label in (("main", "MAIN"), ("sub", "SUB")):
+        r = totals.get(kind) or {}
+        share = (r.get("units", 0) / grand * 100) if grand else 0.0
+        out.append("  TOTAL %-5s %s turns · %s units (%.1f%%) · %s ctx/turn"
+                   % (label, _fmt_int(r.get("turns", 0)),
+                      _fmt_units(r.get("units", 0)), share,
+                      _fmt_int(r.get("ctx_per_turn", 0))))
+    return "\n".join(out)

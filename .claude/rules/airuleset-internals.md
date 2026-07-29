@@ -392,3 +392,59 @@ path-scoped behavior; it only adds the subagent-reachable half.
 - **Never key a corpus-replay result map on a TRUNCATED command string.** Storing `blocked[cmd[:160]] = verdict` collided across a fleet of `ssh -i key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null user@host "cd /opt/app && …"` commands that share a long identical prefix, so a later analysis attributed one command's classifier match to a completely different command (a nonsense `tail -n +165426` label on an `ssh` line was the tell). Key on the full command; truncate only at PRINT time. Per-session counts were unaffected because the replay's own cache was keyed correctly — a collision like this corrupts the ATTRIBUTION long before it corrupts the totals, so it is easy to miss if you only check the numbers.
 - **ATTENDANCE is a measurable per-event axis, and it is the discriminator for "should an autonomous-session guard engage here".** For each main tool call, bisect its timestamp into the sorted list of that session's REAL user prompts (a `type=="user"` transcript entry with a `promptId`, a string `message.content`, not starting with `<`, and no `<local-command-stdout>`) and take the gap. On dev1 for 2026-07-28, only 931 of ~2000 main calls were more than 5 minutes after a human prompt, which is what let #128 widen a guard's engagement to previously-unguarded sessions while touching ZERO attended calls (103 newly blocked, minimum gap 15.0 min). The runtime counterpart of that transcript measurement is `/tmp/claude-user-active-<sid>` (stamped by `clear-question-dedup.sh` on UserPromptSubmit, which goal re-pokes and hook feedback do NOT fire) — a `stat -c %Y` away, so a hook can read the same axis for one session in O(1) with no transcript scan. Fail-open on a missing marker: `/tmp` gets cleared under long-running sessions, and "not provably away" must never start blocking a session that was previously unguarded.
 - **The design gate reads the WHOLE Bash command, so a heredoc BODY containing bare `#N` blocks the commit even when the commit message is clean.** The existing bullets cover bare `#N` in a commit MESSAGE; the same gate fired on `cat >> docs/autopilot-log.md <<'ENTRY' … ENTRY && git add … && git commit -m "<clean message>"`, because the log entry itself legitimately cites the historical tickets it is recording. It also fires on the `gh issue comment … && git commit …` one-liner, since PreToolUse evaluates the whole compound BEFORE the comment posts. Both are the same fix: write the body with the **Write tool** into the scratchpad, then `cat scratch >> target` and `git commit` as SEPARATE calls — never chain a design-comment post or a heredoc-bodied append into the same Bash call as the commit.
+
+## The measure → change one thing → re-measure cycle (#130)
+
+**This repo's changes are judged on the LIVE long-running goal-armed runs, not
+on the ticket's own replay.** Four days of cost work shipped before anything
+could tell whether any of it made things cheaper, because every ticket was
+graded on its own isolated evidence. `airuleset.py delegation` is the standing
+instrument that closes that gap; this is how to use it.
+
+```bash
+python3 airuleset.py delegation --hours 12                  # this box
+python3 airuleset.py delegation --hours 12 --host all       # the whole fleet
+python3 airuleset.py delegation --hours 12 --host all --tickets   # + cost per closed ticket
+python3 airuleset.py delegation --hours 12 --json           # machine-readable
+```
+
+**The cycle, and a change is not finished until it has been round-tripped:**
+
+1. **Measure** the live runs over a window that contains real work (`--hours
+   12` is the window both hand measurements on #130 used). Save the `--json`
+   output — it is the baseline, and without one there is nothing to compare to.
+2. **Change ONE thing.** Two changes in a window are unattributable; the
+   measurement cannot tell you which one moved the number, and the temptation
+   is then to credit the one you preferred.
+3. **Re-measure the SAME runs over a comparable window.** Same `--hours`, same
+   projects, ideally the same time of day — these boxes are not uniformly busy.
+4. **Keep or revert on the number.** A change that cannot be shown to move a
+   live-run number is not finished. Reverting on the number is the point of the
+   loop, not a failure of it — the alternative is what this ticket was filed
+   about, a ruleset accumulating unverified changes.
+
+**Reading the output honestly:**
+
+- **The cost unit is RELATIVE, never a price.** The weighting
+  (`input x1.0 + cache_write x1.25 + cache_read x0.1 + output x5.0`,
+  `burn.COST_UNIT_WEIGHTS`) is printed on every render for exactly this reason.
+  It is the Opus row of `burn.PRICE` divided by 5, so it is deliberately
+  TIER-NEUTRAL: it measures VOLUME, and model-tier drift is a separate signal
+  that must not be silently folded in here.
+- **A subagent turn is not a main turn.** A subagent's tokens are mostly cache
+  reads of a smaller prefix while a main turn re-sends a 200–350K context — so
+  compare `ctx/turn` alongside `units`, and state the weighting whenever
+  quoting a ratio. Whichever way a number falls, that confound is stated, never
+  buried.
+- **`per closed ticket: —` means zero tickets closed, not cheap.** A window
+  with real spend and no closed ticket is a materially different finding from a
+  low cost-per-ticket, and `burn.units_per_ticket` returns None rather than
+  letting the two blur.
+- **`--tickets` is opt-in** because it needs network + `gh` auth; the base
+  measurement must never depend on them. A project whose repo does not resolve
+  (`repo: null`) shows no per-ticket line rather than borrowing a denominator.
+
+**It is an instrument, and it stays one.** It reports; it does not gate, block
+or threshold anything, and it deliberately leaves `burn.scan()` and every
+alert baseline untouched. Enforcement is a separate decision to be taken
+against a baseline, once one exists.
