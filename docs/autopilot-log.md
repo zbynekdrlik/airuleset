@@ -1670,3 +1670,53 @@ nothing filed (issue 160 already tracks the remaining wiring).
 CLAUDE_CODE_STOP_HOOK_BLOCK_CAP finding (default 8, overrides any blocking
 Stop hook aggregate across hooks, confirmed from the CC binary + a live
 control-arm probe): a Stop hook can delay a stop, never durably prevent one.
+
+## #172 — watchdog livelock: jobs 27/28 never persisted cadence, killing every sweep
+
+Live incident 2026-07-29: systemd `TimeoutStartSec=120` killed every
+`api-watchdog.service` run for 7h07m (236 kills that day, zero before) --
+jobs 27/28 (net-issue-drift alarm / stuck-main sweep, #137) swept ALL 40
+discovered repos every hour, each costing a `git fetch` (90s timeout) or two
+`gh issue list` calls (45s each), blowing the 120s unit budget. Because the
+cadence marker lived only in `run_once`'s in-memory `state` (save_state()
+ran only at the very end), a kill mid-sweep lost it entirely -- the next 60s
+tick re-attempted the identical sweep, was killed again, forever, starving
+job 1's 529 continue-nudge of wall-clock the whole time.
+
+Fix, RED->GREEN: test:7ac7aff[red] (TestCadencePersistedBeforeKill_172 --
+SystemExit-modeled kill mid-sweep, cadence marker absent from disk after)
+-> fix:7570c79[green]:
+1. Both jobs now take a `persist=` callback (same shape as the existing
+   bounce/gk-request backstop jobs) invoked immediately after the cadence
+   marker is set, BEFORE any per-repo network call.
+2. New `_repo_sweep_batch()` bounds each sweep to
+   `AIRULESET_REPO_SWEEP_BATCH` (default 3) repos via a round-robin cursor
+   in state; dedup-pruning fixed to only drop entries for repos actually
+   touched this sweep. `_watchdog_git_fetch` cut 90s->15s,
+   `_watchdog_issue_counts_fetch`'s two `gh` calls 45s->10s each.
+3. `run_once`'s decision log now flushes incrementally via a `_FlushList`
+   fanning to an injected `log_fn`; `cmd_watchdog` wires `log_fn=print`
+   instead of printing the returned list only after `run_once()` returns --
+   a killed sweep used to print NOTHING for its whole duration.
+4. Confirmed by reading: job 1's 529 auto-resume logic is untouched and
+   runs well before jobs 27/28, so it resumes correctly once sweeps
+   complete again.
+
+Live-verified on dev1 after `airuleset.py push`: forced both cadence
+markers 2h stale, ran `systemctl --user start api-watchdog.service` twice.
+First run (23:21:13->23:21:31, 18s) fired both jobs, persisted
+`net_drift_cursor=6`/`stuck_main_cursor=3` and fresh `*_last_sweep`
+timestamps. Second run (23:21:49->23:22:01, 12s) correctly did NOT
+re-attempt jobs 27/28 (gated for the hour) -- no journal timeout/kill
+lines either run. Full suite 3236 passed, ruff clean.
+
+Fired `notify --run-card` for #172 (rc=0, sent). No dropped work; nothing
+filed (job 1's gating was verified intact, no second gate found).
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` -- a cadence marker set
+only in an in-memory dict and saved once at the very end of a long function
+is not durable against an uncaught process kill (SIGTERM), which is not a
+catchable Python exception and defeats even a wrapping `except Exception`;
+the fix pattern (persist immediately after the cadence stamp, before
+expensive work) already existed for jobs 8/11 and should be the default
+shape for any future cadence-gated sweep job.
