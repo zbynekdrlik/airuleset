@@ -35,6 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import TestCase, main
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset                                        # noqa: E402
@@ -233,6 +234,89 @@ class TestUrlTransportLabel(TestCase):
         self.assertIn("NEŠIFROVANÉ", lan)
         self.assertIn("tailscale", ts.lower())
         self.assertNotIn("NEŠIFROVANÉ", ts)
+
+
+class TestRemainderFlags(TestCase):
+    """`cmd` is an argparse.REMAINDER, which stops parsing at the first token
+    after the positional NAME — so every flag a user naturally writes AFTER the
+    name lands in the remainder as a literal argument.
+
+    Found live: `secret request LIVE_CHECK_PAT --ttl 900 --keep 900` reported
+    `endpoint-ttl=600s keep=28800s` and really did store the value with the
+    8-hour default. A TTL flag that is silently ignored on a credential channel
+    is not a cosmetic bug — it is the one control the user has over how long
+    the value lives.
+    """
+
+    def _ns(self, **kw):
+        import argparse as ap
+        base = dict(action="request", name="DB_PASS", ttl=None, keep=None,
+                    port=None, env=None, stdin=False, cmd=[])
+        base.update(kw)
+        return ap.Namespace(**base)
+
+    def test_ttl_and_keep_written_after_the_name_are_applied(self):
+        ns = self._ns(cmd=["--ttl", "900", "--keep", "900"])
+        airuleset._secret_apply_remainder(ns)
+        self.assertEqual((ns.ttl, ns.keep, ns.cmd), (900, 900, []))
+
+    def test_equals_form_and_port_are_applied(self):
+        ns = self._ns(cmd=["--ttl=60", "--port=8841"])
+        airuleset._secret_apply_remainder(ns)
+        self.assertEqual((ns.ttl, ns.port), (60, 8841))
+
+    def test_an_explicit_flag_still_wins_over_the_default(self):
+        ns = self._ns(ttl=42, cmd=[])
+        airuleset._secret_apply_remainder(ns)
+        self.assertEqual(ns.ttl, 42)
+
+    def test_flags_after_the_separator_belong_to_the_child(self):
+        ns = self._ns(action="exec", cmd=["--stdin", "--", "psql", "--ttl", "1"])
+        airuleset._secret_apply_remainder(ns)
+        self.assertTrue(ns.stdin)
+        self.assertIsNone(ns.ttl)
+        self.assertEqual(ns.cmd, ["psql", "--ttl", "1"])
+
+    def test_an_unknown_flag_is_left_for_the_child(self):
+        ns = self._ns(action="exec", cmd=["--weird", "--", "cmd"])
+        airuleset._secret_apply_remainder(ns)
+        self.assertEqual(ns.cmd, ["--weird", "--", "cmd"])
+
+
+class TestTransportLabelUsesTheInterface(TestCase):
+    """A WireGuard or ZeroTier address is NOT plain HTTP.
+
+    Found live: `bind_ips()` correctly keeps real overlays (wg0 10.88.*,
+    wg-money 192.168.10.*, a zerotier 10.243.*), and every one of them was
+    advertised as `LAN — NEŠIFROVANÉ`. Telling the user the encrypted tunnel is
+    the unencrypted option, on the one page where they type a password, pushes
+    them towards the worse choice.
+    """
+
+    def test_wireguard_and_zerotier_are_not_called_unencrypted(self):
+        for ip, ifn in (("10.88.1.112", "wg0"), ("192.168.10.20", "wg-money"),
+                        ("10.243.30.171", "ztmjfo3aj4")):
+            line = airuleset._secret_url_line(ip, 8830, TOK, iface=ifn)
+            self.assertNotIn("NEŠIFROVANÉ", line, ifn)
+            self.assertIn("šifrovan", line, ifn)
+
+    def test_a_real_lan_interface_is_still_called_unencrypted(self):
+        line = airuleset._secret_url_line("10.77.9.100", 8830, TOK, iface="enp1s0")
+        self.assertIn("NEŠIFROVANÉ", line)
+
+    def test_an_unencrypted_ipip_tunnel_is_not_mistaken_for_wireguard(self):
+        # `tunl0` is IPIP — a tunnel, and not an encrypted one. Under-claiming
+        # is the only safe direction for this label.
+        line = airuleset._secret_url_line("10.5.0.2", 8830, TOK, iface="tunl0")
+        self.assertIn("NEŠIFROVANÉ", line)
+
+    def test_the_interface_is_resolved_from_the_address_when_not_given(self):
+        with m.patch("filedrop._iface_ips",
+                     return_value=[("10.88.1.112", "wg0"), ("10.77.9.100", "enp1s0")]):
+            self.assertNotIn("NEŠIFROVANÉ",
+                             airuleset._secret_url_line("10.88.1.112", 8830, TOK))
+            self.assertIn("NEŠIFROVANÉ",
+                          airuleset._secret_url_line("10.77.9.100", 8830, TOK))
 
 
 class TestCliSurface(TestCase):
