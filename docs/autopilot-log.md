@@ -1497,3 +1497,64 @@ Gate: 3015 tests pass, ruff clean, validate OK.
 Follow-up filed: **#152** — the rule-module change telling sessions to use this
 channel, which is a policy decision through the rule intake gate and outside
 what this dispatch was allowed to touch.
+
+---
+
+## 2026-07-29 — #156 + #157, the store guard's own enforcement holes
+
+Both worked as one batch because both change `hooks/block-vault-store-read.sh`.
+Every hole reproduced against HEAD before any fix; design comments on both
+tickets predate the first commit.
+
+**#156 hole 1 — globbing walked past the path predicate.**
+`b0b6ea7` [red] -> `b584dc5` [green]. Root cause: the predicate read the
+command's SPELLING while the shell reads the POST-EXPANSION path, with an
+entire glob-expansion layer between them that the hook had no model of. Fixed
+with rule D — a component-wise `can_be(component, target)` asking what the
+shell can expand a component INTO — added ALONGSIDE the literal regexes, plus
+within-one-command `cd` tracking for `cd ~/.claude && cat sec*/*`.
+
+The anchor rule is the whole design and was chosen by measurement, twice over
+a 212,557-command corpus: "any literal run anywhere" matched grep REGEXES and
+`find -name` PATTERNS (18 hits, all mention-not-use), and an unanchored
+wildcard under `~` refused `du -sh ~/.claude/*` — a recurring real diagnostic
+that reports sizes, never content. Shipped rule: the component's literal
+PREFIX, >= 3 chars, must itself be a prefix of the target.
+
+**#156 hole 2 — a malformed payload failed OPEN.**
+`8e49654` [red] -> `af8212e` (test correction) -> `bf57065` [green]. The
+fallback meant to catch it tested `not isinstance(payload, dict)` two lines
+after the handler assigned `{}` — statically unreachable. Now the matcher
+exits 3 where the failure happens and the existing wrapper turns that into
+fail_closed. A string `tool_input` is SCANNED rather than failed closed; empty
+stdin stays exit 0 and is admitted rather than closed.
+
+**#156 hole 3 — `Write` is not a matcher.** `8c641c2` [red] -> `725d9b3`.
+Declined deliberately and written into the header: a Write matcher would block
+editing this hook and its own tests, so the guard would prevent its own
+maintenance, and it would destroy the documented remedy for the accepted false
+positive ("write the body to a file with the Write tool").
+
+**#156 hole 4 — the purge guard had no teeth.** `8a9e8e9` [red] -> `d0c39aa`
+[green]. The guard read run_once's LOG, and the job is silent when nothing
+expired, so a real sweep against an empty store was indistinguishable from no
+sweep. Observable moved to `state["vault_purge_hour"]` — the artifact a sweep
+leaves whatever it finds. Teeth proven by a mutation test that rewrites
+`vault_purge=None` in run_once's signature to a live sweep and requires the
+guard to fail; verified bidirectionally.
+
+**#157 — the audit log was a second resting place.** `7ba760e` [red] ->
+`dca7eb8` [green]. The bypass line recorded the FULL command, so a bypassed
+write deposited its value verbatim into a plaintext 0664 file. Now a
+fingerprint (tool, matched store refs, SHA-256, length), log created 0600.
+Redaction with the channel's own filter was rejected: it takes the VALUE as an
+argument and the only way this hook could get one is by reading the store.
+
+**Authoritative blast radius**, the REAL hook before vs after over the 18,057
+prefiltered candidates of a 212,743-command corpus: 3 newly blocked (all three
+this session's own probe commands), 0 no-longer-blocked.
+
+Filed: **#162** — the hook TIMES OUT gap. Not closeable from inside a hook ("a
+timed-out hook does not block" is a harness property); measured median 33 ms
+against a 5000 ms budget, so it is a claim-honesty defect rather than a live
+risk, and its real resolution belongs to the permissions-layer decision.
