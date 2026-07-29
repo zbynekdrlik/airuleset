@@ -487,6 +487,19 @@ def sweeps_the_parent(segment, head):
     return None
 
 
+def excerpt(segment):
+    """One line, always — the excerpt is untrusted text on a shared channel.
+
+    A newline is a segment separator OUTSIDE quotes, but inside SINGLE quotes
+    it is buffered into the SAME segment, so a quoted excerpt could span lines
+    and a crafted second line could begin with the audit marker below. That
+    forged an entry in the very artifact this hook's honest-limit claim rests
+    on ("circumventing it leaves an artifact"). Collapsing whitespace closes
+    the channel at the source and fixes the refusal message's layout too.
+    """
+    return re.sub(r"\s+", " ", segment.strip())[:120]
+
+
 def audit(tool_name, refs, subject):
     """Emit the bypass AUDIT line — a fingerprint, never the raw text (#157).
 
@@ -526,7 +539,7 @@ if not cmd:
             fields.append(("pattern", val))
     bad = [(k, references_store(v), v) for k, v in fields if references_store(v)]
     if bad:
-        print("\n".join("  %s %s -> %s" % (tool or "tool", k, v[:120])
+        print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
                         for k, _ref, v in bad))
         audit(tool, [ref for _k, ref, _v in bad], " ".join(v for _k, _r, v in fields))
         sys.exit(2)
@@ -544,7 +557,7 @@ for seg, term in split_segments(cmd):
     head = head_of(seg)
     sweep = sweeps_the_parent(seg, head)
     if sweep:
-        hits.append("%s  ->  %s (%s)" % (head or "?", seg.strip()[:120], sweep))
+        hits.append("%s  ->  %s (%s)" % (head or "?", excerpt(seg), sweep))
         refs.append(globbed_parent_ref(seg) or ".claude")
         continue
     seg_refs = store_refs(seg, cwd_hint)
@@ -556,7 +569,7 @@ for seg, term in split_segments(cmd):
         # consumes it — `ls <store>/* | xargs cat` (review F5).
         continue
     hits.append("%s  ->  %s" % (head or "(redirection/substitution)",
-                                seg.strip()[:120]))
+                                excerpt(seg)))
     refs.extend(seg_refs)
 
 if hits:
@@ -580,7 +593,10 @@ fi
 # off here rather than re-derived: re-parsing the payload a second time is what
 # used to put the whole command — and therefore any value it carries — into the
 # log. The rest of the matcher's output is the message shown to the caller.
-AUDIT_FIELDS=$(printf '%s\n' "$VIOLATION" | grep '^#AUDIT# ' || true)
+# `tail -1` is belt and braces: the matcher sanitizes every excerpt it prints,
+# so nothing else can carry the marker, and `audit()` always prints LAST — so
+# even if a future edit reopened that channel the real fingerprint still wins.
+AUDIT_FIELDS=$(printf '%s\n' "$VIOLATION" | grep '^#AUDIT# ' | tail -1 || true)
 AUDIT_FIELDS=${AUDIT_FIELDS#\#AUDIT\# }
 VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# ' || true)
 
