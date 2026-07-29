@@ -195,7 +195,10 @@ class TestDistributionNotAMean(unittest.TestCase):
         self.assertEqual(d["p25"], 3)
         self.assertEqual(d["p75"], 8)
         self.assertEqual(d["p90"], 9)
-        self.assertEqual(d["mean"], 5)
+        # 55/10 = 5.5 -> 6. The mean is deliberately reported ALONGSIDE the
+        # quantiles, not instead of them: on the real data it sits between p75
+        # and p90, which is exactly why #131 rejects reporting it alone.
+        self.assertEqual(d["mean"], 6)
 
     def test_empty_is_none_not_a_fabricated_zero(self):
         self.assertIsNone(burn.distribution([]))
@@ -278,9 +281,10 @@ class TestFloorComponentsAreMeasuredNotGuessed(unittest.TestCase):
             (root / "b.md").write_text("BB\n@%s/c.md\n" % root)
             (root / "c.md").write_text("CCC\n")
             total = burn.import_closure_chars(str(root / "a.md"))
-        expected = len((root / "a.md").read_text()) \
-            + len((root / "b.md").read_text()) \
-            + len((root / "c.md").read_text())
+            expected = len((root / "a.md").read_text()) \
+                + len((root / "b.md").read_text()) \
+                + len((root / "c.md").read_text())
+        # c.md is imported by BOTH a.md and b.md and must still count once.
         self.assertEqual(total, expected)
 
     def test_a_cycle_terminates(self):
