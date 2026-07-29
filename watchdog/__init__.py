@@ -3319,6 +3319,40 @@ def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
 
 
 # --------------------------------------------------------------------------- #
+# Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144). `airuleset.py secret` stores a
+# credential 0600 under ~/.claude/secrets/ with a TTL, but the only thing that
+# ever enforced that TTL was the next `secret` invocation — so the normal
+# one-off shape (request, exec, never run it again) left the value on disk
+# indefinitely, which is precisely the property the channel exists to provide.
+# This box already runs a sweep every 60s; expiry belongs here rather than in a
+# CLI nobody is obliged to call again. Detection-and-delete only: no keystrokes,
+# no pings, nothing to a pane.
+# --------------------------------------------------------------------------- #
+
+
+def vault_purge_job(now, state, purge_fn=None, dry_run=False):
+    """Job 29 — delete every stored credential past its TTL, at most hourly.
+
+    `purge_fn` is injected (cmd_watchdog passes `filedrop.vault.purge`) so the
+    job never imports a store path in a test, and so an existing caller that
+    knows nothing about it sees no behavior change — the same "wired = on"
+    convention as jobs 3/7/8/11/13.
+    """
+    if purge_fn is None:
+        return []
+    hour_bucket = int(now // 3600)
+    if state.get("vault_purge_hour") == hour_bucket:
+        return []
+    if dry_run:
+        return ["[dry-run] vault-purge (not swept)"]
+    gone = purge_fn() or []
+    state["vault_purge_hour"] = hour_bucket
+    if not gone:
+        return []
+    return ["vault-purge expired %d: %s" % (len(gone), ", ".join(gone))]
+
+
+# --------------------------------------------------------------------------- #
 # Job 16 — HOURLY FLEET BURN (#55, 2026-07-25 follow-up to job 13). The
 # user's ask: "zacat aj v hodinovych intervaloch vyhodnocovat stav spotreby
 # tokenov cez monitorovanu sadu claude targetov" — job 13 above only ever
@@ -7474,8 +7508,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              goal_rearm_enabled=False, long_turn_enabled=False,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None, compact_stall_enabled=False,
-             repo_roots=None, issue_counts_fetch=None, git_fetch=None):
-    """Scan every `claude` pane once. 28 numbered jobs per poll — 23 LIVE and 5
+             repo_roots=None, issue_counts_fetch=None, git_fetch=None,
+             vault_purge=None):
+    """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
@@ -7764,6 +7799,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           reading refs, since no live session may have fetched recently.
           Same hourly cadence gate as job 27, one deduped ping per repo per
           day (stuck_main_sweep).
+      (29) (only when `vault_purge` is given) HOURLY CREDENTIAL-STORE SWEEP
+          (#144) — delete every `airuleset.py secret` value past its TTL.
+          The store's expiry used to be enforced ONLY by the next `secret`
+          invocation, so the normal one-off shape (request, exec, never run
+          it again) left a credential 0600 on disk indefinitely — the exact
+          property the channel exists to provide. Delete-only: no pane, no
+          keystrokes, no ping, and it removes only what is already expired.
     Returns a list of human-readable action log lines (for --verbose / tests)."""
     now = time.time() if now is None else now
     run = run or _default_run
@@ -8647,6 +8689,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                            dry_run=dry_run)
     except Exception as e:
         logs.append("exec-marker-cleanup error: %r" % (e,))
+
+    # Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144): only when `vault_purge`
+    # is given (cmd_watchdog passes filedrop.vault.purge). Best-effort and
+    # internally hour-gated; deletes only what is already past its own TTL.
+    if vault_purge:
+        try:
+            logs += vault_purge_job(now, state, purge_fn=vault_purge,
+                                    dry_run=dry_run)
+        except Exception as e:
+            logs.append("vault-purge error: %r" % (e,))
 
     save_state(state_path, state)
     return logs

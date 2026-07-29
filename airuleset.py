@@ -2888,6 +2888,19 @@ def _watchdog_delivery_probe(root, base):
     return None
 
 
+def _watchdog_vault_purge():
+    """Job 29's credential-store sweep (#144) — the injection point so run_once
+    never imports the store (or touches a real `~/.claude/secrets/`) in a test.
+
+    The store's TTL used to be enforced only by the NEXT `airuleset.py secret`
+    invocation, so the ordinary one-off shape — request a credential, use it
+    once, never run the command again — left the value on disk indefinitely.
+    A box that already sweeps every 60s is the right place for an expiry that
+    must not depend on anyone remembering to run something."""
+    from filedrop.vault import purge
+    return purge()
+
+
 def _watchdog_repo_roots():
     """Jobs 27/28's repo enumeration (#137) — every `.git` this box hosts,
     per #138's own corrected lesson that the corpus is `$HOME`, never a
@@ -3037,6 +3050,7 @@ def cmd_watchdog(args):
                     # checkouts it can actually measure. Self-gated hourly
                     # internally, so wiring them costs nothing on the 59
                     # sweeps out of 60 that skip.
+                    vault_purge=_watchdog_vault_purge,
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
                     git_fetch=_watchdog_git_fetch)

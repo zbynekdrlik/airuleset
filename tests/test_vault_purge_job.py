@@ -52,7 +52,10 @@ class VaultPurgeJob(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_at_most_once_per_hour(self):
-        now = 1_000_000.0
+        # One minute INTO its hour, per the repo's own hour-bucket lesson: at
+        # 1_000_000 the offsets below cross a boundary and the test fails for
+        # the fixture's reason rather than the code's.
+        now = 277 * 3600 + 60.0
         wd.vault_purge_job(now, self.state, purge_fn=self._purge())
         wd.vault_purge_job(now + 60, self.state, purge_fn=self._purge())
         wd.vault_purge_job(now + 1800, self.state, purge_fn=self._purge())
