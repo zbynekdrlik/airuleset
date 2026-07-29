@@ -101,7 +101,8 @@ def assert_unwired_caller_did_not_sweep(case, module, tmpdir, **kw):
     case.assertEqual([ln for ln in logs if "vault-purge" in ln], [], logs)
     state = (json.loads(state_path.read_text())
              if state_path.exists() else {})
-    _ = state   # SHIPPED observable only: the log (strengthened next commit)
+    case.assertNotIn("vault_purge_hour", state,
+                     "an unwired caller swept the store and claimed the hour")
 
 
 class RunOnceVaultWiring(unittest.TestCase):
