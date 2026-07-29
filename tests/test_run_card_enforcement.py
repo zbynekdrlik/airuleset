@@ -571,6 +571,22 @@ class TestCardReconcile(unittest.TestCase):
             self.reconcile([r], marker_ok=notify.marker_delivered)
         self.assertTrue(self.sent, "a failed digest must leave the gap open")
 
+    def test_a_missing_backfill_symbol_degrades_to_card_only_and_logs(self):
+        # The new name was added to the SAME `from notify import ...` whose
+        # ImportError path `continue`s the repo — so during any window where
+        # watchdog/ is newer on disk than notify/ (the timer runs the working
+        # tree every 60s, so a mid-push checkout is exactly that window) the
+        # whole backstop would go silently dead. That is the #134 shape.
+        r = self.repo(closes=(3,))
+        saved = notify.backfill_marker_key
+        del notify.backfill_marker_key
+        try:
+            logs = self.reconcile([r])
+        finally:
+            notify.backfill_marker_key = saved
+        self.assertTrue(self.sent, "the card-only check must still run")
+        self.assertTrue(any("backfill" in ln for ln in logs), logs)
+
     def test_it_never_sends_keystrokes(self):
         import inspect
         src = inspect.getsource(wd.card_reconcile)
@@ -755,6 +771,16 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         import airuleset
         self.a = airuleset
         self.sent = []
+        # This class drives the REAL `_notify_backfill_digest`, which reaches
+        # the REAL `mark_backfill_reported` — so without this the suite
+        # writes live SUPPRESSION markers into `~/.claude/autopilot-notify-
+        # sent/` and silences job 25 for any repo named `proj`, for the
+        # 14-day marker TTL. Found in review AFTER it had already happened.
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-bfguard-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = m.patch.object(notify, "_claude_dir", lambda: str(self.tmp))
+        p.start()
+        self.addCleanup(p.stop)
 
     def send(self, body, owner=None, dedup_key=None, dry_run=False):
         self.sent.append(body)
@@ -762,9 +788,84 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
 
     def args(self, **kw):
         d = {"repo": "owner/proj", "since": "2026-07-20T00:00:00Z",
-             "owner_name": None, "dry_run": False}
+             "owner_name": None, "dry_run": False, "force": False}
         d.update(kw)
         return _Args(**d)
+
+    def test_this_class_never_writes_into_the_real_marker_store(self):
+        # the isolation is the assertion: a marker written during this test
+        # must land in the temp dir, never in the box's live store.
+        self.assertTrue(notify._dedup_dir().startswith(str(self.tmp)))
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name, **kw: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: json.dumps(
+                 [{"number": 7, "title": "t",
+                   "closedAt": "2026-07-24T00:00:00Z"}])):
+            self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertTrue(
+            (self.tmp / "autopilot-notify-sent" /
+             notify.backfill_marker_key("proj", 7)).exists())
+
+    # --- the resolver must not refuse a legitimate operator ---------------
+    def test_a_checkout_deeper_than_the_default_sweep_is_still_found(self):
+        # `discover_managed_repos` stops at depth 4 (it `continue`s BEFORE
+        # testing for .git), so a real repo one level deeper resolves to
+        # None and the operator standing on the right box is refused with no
+        # way through. Measured on dev1: 40 discovered vs 55 real checkouts.
+        deep = self.tmp / "a" / "b" / "c" / "d" / "proj"
+        (deep / ".git").mkdir(parents=True)
+        found = self.a._local_checkout_for_repo(
+            "proj", home=str(self.tmp), name_of=lambda r: Path(r).name)
+        self.assertEqual(found, str(deep))
+
+    def test_a_worktree_or_submodule_checkout_is_still_found(self):
+        # a git worktree / submodule has `.git` as a FILE, which the sweep
+        # never even looks for. JUCE on dev1 is exactly this shape.
+        wt = self.tmp / "wt" / "proj"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /elsewhere/.git/worktrees/proj\n")
+        found = self.a._local_checkout_for_repo(
+            "proj", home=str(self.tmp), name_of=lambda r: Path(r).name)
+        self.assertEqual(found, str(wt))
+
+    def test_the_invocation_cwd_short_circuits_the_sweep(self):
+        # standing IN the repo is the common case and must cost no walk.
+        swept = []
+        got = self.a._local_checkout_for_repo(
+            "proj", cwd="/home/x/devel/proj",
+            roots=lambda: swept.append(1) or [],
+            name_of=lambda r: "proj" if r == "/home/x/devel/proj" else "")
+        self.assertEqual(got, "/home/x/devel/proj")
+        self.assertEqual(swept, [], "no $HOME walk when the cwd answers it")
+
+    def test_one_bad_root_does_not_abort_the_whole_scan(self):
+        def flaky(root):
+            if root == "/bad":
+                raise RuntimeError("weird")
+            return "proj"
+        self.assertEqual(
+            self.a._local_checkout_for_repo(
+                "proj", roots=lambda: ["/bad", "/good"], name_of=flaky,
+                cwd="/nowhere"),
+            "/good")
+
+    def test_force_runs_it_anyway(self):
+        # the command exists to REPAIR a silence; a detector that can be
+        # wrong must never be the only thing standing between the operator
+        # and the repair.
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name, **kw: None), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: json.dumps(
+                 [{"number": 7, "title": "t",
+                   "closedAt": "2026-07-24T00:00:00Z"}])):
+            self.a._notify_backfill_digest(self.args(force=True), self.send)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_the_help_documents_the_override(self):
+        r = subprocess.run([sys.executable, str(ROOT / "airuleset.py"),
+                            "notify", "--help"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertIn("--force", " ".join(r.stdout.split()))
 
     # --- the resolver -----------------------------------------------------
     def test_the_resolver_matches_on_the_ORIGIN_name_not_the_directory(self):
@@ -881,12 +982,47 @@ class TestBackfillMarkerIsWrittenOnlyOnPROVENDelivery(unittest.TestCase):
             "writing it here would let a genuinely missing card pass")
 
     def test_the_two_namespaces_cannot_collide(self):
-        # `#` cannot occur in a repo name, so no repo can produce a card key
-        # equal to a backfill key after _dedup_path's sanitisation.
-        self.assertNotEqual(self.key(3), "proj#3")
-        self.assertNotIn(":", self.key(3),
-                         "a separator _dedup_path rewrites would collapse "
-                         "distinct keys onto one file")
+        # Teeth, not formatting: the claim is that NO repo name can make a
+        # card key land on the same FILE as a backfill key. Asserting the
+        # format string back to itself proved nothing — `name` reaches the
+        # key builder from an unvalidated `--repo` split and from
+        # `repo_name_for`, which parses any remote URL (this suite's own
+        # fixtures use `/tmp/...git` paths), so "GitHub forbids `#`" is a
+        # convention, not an enforced property.
+        # Scope of the claim, stated exactly: for every name a GitHub repo
+        # can actually have (`[A-Za-z0-9._-]`), the two namespaces land on
+        # different files. `backfill` and `backfill_proj` are in the list
+        # because they are the names that LOOK like they should collide.
+        names = ["proj", "backfill", "backfill_proj", "backfill-proj",
+                 "backfill.proj", "proj.git", "PROJ", "a_b-c.d"]
+        cards = {notify._dedup_path("%s#%s" % (n, i))
+                 for n in names for i in (3, 7, 37)}
+        backs = {notify._dedup_path(notify.backfill_marker_key(n, i))
+                 for n in names for i in (3, 7, 37)}
+        self.assertEqual(cards & backs, set(),
+                         "a card marker and a digest marker collapsed onto "
+                         "one file — one fact would overwrite the other")
+
+    def test_the_key_builder_neutralises_a_hostile_name(self):
+        # The residual exposure is a name carrying `#`, which needs a
+        # non-GitHub remote (`repo_name_for` parses any URL, and this
+        # suite's own fixtures use `/tmp/...git` paths). The DIGEST side can
+        # never be the one that forges it: the builder sanitises its name to
+        # the card alphabet, so its key always has exactly two `#`.
+        for hostile in ["a#b", "backfill#proj", "a:b", "a/b", "a b"]:
+            with self.subTest(name=hostile):
+                key = notify.backfill_marker_key(hostile, 3)
+                self.assertEqual(key.count("#"), 2, key)
+                self.assertTrue(key.startswith("backfill#"))
+
+    def test_the_count_is_writes_that_happened_not_writes_attempted(self):
+        # this is the one function whose whole premise is honesty about
+        # artifacts; returning N while nothing reached disk (read-only or
+        # full filesystem) is the same class of lie it exists to prevent.
+        with m.patch.object(notify, "_dedup_mark_status",
+                            lambda key, status: False):
+            self.assertEqual(
+                notify.mark_backfill_reported("proj", [3, 4], "sent"), 0)
 
     def test_it_works_on_a_box_that_has_never_sent_anything(self):
         # no marker directory exists yet — the write must create it rather
@@ -921,9 +1057,9 @@ class TestBackfillDigestRecordsWhatItReported(unittest.TestCase):
             [{"number": 7, "title": "a", "closedAt": "2026-07-24T00:00:00Z"},
              {"number": 8, "title": "b", "closedAt": "2026-07-25T00:00:00Z"}])
         args = _Args(repo="owner/proj", since=since, owner_name=None,
-                     dry_run=dry_run)
+                     dry_run=dry_run, force=False)
         with m.patch.object(self.a, "_local_checkout_for_repo",
-                            lambda name: "/home/x/devel/proj"), \
+                            lambda name, **kw: "/home/x/devel/proj"), \
              m.patch.object(self.a, "_gh_out", lambda *a, **k: issues):
             try:
                 self.a._notify_backfill_digest(args, self.send)
@@ -956,6 +1092,41 @@ class TestBackfillDigestRecordsWhatItReported(unittest.TestCase):
         self.assertEqual(self.sent, [],
                          "a second digest must not re-report tickets an "
                          "earlier delivered one already accounted for")
+
+    def test_it_suppresses_only_the_tickets_the_message_actually_NAMED(self):
+        # The digest shows at most 10 titles and then "a ďalších N" — the
+        # overflow tickets are counted but never named, so the user has no
+        # number to chase. Marking them would let the artifact claim
+        # per-ticket coverage the message never gave, and job 25 would go
+        # permanently quiet on tickets the user cannot identify. The bound
+        # is deliberate (the phone gets numbers, not a wall), so the honest
+        # resolution is to suppress exactly what was named and let job 25
+        # keep surfacing the rest, a batch at a time.
+        big = json.dumps([{"number": i, "title": "t%d" % i,
+                           "closedAt": "2026-07-24T00:00:00Z"}
+                          for i in range(1, 26)])
+        args = _Args(repo="owner/proj", since="2026-07-20T00:00:00Z",
+                     owner_name=None, dry_run=False, force=False)
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name, **kw: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: big):
+            self.a._notify_backfill_digest(args, self.send)
+        named = [i for i in range(1, 26)
+                 if notify.marker_delivered(self.key(i))]
+        self.assertEqual(named, list(range(1, 11)))
+        for i in named:
+            self.assertIn("#%d " % i, self.sent[0] + " ")
+
+    def test_a_dedup_return_does_not_read_as_a_delivery(self):
+        # the digest-level key is date-truncated, so a same-day re-run after
+        # a NEW ticket closes hits the claim, sends nothing, and used to
+        # print `dedup (1 tickets)` and exit 0 — indistinguishable from a
+        # delivery, while that ticket stayed unreported.
+        self.status = "dedup"
+        code = self.run_digest()
+        self.assertNotEqual(code, 0,
+                            "nothing was sent and tickets are still pending")
+        self.assertFalse(notify.marker_delivered(self.key(7)))
 
 
 class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):
