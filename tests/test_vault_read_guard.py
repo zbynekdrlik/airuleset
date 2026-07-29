@@ -652,6 +652,16 @@ class ToolsOtherThanBash(unittest.TestCase):
         r = run_payload(obj)
         self.assertEqual(r.returncode, 2,
                          "expected BLOCK for payload: %s\nstderr=%s" % (obj, r.stderr))
+        # rc==2 ALONE cannot tell a real refusal from a crashed check: the
+        # fail-closed branch exits 2 as well, by design. So every one of these
+        # passed while the whole tool branch was dying on an exception. Assert
+        # the DECISION, not just the exit code.
+        self.assertNotIn("fail-closed", r.stderr,
+                         "the check crashed and fail-closed caught it; the "
+                         "block is real but the guard is broken:\n%s" % r.stderr)
+        self.assertNotIn("Traceback", r.stderr, r.stderr)
+        self.assertIn("secret exec", r.stderr,
+                      "a real refusal points at the sanctioned route")
 
     def assertAllowed(self, obj):
         r = run_payload(obj)
@@ -700,6 +710,23 @@ class ToolsOtherThanBash(unittest.TestCase):
         self.assertAllowed({"tool_name": "Glob",
                             "tool_input": {"pattern": "**/*.py",
                                            "path": "/home/newlevel/devel/airuleset"}})
+
+    def test_a_tool_bypass_is_audited_like_a_bash_one(self):
+        # The audit trail must cover the route an agent reaches for FIRST.
+        # This is also the assertion that would have caught the crash: a
+        # broken branch writes no line at all.
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        log = Path(td) / "a.log"
+        r = run_payload({"tool_name": "Read",
+                         "tool_input": {"file_path": "%s/DB_PASS.secret" % ABS}},
+                        env_extra={"AIRULESET_ALLOW_VAULT_READ": "1",
+                                   "AIRULESET_VAULT_READ_AUDIT": str(log)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = log.read_text()
+        self.assertIn("tool=Read", body)
+        self.assertIn("DB_PASS.secret", body)
+        self.assertIn("sha256=", body)
 
 
 class Registered(unittest.TestCase):
