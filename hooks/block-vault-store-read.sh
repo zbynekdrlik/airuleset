@@ -107,6 +107,18 @@ set -euo pipefail
 #     (`python3 -c "import pathlib; open(pathlib.Path.home()/'.claude'/'secrets'/n)"`,
 #     a variable assembled from parts, a path read out of another file) does
 #     not match either pattern — text matching cannot see it.
+#   - AUTHORING THEN RUNNING is out of scope, decided rather than overlooked
+#     (#156). `Write` a script that reads the store, then `bash` it: both halves
+#     are allowed, and no `Write` matcher is registered. Adding one was
+#     considered and REJECTED for two reasons. It would block editing this hook
+#     and its own tests, which necessarily contain the store path, so the guard
+#     would prevent its own maintenance — and it would destroy the documented
+#     remedy for the accepted false positive below, which is precisely "write
+#     the body to a file with the Write tool". Against that it buys little: a
+#     script whose path is assembled at runtime defeats a content match anyway,
+#     the same limit already stated for computed paths. The honest scope is
+#     that this hook gates the ACT of reading, not the authoring of something
+#     that will later read.
 #   - Not a shell parser: `xargs` fed from a file LIST, and a wrapper script
 #     that does the read internally, are invisible. (Process substitution is
 #     NOT in this list — `(` is a separator outside quotes, so `cat <(cat
