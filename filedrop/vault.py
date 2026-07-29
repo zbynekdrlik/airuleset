@@ -36,6 +36,8 @@ THE THREE NO-LEAK PROPERTIES THIS MODULE IS RESPONSIBLE FOR:
 import json
 import os
 import re
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,18 +67,46 @@ class SecretError(Exception):
     """A named credential could not be stored, read or removed."""
 
 
+def _override_dir(var, default):
+    """An env-var relocation of a credential path, honoured ONLY under the
+    system temp dir.
+
+    `AIRULESET_SECRETS_DIR` was documented "tests only" and enforced nowhere, so
+    any env var that reached the CLI — a settings.json env block, a hook, an
+    exported variable — silently moved every credential somewhere else,
+    including into a git worktree. Tests all run under a `tempfile` directory,
+    so restricting the override to that keeps them working while making the
+    relocation useless as an attack. A rejected override is REPORTED, never
+    silently ignored: a store that is not where the caller thinks it is must
+    not be a quiet condition.
+    """
+    raw = os.environ.get(var)
+    if not raw:
+        return default
+    path = Path(raw)
+    try:
+        allowed = path.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve())
+    except (OSError, ValueError):
+        allowed = False
+    if allowed:
+        return path
+    sys.stderr.write(
+        "vault: ignoring %s=%s — a credential path may only be relocated "
+        "under %s\n" % (var, raw, tempfile.gettempdir()))
+    return default
+
+
 def secrets_dir():
-    """Where values live. `AIRULESET_SECRETS_DIR` relocates it (tests only) —
-    the same escape hatch filedrop gives itself with FILEDROP_DIR."""
-    base = os.environ.get(SECRETS_DIR_ENV) or (Path.home() / ".claude" / "secrets")
-    return Path(base)
+    """Where values live. `AIRULESET_SECRETS_DIR` relocates it for tests only,
+    and only under the system temp dir (see _override_dir)."""
+    return _override_dir(SECRETS_DIR_ENV, Path.home() / ".claude" / "secrets")
 
 
 def log_path():
     """This channel's OWN log. Not `~/.claude/upload-logs/`: that one records
     `SAVED <full path> (<n> bytes)` by design, which is exactly the policy a
     credential channel must not have."""
-    base = os.environ.get(SECRET_LOG_DIR_ENV) or (Path.home() / ".claude" / "secret-logs")
+    base = _override_dir(SECRET_LOG_DIR_ENV, Path.home() / ".claude" / "secret-logs")
     return Path(base) / "secret.log"
 
 
@@ -91,10 +121,41 @@ def check_name(name):
     return name
 
 
+def assert_safe_store_dir(d):
+    """Raise unless `d` is a place a credential may live.
+
+    Two conditions, both of which were previously only claimed. It must not be
+    a SYMLINK — `mkdir(exist_ok=True)` and `chmod` both follow one, so a
+    planted link would put every value wherever it points while the 0700 proof
+    tightened the target instead. And it must not sit inside a git repository:
+    the whole point of storing outside every repo is that a credential cannot
+    be committed, and a path that resolves under a `.git` ancestor defeats that
+    however correct its permissions are.
+    """
+    if d.is_symlink():
+        raise SecretError(
+            "refusing a credential store at %s — it is a symlink, and a store "
+            "that can be redirected is not a store" % d)
+    try:
+        real = d.resolve()
+    except (OSError, RuntimeError) as e:
+        raise SecretError("cannot resolve credential store %s: %s" % (d, e)) from e
+    for parent in [real] + list(real.parents):
+        if (parent / ".git").exists():
+            raise SecretError(
+                "refusing a credential store inside a git repository (%s) — "
+                "a value there is one `git add` from being committed" % parent)
+    return real
+
+
 def ensure_dir():
     """The store dir, created 0700 and re-tightened on every call."""
     d = secrets_dir()
+    assert_safe_store_dir(d)
     d.mkdir(parents=True, exist_ok=True)
+    # AGAIN after mkdir: `exist_ok=True` succeeds against a symlink pointing at
+    # an existing directory, so the pre-check alone can be raced.
+    assert_safe_store_dir(d)
     try:
         os.chmod(str(d), 0o700)
     except OSError:
@@ -141,7 +202,13 @@ def log_event(event, name, ttl=None):
         line += " ttl=%ds" % int(ttl)
     p = log_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fd = _open_no_follow(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    except SecretError as e:
+        # LOUD, but never fatal: this runs AFTER a value is safely on disk, so
+        # raising here would report "not stored" for a credential that was.
+        sys.stderr.write("vault: %s\n" % e)
+        return
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     try:
@@ -153,8 +220,23 @@ def log_event(event, name, ttl=None):
         pass
 
 
+def _open_no_follow(path, flags, mode=0o600):
+    """`os.open` that refuses a symlink at the final component.
+
+    O_NOFOLLOW turns a planted link into ELOOP instead of a write THROUGH it.
+    Without it the metadata write (O_TRUNC) truncated whatever the link pointed
+    at — an arbitrary same-uid file-destruction primitive.
+    """
+    try:
+        return os.open(str(path), flags | os.O_NOFOLLOW, mode)
+    except OSError as e:
+        raise SecretError(
+            "refusing to write %s: %s (a symlink at a credential path is "
+            "never followed)" % (path, e)) from e
+
+
 def _write_json_0600(path, data):
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = _open_no_follow(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
@@ -200,8 +282,11 @@ def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None):
         raise SecretError("value over the %d-byte cap" % MAX_SECRET_BYTES)
     p = value_path(name)
     try:
-        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600)
     except FileExistsError as e:
+        # O_EXCL also refuses a PLANTED SYMLINK at this path (EEXIST), which is
+        # why the value write was never redirectable the way the meta one was.
         raise SecretError("%s is already present — forget it first" % name) from e
     with os.fdopen(fd, "wb") as f:
         f.write(bytes(data))
