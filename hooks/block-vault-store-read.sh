@@ -24,14 +24,21 @@ set -euo pipefail
 #      (`~/`, `$HOME/`, an absolute path, or bare);
 #   B. any `<stem>.secret` filename — this channel's own extension, so a
 #      relative read after a `cd` into the store is still caught.
-#   D. either of those SPELLED WITH A GLOB (#156). A and B match literal
-#      characters, but the shell expands `~/.claude/secr*/DB_PASS.sec*` to the
-#      store before either of them sees a real path — so the guard was
+#   D. either of those AFTER THE SHELL'S OWN RESOLUTION (#156). A and B match
+#      literal characters, but the shell expands `~/.claude/secr*/DB_PASS.sec*`
+#      to the store before either of them sees a real path — so the guard was
 #      deny-by-default on the HEAD and a blocklist on the SPELLING, and only
 #      the first half was ever disclosed. D decides per path COMPONENT what the
-#      shell can expand it INTO: `.cl*`, `.claud?`, `.claud[e]` can all be
-#      `.claude`, and `sec*`/`secret[s]` can be `secrets`. It also resolves a
-#      relative token against a `cd` earlier in the SAME command.
+#      shell can resolve it INTO, across every layer that sits between the text
+#      and the open():
+#        - GLOBBING: `.cl*`, `.claud?`, `.claud[e]` can all be `.claude`, and
+#          `sec*`/`secret[s]` can be `secrets`;
+#        - BRACE EXPANSION: `{secrets,x}`, `{s,y}ecrets`, `{.claude,x}`;
+#        - PATH NOISE: `.claude/./secrets` and `.claude/x/../secrets` spell
+#          both names LITERALLY and defeated even A's adjacency;
+#        - a `cd` earlier in the SAME command, against which a later relative
+#          token is resolved.
+#      Each of these was measured reading a credential, not theorised.
 # The command is then split into segments (quote-aware, and command
 # substitutions `$(...)` / backticks become their OWN segments so a read
 # nested inside an allowlisted head — `ls "$(cat …/DB.secret)"` — is still
@@ -103,6 +110,12 @@ set -euo pipefail
 #     tab-completion actually produces; what is left open is a spelling nobody
 #     types by accident — which is the exact boundary of this hook's claim,
 #     that the leak cannot happen by REFLEX.
+#   - D enumerates the shell layers it knows about (globbing, braces, path
+#     noise, an in-command `cd`). Any OTHER resolution step is by construction
+#     outside it — command/parameter/tilde-user substitution that produces a
+#     path component, and any expansion whose result depends on state this
+#     process cannot see. That is the same class as the computed-path gap
+#     below, and it is enumeration, so it is a floor and never a proof.
 #   - A path computed at runtime rather than written literally
 #     (`python3 -c "import pathlib; open(pathlib.Path.home()/'.claude'/'secrets'/n)"`,
 #     a variable assembled from parts, a path read out of another file) does
@@ -120,14 +133,28 @@ set -euo pipefail
 #     that this hook gates the ACT of reading, not the authoring of something
 #     that will later read.
 #   - Not a shell parser: `xargs` fed from a file LIST, and a wrapper script
-#     that does the read internally, are invisible. (Process substitution is
+#     that does the read internally, are invisible. The measured shape of this
+#     is `find <parent> -type f | xargs cat`, which reads every credential and
+#     is NOT blocked: the consumer sits in a separate segment, and deciding it
+#     would mean enumerating reader commands — the enumeration this guard
+#     rejects on principle, since one unlisted reader then walks through with
+#     no signal. The `-exec` form of the same walk IS blocked, because the
+#     action is part of the segment. Closing the piped form by treating every
+#     `find` over the parent as a sweep was measured at 104 further real
+#     commands that only ever listed names, against 5 for the action form.
+#     (Process substitution is
 #     NOT in this list — `(` is a separator outside quotes, so `cat <(cat
 #     …/DB.secret)` really is blocked. An earlier version of this header
 #     claimed otherwise and was wrong.)
 #   - The Bash tool's working directory PERSISTS between calls, and this hook
 #     is stateless. `cd` into the store is refused for exactly that reason —
 #     otherwise an allowed `cd` in one call makes `cat *` in the next
-#     unreachable to any single-command check.
+#     unreachable to any single-command check. Refusing the STORE does not
+#     close this, and the earlier wording implied it did: `cd ~/.claude` is
+#     ALLOWED (a legitimate place to work), and `cat secrets/*` in the NEXT
+#     call is then a bare relative read this process cannot resolve. Within
+#     ONE command rule D does resolve it; across two calls nothing here can,
+#     short of refusing `cd` into the parent, which is ordinary work.
 #   - FALSE POSITIVE, accepted deliberately: a command whose TEXT merely NAMES
 #     the store is blocked even when it reads nothing — `grep -rn
 #     '\.claude/secrets' hooks/`, or a commit/issue body naming the path. The
@@ -158,7 +185,11 @@ set -euo pipefail
 #     someone who can already READ that 0600 file it is only as strong as the
 #     value's own entropy. That is the same someone who can read the store
 #     itself, so the digest widens nothing — but the file is not a secret
-#     store and must not be treated as one.
+#     store and must not be treated as one. The recorded REFERENCES are
+#     restricted to matches sitting in a path context, because "a path
+#     fragment by construction" was too strong: a value shaped like a store
+#     filename matches the same pattern, and did reach the log before that
+#     restriction.
 #
 # Exit code 2 = block the tool call.
 
@@ -226,6 +257,20 @@ if not isinstance(payload, dict):
     print("  the payload parsed to %s, not an object" % type(payload).__name__)
     sys.exit(3)
 
+def strings_in(obj, _depth=0):
+    """Every string anywhere in a payload value, bounded."""
+    if _depth > 6:
+        return
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from strings_in(v, _depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from strings_in(v, _depth + 1)
+
+
 tool = payload.get("tool_name") or ""
 tin = payload.get("tool_input") or {}
 cmd = ""
@@ -238,7 +283,10 @@ elif isinstance(tin, str):
     # it through unscanned is what the ticket measured as a hole.
     cmd, tin = tin, {}
 else:
-    tin = {}
+    # A LIST (or anything else) is the same shape as the string above and gets
+    # the same treatment. Treating it as `{}` exited 0 having inspected
+    # nothing — an inconsistency with no argument behind it.
+    cmd, tin = " ".join(strings_in(tin)), {}
 
 # A. the store directory, however it is spelled.
 STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
@@ -255,6 +303,17 @@ VALUE_FILE_RE = re.compile(
 CLAUDE_ROOT_RE = re.compile(r"\.claude/?(?![A-Za-z0-9_./-])")
 RECURSIVE_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$)")
 BULK_HEADS = {"tar", "zip", "rsync", "cpio", "pax", "7z", "scp"}
+# Heads that walk a tree BY CONSTRUCTION, so there is no `-r` flag to detect —
+# but ONLY when they also carry an action that reads or mutates what they find.
+# `find <parent> -exec cat {} +` prints every credential; `find <parent> -name
+# x` prints NAMES, exactly like the `ls -R` the allowlist already permits.
+# Measured over the real corpus before choosing: requiring the action costs 5
+# commands (3 of them this session's own probes), while treating any `find`
+# over the parent as a sweep costs 104 more that only ever listed names.
+# `du` is deliberately absent for the same reason it was refused earlier —
+# `du -sh ~/.claude/*` reports sizes, never content.
+TREE_WALK_HEADS = {"find", "fd"}
+TREE_WALK_ACTION_RE = re.compile(r"(?:^|\s)-(?:exec|execdir|ok|okdir|delete)\b")
 
 # D. the same three references SPELLED WITH A GLOB (#156 hole 1). A/B/C above
 # match literal characters, but the shell expands `~/.claude/secr*/*` to the
@@ -324,28 +383,103 @@ def cd_target(segment, head):
     return None
 
 
-def globbed_store_ref(segment, cwd_hint=None):
-    """A store reference whose literals are elided by shell globbing."""
+BRACE_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+BRACE_CAP = 64
+
+
+def expand_braces(token, _depth=0):
+    """Brace expansion — a SECOND expansion layer with globbing's shape.
+
+    `~/.claude/{secrets,x}/*` and `{s,y}ecrets` resolve to the store before any
+    text pattern sees a real path, exactly as a glob does. Bounded: a token
+    whose expansion exceeds BRACE_CAP keeps the alternatives found so far, and
+    the literal token is always among the candidates, so a pathological brace
+    can waste nothing but its own alternatives.
+    """
+    out = [token]
+    m = BRACE_RE.search(token)
+    if m and _depth < 6:
+        out = []
+        for alt in m.group(1).split(","):
+            grown = token[:m.start()] + alt + token[m.end():]
+            out.extend(expand_braces(grown, _depth + 1))
+            if len(out) >= BRACE_CAP:
+                break
+    return out[:BRACE_CAP]
+
+
+def normalize(comps):
+    """Drop `.` components and resolve `..` — path noise is not a barrier.
+
+    `~/.claude/./secrets/*` and `~/.claude/x/../secrets/*` spell BOTH names
+    literally and still reached the store, because the adjacency test wants the
+    two components next to each other. The shell does not care what sits
+    between them, so neither can this.
+    """
+    out = []
+    for c in comps:
+        if c == ".":
+            continue
+        if c == ".." and out and out[-1] not in ("..", "~"):
+            out.pop()
+            continue
+        out.append(c)
+    return out
+
+
+def path_candidates(segment, cwd_hint=None):
+    """Every path a token could resolve to, across both expansion layers."""
     for tok in TOKEN_RE.findall(segment):
-        cands = [tok]
+        roots = [tok]
         if cwd_hint and not tok.startswith(("/", "~", "$", "-")):
-            cands.append(cwd_hint + "/" + tok)
-        for t in cands:
-            comps = [c for c in t.split("/") if c]
-            for a, b in zip(comps, comps[1:]):
-                if can_be(a, CLAUDE_DIR) and can_be(b, STORE_DIR):
-                    return t
-            if comps and ext_can_be_value(comps[-1]):
+            roots.append(cwd_hint + "/" + tok)
+        for root in roots:
+            for t in expand_braces(root):
+                yield t, normalize([c for c in t.split("/") if c])
+
+
+def globbed_store_ref(segment, cwd_hint=None):
+    """A store reference whose literals are elided by an expansion layer."""
+    for t, comps in path_candidates(segment, cwd_hint):
+        for a, b in zip(comps, comps[1:]):
+            if can_be(a, CLAUDE_DIR) and can_be(b, STORE_DIR):
                 return t
+        if comps and ext_can_be_value(comps[-1]):
+            return t
     return None
 
 
+# `find`'s expression takes PATTERNS, not paths — `-name "*.claude*"` searches
+# for claude-related files somewhere else entirely and reaches no store. The
+# mention-vs-use distinction again, and it only became load-bearing once `find`
+# started triggering the parent-sweep rule.
+PATTERN_FLAGS = {"-name", "-iname", "-path", "-ipath", "-wholename",
+                 "-iwholename", "-regex", "-iregex", "-lname", "-ilname"}
+
+
+def without_pattern_args(segment):
+    """`segment` with every `<pattern-flag> <value>` pair removed."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        tk = segment.split()
+    out, skip = [], False
+    for t in tk:
+        if skip:
+            skip = False
+            continue
+        if t in PATTERN_FLAGS:
+            skip = True
+            continue
+        out.append(t)
+    return " ".join(out)
+
+
 def globbed_parent_ref(segment):
-    """Rule C's own glob spelling — `tar czf x.tgz ~/.cl*`."""
-    for tok in TOKEN_RE.findall(segment):
-        comps = [c for c in tok.split("/") if c]
-        if comps and comps[-1] != CLAUDE_DIR and can_be(comps[-1], CLAUDE_DIR):
-            return tok
+    """Rule C's own glob/brace spelling — `tar czf x.tgz ~/.cl*`."""
+    for t, comps in path_candidates(segment):
+        if comps and can_be(comps[-1], CLAUDE_DIR):
+            return t
     return None
 
 # Heads that are PROVABLY content-free AND non-mutating. Everything the
@@ -470,6 +604,35 @@ def references_store(segment, cwd_hint=None):
     return found[0] if found else None
 
 
+def audit_refs(segment, cwd_hint=None):
+    """The subset of `store_refs` safe to WRITE DOWN.
+
+    A reference is not "a path fragment by construction" — it is whatever the
+    pattern matched, and a VALUE that happens to look like a store filename
+    matches too: `echo 'topsecret.secret' > <store>/X.secret` recorded the
+    value. Only a match sitting in a PATH CONTEXT is logged — inside a token
+    carrying a separator, or one resolved against a `cd` — which keeps the
+    item name that makes the trail useful and drops the bare argument.
+    """
+    out = []
+    m = STORE_DIR_RE.search(segment)
+    if m:
+        out.append(m.group(0))          # a fixed path fragment, never a value
+    # EVERY value-file match, not just the first: a value shaped like one can
+    # precede the real path in the same segment, and taking the first match
+    # would then both log the value AND lose the item name.
+    toks = TOKEN_RE.findall(segment)
+    for m in VALUE_FILE_RE.finditer(segment):
+        ref = m.group(0)
+        if any(ref in tok and "/" in tok for tok in toks):
+            out.append(ref)
+    if not out:
+        globbed = globbed_store_ref(segment, cwd_hint)
+        if globbed:
+            out.append(globbed)
+    return out
+
+
 def sweeps_the_parent(segment, head):
     """The store's PARENT read wholesale, without ever naming the store.
 
@@ -480,9 +643,12 @@ def sweeps_the_parent(segment, head):
     """
     if head in ALLOW_HEADS:
         return None          # `ls -R ~/.claude` lists names, never content
-    if not (CLAUDE_ROOT_RE.search(segment) or globbed_parent_ref(segment)):
+    operands = without_pattern_args(segment)
+    if not (CLAUDE_ROOT_RE.search(operands) or globbed_parent_ref(operands)):
         return None
-    if head in BULK_HEADS or RECURSIVE_RE.search(segment):
+    if (head in BULK_HEADS or RECURSIVE_RE.search(segment)
+            or (head in TREE_WALK_HEADS
+                and TREE_WALK_ACTION_RE.search(segment))):
         return "recursive read/archive of the store's parent dir"
     return None
 
@@ -515,8 +681,8 @@ def audit(tool_name, refs, subject):
     digest = hashlib.sha256(subject.encode("utf-8", "replace")).hexdigest()
     safe = ",".join(sorted({re.sub(r"[^\w./~*?\[\]-]", "", r)[:60]
                             for r in refs if r})) or "-"
-    print("#AUDIT# tool=%s refs=%s sha256=%s len=%d"
-          % (tool_name or "Bash", safe, digest, len(subject)))
+    print("#AUDIT# tool=%s refs=%s sha256=%s"
+          % (tool_name or "Bash", safe, digest))
 
 
 # --- a file-reading TOOL rather than a shell command (review F1) ------------
@@ -526,16 +692,16 @@ def audit(tool_name, refs, subject):
 if not cmd:
     fields = []
     for key in ("file_path", "notebook_path", "path", "glob"):
-        val = tin.get(key)
-        if isinstance(val, str) and val:
+        val = " ".join(strings_in(tin.get(key)))
+        if val:
             fields.append((key, val))
     # For Glob the `pattern` IS a path pattern. For Grep it is a regex to
     # search FOR — treating that as a path would block searching this repo for
     # the guard's own subject matter, which is a false positive with no
     # security value.
     if tool == "Glob":
-        val = tin.get("pattern")
-        if isinstance(val, str) and val:
+        val = " ".join(strings_in(tin.get("pattern")))
+        if val:
             fields.append(("pattern", val))
     bad = [(k, store_refs(v), v) for k, v in fields if store_refs(v)]
     if bad:
@@ -546,7 +712,8 @@ if not cmd:
         # inside this branch. It still exited 2 because fail_closed does too,
         # so the store stayed shut and every block test passed while the real
         # refusal, the audit line and the user's env bypass were all gone.
-        audit(tool, [r for _k, rs, _v in bad for r in rs],
+        audit(tool, [r for k, _rs, v in bad
+                     for r in audit_refs(v)],
               " ".join(v for _k, v in fields))
         sys.exit(2)
     sys.exit(0)
@@ -576,7 +743,7 @@ for seg, term in split_segments(cmd):
         continue
     hits.append("%s  ->  %s" % (head or "(redirection/substitution)",
                                 excerpt(seg)))
-    refs.extend(seg_refs)
+    refs.extend(audit_refs(seg, cwd_hint))
 
 if hits:
     print("\n".join("  " + h for h in dict.fromkeys(hits)))
