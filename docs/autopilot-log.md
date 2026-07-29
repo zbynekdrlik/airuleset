@@ -1598,3 +1598,33 @@ Also filed: **#165** — the value-file pattern matches an INFIX, so an ordinary
 `config.<ext>.json`-style local config is refused. Pre-existing, outside the
 four holes, and a real trade (the same tightening stops covering a `.bak` copy
 of a value file), so it is a decision ticket rather than a reflex fix.
+
+## 2026-07-29 — batch: burn.scan_split() request-line over-count + btop RUNTIME_DEPS
+
+**#150** (burn.scan_split() counted a transcript LINE as a turn, ~2.13x
+over-count): RED `tests/test_delegation_meter.py::TestRequestDedup` (commit
+7d5a475) — a fixture where one requestId spans several usage lines, asserting
+one turn/one copy of usage; GREEN (commit 0551b2f) extracted `_fold_usage_line`
+(shared with `read_dispatch()`, which already deduped correctly) and rewired
+`scan_split()`'s per-file loop to dedupe by requestId before window-filtering.
+No baseline migration needed — `scan_split()` has no persisted history/alert
+thresholds. Full suite 3209 passed, ruff clean.
+
+**#145** (btop missing from RUNTIME_DEPS): added `"btop"` to `RUNTIME_DEPS`
+(commit 494c383) + locking tests mirroring the sshpass/jq shape in
+`tests/test_runtime_deps.py`. No new install-time code needed —
+`check_runtime_deps()` was already fully generic. Live-verified post-push:
+`btop --version` → `1.3.0` on dev1, dev2, gatekeeper (auto-installed via
+sudo). montalu/marek/david/simap on subdev have no sudo — each printed the
+loud `MISSING RUNTIME DEP: btop` warning (never silent), confirmed live via
+`sudo -n true` failing on all four. Filed **#171** (gk-request) asking
+whoever holds subdev's root key to `apt-get install -y btop` once for the
+whole box.
+
+Both design comments posted before their first code commit
+(issuecomment-5122067677 for #150, issuecomment-5122070675 for #145).
+Repo pushes direct to `main` (no dev branch/PR/CI) via `python3 airuleset.py
+push` — both issues auto-closed by GitHub on the `Closes #N` trailers.
+Playbook: `.claude/rules/airuleset-internals.md` (commit 191e383) — the
+requestId-fallback-protects-old-fixtures finding, and the RED-commit-trailer
+premature-close gotcha for this repo's direct-to-main flow.
