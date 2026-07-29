@@ -3401,12 +3401,34 @@ def _secret_bindable(ip):
     return bool(_is_private(ip) or (isinstance(ip, str) and ip.startswith("127.")))
 
 
-def _secret_url_line(ip, port, token):
+# Interfaces whose traffic is encrypted BEFORE it leaves the box, so a plain
+# HTTP endpoint on them is not actually in the clear. Deliberately does NOT
+# include `tun` — `tunl0` is IPIP, a tunnel with no encryption at all, and the
+# only safe direction for this label is to under-claim.
+_SECRET_ENCRYPTED_IFACE = ("tailscale", "wg", "wireguard", "zt")
+
+
+def _secret_iface_for(ip):
+    """The interface `ip` is configured on, or None."""
+    from filedrop import _iface_ips
+    for cand, ifname in _iface_ips():
+        if cand == ip:
+            return ifname
+    return None
+
+
+def _secret_url_line(ip, port, token, iface=None):
     """One advertised URL plus its TRANSPORT, spelled out.
 
-    The ticket's own requirement: tailscale is WireGuard-encrypted, a LAN URL is
-    plain HTTP, and when both are offered the user must be able to SEE which is
-    which before deciding where to type a password.
+    The ticket's own requirement: when several URLs are offered the user must be
+    able to SEE which one is encrypted before deciding where to type a password.
+
+    The label keys on the INTERFACE, not on the address range, because the
+    ranges do not carry the answer: `bind_ips()` legitimately advertises real
+    overlays, and on this box wg0 (10.88.*), wg-money (192.168.10.*) and a
+    zerotier (10.243.*) all look exactly like plain LAN addresses. Calling an
+    encrypted tunnel "NEŠIFROVANÉ" steers the user to the worse option on the
+    one page where it matters most.
     """
     from filedrop import _is_tailscale
     url = "http://%s:%d/%s/" % (ip, port, token)
@@ -3414,37 +3436,59 @@ def _secret_url_line(ip, port, token):
         return "%s   [tailscale — šifrované (WireGuard), odporúčané]" % url
     if str(ip).startswith("127."):
         return "%s   [loopback — len z tohto stroja]" % url
+    if iface is None:
+        iface = _secret_iface_for(ip)
+    if iface and str(iface).lower().startswith(_SECRET_ENCRYPTED_IFACE):
+        return "%s   [%s — šifrovaný tunel]" % (url, iface)
     return "%s   [LAN — NEŠIFROVANÉ (plain HTTP), použi radšej tailscale]" % url
 
 
-def _secret_exec_argv(tokens, use_stdin, env_name):
-    """Split `secret exec NAME [--stdin] [--env X] -- CMD...` into its parts.
+def _secret_apply_remainder(args):
+    """Move the flags argparse's REMAINDER swallowed back onto `args`.
 
-    `cmd` is an `argparse.REMAINDER`, which stops parsing at the first token
-    after the positional NAME — so a flag written where a user naturally writes
-    it (`secret exec DB_PASS --stdin -- psql`) lands in the REMAINDER as a
-    literal argument and would be exec'd as the command. Rather than force the
-    flags in front of the subcommand, consume the ones we own from the head of
-    the remainder, and stop dead at `--` so a flag meant for the CHILD is never
-    eaten (`secret exec DB_PASS -- mycmd --stdin` keeps its `--stdin`).
+    `cmd` is an `argparse.REMAINDER` (needed so `exec NAME -- CMD ...` can carry
+    arbitrary child arguments), and REMAINDER stops parsing at the first token
+    after the positional NAME — so `secret request DB_PASS --ttl 900` puts
+    `--ttl 900` in the remainder and the flag is silently ignored. Found live:
+    a request made with `--ttl 900 --keep 900` reported `endpoint-ttl=600s
+    keep=28800s` and stored the value with the 8-hour default.
+
+    Consume only OUR flags, only from the head, and stop dead at `--` so a flag
+    meant for the child is never eaten (`exec DB -- psql --ttl 1` keeps its own
+    `--ttl`). An explicitly parsed value wins — the remainder only ever fills a
+    field argparse left unset.
     """
-    rest = list(tokens)
+    ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
+    strs = {"--env": "env"}
+    rest = list(getattr(args, "cmd", None) or [])
     while rest:
         tok = rest[0]
         if tok == "--":
             rest.pop(0)
             break
         if tok == "--stdin":
-            use_stdin = True
-        elif tok == "--env" and len(rest) > 1:
+            args.stdin = True
             rest.pop(0)
-            env_name = rest[0]
-        elif tok.startswith("--env="):
-            env_name = tok.split("=", 1)[1]
+            continue
+        key, eq, inline = tok.partition("=")
+        if key not in ints and key not in strs:
+            break                           # not ours — it belongs to the child
+        if eq:
+            value, width = inline, 1
+        elif len(rest) > 1:
+            value, width = rest[1], 2
         else:
-            break
-        rest.pop(0)
-    return rest, use_stdin, env_name
+            break                           # a dangling flag: leave it visible
+        dest = ints.get(key) or strs[key]
+        if key in ints:
+            try:
+                value = int(value)
+            except ValueError:
+                break                       # not a flag of ours after all
+        if getattr(args, dest, None) is None:
+            setattr(args, dest, value)      # an explicit value always wins
+        del rest[:width]
+    args.cmd = rest
 
 
 def cmd_secret(args):
@@ -3467,6 +3511,7 @@ def cmd_secret(args):
     from filedrop import bind_ips
     from filedrop import vault as st
 
+    _secret_apply_remainder(args)
     action = args.action
     name = getattr(args, "name", None)
 
@@ -3517,11 +3562,7 @@ def cmd_secret(args):
 
     if action == "exec":
         nm = _need_name()
-        cmd, use_stdin, env_name = _secret_exec_argv(
-            getattr(args, "cmd", None) or [],
-            bool(getattr(args, "stdin", False)),
-            getattr(args, "env", None) or nm)
-        args.stdin, args.env = use_stdin, env_name
+        cmd = list(getattr(args, "cmd", None) or [])
         if not cmd:
             print("secret exec: needs a command after `--`", file=sys.stderr)
             sys.exit(2)
