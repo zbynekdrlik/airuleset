@@ -1255,9 +1255,42 @@ def split_report(hours=12, root=None):
     return data
 
 
+def _split_rows_of(rep):
+    """Yield `(host, project, row)` from EITHER report shape.
+
+    A local `split_report()` carries `projects` keyed by project, with the host
+    on the report. A REMOTE box is collected by invoking its own deployed
+    `airuleset.py delegation --json`, which prints the ALREADY-MERGED shape:
+    `by_project` keyed `<host>:<project>`, with the host on each row. Reading
+    only the first shape made every remote box parse cleanly and contribute
+    nothing — a reachable-but-empty box is indistinguishable from an idle one,
+    so the coordinator printed a dev1-only table as a fleet total with no WARN.
+    """
+    host = rep.get("host") or "?"
+    projects = rep.get("projects")
+    if isinstance(projects, dict):
+        for proj, prow in projects.items():
+            if isinstance(prow, dict):
+                yield host, proj, prow
+        return
+    merged = rep.get("by_project")
+    if isinstance(merged, dict):
+        for key, prow in merged.items():
+            if not isinstance(prow, dict):
+                continue
+            # The row's OWN host wins — it names the box the work ran on, not
+            # the box that collected it.
+            rhost = prow.get("host") or (
+                key.split(":", 1)[0] if ":" in key else host)
+            rproj = prow.get("project") or (
+                key.split(":", 1)[1] if ":" in key else key)
+            yield rhost, rproj, prow
+
+
 def merge_splits(reports):
-    """Merge N `split_report()`-shaped reports. `by_project` keys are
-    `<host>:<project>` so the same project name on two boxes cannot collide."""
+    """Merge N reports of EITHER shape (see `_split_rows_of`). `by_project`
+    keys are `<host>:<project>` so the same project name on two boxes cannot
+    collide."""
     by_project = {}
     totals = {"main": _split_row(), "sub": _split_row()}
     files = 0
@@ -1266,14 +1299,11 @@ def merge_splits(reports):
     for rep in reports:
         if not isinstance(rep, dict):
             continue
-        host = rep.get("host") or "?"
         if rep.get("hours"):
             hours = rep["hours"]
         files += int(rep.get("files_scanned", 0) or 0)
         usage_lines += int(rep.get("usage_lines", 0) or 0)
-        for proj, prow in (rep.get("projects") or {}).items():
-            if not isinstance(prow, dict):
-                continue
+        for host, proj, prow in _split_rows_of(rep):
             key = "%s:%s" % (host, proj)
             dst = by_project.setdefault(key, {
                 "host": host, "project": proj,
@@ -1283,6 +1313,8 @@ def merge_splits(reports):
             })
             if dst.get("repo") is None:
                 dst["repo"] = prow.get("repo")
+            if dst.get("cwd") is None:
+                dst["cwd"] = prow.get("cwd")
             for kind in ("main", "sub"):
                 src = prow.get(kind) or {}
                 _split_add(dst[kind], src)
