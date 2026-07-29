@@ -1440,3 +1440,17 @@ of the 20 unreported got a backfill lookup.
 
 Gate: 2893 tests pass (2875 baseline + 18 new), `ruff check .` clean,
 `airuleset.py validate` OK, deployed to all 7 targets via `airuleset.py push`.
+
+Review round on the same ticket (adversarial read of the four commits, dispatched
+read-only): 11 findings, all fixed in `380ee82` after RED `fdee82f`. The two that
+mattered — the digest test class never isolated `notify._claude_dir` and had
+written a real suppression marker into this box's live store (removed; a full
+suite run now leaves it clean), and the checkout gate refused legitimate
+operators because the shared sweep stops at depth 4 and cannot see a `.git`
+FILE (worktrees/submodules), measured 40 discovered against 55 real checkouts.
+Resolution now tries the invocation cwd first (0.03s, no walk), walks its own
+way rather than widening a sweep two other jobs share, and carries a logged
+`--force`. Also: the write count is writes that happened; a `dedup` return no
+longer reads as a delivery; the digest suppresses only the tickets its message
+NAMED; job 25 degrades to card-only (and logs) if the new symbol is missing.
+Gate after the review round: 2905 tests pass, ruff clean, validate OK.
