@@ -4708,6 +4708,48 @@ class TestApiWatchdog(TestCase):
         self._deliver(now, prefix, owner_by_sid={"sidF": "marek"})
         self.assertEqual(self.pings[0][2], "marek", "@mentions the session's owner")
 
+    def test_deliver_done_owner_from_cwd_when_sid_missing(self):
+        # LIVE INCIDENT (dev2, 2026-07-29 17:00): the presenter ✅ was delivered
+        # in a sweep whose pane loop had not registered that session, so
+        # owner_by_sid missed it and the ping fell through to account_owner —
+        # "the FIRST owner seen", which on that box was david (the codex-bridge
+        # pane). zbynek's project reported itself into david's thread.
+        # The session's own cwd identifies the owner without the sid mapping.
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidOWN", [self._DONE], 300, now, cwd="/devel/projx")
+        pf = prefix + "sidOWN"
+        Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, owner_by_sid={}, account_owner="david",
+                      owner_by_cwd={"/devel/projx": "zbynek"})
+        self.assertEqual(self.pings[0][2], "zbynek",
+                         "cwd identifies the owner — never the first-seen owner")
+
+    def test_deliver_done_no_mention_rather_than_wrong_owner(self):
+        # Multi-owner box, session unresolvable by sid AND by cwd: the
+        # account_owner fallback is arbitrary there, and a ✅ landing in the
+        # wrong person's thread is worse than one with no @mention — the real
+        # owner never sees it and someone else gets the noise.
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidAMB", [self._DONE], 300, now, cwd="/devel/other")
+        pf = prefix + "sidAMB"
+        Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, owner_by_sid={}, account_owner="david",
+                      owners_seen=["david", "zbynek", "marek"])
+        self.assertIsNone(self.pings[0][2],
+                          "ambiguous owner → no mention, never a guessed one")
+
+    def test_deliver_done_single_owner_box_keeps_account_fallback(self):
+        # The fallback still earns its place on a one-owner box: there is
+        # exactly one person it could be, so a missing sid mapping must not
+        # cost the mention.
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidONE", [self._DONE], 300, now, cwd="/devel/solo")
+        pf = prefix + "sidONE"
+        Path(pf).write_text("✅ hotovo")
+        self._deliver(now, prefix, owner_by_sid={}, account_owner="zbynek",
+                      owners_seen=["zbynek"])
+        self.assertEqual(self.pings[0][2], "zbynek")
+
     def test_deliver_done_orphan_no_transcript(self):
         # session pane closed, transcript gone → trust the recorded ✅, deliver on age
         now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
