@@ -64,6 +64,20 @@ class RuntimeDepsCheck(unittest.TestCase):
         self.assertIn("MISSING RUNTIME DEP", out.getvalue())
         self.assertIn("jq", out.getvalue())
 
+    def test_missing_btop_prints_loud_warning_when_install_fails(self):
+        # A sudo-less box (marek/david/montalu/simap on subdev) cannot
+        # apt-get install — the gap must be reported LOUDLY, never silently
+        # skipped, exactly like every other tracked dependency.
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "btop" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=1)):
+            out = StringIO()
+            with m.patch("sys.stdout", out):
+                missing = airuleset.check_runtime_deps()
+        self.assertEqual(missing, ["btop"])
+        self.assertIn("MISSING RUNTIME DEP", out.getvalue())
+        self.assertIn("btop", out.getvalue())
+
     def test_all_present_is_quiet(self):
         with m.patch("shutil.which", side_effect=lambda d: "/usr/bin/" + d):
             out = StringIO()
@@ -82,6 +96,13 @@ class RuntimeDepsCheck(unittest.TestCase):
         # and its sibling) but was never added to RUNTIME_DEPS — so install/push
         # never provisioned or verified it on any target.
         self.assertIn("sshpass", airuleset.RUNTIME_DEPS)
+
+    def test_btop_is_a_tracked_dependency(self):
+        # user directive 2026-07-28 ("chcem aby airuleset sa staral aby vsade
+        # na targetoch bola au utilita btop") — btop was never added to
+        # RUNTIME_DEPS, so install/push never provisioned or verified it, and
+        # a box missing it degraded with no signal at all.
+        self.assertIn("btop", airuleset.RUNTIME_DEPS)
 
 
 class SudoLessToolRequestPath(unittest.TestCase):

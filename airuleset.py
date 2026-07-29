@@ -1041,7 +1041,7 @@ def cmd_diff(args):
 # it on every target in one shot.
 # Push runs install on EVERY target, so every deploy verifies + heals the
 # whole fleet's toolset.
-RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass")
+RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop")
 
 
 def check_runtime_deps(deps=RUNTIME_DEPS):
