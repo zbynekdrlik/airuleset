@@ -131,6 +131,75 @@ class TestStoragePermissions(_StoreCase):
         self.assertNotIn(str(ROOT), str(st.secrets_dir()))
 
 
+class TestStoreLocationIsEnforcedNotAsserted(_StoreCase):
+    """Adversarial-review finding #3 (HIGH).
+
+    C3 claims values live 0600 in a 0700 dir outside every repo. Three ways
+    that was asserted rather than enforced:
+
+      * `AIRULESET_SECRETS_DIR` was honoured unconditionally though documented
+        "tests only" — any env var reaching the CLI (a settings.json env block,
+        a hook, an exported var) silently relocated every credential, including
+        into a git worktree;
+      * `ensure_dir()`'s mkdir/chmod FOLLOW a symlink, so a planted
+        `~/.claude/secrets -> <a repo>` put every value in a tracked tree while
+        the 0700 "proof" chmod'd the link's target;
+      * `_write_json_0600` used O_TRUNC with no O_NOFOLLOW, which follows an
+        existing symlink and truncates it — a planted
+        `secrets/NAME.meta -> ~/.ssh/authorized_keys` was silently clobbered.
+    """
+
+    def test_the_meta_write_refuses_to_follow_a_symlink(self):
+        st.ensure_dir()
+        victim = Path(self.tmp.name) / "authorized_keys"
+        victim.write_text("ssh-ed25519 AAAA real-key\n", encoding="utf-8")
+        link = st.secrets_dir() / "DB_PASS.meta"
+        link.symlink_to(victim)
+        with self.assertRaises(st.SecretError):
+            st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        self.assertEqual(victim.read_text(encoding="utf-8"),
+                         "ssh-ed25519 AAAA real-key\n")
+
+    def test_the_value_write_refuses_to_follow_a_symlink(self):
+        st.ensure_dir()
+        victim = Path(self.tmp.name) / "innocent"
+        victim.write_text("keep me", encoding="utf-8")
+        (st.secrets_dir() / "DB_PASS.secret").symlink_to(victim)
+        with self.assertRaises(st.SecretError):
+            st.store_value("DB_PASS", VAL.encode(), keep_s=60)
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep me")
+
+    def test_the_log_write_refuses_to_follow_a_symlink(self):
+        victim = Path(self.tmp.name) / "settings.json"
+        victim.write_text('{"real": true}', encoding="utf-8")
+        st.log_path().parent.mkdir(parents=True, exist_ok=True)
+        st.log_path().symlink_to(victim)
+        st.log_event("request", "DB_PASS")          # loud, but never fatal
+        self.assertEqual(victim.read_text(encoding="utf-8"), '{"real": true}')
+
+    def test_a_symlinked_store_directory_is_refused(self):
+        real = Path(self.tmp.name) / "elsewhere"
+        real.mkdir()
+        link = Path(self.tmp.name) / "linked-secrets"
+        link.symlink_to(real, target_is_directory=True)
+        os.environ[st.SECRETS_DIR_ENV] = str(link)
+        with self.assertRaises(st.SecretError):
+            st.ensure_dir()
+
+    def test_a_store_inside_a_git_repo_is_refused(self):
+        repo = Path(self.tmp.name) / "repo"
+        (repo / ".git").mkdir(parents=True)
+        with self.assertRaises(st.SecretError):
+            st.assert_safe_store_dir(repo / "secrets")
+
+    def test_the_env_override_is_ignored_outside_a_temp_dir(self):
+        os.environ[st.SECRETS_DIR_ENV] = str(Path.home() / "some" / "repo")
+        self.assertEqual(st.secrets_dir(), Path.home() / ".claude" / "secrets")
+
+    def test_the_env_override_still_works_for_a_temp_dir(self):
+        self.assertTrue(str(st.secrets_dir()).startswith(self.tmp.name))
+
+
 class TestState(_StoreCase):
     def test_absent_pending_ready(self):
         self.assertEqual(st.state("DB_PASS"), "absent")
