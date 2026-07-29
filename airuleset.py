@@ -3593,6 +3593,14 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
 
     if not value:
         return blob
+    # The floor is on the VALUE, not on each derived form. Escaping EXPANDS:
+    # `"` renders as `&quot;` and `<` as `&lt;`, both of which clear a
+    # per-form floor — so a per-form test silently broke this docstring's own
+    # promise and turned every `&quot;` in a child's HTML output into the
+    # marker. Base64 had the same shape long before the escaped forms existed
+    # (one byte encodes to four characters).
+    if len(value.strip()) < 4:
+        return blob
     forms = {value, value.strip()}
     try:
         text = value.decode("utf-8")
@@ -3605,6 +3613,9 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
         # without the quotes the dumper adds around it, so the form matches
         # wherever it is nested (a dict, a config line, a traceback).
         forms.add(json.dumps(text)[1:-1].encode())
+        # ensure_ascii=False is an ordinary dump option and renders a
+        # non-ASCII value completely differently from the default.
+        forms.add(json.dumps(text, ensure_ascii=False)[1:-1].encode())
         forms.add(repr(text)[1:-1].encode())
         forms.add(repr(value)[2:-1].encode())
         forms.add(text.encode("unicode_escape"))
@@ -3614,8 +3625,10 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
         forms.add(text.replace("%", "%%").encode())
     forms.add(base64.b64encode(value))
     forms.add(base64.b64encode(value).rstrip(b"="))
+    forms.add(base64.urlsafe_b64encode(value))
     forms.add(base64.urlsafe_b64encode(value).rstrip(b"="))
     forms.add(value.hex().encode())
+    forms.add(value.hex().upper().encode())      # plenty of tools print caps
     out = blob
     # Longest first, so a form that contains another does not leave a tail.
     for form in sorted((f for f in forms if len(f) >= 4), key=len, reverse=True):

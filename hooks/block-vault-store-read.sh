@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PreToolUse (Bash matcher) — issue #153 finding 1.
+# Hook: PreToolUse (Bash, Read, Grep, Glob matchers) — issue #153 finding 1.
 #
 # The credential store (`~/.claude/secrets/<NAME>.secret`, the `airuleset.py
 # secret` channel from #144) is not read by hand. `secret exec` hands the value
@@ -39,10 +39,27 @@ set -euo pipefail
 # credential into a shell command, which is the same leak from the other side.
 # Use `secret request` — the user posts it from their own browser.
 #
-# ALLOWED (metadata only — no content, no relocation): ls, stat, file, test,
-# du, rm, shred, chmod, chown, touch, cd, pushd. Plus the whole sanctioned CLI
-# surface (`airuleset.py secret request|status|list|exec|forget|purge`), which
-# never names a store path on the command line at all.
+# NOT ONLY BASH. An agent asked what is in the store reaches for the `Read`
+# TOOL long before it reaches for `cat`, so Read/Grep/Glob are matched too (by
+# EXACT tool name, one settings entry each — an alternation matcher has been
+# observed in this repo to silently never match, and a guard that never runs is
+# worse than none because it reads as coverage). For those the inspected fields
+# are file_path / notebook_path / path / glob, plus `pattern` for Glob ONLY:
+# Grep's pattern is a regex to search FOR, and treating it as a path would
+# block searching this repo for the guard's own subject matter.
+#
+# ALLOWED heads (provably content-free AND non-mutating): ls, stat, test, [.
+# Plus the whole sanctioned CLI surface (`airuleset.py secret
+# request|status|list|exec|forget|purge`), which never names a store path on
+# the command line at all. An allowlisted head loses its exemption when the
+# segment is PIPED — `ls <store>/* | xargs cat` makes `ls` a name source, not a
+# listing. Heads deliberately NOT allowlisted, each because it defeated an
+# earlier version: `file -f` and `du --files0-from` ingest a file as a NAME
+# LIST and echo its contents back in their own error text; `cd`/`pushd` let the
+# store be entered and then read by a bare glob; chmod/chown/rm/shred/touch are
+# mutations (the first two hand a 0600 credential to another uid on a box that
+# hosts foreign uids by design, and `secret forget` is the honest deletion
+# path). `ls -l` and `stat` answer every legitimate metadata question.
 #
 # BYPASS — env only, and always logged:
 #   AIRULESET_ALLOW_VAULT_READ=1   -> audits/vault-store-reads.log
@@ -62,14 +79,38 @@ set -euo pipefail
 #     circumvention leaves a greppable artifact (an audit line, or the
 #     removal itself in git).
 #   - A hook is configuration. Anything that edits settings.json, unregisters
-#     this hook, or reaches the file outside the Bash tool is outside its
-#     reach by construction.
+#     this hook, or reaches the file through a tool with no matcher here is
+#     outside its reach by construction.
 #   - A path computed at runtime rather than written literally
 #     (`python3 -c "import pathlib; open(pathlib.Path.home()/'.claude'/'secrets'/n)"`,
 #     a variable assembled from parts, a path read out of another file) does
 #     not match either pattern — text matching cannot see it.
-#   - Not a shell parser: process substitution, `xargs` fed from a file list,
-#     and a wrapper script that does the read internally are invisible.
+#   - Not a shell parser: `xargs` fed from a file LIST, and a wrapper script
+#     that does the read internally, are invisible. (Process substitution is
+#     NOT in this list — `(` is a separator outside quotes, so `cat <(cat
+#     …/DB.secret)` really is blocked. An earlier version of this header
+#     claimed otherwise and was wrong.)
+#   - The Bash tool's working directory PERSISTS between calls, and this hook
+#     is stateless. `cd` into the store is refused for exactly that reason —
+#     otherwise an allowed `cd` in one call makes `cat *` in the next
+#     unreachable to any single-command check.
+#   - FALSE POSITIVE, accepted deliberately: a command whose TEXT merely NAMES
+#     the store is blocked even when it reads nothing — `grep -rn
+#     '\.claude/secrets' hooks/`, or a commit/issue body naming the path. The
+#     env bypass cannot help mid-session (an inline `VAR=1 cmd` sets the
+#     variable for the COMMAND, not for this hook process), so the workaround
+#     is to describe the path in prose, or write the body to a file with the
+#     Write tool and `cat` it — the same self-tripping shape, and the same
+#     remedy, as block-sensitive-staging.sh. Stripping heredoc bodies to fix
+#     it was considered and REJECTED: a heredoc body is not inert here
+#     (`python3 <<EOF` genuinely executes), so that exemption would re-open a
+#     real read path to buy comfort.
+#   - Fail-closed is bounded by the harness: a hook that TIMES OUT (5s) is
+#     treated as an error and does not block, so a pathologically slow python3
+#     start fails open. Not agent-controllable, but real.
+#   - The audit line records the full command, so a bypassed WRITE would put
+#     the value in audits/vault-store-reads.log. That path is gitignored
+#     (.gitignore: `audits/*.log`) but is plaintext on disk.
 #
 # Exit code 2 = block the tool call.
 
@@ -113,34 +154,58 @@ import sys
 
 raw = sys.argv[1]
 try:
-    cmd = json.loads(raw).get("tool_input", {}).get("command", "") or ""
+    payload = json.loads(raw)
 except Exception:
-    cmd = raw          # not JSON: inspect what we were given rather than skip
-
-if not cmd.strip():
-    sys.exit(0)
+    payload = {}
+tool = payload.get("tool_name") or ""
+tin = payload.get("tool_input") or {}
+if not isinstance(tin, dict):
+    tin = {}
+cmd = tin.get("command") or ""
+if not cmd and not isinstance(payload, dict):
+    cmd = raw
 
 # A. the store directory, however it is spelled.
 STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
-# B. a value file by name. The stem must start with an alnum/underscore, so a
-# regex or glob fragment (`"\.secret\b"`, `(".secret",`) is not a match.
-VALUE_FILE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\.secret(?![A-Za-z0-9_-])")
+# B. a value file by name. The stem is an alnum/underscore OR a glob
+# metacharacter: `find ~/.claude -name '*.secret'` names no directory and no
+# literal stem, and was the review's F3 bypass. A regex or source fragment
+# (`"\.secret\b"`, `(".secret",`) still does not match, which is the point of
+# requiring SOME stem character rather than none.
+VALUE_FILE_RE = re.compile(
+    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|[*?\]}])\.secret(?![A-Za-z0-9_-])")
+# C. the store's PARENT swept recursively or archived (review F2). Anchored on
+# `.claude` NOT followed by a deeper path component, so `~/.claude/projects`
+# — the transcript greps this repo's own work runs constantly — is untouched.
+CLAUDE_ROOT_RE = re.compile(r"\.claude/?(?![A-Za-z0-9_./-])")
+RECURSIVE_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$)")
+BULK_HEADS = {"tar", "zip", "rsync", "cpio", "pax", "7z", "scp"}
 
-# Heads that cannot move or reveal the CONTENT of a file.
-ALLOW_HEADS = {"ls", "stat", "file", "test", "[", "du", "rm", "shred",
-               "chmod", "chown", "touch", "cd", "pushd"}
+# Heads that are PROVABLY content-free AND non-mutating. Everything the
+# adversarial review broke is gone: `file -f` and `du --files0-from` read a
+# file as a NAME LIST and echo it back in their error text; `cd` let the store
+# be entered and then read by a bare glob (and the Bash tool's cwd persists
+# ACROSS calls, so an allowed `cd` makes the NEXT call's `cat *` invisible to a
+# stateless hook); chmod/chown/rm/shred/touch are mutations, and the first two
+# hand a 0600 credential to another uid on a box that hosts foreign uids by
+# design. `ls -l` and `stat` already answer every legitimate metadata question.
+ALLOW_HEADS = {"ls", "stat", "test", "["}
 PREFIXES = {"sudo", "env", "time", "nice", "ionice", "command", "builtin", "exec"}
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def split_segments(text):
-    """Quote-aware split on shell separators.
+    """Quote-aware split on shell separators -> [(segment, terminator), ...].
 
     Command substitutions become their OWN segments — `$(` and backticks are
     separators even inside double quotes, where the shell really does expand
     them — so a read nested inside an allowlisted head is not laundered by it.
     Inside SINGLE quotes nothing is a separator, which keeps a `python3 -c
     '...'` body intact as one segment headed by python3.
+
+    The TERMINATOR is returned because it changes what an allowlisted head
+    means: piped, `ls` is not a listing, it is a name source for whatever
+    consumes it (review F5).
     """
     segs, buf = [], []
     i, n = 0, len(text)
@@ -155,12 +220,12 @@ def split_segments(text):
             i += 1
             continue
         if two == "$(":
-            segs.append("".join(buf))
+            segs.append(("".join(buf), "$("))
             buf = []
             i += 2
             continue
         if c == "`":
-            segs.append("".join(buf))
+            segs.append(("".join(buf), "`"))
             buf = []
             i += 1
             continue
@@ -186,18 +251,18 @@ def split_segments(text):
             i += 1
             continue
         if two in ("&&", "||"):
-            segs.append("".join(buf))
+            segs.append(("".join(buf), two))
             buf = []
             i += 2
             continue
         if c in ";|&\n()":
-            segs.append("".join(buf))
+            segs.append(("".join(buf), c))
             buf = []
             i += 1
             continue
         buf.append(c)
         i += 1
-    segs.append("".join(buf))
+    segs.append(("".join(buf), ""))
     return segs
 
 
@@ -220,13 +285,60 @@ def references_store(segment):
     return m.group(0) if m else None
 
 
-hits = []
-for seg in split_segments(cmd):
-    ref = references_store(seg)
-    if not ref:
-        continue
-    head = head_of(seg)
+def sweeps_the_parent(segment, head):
+    """The store's PARENT read wholesale, without ever naming the store.
+
+    `grep -r password ~/.claude` and `tar czf /tmp/c.tgz ~/.claude` print or
+    package every credential inline and match neither path pattern (review
+    F2). Anchored on `.claude` with NO deeper component, so `~/.claude/projects`
+    — the transcript sweeps this repo's own work depends on — is untouched.
+    """
     if head in ALLOW_HEADS:
+        return None          # `ls -R ~/.claude` lists names, never content
+    if not CLAUDE_ROOT_RE.search(segment):
+        return None
+    if head in BULK_HEADS or RECURSIVE_RE.search(segment):
+        return "recursive read/archive of the store's parent dir"
+    return None
+
+
+# --- a file-reading TOOL rather than a shell command (review F1) ------------
+# Bash was never the most reflexive route to the store: an agent asked what is
+# in it reaches for `Read` long before `cat`, and a prompt-injected one has a
+# route no Bash-matched hook can see.
+if not cmd:
+    fields = []
+    for key in ("file_path", "notebook_path", "path", "glob"):
+        val = tin.get(key)
+        if isinstance(val, str) and val:
+            fields.append((key, val))
+    # For Glob the `pattern` IS a path pattern. For Grep it is a regex to
+    # search FOR — treating that as a path would block searching this repo for
+    # the guard's own subject matter, which is a false positive with no
+    # security value.
+    if tool == "Glob":
+        val = tin.get("pattern")
+        if isinstance(val, str) and val:
+            fields.append(("pattern", val))
+    bad = [(k, v) for k, v in fields if references_store(v)]
+    if bad:
+        print("\n".join("  %s %s -> %s" % (tool or "tool", k, v[:120])
+                        for k, v in bad))
+        sys.exit(2)
+    sys.exit(0)
+
+hits = []
+for seg, term in split_segments(cmd):
+    head = head_of(seg)
+    sweep = sweeps_the_parent(seg, head)
+    if sweep:
+        hits.append("%s  ->  %s (%s)" % (head or "?", seg.strip()[:120], sweep))
+        continue
+    if not references_store(seg):
+        continue
+    if head in ALLOW_HEADS and term != "|":
+        # Piped, an allowlisted head is just a name source for whatever
+        # consumes it — `ls <store>/* | xargs cat` (review F5).
         continue
     hits.append("%s  ->  %s" % (head or "(redirection/substitution)",
                                 seg.strip()[:120]))
