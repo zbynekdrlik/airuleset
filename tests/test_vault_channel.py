@@ -745,6 +745,53 @@ class TestTokenIsNotInArgv(_StoreCase):
         self.assertIn("AIRULESET_VAULT_TOKEN", proc.stderr)
 
 
+class TestLifetimesAreBounded(_StoreCase):
+    """Adversarial-review finding #4 (MEDIUM).
+
+    `vault_server.py` armed its self-shutdown timer only `if TTL > 0`, and the
+    CLI's `int(args.ttl or DEFAULT)` let a NEGATIVE value through (0 is falsy
+    and correctly fell back; -1 is truthy). `secret request X --ttl -1`
+    therefore started a credential-receiving endpoint with NO timer at all,
+    alive until reboot — while `register_request` wrote an already-past
+    `expires_at`, so the next invocation purged the record and `status` said
+    `absent`. A live write endpoint with no trace in the store is the worst of
+    both. `--keep` was likewise unbounded upward.
+    """
+
+    def test_a_negative_or_zero_ttl_is_clamped_up(self):
+        for bad in (-1, 0, -99999):
+            self.assertEqual(airuleset._secret_clamp_ttl(bad),
+                             airuleset.SECRET_MIN_TTL_S)
+
+    def test_an_absurd_ttl_is_clamped_down(self):
+        self.assertEqual(airuleset._secret_clamp_ttl(10 ** 9),
+                         airuleset.SECRET_MAX_TTL_S)
+
+    def test_keep_is_bounded_at_both_ends(self):
+        self.assertEqual(airuleset._secret_clamp_keep(0),
+                         airuleset.SECRET_MIN_KEEP_S)
+        self.assertEqual(airuleset._secret_clamp_keep(10 ** 9),
+                         airuleset.SECRET_MAX_KEEP_S)
+
+    def test_a_sane_value_passes_through_untouched(self):
+        self.assertEqual(airuleset._secret_clamp_ttl(600), 600)
+        self.assertEqual(airuleset._secret_clamp_keep(8 * 3600), 8 * 3600)
+
+    def test_the_endpoint_refuses_a_non_positive_ttl_outright(self):
+        # Belt to the CLI's braces: a timer that is merely "not armed" is an
+        # immortal endpoint, so the server must treat it as fatal, not optional.
+        for ttl in ("0", "-1"):
+            env = dict(os.environ)
+            env.update(self._env)
+            env["AIRULESET_VAULT_TOKEN"] = TOK
+            proc = subprocess.run(
+                [sys.executable, str(SERVER), str(_free_port()), "127.0.0.1",
+                 "DB_PASS", ttl, "60"],
+                capture_output=True, text=True, timeout=30, env=env)
+            self.assertNotEqual(proc.returncode, 0, ttl)
+            self.assertIn("ttl", proc.stderr.lower())
+
+
 class TestHealthProbeCarriesNoToken(_ServerCase):
     """The CLI's own liveness probe used to GET the token URL, which hands the
     token to whatever is listening — including another local user's process
