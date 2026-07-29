@@ -1767,3 +1767,62 @@ filed.
 pure-function contract (no new state shape beyond the `dormant` flag,
 which is exactly the same "caller forces a state that decide() then
 respects" pattern the usage-cap path already used before this ticket).
+
+## #176 -- job 1's busy-pane gate misdiagnosed an idle-with-draft pane as busy, silently forever
+
+Live incident, corrected here: the sibling watchdog-livelock ticket blamed the
+2026-07-29 stall on jobs 27/28 starving job 1 of wall-clock. An independent
+forensic review found that reasoning was wrong (job 1 runs long before jobs
+27/28 in the same sweep, and the box that actually stalled completed 1140
+sweeps that day) and traced the real cause: `pane_at_idle_prompt` (bare_only)
+cannot distinguish a real running foreground turn from a pane genuinely idle
+at `❯` that merely holds a foreign draft in its input box -- both read as
+"not idle". That branch wrote no state, sent no ping, and had no bound, so
+the gatekeeper pane held a stale draft through 32 consecutive polls (36
+minutes) with zero keystrokes and zero pings.
+
+Design comment posted BEFORE the first code commit (issuecomment-5123978973).
+RED->GREEN: 7ee3704 (four new tests: idle-with-draft revives via the stash
+protocol; an aborted stash never burns a retry; a genuinely busy pane pings
+once past 2x grace; the queued-placeholder normalizer's counted-variant gap
+-- all fail against current code for the stated reason; the pre-existing
+test_run_once_apierror_skipped_when_pane_busy is untouched and still passes)
+-> 49832d9 (job 1's busy-pane gate now classifies via `_classify_boundary`
+instead of the binary `pane_at_idle_prompt` check: `kind == "input"` with a
+non-empty draft delivers the `continue` nudge through `deliver_with_stash`
+-- the verified idle-with-draft protocol jobs 7/9/20 already use -- instead
+of refusing forever, and an aborted stash never advances the nudge state;
+any other kind stays genuinely busy and is still never typed into, but now
+gets job 4's escalation shape via a DEDICATED `apierr-busypane:` state
+record -- its own prefix so it never collides with job 4's own `busypane:`
+bookkeeping for the same session -- pinging exactly once per episode once
+the stall runs strictly past 2x grace; every busy-pane skip now logs the
+classified boundary kind + a text snippet instead of an undifferentiated
+"busy-pane"; the queued-placeholder normalizer widened from exact-equality
+to a regex so a counted variant, e.g. "... 2 queued messages", also
+normalizes). Full suite 3241 passed (3237 baseline + 4 new), ruff clean.
+
+Corrected the record per the review's retraction list: the sibling ticket's
+own autopilot-log entry and its matching playbook bullet in
+`.claude/rules/airuleset-internals.md` (3a0d08d), and its own GitHub issue
+body via `gh issue edit` -- job 1 was never starved, its
+keystroke-safety gates were NOT verified intact during the real stall, the
+cited nudge timestamp belongs to an unrelated session, and the "4h 28m" stall
+figure is uncorroborated (the demonstrable dead-with-zero-nudges window is
+36m10s).
+
+Fired `notify --run-card` for #176. No dropped work; nothing filed -- the
+acceptance list's six items were all implemented in this ticket's scope, and
+the reopened sibling ticket's own five defects (jobs 27/28 batching, log_fn
+flushing, dedup persistence) are explicitly OUT of this ticket's scope, left
+for its own separate worker.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` -- two independent jobs
+that each escalate a "genuinely busy, silence otherwise" episode with the
+SAME state-record shape must use DISTINCT state-key prefixes even when
+keyed on the same session id; a NEW "ping past N x an existing tunable"
+threshold must be checked against every pre-existing test using that
+tunable nearby (a strict `>` instead of `>=` kept an existing fixture
+passing unmodified here); an aborted VERIFIED delivery must not be allowed
+to silently advance a decide()-style counter computed before the delivery
+was attempted.

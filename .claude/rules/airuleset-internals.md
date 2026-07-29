@@ -537,3 +537,52 @@ against a baseline, once one exists.
   consecutive polls (36 minutes) — see the `_classify_boundary` +
   `deliver_with_stash` fix below (#176). The "4h 28m" figure quoted for that stall
   is also uncorroborated; the demonstrable dead-with-zero-nudges window is 36m10s.
+
+- **Two INDEPENDENT jobs that each escalate a "genuinely busy, silence otherwise"
+  episode with job 4's shape (a state record + one deduped ping past a threshold)
+  must NOT share one state-key prefix, even when they key on the identical session
+  id.** #176: job 1's api-error busy-pane skip reuses job 4's exact escalation
+  pattern (`:8536`) but writes `state["apierr-busypane:" + key]`, a prefix distinct
+  from job 4's own `"busypane:" + key` — the two episodes (a 529 stall vs a `⏳
+  WORKING` stall) are otherwise unrelated and can be live for the SAME session at
+  different times; sharing one bookkeeping dict would let one job's `pinged`/
+  `first_seen` silently suppress or corrupt the other's independent episode. The
+  existing generic state-cleanup loop (`k.startswith(...)`) needed exactly one new
+  branch added to its OR-chain for the new prefix — no new cleanup mechanism.
+- **Reproducing a busy-pane misdiagnosis in a test: don't reach for the full
+  `_BUSY_PANE`/chrome-peel fixture machinery when the boundary shape itself is the
+  whole point — a ONE-LINE capture (`"❯\xa0nechať ako je\n"`) is enough to drive
+  `_find_boundary_line_raw`'s glyph-fallback peel to the right answer** (no chrome
+  rows below it to peel, so the loop stops immediately and returns that one line).
+  Mocking the delivery primitive itself (`m.patch.object(wd, "deliver_with_stash",
+  side_effect=_fake)`, recording `(pid, text)` and returning True/False) is what
+  actually proves "job 1 now routes an idle-with-draft pane through the stash
+  protocol instead of refusing" — driving the real tmux Ctrl-S/type/Enter sequence
+  through `_FakeTmux`'s static per-pid capture would need a THIRD capture-sequencing
+  fixture shape (`cap_seq`, already used elsewhere in this repo) for no added proof
+  value at the `run_once`-integration level; that lower-level protocol is already
+  covered by `deliver_with_stash`'s own dedicated test file.
+- **Adding a NEW "ping once past a multiple of an existing tunable" threshold: check
+  it against every EXISTING test that already uses that tunable at a nearby value,
+  not just against the incident's own numbers.** #176's acceptance text asked for a
+  ping "after 2×grace"; the pre-existing (must-keep-passing)
+  `test_run_once_apierror_skipped_when_pane_busy` happens to use `grace=300` with a
+  transcript exactly `600` seconds stale — precisely `2 * grace`. An inclusive
+  `idle >= 2 * grace` fires exactly at that fixture's own boundary and flips its
+  "no ping" assertion. A strict `idle > 2 * grace` keeps that pre-existing fixture
+  a no-op unmodified while still guaranteeing the ping fires the moment a REAL
+  stall runs even one tick past the threshold — cheaper and safer than editing an
+  existing locked test to accommodate a new one when a one-character `>`-vs-`>=`
+  choice resolves the collision outright.
+- **An aborted verified-delivery attempt (`deliver_with_stash` returning False) must
+  not be allowed to silently advance a decide()-style nudge/backoff counter that was
+  already computed before the delivery was attempted.** The pre-existing shape here
+  unconditionally wrote `state[key] = entry` immediately after calling `decide()`,
+  before knowing whether any keystroke would actually be typed — harmless while the
+  only delivery method (`send_continue`) was fire-and-forget with no verification.
+  Once one branch (idle-with-a-draft) gained a VERIFIED delivery, the write had to
+  move to AFTER that verification succeeds (still unconditional for the
+  unverified `send_continue` path, since that never changed) — every OTHER branch
+  (the usage-cap ping, the plain `wait` action) still writes `state[key]` exactly
+  where it always did, so the only behavioral change is confined to the one new
+  verified-and-fallible path.
