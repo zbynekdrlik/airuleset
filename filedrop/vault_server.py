@@ -39,6 +39,8 @@ THREE THINGS THIS PROCESS MUST NEVER DO, and how each is prevented:
     `filedrop._is_private`, so a future regression in that one still cannot
     put a credential endpoint on a box's public IP.
 """
+import hmac
+import ipaddress
 import os
 import sys
 import threading
@@ -80,18 +82,14 @@ def is_private(ip):
     reachable BY the user): it is strictly more private than tailscale, since
     it cannot leave the box at all.
     """
-    if ":" in ip:
-        return False
-    parts = ip.split(".")
-    if len(parts) != 4:
-        return False
+    # `ipaddress` rather than int()-per-octet: that accepted " 10" and "+10",
+    # and read "010" as decimal 10 where inet_aton reads it as OCTAL 8 — a
+    # spelling that could pass the check and bind something else entirely.
     try:
-        octets = [int(p) for p in parts]
-    except ValueError:
+        addr = ipaddress.IPv4Address(ip)
+    except (ipaddress.AddressValueError, ValueError):
         return False
-    if any(o < 0 or o > 255 for o in octets):
-        return False
-    a, b = octets[0], octets[1]
+    a, b = (int(x) for x in str(addr).split(".")[:2])
     if a == 127:                        # loopback — never leaves this box
         return True
     if a == 100 and 64 <= b <= 127:     # tailscale CGNAT (WireGuard-encrypted)
@@ -190,6 +188,37 @@ v.focus();
 </script></html>"""
 
 
+# A credential endpoint serves exactly one browser for a few minutes. Unbounded
+# threads are pure abuse surface, so refuse past a small cap rather than let a
+# single host spawn one thread per connection for the whole TTL.
+MAX_CONNECTIONS = 16
+
+
+class BoundedServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._live = 0
+        self._lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        with self._lock:
+            if self._live >= MAX_CONNECTIONS:
+                self.shutdown_request(request)
+                return
+            self._live += 1
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        super().shutdown_request(request)
+
+    def close_request(self, request):
+        super().close_request(request)
+        with self._lock:
+            self._live = max(0, self._live - 1)
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 60
@@ -210,6 +239,12 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    @staticmethod
+    def _is_token(segment):
+        """Constant-time compare — free, and the alternative is a timing
+        oracle on the endpoint's only authentication."""
+        return hmac.compare_digest(segment, TOKEN)
+
     def do_GET(self):
         p = self._parts()
         if p == ["healthz"]:
@@ -224,13 +259,22 @@ class H(BaseHTTPRequestHandler):
         # The token segment is compared RAW and never percent-decoded — this is
         # the endpoint's only auth, and decoding it would let `%74ok...`
         # authenticate as `tok...` (the #116 lesson, kept on purpose).
-        if len(p) == 1 and p[0] == TOKEN:
+        if len(p) == 1 and self._is_token(p[0]):
             body = PAGE.replace("NAME_PLACEHOLDER", repr(NAME)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # The page is entirely self-contained (inline style/script, inline
+            # data: icon) and posts only to its own path, so it can afford the
+            # tightest policy there is.
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; img-src data:; style-src 'unsafe-inline'; "
+                "script-src 'unsafe-inline'; connect-src 'self'; "
+                "form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
         else:
@@ -238,11 +282,17 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self._parts()
-        if len(p) != 1 or p[0] != TOKEN:
+        if len(p) != 1 or not self._is_token(p[0]):
             return self._txt(404, "not found")
         if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
             return self._txt(501, "chunked transfer-encoding not supported")
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            # A garbage length used to raise into socketserver.handle_error,
+            # which prints a traceback into the endpoint's own log — noise any
+            # reachable host could generate at will.
+            return self._txt(400, "malformed Content-Length")
         if length <= 0:
             return self._txt(411, "Content-Length required (got none/zero)")
         if length > MAX_SECRET_BYTES:
@@ -277,19 +327,35 @@ class H(BaseHTTPRequestHandler):
             pass
         os._exit(0)
 
+    # Draining an oversize body is a courtesy — it lets the client actually
+    # READ the 413 instead of getting a reset — so it must never cost more than
+    # a courtesy. A client that announces a length and then sends nothing would
+    # otherwise hold the handler for the full 60s socket timeout, which is a
+    # free slowloris against a single-purpose endpoint.
+    DRAIN_TIMEOUT_S = 2
+
     def _drain(self, length):
         left = min(length, MAX_SECRET_BYTES * 4)
-        while left > 0:
-            chunk = self.rfile.read(min(1 << 16, left))
-            if not chunk:
-                return
-            left -= len(chunk)
+        try:
+            self.connection.settimeout(self.DRAIN_TIMEOUT_S)
+            while left > 0:
+                chunk = self.rfile.read(min(1 << 16, left))
+                if not chunk:
+                    return
+                left -= len(chunk)
+        except OSError:
+            return          # promised bytes that never came: stop waiting
+        finally:
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError as e:
+                sys.stderr.write("vault: could not restore timeout: %s\n" % e)
 
 
 _servers = []
 for _h in BIND_IPS:
     try:
-        _s = ThreadingHTTPServer((_h, PORT), H)
+        _s = BoundedServer((_h, PORT), H)
     except OSError as _e:
         sys.stderr.write("vault: skip bind %s:%d (%s)\n" % (_h, PORT, _e))
         continue

@@ -206,7 +206,13 @@ def log_event(event, name, ttl=None):
     if ttl is not None:
         line += " ttl=%ds" % int(ttl)
     p = log_path()
+    # 0700: the FILES are 0600, but on a multi-uid box a world-readable
+    # directory listing still tells everyone WHICH credentials exist.
     p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(p.parent), 0o700)
+    except OSError as e:
+        sys.stderr.write("vault: could not tighten %s: %s\n" % (p.parent, e))
     try:
         fd = _open_no_follow(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     except SecretError as e:
