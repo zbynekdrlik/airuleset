@@ -2984,10 +2984,15 @@ def _watchdog_repo_roots():
 def _watchdog_git_fetch(root):
     """Job 28's best-effort ref refresh — same shape as job 24's own probe
     fetch, minus the enrichment half (job 28 needs no blocker lookup, only
-    fresh refs). Errors are swallowed by the caller (logged, never raised)."""
+    fresh refs). Errors are swallowed by the caller (logged, never raised).
+
+    #172: timeout cut 90s -> 15s. One hung `git fetch` must never eat most
+    of the 120s `TimeoutStartSec` unit budget — the repo-batch cap
+    (`_repo_sweep_batch`, `AIRULESET_REPO_SWEEP_BATCH`) bounds how many
+    repos this costs per sweep; this bounds what ONE of them can cost."""
     import subprocess
     subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                    "origin"], capture_output=True, timeout=90, check=True)
+                    "origin"], capture_output=True, timeout=15, check=True)
 
 
 def _watchdog_issue_counts_fetch(repo_label, window_s):
@@ -2997,7 +3002,11 @@ def _watchdog_issue_counts_fetch(repo_label, window_s):
     network-free. `repo_label` is `owner/name` (from `_repo_label`, i.e. the
     remote, never a directory basename). Returns `(opened, closed)` or None
     on any failure — never treated as a stall, per the "never block on
-    don't-know" contract every other fetch in this file already follows."""
+    don't-know" contract every other fetch in this file already follows.
+
+    #172: timeout cut 45s -> 10s per `gh` call (two calls per repo, so 20s
+    worst case per repo instead of 90s) — same reasoning as
+    `_watchdog_git_fetch`, paired with the repo-batch cap."""
     import subprocess
     import time
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - window_s))
@@ -3006,12 +3015,12 @@ def _watchdog_issue_counts_fetch(repo_label, window_s):
             ["gh", "issue", "list", "-R", repo_label, "--state", "all",
              "--search", "created:>=%s" % since[:10], "--limit", "1000",
              "--json", "number"],
-            capture_output=True, text=True, timeout=45)
+            capture_output=True, text=True, timeout=10)
         closed = subprocess.run(
             ["gh", "issue", "list", "-R", repo_label, "--state", "closed",
              "--search", "closed:>=%s" % since[:10], "--limit", "1000",
              "--json", "number"],
-            capture_output=True, text=True, timeout=45)
+            capture_output=True, text=True, timeout=10)
         if opened.returncode != 0 or closed.returncode != 0:
             return None
         return (len(json.loads(opened.stdout or "[]")),
@@ -3058,7 +3067,15 @@ def cmd_watchdog(args):
     flag meant every job's arm/skip/ping decision was silently lost in
     production; the journal showed only systemd boilerplate, and the
     strip-selection keystroke bug (#36 itself) was undebuggable from it.
-    `--verbose` is kept for any additional debug output a caller wants later."""
+    `--verbose` is kept for any additional debug output a caller wants later.
+
+    #172: printing is now INCREMENTAL (`log_fn=print`, below) rather than
+    "collect the whole list, print it after run_once() returns" — a sweep
+    killed mid-way by systemd's TimeoutStartSec=120 never returns at all,
+    so the old collect-then-print shape showed NOTHING in the journal for
+    the whole 14h the #172 livelock recurred, even though early jobs (incl.
+    job 1's 529 auto-resume) had already decided plenty before a later
+    job's hung network call ate the rest of the unit's budget."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
                           compact_requests_path, goal_templates_path)
@@ -3123,9 +3140,14 @@ def cmd_watchdog(args):
                     vault_purge=_watchdog_vault_purge,
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
-                    git_fetch=_watchdog_git_fetch)
-    for line in logs:
-        print(line)
+                    git_fetch=_watchdog_git_fetch,
+                    # #172: print each job's decision line AS IT HAPPENS,
+                    # not only from the list run_once() returns — a sweep
+                    # killed mid-way (systemd TimeoutStartSec=120) used to
+                    # print NOTHING at all, for 14h, because the only print
+                    # path was this loop running AFTER run_once() returned.
+                    log_fn=print)
+    del logs   # already streamed via log_fn=print above; nothing left to print
 
 
 def cmd_compact_request(args):

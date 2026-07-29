@@ -269,14 +269,33 @@ class PromptWedgeMachineSubmitEscapesFirst(unittest.TestCase):
 class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
     """cmd_watchdog (airuleset.py) must print job logs UNCONDITIONALLY — the
     systemd unit runs `watchdog --once` with no `--verbose`, and this class of
-    bug (#36) was undebuggable because the journal carried zero output."""
+    bug (#36) was undebuggable because the journal carried zero output.
+
+    #172 changed HOW that printing happens: cmd_watchdog no longer waits for
+    run_once() to RETURN and then prints the whole list — it wires
+    `log_fn=print` so every job's decision line prints AS IT HAPPENS (a
+    sweep killed mid-way by systemd's TimeoutStartSec used to print NOTHING
+    at all, because the only print path ran AFTER run_once() returned, which
+    a kill prevents). The fake run_once below calls the injected `log_fn`
+    itself, exactly like the real one does, to prove cmd_watchdog wires it
+    correctly rather than merely printing whatever run_once returns."""
 
     class _Args:
         dry_run = False
         verbose = False
 
+    @staticmethod
+    def _fake_run_once(line):
+        def fake(*a, **kw):
+            log_fn = kw.get("log_fn")
+            if log_fn:
+                log_fn(line)
+            return [line]
+        return fake
+
     def test_logs_print_without_verbose_flag(self):
-        with m.patch.object(wd, "run_once", return_value=["job-decision-x"]):
+        with m.patch.object(wd, "run_once",
+                            side_effect=self._fake_run_once("job-decision-x")):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_watchdog(self._Args())
@@ -285,11 +304,24 @@ class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
     def test_logs_print_when_verbose_attribute_is_missing_entirely(self):
         class NoVerboseArgs:
             dry_run = False
-        with m.patch.object(wd, "run_once", return_value=["job-decision-y"]):
+        with m.patch.object(wd, "run_once",
+                            side_effect=self._fake_run_once("job-decision-y")):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_watchdog(NoVerboseArgs())
         self.assertIn("job-decision-y", buf.getvalue())
+
+    def test_run_once_is_wired_with_log_fn_print(self):
+        """Locks the wiring itself -- without `log_fn=print`, a sweep killed
+        mid-way would print nothing at all (the #172 incident)."""
+        captured = {}
+
+        def fake(*a, **kw):
+            captured.update(kw)
+            return []
+        with m.patch.object(wd, "run_once", side_effect=fake):
+            airuleset.cmd_watchdog(self._Args())
+        self.assertIs(captured.get("log_fn"), print)
 
 
 if __name__ == "__main__":

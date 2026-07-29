@@ -171,10 +171,10 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         import sys as _sys
         src_path = Path(wd.__file__)
         src = src_path.read_text()
-        old = "             vault_purge=None):"
+        old = "             vault_purge=None, log_fn=None):"
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         mutated = src.replace(
-            old, "             vault_purge=lambda: []):", 1)
+            old, "             vault_purge=lambda: [], log_fn=None):", 1)
         self.assertNotEqual(mutated, src, "the mutation did not apply")
 
         name = "watchdog_live_default_mutant"

@@ -7403,6 +7403,43 @@ def _sweep_due(state, key, now, interval):
     return True
 
 
+# #172 fix (2): dev1 alone hosts 40+ repos -- sweeping ALL of them every hour,
+# each costing a `git fetch` (job 28) or two `gh issue list` calls (job 27),
+# is exactly what blew the 120s TimeoutStartSec budget in the first place.
+# Bound the batch and rotate through the full repo list via a cursor kept in
+# state, so coverage still reaches every repo over successive hourly sweeps
+# instead of either "all of them, maybe killed" or "arbitrarily few forever".
+REPO_SWEEP_BATCH_MAX = 3          # env AIRULESET_REPO_SWEEP_BATCH
+
+
+def _repo_sweep_batch(repos, state, cursor_key, max_repos=None):
+    """Round-robin slice of `repos` (already deduped) bounded to `max_repos`
+    per sweep. `repos` MUST be the same stable order every call (the caller
+    passes a sorted list) or the cursor drifts. Returns the batch AND does
+    NOT mutate `repos` itself -- only `state[cursor_key]` advances."""
+    if max_repos is None:
+        try:
+            max_repos = int(os.environ.get("AIRULESET_REPO_SWEEP_BATCH",
+                                           REPO_SWEEP_BATCH_MAX))
+        except ValueError:
+            max_repos = REPO_SWEEP_BATCH_MAX
+    n = len(repos)
+    if n == 0 or max_repos <= 0 or max_repos >= n:
+        state[cursor_key] = 0
+        return list(repos)
+    try:
+        start = int(state.get(cursor_key, 0) or 0) % n
+    except (TypeError, ValueError):
+        start = 0
+    end = start + max_repos
+    if end <= n:
+        batch = repos[start:end]
+    else:
+        batch = repos[start:n] + repos[0:end - n]
+    state[cursor_key] = end % n
+    return batch
+
+
 # --------------------------------------------------------------------------- #
 # Job 27 — NET-ISSUE-DRIFT ALARM (#137). Per managed repo, the trailing-7-day
 # opened-minus-closed count via `gh`. camera-box's own +101 over 21 days is
@@ -7421,10 +7458,22 @@ NET_DRIFT_REPING_S = 86400        # once a day while it persists
 def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                     issue_counts_fetch=None, git_run=None, threshold=None,
                     window=NET_DRIFT_WINDOW_S, reping=NET_DRIFT_REPING_S,
-                    interval=MANAGED_SWEEP_INTERVAL_S):
+                    interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
+                    max_repos=None):
     """Job 27 -- see the section comment. `issue_counts_fetch(repo_label,
     window_s) -> (opened, closed) | None` -- None means unmeasurable (no gh
-    auth, rate-limited, repo not on GitHub) and is never treated as a stall."""
+    auth, rate-limited, repo not on GitHub) and is never treated as a stall.
+
+    #172: `persist` (the caller's save-state closure, same shape jobs 8/11
+    already use) is invoked BEFORE any per-repo network call leaves this
+    process -- the live incident: systemd's TimeoutStartSec=120 killed the
+    run mid-sweep, the cadence marker had only ever been set in run_once's
+    OWN memory, and the next 60s tick re-attempted the identical 40-repo
+    sweep, was killed again, forever. Persisting first breaks the livelock:
+    a killed sweep now costs one hour of stale drift data, not the whole
+    watchdog. The repo list is also BOUNDED per sweep (`_repo_sweep_batch`)
+    so a box with many repos doesn't try to fetch all of them in one
+    120s-budgeted run in the first place."""
     if issue_counts_fetch is None:
         return []
     if threshold is None:
@@ -7433,16 +7482,26 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                                            NET_DRIFT_THRESHOLD))
         except ValueError:
             threshold = NET_DRIFT_THRESHOLD
+    persist = persist or (lambda: None)
     logs = []
     if not _sweep_due(state, "net_drift_last_sweep", now, interval):
         return logs
-    if not dry_run:
+    repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
+    if dry_run:
+        # dry-run must not mutate persistent state -- peek the batch on a
+        # throwaway copy of state so the real cursor never advances.
+        batch = _repo_sweep_batch(repos, dict(state), "net_drift_cursor", max_repos)
+    else:
         state["net_drift_last_sweep"] = now
-    repos = repo_roots() if callable(repo_roots) else (repo_roots or [])
+        batch = _repo_sweep_batch(repos, state, "net_drift_cursor", max_repos)
+        persist()      # cadence stamp + cursor advance survive a kill BEFORE
+                        # a single per-repo `gh` call leaves this process
+    touched = set()
     seen = dict(state.get("net_drift") or {})
     live = set()
-    for root in sorted(set(repos)):
+    for root in batch:
         label = _repo_label(root, git_run)
+        touched.add(label)
         try:
             counts = issue_counts_fetch(label, window)
         except Exception as exc:
@@ -7474,7 +7533,11 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         logs.append("net-drift PING %s -> %s" % (label, status))
         seen[label] = {"pinged_ts": now}
     if not dry_run:
-        state["net_drift"] = {k: v for k, v in seen.items() if k in live}
+        # keep dedup memory for every repo NOT touched THIS sweep (the
+        # round-robin batch means most repos sit out most sweeps) -- only
+        # drop/refresh entries for repos actually re-measured just now.
+        state["net_drift"] = {k: v for k, v in seen.items()
+                              if k in live or k not in touched}
     return logs
 
 
@@ -7500,12 +7563,20 @@ STUCK_MAIN_REPING_S = 86400
 def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      git_run=None, git_fetch=None, age_threshold=None,
                      ahead_threshold=None, reping=STUCK_MAIN_REPING_S,
-                     interval=MANAGED_SWEEP_INTERVAL_S):
+                     interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
+                     max_repos=None):
     """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
     effort, errors logged and ignored) before reading refs, since no live
     session may have fetched this repo recently -- injected so a test never
     shells a real network fetch. `git_fetch=None` skips the fetch entirely
-    (a test working with fixture repos that have no real remote)."""
+    (a test working with fixture repos that have no real remote).
+
+    #172: `persist` (same shape jobs 8/11/27 already use) is invoked BEFORE
+    any per-repo `git fetch` leaves this process, and the repo list is
+    BOUNDED per sweep (`_repo_sweep_batch`) -- see net_drift_alarm's
+    docstring for the full incident this fixes (a systemd
+    TimeoutStartSec=120 kill mid-sweep, with the cadence marker never
+    reaching disk, re-attempting the identical sweep forever)."""
     if age_threshold is None:
         try:
             age_threshold = int(os.environ.get("AIRULESET_STUCK_MAIN_AGE_S",
@@ -7518,15 +7589,26 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                                                   STUCK_MAIN_AHEAD_MIN))
         except ValueError:
             ahead_threshold = STUCK_MAIN_AHEAD_MIN
+    persist = persist or (lambda: None)
     logs = []
     if not _sweep_due(state, "stuck_main_last_sweep", now, interval):
         return logs
-    if not dry_run:
+    repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
+    if dry_run:
+        # dry-run must not mutate persistent state -- peek the batch on a
+        # throwaway copy of state so the real cursor never advances.
+        batch = _repo_sweep_batch(repos, dict(state), "stuck_main_cursor", max_repos)
+    else:
         state["stuck_main_last_sweep"] = now
-    repos = repo_roots() if callable(repo_roots) else (repo_roots or [])
+        batch = _repo_sweep_batch(repos, state, "stuck_main_cursor", max_repos)
+        persist()      # cadence stamp + cursor advance survive a kill BEFORE
+                        # a single `git fetch` leaves this process
+    touched = set()
     seen = dict(state.get("stuck_main") or {})
     live = set()
-    for root in sorted(set(repos)):
+    for root in batch:
+        label = _repo_label(root, git_run)
+        touched.add(label)
         if git_fetch is not None:
             try:
                 git_fetch(root)
@@ -7535,7 +7617,6 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
         st = delivery_state(root, now, git_run=git_run)
         if st is None:
             continue
-        label = _repo_label(root, git_run)
         stalled = (st["undelivered"] >= ahead_threshold
                    and age_threshold <= st["delivery_age"] <= DELIVERY_STALL_MAX_S)
         logs.append("stuck-main %s undelivered=%d delivery_age=%ds base=%s"
@@ -7562,8 +7643,43 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
         logs.append("stuck-main PING %s -> %s" % (label, status))
         seen[label] = {"pinged_ts": now}
     if not dry_run:
-        state["stuck_main"] = {k: v for k, v in seen.items() if k in live}
+        state["stuck_main"] = {k: v for k, v in seen.items()
+                               if k in live or k not in touched}
     return logs
+
+
+class _FlushList(list):
+    """A plain list that ALSO fans every appended/extended item out to
+    `log_fn` immediately, as it happens (#172 fix 3). `run_once()`'s own
+    decision log used to be visible to a caller ONLY through the list it
+    RETURNS -- so a sweep killed mid-way by systemd's TimeoutStartSec (the
+    exact #172 incident) printed NOTHING for the whole 14h it recurred, even
+    though job 1 (the API-error auto-resume) runs first and had already
+    decided plenty before a later job's hung network call ate the rest of
+    the unit's budget. Every existing `logs += job(...)` / `logs.append(...)`
+    call site in this module keeps working unchanged: `+=` on a list calls
+    `__iadd__`, which here still fans out, and a helper handed `logs` by
+    reference (e.g. `_nudge_dying_subagent`) mutates the SAME object."""
+
+    def __init__(self, log_fn=None):
+        super().__init__()
+        self._log_fn = log_fn
+
+    def append(self, item):
+        super().append(item)
+        if self._log_fn:
+            self._log_fn(item)
+
+    def extend(self, items):
+        items = list(items)
+        super().extend(items)
+        if self._log_fn:
+            for item in items:
+                self._log_fn(item)
+
+    def __iadd__(self, other):
+        self.extend(other)
+        return self
 
 
 # --------------------------------------------------------------------------- #
@@ -7588,7 +7704,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None, compact_stall_enabled=False,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
-             vault_purge=None):
+             vault_purge=None, log_fn=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -7865,7 +7981,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           Runs at most once an hour (`MANAGED_SWEEP_INTERVAL_S`, its own
           cadence gate — a `gh` round trip per repo is too costly for a
           60s poll), one deduped ping per repo per day while the net stays
-          above `NET_DRIFT_THRESHOLD` (net_drift_alarm).
+          above `NET_DRIFT_THRESHOLD` (net_drift_alarm). #172 (regression
+          from #137's own launch): the cadence marker is persisted to DISK
+          (`persist=`) BEFORE the per-repo loop, and the repo list is
+          BOUNDED + round-robin-cursored per sweep
+          (`_repo_sweep_batch`/`AIRULESET_REPO_SWEEP_BATCH`) — a systemd
+          `TimeoutStartSec=120` kill mid-sweep used to lose the cadence
+          marker entirely (in-memory only, `save_state` only ran at the
+          very end of `run_once`), so the NEXT 60s tick re-attempted the
+          identical 40-repo sweep, was killed again, forever — a livelock
+          that starved every other job (incl. job 1's 529 continue-nudge)
+          of wall-clock for 7h+. Persisting first bounds the damage to one
+          hour of stale drift data per kill, never the whole watchdog.
       (28) (only when `repo_roots` is given) STUCK-MAIN SWEEP (#137) — the
           NON-pane-gated sibling of job 24: same measurement
           (`delivery_state`/the base-branch-frozen-while-work-piles-up
@@ -7877,7 +8004,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `git_fetch(root)` (best-effort, errors logged) runs before
           reading refs, since no live session may have fetched recently.
           Same hourly cadence gate as job 27, one deduped ping per repo per
-          day (stuck_main_sweep).
+          day (stuck_main_sweep). Same #172 fix as job 27: `persist=`
+          before the loop, same repo-batch cap (its own cursor, so the two
+          jobs rotate through the repo list independently).
       (29) (only when `vault_purge` is given) HOURLY CREDENTIAL-STORE SWEEP
           (#144) — delete every `airuleset.py secret` value past its TTL.
           The store's expiry used to be enforced ONLY by the next `secret`
@@ -7885,7 +8014,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           it again) left a credential 0600 on disk indefinitely — the exact
           property the channel exists to provide. Delete-only: no pane, no
           keystrokes, no ping, and it removes only what is already expired.
-    Returns a list of human-readable action log lines (for --verbose / tests)."""
+    Returns a list of human-readable action log lines (for --verbose / tests).
+    `log_fn` (#172), when given, is called with EACH line as it is decided —
+    incrementally, job by job — rather than the caller only ever seeing the
+    full list after this function returns. cmd_watchdog wires it to `print`
+    so a sweep killed mid-way (systemd TimeoutStartSec) still leaves every
+    earlier job's decision in the journal, instead of the whole sweep's
+    output vanishing with it (the exact #172 "job 1 logged nothing for 14h"
+    symptom)."""
     now = time.time() if now is None else now
     run = run or _default_run
     from notify import compose_api_error_alert
@@ -7893,7 +8029,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         from notify import send as send_fn
 
     state = load_state(state_path)
-    logs = []
+    logs = _FlushList(log_fn)
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
@@ -8742,23 +8878,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Job 27 — NET-ISSUE-DRIFT ALARM (#137): only when `issue_counts_fetch`
     # is given (cmd_watchdog wires the real gh round trip) — the "wired = on"
     # convention. Self-gated on an hourly cadence internally; best-effort.
+    # `persist=` (#172): the cadence marker + repo-batch cursor reach DISK
+    # BEFORE any per-repo `gh` call, so a systemd TimeoutStartSec kill
+    # mid-sweep costs one hour of stale data, never an unbounded livelock.
     if issue_counts_fetch is not None:
         try:
             logs += net_drift_alarm(now, state, send_fn=send_fn,
                                     dry_run=dry_run, repo_roots=repo_roots,
-                                    issue_counts_fetch=issue_counts_fetch)
+                                    issue_counts_fetch=issue_counts_fetch,
+                                    persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("net-drift error: %r" % (e,))
 
     # Job 28 — STUCK-MAIN SWEEP (#137): only when `repo_roots` is given —
     # the "wired = on" convention. Self-gated on an hourly cadence
     # internally; best-effort. Independent of job 27's own gate (a repo
-    # sweep with no gh access can still measure this locally).
+    # sweep with no gh access can still measure this locally). `persist=`
+    # (#172): same reasoning as job 27, one `git fetch` timeout at a time.
     if repo_roots is not None:
         try:
             logs += stuck_main_sweep(now, state, send_fn=send_fn,
                                      dry_run=dry_run, repo_roots=repo_roots,
-                                     git_fetch=git_fetch)
+                                     git_fetch=git_fetch,
+                                     persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("stuck-main error: %r" % (e,))
 
