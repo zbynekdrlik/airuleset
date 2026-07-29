@@ -110,13 +110,18 @@ for _ip in BIND_IPS:
         sys.exit("vault: refusing to bind non-private address %s — a credential "
                  "endpoint may only listen on tailscale/LAN/loopback" % _ip)
 
-if TTL > 0:
-    # DAEMON, always (#114): a non-daemon Timer is joined at interpreter exit
-    # and would park every other exit path for the rest of the TTL, then end
-    # the process with its own status instead.
-    _ttl_timer = threading.Timer(TTL, lambda: os._exit(0))
-    _ttl_timer.daemon = True
-    _ttl_timer.start()
+if TTL <= 0:
+    # FATAL, not "no timer wanted": an endpoint that receives credentials and
+    # never shuts itself down is the one shape this design must not have.
+    sys.exit("vault: ttl must be positive (got %d) — an endpoint with no "
+             "self-shutdown timer would live until reboot" % TTL)
+
+# DAEMON, always (#114): a non-daemon Timer is joined at interpreter exit
+# and would park every other exit path for the rest of the TTL, then end
+# the process with its own status instead.
+_ttl_timer = threading.Timer(TTL, lambda: os._exit(0))
+_ttl_timer.daemon = True
+_ttl_timer.start()
 
 # Served RAW (PAGE.encode(), never .format()), so braces stay SINGLE — a doubled
 # `{{` renders literally and silently breaks the CSS/JS (#18, live). The icon is

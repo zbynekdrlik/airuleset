@@ -3380,6 +3380,21 @@ def cmd_upload(args):
 
 
 SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge")
+# Both lifetimes are CLAMPED, not merely defaulted. `int(args.ttl or DEFAULT)`
+# let a negative value through (0 is falsy and fell back; -1 is truthy), and the
+# server armed its shutdown timer only for a positive TTL — so `--ttl -1` gave a
+# credential-receiving endpoint with no timer at all, alive until reboot, while
+# its store record was already expired and `status` reported `absent`.
+SECRET_MIN_TTL_S, SECRET_MAX_TTL_S = 30, 3600
+SECRET_MIN_KEEP_S, SECRET_MAX_KEEP_S = 60, 24 * 3600
+
+
+def _secret_clamp_ttl(value):
+    return max(SECRET_MIN_TTL_S, min(int(value), SECRET_MAX_TTL_S))
+
+
+def _secret_clamp_keep(value):
+    return max(SECRET_MIN_KEEP_S, min(int(value), SECRET_MAX_KEEP_S))
 # A distinct range from `upload`'s 8799-8819, so the two endpoint kinds can
 # never be confused for one another by a port alone.
 SECRET_PORTS = range(8830, 8850)
@@ -3660,8 +3675,8 @@ def cmd_secret(args):
         print("%s is already stored — `secret forget %s` first" % (nm, nm),
               file=sys.stderr)
         sys.exit(1)
-    ttl = int(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
-    keep = int(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
+    ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
+    keep = _secret_clamp_keep(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
 
     ips = [ip for ip in bind_ips() if _secret_bindable(ip)]
     if not ips:
