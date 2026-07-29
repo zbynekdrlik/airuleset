@@ -123,6 +123,71 @@ class TestOneRequestIsOneTurn(unittest.TestCase):
         self.assertEqual(data["dispatches"][0]["turns"], 1)
 
 
+class TestSyntheticEntriesAreNotTurns(unittest.TestCase):
+    """Claude Code writes a `<synthetic>` placeholder entry (interrupt / error)
+    carrying a usage block whose four counters are all zero and a UUID where a
+    requestId would be. It is not an API request. Counted as one, it becomes a
+    dispatch's LAST request and reports a context of 0 — which showed up live
+    as a growth of -117,959 on 1 of 301 real dispatches.
+    """
+
+    def _synthetic(self, ts):
+        return json.dumps({
+            "timestamp": ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "requestId": "a2beb015-5f2f-4b96-a3d8-143b1be75b08",
+            "type": "assistant",
+            "message": {"model": "<synthetic>", "usage": {
+                "input_tokens": 0, "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0, "output_tokens": 0}},
+        })
+
+    def test_a_trailing_synthetic_entry_does_not_become_the_last_turn(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1", [
+                _line(now, "req_1", cw=100000),
+                _line(now, "req_2", cw=800, cr=100000),
+                self._synthetic(now),
+            ])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        row = data["dispatches"][0]
+        self.assertEqual(row["turns"], 2)
+        self.assertEqual(row["last"], 100800)
+        self.assertEqual(row["growth"], 800)
+
+    def test_a_leading_synthetic_entry_does_not_become_the_floor(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1", [
+                self._synthetic(now),
+                _line(now, "req_1", cw=100000),
+            ])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        row = data["dispatches"][0]
+        self.assertEqual(row["turns"], 1)
+        self.assertEqual(row["floor"], 100000)
+
+    def test_a_dispatch_of_only_synthetic_entries_is_not_a_dispatch(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1", [self._synthetic(now)])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"], [])
+
+    def test_a_real_request_reporting_zero_context_is_still_dropped(self):
+        """The discriminator is the zero USAGE, not the model string — a
+        placeholder written without the `<synthetic>` marker must not be
+        allowed to report a 0-token context either."""
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1", [
+                _line(now, "req_1", cw=50000),
+                _line(now, "req_2", i=0, cw=0, cr=0, o=0),
+            ])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"][0]["turns"], 1)
+
+
 class TestFloorAndGrowth(unittest.TestCase):
     def test_floor_is_the_first_request_and_last_is_the_last(self):
         now = datetime.datetime.now(UTC)
