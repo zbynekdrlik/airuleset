@@ -771,6 +771,7 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         import airuleset
         self.a = airuleset
         self.sent = []
+        self.sent_owners = []
         # This class drives the REAL `_notify_backfill_digest`, which reaches
         # the REAL `mark_backfill_reported` — so without this the suite
         # writes live SUPPRESSION markers into `~/.claude/autopilot-notify-
@@ -784,6 +785,7 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
 
     def send(self, body, owner=None, dedup_key=None, dry_run=False):
         self.sent.append(body)
+        self.sent_owners.append(owner)
         return "dry-run" if dry_run else "sent"
 
     def args(self, **kw):
@@ -937,6 +939,114 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
                       "reads the command, not only in the source")
         self.assertIn("checkout", h)
         self.assertIn("refuses", h)
+
+    # --- who the digest is ADDRESSED to ------------------------------------
+    # The owner used to be whatever the operator typed after `--owner-name`,
+    # with `resolve_owner()` (the OPERATOR's own tmux, or nothing at all over
+    # ssh) as the only fallback. Both are guesses about someone else's repo:
+    # on 2026-07-29 a codex-bridge catch-up — a repo whose every pane belongs
+    # to `david` — was sent `--owner-name zbynek` from a dev1 session and
+    # landed in the wrong thread. The checkout's own pane knows the answer, so
+    # the flag stops being the primary source and a flag that contradicts the
+    # pane is refused rather than obeyed.
+
+    def test_the_owner_comes_from_the_pane_sitting_in_the_checkout(self):
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_checkout_pane_owner",
+                            lambda path: "david"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertEqual(self.sent_owners, ["david"])
+
+    def test_a_stated_owner_contradicting_the_checkouts_pane_is_refused(self):
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_checkout_pane_owner",
+                            lambda path: "david"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            with self.assertRaises(SystemExit) as cm:
+                self.a._notify_backfill_digest(
+                    self.args(owner_name="zbynek"), self.send)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(self.sent, [],
+                         "a digest addressed to the wrong thread must never "
+                         "leave — the misdirected report is the whole defect")
+
+    def test_a_stated_owner_still_carries_when_no_pane_answers(self):
+        # the repair path must stay usable on a box where the repo has no
+        # live pane at all — that is why the flag exists.
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_checkout_pane_owner",
+                            lambda path: ""), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(
+                self.args(owner_name="zbynek"), self.send)
+        self.assertEqual(self.sent_owners, ["zbynek"])
+
+    def test_a_stated_owner_that_AGREES_with_the_pane_is_not_refused(self):
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_checkout_pane_owner",
+                            lambda path: "david"), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(
+                self.args(owner_name="david"), self.send)
+        self.assertEqual(self.sent_owners, ["david"])
+
+    # --- the pane resolver itself -----------------------------------------
+    def test_the_pane_resolver_matches_the_checkout_directory(self):
+        got = self.a._checkout_pane_owner(
+            "/home/x/devel/proj",
+            panes=lambda: [("%1", "/home/x/devel/other"),
+                           ("%4", "/home/x/devel/proj")],
+            owner_of=lambda pid: {"%1": "marek", "%4": "david"}[pid])
+        self.assertEqual(got, "david")
+
+    def test_the_pane_resolver_matches_a_pane_deeper_in_the_checkout(self):
+        # a session parked in a subdirectory of the repo is the same repo.
+        got = self.a._checkout_pane_owner(
+            "/home/x/devel/proj",
+            panes=lambda: [("%4", "/home/x/devel/proj/src/deep")],
+            owner_of=lambda pid: "david")
+        self.assertEqual(got, "david")
+
+    def test_a_sibling_directory_sharing_a_prefix_is_not_a_match(self):
+        # `/proj-old` starts with `/proj` as a STRING and is a different repo.
+        got = self.a._checkout_pane_owner(
+            "/home/x/devel/proj",
+            panes=lambda: [("%9", "/home/x/devel/proj-old")],
+            owner_of=lambda pid: "marek")
+        self.assertEqual(got, "")
+
+    def test_two_owners_on_one_checkout_resolve_to_nothing(self):
+        # the same ambiguity job 5 refuses to guess through: no mention beats
+        # a wrong one.
+        got = self.a._checkout_pane_owner(
+            "/home/x/devel/proj",
+            panes=lambda: [("%1", "/home/x/devel/proj"),
+                           ("%2", "/home/x/devel/proj")],
+            owner_of=lambda pid: {"%1": "david", "%2": "marek"}[pid])
+        self.assertEqual(got, "")
+
+    def test_the_pane_resolver_never_raises_without_tmux(self):
+        def boom():
+            raise OSError("no tmux here")
+        self.assertEqual(
+            self.a._checkout_pane_owner("/home/x/devel/proj", panes=boom), "")
 
 
 class TestBackfillMarkerIsWrittenOnlyOnPROVENDelivery(unittest.TestCase):
