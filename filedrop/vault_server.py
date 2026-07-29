@@ -56,6 +56,10 @@ if len(sys.argv) < 6:
     sys.exit("usage: AIRULESET_VAULT_TOKEN=<token> vault_server.py <port> "
              "<bind_ips_csv> <name> <ttl_s> <keep_s>")
 TOKEN = os.environ.get("AIRULESET_VAULT_TOKEN") or ""
+# Ties this process to ONE request. If the name is forgotten (or the request
+# replaced) while this endpoint is still alive, the nonce no longer matches and
+# the store refuses us — so a revoked URL cannot repopulate the name.
+NONCE = os.environ.get("AIRULESET_VAULT_NONCE") or None
 if not TOKEN:
     sys.exit("vault: AIRULESET_VAULT_TOKEN is required — the token is passed "
              "through the environment (0400) and never in argv (0444)")
@@ -255,7 +259,7 @@ class H(BaseHTTPRequestHandler):
             return self._txt(400, "incomplete body: got %d of %d bytes"
                                   % (len(data), length))
         try:
-            store_value(NAME, data, keep_s=KEEP)
+            store_value(NAME, data, keep_s=KEEP, nonce=NONCE)
         except SecretError as e:
             # `e` is raised by the store and names the NAME and the cap only —
             # no code path there puts the value into an exception message.

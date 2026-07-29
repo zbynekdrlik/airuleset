@@ -36,6 +36,8 @@ THE THREE NO-LEAK PROPERTIES THIS MODULE IS RESPONSIBLE FOR:
 import json
 import os
 import re
+import secrets as _secrets
+import signal
 import sys
 import tempfile
 import time
@@ -252,28 +254,89 @@ def read_meta(name):
 
 def register_request(name, endpoint_ttl_s=DEFAULT_ENDPOINT_TTL_S,
                      keep_s=DEFAULT_KEEP_S, now=None):
-    """Record that a value has been REQUESTED (state `pending`).
+    """Record that a value has been REQUESTED (state `pending`); return its NONCE.
 
     A pending request expires with its endpoint: once the one-shot server is
     gone the URL is dead, so a still-pending record is just litter.
+
+    The nonce is what ties a running endpoint to THIS request. Without it,
+    `forget` printed "forgotten" while a live endpoint could still repopulate
+    the name — the O_EXCL that stops a double-store is freed by the very
+    deletion that was supposed to revoke the credential.
     """
     check_name(name)
     ts = _now(now)
+    nonce = _secrets.token_urlsafe(12)
     _write_json_0600(meta_path(name), {
         "requested": ts,
         "keep_s": int(keep_s),
         "expires_at": ts + int(endpoint_ttl_s),
+        "nonce": nonce,
     })
     log_event("request", name, ttl=int(endpoint_ttl_s))
+    return nonce
 
 
-def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None):
+ENDPOINT_MARKER = "vault_server.py"
+
+
+def record_endpoint(name, pid, marker=ENDPOINT_MARKER):
+    """Remember which process is serving `name`, so revocation can stop it."""
+    meta = read_meta(name)
+    if not meta:
+        return False
+    meta.update({"endpoint_pid": int(pid), "endpoint_marker": str(marker)})
+    _write_json_0600(meta_path(name), meta)
+    return True
+
+
+def stop_endpoint(name):
+    """SIGTERM the endpoint recorded for `name`. Returns what happened.
+
+    Gated on the process still BEING that endpoint: a recorded pid can belong
+    to something else entirely by the time revocation runs, and killing an
+    unrelated process because a number was reused is a far worse bug than
+    leaving a doomed endpoint to its TTL. Reports a sentinel string rather
+    than raising — revocation must not fail because a process already exited.
+    """
+    meta = read_meta(name)
+    pid = meta.get("endpoint_pid")
+    if not isinstance(pid, int):
+        return "no endpoint recorded"
+    marker = str(meta.get("endpoint_marker") or ENDPOINT_MARKER)
+    try:
+        cmdline = Path("/proc", str(pid), "cmdline").read_bytes()
+    except OSError:
+        return "endpoint already gone"
+    if marker.encode() not in cmdline:
+        return "pid %d is not this endpoint (reused)" % pid
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        return "could not stop endpoint: %r" % (e,)
+    return "endpoint stopped"
+
+
+def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None, nonce=None):
     """Write `data` (bytes, byte-exact) as the value for `name`.
 
     O_EXCL, so a second submission can never silently overwrite the first —
     a caller that means to replace a value must `forget` it explicitly.
+
+    `nonce` is the endpoint's proof that it belongs to the CURRENT request:
+    the server always passes one, and a mismatch (or a metadata record that is
+    gone entirely, i.e. after `forget` or `purge`) is refused. That is what
+    stops a still-running endpoint from repopulating a name the user has just
+    revoked. A direct caller may omit it; only a request-backed store has a
+    nonce to check against.
     """
     check_name(name)
+    if nonce is not None:
+        current = read_meta(name).get("nonce")
+        if current != nonce:
+            raise SecretError(
+                "%s: this endpoint no longer matches the current request "
+                "(it was revoked or replaced) — refusing to store" % name)
     if not isinstance(data, (bytes, bytearray)):
         raise SecretError("value must be bytes")
     if not data:
@@ -326,6 +389,7 @@ def read_value(name):
 def forget(name):
     """Delete the value and its metadata. True when something was removed."""
     check_name(name)
+    stop_endpoint(name)          # revoke the URL too, not only the value
     removed = False
     for p in (value_path(name), meta_path(name)):
         try:
@@ -364,6 +428,7 @@ def purge(now=None):
         meta = read_meta(name)
         exp = meta.get("expires_at")
         if not isinstance(exp, (int, float)) or ts >= exp:
+            stop_endpoint(name)
             for p in (value_path(name), meta_path(name)):
                 try:
                     p.unlink()
