@@ -842,7 +842,7 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         def flaky(root):
             if root == "/bad":
                 raise RuntimeError("weird")
-            return "proj"
+            return "proj" if root == "/good" else ""
         self.assertEqual(
             self.a._local_checkout_for_repo(
                 "proj", roots=lambda: ["/bad", "/good"], name_of=flaky,
@@ -875,8 +875,8 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         root = "/home/x/devel/forestshop/parovanie_produktov"
         self.assertEqual(
             self.a._local_checkout_for_repo(
-                "parovanie-produktov", roots=[root],
-                name_of=lambda r: "parovanie-produktov"),
+                "parovanie-produktov", cwd="/elsewhere", roots=[root],
+                name_of=lambda r: ("parovanie-produktov" if r == root else "")),
             root)
 
     def test_the_resolver_returns_None_when_no_checkout_matches(self):

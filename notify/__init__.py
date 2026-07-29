@@ -425,14 +425,17 @@ def _dedup_mark_status(key, status):
     delivery. Writing the outcome afterwards is what turns the marker into an
     artifact the #134 gate / backstop / suppression can key on. Best-effort:
     a marker that cannot be updated keeps its claim and simply reads as
-    legacy (see `marker_delivered`)."""
+    legacy (see `marker_delivered`). Returns whether the marker really
+    reached disk, so a caller counting artifacts counts writes that
+    happened rather than writes attempted."""
     if not key:
-        return
+        return False
     try:
         with open(_dedup_path(key), "w", encoding="utf-8") as fh:
             fh.write("%s %s" % (time.time(), status))
     except OSError:
-        return
+        return False
+    return True
 
 
 def marker_delivered(key):
@@ -470,11 +473,16 @@ def backfill_marker_key(name, number):
     `newest_delivered_card`, so writing it here would let a worker's
     genuinely missing card pass the gate. Two facts, two namespaces.
 
-    `#` cannot occur in a GitHub repo name, so no repo can produce a card
-    key equal to a backfill key — and `#` survives `_dedup_path`'s
-    sanitisation, unlike `:`, which it rewrites to `_` (a repo literally
-    named `backfill_x` would otherwise collide)."""
-    return "backfill#%s#%s" % (name, number)
+    `#` survives `_dedup_path`'s sanitisation while `:` is rewritten to `_`
+    (so a `backfill:<name>` key could collide with a repo literally named
+    `backfill_<name>`), and no GitHub repo name may contain `#` — hence a
+    card key for any real repo has exactly one `#` and this one has two.
+    `name` is sanitised to the card alphabet because it does NOT arrive
+    validated: `repo_name_for` parses whatever a remote URL ends with, and
+    `--repo` is split by hand. That keeps the digest side from ever being
+    the one that forges a collision."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+    return "backfill#%s#%s" % (safe, number)
 
 
 def mark_backfill_reported(name, numbers, status):
@@ -491,18 +499,19 @@ def mark_backfill_reported(name, numbers, status):
     call site precisely so no caller can lose it by forgetting a branch.
 
     Best-effort in the fail-OPEN direction: a marker that cannot be written
-    simply is not written, and the ticket stays reported as missing."""
+    simply is not written, and the ticket stays reported as missing. The
+    count is therefore writes that HAPPENED, never writes attempted — this
+    is the one function whose whole premise is honesty about artifacts, so
+    reporting N while a read-only filesystem took none would be the same
+    class of lie it exists to prevent."""
     if status != "sent":
         return 0
     try:
         os.makedirs(_dedup_dir(), exist_ok=True)
     except OSError:
         return 0
-    written = 0
-    for n in numbers:
-        _dedup_mark_status(backfill_marker_key(name, n), status)
-        written += 1
-    return written
+    return sum(1 for n in numbers
+               if _dedup_mark_status(backfill_marker_key(name, n), status))
 
 
 # --- the autopilot worker's evidence block (#134) --------------------------

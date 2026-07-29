@@ -5810,7 +5810,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # `parovanie-produktov`, so a directory-derived key matches nothing
         # and would report every ticket as unreported.
         try:
-            from notify import repo_name_for, backfill_marker_key
+            from notify import repo_name_for
             name = repo_name_for(root)
         except ImportError:
             name = ""
@@ -5820,9 +5820,23 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # a catch-up DIGEST that accounted for it (#141). The digest writes
         # its own namespace, and only on a delivered POST — so a digest that
         # never reached Discord suppresses nothing here.
+        #
+        # Resolved SEPARATELY from `repo_name_for`, whose ImportError path
+        # skips the repo entirely: the timer runs the working tree every
+        # 60s, so a mid-push checkout can genuinely see a watchdog newer
+        # than notify. Sharing that import would turn a transient
+        # missing-symbol window into a silent, unlogged death of the whole
+        # backstop — the exact shape this job exists to catch.
+        try:
+            from notify import backfill_marker_key
+        except ImportError:
+            backfill_marker_key = None
+            logs.append("card-reconcile backfill-namespace-unavailable %s"
+                        % name)
         missing = [n for n in closed
                    if not marker_ok("%s#%d" % (name, n))
-                   and not marker_ok(backfill_marker_key(name, n))]
+                   and not (backfill_marker_key is not None
+                            and marker_ok(backfill_marker_key(name, n)))]
         if not missing:
             seen.pop(root, None)
             continue

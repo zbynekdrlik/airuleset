@@ -2275,6 +2275,11 @@ def cmd_gk_request(args):
     return 1
 
 
+# How many tickets the digest NAMES. Also the suppression bound: the caller
+# may only mark what this body listed by number.
+BACKFILL_MAX_SHOWN = 10
+
+
 def compose_backfill_digest(repo_name, tickets, since_label):
     """ONE catch-up message per repo for a window that went unreported (#134).
 
@@ -2282,8 +2287,11 @@ def compose_backfill_digest(repo_name, tickets, since_label):
     issues across two repos, and firing a retroactive card per ticket would
     put a hundred pings on the user's phone to apologise for having sent
     none. Plain Slovak, phone-readable, bounded — the numbers plus a few
-    titles, never a wall."""
-    shown = tickets[:10]
+    titles, never a wall.
+
+    `BACKFILL_MAX_SHOWN` is shared with the caller on purpose: the tickets
+    this body NAMES are exactly the tickets the caller may then suppress."""
+    shown = tickets[:BACKFILL_MAX_SHOWN]
     n = len(tickets)
     # Slovak plural: 1 ticket / 2-4 tickety / 5+ ticketov.
     word = "ticket" if n == 1 else ("tickety" if 2 <= n <= 4 else "ticketov")
@@ -2307,31 +2315,75 @@ def compose_backfill_digest(repo_name, tickets, since_label):
     return "\n".join(lines)
 
 
-def _local_checkout_for_repo(name, roots=None, name_of=None):
+# A repo's own checkout can sit deeper than the watchdog's repo sweep looks,
+# and a worktree or submodule keeps `.git` as a FILE rather than a directory
+# — `discover_managed_repos` sees neither (it stops at depth 4 and tests only
+# `dirnames`). Measured on dev1: 40 discovered against 55 real checkouts,
+# among them a real depth-4 repo and a submodule. That sweep is shared with
+# watchdog jobs 27/28 and is right for what THEY do, so this walks its own
+# way rather than widening a function two other jobs depend on.
+_CHECKOUT_MAX_DEPTH = 6
+_CHECKOUT_SKIP = {"node_modules", ".cache", ".local", "venv", ".venv",
+                  "__pycache__", ".npm", "target", "dist", "build"}
+
+
+def _checkout_roots(home=None):
+    """Every checkout root under `home` — `.git` as a directory OR a file."""
+    home = home or os.environ.get("HOME") or os.path.expanduser("~")
+    roots, base = [], str(home).rstrip("/").count("/")
+    for dirpath, dirnames, filenames in os.walk(home, topdown=True,
+                                                onerror=lambda e: None):
+        if dirpath.rstrip("/").count("/") - base >= _CHECKOUT_MAX_DEPTH:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _CHECKOUT_SKIP]
+        if ".git" in dirnames:
+            roots.append(dirpath)
+            dirnames.remove(".git")          # never descend into .git itself
+        elif ".git" in filenames:
+            roots.append(dirpath)            # worktree / submodule
+    return roots
+
+
+def _local_checkout_for_repo(name, cwd=None, home=None, roots=None,
+                             name_of=None):
     """The local checkout root whose `origin` resolves to repo NAME `name`,
     or None when this box holds no such checkout.
 
     Matched on the NAME, not `owner/name`, because that is exactly the
-    granularity of the marker namespace this answer is used to guard
+    granularity of the marker namespace this answer guards
     (`notify._dedup_path` keys cards as `<name>#<n>`). It is a NECESSARY
-    condition, never a sufficient one: a repo checked out on two boxes has
-    its markers split across both, and no local read can see that.
+    condition, never a sufficient one — a fork, a same-named repo of another
+    owner, or a repo checked out on two boxes all pass it — so the caller
+    pairs it with an explicit override rather than treating it as proof.
 
-    Best-effort in the fail-CLOSED direction — an unreadable tree or a
-    missing git returns None, so the caller refuses rather than sending a
-    digest it cannot compute honestly."""
+    The invocation cwd is consulted FIRST: standing in the repo is the
+    common case and answers the question with no walk at all. A root that
+    cannot be identified is skipped, never fatal — one unreadable checkout
+    must not hide the real match further down the list."""
+    if name_of is None:
+        from notify import repo_name_for
+        name_of = repo_name_for
+
+    def named(path):
+        try:
+            return name_of(path)
+        except Exception:
+            return ""
+
+    here = cwd if cwd is not None else os.getcwd()
+    if here and named(here) == name:
+        return here
     try:
         if roots is None:
-            from watchdog import discover_managed_repos
-            roots = discover_managed_repos()
-        if name_of is None:
-            from notify import repo_name_for
-            name_of = repo_name_for
-        for root in roots:
-            if name_of(root) == name:
-                return root
+            candidates = _checkout_roots(home)
+        else:
+            candidates = roots() if callable(roots) else roots
     except Exception:
-        return None
+        candidates = []
+    for root in candidates:
+        if named(root) == name:
+            return root
     return None
 
 
@@ -2357,14 +2409,20 @@ def _notify_backfill_digest(args, send):
               file=sys.stderr)
         sys.exit(1)
     name = str(repo).rstrip("/").split("/")[-1]
-    if _local_checkout_for_repo(name) is None:
+    if getattr(args, "force", False):
+        print("notify --backfill-digest: --force — skipping the local-checkout "
+              "check for '%s' on %s. If this box does not hold that repo's "
+              "markers, the digest will over-report."
+              % (name, os.uname().nodename), file=sys.stderr)
+    elif _local_checkout_for_repo(name) is None:
         print("notify --backfill-digest: no local checkout of '%s' on this "
               "box (%s).\nThe digest is computed from THIS box's card markers "
               "(~/.claude/%s/), which are machine-local — with no checkout "
               "here every ticket reads as unreported and the digest would "
               "apologise for reports another box already delivered.\nRun it "
               "on the box holding the '%s' checkout, or leave it to that "
-              "box's watchdog job 25."
+              "box's watchdog job 25. If the checkout IS here and this "
+              "check simply missed it, re-run with --force."
               % (name, os.uname().nodename, "autopilot-notify-sent", name),
               file=sys.stderr)
         sys.exit(1)
@@ -2392,14 +2450,31 @@ def _notify_backfill_digest(args, send):
                   dry_run=getattr(args, "dry_run", False))
     print("%s (%d tickets)" % (status, len(tickets)))
     # Record what this digest reported, so watchdog job 25 stops re-flagging
-    # tickets the user has already heard about. `mark_backfill_reported`
-    # writes ONLY on a proven 'sent' — a digest that never reached Discord
-    # must never silence a real report (#134).
+    # tickets the user has already heard about — but ONLY the tickets the
+    # message actually NAMED. The body shows at most BACKFILL_MAX_SHOWN
+    # titles and then "a ďalších N": the overflow is counted, never named,
+    # so the user has no number to chase and a marker for it would claim
+    # per-ticket coverage the message never gave. Suppressing exactly what
+    # was named leaves job 25 surfacing the rest a batch at a time, which is
+    # the direction that cannot lose a ticket. `mark_backfill_reported`
+    # itself writes only on a proven 'sent' (#134).
+    named = tickets[:BACKFILL_MAX_SHOWN]
     marked = mark_backfill_reported(
-        name, [t.get("number") for t in tickets], status)
+        name, [t.get("number") for t in named], status)
     if marked:
-        print("backfill: %d tickets recorded as reported" % marked)
-    if status not in ("sent", "dedup", "dry-run"):
+        print("backfill: %d of %d tickets recorded as reported (only those "
+              "the message named)" % (marked, len(tickets)))
+    if status == "dedup":
+        # The digest-level key is date-truncated, so a same-day re-run after
+        # a new ticket closed hits the claim and sends NOTHING. Printing
+        # 'dedup' and exiting 0 read exactly like a delivery while those
+        # tickets stayed unreported.
+        print("notify --backfill-digest: NOTHING SENT — an earlier digest "
+              "for %s/%s already claimed this key, so these %d ticket(s) "
+              "were not reported. Re-run with a different --since."
+              % (name, since[:10], len(tickets)), file=sys.stderr)
+        sys.exit(1)
+    if status not in ("sent", "dry-run"):
         sys.exit(1)
 
 
@@ -4053,6 +4128,13 @@ def main():
                                "it refuses otherwise rather than reporting "
                                "another box's delivered cards as missing")
     p_notify.add_argument("--since", help="ISO8601 window start (--backfill-digest)")
+    p_notify.add_argument("--force", action="store_true",
+                          help="With --backfill-digest: run even though no "
+                               "local checkout of --repo was found. The "
+                               "check can miss a real checkout (a worktree, "
+                               "an unusual location), and repairing a "
+                               "reporting gap must never be impossible on "
+                               "the box that holds it")
     p_notify.add_argument("--owner-name", dest="owner_name",
                           help="Deliver to this owner's thread (--backfill-digest)")
     p_notify.add_argument("--repo-name", dest="repo_name", action="store_true",
