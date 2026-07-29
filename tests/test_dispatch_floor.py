@@ -29,7 +29,6 @@ import contextlib
 import datetime
 import io
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -127,7 +126,9 @@ class TestOneRequestIsOneTurn(unittest.TestCase):
 class TestFloorAndGrowth(unittest.TestCase):
     def test_floor_is_the_first_request_and_last_is_the_last(self):
         now = datetime.datetime.now(UTC)
-        t = lambda m: now - datetime.timedelta(minutes=m)
+
+        def t(m):
+            return now - datetime.timedelta(minutes=m)
         with TemporaryDirectory() as root:
             _write_sub(root, "proj", "s1", "agent-a1", [
                 _line(t(30), "req_1", cw=100000, cr=0),
