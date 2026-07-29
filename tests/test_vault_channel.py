@@ -246,6 +246,78 @@ class TestTtlPurge(_StoreCase):
         self.assertEqual(st.state("ORPHAN"), "absent")
 
 
+class TestNoResurrection(_StoreCase):
+    """Adversarial-review finding #5 (MEDIUM).
+
+    Nothing linked an endpoint's lifetime to the store. After `secret forget`
+    printed "forgotten" — the agent's revocation signal — a still-running
+    endpoint's `store_value` met a now-free O_EXCL and repopulated the name
+    with whatever the token holder posted. A second `request` for a pending
+    name minted a second port and a second valid token, neither invalidating
+    the other.
+    """
+
+    def test_a_store_from_a_stale_endpoint_is_refused(self):
+        st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        st.forget("DB_PASS")
+        st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        with self.assertRaises(st.SecretError):
+            st.store_value("DB_PASS", VAL.encode(), keep_s=60, nonce="stale")
+        self.assertEqual(st.state("DB_PASS"), "pending")
+
+    def test_the_current_endpoints_nonce_is_accepted(self):
+        nonce = st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        self.assertTrue(nonce)
+        st.store_value("DB_PASS", VAL.encode(), keep_s=60, nonce=nonce)
+        self.assertEqual(st.state("DB_PASS"), "ready")
+
+    def test_a_store_after_forget_is_refused_even_with_the_old_nonce(self):
+        nonce = st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        st.forget("DB_PASS")
+        with self.assertRaises(st.SecretError):
+            st.store_value("DB_PASS", VAL.encode(), keep_s=60, nonce=nonce)
+        self.assertEqual(st.state("DB_PASS"), "absent")
+
+    def test_forget_stops_the_endpoint_it_recorded(self):
+        proc = subprocess.Popen([sys.executable, "-c",
+                                 "import time;time.sleep(120)"])
+        self.addCleanup(self._reap_proc, proc)
+        st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        st.record_endpoint("DB_PASS", proc.pid, marker="time.sleep(120)")
+        st.forget("DB_PASS")
+        proc.wait(timeout=15)                 # SIGTERM'd, not left running
+
+    def test_purge_stops_the_endpoint_of_an_expired_request(self):
+        proc = subprocess.Popen([sys.executable, "-c",
+                                 "import time;time.sleep(120)"])
+        self.addCleanup(self._reap_proc, proc)
+        now = 1_000_000.0
+        st.register_request("PEND", endpoint_ttl_s=10, keep_s=60, now=now)
+        st.record_endpoint("PEND", proc.pid, marker="time.sleep(120)")
+        self.assertEqual(st.purge(now=now + 60), ["PEND"])
+        proc.wait(timeout=15)
+
+    @staticmethod
+    def _reap_proc(proc):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def test_stop_endpoint_refuses_a_pid_that_is_not_our_endpoint(self):
+        # pid reuse: the recorded number may belong to something else entirely
+        # by the time forget runs, so the kill is gated on the process really
+        # being one of ours.
+        proc = subprocess.Popen([sys.executable, "-c",
+                                 "import time;time.sleep(30)"])
+        self.addCleanup(self._reap_proc, proc)
+        st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        # Recorded with the REAL marker while the pid belongs to something else
+        # — exactly what pid reuse looks like.
+        st.record_endpoint("DB_PASS", proc.pid)
+        self.assertIn("not this endpoint", st.stop_endpoint("DB_PASS"))
+        self.assertIsNone(proc.poll())
+
+
 class TestLogPolicy(_StoreCase):
     def test_log_records_name_and_event_only(self):
         st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
