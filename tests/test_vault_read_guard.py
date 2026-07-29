@@ -456,11 +456,16 @@ class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_the_dead_fallback_is_gone(self):
-        # The bug was a condition that could never be true. Its shape must not
-        # come back: nothing may re-derive "did the parse fail?" from the type
-        # of a variable the failure handler itself assigned.
-        text = HOOK.read_text()
-        self.assertNotIn("not isinstance(payload, dict)", text)
+        # The bug was a CONJUNCTION that could never be true, not the type test
+        # itself — a top-level `if not isinstance(payload, dict)` guard is the
+        # correct fix and legitimately contains that token. Forbidding the bare
+        # token would be a lock that no correct implementation can satisfy.
+        dead = "not cmd and not isinstance(payload, dict)"
+        offenders = [i for i, ln in enumerate(HOOK.read_text().splitlines(), 1)
+                     if dead in ln]
+        self.assertEqual(offenders, [],
+                         "the unreachable fallback is back at line(s) %s"
+                         % offenders)
 
 
 class RefusalQuality(unittest.TestCase):
