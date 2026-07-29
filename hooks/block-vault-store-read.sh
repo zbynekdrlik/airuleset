@@ -129,7 +129,13 @@ set -euo pipefail
 #     real read path to buy comfort.
 #   - Fail-closed is bounded by the harness: a hook that TIMES OUT (5s) is
 #     treated as an error and does not block, so a pathologically slow python3
-#     start fails open. Not agent-controllable, but real.
+#     start fails open. Not agent-controllable, but real. Measured on dev1 the
+#     whole hook runs in a median 33ms (min 29, max 41) against that 5000ms
+#     budget, and the gap is not closeable from inside a hook — it is tracked
+#     as its own ticket rather than as a bullet in a decision ticket (#156).
+#   - Fail-closed covers a payload that is PRESENT and unparseable, never an
+#     EMPTY one: no payload at all still exits 0. See the comment at the read
+#     loop for why that specific row was left open rather than closed.
 #   - The audit line records the full command, so a bypassed WRITE would put
 #     the value in audits/vault-store-reads.log. That path is gitignored
 #     (.gitignore: `audits/*.log`) but is plaintext on disk.
@@ -148,7 +154,13 @@ while IFS= read -r line || [ -n "$line" ]; do
 done
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 
-# Nothing to inspect at all is not a violation — the hook simply has no input.
+# EMPTY stdin exits 0, deliberately, and this is the one row of #156 hole 2
+# left open rather than closed. "I was handed nothing" is a different state
+# from "I was handed something I cannot understand" (which now fails closed
+# below): the payload envelope is built by the harness, not by the agent, so
+# an empty one is not agent-reachable — while failing closed here would turn
+# any harness change that stops supplying a payload into a fleet-wide denial
+# of every Bash, Read, Grep and Glob call on every managed box.
 [ -z "${PAYLOAD//[$'\n\t ']/}" ] && exit 0
 
 fail_closed() {
@@ -176,17 +188,36 @@ import shlex
 import sys
 
 raw = sys.argv[1]
+
+# EXIT 3 = "I was handed something and could not understand it", which the
+# bash wrapper turns into fail_closed. The predecessor caught the parse error
+# and assigned `payload = {}` — a dict — and then tried to detect the failure
+# by asking whether `payload` was a dict, a test that is statically always
+# False on that very path (#156 hole 2). Nothing may re-derive "did the parse
+# fail?" from the type of a variable the failure handler itself assigned; the
+# failure is reported where it happens.
 try:
     payload = json.loads(raw)
-except Exception:
-    payload = {}
+except Exception as exc:
+    print("  the payload is not JSON (%s)" % exc.__class__.__name__)
+    sys.exit(3)
+if not isinstance(payload, dict):
+    print("  the payload parsed to %s, not an object" % type(payload).__name__)
+    sys.exit(3)
+
 tool = payload.get("tool_name") or ""
 tin = payload.get("tool_input") or {}
-if not isinstance(tin, dict):
+cmd = ""
+if isinstance(tin, dict):
+    cmd = tin.get("command") or ""
+elif isinstance(tin, str):
+    # Understandable input in an UNEXPECTED SHAPE — not the same thing as
+    # unparseable input, so it is inspected rather than failed closed. Failing
+    # closed on an unknown-but-valid tool would deny every call to it; letting
+    # it through unscanned is what the ticket measured as a hole.
+    cmd, tin = tin, {}
+else:
     tin = {}
-cmd = tin.get("command") or ""
-if not cmd and not isinstance(payload, dict):
-    cmd = raw
 
 # A. the store directory, however it is spelled.
 STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
