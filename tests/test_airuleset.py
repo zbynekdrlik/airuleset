@@ -4315,6 +4315,37 @@ class TestApiWatchdog(TestCase):
         a, e = self._dec(st, "k", "h", now + 1500, seed=now)   # then noop
         self.assertEqual(a, "noop")
 
+    def test_decide_backoff_never_gives_up_on_a_multi_hour_stall(self):
+        # #175: a multi-hour upstream 529 storm used to strand a session — the
+        # OLD policy covered ~15-20 min (3 nudges @ grace/interval=300s) then
+        # returned 'escalate' once and 'noop' forever after, even though the
+        # session was still stalled hours later. MAX_NUDGES must stop being a
+        # hard end: past it, decide() keeps returning 'nudge' INDEFINITELY, at
+        # a WIDENING interval (300, 300, 300, then 600 / 1200 / 1800 / 1800 /
+        # ...), covering a stall well past the 2-hour mark instead of going
+        # silent at ~15 min.
+        st, now = {}, 1_000_000
+        a, e = self._dec(st, "k", "h", now, seed=now)
+        self.assertEqual(a, "wait")
+        st["k"] = e
+        schedule = [300, 300, 300, 600, 1200, 1800, 1800, 1800]   # nudges #1..#8
+        cursor = now
+        for i, gap in enumerate(schedule, start=1):
+            cursor += gap
+            a, e = self._dec(st, "k", "h", cursor, seed=now)
+            self.assertEqual(a, "nudge",
+                              "nudge #%d must still fire at +%ds (elapsed since "
+                              "first stall) — decide() must not give up" % (i, cursor - now))
+            self.assertEqual(len(e["nudges"]), i)
+            if i < 4:
+                self.assertFalse(e["escalated"], "no give-up ping before nudge #4")
+            else:
+                self.assertTrue(e["escalated"], "give-up ping flag set from nudge #4 on")
+            st["k"] = e
+        # total elapsed here is 8100s (2h15m) — well past the 2-hour incident
+        # window (gatekeeper 4h28m / simap 6h31m) — and it is STILL nudging.
+        self.assertGreater(cursor - now, 2 * 3600)
+
     def test_decide_already_stale_nudges_on_first_sighting(self):
         # seed older than grace (the rate-limit / presenter case once detected) →
         # the first `continue` goes out immediately, no extra grace wait
