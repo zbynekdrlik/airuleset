@@ -349,6 +349,93 @@ class TestLogPolicy(_StoreCase):
         self.assertNotIn("passwd", st.log_path().read_text(encoding="utf-8"))
 
 
+class TestNameAnchoringAndEnvKey(_StoreCase):
+    """Adversarial-review finding #9 (LOW, with a sharp edge).
+
+    `NAME_RE.match` + `$` accepts a TRAILING NEWLINE, so a name could carry one
+    into the log (a blank line in the metadata log), into the filename, and
+    into the env key handed to the child — where `env` renders it as two lines.
+    Worse, `--env` was never validated at all, which voids the stated reason
+    the grammar exists: `--env 'BASH_FUNC_pwn%%'` makes any bash child parse
+    the stored value as a function definition and execute it.
+    """
+
+    def test_a_trailing_newline_is_not_a_valid_name(self):
+        for bad in ("DB_PASS\n", "DB_PASS\n\n", "\nDB_PASS"):
+            with self.assertRaises(st.SecretError, msg=repr(bad)):
+                st.check_name(bad)
+
+    def test_the_env_key_is_held_to_the_same_grammar(self):
+        st.store_value("DB_PASS", VAL.encode(), keep_s=60)
+        env = dict(os.environ)
+        env.update(self._env)
+        for bad in ("BASH_FUNC_pwn%%", "A=B", "X\nY", ""):
+            out = subprocess.run(
+                [sys.executable, str(ROOT / "airuleset.py"), "secret", "exec",
+                 "DB_PASS", "--env", bad, "--", sys.executable, "-c", "pass"],
+                capture_output=True, text=True, timeout=90, env=env)
+            self.assertNotEqual(out.returncode, 0, bad)
+            self.assertNotIn(VAL, out.stdout + out.stderr)
+
+    def test_a_good_env_key_still_works(self):
+        st.store_value("DB_PASS", VAL.encode(), keep_s=60)
+        env = dict(os.environ)
+        env.update(self._env)
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "airuleset.py"), "secret", "exec",
+             "DB_PASS", "--env", "PGPASSWORD", "--", sys.executable, "-c",
+             "import os;print('LEN', len(os.environ['PGPASSWORD']))"],
+            capture_output=True, text=True, timeout=90, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("LEN %d" % len(VAL), out.stdout)
+
+
+class TestRevocationReportsHonestly(_StoreCase):
+    """Adversarial-review finding #10 (LOW).
+
+    `forget` set removed=True if EITHER path unlinked, so a meta-only removal
+    printed "forgotten" while the value file remained; `purge` swallowed the
+    per-path OSError and still logged `expired` and returned the name. For the
+    one operation whose entire job is to prove a credential is gone, a false
+    success is the worst possible output.
+    """
+
+    def _freeze_dir(self):
+        d = st.ensure_dir()
+        os.chmod(str(d), 0o500)
+        self.addCleanup(os.chmod, str(d), 0o700)
+
+    def test_forget_refuses_to_claim_success_when_the_value_survives(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the directory write bit")
+        st.store_value("DB_PASS", VAL.encode(), keep_s=60)
+        self._freeze_dir()
+        with self.assertRaises(st.SecretError):
+            st.forget("DB_PASS")
+        self.assertTrue(st.value_path("DB_PASS").exists())
+
+    def test_purge_does_not_report_a_value_it_could_not_delete(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the directory write bit")
+        now = 1_000_000.0
+        st.store_value("DB_PASS", VAL.encode(), keep_s=10, now=now)
+        self._freeze_dir()
+        self.assertEqual(st.purge(now=now + 1000), [])
+        self.assertTrue(st.value_path("DB_PASS").exists())
+
+
+class TestProbeIgnoresProxyEnvironment(TestCase):
+    """Adversarial-review finding #8 (LOW). The default urllib opener reads
+    $http_proxy, so the probe URL went to a proxy host and a proxy error page
+    returning 200 made a dead endpoint look live."""
+
+    def test_the_opener_has_no_proxy_handler(self):
+        opener = airuleset._secret_opener()
+        self.assertTrue(any(type(h).__name__ == "ProxyHandler"
+                            and not h.proxies for h in opener.handlers),
+                        "the probe opener must carry an EMPTY ProxyHandler")
+
+
 class TestBindPolicy(TestCase):
     def test_public_addresses_are_refused_by_the_cli_check(self):
         for ip in ("88.99.170.148", "8.8.8.8", "1.1.1.1", "172.17.0.1"):
