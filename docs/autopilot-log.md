@@ -1403,3 +1403,40 @@ re-baselining the standing meter is its own decision).
 Gate: 2875 tests pass (2871 baseline + 4 new after the synthetic-entry pair),
 `ruff check .` clean, `airuleset.py validate` OK, deployed to all 7 targets
 via `airuleset.py push`.
+
+## 141 — backfill digest: wrong marker store, and a digest job 25 cannot see
+
+Two bounded correctness bugs in the catch-up path, both traced to the same
+place — card markers are machine-local and the digest never wrote the key
+anything else reads.
+
+Half 1: `marker_delivered` resolves through the running box's own `$HOME`,
+and `--backfill-digest` takes a bare `owner/name` from an operator, so a repo
+whose checkout lives on another box reads as entirely unreported. Now
+resolved against `discover_managed_repos` x `repo_name_for` (matched on the
+NAME, the granularity of the marker namespace) and refused before any `gh`
+call; the constraint is in `--help`. Fail-closed. Live on dev1: odoo-erp
+(checkout on subdev) is refused, airuleset resolves to its own root.
+RED `08b895f` -> GREEN `9e8ff29`, tests `TestBackfillDigestNeedsALocalCheckout`.
+
+Half 2 (the engineering fork, decided in the design comment): the digest
+sent under a digest-level dedup key while job 25 asked about a per-ticket
+key nothing wrote — disjoint namespaces, so a delivered digest left its
+tickets flagged for the full 48h window, and that alert is FALSE rather than
+merely duplicate. Chose a second namespace `backfill#<repo>#<n>` written by
+`notify.mark_backfill_reported` ONLY on the literal `sent` (send()'s return
+after the POST) and consulted by `card_reconcile`; rejected accepting +
+documenting the overlap, since a documented false alert still degrades the
+one signal the subsystem protects. Deliberately not the per-ticket card
+namespace, which the SubagentStop gate reads. RED `a45ccc9` -> GREEN
+`324cc26`, tests `TestBackfillMarkerIsWrittenOnlyOnPROVENDelivery`,
+`TestBackfillDigestRecordsWhatItReported`, plus two in `TestCardReconcile`.
+
+Teeth verified by mutation (dropping job 25's consult kills the
+delivered-digest test; writing the marker regardless of the POST result
+kills four including the fail-open one) and by a live read-only probe of
+job 25 on dev1: 45 card keys checked for this repo, 25 delivered, and each
+of the 20 unreported got a backfill lookup.
+
+Gate: 2893 tests pass (2875 baseline + 18 new), `ruff check .` clean,
+`airuleset.py validate` OK, deployed to all 7 targets via `airuleset.py push`.
