@@ -39,7 +39,10 @@ def run(cmd, env_extra=None):
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/home/newlevel")}
     if env_extra:
         env.update(env_extra)
-    return subprocess.run(["bash", str(HOOK)], input=payload,
+    # /bin/bash by ABSOLUTE path: the interpreter is resolved through the env
+    # we pass, so a test that empties PATH to break the CHECK would otherwise
+    # just fail to find bash and never run the hook at all (127, not a verdict).
+    return subprocess.run(["/bin/bash", str(HOOK)], input=payload,
                           capture_output=True, text=True, env=env)
 
 
@@ -231,10 +234,16 @@ class RefusalQuality(unittest.TestCase):
         self.assertRegex(r.stderr.lower(), r"guardrail|not a (security )?boundary")
 
     def test_it_fails_closed_when_the_check_itself_breaks(self):
-        # A malfunctioning guard must not silently open the store.
-        r = run("cat %s/DB_PASS.secret" % STORE,
-                env_extra={"PATH": "/nonexistent"})
+        # A malfunctioning guard must not silently open the store. The failure
+        # injected is the REAL one — python3 (which runs the matcher) missing
+        # from PATH, with bash itself still reachable so the hook actually runs
+        # and has to decide. Reading the payload with a shell builtin instead
+        # of `cat` is what makes that distinguishable from "no payload".
+        with tempfile.TemporaryDirectory() as empty:
+            r = run("cat %s/DB_PASS.secret" % STORE,
+                    env_extra={"PATH": empty})
         self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fail-closed", r.stderr)
 
 
 class DocumentedGaps(unittest.TestCase):
