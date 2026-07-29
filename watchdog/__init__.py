@@ -3127,6 +3127,30 @@ def _viewport_goal_wrapped(cap, frag):
     return False
 
 
+def _goal_was_cleared_by_user(tpath):
+    """True when this session's NEWEST `/goal` marker is a CLEAR (#170).
+
+    Claude Code writes `Goal cleared:` ONLY for an explicit `/goal clear`; a
+    goal that finishes on its own prints `✔ Goal achieved` to the screen and
+    persists nothing. Measured across 8329 local transcripts: 86 `Goal set:`
+    markers against 32 genuine `Goal cleared:` ones, every one an explicit
+    clear. So a newest-marker-is-clear reading means the user switched this
+    loop off — which the pane's own viewport cannot show, since the arm
+    question and the printed `/goal` line survive the clear untouched.
+
+    Reuses `scan_goal_markers` rather than adding a second marker reader, so
+    the structural filter that keeps a QUOTED marker (one session pasting
+    another's transcript) from being read as state applies here too.
+
+    Fail-open: unreadable, absent or markerless returns False, so a pane that
+    used to arm keeps arming. Not provably cleared must never start blocking."""
+    try:
+        _off, mark = scan_goal_markers(tpath)
+    except Exception:
+        return False
+    return bool(mark) and mark.get("state") == "cleared"
+
+
 def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
     """Job 9 — see the section comment. Mutates state['goalarm']; returns log
     lines. Best-effort (never raises)."""
@@ -3152,6 +3176,13 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         # /goal cycle re-prints the arm question while the OLD indicator is
         # still lit, and typing /goal safely replaces the old goal (the gk
         # re-arm incident, 2026-07-20). The tail arm question is authoritative.
+        #
+        # What DOES block is a goal the user explicitly CLEARED (#170): a
+        # `/goal clear` leaves the arm question and the printed `/goal` line on
+        # screen, so a viewport-only decision re-armed the very loop they had
+        # just switched off. That signal is not in the viewport at all — it is
+        # the transcript's newest goal marker, read below once the session is
+        # resolved. The indicator stays ignored; the marker is the addition.
         busy_tail = _BG_AGENTS_WAIT_RX.sub("", tail)
         if "esc to interrupt" in busy_tail or "Waiting for" in busy_tail:
             continue                       # live work on screen — not at rest
@@ -3175,6 +3206,24 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
         # exact bytes when available; the fragment only when provably whole.
         full = None
         tr = find_active_transcript(projects_dir, cwd)
+        if tr and _goal_was_cleared_by_user(tr[0]):
+            # #170 — the user turned this loop OFF. Leave it alone until they
+            # arm it again themselves, which flips the newest marker back to
+            # `set` and re-enables this pane with no further bookkeeping.
+            # Logged ONCE per session: a cleared session is otherwise a
+            # permanent resident and would print this every sweep, forever
+            # (the `untracked_logged` precedent in _goal_template_drift).
+            cl = state.setdefault("goalarm_cleared", {})
+            sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
+            logs_once = []
+            if not cl.get(sid):
+                cl[sid] = True
+                logs_once.append(
+                    "skip cleared (goal-autoarm) %s (%s) -> the user cleared "
+                    "this goal; not re-arming until they arm it again"
+                    % (pid, os.path.basename(cwd.rstrip("/"))))
+            logs += logs_once
+            continue
         if tr:
             full = _transcript_goal_line(tr[0])
         if full is None:
