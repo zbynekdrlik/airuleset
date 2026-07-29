@@ -1720,3 +1720,35 @@ catchable Python exception and defeats even a wrapping `except Exception`;
 the fix pattern (persist immediately after the cadence stamp, before
 expensive work) already existed for jobs 8/11 and should be the default
 shape for any future cadence-gated sweep job.
+
+#175 (nudge policy gave up after 3 tries / ~15 min -- a multi-hour 529
+outage stranded sessions even with a healthy watchdog). Design comment
+posted BEFORE the first code commit (issuecomment-5123634983), per the
+user's decision (issuecomment-5123589218, option 1: back off and keep
+going). RED->GREEN: feeb880 (test_decide_backoff_never_gives_up_on_a_multi_hour_stall,
+fails on current code -- gives up at the 4th attempt) -> f14d9bd (decide()
+no longer returns 'escalate'/'noop'; past MAX_NUDGES it keeps returning
+'nudge' with a widening interval doubling from RETRY_INTERVAL_SECONDS,
+capped at the new BACKOFF_CAP_SECONDS=30min; the one-shot give-up ping is
+now detected by entry["escalated"] flipping False->True, read by the job-1
+caller in run_once instead of a returned action; a usage/quota-cap error
+gets a dedicated entry["dormant"] flag so IT alone still holds forever,
+unaffected by the new back-off). Updated the two pre-existing tests that
+pinned the old give-up contract (test_decide_lifecycle_fresh_stall,
+renamed test_run_once_backs_off_but_never_gives_up). Full suite 3237
+passed, ruff clean. Live-verified on dev1 by driving decide() directly
+with a stubbed clock over a simulated 2h15m stall (the working tree the
+real api-watchdog.service executes): nudges fire at t+300/600/900 (base
+300s cadence), then t+1500/2700/4500/6300/8100 (widening 600/1200/1800/
+1800/1800s) -- still nudging at 135 minutes, well past the old ~15-20 min
+give-up point, with `escalated` flipping False->True exactly once (nudge
+#4) and staying True with no repeat ping. `airuleset.py push` ran the
+fail-closed gate (3237 tests, ruff) then deployed to all 6 targets.
+
+Fired `notify --run-card` for #175 (rc=0, sent). No dropped work; nothing
+filed.
+
+📔 Playbook: none new -- this fix stayed inside `decide()`'s existing
+pure-function contract (no new state shape beyond the `dormant` flag,
+which is exactly the same "caller forces a state that decide() then
+respects" pattern the usage-cap path already used before this ticket).
