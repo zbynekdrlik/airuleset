@@ -3368,7 +3368,7 @@ def cmd_upload(args):
 
     def _live(u):
         try:
-            return urllib.request.urlopen(u, timeout=2).status in (200, 204)
+            return urllib.request.urlopen(u, timeout=2).status == 200
         except OSError:
             return False
 
@@ -3377,9 +3377,8 @@ def cmd_upload(args):
     # specifically: the upload_server skips an interface that fails to bind (a
     # transiently-down tailscale while the LAN binds fine), so gating on the first
     # URL alone would abort + orphan a working endpoint on another interface.
-    probes = [_secret_health_url(ip, port) for ip in ips]
     for _ in range(20):
-        if any(_live(u) for u in probes):
+        if any(_live(u) for u in urls):
             break
         time.sleep(0.25)
     else:

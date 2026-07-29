@@ -193,7 +193,11 @@ class TestStoreLocationIsEnforcedNotAsserted(_StoreCase):
             st.assert_safe_store_dir(repo / "secrets")
 
     def test_the_env_override_is_ignored_outside_a_temp_dir(self):
-        os.environ[st.SECRETS_DIR_ENV] = str(Path.home() / "some" / "repo")
+        # An absolute path that cannot be under the temp dir whatever $HOME is
+        # — another test in the full suite leaves HOME pointing into /tmp, and
+        # an override there is legitimately allowed, so a home-relative path
+        # would make this assert the environment rather than the rule.
+        os.environ[st.SECRETS_DIR_ENV] = "/etc/airuleset-not-a-temp-dir/secrets"
         self.assertEqual(st.secrets_dir(), Path.home() / ".claude" / "secrets")
 
     def test_the_env_override_still_works_for_a_temp_dir(self):
