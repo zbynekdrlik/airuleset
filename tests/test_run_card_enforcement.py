@@ -793,14 +793,18 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         r = subprocess.run([sys.executable, str(ROOT / "airuleset.py"),
                             "notify", "--help"],
                            capture_output=True, text=True, timeout=60)
-        # argparse hard-wraps, so compare against a whitespace-normalised
-        # form — never the rendered line breaks.
+        # argparse hard-wraps, and textwrap breaks ON HYPHENS — so
+        # "machine-local" really renders as "machine-\nlocal" and a plain
+        # whitespace join yields "machine- local". Re-join that one artifact
+        # rather than asserting around where the wrap happened to land.
         h = " ".join(r.stdout.split())
+        flat = h.replace("- ", "-")
         self.assertIn("--backfill-digest", h)
-        self.assertIn("machine-local", h,
+        self.assertIn("machine-local", flat,
                       "the constraint must be visible where the operator "
                       "reads the command, not only in the source")
         self.assertIn("checkout", h)
+        self.assertIn("refuses", h)
 
 
 class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):

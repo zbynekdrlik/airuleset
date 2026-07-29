@@ -2307,12 +2307,47 @@ def compose_backfill_digest(repo_name, tickets, since_label):
     return "\n".join(lines)
 
 
+def _local_checkout_for_repo(name, roots=None, name_of=None):
+    """The local checkout root whose `origin` resolves to repo NAME `name`,
+    or None when this box holds no such checkout.
+
+    Matched on the NAME, not `owner/name`, because that is exactly the
+    granularity of the marker namespace this answer is used to guard
+    (`notify._dedup_path` keys cards as `<name>#<n>`). It is a NECESSARY
+    condition, never a sufficient one: a repo checked out on two boxes has
+    its markers split across both, and no local read can see that.
+
+    Best-effort in the fail-CLOSED direction — an unreadable tree or a
+    missing git returns None, so the caller refuses rather than sending a
+    digest it cannot compute honestly."""
+    try:
+        if roots is None:
+            from watchdog import discover_managed_repos
+            roots = discover_managed_repos()
+        if name_of is None:
+            from notify import repo_name_for
+            name_of = repo_name_for
+        for root in roots:
+            if name_of(root) == name:
+                return root
+    except Exception:
+        return None
+    return None
+
+
 def _notify_backfill_digest(args, send):
     """One catch-up digest for a repo whose completion cards never fired.
 
     Reads the closed issues in the window from gh, drops any that DID get a
     delivered card, and sends a single message. Idempotent through the same
-    dedup path as every other notification."""
+    dedup path as every other notification.
+
+    MACHINE-LOCAL BY CONSTRUCTION: `marker_delivered` reads this box's own
+    `~/.claude/autopilot-notify-sent/`. Job 25 never trips over that (it
+    only examines checkouts a live pane sits in), but this command takes a
+    bare `owner/name` from an operator, so it refuses outright when the repo
+    has no checkout here — under-reporting would produce a digest
+    apologising for reports another box really delivered."""
     from notify import marker_delivered
     repo = getattr(args, "repo", None)
     since = getattr(args, "since", None)
@@ -2321,6 +2356,17 @@ def _notify_backfill_digest(args, send):
               file=sys.stderr)
         sys.exit(1)
     name = str(repo).rstrip("/").split("/")[-1]
+    if _local_checkout_for_repo(name) is None:
+        print("notify --backfill-digest: no local checkout of '%s' on this "
+              "box (%s).\nThe digest is computed from THIS box's card markers "
+              "(~/.claude/%s/), which are machine-local — with no checkout "
+              "here every ticket reads as unreported and the digest would "
+              "apologise for reports another box already delivered.\nRun it "
+              "on the box holding the '%s' checkout, or leave it to that "
+              "box's watchdog job 25."
+              % (name, os.uname().nodename, "autopilot-notify-sent", name),
+              file=sys.stderr)
+        sys.exit(1)
     raw = _gh_out("issue", "list", "-R", repo, "--state", "closed", "-L", "200",
                   "--json", "number,title,closedAt", timeout=60)
     try:
@@ -3987,7 +4033,11 @@ def main():
                           action="store_true",
                           help="ONE catch-up digest for --repo covering the "
                                "tickets closed since --since that never got a "
-                               "delivered card (never one card per ticket)")
+                               "delivered card (never one card per ticket). "
+                               "Card markers are machine-local, so this MUST "
+                               "run on the box holding the repo's checkout — "
+                               "it refuses otherwise rather than reporting "
+                               "another box's delivered cards as missing")
     p_notify.add_argument("--since", help="ISO8601 window start (--backfill-digest)")
     p_notify.add_argument("--owner-name", dest="owner_name",
                           help="Deliver to this owner's thread (--backfill-digest)")
