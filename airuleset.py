@@ -3378,6 +3378,236 @@ def cmd_upload(args):
           + str(log))
 
 
+SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge")
+# A distinct range from `upload`'s 8799-8819, so the two endpoint kinds can
+# never be confused for one another by a port alone.
+SECRET_PORTS = range(8830, 8850)
+
+
+def _secret_bindable(ip):
+    """May a credential endpoint listen here?
+
+    The CLI-side half of the two independent checks (the other is
+    `filedrop/vault_server.py:is_private`, which re-validates its own argv). A
+    public address is refused outright — the token in the path is the endpoint's
+    only auth, and on a box with a public IP (the gatekeeper VPS) an open
+    credential endpoint on the internet is not a recoverable mistake. Loopback
+    is allowed here even though `filedrop._is_private` drops it for the file
+    endpoints: it cannot leave the box, so it is strictly more private than
+    tailscale — it is simply not reachable BY the user, which the URL print
+    makes obvious.
+    """
+    from filedrop import _is_private
+    return bool(_is_private(ip) or (isinstance(ip, str) and ip.startswith("127.")))
+
+
+def _secret_url_line(ip, port, token):
+    """One advertised URL plus its TRANSPORT, spelled out.
+
+    The ticket's own requirement: tailscale is WireGuard-encrypted, a LAN URL is
+    plain HTTP, and when both are offered the user must be able to SEE which is
+    which before deciding where to type a password.
+    """
+    from filedrop import _is_tailscale
+    url = "http://%s:%d/%s/" % (ip, port, token)
+    if _is_tailscale(ip):
+        return "%s   [tailscale — šifrované (WireGuard), odporúčané]" % url
+    if str(ip).startswith("127."):
+        return "%s   [loopback — len z tohto stroja]" % url
+    return "%s   [LAN — NEŠIFROVANÉ (plain HTTP), použi radšej tailscale]" % url
+
+
+def _secret_exec_argv(tokens, use_stdin, env_name):
+    """Split `secret exec NAME [--stdin] [--env X] -- CMD...` into its parts.
+
+    `cmd` is an `argparse.REMAINDER`, which stops parsing at the first token
+    after the positional NAME — so a flag written where a user naturally writes
+    it (`secret exec DB_PASS --stdin -- psql`) lands in the REMAINDER as a
+    literal argument and would be exec'd as the command. Rather than force the
+    flags in front of the subcommand, consume the ones we own from the head of
+    the remainder, and stop dead at `--` so a flag meant for the CHILD is never
+    eaten (`secret exec DB_PASS -- mycmd --stdin` keeps its `--stdin`).
+    """
+    rest = list(tokens)
+    while rest:
+        tok = rest[0]
+        if tok == "--":
+            rest.pop(0)
+            break
+        if tok == "--stdin":
+            use_stdin = True
+        elif tok == "--env" and len(rest) > 1:
+            rest.pop(0)
+            env_name = rest[0]
+        elif tok.startswith("--env="):
+            env_name = tok.split("=", 1)[1]
+        else:
+            break
+        rest.pop(0)
+    return rest, use_stdin, env_name
+
+
+def cmd_secret(args):
+    """Receive a CREDENTIAL from the user through a URL — never through chat.
+
+    A password / SSH key / PAT / token typed into the chat is written
+    permanently into the session transcript (`~/.claude/projects/**/*.jsonl`),
+    survives compaction, and cannot be revoked. This command is the alternative:
+    `request` prints a one-shot URL, the user posts the value from their own
+    browser, and the session learns only that the NAME is ready. The value is
+    stored 0600 under `~/.claude/secrets/` and is handed to a child process by
+    `exec` — it is never printed by any action here, and there is deliberately
+    no action that could print it.
+    """
+    import secrets as _secrets
+    import subprocess
+    import time
+    import urllib.request
+
+    from filedrop import bind_ips
+    from filedrop import vault as st
+
+    action = args.action
+    name = getattr(args, "name", None)
+
+    # Opportunistic TTL sweep on EVERY invocation — the guarantee that a value
+    # cannot lie on disk indefinitely must not depend on anyone remembering to
+    # run `purge` (the same shape filedrop.share.prune has).
+    expired = st.purge()
+
+    def _need_name():
+        if not name:
+            print("secret %s: needs a NAME" % action, file=sys.stderr)
+            sys.exit(2)
+        try:
+            st.check_name(name)
+        except st.SecretError as e:
+            print("secret: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        return name
+
+    if action == "purge":
+        print("purged: %s" % (", ".join(expired) if expired else "nothing"))
+        return
+
+    if action == "list":
+        rows = st.list_entries()
+        if not rows:
+            print("no secrets stored")
+            return
+        print("%-24s %-8s %-26s %s" % ("NAME", "STATE", "RECEIVED", "EXPIRES"))
+        for nm, state, _req, recv, exp in rows:
+            print("%-24s %-8s %-26s %s" % (nm, state, recv, exp))
+        return
+
+    if action == "status":
+        nm = _need_name()
+        state = st.state(nm)
+        meta = st.read_meta(nm)
+        extra = ""
+        if state == "ready" and isinstance(meta.get("expires_at"), (int, float)):
+            extra = "  expires=%s" % st._iso(meta["expires_at"])
+        print("%s %s%s" % (nm, state, extra))
+        return
+
+    if action == "forget":
+        nm = _need_name()
+        print("%s %s" % (nm, "forgotten" if st.forget(nm) else "was not stored"))
+        return
+
+    if action == "exec":
+        nm = _need_name()
+        cmd, use_stdin, env_name = _secret_exec_argv(
+            getattr(args, "cmd", None) or [],
+            bool(getattr(args, "stdin", False)),
+            getattr(args, "env", None) or nm)
+        args.stdin, args.env = use_stdin, env_name
+        if not cmd:
+            print("secret exec: needs a command after `--`", file=sys.stderr)
+            sys.exit(2)
+        try:
+            value = st.read_value(nm)
+        except st.SecretError as e:
+            print("secret exec: %s" % e, file=sys.stderr)
+            sys.exit(1)
+        st.log_event("used", nm)
+        if getattr(args, "stdin", False):
+            # stdin, so the value is not in the child's environment at all
+            # (/proc/<pid>/environ is owner-only, but a child that dumps its own
+            # env into a log is a real shape).
+            rc = subprocess.run(cmd, input=value).returncode
+        else:
+            env = dict(os.environ)
+            try:
+                env[getattr(args, "env", None) or nm] = value.decode("utf-8")
+            except UnicodeDecodeError:
+                print("secret exec: %s is not UTF-8 — use --stdin" % nm,
+                      file=sys.stderr)
+                sys.exit(1)
+            rc = subprocess.run(cmd, env=env).returncode
+        sys.exit(rc)
+
+    # --- request -----------------------------------------------------------
+    nm = _need_name()
+    state = st.state(nm)
+    if state == "ready":
+        print("%s is already stored — `secret forget %s` first" % (nm, nm),
+              file=sys.stderr)
+        sys.exit(1)
+    ttl = int(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
+    keep = int(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
+
+    ips = [ip for ip in bind_ips() if _secret_bindable(ip)]
+    if not ips:
+        print("secret: no private interface to bind (refusing a public bind)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
+    if port is None:
+        print("secret: no free port in %d-%d" % (SECRET_PORTS[0], SECRET_PORTS[-1]),
+              file=sys.stderr)
+        sys.exit(1)
+
+    token = _secrets.token_urlsafe(24)
+    st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep)
+    # The endpoint's own diagnostics (bind failures) — NOT the value log, and
+    # the server deliberately never writes the token or the body here.
+    endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
+    endpoint_log.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(endpoint_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "ab") as lf:
+        subprocess.Popen(
+            [sys.executable, str(REPO_DIR / "filedrop" / "vault_server.py"),
+             token, str(port), ",".join(ips), nm, str(ttl), str(keep)],
+            stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
+            start_new_session=True)
+
+    urls = ["http://%s:%d/%s/" % (ip, port, token) for ip in ips]
+
+    def _live(u):
+        try:
+            return urllib.request.urlopen(u, timeout=2).status == 200
+        except OSError:
+            return False
+
+    for _ in range(20):
+        if any(_live(u) for u in urls):
+            break
+        time.sleep(0.25)
+    else:
+        print("secret: endpoint failed to come up — see %s" % endpoint_log,
+              file=sys.stderr)
+        sys.exit(1)
+
+    for ip in ips:
+        if _live("http://%s:%d/%s/" % (ip, port, token)):
+            print(_secret_url_line(ip, port, token))
+    print("name=%s  endpoint-ttl=%ds  keep=%ds" % (nm, ttl, keep))
+    print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
+          "Stav: `airuleset.py secret status %s`." % nm)
+
+
 def cmd_fable_gate(args):
     """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
     exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
@@ -4322,6 +4552,33 @@ def main():
     p_up.add_argument("--port", type=int, default=None,
                       help="Port (default: first free in 8799-8819)")
 
+    p_sec = sub.add_parser(
+        "secret",
+        help="Ask the user for a CREDENTIAL through a one-shot URL — never in "
+             "chat (a value typed into chat is in the transcript forever)")
+    p_sec.add_argument("action", choices=list(SECRET_ACTIONS),
+                       help="request (stand up the URL) | status | list | "
+                            "exec NAME -- CMD (hand the value to a child) | "
+                            "forget NAME | purge (drop everything past its TTL)")
+    p_sec.add_argument("name", nargs="?", default=None,
+                       help="Secret name: letters/digits/underscore, also used "
+                            "as the env var name for `exec`")
+    p_sec.add_argument("--ttl", type=int, default=None,
+                       help="Endpoint self-shutdown after N seconds "
+                            "(default 600 — minutes, not hours)")
+    p_sec.add_argument("--keep", type=int, default=None,
+                       help="Delete the stored value after N seconds "
+                            "(default 28800); `forget` removes it sooner")
+    p_sec.add_argument("--port", type=int, default=None,
+                       help="Port (default: first free in 8830-8849)")
+    p_sec.add_argument("--env", default=None,
+                       help="exec: environment variable to set (default: NAME)")
+    p_sec.add_argument("--stdin", action="store_true",
+                       help="exec: feed the value on the child's stdin instead "
+                            "of through the environment")
+    p_sec.add_argument("cmd", nargs=argparse.REMAINDER,
+                       help="exec: the command to run, after `--`")
+
     p_auth = sub.add_parser(
         "authority",
         help="Print this stream's autopilot authority profile "
@@ -4370,6 +4627,7 @@ SUBCOMMANDS = {
     "delegation": cmd_delegation,
     "authority": cmd_authority,
     "upload": cmd_upload,
+    "secret": cmd_secret,
     "tickets-status": cmd_tickets_status,
     "gk-request": cmd_gk_request,
     "autopilot-lock": cmd_autopilot_lock,
