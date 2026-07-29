@@ -269,6 +269,53 @@ class GlobbingWalksPastTheSpelling(unittest.TestCase):
         self.assertBlocked("cd ~/.claude && cat sec*/*")
 
 
+class OtherLayersBetweenTheSpellingAndThePath(unittest.TestCase):
+    """The adversarial review's findings on the hole-1 fix — same root cause,
+    layers other than globbing.
+
+    Each was ALLOW and each was then VERIFIED to actually read a credential
+    against a sandbox HOME. Globbing is not the only thing the shell resolves
+    between the text this hook reads and the path it opens.
+    """
+
+    def assertBlocked(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for: %s\nstderr=%s" % (cmd, r.stderr))
+
+    # --- path noise between the two components. Both names are spelled
+    # LITERALLY here, so this defeated the original adjacency regex too.
+    def test_a_dot_component_between_the_two_names(self):
+        self.assertBlocked("cat %s/./DB_PASS.sec*" % STORE.replace(
+            "/secrets", "/./secrets"))
+
+    def test_dot_between_the_parent_and_the_store(self):
+        self.assertBlocked("cat ~/.claude/./secrets/*")
+
+    def test_a_doubled_slash_after_the_dot(self):
+        self.assertBlocked("cat ~/.claude/.//secrets/*")
+
+    def test_a_dotdot_traversal_through_a_sibling(self):
+        self.assertBlocked("cat ~/.claude/x/../secrets/*")
+
+    # --- brace expansion: a SECOND expansion layer, exactly like globbing
+    def test_brace_alternative_naming_the_store(self):
+        self.assertBlocked("cat ~/.claude/{secrets,x}/*")
+
+    def test_brace_inside_a_component(self):
+        self.assertBlocked("cat ~/.claude/{s,y}ecrets/*")
+
+    def test_brace_over_the_parent_component(self):
+        self.assertBlocked("cat ~/{.claude,x}/secrets/*")
+
+    # --- `find` walks a tree by construction, with no -r flag to detect
+    def test_find_over_the_parent_execing_a_reader(self):
+        self.assertBlocked("find ~/.claude -type f -exec cat {} +")
+
+    def test_find_over_the_parent_piped_into_a_reader(self):
+        self.assertBlocked("find ~/.claude -type f | xargs cat")
+
+
 class TheWideningDoesNotDenyOrdinaryWork(unittest.TestCase):
     """The other half of hole 1, and the reason it was measured rather than
     reasoned about.
