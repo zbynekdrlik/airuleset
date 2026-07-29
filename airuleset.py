@@ -2387,6 +2387,61 @@ def _local_checkout_for_repo(name, cwd=None, home=None, roots=None,
     return None
 
 
+def _checkout_pane_owner(path, panes=None, owner_of=None):
+    """The tmux owner of the live Claude pane sitting in checkout `path`, or
+    "" when no pane answers or more than one owner does.
+
+    This is the only source that actually KNOWS who a repo belongs to. The
+    operator's own tmux does not: a catch-up digest for someone else's repo
+    is typically issued from a third box, and over ssh there is no tmux at
+    all. On 2026-07-29 a codex-bridge digest — a repo whose only pane sits in
+    the `david` session group — was addressed from a dev1 session and landed
+    in the wrong thread.
+
+    Two owners on one checkout resolve to "" for the same reason job 5 stops
+    guessing on a multi-owner box: an unaddressed report costs less than a
+    misdirected one. Every failure degrades to "" (no tmux, an unreadable
+    pane list, an owner lookup that raises) so the caller's own override
+    still works on a box with no panes at all."""
+    if not path:
+        return ""
+    try:
+        from watchdog import list_claude_panes, pane_owner
+    except Exception:                      # a box without the package
+        if panes is None:
+            return ""
+        list_claude_panes = pane_owner = None
+    panes = panes or list_claude_panes
+    owner_of = owner_of or pane_owner
+    try:
+        rows = panes()
+    except Exception:
+        return ""
+    try:
+        target = os.path.realpath(path)
+    except Exception:
+        target = path
+    found = set()
+    for pid, cwd in rows or ():
+        if not cwd:
+            continue
+        try:
+            here = os.path.realpath(cwd)
+        except Exception:
+            here = cwd
+        # `startswith` alone would match a SIBLING sharing the prefix
+        # (`proj-old` vs `proj`); the separator is what makes it containment.
+        if here != target and not here.startswith(target.rstrip("/") + os.sep):
+            continue
+        try:
+            owner = (owner_of(pid) or "").strip().lower()
+        except Exception:
+            owner = ""
+        if owner:
+            found.add(owner)
+    return found.pop() if len(found) == 1 else ""
+
+
 def _notify_backfill_digest(args, send):
     """One catch-up digest for a repo whose completion cards never fired.
 
@@ -2409,12 +2464,13 @@ def _notify_backfill_digest(args, send):
               file=sys.stderr)
         sys.exit(1)
     name = str(repo).rstrip("/").split("/")[-1]
+    checkout = _local_checkout_for_repo(name)
     if getattr(args, "force", False):
         print("notify --backfill-digest: --force — skipping the local-checkout "
               "check for '%s' on %s. If this box does not hold that repo's "
               "markers, the digest will over-report."
               % (name, os.uname().nodename), file=sys.stderr)
-    elif _local_checkout_for_repo(name) is None:
+    elif checkout is None:
         print("notify --backfill-digest: no local checkout of '%s' on this "
               "box (%s).\nThe digest is computed from THIS box's card markers "
               "(~/.claude/%s/), which are machine-local — with no checkout "
@@ -2444,8 +2500,22 @@ def _notify_backfill_digest(args, send):
     if not tickets:
         print("backfill: nothing unreported for %s since %s" % (name, since))
         return
+    # WHO it goes to is resolved from the checkout's own pane, not from the
+    # operator. `--owner-name` remains for a box where the repo has no live
+    # pane, but it may no longer CONTRADICT one: obeying a flag over the pane
+    # is exactly how a codex-bridge catch-up reached the wrong thread.
+    derived = _checkout_pane_owner(checkout)
+    stated = (getattr(args, "owner_name", None) or "").strip().lower()
+    if derived and stated and derived != stated:
+        print("notify --backfill-digest: --owner-name %s contradicts the "
+              "checkout's own pane, which belongs to %s.\n'%s' is where this "
+              "repo's reports go; sending it anywhere else puts the report in "
+              "the wrong thread and gives someone else the noise.\nDrop "
+              "--owner-name (the pane answers it), or correct it to '%s'."
+              % (stated, derived, derived, derived), file=sys.stderr)
+        sys.exit(1)
     body = compose_backfill_digest(name, tickets, since[:10])
-    status = send(body, owner=getattr(args, "owner_name", None) or None,
+    status = send(body, owner=derived or stated or None,
                   dedup_key="backfill:%s:%s" % (name, since[:10]),
                   dry_run=getattr(args, "dry_run", False))
     print("%s (%d tickets)" % (status, len(tickets)))
@@ -4691,7 +4761,13 @@ def main():
                                "reporting gap must never be impossible on "
                                "the box that holds it")
     p_notify.add_argument("--owner-name", dest="owner_name",
-                          help="Deliver to this owner's thread (--backfill-digest)")
+                          help="Deliver to this owner's thread "
+                               "(--backfill-digest). Rarely needed: the owner "
+                               "is read from the checkout's own live pane, "
+                               "which is the only thing that actually knows "
+                               "whose repo it is. Use it only when the repo "
+                               "has no pane here — a value contradicting the "
+                               "pane is refused, not obeyed")
     p_notify.add_argument("--repo-name", dest="repo_name", action="store_true",
                           help="Print the GitHub repo NAME for --cwd, from its "
                                "origin remote (never the directory basename)")
