@@ -221,8 +221,10 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertFalse(ok)
         tails = [a[-1] for a in run.sent if a]
         self.assertEqual(tails.count("C-s"), 2, run.sent)   # stash, then restore
-        first_bs = next(i for i, t in enumerate(tails) if t == "BSpace")
-        self.assertLess(first_bs, len(tails) - 1 - tails[::-1].index("C-s"),
+        self.assertIn("BSpace", tails,
+                      "the undo must run before any restore: %r" % run.sent)
+        self.assertLess(tails.index("BSpace"),
+                        len(tails) - 1 - tails[::-1].index("C-s"),
                         "the backspaces must come BEFORE the restoring "
                         "toggle: %r" % run.sent)
         self.assertFalse(any("Enter" in a for a in run.sent),
