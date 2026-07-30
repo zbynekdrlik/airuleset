@@ -2339,3 +2339,101 @@ they answer different questions on purpose before forcing them equal; and
 a parse-failure fallback that reuses "absence looks like the negative
 case" silently re-enables the wrong-direction version of the bug the
 surrounding code exists to prevent.
+
+## 2026-07-30 — #181 (reduced-authority /goal false stop) + #164 (two ticket
+## counts, one label), ROUND 3: the false stop had moved to the FULL box
+
+Round-3 adversarial review reopened both. Round 2's C1/C2/I5/M11/I6 fixes were
+re-verified genuine and left alone; its I4 fix was the new defect.
+
+CRITICAL. `_core_search_excl()` is the FOOTER's *display* partition ("which
+population am I showing"); round 2 reused it as the `/goal` stop-proof's
+*obligation* partition ("what must I finish before I may stop"). Those are
+different sets, and the difference is exactly the tickets a full-authority box
+is the only one able to move. Measured live on `zbynekdrlik/odoo-erp`
+2026-07-30: 84 open non-skip, 41 in the core partition, 54 in the obligation
+set — #2396 and #2377 carry `stream:montalu` AND `needs-gatekeeper`, so a
+core-only proof cannot see them at all, plus 11 open `prio:bounce`. The
+gatekeeper closes its 41, the proof prints `0`, the loop stops, and 13 tickets
+stay blocked on the box that just stopped. #181 verbatim at a new address, and
+a silent breach of cross-stream rule 4, which the pre-round-2 whole-repo proof
+had upheld only as a side effect of being whole-repo.
+
+Fix: `airuleset.py core-quals` counts the OBLIGATION set — the core partition
+UNIONED with every open non-skip ticket labelled `needs-gatekeeper` /
+`prio:bounce` / `ready-for-review` regardless of stream (`_obligation_quals`,
+`MAINTAINER_ACTION_LABELS`, per-qual queries unioned in Python since `--search`
+ANDs across qualifier types). NOT a revert to whole-repo: a stream ticket the
+sub-dev is actively working carries none of those and still does not block this
+box. Both offered options were implemented rather than one, because each alone
+leaves a hole — the count fix alone would let the loop start IMPLEMENTING a
+sub-dev's ticket, the clause alone leaves the count wrong. So `core-quals` also
+gained `--list` and became the FULL box's backlog SELECTION query
+(`SKILL.md` Step 1 + the backlog-scope bullet), cross-stream rule 4 records
+that the gatekeeper's hold is now mechanical, and the FULL `/goal` template
+lost its false prose ("not owned by a sub-dev stream — I never touch those,
+their own box works them" — false for fork streams, where the maintainer MUST
+review/merge/close, and for `needs-gatekeeper`, where only the maintainer can
+act), gained the obligation-set scope sentence, and finally carries the
+REVIEW-WATCH clause the other two templates always had. 3663/4000 chars, cap
+and cap-test untouched — the headroom came from aligning its (A) clause and
+question/sleep paragraph with the two reduced templates' shorter wording.
+
+I-1: the C2 cross-check `involves:@me` only required parseable JSON, and `[]`
+parses — "search returns nothing everywhere" IS `[]`, so the state it claimed
+to detect was the state it accepted. Replaced by `_search_index_healthy()`: a
+SORT-ONLY search (`sort:created-desc`, verified live) that cannot legitimately
+be empty, disambiguated by the REST listing path (a different gh code path)
+when it is. REST sees issues + search sees none → refuse; both empty → the
+repo has no open issues and 0 is trivially correct.
+
+I-2: `_gh_login`'s bare `except: return ""` made "gh api user failed"
+indistinguishable from "not the maintainer", so a broken-gh box silently got
+the own-account 3-qual union — C2 skipped, and on odoo-erp `author:@me` is the
+whole maintainer backlog (the 2026-07-20 foreign-stream leak the branch exists
+to prevent). Live-reproduced on david@subdev, where `slice-quals` prints all
+three quals because the query FAILS, not because the login differs. Now returns
+None, `_slice_quals` raises `SliceUnresolved`, and each caller answers in its
+own established way (CLI refuses; footer and run-card keep `None`).
+
+I-3: `cmd_core_quals` never consulted `resolve_authority()` — C1's fix applied
+in one direction only. It now refuses on a reduced-authority box.
+
+I-4 (#164): `bump_done`'s invariant was locked only by kwargs assertions with
+the function mocked out, so replacing `done = base_done + 1 if bump_done else
+base_done` with `done = base_done + 1` left the suite green. Now asserted
+directly — `done` unchanged AND `ts` advanced — and the mutant re-run confirms
+it dies (`AssertionError: 5 != 4 : bump_done=False incremented done`). The
+three call-site assertions read the effective flag from args OR kwargs (M-3).
+
+I-5: `cmd_slice_quals`/`cmd_core_quals` resolved authority against the PROCESS
+cwd while the footer used the repo ROOT. One `_repo_root()` helper (git
+rev-parse + the #61 subdirectory scan) now serves all three, and both CLI
+commands run gh with `cwd=root`.
+
+I-6: CONFIRMED live on david@subdev — `_gh_out` did not use `_gh_env()`. That
+box has no GH_TOKEN in env and authenticates from `~/.git-credentials`, so bare
+`gh` exits 4 and every `slice-quals` query failed closed: the fork-no-merge
+template's condition (B) could NEVER hold there, i.e. that loop could not
+legitimately finish at all. `_gh_out` now runs under `_gh_env()` and takes an
+optional `cwd`.
+
+M-1 (#164): a heartbeat-only write with no prior (or expired) progress file
+created `{"done": 0, "ts": now}`, so the footer rendered `Issues 0/40` for a
+full 6h window — a run claimed active with nothing achieved. It now refreshes
+an already-live window and never opens one. M-2: `slice-quals` raised to
+`-L 1000`, matching `core-quals`. M-5: `_core_search_excl()` excludes only
+non-`full` profiles, so a future `full` entry cannot silently delete a whole
+population from every count. M-6: the comma-OR playbook note restated as the
+`label:`-family behaviour it is (`assignee:` has none).
+
+Deliberately NOT changed: the footer and the Discord card keep their core
+DISPLAY partition. The two answer different questions on purpose — the same
+resolution round 2 reached for I3 — and the hidden population is already
+disclosed as `· streamy M`. Documented in the skill and locked by
+`TestObligationVsDisplayPartition`.
+
+22 tests RED against `04b575d` (verified by `git stash push`-ing the three
+implementation files and re-running), every one for a BEHAVIOURAL reason —
+zero AttributeError, which was the tautology shape round 1 shipped once.
+3326 tests pass, ruff clean.
