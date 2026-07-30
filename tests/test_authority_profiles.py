@@ -544,9 +544,12 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
         self.assertNotIn("0", buf.getvalue())
 
     def test_shared_account_zero_refuses_when_the_cross_check_query_fails(self):
-        # C2: the label genuinely exists but nothing carries it — the
-        # involves:@me cross-check must ALSO succeed (proving gh search
-        # itself works for this identity/repo) before a 0 is trusted.
+        # C2: the label genuinely exists but nothing carries it — a
+        # cross-check must ALSO prove gh's SEARCH path works for this
+        # identity/repo before a 0 is trusted. #181 I-1 (round 3) replaced
+        # round 2's `involves:@me` probe, which accepted `[]` — the very
+        # state it claimed to detect — with a SORT-ONLY search that cannot
+        # legitimately be empty; this test now drives that probe failing.
         import contextlib
         import io
         import unittest.mock as mk
@@ -555,8 +558,8 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
             j = " ".join(str(x) for x in a)
             if a and a[0] == "label":
                 return '[{"name": "stream:montalu"}]'
-            if "involves:@me" in j:
-                return ""   # gh error on the cross-check query
+            if "sort:created-desc" in j:
+                return ""   # gh error on the cross-check probe
             return "[]"     # the slice query itself: empty
 
         buf = io.StringIO()
@@ -582,8 +585,8 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
             j = " ".join(str(x) for x in a)
             if a and a[0] == "label":
                 return '[{"name": "stream:montalu"}]'
-            if "involves:@me" in j:
-                return '[{"number": 999}]'
+            if "sort:created-desc" in j:
+                return '[{"number": 999}]'   # search demonstrably answers
             return "[]"
 
         buf = io.StringIO()
@@ -661,8 +664,7 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
                                          "_write_autopilot_progress") as wap:
                         airuleset.cmd_notify(self._args())
         wap.assert_called_once()
-        _, kwargs = wap.call_args
-        self.assertEqual(kwargs.get("bump_done"), False)
+        self.assertEqual(_bump_done_of(wap.call_args), False)
 
     def test_core_tickets_card_still_bumps_done(self):
         import unittest.mock as mk
@@ -679,8 +681,7 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
                                          "_write_autopilot_progress") as wap:
                         airuleset.cmd_notify(self._args())
         wap.assert_called_once()
-        _, kwargs = wap.call_args
-        self.assertEqual(kwargs.get("bump_done"), True)
+        self.assertEqual(_bump_done_of(wap.call_args), True)
 
     def test_a_failed_issue_lookup_defaults_to_not_bumping_done(self):
         # M11: a parse/lookup failure used to leave is_core_ticket=True
@@ -702,5 +703,562 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
                                          "_write_autopilot_progress") as wap:
                         airuleset.cmd_notify(self._args())
         wap.assert_called_once()
-        _, kwargs = wap.call_args
-        self.assertEqual(kwargs.get("bump_done"), False)
+        self.assertEqual(_bump_done_of(wap.call_args), False)
+
+
+def _bump_done_of(call_args):
+    """The EFFECTIVE `bump_done` a call passed, read from either a keyword or
+    a positional argument (#181 M-3).
+
+    The round-2 tests asserted `kwargs.get("bump_done")`, which couples the
+    lock to call STYLE rather than behaviour: a correct implementation that
+    passes the flag positionally false-fails, and a wrong one that accepts the
+    kwarg and ignores it passes. `_write_autopilot_progress(name, remaining,
+    bump_done=True)` puts it at positional index 2."""
+    args, kwargs = call_args
+    if "bump_done" in kwargs:
+        return kwargs["bump_done"]
+    return args[2] if len(args) > 2 else True
+
+
+def _fake_gh_by_search(populations):
+    """A `_gh_out` stand-in that answers an `--search` query with whichever
+    populations' keys occur in the search string, unioned.
+
+    It deliberately serves BOTH query shapes so the same fixture measures the
+    round-2 implementation (one query, `--json number -q length`, an integer
+    on stdout) and this one (per-qual queries, JSON rows unioned in Python) —
+    a fixture that only served one of them would fail pre-fix for a parsing
+    reason instead of a behavioural one."""
+    import json as _json
+
+    searches = []
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        if "--search" not in args:
+            return "[]"
+        search = args[args.index("--search") + 1]
+        searches.append(search)
+        nums = set()
+        for key, val in populations.items():
+            if key in search:
+                nums |= set(val)
+        if "-q" in args:
+            return str(len(nums))
+        return _json.dumps(
+            [{"number": n, "title": "t%d" % n,
+              "createdAt": "2026-07-%02dT00:00:00Z" % (n % 28 + 1)}
+             for n in sorted(nums)])
+
+    return gh, searches
+
+
+class TestCoreQualsCountsTheObligationSet(TestCase):
+    """#181 round 3, CRITICAL: `_core_search_excl()` is the FOOTER's *display*
+    partition ("which population am I showing"); round 2's I4 fix reused it as
+    the /goal stop-proof's *obligation* partition ("what must I finish before
+    I may stop"). Those are not the same set.
+
+    Live on zbynekdrlik/odoo-erp 2026-07-30: 83 open non-skip, 40 in the core
+    partition, 5 open `needs-gatekeeper` of which #2396 and #2377 carry
+    `stream:montalu` and are therefore INVISIBLE to a core-only count — plus
+    11 open `prio:bounce`. The gatekeeper closes its 40, the proof prints 0,
+    the loop stops, and 13 tickets stay blocked on the very box that stopped.
+    That is #181 verbatim at a new address."""
+
+    POPULATIONS = {
+        "-label:stream:": {1, 2},                 # the core partition
+        "label:needs-gatekeeper": {2396, 2377},   # stream-labelled, only I can act
+        "label:prio:bounce": {5},                 # my ball per cross-stream rule 4
+        "label:ready-for-review": set(),          # a hand-off awaiting my review
+    }
+
+    def _run(self, populations=None, **flags):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        gh, searches = _fake_gh_by_search(
+            self.POPULATIONS if populations is None else populations)
+        buf = io.StringIO()
+        args = dict(count=True, list=False)
+        args.update(flags)
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(mk.Mock(**args))
+        return buf.getvalue(), searches
+
+    def test_a_stream_ticket_only_this_box_can_action_is_counted(self):
+        out, _ = self._run()
+        # {1, 2} ∪ {2396, 2377} ∪ {5} — five, not the core partition's two.
+        self.assertEqual(out.strip(), "5")
+
+    def test_the_listing_names_the_tickets_only_this_box_can_unblock(self):
+        out, _ = self._run(count=False, list=True)
+        self.assertIn("2396", out)
+        self.assertIn("2377", out)
+        self.assertIn("5\t", out)
+
+    def test_a_stream_ticket_the_subdev_is_working_still_does_not_block_me(self):
+        """NOT a revert to the whole-repo count — that is the never-stops
+        failure the original ticket explicitly rejected."""
+        out, searches = self._run({
+            "-label:stream:": {1},
+            "label:needs-gatekeeper": set(),
+            "label:prio:bounce": set(),
+            "label:ready-for-review": set(),
+        })
+        self.assertEqual(out.strip(), "1")
+        bare = [s for s in searches
+                if s.strip() == "-label:autopilot-skip"]
+        self.assertEqual(
+            bare, [],
+            "a bare whole-repo query is back — that is the never-stops "
+            "failure #181 rejected, not the obligation set")
+
+    def test_every_maintainer_action_label_is_actually_queried(self):
+        _, searches = self._run()
+        joined = " | ".join(searches)
+        for label in ("needs-gatekeeper", "prio:bounce", "ready-for-review"):
+            self.assertIn("label:" + label, joined)
+
+    def test_reduced_authority_box_refuses_instead_of_answering(self):
+        """I-3: C1's fix applied in the mirror direction. `slice-quals`
+        correctly refuses on a full box; `core-quals` answered on ANY box, so
+        run on montalu it printed a number that is neither that box's slice
+        nor a valid stop-proof for it."""
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        gh, _ = _fake_gh_by_search(self.POPULATIONS)
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "resolve_authority",
+                             return_value="branch-merge"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(SystemExit) as cm:
+                        airuleset.cmd_core_quals(mk.Mock(count=True, list=False))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip(), "")
+
+    def test_a_failed_gh_query_never_prints_a_number(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", return_value="not json"):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(SystemExit) as cm:
+                        airuleset.cmd_core_quals(mk.Mock(count=True, list=False))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip(), "")
+
+
+class TestObligationVsDisplayPartition(TestCase):
+    """The two partitions answer DIFFERENT questions on purpose (the same
+    resolution round 2 reached for I3). Locked so a future round cannot
+    "fix" the divergence into numeric equality and re-open #181, nor fold
+    the display partition back into the obligation one and re-open #164."""
+
+    def test_the_footers_exclusion_still_hides_every_reduced_stream(self):
+        excl = airuleset._core_search_excl()
+        for user, profile in airuleset.AUTHORITY_BY_USER.items():
+            if profile != "full":
+                self.assertIn("-label:stream:" + user, excl)
+
+    def test_a_full_profile_entry_is_not_treated_as_a_sub_dev_stream(self):
+        """M-5: `_core_search_excl()` keyed on AUTHORITY_BY_USER's KEYS, so a
+        future `full` entry would silently remove a whole population from
+        every full-authority count."""
+        import unittest.mock as mk
+
+        with mk.patch.object(airuleset, "AUTHORITY_BY_USER",
+                             {"david": "fork-no-merge", "boss": "full"}):
+            excl = airuleset._core_search_excl()
+        self.assertIn("-label:stream:david", excl)
+        self.assertNotIn("stream:boss", excl)
+
+    def test_core_quals_declares_the_obligation_set_it_counts(self):
+        """Driven through the command, so it fails when the COUNT is core-only
+        rather than merely when a constant is missing. The two live tickets
+        that proved the CRITICAL — odoo-erp #2396/#2377 — carry
+        `stream:montalu` AND `needs-gatekeeper`, actionable ONLY by the box
+        whose loop would otherwise stop."""
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", return_value="[]"):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(mk.Mock(count=False, list=False))
+        printed = buf.getvalue()
+        self.assertIn(airuleset._core_search_excl(), printed)
+        for label in ("needs-gatekeeper", "prio:bounce", "ready-for-review"):
+            self.assertIn("label:" + label, printed)
+
+
+class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
+    """#181 I-2, live-reproduced on david@subdev: `_gh_login`'s bare
+    `except: return ""` made "gh api user failed" indistinguishable from
+    "not the maintainer", so a broken-gh box silently got the own-account
+    3-qual union — C2's shared-account validation skipped entirely, and on
+    odoo-erp `author:@me` re-opens the 2026-07-20 foreign-stream leak the
+    branch exists to prevent."""
+
+    def _failing_gh_api_user(self):
+        """A `subprocess.run` stand-in that reproduces the real failure:
+        `gh api user` exits 4 ("please run gh auth login")."""
+        import subprocess
+        import unittest.mock as mk
+
+        real = subprocess.run
+
+        def run(argv, *a, **k):
+            if list(argv[:3]) == ["gh", "api", "user"]:
+                return subprocess.CompletedProcess(
+                    argv, 4, "",
+                    "To get started with GitHub CLI, please run: gh auth login")
+            return real(argv, *a, **k)
+
+        return mk.patch("subprocess.run", side_effect=run)
+
+    def test_slice_quals_never_returns_a_guessed_qual_set(self):
+        with self._failing_gh_api_user():
+            try:
+                quals = airuleset._slice_quals("montalu")
+            except Exception as exc:      # noqa: BLE001 - the type is asserted
+                self.assertIsInstance(exc, airuleset.SliceUnresolved)
+                return
+        self.fail(
+            "_slice_quals guessed %r from an identity it could not resolve — "
+            "on a shared-account box that means C2's validation is skipped, "
+            "and on odoo-erp `author:@me` is the whole maintainer backlog "
+            "(the 2026-07-20 foreign-stream leak)" % (quals,))
+
+    def test_the_cli_refuses_rather_than_printing_a_count(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        buf = io.StringIO()
+        with self._failing_gh_api_user():
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="branch-merge"):
+                with mk.patch.object(airuleset, "_current_user",
+                                     return_value="montalu"):
+                    with mk.patch.object(
+                            airuleset, "_gh_out",
+                            return_value='[{"number": 1, "title": "t", '
+                                         '"createdAt": "2026-07-01T00:00:00Z"}]'):
+                        with contextlib.redirect_stdout(buf):
+                            with self.assertRaises(SystemExit) as cm:
+                                airuleset.cmd_slice_quals(
+                                    mk.Mock(count=True, list=False, extra=None))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip(), "")
+
+    def test_a_resolved_login_still_picks_the_right_branch(self):
+        import unittest.mock as mk
+
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            self.assertEqual(airuleset._slice_quals("montalu"),
+                             ["label:stream:montalu"])
+        with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
+            self.assertEqual(len(airuleset._slice_quals("david")), 3)
+
+
+class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
+    """#181 I-1: round 2's `involves:@me` cross-check only required the
+    response to PARSE — and `[]` parses. "Search returns nothing everywhere"
+    IS `[]`, i.e. the exact state it claimed to detect was the state it
+    accepted (reviewer executed it: every query [] -> rc 0, stdout `0`)."""
+
+    def _run(self, gh):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        buf = io.StringIO()
+        exc = None
+        with mk.patch.object(airuleset, "resolve_authority",
+                             return_value="branch-merge"):
+            with mk.patch.object(airuleset, "_gh_login",
+                                 return_value="zbynekdrlik"):
+                with mk.patch.object(airuleset, "_current_user",
+                                     return_value="montalu"):
+                    with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                        with contextlib.redirect_stdout(buf):
+                            try:
+                                airuleset.cmd_slice_quals(
+                                    mk.Mock(count=True, list=False, extra=None))
+                            except SystemExit as e:
+                                exc = e
+        return buf.getvalue(), exc
+
+    def test_an_empty_search_index_refuses_instead_of_reporting_zero(self):
+        """Every SEARCH query empty while the repo demonstrably has open
+        issues: the search index is not answering, so 0 is not evidence."""
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            if args and args[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "--search" in args:
+                return "[]"          # search sees nothing, anywhere
+            return '[{"number": 4242}]'   # the REST listing path does
+
+        out, exc = self._run(gh)
+        self.assertIsNotNone(exc, "an unanswering search index printed a count")
+        self.assertNotEqual(exc.code, 0)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_healthy_search_index_still_trusts_a_real_zero(self):
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            j = " ".join(args)
+            if args and args[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "sort:created-desc" in j:
+                return '[{"number": 4242}]'   # search demonstrably answers
+            return "[]"
+
+        out, exc = self._run(gh)
+        self.assertIsNone(exc, "a validated zero must still be reportable")
+        self.assertEqual(out.strip(), "0")
+
+    def test_a_repo_with_no_open_issues_at_all_still_trusts_zero(self):
+        """The sort-only probe is legitimately empty here, and the REST path
+        confirms it — an empty slice on an empty repo is trivially correct."""
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            if args and args[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            return "[]"
+
+        out, exc = self._run(gh)
+        self.assertIsNone(exc)
+        self.assertEqual(out.strip(), "0")
+
+    def test_a_failing_cross_check_probe_refuses(self):
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            j = " ".join(args)
+            if args and args[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "sort:created-desc" in j:
+                return ""            # gh error on the probe itself
+            return "[]"
+
+        out, exc = self._run(gh)
+        self.assertIsNotNone(exc)
+        self.assertNotEqual(exc.code, 0)
+        self.assertEqual(out.strip(), "")
+
+
+class TestSliceQualsResolvesAgainstTheRepoRoot(TestCase):
+    """#181 I-5: `cmd_slice_quals` resolved authority against the PROCESS cwd
+    (`resolve_authority()` reads `Path.cwd()/CLAUDE.md`) while the footer
+    resolves against the repo ROOT — so a project marker was invisible to one
+    of the two consumers of "THE one definition", and they could disagree
+    about which profile the box is even running."""
+
+    def _fake_gh(self, bindir):
+        import os as _os
+        gh = Path(bindir) / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"api user"*) echo "kvaskodev";;\n'
+            '  *"repo view"*) echo "kvaskodev/demo";;\n'
+            '  *assignee:@me*) echo \'[{"number":1,"title":"t",'
+            '"createdAt":"2026-07-01T00:00:00Z"}]\';;\n'
+            '  *) echo "[]";;\n'
+            "esac\n")
+        gh.chmod(0o755)
+        _os.environ  # noqa: B018 - keep the import used and explicit
+        return gh
+
+    def test_a_project_marker_at_the_root_is_honoured_from_a_subdirectory(self):
+        import os
+        import subprocess
+        import sys as _sys
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=branch-merge -->\n")
+            sub = Path(repo, "addons", "deep")
+            sub.mkdir(parents=True)
+            self._fake_gh(bindir)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+            env.update(HOME=home, PATH="%s:%s" % (bindir, os.environ["PATH"]))
+            r = subprocess.run(
+                [_sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "slice-quals", "--count"],
+                cwd=str(sub), capture_output=True, text=True, env=env)
+            self.assertEqual(
+                r.returncode, 0,
+                "the root marker was invisible from a subdirectory: %s"
+                % r.stderr)
+            self.assertEqual(r.stdout.strip(), "1")
+
+
+class TestGhCallsCarryTheCredentialsFileToken(TestCase):
+    """#181 I-6, CONFIRMED live on david@subdev 2026-07-30: `_gh_out` did not
+    use `_gh_env()`, unlike `cmd_tickets_status`. That box has no GH_TOKEN in
+    its shell env and authenticates per-command from ~/.git-credentials, so
+    bare `gh` exits 4 and `slice-quals --count` printed "a gh query failed"
+    and exited 1 — which means the fork-no-merge template's condition (B) can
+    never hold there and that loop can never legitimately finish."""
+
+    def test_slice_quals_works_on_a_box_whose_gh_is_only_credentials_file_authed(self):
+        import os
+        import subprocess
+        import sys as _sys
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            Path(home, ".git-credentials").write_text(
+                "https://kvaskodev:ghp_fake_token_for_this_test@github.com\n")
+            gh = Path(bindir) / "gh"
+            # Exactly david's box: unauthenticated without a token in the env.
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ -z "${GH_TOKEN:-}" ]; then\n'
+                '  echo "To get started with GitHub CLI, please run: '
+                'gh auth login" >&2\n'
+                "  exit 4\n"
+                "fi\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "kvaskodev";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"title":"t",'
+                '"createdAt":"2026-07-01T00:00:00Z"}]\';;\n'
+                '  *) echo "[]";;\n'
+                "esac\n")
+            gh.chmod(0o755)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+            env.update(HOME=home, PATH="%s:%s" % (bindir, os.environ["PATH"]))
+            r = subprocess.run(
+                [_sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "slice-quals", "--count"],
+                cwd=repo, capture_output=True, text=True, env=env)
+            self.assertEqual(
+                r.returncode, 0,
+                "condition (B) is unsatisfiable on a credentials-file box: %s"
+                % r.stderr)
+            self.assertEqual(r.stdout.strip(), "1")
+
+
+class TestSliceQualsDoesNotSilentlyCapItsOwnCount(TestCase):
+    """M-2: `slice-quals` still asked for `-L 200` while `core-quals` asked
+    for 1000. A single population can only be UNDER-counted by a clamp, never
+    zeroed — but the documented "0 = slice empty" contract must not silently
+    cap either."""
+
+    def test_the_slice_queries_ask_for_the_same_limit_as_core_quals(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        seen = []
+
+        def gh(*a, **k):
+            seen.append([str(x) for x in a])
+            return ('[{"number": 1, "title": "t", '
+                    '"createdAt": "2026-07-01T00:00:00Z"}]')
+
+        with mk.patch.object(airuleset, "resolve_authority",
+                             return_value="fork-no-merge"):
+            with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
+                with mk.patch.object(airuleset, "_current_user",
+                                     return_value="david"):
+                    with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            airuleset.cmd_slice_quals(
+                                mk.Mock(count=True, list=False, extra=None))
+        issue_queries = [q for q in seen if q and q[0] == "issue"]
+        self.assertTrue(issue_queries)
+        for q in issue_queries:
+            self.assertIn("1000", q)
+            self.assertNotIn("200", q)
+
+
+class TestHeartbeatRefreshesALiveRunNeverOpensOne(TestCase):
+    """#164 M-1 (round 3): a heartbeat-only write with no prior progress file
+    created `{"done": 0}` + a fresh `ts`, and statusbar then rendered
+    `Issues 0/40` for a full 6h window — an assertion that a run is active and
+    has achieved nothing, replacing the correct `Issues 40 core`. Round 2
+    fixed a heartbeat that stopped too early with one that started too
+    eagerly."""
+
+    def setUp(self):
+        import unittest.mock as mk
+        from tempfile import TemporaryDirectory
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        p = mk.patch("statusbar.progress_dir", return_value=self.dir)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _read(self, name="demo"):
+        import json as _json
+        return _json.loads((self.dir / (name + ".json")).read_text())
+
+    def _seed(self, done, age_s, name="demo"):
+        import json as _json
+        import time
+        (self.dir / (name + ".json")).write_text(_json.dumps(
+            {"done": done, "remaining": 7, "ts": int(time.time()) - age_s}))
+
+    def test_a_heartbeat_with_no_live_run_writes_nothing(self):
+        airuleset._write_autopilot_progress("demo", 40, bump_done=False)
+        self.assertFalse(
+            (self.dir / "demo.json").exists(),
+            "a stream-only card opened a run window at 0/40 — the footer now "
+            "claims an active run that has achieved nothing")
+
+    def test_a_heartbeat_after_the_window_expired_does_not_reopen_it(self):
+        import statusbar
+        self._seed(done=4, age_s=statusbar.AUTOPILOT_RUN_WINDOW_S + 60)
+        before = self._read()
+        airuleset._write_autopilot_progress("demo", 40, bump_done=False)
+        self.assertEqual(
+            self._read(), before,
+            "an expired run window was reopened at done=0 by a heartbeat")
+
+    def test_a_heartbeat_inside_the_window_advances_ts_and_leaves_done(self):
+        """#164 I-4: the invariant round 2 shipped with NO behavioural test —
+        replacing `done = base_done + 1 if bump_done else base_done` with
+        `done = base_done + 1` left 104 tests passing."""
+        self._seed(done=4, age_s=300)
+        before = self._read()
+        airuleset._write_autopilot_progress("demo", 40, bump_done=False)
+        after = self._read()
+        self.assertEqual(after["done"], 4, "bump_done=False incremented done")
+        self.assertGreater(after["ts"], before["ts"],
+                           "the heartbeat did not advance ts")
+
+    def test_a_core_ticket_card_still_increments_done(self):
+        self._seed(done=4, age_s=300)
+        airuleset._write_autopilot_progress("demo", 40, bump_done=True)
+        self.assertEqual(self._read()["done"], 5)
+
+    def test_a_first_core_ticket_card_opens_the_run_window(self):
+        airuleset._write_autopilot_progress("demo", 40, bump_done=True)
+        self.assertEqual(self._read()["done"], 1)

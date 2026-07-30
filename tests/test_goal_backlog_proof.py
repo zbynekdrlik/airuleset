@@ -358,6 +358,64 @@ class TestReducedAuthorityTemplatesToo(TestCase):
             self.assertIn("git merge-base", reason)
 
 
+class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
+    """#181 round 3, CRITICAL. Round 2 made the FULL stop-proof count the
+    CORE slice — the FOOTER's *display* partition — and thereby stopped
+    counting the tickets a full-authority box is the ONLY one able to move.
+
+    Live on zbynekdrlik/odoo-erp 2026-07-30: 83 open non-skip, 40 core, and
+    #2396/#2377 carry `stream:montalu` AND `needs-gatekeeper`, so they are
+    invisible to a core-only count while being actionable by nobody else.
+    The gatekeeper closes its 40, the proof prints 0, the loop stops, and
+    those tickets stay blocked on the box that just stopped.
+
+    The three places in this skill that contradicted the round-2 proof are
+    reconciled here in the same change, so SELECTION and the STOP-PROOF can
+    never again disagree about what "done" means on a full-authority box."""
+
+    def test_the_full_template_no_longer_claims_it_never_touches_stream_work(self):
+        # The prose was false as written: for fork-no-merge streams the
+        # maintainer MUST touch those tickets (review, merge, close), and for
+        # `needs-gatekeeper` the maintainer is the ONLY one who can.
+        line = goal_lines()[FULL]
+        self.assertNotIn("I never touch those, their own box works them", line)
+
+    def test_the_full_template_scopes_the_proof_to_the_obligation_set(self):
+        line = goal_lines()[FULL]
+        self.assertIn("OBLIGED to action", line)
+        for label in ("needs-gatekeeper", "prio:bounce"):
+            self.assertIn(label, line)
+
+    def test_the_full_template_says_a_stream_ticket_is_actioned_not_implemented(self):
+        # Counting a stream ticket must not turn into WORKING it — that is
+        # the other half of the same reconciliation.
+        line = goal_lines()[FULL]
+        self.assertIn("NOT mine to implement", line)
+
+    def test_the_full_template_finally_carries_a_review_watch_clause(self):
+        # It was the only one of the three without one, so nothing kept the
+        # gatekeeper's loop alive while the other side held the ball
+        # (cross-stream protocol rule 4).
+        line = goal_lines()[FULL]
+        self.assertIn("REVIEW-WATCH", line)
+
+    def test_the_backlog_scope_bullet_no_longer_contradicts_the_proof(self):
+        # `autopilot-skip is the ONLY exclusion` read as a whole-repo
+        # selection, which disagreed with a core-scoped stop-proof.
+        t = read(SKILL)
+        i = t.index("**Backlog scope")
+        bullet = t[i:i + 1200]
+        self.assertIn("needs-gatekeeper", bullet)
+        self.assertIn("core-quals --list", bullet)
+
+    def test_cross_stream_rule_four_records_the_mechanical_hold(self):
+        t = read(SKILL)
+        i = t.index("Neither side ever \"finishes\" while the other")
+        window = t[i:i + 900]
+        self.assertIn("core-quals", window)
+        self.assertIn("needs-gatekeeper", window)
+
+
 class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
     """A template Claude Code REFUSES protects nothing (#169).
 
