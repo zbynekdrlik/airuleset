@@ -2053,6 +2053,25 @@ def _await_stash_bare(pid, run, sleep_fn):
     return cap, False
 
 
+def _await_draft_visible(pid, run, sleep_fn):
+    """Poll (bounded) for the box to show a NON-EMPTY input line again — the
+    structural complement of `_await_stash_bare` (which polls for the
+    opposite: bare-with-marker). Used to VERIFY that a restoring/corrective
+    `C-s` genuinely brought a draft back into view (#176 R3) instead of
+    trusting an unchecked restore blindly — a raced render can lag a toggle
+    landing here exactly as it can for the original stash, so this is a
+    render-SETTLE poll too, never a blind timeout: it returns the instant the
+    box agrees. Returns (last_capture, visible_bool)."""
+    cap = None
+    for i in range(STASH_VERIFY_SETTLE_POLLS):
+        cap = capture_pane(pid, run, lines=30)
+        if _input_line_text(cap):
+            return cap, True
+        if i < STASH_VERIFY_SETTLE_POLLS - 1:
+            sleep_fn(STASH_VERIFY_SETTLE_S)
+    return cap, False
+
+
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     """Deliver `text` into a pane that is IDLE but holds a foreign draft.
 
@@ -2069,12 +2088,21 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
       4. Ctrl+S stashes the draft. Poll (bounded, render-SETTLE — never a
          blind timeout) for the box to go bare with the `› stashed`
          indicator lit; an immediate capture can lag behind the toggle
-         actually landing. Still unverified after the settle window →
-         best-effort RESTORE (one more Ctrl+S, outcome unchecked — same
-         "return False regardless" philosophy as step 5's own abort-restore
-         below) and abort: an unsettled false-negative here used to
-         silently strand the user's draft in the invisible stash slot with
-         no delivered turn left to auto-restore it (#176 F4).
+         actually landing. Still unverified after the settle window → send a
+         best-effort restoring Ctrl+S and VERIFY IT (another bounded settle
+         poll for the input line to show non-empty text again) before
+         aborting — an unverified false-negative here used to silently
+         strand the user's draft in the invisible stash slot with no
+         delivered turn left to auto-restore it (#176 F4). That restore is
+         itself ambiguous whenever the FIRST Ctrl+S was genuinely LOST
+         rather than merely render-lagged: the restore is then the FIRST
+         real toggle CC ever receives, and it just genuinely stashes the
+         draft for real (the pre-#176-F4 base was accidentally safe here
+         only because it never sent this second keystroke at all). If the
+         verify still shows no draft after the restore, ONE corrective
+         Ctrl+S undoes it and is verified again the same way, and the
+         outcome (recovered or not) is logged honestly either way (#176 R3)
+         — never a blind, unchecked restore.
       5. Type `text` literally, re-capture, verify the boundary line is `❯` +
          a TAIL of `text` (a wrapped input renders its tail at the
          boundary). Verify failure → ABORT-RESTORE: Ctrl+S pops the stashed
@@ -2114,7 +2142,23 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     if not bare_ok:
         _log("stash-abort: verify-bare-failed")
         run(["tmux", "send-keys", "-t", pid, "C-s"])      # best-effort restore (#176 F4)
-        capture_pane(pid, run, lines=30)
+        # #176 R3: the restore above is ambiguous. If the FIRST Ctrl+S merely
+        # render-lagged (already toggled server-side), THIS restore correctly
+        # un-stashes it and the draft becomes visible again. If the FIRST
+        # Ctrl+S was genuinely LOST (never toggled anything), THIS restore is
+        # actually the first real toggle — it just genuinely stashed the
+        # draft for real, with no delivered turn ever coming to auto-restore
+        # it. VERIFY which one happened instead of trusting the restore
+        # blindly: if the draft is still not visible after a full settle
+        # window, send ONE corrective toggle to undo it and verify that
+        # actually worked too, logging the final outcome honestly either way.
+        _, draft_back = _await_draft_visible(pid, run, sleep_fn)
+        if not draft_back:
+            _log("stash-abort: draft-still-hidden — sending a corrective toggle")
+            run(["tmux", "send-keys", "-t", pid, "C-s"])
+            _, draft_back = _await_draft_visible(pid, run, sleep_fn)
+        _log("stash-abort: draft-recovered" if draft_back
+             else "stash-abort: draft-still-not-visible-after-2-restores")
         return False
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=30)
@@ -7761,6 +7805,41 @@ class _FlushList(list):
         return self
 
 
+def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
+                            grace, reason, owner, dry_run, skip_label):
+    """Shared bounded escalation for EVERY job-1 skip path that could not
+    verify a stash delivery this poll for an idle-with-a-draft pane — an
+    ABORTED stash (`deliver_with_stash` returning False, #176 F1) or a RACED
+    re-classification (the fresh capture no longer agrees with idle-with-draft
+    between the top-of-sweep capture and the send, #176 REOPENED R2). Both
+    are structurally the SAME shape from the escalation's point of view: no
+    keystroke was sent this poll and delivery could not be verified, so BOTH
+    share the SAME dedicated `apierr-stashabort:` state record — a single
+    episode gets job 4's escalation shape (exactly one deduped ping once the
+    stall runs strictly past 2x grace of WALL CLOCK, never live transcript
+    idle — the #176 F2 anchor, extended here) regardless of which of the two
+    reasons kept recurring. `state[key]` (the decide()-tracked nudge/backoff
+    entry) is never touched here — only this dedicated bookkeeping key — so
+    NEITHER skip path ever burns a retry."""
+    skey = "apierr-stashabort:" + key
+    sb = state.get(skey) or {"first_seen": int(now - idle), "pinged": False}
+    sb["last_seen"] = int(now)
+    state[skey] = sb
+    logs.append("%s %s [%s] (%s)" % (skip_label, project or pid, key, reason))
+    if not sb["pinged"] and (now - sb["first_seen"]) > 2 * grace:
+        sb["pinged"] = True
+        logs.append("stash-abort-wedged (api-error) %s [%s] (%s) "
+                    "— ping only (never a raw keystroke)"
+                    % (project, key, reason))
+        send_fn("\U0001f6d1 **%s** — API chyba drží pane s "
+                "rozpísaným draftom, no doručenie zlyhalo (%s) "
+                "— over ju prosím ručne."
+                % (project, reason),
+                owner=owner,
+                dedup_key="apierr-stashabort:%s:%s" % (key, sb["first_seen"]),
+                dry_run=dry_run)
+
+
 # --------------------------------------------------------------------------- #
 # One poll cycle
 # --------------------------------------------------------------------------- #
@@ -8364,11 +8443,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     if boundary_kind == "input" and boundary_txt:
                         draft_pending = True
                     else:
-                        # Genuinely busy (or no boundary at all) → NEVER type. Silence
-                        # must become impossible (#176 item 2): job 4's own escalation
-                        # shape (a dedicated state record + exactly ONE ping per episode,
-                        # below in this same function) — so a 529 pane can never again go
-                        # silent with no keystroke and no ping. A DEDICATED state prefix
+                        # Genuinely busy (or no boundary at all) → NEVER type. THIS
+                        # BRANCH is bounded to at most one ping (#176 item 2): job
+                        # 4's own escalation shape (a dedicated state record +
+                        # exactly ONE ping per episode, below in this same
+                        # function) fires once the stall runs strictly past 2x
+                        # grace of wall clock. (#176 R1: this comment used to
+                        # over-claim, presenting THIS one branch's own bound as if
+                        # it were a system-wide guarantee — false at the time it
+                        # was written: the separate stash-abort/raced skip further
+                        # below (in this same function) had no bound of its own
+                        # until the reopened pass gave it the identical shape; see
+                        # its own comment for what it covers.) A DEDICATED state prefix
                         # ("apierr-busypane:", not job 4's own "busypane:") keeps the two
                         # independent episodes from ever clobbering each other's
                         # bookkeeping for the same session. Logging the classified kind +
@@ -8453,8 +8539,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         fresh = capture_pane(pid, run, lines=30)
                         fkind, ftxt = _classify_boundary(fresh)
                         if fkind != "input" or not ftxt:
-                            logs.append("skip raced (api-error stash) %s [%s]"
-                                        % (project or pid, key))
+                            # #176 REOPENED R2: this "raced" mismatch used to
+                            # `continue` bare — no state, no ping, no bound —
+                            # a THIRD stateless skip path, structurally the
+                            # same shape this ticket removed from the busy
+                            # and stash-abort branches. It shares the SAME
+                            # `apierr-stashabort:` episode as an aborted
+                            # stash (below): both mean "delivery could not be
+                            # verified for this pane, this poll", the same
+                            # granularity the eventual ping's reason text
+                            # already distinguishes.
+                            _apierr_stashabort_skip(
+                                state, logs, send_fn, project, pid, key, now,
+                                idle, grace, "raced: pane moved since the "
+                                "sweep's own top-of-sweep capture", owner,
+                                dry_run, "skip raced (api-error stash)")
                             continue
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
@@ -8473,24 +8572,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             # named in the ping text.
                             reason = (logs[-1] if len(logs) > _logs_before
                                      else "stash-abort: unknown")
-                            skey = "apierr-stashabort:" + key
-                            sb = state.get(skey) or {"first_seen": int(now - idle), "pinged": False}
-                            sb["last_seen"] = int(now)
-                            state[skey] = sb
-                            logs.append("skip stash-abort (api-error) %s [%s] (%s)"
-                                        % (project or pid, key, reason))
-                            if not sb["pinged"] and (now - sb["first_seen"]) > 2 * grace:
-                                sb["pinged"] = True
-                                logs.append("stash-abort-wedged (api-error) %s [%s] (%s) "
-                                            "— ping only (never a raw keystroke)"
-                                            % (project, key, reason))
-                                send_fn("\U0001f6d1 **%s** — API chyba drží pane s "
-                                        "rozpísaným draftom, no doručenie zlyhalo (%s) "
-                                        "— over ju prosím ručne."
-                                        % (project, reason),
-                                        owner=owner,
-                                        dedup_key="apierr-stashabort:%s:%s" % (key, sb["first_seen"]),
-                                        dry_run=dry_run)
+                            _apierr_stashabort_skip(
+                                state, logs, send_fn, project, pid, key, now,
+                                idle, grace, reason, owner, dry_run,
+                                "skip stash-abort (api-error)")
                             continue
                         state[key] = entry
                         logs.append("nudge#%d %s [%s] (stash)" % (n, project, key))
