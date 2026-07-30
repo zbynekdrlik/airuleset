@@ -259,7 +259,15 @@ class TestStuckMainSweep(unittest.TestCase):
                            git_fetch=lambda root: fetched.append(root))
         self.assertEqual(fetched, [str(r)])
 
-    def test_git_fetch_error_is_logged_not_raised(self):
+    def test_git_fetch_error_is_logged_and_skips_the_repo(self):
+        """#172 (reopened) finding 5: a failed fetch means the local refs
+        MAY BE STALE -- measuring stuck-main on them anyway is a
+        false-positive generator (a repo merely behind a slow link would
+        read as stuck-main). The repo must be skipped entirely for this
+        sweep, never pinged on data that might be stale. (This corrects the
+        original #172 fix's own test, which asserted the OPPOSITE -- that
+        the job "still measures + pings despite the fetch failure" -- as
+        desired; that was the exact defect the reopened review found.)"""
         r = _make_repo(self.tmp, "y", base_ts=NOW - 6 * DAY, undelivered=25)
 
         def boom(root):
@@ -267,9 +275,10 @@ class TestStuckMainSweep(unittest.TestCase):
         logs = wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
                                    repo_roots=[str(r)], git_fetch=boom)
         self.assertTrue(any("git-fetch-error" in line for line in logs))
-        # the job still measures + pings despite the fetch failure --
-        # degrades to the local-only heuristic rather than going silent.
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(
+            self.sent, [],
+            "a fetch failure must skip the repo, never ping on refs that "
+            "may be stale")
 
     def test_second_sweep_within_interval_is_a_noop(self):
         r = _make_repo(self.tmp, "x", base_ts=NOW - 6 * DAY, undelivered=25)
@@ -405,6 +414,162 @@ class TestCadencePersistedBeforeKill_172(unittest.TestCase):
             "marker already shows this hour as swept")
 
 
+class TestMarkerPersistedBeforeRepoRoots_172(unittest.TestCase):
+    """#172 (reopened) finding 4: the cadence marker must reach DISK BEFORE
+    `repo_roots()` itself runs (an `os.walk($HOME)`, executed once per due
+    sweep) -- not merely before the per-repo network loop. A kill inside
+    the walk used to lose the marker exactly like a kill inside the loop
+    did (the original #172 fix only moved the persist point ahead of the
+    loop, not ahead of `repo_roots()`)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-f4-172-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_path = self.tmp / "state.json"
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        return "sent"
+
+    def test_job27_marker_persists_even_when_repo_roots_itself_is_killed(self):
+        def killed_repo_roots():
+            raise SystemExit("simulated kill during os.walk")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path,
+                       repo_roots=killed_repo_roots,
+                       issue_counts_fetch=lambda label, w: (40, 5))
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "net_drift_last_sweep", on_disk,
+            "the cadence marker must persist BEFORE repo_roots() runs -- a "
+            "kill inside the os.walk itself must not lose it either")
+
+    def test_job28_marker_persists_even_when_repo_roots_itself_is_killed(self):
+        def killed_repo_roots():
+            raise SystemExit("simulated kill during os.walk")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path,
+                       repo_roots=killed_repo_roots)
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "stuck_main_last_sweep", on_disk,
+            "the cadence marker must persist BEFORE repo_roots() runs -- a "
+            "kill inside the os.walk itself must not lose it either")
+
+
+class TestDedupPersistedBeforeThePing_172(unittest.TestCase):
+    """#172 (reopened) finding 3: dedup memory (duplicate-ping suppression)
+    must reach DISK the MOMENT a ping fires, not only at the very end of
+    the per-repo loop -- mirroring jobs 8/11's own "dedup memory BEFORE
+    the ping" shape, which the original #172 fix had copied only half of
+    (the cadence stamp, not the per-repo dedup write). Before this fix, a
+    kill between two pings in the same sweep lost the FIRST repo's dedup
+    entry entirely, so it re-pinged on its next rotation -- crossing
+    `notify.send`'s own daily dedup bucket, i.e. a duplicate Discord
+    alert."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-f3-172-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.state_path = self.tmp / "state.json"
+        self.sent = []
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append(msg)
+        return "sent"
+
+    def test_net_drift_first_repos_dedup_survives_a_kill_on_the_second(self):
+        def fetch(label, window_s):
+            if label == "b":
+                raise SystemExit("simulated kill mid-fetch on repo b")
+            return (40, 5)   # repo "a" -- above threshold, pings first
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path,
+                       repo_roots=["/repos/a", "/repos/b"],
+                       issue_counts_fetch=fetch)
+        self.assertEqual(len(self.sent), 1,
+                         "repo a must have pinged before repo b's kill")
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "a", on_disk.get("net_drift", {}),
+            "repo a's dedup entry (already pinged) must have reached disk "
+            "BEFORE repo b's fetch even started -- a kill there must not "
+            "lose it, or repo a re-pings on its next rotation")
+
+    def test_stuck_main_first_repos_dedup_survives_a_kill_on_the_second(self):
+        r = _make_repo(self.tmp, "aa", base_ts=NOW - 6 * DAY, undelivered=25)
+
+        def killed_fetch(root):
+            if root.endswith("bb"):
+                raise SystemExit("simulated kill mid-fetch on repo bb")
+
+        with self.assertRaises(SystemExit):
+            wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
+                       state_path=self.state_path,
+                       repo_roots=[str(r), str(self.tmp / "bb")],
+                       git_fetch=killed_fetch)
+        self.assertEqual(len(self.sent), 1,
+                         "repo aa must have pinged before repo bb's kill")
+        on_disk = wd.load_state(self.state_path)
+        self.assertIn(
+            "aa", on_disk.get("stuck_main", {}),
+            "repo aa's dedup entry (already pinged) must have reached disk "
+            "BEFORE repo bb's fetch even started")
+
+
+class TestDedupMemoryAges_172(unittest.TestCase):
+    """#172 (reopened) smaller item: a dedup entry used to be kept FOREVER
+    once its repo stopped appearing in `repo_roots()` at all (deleted,
+    renamed, or moved past `discover_managed_repos`' max_depth) -- "not
+    touched this sweep" was true both for a repo merely sitting out the
+    round-robin batch (must survive, see TestBatchingPreservesUntouchedDedup)
+    and for a repo that is simply gone (should eventually be forgotten),
+    and the old pruning filter could not tell them apart. Age entries out
+    past DEDUP_MEMORY_MAX_AGE_S instead."""
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        return "sent"
+
+    def test_net_drift_stale_entry_for_a_vanished_repo_is_pruned(self):
+        state = {"net_drift": {"gone": {
+            "pinged_ts": NOW - wd.DEDUP_MEMORY_MAX_AGE_S - DAY}}}
+
+        def fetch(label, window_s):
+            return (5, 5)   # below threshold -- never re-adds "gone" itself
+
+        wd.net_drift_alarm(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/other"], issue_counts_fetch=fetch)
+        self.assertNotIn("gone", state.get("net_drift", {}))
+
+    def test_net_drift_recent_untouched_entry_survives(self):
+        state = {"net_drift": {"sits-out": {"pinged_ts": NOW - DAY}}}
+
+        def fetch(label, window_s):
+            return (5, 5)
+
+        wd.net_drift_alarm(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/other"], issue_counts_fetch=fetch)
+        self.assertIn("sits-out", state.get("net_drift", {}))
+
+    def test_stuck_main_stale_entry_for_a_vanished_repo_is_pruned(self):
+        state = {"stuck_main": {"gone": {
+            "pinged_ts": NOW - wd.DEDUP_MEMORY_MAX_AGE_S - DAY}}}
+        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/other"], git_fetch=None)
+        self.assertNotIn("gone", state.get("stuck_main", {}))
+
+    def test_stuck_main_recent_untouched_entry_survives(self):
+        state = {"stuck_main": {"sits-out": {"pinged_ts": NOW - DAY}}}
+        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/other"], git_fetch=None)
+        self.assertIn("sits-out", state.get("stuck_main", {}))
+
+
 class TestRepoSweepBatch172(unittest.TestCase):
     """#172 fix (2): bound how many repos ONE sweep touches, with a
     round-robin cursor in state so coverage still rotates over successive
@@ -445,30 +610,96 @@ class TestRepoSweepBatch172(unittest.TestCase):
             batch = wd._repo_sweep_batch(repos, state, "k")
         self.assertEqual(len(batch), 2)
 
+    def test_env_override_of_zero_clamps_to_the_default_not_all_repos(self):
+        """#172 (reopened) finding 2: `AIRULESET_REPO_SWEEP_BATCH=0` (the
+        obvious spelling for "disable batching") must NOT silently sweep
+        the FULL repo list -- that re-arms the exact 40-repo-in-one-sweep
+        cost the cap exists to prevent, via the knob an operator disabling
+        batching is most likely to reach for."""
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        with unittest.mock.patch.dict(os.environ,
+                                      {"AIRULESET_REPO_SWEEP_BATCH": "0"}):
+            batch = wd._repo_sweep_batch(repos, state, "k")
+        self.assertEqual(len(batch), wd.REPO_SWEEP_BATCH_MAX)
+
+    def test_env_override_of_negative_also_clamps(self):
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        with unittest.mock.patch.dict(os.environ,
+                                      {"AIRULESET_REPO_SWEEP_BATCH": "-5"}):
+            batch = wd._repo_sweep_batch(repos, state, "k")
+        self.assertEqual(len(batch), wd.REPO_SWEEP_BATCH_MAX)
+
+    def test_explicit_max_repos_zero_also_clamps(self):
+        repos = ["/r/%d" % i for i in range(10)]
+        state = {}
+        batch = wd._repo_sweep_batch(repos, state, "k", max_repos=0)
+        self.assertEqual(len(batch), wd.REPO_SWEEP_BATCH_MAX)
+
+    def test_short_list_fast_path_does_not_reset_the_cursor(self):
+        """#172 (reopened) smaller item: a short repo list (batch >= repo
+        count -- here because max_repos is large, but the same branch a
+        TRANSIENT short `discover_managed_repos` result would also take)
+        must leave the cursor untouched, not rewind it to 0. A mount
+        hiccup that makes one sweep see only 2 repos instead of 40 must
+        not restart the whole rotation once the real count returns."""
+        state = {"k": 7}
+        wd._repo_sweep_batch(["/r/a", "/r/b"], state, "k", max_repos=5)
+        self.assertEqual(
+            state.get("k"), 7,
+            "the short-list fast path must not rewind an existing cursor")
+
+    def test_n_zero_also_does_not_reset_an_existing_cursor(self):
+        state = {"k": 3}
+        wd._repo_sweep_batch([], state, "k", max_repos=5)
+        self.assertEqual(state.get("k"), 3)
+
 
 class TestBatchingPreservesUntouchedDedup_172(unittest.TestCase):
     """#172: when a sweep only touches a ROUND-ROBIN BATCH of the full repo
     list, a repo sitting OUT this sweep must keep its existing dedup memory
     -- the original pruning rule (`seen if k in live`) silently assumed
     every repo was re-measured every sweep, which stopped being true once
-    batching was added."""
+    batching was added.
+
+    #172 (reopened): the original version of this test passed
+    `repo_roots=["/repos/x"]` -- ONE repo -- with `max_repos=1`, so
+    `_repo_sweep_batch` takes its `max_repos >= n` FULL-LIST fast path
+    (n=1) and the round-robin sit-out this test's own docstring claims to
+    exercise never actually happens; "o/untouched" (a label that never even
+    appears in `repo_roots`) survives for the trivial reason that it was
+    never a candidate at all, not because batching preserved it. Two repo
+    roots with `max_repos=1` is what actually forces one of them to sit out
+    a real round-robin batch."""
 
     def send(self, msg, owner=None, dedup_key=None, dry_run=False):
         return "sent"
 
-    def test_net_drift_untouched_repo_keeps_its_pinged_state(self):
-        state = {"net_drift": {"o/untouched": {"pinged_ts": NOW - 10}}}
+    def test_net_drift_repo_that_sits_out_the_batch_keeps_its_pinged_state(self):
+        state = {"net_drift": {"untouched": {"pinged_ts": NOW - 10}}}
 
         def fetch(label, window_s):
             return (40, 5)   # net well above threshold -> would re-ping
 
-        # batch of exactly 1, repo list has 2 -- "o/untouched" sits out.
+        # TWO repo roots, batch of exactly 1 -- one of them genuinely sits
+        # out this sweep's round-robin batch. `_repo_label` with no remote
+        # falls back to the basename; sorted() puts "/repos/touched" first
+        # ('t' < 'u'), so the default cursor=0 batch touches ONLY it and
+        # "/repos/untouched" (label "untouched") genuinely sits out.
         wd.net_drift_alarm(NOW, state, send_fn=self.send,
-                           repo_roots=["/repos/x"],
+                           repo_roots=["/repos/touched", "/repos/untouched"],
                            issue_counts_fetch=fetch, max_repos=1)
-        # A repo never even in repo_roots this call can't be "touched" by
-        # definition -- assert its prior dedup entry survived untouched.
-        self.assertIn("o/untouched", state.get("net_drift", {}))
+        # A repo genuinely sitting out this sweep's batch (not touched, but
+        # still a candidate in repo_roots) must keep its prior dedup entry.
+        self.assertIn("untouched", state.get("net_drift", {}))
+
+    def test_stuck_main_repo_that_sits_out_the_batch_keeps_its_pinged_state(self):
+        state = {"stuck_main": {"y": {"pinged_ts": NOW - 10}}}
+        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
+                           repo_roots=["/repos/y", "/repos/x"],
+                           git_fetch=None, max_repos=1)
+        self.assertIn("y", state.get("stuck_main", {}))
 
 
 class TestIncrementalLogFlush172(unittest.TestCase):

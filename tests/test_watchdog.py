@@ -888,6 +888,54 @@ class SessionLimitDetector(unittest.TestCase):
     def test_parse_missing_time_returns_none(self):
         self.assertIsNone(wd.parse_reset_epoch("You've hit your session limit", 0))
 
+    # --- #172 carried over from #175/#176's own closing pass: the WEEKLY
+    # cap banner names an explicit CALENDAR DATE ahead of the clock
+    # ("resets Jul 31, 9pm"), not just a bare time-of-day. The old regex
+    # required a digit immediately after "resets "/"resets at ", so this
+    # form matched `is_usage_cap` (bounded, #175 F2) but `parse_reset_epoch`
+    # returned None — job 6 could ping once but never compute a resume
+    # instant, so it never auto-resumed even once the real reset passed.
+    def test_dated_weekly_reset_parses_the_named_date(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Prague")
+        now = datetime(2026, 7, 26, 10, 0, tzinfo=tz).timestamp()
+        epoch = wd.parse_reset_epoch(
+            "You've hit your weekly limit · resets Jul 31, 9pm (Europe/Prague)",
+            now)
+        self.assertIsNotNone(epoch)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M")
+        self.assertEqual(got, "2026-07-31 21:00")
+
+    def test_dated_reset_far_in_the_past_this_year_rolls_to_next_year(self):
+        # "resets Jan 2, ..." seen in December must mean NEXT January, not a
+        # date that already passed 11 months ago this year.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Prague")
+        now = datetime(2026, 12, 20, 10, 0, tzinfo=tz).timestamp()
+        epoch = wd.parse_reset_epoch(
+            "You've hit your weekly limit · resets Jan 2, 9am (Europe/Prague)",
+            now)
+        self.assertIsNotNone(epoch)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%Y-%m-%d %H:%M")
+        self.assertEqual(got, "2027-01-02 09:00")
+
+    def test_dated_reset_does_not_break_the_existing_time_only_forms(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 8, 0, tzinfo=tz).timestamp()
+        for banner, expect in (
+                ("resets 11:20pm (Europe/Prague)", "23:20"),
+                ("resets 12pm (Europe/Prague)", "12:00"),
+                ("resets 11am (Europe/Prague)", "11:00"),
+                ("resets at 18:10 (Europe/Prague)", "18:10")):
+            epoch = wd.parse_reset_epoch(banner, now)
+            self.assertIsNotNone(epoch, "banner %r" % banner)
+            got = datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+            self.assertEqual(got, expect, "banner %r" % banner)
+
     # --- FIX A: gk incident 2026-07-24 — a UTC-hosted box's banner reads
     # "resets 4:40pm (UTC)". The old `_RESET_TZ_RX` only matched "Area/City"
     # (e.g. "Europe/Prague"), so a bare "(UTC)" fell through to the

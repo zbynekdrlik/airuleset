@@ -18,6 +18,8 @@ WITHOUT `--verbose`, and `cmd_watchdog` only printed job logs under that flag
 
 import io
 import contextlib
+import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -28,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 import watchdog as wd
+
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 # Verbatim pane snapshot from issue #36's report (2026-07-25), copied
 # byte-for-byte from the live capture (incl. the exact ● / ◯ glyphs — the
@@ -311,9 +315,16 @@ class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
                 airuleset.cmd_watchdog(NoVerboseArgs())
         self.assertIn("job-decision-y", buf.getvalue())
 
-    def test_run_once_is_wired_with_log_fn_print(self):
-        """Locks the wiring itself -- without `log_fn=print`, a sweep killed
-        mid-way would print nothing at all (the #172 incident)."""
+    def test_run_once_is_wired_with_a_flushing_log_fn(self):
+        """#172 REOPENED finding 1: `captured.get('log_fn') is print` locked
+        in the exact regression it should have caught -- a BARE `print` does
+        NOT flush, so under systemd's piped, non-tty stdout the "prints
+        nothing when killed" symptom this whole fix exists to remove
+        survived byte-for-byte. Assert the WIRED callable is NOT the bare
+        builtin (a real behavioural difference, not just an identity
+        swap) -- the actual flushing BEHAVIOUR is proven separately below,
+        through a real pipe + SIGTERM, which is the only way to observe it
+        (unittest.mock captures never exercise a real OS pipe buffer)."""
         captured = {}
 
         def fake(*a, **kw):
@@ -321,7 +332,68 @@ class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
             return []
         with m.patch.object(wd, "run_once", side_effect=fake):
             airuleset.cmd_watchdog(self._Args())
-        self.assertIs(captured.get("log_fn"), print)
+        log_fn = captured.get("log_fn")
+        self.assertIsNotNone(log_fn)
+        self.assertIsNot(
+            log_fn, print,
+            "log_fn must not be the bare `print` builtin -- it does not "
+            "flush under a piped, non-tty stdout (systemd), so a killed "
+            "sweep prints nothing at all, reproducing the #172 incident")
+
+    def test_log_fn_survives_a_sigterm_under_a_real_pipe(self):
+        """#172 REOPENED finding 1, measured exactly like the reopen review
+        did: `print('x')` + SIGTERM 1s later captures '' under a real OS
+        pipe (systemd's own stdout shape -- non-tty, so CPython
+        block-buffers it); `print('x', flush=True)` + the same SIGTERM
+        captures 'x'. This drives the REAL `cmd_watchdog` wiring (run_once
+        mocked to log one line then block, exactly like a hung per-repo
+        network call would) in a REAL subprocess with a REAL pipe for
+        stdout, then SIGTERMs it -- the only way to observe whether a
+        decision line genuinely reached the journal before a kill, since
+        unittest.mock's in-process capture never touches an OS buffer at
+        all."""
+        script = f"""
+import sys, time
+sys.path.insert(0, {REPO_ROOT!r})
+import unittest.mock as m
+import airuleset
+import watchdog as wd
+
+def fake(*a, **kw):
+    log_fn = kw.get("log_fn")
+    if log_fn:
+        log_fn("PIPE-FLUSH-PROBE-172")
+    time.sleep(15)      # stay alive so the parent can SIGTERM mid-sleep
+    return []
+
+class Args:
+    dry_run = False
+    verbose = False
+
+with m.patch.object(wd, "run_once", side_effect=fake):
+    airuleset.cmd_watchdog(Args())
+"""
+        proc = subprocess.Popen([sys.executable, "-c", script],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        try:
+            time.sleep(1.5)   # give the child time to import + print
+            proc.send_signal(signal.SIGTERM)
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertIn(
+            b"PIPE-FLUSH-PROBE-172", out,
+            "the decision line must survive a SIGTERM delivered while the "
+            "process is alive but blocked (mid per-repo network call) -- "
+            "under systemd's real piped stdout, a non-flushing log_fn "
+            "loses it exactly like the #172 incident (stderr: %r)" % err)
 
 
 if __name__ == "__main__":
