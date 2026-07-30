@@ -3187,5 +3187,139 @@ class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
             probe._expect_one(home, "RECORD", sid="sup-t3")
 
 
+# --------------------------------------------------------------------------- #
+# #188 — a boundary the SUPERVISOR never consumed is not yet a safe boundary
+# --------------------------------------------------------------------------- #
+
+def _write_api_error_transcript(base, cwd, sid, text="API Error: 529 Overloaded",
+                                ctx_tokens=300_000):
+    """A transcript whose last real assistant entry is Claude Code's own
+    api-error message (`isApiErrorMessage: true`) — the shape job 1 already
+    keys its auto-resume on, written here so the delivery-time gate can read
+    the SAME fact."""
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    entry = {"type": "assistant", "isApiErrorMessage": True,
+             "message": {"id": "msg_1", "content": text,
+                         "usage": {"cache_read_input_tokens": ctx_tokens,
+                                   "cache_creation_input_tokens": 0}}}
+    p.write_text(json.dumps(entry) + "\n")
+    return p
+
+
+class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
+    """#188 (montalu@subdev, 2026-07-30). `background_tasks` was empty and the
+    boundary predicate was right — but the supervisor turn that would have READ
+    the worker evidence block died on `API Error: 529 Overloaded` first, so the
+    session compacted at the one moment its most recent result was unprocessed.
+
+    The proven-boundary justification is that a completed ticket durable state
+    already lives in git/GitHub. That holds for a ticket the supervisor
+    VERIFIED; verification is exactly the step that had not happened. Normally
+    it HAS happened by delivery time, because CC drains its type-ahead queue
+    only at a turn boundary, so the supervisor next turn runs before the queued
+    `/compact` — a turn that dies on a 529 is precisely the case that skips it.
+
+    Neither existing gate can see this: `_compact_not_at_boundary` reads only
+    the `⏳`/`❓` status marker, and an api-error turn carries neither.
+
+    Every case below drives a REAL entry point (`deliver_compact_now`, job 14)
+    rather than the new predicate directly, so a pre-fix run fails on the
+    VALUE — never merely on a missing symbol, which would prove nothing."""
+
+    SID = "sess-unresumed-1"
+    CWD = "/home/newlevel/devel/unresumedproj"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _p(self):
+        f = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        f.close()
+        self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
+        return f.name
+
+    def _deliver(self, proj, origin="subagent-stop"):
+        tmux = DeliverCompactNowFakeTmux(
+            [(self.PANE, "claude", self.CWD, "111")], CB_IDLE_CAP)
+        out = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                     projects_dir=proj, origin=origin)
+        return out, tmux
+
+    # ---- the reported incident --------------------------------------- #
+
+    def test_an_api_error_turn_defers_the_send(self):
+        proj = self._dir()
+        _write_api_error_transcript(proj, self.CWD, self.SID)
+        out, tmux = self._deliver(proj)
+        self.assertEqual(out, "")
+        self.assertEqual(tmux.sent, [],
+                         "typed /compact into a session that never read the"
+                         " worker evidence block")
+
+    def test_job14_leaves_the_request_in_place_to_retry(self):
+        """It DEFERS, it does not drop: the entry must survive so the next
+        sweep delivers it once job 1 `continue` has resumed the session."""
+        proj = self._dir()
+        _write_api_error_transcript(proj, self.CWD, self.SID)
+        path = self._p()
+        wd.record_compact_request(self.SID, self.CWD, path=path,
+                                  origin="subagent-stop")
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(time.time(), tmux, {},
+                                   {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                   path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIn(self.SID, json.loads(Path(path).read_text()),
+                      "the request was consumed instead of deferred")
+
+    # ---- positive controls: nothing else changed --------------------- #
+
+    def test_a_resumed_session_still_sends(self):
+        """The proof this defers rather than drops: the same request goes
+        through the moment a real assistant turn exists again — which is
+        exactly what job 1 `continue` produces."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: ticket hotový")
+        out, tmux = self._deliver(proj)
+        self.assertEqual(out, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_a_turn_with_no_error_evidence_still_sends(self):
+        """Only POSITIVE evidence of an unconsumed result defers — a turn that
+        simply carries no marker and no error is not an error, the same
+        fail-direction every other compact gate uses. (The no-transcript-at-all
+        branch is the `_transcript_for_session(...) is None` guard the sibling
+        gates share; it is unreachable through this entry point, because the
+        pane resolver itself matches on the transcript stem.)"""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "plain reply, no marker")
+        out, tmux = self._deliver(proj)
+        self.assertEqual(out, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_other_origins_are_untouched_by_the_new_gate(self):
+        """A plain Stop-hook request was justified by the supervisor OWN
+        `✅ DONE` turn, so its work was already consumed and reported; a later
+        529 does not retroactively invalidate that boundary. Such a request is
+        governed by the #99/#48 gates exactly as before."""
+        proj = self._dir()
+        _write_api_error_transcript(proj, self.CWD, self.SID)
+        for origin in ("", None):
+            with self.subTest(origin=origin):
+                with m.patch.object(wd, "compact_boundary_substantial",
+                                    return_value=True):
+                    out, tmux = self._deliver(proj, origin=origin)
+                self.assertEqual(out, "sent")
+                self.assertIn("/compact", tmux.typed_texts())
+
+
 if __name__ == "__main__":
     unittest.main()
