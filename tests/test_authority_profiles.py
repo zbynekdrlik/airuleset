@@ -1277,7 +1277,7 @@ class TestHeartbeatRefreshesALiveRunNeverOpensOne(TestCase):
 
 def _renamed_repo_gh(rest='[{"number": 4242}]', healthy=False,
                      workflow_state="active", newest_run="success",
-                     workflows=None):
+                     workflows=None, _NORUN=object()):
     """A `_gh_out` stand-in reproducing the LIVE renamed-repo state.
 
     Measured 2026-07-30 against a checkout whose `origin` still points at the
@@ -1299,6 +1299,11 @@ def _renamed_repo_gh(rest='[{"number": 4242}]', healthy=False,
                 {"name": "Sub-dev Handoff Label", "state": workflow_state,
                  "path": ".github/workflows/subdev-handoff-label.yml"}])
         if args and args[0] == "run":
+            if newest_run is None:
+                return "[]"                     # the workflow has never run
+            if newest_run == "in_progress":
+                return _json.dumps([{"conclusion": None,
+                                     "status": "in_progress"}])
             return _json.dumps([{"conclusion": newest_run,
                                  "status": "completed"}])
         if "sort:created-desc" in joined:
@@ -1406,17 +1411,47 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
             self.assertEqual(out.strip(), "")
             self.assertNotEqual(err.strip(), "")
 
+    def test_both_commands_route_through_the_SAME_helper(self):
+        """The assertion above is satisfied by two parallel copies, which is
+        exactly the shape this round set out to remove — so it cannot be the
+        only thing standing behind the word "identical" (adversarial review,
+        round 4). This drives both real commands and records who asked."""
+        import unittest.mock as mk
+
+        callers = []
+
+        def recorder(cmd, quals, cwd=None):
+            callers.append(cmd)
+
+        with mk.patch.object(airuleset, "_refuse_unless_empty_is_trustworthy",
+                             side_effect=recorder):
+            _drive(airuleset.cmd_core_quals, _renamed_repo_gh(healthy=True))
+            _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(healthy=True),
+                   authority="fork-no-merge", user="david", login="kvaskodev")
+        self.assertEqual(
+            sorted(callers), ["core-quals", "slice-quals"],
+            "one of the two stop-proofs does not go through the shared "
+            "refusal helper: %r" % (callers,))
+
     # ----- controls: a legitimate zero must still be reportable ------------ #
 
+    def _drive_unenrolled(self, gh):
+        """Pin the repo identity: these controls reach the hand-off gate, and
+        leaving them on the REAL `notify.repo_name_for` made them pass only
+        because this repo happens not to be enrolled in the cross-stream flow
+        — they would flip the day it was (adversarial review, round 4). A
+        control whose result depends on where it is run is not a control."""
+        import unittest.mock as mk
+        with mk.patch("notify.repo_name_for", return_value="not-enrolled"):
+            return _drive(airuleset.cmd_core_quals, gh)
+
     def test_a_healthy_index_still_lets_core_quals_report_a_real_zero(self):
-        out, _, exc = _drive(airuleset.cmd_core_quals,
-                             _renamed_repo_gh(healthy=True))
+        out, _, exc = self._drive_unenrolled(_renamed_repo_gh(healthy=True))
         self.assertIsNone(exc, "a validated zero must still be reportable")
         self.assertEqual(out.strip(), "0")
 
     def test_a_repo_with_no_open_issues_at_all_still_reports_zero(self):
-        out, _, exc = _drive(airuleset.cmd_core_quals,
-                             _renamed_repo_gh(rest="[]"))
+        out, _, exc = self._drive_unenrolled(_renamed_repo_gh(rest="[]"))
         self.assertIsNone(exc)
         self.assertEqual(out.strip(), "0")
 
@@ -1463,6 +1498,42 @@ class TestTheHandoffArmVerifiesItsOwnMechanism(TestCase):
             _renamed_repo_gh(healthy=True, workflows=[]))
         self.assertIsNotNone(exc)
         self.assertEqual(out.strip(), "")
+
+    def test_every_unsuccessful_newest_run_counts_as_broken(self):
+        """The predicate was literally `conclusion == "failure"`, so a
+        `startup_failure` / `timed_out` / `cancelled` / `action_required` run
+        passed as healthy (adversarial review, round 4). odoo-erp's live
+        failures are startup-SHAPED — the failing job records no failing STEP
+        — so this is the neighbouring spelling of the very case that motivated
+        the guard, and GitHub reports `startup_failure` as its own
+        conclusion."""
+        for conclusion in ("startup_failure", "timed_out", "cancelled",
+                           "action_required"):
+            with self.subTest(conclusion=conclusion):
+                out, _, exc = self._drive_enrolled(
+                    _renamed_repo_gh(healthy=True, newest_run=conclusion))
+                self.assertIsNotNone(
+                    exc, "a %r newest run passed as a healthy labeller"
+                    % conclusion)
+                self.assertEqual(out.strip(), "")
+
+    def test_a_labeller_that_has_never_run_is_not_evidence_either(self):
+        """An enrolled repo whose hand-off workflow has never produced a run
+        cannot have labelled any hand-off, so an empty run list is exactly as
+        much evidence as a failing one — none."""
+        out, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, newest_run=None))
+        self.assertIsNotNone(exc)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_run_still_in_progress_is_not_treated_as_broken(self):
+        """The companion control: a run in flight has a null conclusion and is
+        not evidence of breakage — refusing on it would spin the loop for the
+        duration of every labeller run."""
+        out, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, newest_run="in_progress"))
+        self.assertIsNone(exc)
+        self.assertEqual(out.strip(), "0")
 
     def test_a_healthy_labeller_still_lets_the_zero_through(self):
         out, _, exc = self._drive_enrolled(_renamed_repo_gh(healthy=True))
@@ -1620,6 +1691,33 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             "action-only", row[0],
             "a row whose labels could not be read was advertised as ordinary "
             "work — that is the dangerous direction")
+
+    def test_labels_present_but_malformed_is_also_undeterminable(self):
+        """`"labels" in row` is not enough: a `labels` value that is not a list
+        of dicts (bare strings, an explicit null) is unreadable ownership, not
+        an absence of ownership, and printing `implement` for it is the
+        dangerous direction (adversarial review, round 4)."""
+        import json as _json
+
+        for value in (["stream:david"], None, "stream:david", [None]):
+            with self.subTest(labels=value):
+                def gh(*a, _v=value, **k):
+                    args = [str(x) for x in a]
+                    if "sort:created-desc" in " ".join(args):
+                        return '[{"number": 999}]'
+                    if "--search" in args:
+                        return _json.dumps([
+                            {"number": 41, "title": "malformed ownership",
+                             "createdAt": "2026-07-01T00:00:00Z",
+                             "labels": _v}])
+                    return "[]"
+
+                out, _, exc = _drive(airuleset.cmd_core_quals, gh,
+                                     count=False, list=True)
+                self.assertIsNone(exc)
+                row = [ln for ln in out.splitlines() if ln.startswith("41\t")]
+                self.assertTrue(row, out)
+                self.assertIn("action-only", row[0])
 
     def test_my_OWN_streams_ticket_is_mine_to_implement(self):
         """A reduced-authority box's own `stream:<me>` tickets must not come
