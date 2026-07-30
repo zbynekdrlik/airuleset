@@ -3840,8 +3840,8 @@ def _stream_owner_of(labels):
     return ""
 
 
-def _row_action(labels, own_stream=None):
-    """What THIS box may do with a row: `action-only` or `implement`.
+def _row_action(row, own_stream=None):
+    """What THIS box may do with an issue row: `action-only` or `implement`.
 
     A ticket owned by a stream OTHER than this box's is in the obligation set
     because only this box can REVIEW / MERGE / CLOSE / UNBLOCK it — never
@@ -3849,8 +3849,20 @@ def _row_action(labels, own_stream=None):
     relative to this box (`own_stream`), not absolute: a reduced-authority
     stream's own `stream:<me>` tickets ARE its to implement, and an absolute
     "carries any stream label" rule would mark every row of its own slice
-    untouchable."""
-    owner = _stream_owner_of(labels)
+    untouchable.
+
+    A row with NO `labels` key at all is UNDETERMINABLE, not "unlabelled", and
+    takes the conservative side — the same `"labels" in view` discrimination
+    `_notify_run_card` already makes, and for the same reason (#181 M11: a
+    failed lookup read as the negative case silently restored a pre-existing
+    wrong behaviour). The two errors here are not symmetric: a sub-dev's
+    ticket printed `implement` invites this box to write code on a foreign
+    stream's ticket — the exact harm the column exists to prevent — while a
+    core ticket printed `action-only` merely stalls visibly. `labels: []` is a
+    genuinely unlabelled core ticket and stays `implement`."""
+    if not isinstance(row, dict) or "labels" not in row:
+        return ROW_ACTION_ONLY
+    owner = _stream_owner_of(row.get("labels"))
     if owner and owner != (own_stream or ""):
         return ROW_ACTION_ONLY
     return ROW_IMPLEMENT
@@ -3867,7 +3879,7 @@ def _print_issue_rows(rows, own_stream=None):
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
-                                  _row_action(row.get("labels"), own_stream),
+                                  _row_action(row, own_stream),
                                   row.get("title") or ""))
 
 
@@ -4192,11 +4204,23 @@ def cmd_core_quals(args):
         sys.exit(1)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
+    if not seen and not extra:
         # The `ready-for-review` arm of this set rests ENTIRELY on the repo's
         # own hand-off-label workflow (a read-role stream gets a 403 adding
         # the label itself). A zero that rests on a mechanism which may have
         # MISSED a hand-off is not evidence — same shape as C2's "validate
         # the evidence's own existence before trusting its absence of hits".
+        #
+        # `not extra` is load-bearing: with a filter (`--extra
+        # "label:prio:bounce"`, the bounce seed) the question asked is "any
+        # open bounce ticket?", and "none" is an ordinary answer that does not
+        # depend on hand-off labels at all. Gating that would refuse a
+        # legitimate result and spin the loop forever on the one repo the
+        # cross-stream flow runs on — the mirror of this ticket's own bug, not
+        # a safer version of it. The arm belongs to the UNFILTERED obligation
+        # set, which is what the stop-proof reads. (The search-index guard
+        # above stays unconditional: a dead index makes a FILTERED answer just
+        # as meaningless as an unfiltered one.)
         health, detail = _handoff_label_mechanism_health(cwd=root)
         if health not in ("ok", "n/a"):
             print(
