@@ -203,8 +203,13 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         self.assertIn("never staging/main", t.lower())
 
     def test_reduced_authority_scopes_backlog_to_assigned(self):
+        # #181: the SINGLE definition of "my slice" is `slice-quals`, never a
+        # hand-rolled --assignee @me (which silently returns 0 on a
+        # shared-gh-account stream box — montalu/marek/simap). The skill still
+        # NAMES --assignee @me, but only in prose explaining why not to use it.
         t = read(self.SKILL)
-        self.assertIn("--assignee @me", t)
+        self.assertIn("slice-quals --list", t)
+        self.assertIn("slice-quals --count", t)
 
 
 class TestWorkerCarriesProfiles(TestCase):
@@ -355,3 +360,98 @@ class TestRunCardRemainingScopedToStream(TestCase):
         m = re.search(r"ostáva (\d+)", captured["b"])
         self.assertIsNotNone(m, captured["b"])
         self.assertEqual(m.group(1), "2", captured["b"])   # slice, NOT 26
+
+
+class TestSliceQualsIsTheOneSliceDefinition(TestCase):
+    """#181: montalu@subdev's armed /goal declared the backlog EMPTY (its own
+    stop-proof printed 0) while the footer on the SAME box read 'Issues 5' —
+    a real FALSE STOP, not a labeling mismatch. Root cause: the footer's
+    `_slice_quals()` already branches on the gh LOGIN (shared-account box ->
+    the stream LABEL alone, since `@me` there resolves to the maintainer and
+    matches nothing assigned) but the /goal proof template hardcoded
+    `--assignee @me` with no such branch. `slice-quals` is the fix: ONE
+    definition, consumed by the footer AND the /goal proof, so they cannot
+    drift apart again."""
+
+    def test_shared_account_box_gets_a_nonzero_count_when_work_is_open(self):
+        # Reproduces the live montalu incident exactly: gh login == the
+        # maintainer account, an open ticket carries label:stream:montalu and
+        # is NOT assigned to anyone. --assignee @me finds nothing (the old,
+        # broken proof); slice-quals must still report it.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "assignee:@me" in j:
+                return "[]"   # the OLD proof's key — must NEVER be relied on
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "t", '
+                        '"createdAt": "2026-07-01T00:00:00Z"}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "1")
+
+    def test_slice_quals_key_matches_the_footers_key_for_a_shared_account_box(self):
+        # The single-source-of-truth guarantee: slice-quals must resolve the
+        # SAME quals _slice_quals() itself returns for THIS box, not a
+        # parallel re-implementation that could drift.
+        import unittest.mock as mk
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            self.assertEqual(airuleset._slice_quals("montalu"),
+                             ["label:stream:montalu"])
+
+    def test_own_account_box_still_unions_all_three_quals(self):
+        # david/kvaskodev (own-account) must keep the full 3-way union — a
+        # naive "just use the label" fix would under-count them.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "assignee:@me" in j:
+                return ('[{"number": 1, "title": "a", '
+                        '"createdAt": "2026-07-01T00:00:00Z"}]')
+            if "author:@me" in j:
+                return ('[{"number": 2, "title": "b", '
+                        '"createdAt": "2026-07-02T00:00:00Z"}]')
+            if "label:stream:david" in j:
+                return ('[{"number": 2, "title": "b", '
+                        '"createdAt": "2026-07-02T00:00:00Z"}]')   # dup of #2
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "2")   # {1, 2} unioned, not 3
+
+    def test_a_failed_gh_query_never_prints_zero(self):
+        # The false-stop's exact shape: a wrong/failed query must NEVER
+        # collapse to a printed 0 — that IS the bug this exists to prevent.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", return_value="not json"):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        with self.assertRaises(SystemExit) as cm:
+                            airuleset.cmd_slice_quals(
+                                mk.Mock(count=True, list=False, extra=None))
+                    self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotIn("0", buf.getvalue())

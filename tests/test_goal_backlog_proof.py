@@ -69,11 +69,17 @@ MARKER = "🏁 BACKLOG EMPTY:"
 # match against the template text could never find it in the transcript.
 FULL, BRANCH_MERGE, FORK_NO_MERGE = 0, 1, 2
 
+# The reduced-authority profiles' FIRST proof is `airuleset.py slice-quals
+# --count` (#181), never a hand-rolled `gh issue list --assignee @me` — a
+# shared-gh-account stream box (montalu/marek/simap) makes `@me` resolve to
+# the maintainer, so that key silently prints 0 with real work open.
+SLICE_QUALS_COUNT = "python3 ~/devel/airuleset/airuleset.py slice-quals --count"
+
 PROOF_SPEC = {
     FULL: [("gh issue list", "0"), ("gh run list", "success")],
-    BRANCH_MERGE: [("gh issue list", "0"), ("gh run list", "success"),
+    BRANCH_MERGE: [(SLICE_QUALS_COUNT, "0"), ("gh run list", "success"),
                    ("git merge-base", "RELEASED")],
-    FORK_NO_MERGE: [("gh issue list", "0"), ("git merge-base", "RELEASED")],
+    FORK_NO_MERGE: [(SLICE_QUALS_COUNT, "0"), ("git merge-base", "RELEASED")],
 }
 
 
@@ -303,10 +309,20 @@ class TestReducedAuthorityTemplatesToo(TestCase):
             self.assertFalse(holds)
 
     def test_reduced_templates_still_scope_the_count_to_my_own_slice(self):
+        # #181: the scoping is `slice-quals --count` (THE one definition of
+        # "my slice", shared with the footer) — never a hand-rolled
+        # `--assignee @me`, which silently prints 0 on a shared-gh-account
+        # stream box (montalu/marek/simap).
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            cmds = declared_commands(goal_lines()[profile], "gh issue list")
+            cmds = declared_commands(goal_lines()[profile], "python3")
             self.assertTrue(cmds)
-            self.assertIn("--assignee @me", cmds[0])
+            self.assertIn("slice-quals --count", cmds[0])
+
+    def test_assignee_at_me_is_absent_from_the_reduced_proof_commands(self):
+        # #181's own suggested regression lock: the literal string that
+        # caused the false stop must never reappear in the ARMED template.
+        for line in goal_lines()[1:]:
+            self.assertNotIn("--assignee @me", line)
 
     def test_a_reduced_stream_must_also_prove_the_work_was_RELEASED(self):
         """The 2026-07-20 incident: tickets closed, prod got nothing. An empty

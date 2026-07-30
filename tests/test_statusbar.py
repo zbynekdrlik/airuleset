@@ -276,6 +276,55 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 10)      # own slice, NOT the 17 backlog
             self.assertEqual(cache.get("scope"), "core")
 
+    def test_refresh_computes_the_streamy_bucket_and_the_footer_self_describes(self):
+        # #164: the footer used to say a bare "Issues 28" while 45 more
+        # tickets sat excluded and invisible (28 core + 45 streamy = 73
+        # repo-wide non-skip — the user's own ground truth). streamy =
+        # total(non-skip, whole repo) - core; the footer must show BOTH
+        # numbers, self-describing the population instead of hiding it.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *"--search -label:autopilot-skip -label:stream:david"*) echo 28;;\n'
+                '  *"--search -label:autopilot-skip -L 200"*) echo 73;;\n'
+                '  *) echo 0;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 28)
+            self.assertEqual(cache["streamy"], 45)      # 73 - 28, locks the identity
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("Issues 28 core", seg)
+            self.assertIn("streamy 45", seg)
+
+    def test_streamy_bucket_still_renders_at_zero(self):
+        # Same reasoning as the gk-zero rule: a hidden zero looks exactly
+        # like a broken counter.
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=12, name="demo", scope="core")
+            d = json.loads((statusbar.cache_dir(home) /
+                            (statusbar.cwd_key(cwd) + ".json")).read_text())
+            d["streamy"] = 0
+            (statusbar.cache_dir(home) /
+             (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(d))
+            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
+            self.assertIn("Issues 12 core", seg)
+            self.assertIn("streamy 0", seg)
+
     def test_refresh_subdev_slice_includes_own_stream_label(self):
         # Consistency with the ownership convention: a ticket labeled
         # stream:<this-stream> belongs to this box even when not assigned/authored
