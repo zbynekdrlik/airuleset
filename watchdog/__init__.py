@@ -4773,6 +4773,53 @@ def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     return transcript_last_marker(tpath) in markers
 
 
+def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
+    """#188 — True when a PROVEN boundary's result has demonstrably not been
+    consumed yet, because the session's last real turn died on an API error.
+
+    `notify-compact-subagent-boundary.sh` proves a boundary from one fact: this
+    session's own task registry is empty apart from the stopping worker. That
+    predicate is correct, and the justification it rests on is broader than the
+    predicate — *a completed ticket's durable state already lives in git /
+    GitHub, so the conversation is safe to summarise*. That holds for a ticket
+    the supervisor VERIFIED, and verification is exactly the step that has not
+    happened at the instant a worker returns.
+
+    Normally it happens before the compaction anyway: CC drains its type-ahead
+    queue only at a turn boundary, so the supervisor's next turn — the one that
+    reads the worker's evidence block — runs FIRST and `/compact` lands after
+    it. The reported incident (montalu@subdev, 2026-07-30) is the case that
+    skips that step: the turn died on `API Error: 529 Overloaded`, ended
+    without reading anything, and the queued `/compact` drained into a session
+    whose most recent result was unprocessed. After compaction the supervisor
+    would be verifying a ticket from a summary of a message it never saw.
+
+    `_compact_not_at_boundary` cannot see this — it reads the `⏳`/`❓` status
+    marker, and an api-error turn carries neither — so this is its sibling,
+    consulted at the same send points and with the same contract: the request
+    is LEFT IN PLACE, never consumed. Job 1 then sends its `continue`, the
+    session resumes and consumes the evidence block, the next real assistant
+    message clears the error, and the following sweep delivers the compaction.
+    Self-healing, no new state, and still bounded by
+    `COMPACT_REQUEST_MAX_AGE_S` so a permanently wedged session cannot hold a
+    request forever.
+
+    Scoped to the proven-boundary origin ON PURPOSE. Every other origin's
+    request was justified by the supervisor's OWN `✅ DONE` turn, so its work
+    was already consumed and reported; a later API error does not retroactively
+    invalidate that boundary, and gating those too would be over-broad.
+
+    Unmeasurable never blocks — the same fail-direction every other compact
+    gate uses."""
+    if origin != _COMPACT_PROVEN_BOUNDARY_ORIGIN:
+        return False
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    return bool(transcript_last_error(tpath))
+
+
 def _stop_already_rejected(cwd, sid, projects_dir=None):
     """#109 — the ENQUEUE-time gate, and the ONE moment the reported incident
     is still preventable.
@@ -5011,6 +5058,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if _compact_not_at_boundary(cwd, sid, projects_dir=pdir,
                                     origin=str(entry.get("origin") or "")):
             logs.append("skip not-a-boundary (compact-request) %s" % loc)
+            continue
+        # #188 — a PROVEN boundary whose result the supervisor demonstrably
+        # never consumed (its turn died on an API error). Left in place, never
+        # consumed: job 1's `continue` resumes the session, it reads the
+        # worker's evidence block, and the next sweep delivers this.
+        if _compact_session_unresumed(cwd, sid, projects_dir=pdir,
+                                      origin=str(entry.get("origin") or "")):
+            logs.append("skip unresumed-session (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
@@ -5291,6 +5346,14 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir,
                                 origin=origin):
         _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #188 -- a PROVEN boundary whose result the supervisor demonstrably never
+    # consumed (its turn died on an API error). Deferred, not dropped: the
+    # request stays on file and the next sweep delivers it once job 1's
+    # `continue` has resumed the session and it has read the evidence block.
+    if _compact_session_unresumed(cwd, sid, projects_dir=projects_dir,
+                                  origin=origin):
+        _log_compact_sync("SKIP unresumed-session sid=%s cwd=%s" % (sid, cwd))
         return ""
     # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident
     # is still preventable: this function runs INSIDE the Stop-hook batch, so
