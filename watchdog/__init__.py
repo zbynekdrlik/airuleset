@@ -1012,19 +1012,33 @@ def pane_at_idle_prompt(captured):
 # at all — this regex used to require one, so both shapes fell straight
 # through to job 1's generic nudge path and got `continue`d every ~30 min for
 # the whole cap window instead of getting job 6's bounded ping-once-then-wait
-# treatment. `(?:session|usage|weekly)?` is now optional. (A weekly cap whose
-# "resets Jul 31, 9pm" clock `_RESET_TIME_RX` cannot parse — no leading digit
-# right after "resets " — still stays bounded: `parse_reset_epoch` returns
-# None, job 6 pings once with "čoskoro" instead of the clock, and the
-# `elif ra and now >= ra:` resume branch below never fires again since `ra`
-# stays None — i.e. ping once, then silence, same as an unparseable date would
-# leave it. This module does not parse a dated reset clock; only the bare
-# clock-time shapes `_RESET_TIME_RX` already handles.)
+# treatment. `(?:session|usage|weekly)?` is now optional.
+#
+# (#172, carried over from #175/#176's own closing pass) A weekly cap's
+# "resets Jul 31, 9pm" clock names an explicit CALENDAR DATE ahead of the
+# time-of-day — `_RESET_TIME_RX` used to require a digit immediately after
+# "resets "/"resets at ", so this dated form matched `is_usage_cap` (bounded,
+# per #175 F2 above) but `parse_reset_epoch` returned None: job 6 could ping
+# once but never compute a resume instant, so a weekly-capped session pinged
+# once and then never auto-resumed even after the real reset passed — the
+# user had to type `continue` by hand. The optional `(?:MONTH DAY,? )?`
+# group below captures the date too, and `parse_reset_epoch` uses it (rather
+# than assuming "today") when present — assuming today would compute an
+# epoch DAYS too early for a multi-day-out weekly reset, and job 6 would
+# retry-resume long before the real reset, immediately re-hitting the limit
+# (exactly what this whole mechanism exists to prevent). The bare
+# clock-time-only forms (`resets 11:20pm`, `resets 12pm`, `resets at 18:10`)
+# are unaffected — the date group is optional and simply doesn't match them.
 _SESSION_LIMIT_RX = re.compile(
     r"hit your (?:(?:session|usage|weekly)\s+)?limit|/usage-credits to finish", re.I)
-# "resets 6:10pm" / "resets 6pm" / "resets at 18:10" — capture the clock.
+# "resets 6:10pm" / "resets 6pm" / "resets at 18:10" / "resets Jul 31, 9pm"
+# -- capture an optional MONTH + DAY ahead of the clock, then the clock.
 _RESET_TIME_RX = re.compile(
-    r"reset(?:s|ting)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
+    r"reset(?:s|ting)?\s+(?:at\s+)?(?:([A-Za-z]{3,9})\s+(\d{1,2}),?\s+)?"
+    r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
+_RESET_MONTH_NUM = {name: i + 1 for i, name in enumerate((
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec"))}
 # The tz the banner names — "(Europe/Prague)" OR a bare zone word like
 # "(UTC)"/"(GMT)". Broadened from Area/City-only after the gk incident
 # (2026-07-24): the gk box runs UTC, its banner reads "resets 4:40pm (UTC)",
@@ -1060,23 +1074,32 @@ def pane_session_limited(captured):
 
 
 def parse_reset_epoch(captured, now):
-    """Parse 'resets <clock>' from the banner into an epoch >= now, or None.
-    The clock is read in the tz the banner names: "UTC"/"GMT" literally, an
-    "Area/City" name via ZoneInfo, any other bare parenthesized word (e.g. a
-    stray "(debug)" elsewhere in the pane) falls back to the Europe/
-    Bratislava default (same offset as Prague) — and rolled to tomorrow if
-    already past. The tz is searched ONLY in the ~80 chars starting at the
-    TIME match, never the whole capture: a global search would hijack on
-    ANY parenthesized word anywhere in the pane, however far from the clock
-    (gk incident 2026-07-24). Fail-safe: any parse/tz error returns None
-    (job 6 then pings but cannot auto-resume — the user handles it)."""
+    """Parse 'resets <clock>' (optionally 'resets <Month> <day>, <clock>')
+    from the banner into an epoch >= now, or None. The clock is read in the
+    tz the banner names: "UTC"/"GMT" literally, an "Area/City" name via
+    ZoneInfo, any other bare parenthesized word (e.g. a stray "(debug)"
+    elsewhere in the pane) falls back to the Europe/Bratislava default
+    (same offset as Prague) — and rolled to tomorrow if already past. The
+    tz is searched ONLY in the ~80 chars starting at the TIME match, never
+    the whole capture: a global search would hijack on ANY parenthesized
+    word anywhere in the pane, however far from the clock (gk incident
+    2026-07-24). Fail-safe: any parse/tz error returns None (job 6 then
+    pings but cannot auto-resume — the user handles it).
+
+    #172 (carried over from #175/#176's own closing pass): when the banner
+    names an explicit calendar date ("resets Jul 31, 9pm"), that date is
+    used for the target — NOT "today". Assuming today for a multi-day-out
+    weekly reset would compute an epoch DAYS too early, and job 6 would
+    retry-resume long before the real reset (immediately re-hitting the
+    limit — the one thing `continue`-before-reset must never do)."""
     try:
         m = _RESET_TIME_RX.search(captured or "")
         if not m:
             return None
-        hh = int(m.group(1))
-        mm = int(m.group(2) or 0)
-        ap = (m.group(3) or "").lower()
+        month_name, day_s, hh_s, mm_s, ap_s = m.groups()
+        hh = int(hh_s)
+        mm = int(mm_s or 0)
+        ap = (ap_s or "").lower()
         if ap == "pm" and hh != 12:
             hh += 12
         elif ap == "am" and hh == 12:
@@ -1102,6 +1125,20 @@ def parse_reset_epoch(captured, now):
         except Exception:
             tz = None
         base = datetime.fromtimestamp(now, tz)
+        month = _RESET_MONTH_NUM.get((month_name or "")[:3].lower())
+        if month and day_s:
+            # An explicit calendar date -- use IT, not "today" (see the
+            # docstring above). A date more than 6h in the "past" against
+            # THIS year must mean next year's occurrence (a reset banner is
+            # never referring to a date that already passed by that much).
+            try:
+                target = base.replace(month=month, day=int(day_s), hour=hh,
+                                      minute=mm, second=0, microsecond=0)
+            except ValueError:
+                return None       # e.g. day out of range for the month
+            if target.timestamp() <= now - 6 * 3600:
+                target = target.replace(year=target.year + 1)
+            return target.timestamp()
         target = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
         ts = target.timestamp()
         # The 5-hour reset window is short. A clock only SLIGHTLY in the past means
@@ -7566,23 +7603,71 @@ def _sweep_due(state, key, now, interval):
 # Bound the batch and rotate through the full repo list via a cursor kept in
 # state, so coverage still reaches every repo over successive hourly sweeps
 # instead of either "all of them, maybe killed" or "arbitrarily few forever".
+#
+# The real per-repo stale-data bound this buys is `interval *
+# ceil(n_repos / batch)` -- NOT "one hour of drift data" (the #172 fix's own
+# original commit message, docstring and playbook entry all overclaimed
+# this; corrected in the #172 reopened pass). At the default batch of 3 on
+# a 40-repo box that's `ceil(40/3) = 14` hourly sweeps, i.e. up to ~14h
+# before a given repo's drift/stuck-main state is re-measured -- a real
+# trade, not the number an operator would reason from if only told "an
+# hour". Batching cuts the REPO COUNT examined per sweep ~13x (40/3), which
+# is what actually prevents the livelock; it is not a time-based cut and it
+# does NOT make a killed sweep impossible: jobs 27+28 alone still cost up
+# to ~105s worst case per sweep at the default batch (job 27: up to 2
+# `gh issue list` calls at `AIRULESET_ISSUE_FETCH_TIMEOUT`-ish 10s each per
+# repo x 3 repos = ~60s; job 28: one `git fetch` at 15s per repo x 3 repos =
+# ~45s) -- comfortably under the 120s `TimeoutStartSec` on its own, but not
+# a hard guarantee once jobs 24/25's own (also network-bound) per-pane
+# probes ahead of them in the same sweep are accounted for.
 REPO_SWEEP_BATCH_MAX = 3          # env AIRULESET_REPO_SWEEP_BATCH
+
+# #172 (reopened) smaller item: a dedup-memory entry (job 27's `net_drift` /
+# job 28's `stuck_main`) used to be kept FOREVER once a repo stopped
+# appearing in `repo_roots()` at all (deleted, renamed, or moved past
+# `discover_managed_repos`' max_depth) -- "not touched this sweep" is true
+# both for a repo merely sitting out the round-robin batch (must survive)
+# and for a repo that is simply gone (should eventually be forgotten), and
+# the old pruning filter could not tell them apart. Age entries out instead
+# of a touched/live check alone -- comfortably longer than one full
+# rotation (~14h at the current default) so an ordinary sit-out is never
+# mistaken for abandonment.
+DEDUP_MEMORY_MAX_AGE_S = 30 * 86400   # 30 days
 
 
 def _repo_sweep_batch(repos, state, cursor_key, max_repos=None):
     """Round-robin slice of `repos` (already deduped) bounded to `max_repos`
     per sweep. `repos` MUST be the same stable order every call (the caller
     passes a sorted list) or the cursor drifts. Returns the batch AND does
-    NOT mutate `repos` itself -- only `state[cursor_key]` advances."""
+    NOT mutate `repos` itself -- only `state[cursor_key]` advances.
+
+    #172 (reopened) finding 2: `max_repos <= 0` (the obvious spelling for
+    "disable batching" -- `AIRULESET_REPO_SWEEP_BATCH=0`, or any negative
+    value) must NEVER silently sweep the FULL repo list -- that re-arms the
+    exact pathological cost this cap exists to prevent, via the knob an
+    operator is most likely to reach for. Clamp to the documented default
+    instead of trusting the value verbatim.
+
+    #172 (reopened) smaller item: the short-list fast path (batch size >=
+    repo count, whether from a small `max_repos` or a transient short
+    `repos` list) must NOT reset the cursor to 0. `discover_managed_repos`
+    is explicitly best-effort -- a mount hiccup or a permissions blip that
+    makes ONE sweep see only 2 repos instead of 40 must not rewind the
+    whole rotation once the real count comes back, or the tail of the list
+    is starved another full rotation for nothing."""
     if max_repos is None:
         try:
             max_repos = int(os.environ.get("AIRULESET_REPO_SWEEP_BATCH",
                                            REPO_SWEEP_BATCH_MAX))
         except ValueError:
             max_repos = REPO_SWEEP_BATCH_MAX
+    if max_repos <= 0:
+        max_repos = REPO_SWEEP_BATCH_MAX
     n = len(repos)
-    if n == 0 or max_repos <= 0 or max_repos >= n:
-        state[cursor_key] = 0
+    if n == 0 or max_repos >= n:
+        # Leave state[cursor_key] untouched -- see the finding-2/short-list
+        # docstring note above. Nothing to rotate through when the whole
+        # list fits in one batch anyway.
         return list(repos)
     try:
         start = int(state.get(cursor_key, 0) or 0) % n
@@ -7626,11 +7711,26 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
     process -- the live incident: systemd's TimeoutStartSec=120 killed the
     run mid-sweep, the cadence marker had only ever been set in run_once's
     OWN memory, and the next 60s tick re-attempted the identical 40-repo
-    sweep, was killed again, forever. Persisting first breaks the livelock:
-    a killed sweep now costs one hour of stale drift data, not the whole
-    watchdog. The repo list is also BOUNDED per sweep (`_repo_sweep_batch`)
-    so a box with many repos doesn't try to fetch all of them in one
-    120s-budgeted run in the first place."""
+    sweep, was killed again, forever. The repo list is also BOUNDED per
+    sweep (`_repo_sweep_batch`) so a box with many repos doesn't try to
+    fetch all of them in one 120s-budgeted run in the first place -- see
+    `REPO_SWEEP_BATCH_MAX`'s own comment for the real (not "one hour")
+    stale-data bound this buys.
+
+    #172 (reopened) finding 4: the cadence marker is now persisted BEFORE
+    `repo_roots()` even runs (an `os.walk($HOME)`, not free) -- a kill
+    inside the walk itself used to lose the marker exactly like a kill
+    inside the per-repo loop did. The cursor advance is persisted again
+    once the batch is drawn, still before the first `gh` call.
+
+    #172 (reopened) finding 3: dedup memory (`state['net_drift']`) is now
+    the SAME dict object as the caller's `state`, updated AND persisted the
+    moment a ping fires -- mirroring jobs 8/11's own '# dedup memory BEFORE
+    the ping' shape, which the original #172 fix copied only half of (the
+    cadence stamp, not the per-repo dedup write). Before this, a kill
+    between two pings in the same sweep lost the FIRST repo's dedup entry
+    entirely, so it re-pinged on its next rotation -- a duplicate alert
+    across `notify.send`'s own daily dedup bucket."""
     if issue_counts_fetch is None:
         return []
     if threshold is None:
@@ -7643,18 +7743,26 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
     logs = []
     if not _sweep_due(state, "net_drift_last_sweep", now, interval):
         return logs
+    if not dry_run:
+        # #172 F4: stamp + persist BEFORE repo_roots() (the os.walk) runs --
+        # not just before the per-repo network loop.
+        state["net_drift_last_sweep"] = now
+        persist()
     repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
     if dry_run:
         # dry-run must not mutate persistent state -- peek the batch on a
         # throwaway copy of state so the real cursor never advances.
         batch = _repo_sweep_batch(repos, dict(state), "net_drift_cursor", max_repos)
     else:
-        state["net_drift_last_sweep"] = now
         batch = _repo_sweep_batch(repos, state, "net_drift_cursor", max_repos)
-        persist()      # cadence stamp + cursor advance survive a kill BEFORE
-                        # a single per-repo `gh` call leaves this process
+        persist()      # cursor advance also survives a kill BEFORE a
+                        # single per-repo `gh` call leaves this process
     touched = set()
     seen = dict(state.get("net_drift") or {})
+    if not dry_run:
+        state["net_drift"] = seen     # #172 F3: same dict from here on, so
+                                       # a per-repo write below is already
+                                       # visible in `state` for persist()
     live = set()
     for root in batch:
         label = _repo_label(root, git_run)
@@ -7679,6 +7787,9 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         if dry_run or send_fn is None or (
                 pinged is not None and now - float(pinged) < reping):
             continue
+        seen[label] = {"pinged_ts": now}
+        if not dry_run:
+            persist()      # #172 F3: dedup memory BEFORE the ping
         status = send_fn(
             "\U0001f4c8 **%s** -- backlog rastie: +%d ticketov za posledny "
             "tyzden\n"
@@ -7688,13 +7799,18 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
             dedup_key="net-drift:%s:%d" % (label, int(now // reping)),
             dry_run=dry_run)
         logs.append("net-drift PING %s -> %s" % (label, status))
-        seen[label] = {"pinged_ts": now}
     if not dry_run:
         # keep dedup memory for every repo NOT touched THIS sweep (the
         # round-robin batch means most repos sit out most sweeps) -- only
-        # drop/refresh entries for repos actually re-measured just now.
-        state["net_drift"] = {k: v for k, v in seen.items()
-                              if k in live or k not in touched}
+        # drop/refresh entries for repos actually re-measured just now --
+        # AND age out anything that hasn't been refreshed in
+        # DEDUP_MEMORY_MAX_AGE_S regardless of touched/live, so a repo that
+        # simply stops existing (deleted, renamed, moved past max_depth)
+        # doesn't keep its dedup entry forever (#172 reopened smaller item).
+        state["net_drift"] = {
+            k: v for k, v in seen.items()
+            if (k in live or k not in touched)
+            and (now - float(v.get("pinged_ts", now)) < DEDUP_MEMORY_MAX_AGE_S)}
     return logs
 
 
@@ -7723,17 +7839,37 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
                      max_repos=None):
     """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
-    effort, errors logged and ignored) before reading refs, since no live
-    session may have fetched this repo recently -- injected so a test never
-    shells a real network fetch. `git_fetch=None` skips the fetch entirely
-    (a test working with fixture repos that have no real remote).
+    effort before this pass -- see the #172 reopened note below) before
+    reading refs, since no live session may have fetched this repo recently
+    -- injected so a test never shells a real network fetch. `git_fetch=None`
+    skips the fetch entirely (a test working with fixture repos that have
+    no real remote).
 
     #172: `persist` (same shape jobs 8/11/27 already use) is invoked BEFORE
     any per-repo `git fetch` leaves this process, and the repo list is
     BOUNDED per sweep (`_repo_sweep_batch`) -- see net_drift_alarm's
     docstring for the full incident this fixes (a systemd
     TimeoutStartSec=120 kill mid-sweep, with the cadence marker never
-    reaching disk, re-attempting the identical sweep forever)."""
+    reaching disk, re-attempting the identical sweep forever) and
+    `REPO_SWEEP_BATCH_MAX`'s own comment for the real (not "one hour")
+    stale-data bound the batching buys.
+
+    #172 (reopened) finding 5: a git_fetch FAILURE now SKIPS the repo for
+    this sweep rather than falling through to `delivery_state()` on
+    whatever refs are already on disk. A repo not fetched in days has a
+    stale `origin/<base>` -- measuring on it inflates both `delivery_age`
+    and `undelivered`, which is exactly the stuck-main signature this job
+    pings on. A repo merely behind a slow link must never read as stuck.
+
+    #172 (reopened) finding 4: the cadence marker is persisted BEFORE
+    `repo_roots()` runs (see net_drift_alarm's matching note); the cursor
+    advance is persisted again once the batch is drawn.
+
+    #172 (reopened) finding 3: dedup memory (`state['stuck_main']`) is the
+    SAME dict object as the caller's `state` from here on, written and
+    persisted the moment a ping fires -- mirroring jobs 8/11's own shape,
+    which the original #172 fix only half-copied (see net_drift_alarm's
+    matching note for the full consequence of the gap)."""
     if age_threshold is None:
         try:
             age_threshold = int(os.environ.get("AIRULESET_STUCK_MAIN_AGE_S",
@@ -7750,18 +7886,23 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
     logs = []
     if not _sweep_due(state, "stuck_main_last_sweep", now, interval):
         return logs
+    if not dry_run:
+        # #172 F4: stamp + persist BEFORE repo_roots() (the os.walk) runs.
+        state["stuck_main_last_sweep"] = now
+        persist()
     repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
     if dry_run:
         # dry-run must not mutate persistent state -- peek the batch on a
         # throwaway copy of state so the real cursor never advances.
         batch = _repo_sweep_batch(repos, dict(state), "stuck_main_cursor", max_repos)
     else:
-        state["stuck_main_last_sweep"] = now
         batch = _repo_sweep_batch(repos, state, "stuck_main_cursor", max_repos)
-        persist()      # cadence stamp + cursor advance survive a kill BEFORE
-                        # a single `git fetch` leaves this process
+        persist()      # cursor advance also survives a kill BEFORE a
+                        # single `git fetch` leaves this process
     touched = set()
     seen = dict(state.get("stuck_main") or {})
+    if not dry_run:
+        state["stuck_main"] = seen    # #172 F3: same dict from here on
     live = set()
     for root in batch:
         label = _repo_label(root, git_run)
@@ -7771,6 +7912,8 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                 git_fetch(root)
             except Exception as exc:
                 logs.append("stuck-main git-fetch-error %s: %r" % (root, exc))
+                continue        # #172 F5: refs may be STALE -- never
+                                 # measure on them, skip this repo entirely
         st = delivery_state(root, now, git_run=git_run)
         if st is None:
             continue
@@ -7788,6 +7931,9 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
         if dry_run or send_fn is None or (
                 pinged is not None and now - float(pinged) < reping):
             continue
+        seen[label] = {"pinged_ts": now}
+        if not dry_run:
+            persist()      # #172 F3: dedup memory BEFORE the ping
         days = int(st["delivery_age"] // 86400)
         status = send_fn(
             "\U0001f512 **%s** -- vetva %s stoji %d dni, %d commitov caka na zluenie\n"
@@ -7798,10 +7944,14 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
             dedup_key="stuck-main:%s:%d" % (label, int(now // reping)),
             dry_run=dry_run)
         logs.append("stuck-main PING %s -> %s" % (label, status))
-        seen[label] = {"pinged_ts": now}
     if not dry_run:
-        state["stuck_main"] = {k: v for k, v in seen.items()
-                               if k in live or k not in touched}
+        # See net_drift_alarm's matching comment: prune untouched-but-live
+        # entries normally, and age out anything unrefreshed past
+        # DEDUP_MEMORY_MAX_AGE_S regardless (#172 reopened smaller item).
+        state["stuck_main"] = {
+            k: v for k, v in seen.items()
+            if (k in live or k not in touched)
+            and (now - float(v.get("pinged_ts", now)) < DEDUP_MEMORY_MAX_AGE_S)}
     return logs
 
 
@@ -8195,17 +8345,37 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           cadence gate — a `gh` round trip per repo is too costly for a
           60s poll), one deduped ping per repo per day while the net stays
           above `NET_DRIFT_THRESHOLD` (net_drift_alarm). #172 (regression
-          from #137's own launch): the cadence marker is persisted to DISK
-          (`persist=`) BEFORE the per-repo loop, and the repo list is
-          BOUNDED + round-robin-cursored per sweep
-          (`_repo_sweep_batch`/`AIRULESET_REPO_SWEEP_BATCH`) — a systemd
-          `TimeoutStartSec=120` kill mid-sweep used to lose the cadence
-          marker entirely (in-memory only, `save_state` only ran at the
-          very end of `run_once`), so the NEXT 60s tick re-attempted the
-          identical 40-repo sweep, was killed again, forever — a livelock
-          that starved every other job (incl. job 1's 529 continue-nudge)
-          of wall-clock for 7h+. Persisting first bounds the damage to one
-          hour of stale drift data per kill, never the whole watchdog.
+          from #137's own launch, a dev1-only livelock — per the #176
+          correction on job (1) above, it never starved job 1, which runs
+          long before jobs 27/28 in the same per-pane loop): the cadence
+          marker used to live only in run_once's in-memory `state`
+          (`save_state` ran once, at the very end), so a systemd
+          `TimeoutStartSec=120` kill mid-sweep lost it entirely and the
+          NEXT 60s tick re-attempted the identical 40-repo sweep, killed
+          again, forever — 236 kills in one day, zero before. Fixed by
+          persisting the cadence marker to DISK (`persist=`) BEFORE the
+          per-repo loop, plus a BOUNDED + round-robin-cursored repo list
+          per sweep (`_repo_sweep_batch`/`AIRULESET_REPO_SWEEP_BATCH`) —
+          see `REPO_SWEEP_BATCH_MAX`'s own comment for the real (not "one
+          hour") stale-data bound this buys and the honest worst-case cost
+          that remains. #172 REOPENED (post-merge adversarial review of
+          the shipped fix) found 4 more real defects here: finding 1 —
+          `log_fn=print` never actually flushed under systemd's piped,
+          non-tty stdout, so a killed sweep STILL printed nothing (fixed:
+          `cmd_watchdog` wires an explicit `flush=True` wrapper instead of
+          bare `print`); finding 2 — `AIRULESET_REPO_SWEEP_BATCH=0` (or a
+          negative value) used to silently sweep ALL repos, re-arming the
+          exact cost the cap exists to prevent, via the knob most likely to
+          be reached for (fixed: clamped to the documented default);
+          finding 3 — the per-repo dedup memory (duplicate-ping
+          suppression) was written to disk only at the very END of the
+          loop, so a kill between two pings lost the FIRST repo's dedup
+          entry and re-pinged it on its next rotation (fixed: mirrors jobs
+          8/11's own "dedup memory BEFORE the ping" shape, which the
+          original #172 fix had copied only half of); finding 4 — the
+          cadence marker was persisted only AFTER `repo_roots()` (an
+          `os.walk($HOME)`) ran, so a kill inside the walk itself still
+          lost it (fixed: persisted before `repo_roots()` is even called).
       (28) (only when `repo_roots` is given) STUCK-MAIN SWEEP (#137) — the
           NON-pane-gated sibling of job 24: same measurement
           (`delivery_state`/the base-branch-frozen-while-work-piles-up
@@ -8215,11 +8385,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           15-day merge deadlock (#138's origin story) run undetected for as
           long as it did whenever no session happened to be open there.
           `git_fetch(root)` (best-effort, errors logged) runs before
-          reading refs, since no live session may have fetched recently.
-          Same hourly cadence gate as job 27, one deduped ping per repo per
-          day (stuck_main_sweep). Same #172 fix as job 27: `persist=`
-          before the loop, same repo-batch cap (its own cursor, so the two
-          jobs rotate through the repo list independently).
+          reading refs, since no live session may have fetched recently —
+          #172 REOPENED finding 5: a fetch FAILURE now SKIPS the repo this
+          sweep instead of measuring on refs that may be stale (a repo
+          merely behind a slow network link used to read as stuck-main —
+          a false-positive generator job 27's own `None`-on-failure
+          contract never had). Same hourly cadence gate as job 27, one
+          deduped ping per repo per day (stuck_main_sweep). Same #172 (and
+          #172 REOPENED findings 2/3/4) fixes as job 27: `persist=` before
+          `repo_roots()` and again before the per-repo loop, dedup memory
+          persisted before each ping, batch-cap clamping — same repo-batch
+          cap, its own cursor, so the two jobs rotate through the repo
+          list independently.
       (29) (only when `vault_purge` is given) HOURLY CREDENTIAL-STORE SWEEP
           (#144) — delete every `airuleset.py secret` value past its TTL.
           The store's expiry used to be enforced ONLY by the next `secret`
@@ -9263,9 +9440,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Job 27 — NET-ISSUE-DRIFT ALARM (#137): only when `issue_counts_fetch`
     # is given (cmd_watchdog wires the real gh round trip) — the "wired = on"
     # convention. Self-gated on an hourly cadence internally; best-effort.
-    # `persist=` (#172): the cadence marker + repo-batch cursor reach DISK
-    # BEFORE any per-repo `gh` call, so a systemd TimeoutStartSec kill
-    # mid-sweep costs one hour of stale data, never an unbounded livelock.
+    # `persist=` (#172, extended #172 REOPENED F3/F4): the cadence marker
+    # reaches DISK before `repo_roots()` even runs, the repo-batch cursor
+    # before the per-repo loop, and the per-repo dedup memory before EACH
+    # ping — so a systemd TimeoutStartSec kill anywhere in this job costs at
+    # most `REPO_SWEEP_BATCH_MAX` repos' worth of stale data (see that
+    # constant's own comment for the real, per-repo bound — NOT "one hour"),
+    # never an unbounded livelock and never a lost dedup entry.
     if issue_counts_fetch is not None:
         try:
             logs += net_drift_alarm(now, state, send_fn=send_fn,
@@ -9279,7 +9460,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # the "wired = on" convention. Self-gated on an hourly cadence
     # internally; best-effort. Independent of job 27's own gate (a repo
     # sweep with no gh access can still measure this locally). `persist=`
-    # (#172): same reasoning as job 27, one `git fetch` timeout at a time.
+    # (#172, extended #172 REOPENED F3/F4): same reasoning as job 27 — one
+    # `git fetch` timeout at a time, dedup memory persisted before the ping,
+    # cadence marker persisted before `repo_roots()` runs. #172 REOPENED F5:
+    # a fetch failure now SKIPS the repo this sweep rather than measuring on
+    # refs that may be stale.
     if repo_roots is not None:
         try:
             logs += stuck_main_sweep(now, state, send_fn=send_fn,

@@ -2897,13 +2897,19 @@ def _watchdog_card_probe(root, base):
     after it. Writes ONLY the remote-tracking ref; every repo this touches
     belongs to somebody else. No `gh` half at all: the `Closes #N` in the
     merge commit is the whole fact this job needs, for free.
+
+    #172 (reopened) smaller item: timeout cut 90s -> 15s, matching jobs
+    27/28's own cuts (`_watchdog_git_fetch`). Job 25 runs BEFORE jobs 27/28
+    in every sweep — one hung fetch here used to still eat 90s of the 120s
+    `TimeoutStartSec` unit budget on its own, leaving jobs 27/28 no chance
+    to run at all even after their OWN timeouts were bounded.
     """
     import subprocess
     remote, _, branch = (base or "origin/main").partition("/")
     try:
         subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
                         remote or "origin", branch or "main"],
-                       capture_output=True, timeout=90)
+                       capture_output=True, timeout=15)
     except Exception as e:
         # Degrade to the local-only read rather than going quiet: an
         # unreported ticket the user never hears about is the failure this
@@ -2928,6 +2934,11 @@ def _watchdog_closed_fetch(root, since_ts):
     reaches this, so it is roughly one call per trailer-less repo per sweep
     rather than one per repo — and returning None on any failure degrades to
     the local-only answer rather than to silence.
+
+    #172 (reopened) smaller item: timeout cut 45s -> 10s, matching jobs
+    27/28's own `gh` cuts (`_watchdog_issue_counts_fetch`) for the same
+    reason `_watchdog_card_probe` above was cut — this call dispatches
+    before jobs 27/28 in every sweep.
     """
     import subprocess
     import time
@@ -2936,7 +2947,7 @@ def _watchdog_closed_fetch(root, since_ts):
         r = subprocess.run(
             ["gh", "issue", "list", "--state", "closed", "--limit", "100",
              "--json", "number,closedAt"],
-            cwd=root, capture_output=True, text=True, timeout=45)
+            cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
         return [i["number"] for i in json.loads(r.stdout or "[]")
@@ -2961,13 +2972,18 @@ def _watchdog_delivery_probe(root, base):
         BLOCKED and the check that is red, so the ping says *why* nothing is
         landing. Any failure (no gh, no network, a repo with no PRs) costs
         that one sentence and nothing else.
+
+    #172 (reopened) smaller item: timeouts cut 90s -> 15s / 45s -> 10s,
+    matching jobs 27/28's own cuts. Job 24 runs before jobs 27/28 in every
+    sweep — one hung fetch or gh call here used to still eat most of the
+    120s `TimeoutStartSec` unit budget on its own.
     """
     import subprocess
     remote, _, branch = (base or "origin/main").partition("/")
     try:
         subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
                         remote or "origin", branch or "main"],
-                       capture_output=True, timeout=90)
+                       capture_output=True, timeout=15)
     except Exception as e:
         # No fetch means no confirmation: job 24 then re-reads the SAME local
         # refs, so its verdict simply stands and the job degrades to the
@@ -2979,7 +2995,7 @@ def _watchdog_delivery_probe(root, base):
         r = subprocess.run(
             ["gh", "pr", "list", "--state", "open", "--limit", "5", "--json",
              "number,mergeStateStatus,statusCheckRollup"],
-            cwd=root, capture_output=True, text=True, timeout=45)
+            cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
         for pr in json.loads(r.stdout or "[]"):
@@ -3106,13 +3122,24 @@ def cmd_watchdog(args):
     strip-selection keystroke bug (#36 itself) was undebuggable from it.
     `--verbose` is kept for any additional debug output a caller wants later.
 
-    #172: printing is now INCREMENTAL (`log_fn=print`, below) rather than
+    #172: printing is now INCREMENTAL (`log_fn=`, below) rather than
     "collect the whole list, print it after run_once() returns" — a sweep
     killed mid-way by systemd's TimeoutStartSec=120 never returns at all,
     so the old collect-then-print shape showed NOTHING in the journal for
     the whole 14h the #172 livelock recurred, even though early jobs (incl.
     job 1's 529 auto-resume) had already decided plenty before a later
-    job's hung network call ate the rest of the unit's budget."""
+    job's hung network call ate the rest of the unit's budget.
+
+    #172 (reopened) finding 1: a bare `log_fn=print` still did not fix the
+    "prints nothing" symptom in production. `ExecStart` runs with no `-u`
+    and no `PYTHONUNBUFFERED=1`, so under systemd stdout is a PIPE and
+    CPython block-buffers it (8 KiB) — `print()` WITHOUT `flush=True` never
+    actually leaves that buffer, and SIGTERM discards it unread. Measured:
+    `print('x')` + SIGTERM 1s later captured nothing; `print('x',
+    flush=True)` + the same SIGTERM captured 'x'. `log_fn` below now wraps
+    `print` with an explicit flush so a decision line is genuinely durable
+    the instant it is logged, not merely "printed" into a buffer a kill can
+    still erase."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
                           compact_requests_path, goal_templates_path)
@@ -3183,8 +3210,13 @@ def cmd_watchdog(args):
                     # killed mid-way (systemd TimeoutStartSec=120) used to
                     # print NOTHING at all, for 14h, because the only print
                     # path was this loop running AFTER run_once() returned.
-                    log_fn=print)
-    del logs   # already streamed via log_fn=print above; nothing left to print
+                    # #172 REOPENED finding 1: bare `print` alone is NOT
+                    # enough — under systemd's piped, non-tty stdout, an
+                    # unflushed print sits in CPython's 8 KiB buffer and a
+                    # SIGTERM discards it unread, reproducing the exact
+                    # "prints nothing" symptom this fix exists to kill.
+                    log_fn=lambda line: print(line, flush=True))
+    del logs   # already streamed via log_fn above; nothing left to print
 
 
 def cmd_compact_request(args):

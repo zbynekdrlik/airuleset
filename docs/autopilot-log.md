@@ -1728,6 +1728,20 @@ zero pings -- the actual root cause of the user's original complaint, fixed
 in #176. The "4h 28m" figure quoted for the stall is also uncorroborated;
 the demonstrable dead-with-zero-nudges window is 36m10s.
 
+**CORRECTION (#172 reopened, 2026-07-30):** the live-verification paragraph
+above ("First run ... persisted `net_drift_cursor=6`/`stuck_main_cursor=3`")
+asserts a cursor value the stated evidence does not support -- with a batch
+size of 3 and both cursors starting at 0, ONE call to `net_drift_alarm`
+(which `run_once` makes exactly once per sweep) advances `net_drift_cursor`
+by at most `min(max_repos, n_repos)`, never to 6 in a single run unless a
+second, unmentioned invocation happened in between. The reopened adversarial
+review flagged this as unsupported-as-written; it is corrected here rather
+than left standing, per this repo's own "never re-report an unverifiable
+number" discipline. The qualitative claim (both jobs fired, cadence markers
++ cursors persisted, no re-attempt on the second run, no journal
+timeout/kill lines) is unaffected and was independently re-confirmed during
+the reopened pass's own live verification below.
+
 📔 Playbook: `.claude/rules/airuleset-internals.md` -- a cadence marker set
 only in an in-memory dict and saved once at the very end of a long function
 is not durable against an uncaught process kill (SIGTERM), which is not a
