@@ -2602,3 +2602,32 @@ under the accounts themselves, not under root, which is what the ticket asked
 for.
 
 Closes #171
+
+## 2026-07-30 — #190 (prose-gate pipeline race) + #188 (unresumed boundary compact)
+
+- **#190 flaky Stop gate.** Root cause was NOT the ticket's own hypothesis (a
+  `/tmp` retry-marker collision — the test already mints a fresh uuid4 sid per
+  probe). Every boolean in `hooks/stop-check-prose-violations.sh` was
+  `$(echo "$MSG" | grep -q… && echo 1 || echo 0)` under `set -euo pipefail`:
+  `grep -q` exits at its first match without draining stdin, the `echo` writer
+  takes SIGPIPE, pipefail reports the writer's **141**, and `&& echo 1 || echo 0`
+  reads that as "line absent". Captured `rc=141` directly on a ~350-byte message
+  under CPU saturation; deterministic past the 64 KiB pipe buffer. Fail-CLOSED: a
+  byte-correct 140 KB completion report drew 5 false violations. Fail-OPEN (worse):
+  `merge despite the failing check` stopped being blocked at all.
+  Fix `3545444` — one `msg_has` helper fed by a here-string (no concurrent writer,
+  so no race), 47 call sites rewritten mechanically, 2 `grep … | head -1` sites
+  became `grep -m1`, and a grep exit ≥2 is now recorded as UNDETERMINABLE so the
+  final decision declines to assert a violation it could not evaluate.
+  RED `443be99` → GREEN `3545444`; tests `tests/test_prose_gate_pipeline_race.py`.
+- **#188 boundary compact on an unconsumed result.** The SubagentStop predicate was
+  correct; its justification was broader than the predicate. `/compact` normally
+  lands after the supervisor's next turn (CC drains type-ahead only at a turn
+  boundary), but that turn died on a 529, so the compaction hit a session whose
+  worker evidence block was never read. Fix `7028118` — `_compact_session_unresumed`
+  reuses `transcript_last_error` (the signal job 1 already trusts), consulted at
+  BOTH send points, scoped to `origin == "subagent-stop"`, and it DEFERS (request
+  left in place) rather than dropping, so job 1's `continue` self-heals it.
+  RED `9609016` → GREEN `7028118`; tests in `tests/test_compact_request.py`.
+- Filed **#192** — the same SIGPIPE idiom still decides 15 other hooks (100 sites);
+  cross-cutting, so not bundled here.
