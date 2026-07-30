@@ -2234,3 +2234,46 @@ loop" fix must extend to EVERY expensive step that precedes the loop
 dedup memory, not just the once-per-sweep cadence stamp — jobs 8/11's own
 "dedup memory BEFORE the ping" shape is the reusable template for any
 future cadence-gated sweep job with per-item duplicate-suppression state.
+
+## #181 + #164 (bundled) — one login-aware slice definition (slice-quals CLI); footer/card self-describe core vs streamy
+
+2026-07-30 batch (#181+#164): #181 the reduced-authority `/goal` stop-proof
+hardcoded `--assignee @me`, silently 0 on a shared-gh-account box
+(montalu/marek/simap) while real labelled work was open — a genuine FALSE
+STOP, not a labeling issue. Fix: new `airuleset.py slice-quals` CLI wraps
+the existing `_slice_quals()` (the footer's own login-aware key) as
+`--count`/`--list`/`--extra`, resolved for the box it runs on; the three
+`/goal` templates in skills/autopilot/SKILL.md (Step 1 listing, bounce
+lane, both reduced-authority proof commands) now call it instead of
+hand-rolling `--assignee @me` — also SHRINKS each template by ~44 chars,
+comfortably inside the 4000-char cap (#169). Rejected: ANDing
+`label:stream:<me>` onto `--assignee @me` in one `--search` string — gh's
+`--search` cannot OR quals, so that would fix montalu while narrowing
+david's real union into an intersection (a different false-empty bug).
+#164: `cmd_tickets_status`'s full-authority branch now computes a
+`streamy` bucket (total non-skip minus core) and the footer renders
+`Issues N core · streamy M` instead of hiding the excluded population;
+`_notify_run_card` scopes `remaining` to the same core exclusion (card
+says "core" too) and skips the progress write for a stream ticket's card
+so D/T never drifts onto two populations. Docs corrected
+(statusline-vocabulary.md, .claude/rules/airuleset-internals.md — both
+previously said the opposite of the shipped full-authority query).
+test:a260584[red]→fix:acb3e3d[green], 3242 tests, ruff clean. Blast-radius
+measurement: searched montalu/marek/simap's full local transcript corpora
+(1266/6/53 files) for an ASSISTANT-AUTHORED `🏁 BACKLOG EMPTY:`/`SLICE
+EMPTY` claim — zero found on all three boxes; Claude Code's own stop
+announcement is pane-only and never persisted, so a definitive historical
+false-stop count is not recoverable from transcript archaeology (findings
+comment: https://github.com/zbynekdrlik/airuleset/issues/181#issuecomment-5127103167).
+Deployed via `python3 airuleset.py push` (2 pushes: acb3e3d then the
+playbook-only 3eee5e7): GitHub + all 6 targets landed, dev2/gatekeeper SHA
+verified byte-identical to local. Both issues closed on push (auto-close,
+no PR in this repo); both Discord run-cards delivered
+(~/.claude/autopilot-notify-sent/airuleset#181, #164).
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — gh's `--search`
+qualifiers AND, never OR, so a caller needing a union across several quals
+must run one query per qual and union server-side (never join the quals
+into one `--search` string); and historical goal-stop archaeology is
+bounded by the same pane-only-announcement limit documented earlier in
+this file, reconfirmed live against three real sub-dev boxes.
