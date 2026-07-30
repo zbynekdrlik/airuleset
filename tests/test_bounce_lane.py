@@ -183,3 +183,62 @@ class TestReviewWatchHoldsForeground(TestCase):
         for line in self.goal_lines()[1:]:
             self.assertIn("FOREGROUND sleep-poll", line)
             self.assertNotIn("ScheduleWakeup", line)
+
+
+class TestBounceMeansOneThingInAllThreeHomes(TestCase):
+    """#181 round 4, item 3. Three documents described `prio:bounce`
+    differently, and the disagreement is load-bearing because `core-quals`
+    counts the label: airuleset.py's `MAINTAINER_ACTION_LABELS` comment said
+    the re-review is THIS box's ball; the skill's cross-stream rules 2 and 3
+    said the gatekeeper returned it for the SUB-DEV to fix and the sub-dev's
+    worker clears it; and the branch-merge template's own (B) makes "no open
+    prio:bounce for my stream" the SUB-DEV's stop condition.
+
+    The behaviour is DECIDED and is not up for redesign: the full-authority
+    loop HOLDS in review-watch while a sub-dev bounce is open — stay alive,
+    re-check hourly, never end the loop — so `core-quals --count` legitimately
+    never reaching 0 in that state is CORRECT, not the never-stops failure the
+    original ticket rejected. All three descriptions must say that one thing.
+    """
+
+    CANON = ("sub-dev", "holds", "review-watch", "not the never-stops failure")
+    SKILL = "skills/autopilot/SKILL.md"
+
+    def _window(self, text, start, end):
+        i = text.index(start)
+        j = text.index(end, i)
+        return text[i:j].lower()
+
+    def _assert_canonical(self, window, where):
+        for needle in self.CANON:
+            self.assertIn(
+                needle, window,
+                "%s does not state the settled prio:bounce meaning (missing "
+                "%r)" % (where, needle))
+
+    def test_the_code_comment_states_it(self):
+        src = read("airuleset.py")
+        window = self._window(
+            src, "An open, non-skip ticket carrying ANY of these labels",
+            "MAINTAINER_ACTION_LABELS = (")
+        self._assert_canonical(window, "airuleset.py's label comment")
+
+    def test_cross_stream_rule_two_states_it(self):
+        t = read(self.SKILL)
+        window = self._window(t, "2. **Priority = labels",
+                              "3. **Label lifecycle")
+        self._assert_canonical(window, "cross-stream rule 2")
+
+    def test_cross_stream_rule_three_states_it(self):
+        t = read(self.SKILL)
+        window = self._window(t, "3. **Label lifecycle",
+                              "4. **The ping-pong")
+        self._assert_canonical(window, "cross-stream rule 3")
+
+    def test_the_branch_merge_stop_condition_is_still_the_subdevs_own(self):
+        """The reduced-authority template's (B) is unchanged by this
+        reconciliation — its scope was never the gatekeeper's."""
+        line = [ln for ln in read(self.SKILL).splitlines()
+                if ln.startswith("/goal STOP CONDITIONS")][1]
+        self.assertIn("prio:bounce", line)
+        self.assertIn("for my stream", line)

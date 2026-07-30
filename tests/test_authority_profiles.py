@@ -1262,3 +1262,462 @@ class TestHeartbeatRefreshesALiveRunNeverOpensOne(TestCase):
     def test_a_first_core_ticket_card_opens_the_run_window(self):
         airuleset._write_autopilot_progress("demo", 40, bump_done=True)
         self.assertEqual(self._read()["done"], 1)
+
+
+# --------------------------------------------------------------------------- #
+# Round 4. Every earlier round shipped the SAME class: a stop-proof that fails
+# OPEN, printing a wrong `0` that silently ends an autonomous /goal loop, with
+# genuine command output attached. The guard rounds 1-3 built is correct; it
+# was wired into ONE of the paths that need it.
+# --------------------------------------------------------------------------- #
+
+
+def _renamed_repo_gh(rest='[{"number": 4242}]', healthy=False,
+                     workflow_state="active", newest_run="success",
+                     workflows=None):
+    """A `_gh_out` stand-in reproducing the LIVE renamed-repo state.
+
+    Measured 2026-07-30 against a checkout whose `origin` still points at the
+    pre-rename `zbynekdrlik/odoo-slovnormal`: GitHub's issue SEARCH index does
+    not follow a repo rename, the REST/repository-listing path does. REST 110,
+    every `--search` 0, and `core-quals --count` printed `0` with rc 0.
+    """
+    import json as _json
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        joined = " ".join(args)
+        if args and args[0] == "label":
+            return '[{"name": "stream:david"}]'
+        if args and args[0] == "workflow":
+            if workflows is not None:
+                return _json.dumps(workflows)
+            return _json.dumps([
+                {"name": "Sub-dev Handoff Label", "state": workflow_state,
+                 "path": ".github/workflows/subdev-handoff-label.yml"}])
+        if args and args[0] == "run":
+            return _json.dumps([{"conclusion": newest_run,
+                                 "status": "completed"}])
+        if "sort:created-desc" in joined:
+            return '[{"number": 999}]' if healthy else "[]"
+        if "--search" in args:
+            return "[]"
+        return rest
+
+    return gh
+
+
+def _drive(cmd, gh, authority="full", user="newlevel", login="zbynekdrlik",
+           **flags):
+    """Run a real stop-proof command and capture stdout / stderr / exit."""
+    import contextlib
+    import io
+    import unittest.mock as mk
+
+    out, err, exc = io.StringIO(), io.StringIO(), None
+    args = dict(count=True, list=False, extra=None)
+    args.update(flags)
+    with mk.patch.object(airuleset, "resolve_authority", return_value=authority):
+        with mk.patch.object(airuleset, "_current_user", return_value=user):
+            with mk.patch.object(airuleset, "_gh_login", return_value=login):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(out):
+                        with contextlib.redirect_stderr(err):
+                            try:
+                                cmd(mk.Mock(**args))
+                            except SystemExit as e:
+                                exc = e
+    return out.getvalue(), err.getvalue(), exc
+
+
+class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
+    """#181 round 4, CRITICAL. `_search_index_healthy()` had exactly ONE call
+    site: inside `cmd_slice_quals`, nested behind
+    `len(quals) == 1 and quals[0].startswith("label:")` — the SHARED-account
+    shape. So it was not a guard on "an empty result out of the search index",
+    it was an extra validation for one caller's zero, and two live paths walked
+    straight past it.
+
+    Both reproduced on dev1, 2026-07-30, against the shipped code:
+
+      gh issue list --state open -L 1000 --json number --jq length        110
+      gh issue list --state open --search "sort:created-desc" -L 1000       0
+      python3 airuleset.py core-quals --count                              0  (rc 0)
+
+      _slice_quals("david") -> ['assignee:@me','author:@me','label:stream:david']
+      cmd_slice_quals(count=True), every search [] -> stdout '0', no SystemExit
+
+    The rename is only the cheapest trigger; any state where search answers
+    empty while REST does not reaches the same line."""
+
+    def _assert_refused(self, out, err, exc, why):
+        self.assertIsNotNone(exc, why)
+        self.assertNotEqual(exc.code, 0, why)
+        self.assertEqual(out.strip(), "", "a refusal must print NOTHING to stdout")
+        self.assertNotEqual(err.strip(), "", "a refusal must say why on stderr")
+
+    def test_core_quals_count_refuses_when_search_is_dead_but_rest_is_not(self):
+        out, err, exc = _drive(airuleset.cmd_core_quals, _renamed_repo_gh())
+        self._assert_refused(
+            out, err, exc,
+            "core-quals printed a stop-proof `0` while the repository listing "
+            "path shows open issues — the gatekeeper pastes that 0, writes "
+            "BACKLOG EMPTY and stops with the whole backlog outstanding")
+
+    def test_core_quals_list_refuses_too(self):
+        """`--list` is the mandated backlog SELECTION source, so an
+        unanswering index empties the worker's work queue just as silently as
+        it zeroes the count."""
+        out, err, exc = _drive(airuleset.cmd_core_quals, _renamed_repo_gh(),
+                               count=False, list=True)
+        self._assert_refused(out, err, exc,
+                             "core-quals --list returned an empty backlog")
+
+    def test_own_account_slice_quals_refuses_when_search_is_dead(self):
+        """The hole is open in the command round 3 fixed, too: an own-account
+        stream has THREE quals, so `len(quals) == 1` is False and the guard is
+        skipped entirely."""
+        out, err, exc = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
+                               authority="fork-no-merge", user="david",
+                               login="kvaskodev")
+        self._assert_refused(
+            out, err, exc,
+            "slice-quals printed a false SLICE EMPTY for an own-account "
+            "stream — the guard is nested behind the shared-account shape")
+
+    def test_own_account_slice_quals_list_refuses_too(self):
+        out, err, exc = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
+                               authority="fork-no-merge", user="david",
+                               login="kvaskodev", count=False, list=True)
+        self._assert_refused(out, err, exc, "slice-quals --list went empty")
+
+    def test_both_stop_proofs_refuse_with_the_IDENTICAL_contract(self):
+        """The refusal contract must not be two parallel copies — that is the
+        shape that let it drift for three rounds."""
+        core = _drive(airuleset.cmd_core_quals, _renamed_repo_gh())
+        slic = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
+                      authority="fork-no-merge", user="david", login="kvaskodev")
+        for out, err, exc in (core, slic):
+            self.assertIsNotNone(exc)
+            self.assertNotEqual(exc.code, 0)
+            self.assertEqual(out.strip(), "")
+            self.assertNotEqual(err.strip(), "")
+
+    # ----- controls: a legitimate zero must still be reportable ------------ #
+
+    def test_a_healthy_index_still_lets_core_quals_report_a_real_zero(self):
+        out, _, exc = _drive(airuleset.cmd_core_quals,
+                             _renamed_repo_gh(healthy=True))
+        self.assertIsNone(exc, "a validated zero must still be reportable")
+        self.assertEqual(out.strip(), "0")
+
+    def test_a_repo_with_no_open_issues_at_all_still_reports_zero(self):
+        out, _, exc = _drive(airuleset.cmd_core_quals,
+                             _renamed_repo_gh(rest="[]"))
+        self.assertIsNone(exc)
+        self.assertEqual(out.strip(), "0")
+
+
+class TestTheHandoffArmVerifiesItsOwnMechanism(TestCase):
+    """#181 round 4, item 6. The `ready-for-review` arm rests entirely on the
+    repo's own hand-off-label workflow — a read-role collaborator gets a 403
+    adding the label itself. Measured on zbynekdrlik/odoo-erp 2026-07-30:
+    workflow `active`, **23 of its last 30 runs FAILED** (the 5 newest all
+    failed, job `label`, startup-shaped), open `ready-for-review` issues **0**.
+    So the arm contributes a zero while the only thing that can produce a
+    non-zero is failing three runs in four — this ticket's own failure mode by
+    a different road, no longer hypothetical.
+
+    A miss must be DETECTABLE at the moment a zero would rest on it. It is NOT
+    guessed from comment text: GitHub tokenizes quoted phrases, so
+    `"READY-FOR-REVIEW:" in:comments` over-matches, and over-counting the
+    obligation set is the never-stops failure."""
+
+    def _drive_enrolled(self, gh, repo="odoo-erp"):
+        import unittest.mock as mk
+        with mk.patch("notify.repo_name_for", return_value=repo):
+            return _drive(airuleset.cmd_core_quals, gh)
+
+    def test_an_empty_obligation_set_refuses_when_the_labeller_is_failing(self):
+        out, err, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, newest_run="failure"))
+        self.assertIsNotNone(
+            exc,
+            "the obligation set is empty and the only mechanism that can put "
+            "`ready-for-review` on a hand-off just failed — a hand-off can be "
+            "outstanding with no label, so this 0 is not evidence")
+        self.assertNotEqual(exc.code, 0)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_disabled_labeller_refuses_too(self):
+        out, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, workflow_state="disabled_manually"))
+        self.assertIsNotNone(exc)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_missing_labeller_on_an_enrolled_repo_refuses(self):
+        out, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, workflows=[]))
+        self.assertIsNotNone(exc)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_healthy_labeller_still_lets_the_zero_through(self):
+        out, _, exc = self._drive_enrolled(_renamed_repo_gh(healthy=True))
+        self.assertIsNone(exc)
+        self.assertEqual(out.strip(), "0")
+
+    def test_a_repo_outside_the_cross_stream_flow_is_never_gated_on_it(self):
+        """airuleset itself has no sub-dev streams working it, so nothing here
+        depends on a hand-off labeller and a zero must not be blocked by one."""
+        out, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, workflows=[]), repo="airuleset")
+        self.assertIsNone(exc)
+        self.assertEqual(out.strip(), "0")
+
+
+def _labelled_rows_gh(healthy=True):
+    """A `_gh_out` stand-in whose issue rows carry real `labels` values."""
+    import json as _json
+
+    populations = {
+        "-label:stream:": [
+            {"number": 11, "title": "core work", "labels": [],
+             "createdAt": "2026-07-01T00:00:00Z"}],
+        "label:needs-gatekeeper": [],
+        "label:prio:bounce": [
+            {"number": 2150, "title": "bounced stream ticket",
+             "createdAt": "2026-06-01T00:00:00Z",
+             "labels": [{"name": "prio:bounce"}, {"name": "stream:david"}]}],
+        "label:ready-for-review": [],
+    }
+    seen = []
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        joined = " ".join(args)
+        seen.append(args)
+        if args and args[0] == "label":
+            return '[{"name": "stream:montalu"}]'
+        if args and args[0] == "workflow":
+            return "[]"
+        if args and args[0] == "run":
+            return "[]"
+        if "sort:created-desc" in joined:
+            return '[{"number": 999}]' if healthy else "[]"
+        if "--search" not in args:
+            return "[]"
+        search = args[args.index("--search") + 1]
+        rows = []
+        for key, val in populations.items():
+            if key in search:
+                rows.extend(val)
+        return _json.dumps(rows)
+
+    return gh, seen
+
+
+class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
+    """#181 round 4, HIGH. `core-quals --list` is the mandated backlog
+    SELECTION source and emitted no not-mine-to-implement discriminator:
+    `_union_open_issues` asked for `number,title,createdAt` — labels were never
+    fetched at all — and `_print_issue_rows` printed number/createdAt/title.
+
+    On odoo-erp the obligation set is 55 rows, and the FULL template's own
+    bounce-lane instruction seeds every new batch from the OLDEST open
+    `prio:bounce` ticket — which is #2150, `stream:david`. Nothing but a prose
+    clause stood between that instruction and the gatekeeper writing code on a
+    sub-dev's ticket, and prose in exactly this position is what this ticket
+    has been about for four rounds."""
+
+    def test_the_union_queries_actually_fetch_the_labels(self):
+        gh, seen = _labelled_rows_gh()
+        _drive(airuleset.cmd_core_quals, gh, count=False, list=True)
+        json_fields = [a[a.index("--json") + 1] for a in seen
+                       if "--json" in a and a and a[0] == "issue"]
+        self.assertTrue(json_fields)
+        self.assertTrue(
+            any("labels" in f for f in json_fields),
+            "labels are never fetched, so no row can carry a discriminator: %r"
+            % (json_fields,))
+
+    def test_a_stream_owned_row_is_marked_action_only(self):
+        gh, _ = _labelled_rows_gh()
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
+                             count=False, list=True)
+        self.assertIsNone(exc)
+        row = [ln for ln in out.splitlines() if ln.startswith("2150\t")]
+        self.assertTrue(row, out)
+        self.assertIn(
+            "action-only", row[0],
+            "the oldest open prio:bounce ticket is stream:david's — the seed "
+            "instruction points straight at it and the row says nothing")
+
+    def test_a_core_row_is_marked_implement(self):
+        gh, _ = _labelled_rows_gh()
+        out, _, _ = _drive(airuleset.cmd_core_quals, gh, count=False, list=True)
+        row = [ln for ln in out.splitlines() if ln.startswith("11\t")]
+        self.assertTrue(row, out)
+        self.assertIn("implement", row[0])
+
+    def test_my_OWN_streams_ticket_is_mine_to_implement(self):
+        """A reduced-authority box's own `stream:<me>` tickets must not come
+        back marked action-only — the discriminator is relative to THIS box."""
+        import json as _json
+
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            if args and args[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "--search" in args:
+                return _json.dumps([
+                    {"number": 7, "title": "mine",
+                     "createdAt": "2026-07-01T00:00:00Z",
+                     "labels": [{"name": "stream:montalu"}]}])
+            return "[]"
+
+        out, _, exc = _drive(airuleset.cmd_slice_quals, gh,
+                             authority="branch-merge", user="montalu",
+                             login="zbynekdrlik", count=False, list=True)
+        self.assertIsNone(exc)
+        row = [ln for ln in out.splitlines() if ln.startswith("7\t")]
+        self.assertTrue(row, out)
+        self.assertIn("implement", row[0])
+        self.assertNotIn("action-only", row[0])
+
+    def test_core_quals_can_scope_the_bounce_seed_like_slice_quals_does(self):
+        """The full-authority bounce seed went through a raw `gh issue list`,
+        so the single highest-priority selection path had neither the guard nor
+        the discriminator."""
+        gh, seen = _labelled_rows_gh()
+        _drive(airuleset.cmd_core_quals, gh, count=False, list=True,
+               extra="label:prio:bounce")
+        searches = [a[a.index("--search") + 1] for a in seen
+                    if "--search" in a and a and a[0] == "issue"]
+        searches = [s for s in searches if "sort:created-desc" not in s]
+        self.assertTrue(searches)
+        for s in searches:
+            self.assertIn("label:prio:bounce", s)
+
+
+class TestRunCardResolvesIdentityAgainstTheRepoRoot(TestCase):
+    """#181 I-5 residual (item 4): `_notify_run_card` was the fourth call site
+    and the only one still resolving identity against the PROCESS cwd — both
+    `resolve_authority()` and `_slice_quals()` were called with no cwd, so the
+    run-card and the footer could resolve the same box differently whenever a
+    session ran from a subdirectory. "One definition, resolved per box" is not
+    true until all four agree."""
+
+    def _args(self, **over):
+        import unittest.mock as mk
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+                    repo_name=False, newest_card=False, backfill_digest=False,
+                    record_question=False, edit_question=False,
+                    channel_id=False, owner=False, mirror_owners=False,
+                    body=None, run=None, repo="kvaskodev/odoo-erp", issue=1408,
+                    pr=None, achieved="hotové", result=None, goal="cieľ",
+                    version=None, merge_sha=None, url=None, review="ok",
+                    handoff=True, dedup_key=None, dry_run=False)
+        base.update(over)
+        return mk.Mock(**base)
+
+    def _capture(self):
+        import unittest.mock as mk
+
+        seen = {}
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "--search" in [str(x) for x in a]:
+                return "[]"
+            return "26"
+
+        def auth(cwd=None):
+            seen["authority_cwd"] = cwd
+            return "fork-no-merge"
+
+        def quals(user, cwd=None):
+            seen["slice_cwd"] = cwd
+            return ["label:stream:david"]
+
+        with mk.patch.object(airuleset, "_repo_root", return_value="/repo/root"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with mk.patch.object(airuleset, "resolve_authority",
+                                     side_effect=auth):
+                    with mk.patch.object(airuleset, "_slice_quals",
+                                         side_effect=quals):
+                        with mk.patch("notify.send", return_value="sent"):
+                            airuleset.cmd_notify(self._args())
+        return seen
+
+    def test_the_card_resolves_the_slice_against_the_repo_root(self):
+        seen = self._capture()
+        self.assertEqual(
+            seen.get("slice_cwd"), "/repo/root",
+            "the run-card still resolves 'my slice' against the process cwd "
+            "while the footer resolves it against the repo root")
+
+    def test_the_card_resolves_authority_against_the_repo_root_too(self):
+        seen = self._capture()
+        self.assertEqual(
+            seen.get("authority_cwd"), "/repo/root",
+            "a project CLAUDE.md authority marker is invisible to the card "
+            "whenever the session cwd is a subdirectory")
+
+
+class TestHeartbeatOnAReviewOnlyRun(TestCase):
+    """#164 M-1 residual (item 5). The GUARD is right; its stated reason was
+    false. The docstring claimed the run a heartbeat exists to keep alive
+    "always has an in-window file already" — which does not hold for a
+    gatekeeper run whose cards are ALL sub-dev stream tickets, a shape the
+    obligation-set change makes more common.
+
+    Opening the window there is NOT the fix and this round does not do it:
+    `done` and `remaining` are both core-scoped by deliberate design (#164), so
+    a review-only run would open at `0/N` and hold it for a full 6h window —
+    M-1 verbatim. Making D/T meaningful for such a run means scoping
+    `remaining` to the OBLIGATION set while the idle render stays core-scoped,
+    i.e. one label over two populations depending on run state, which is #164's
+    own title. So the behaviour stays and the false sentence goes."""
+
+    def setUp(self):
+        import unittest.mock as mk
+        from tempfile import TemporaryDirectory
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        p = mk.patch("statusbar.progress_dir", return_value=self.dir)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_whole_review_only_run_still_opens_no_window(self):
+        for _ in range(5):
+            airuleset._write_autopilot_progress("demo", 40, bump_done=False)
+        self.assertFalse(
+            (self.dir / "demo.json").exists(),
+            "a review-only run opened a progress window at 0/40 — the footer "
+            "would assert an active run that has achieved nothing")
+
+    def test_the_first_core_card_of_that_run_opens_it_immediately(self):
+        for _ in range(5):
+            airuleset._write_autopilot_progress("demo", 40, bump_done=False)
+        airuleset._write_autopilot_progress("demo", 40, bump_done=True)
+        import json as _json
+        self.assertEqual(
+            _json.loads((self.dir / "demo.json").read_text())["done"], 1)
+
+    def test_the_docstring_no_longer_claims_the_file_is_always_there(self):
+        # Whitespace-normalised: the docstring is hard-wrapped, so a raw
+        # assertNotIn would pass vacuously on the newline and lock nothing.
+        doc = " ".join((airuleset._write_autopilot_progress.__doc__ or "").split())
+        self.assertNotIn(
+            "always has an in-window file already", doc,
+            "the single source of truth for this invariant states a reason "
+            "that is false for a review-only gatekeeper run")
+
+    def test_the_docstring_states_the_real_reason_and_the_consequence(self):
+        doc = " ".join((airuleset._write_autopilot_progress.__doc__ or "").split())
+        self.assertIn("review-only", doc)
+        self.assertIn("no evidence of CORE progress", doc)

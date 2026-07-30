@@ -449,3 +449,38 @@ class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestTheMeasurementIsStatedOnceInLabelledUnits(TestCase):
+    """#181 round 4, item 7. Two documents recorded the same measurement of the
+    same repo on the same date differently — and two of the numbers were not
+    even the same QUANTITY: the skill's `13` was obligation-MINUS-core while
+    the log's `54` was the obligation TOTAL, which is exactly how a reader
+    concludes the two contradict each other.
+
+    Locking the SHAPE rather than the values: whichever numbers are current,
+    the measurement must name all three populations with their unit words, in
+    one place, so `outside-core` can never again be read as `obligation`."""
+
+    TRIPLE = re.compile(r"\d+ open non-skip / \d+ core / \d+ obligation")
+
+    def _assert_triple(self, rel):
+        """Compact on failure — never dump a 2400-line document into the
+        assertion message (the repo's own lock-test trap)."""
+        self.assertTrue(
+            self.TRIPLE.search(read(rel)),
+            "%s states no `<N> open non-skip / <N> core / <N> obligation` "
+            "measurement" % rel)
+
+    def test_the_skill_states_the_triple_in_labelled_units(self):
+        self._assert_triple(SKILL)
+
+    def test_the_autopilot_log_states_it_in_the_same_units(self):
+        self._assert_triple("docs/autopilot-log.md")
+
+    def test_the_old_unlabelled_phrasings_are_gone_from_the_skill(self):
+        t = read(SKILL)
+        for stale in ("83 open non-skip, 40 core", "13 tickets"):
+            self.assertNotIn(
+                stale, t,
+                "the skill still carries the unlabelled phrasing %r" % stale)
