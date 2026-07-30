@@ -1557,6 +1557,30 @@ def setup_filedrop_service():
     return False
 
 
+def _current_remote_host_entry():
+    """Best-effort match of "the box currently running install" to its own
+    REMOTE_HOSTS deploy-target entry (#151) -- keyed on the LOCAL system
+    username via the existing `_whoami()` helper. Usernames are unique across
+    every REMOTE_HOSTS entry today (newlevel/gatekeeper/montalu/marek/david/
+    simap), so this needs no new per-entry data and can't confuse the four
+    subdev-VPS users (montalu/marek/david/simap), which all share the SAME
+    physical hostname and would be indistinguishable by a hostname-only match.
+
+    Returns None when no entry's `user` matches -- expected on dev1 itself
+    (the deploy SOURCE, never listed in REMOTE_HOSTS, and always the primary
+    already-configured host in practice, so it essentially never reaches the
+    caller's warning branch). Known edge case: dev1's local user is also
+    `newlevel`, same as the `dev2` entry -- a mismatch there is harmless
+    since dev2 pins no identity either."""
+    me = _whoami()
+    if not me:
+        return None
+    for entry in REMOTE_HOSTS:
+        if entry.get("user") == me:
+            return entry
+    return None
+
+
 def check_discord_notify_config():
     """Report whether Discord notifications are wired on THIS host (no secrets printed).
 
@@ -1565,14 +1589,27 @@ def check_discord_notify_config():
     NOTHING: every notify call fail-safes to a silent no-op. That is exactly how the
     gatekeeper box went dark (the `.env` was never wired when it was added). This
     check makes the gap LOUD at install time instead of a silent failure discovered
-    weeks later. It NEVER prints the token value — only presence."""
+    weeks later. It NEVER prints the token value — only presence.
+
+    The "wire it from an already-configured host" ssh one-liner (#151) is built
+    from THIS box's own REMOTE_HOSTS entry (`_current_remote_host_entry()`) so it
+    carries a pinned `-i <identity>` when one exists -- e.g. simap/marek/david on
+    subdev all pin `~/.secrets/gatekeeper_access_ed25519`. A wrong-key ssh attempt
+    against subdev trips its fail2ban and bans dev1 on every interface (tailscale
+    included) for an hour, so a bare host-agnostic hint there is not cosmetic.
+    When no REMOTE_HOSTS entry matches this box, the old `<this-host>` placeholder
+    is kept unchanged rather than guessing."""
     env = CLAUDE_DIR / "channels" / "discord" / ".env"
     print("  Checking Discord notify config")
     if not env.is_file():
         print("    ⚠ Discord notify DISABLED — no ~/.claude/channels/discord/.env on this host.")
         print("      Pings (❓/✅, api-error, autopilot cards) will silently NOT send.")
         print("      Wire it from an already-configured host (secrets stay local, not git):")
-        print("        cat ~/.claude/channels/discord/.env | ssh <this-host> \\")
+        entry = _current_remote_host_entry()
+        target = f"{entry['user']}@{entry['host']}" if entry else "<this-host>"
+        identity = entry.get("identity") if entry else None
+        id_flag = f"-i {identity} " if identity else ""
+        print(f"        cat ~/.claude/channels/discord/.env | ssh {id_flag}{target} \\")
         print("          'umask 077 && mkdir -p ~/.claude/channels/discord && "
               "cat > ~/.claude/channels/discord/.env'")
         return
