@@ -4476,6 +4476,133 @@ class TestApiWatchdog(TestCase):
                         grace=300, interval=300, max_nudges=3)
         self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
 
+    def test_run_once_apierror_busy_pane_pings_after_wall_clock_2x_grace_even_if_mtime_stays_fresh(self):
+        # #176 REOPENED F2: the busy-pane ping used to be gated on transcript
+        # MTIME (`idle = now - tmtime`), the one signal job 1's OWN grace
+        # deliberately avoids for its other branch — CC's own retries or a
+        # queue/snapshot write can keep touching the transcript while the pane
+        # stays genuinely busy, holding `idle` artificially low forever. The
+        # threshold must be anchored on THIS EPISODE's own first_seen (wall
+        # clock) instead, so it still fires once REAL time passes 2x grace
+        # even though `idle` itself never exceeds 100s here.
+        now = 1_000_000
+        cwd = "/devel/projwedgedfresh"
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=_BUSY_PANE)
+        grace = 300
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 100, now)
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=grace, interval=300, max_nudges=3)
+        self.assertEqual(self.pings, [], "must not ping before 2x grace of wall clock")
+        for i in range(1, 8):
+            t = now + i * 100
+            self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 100, t)
+            self.w.run_once(now=t, run=fake, send_fn=self._send,
+                            projects_dir=self.projects, state_path=self.state,
+                            grace=grace, interval=300, max_nudges=3)
+        self.assertEqual(len(self.pings), 1,
+                         "a genuinely busy pane must ping once past 2x grace of REAL "
+                         "wall-clock time, even if something keeps the transcript's "
+                         "own mtime fresh")
+        self.assertTrue(self.pings[0][1].startswith("apierr-busypane:"))
+
+    def test_run_once_apierror_stash_never_follows_a_job10_submit_in_the_same_sweep(self):
+        # #176 REOPENED F3: job 1's draft-pending path used the STALE
+        # top-of-sweep capture to decide whether to stash-deliver — but job 10
+        # (prompt_wedge_check) runs EARLIER in the SAME sweep and can submit a
+        # recognized MACHINE draft (Escape+Enter) into the exact same pane.
+        # Job 1 must re-verify against a FRESH capture right before sending its
+        # own C-s, or it types into a turn that started microseconds earlier
+        # (job 20's own documented hazard).
+        now = 1_000_000
+        cwd = "/devel/projrace"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 600, now)
+        machine_text = "Priorita: prio:bounce test message"
+        draft_cap = "❯\xa0" + machine_text + "\n"
+        sent = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if argv[:2] == ["tmux", "list-panes"]:
+                return "%5\tclaude\t" + cwd + "\n"
+            if argv[:2] == ["tmux", "display-message"]:
+                if "pane_in_mode" in j:
+                    return "0"
+                return ""
+            if argv[:2] == ["tmux", "capture-pane"]:
+                if any(a and a[-1] == "Enter" for a in sent):
+                    return _BUSY_PANE
+                return draft_cap
+            if argv[:2] == ["tmux", "send-keys"]:
+                sent.append(argv)
+                return ""
+            return ""
+
+        import hashlib
+        h = hashlib.sha1(machine_text.encode("utf-8")).hexdigest()[:12]
+        state = {"pwedge:%5": {"hash": h, "n": self.w.PWEDGE_SWEEPS - 1, "pinged": False}}
+        self.w.save_state(self.state, state)
+
+        logs = self.w.run_once(now=now, run=run, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertTrue(any(a and a[-1] == "Enter" for a in sent), sent)   # job 10 submitted
+        self.assertFalse(any(a and a[-1] == "C-s" for a in sent),
+                         "job1 must not stash-deliver into a pane job10 just "
+                         "submitted in the same sweep: %r" % sent)
+        self.assertTrue(any("skip raced" in ln for ln in logs), logs)
+
+    def test_run_once_apierror_aborted_stash_pings_once_when_wedged(self):
+        # #176 REOPENED F1: the shipped fix RELOCATED the silent unbounded skip
+        # from the busy branch to the stash-abort branch instead of eliminating
+        # it — an occupied stash slot / a live-turn abort left this branch with
+        # no state, no ping, no bound. Must get the SAME bounded escalation the
+        # busy branch already has: zero keystrokes, exactly one deduped ping
+        # once the episode runs strictly past 2x grace of wall clock.
+        now = 1_000_000
+        cwd = "/devel/projstashwedged"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 1000, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._DRAFT_PANE)
+        with m.patch.object(self.w, "deliver_with_stash", return_value=False):
+            logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                                   projects_dir=self.projects, state_path=self.state,
+                                   grace=300, interval=300, max_nudges=3)
+        self.assertEqual(fake.continues_sent(), 0, "must NOT type into the drafted pane")
+        self.assertEqual(len(self.pings), 1, "exactly one stash-abort-wedged ping")
+        self.assertTrue(self.pings[0][1].startswith("apierr-stashabort:"))
+        self.assertTrue(any("stash-abort-wedged (api-error)" in ln for ln in logs), logs)
+        # second poll in the same episode, still aborting → no second ping
+        with m.patch.object(self.w, "deliver_with_stash", return_value=False):
+            self.w.run_once(now=now + 60, run=fake, send_fn=self._send,
+                            projects_dir=self.projects, state_path=self.state,
+                            grace=300, interval=300, max_nudges=3)
+        self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
+
+    def test_run_once_apierr_episode_state_is_pruned_after_wait_clear(self):
+        # #176 REOPENED F7: the cleanup OR-chain must actually name BOTH the
+        # busy-pane and stash-abort episode prefixes, or their state keys leak
+        # forever once the session recovers — removing either branch left
+        # every pre-existing test green, since neither key is a bare UUID (the
+        # OTHER cleanup branch's own shape) and nothing else ever reads them.
+        now = 1_000_000
+        state = {
+            "apierr-busypane:oldsid": {"first_seen": now - 10000,
+                                       "last_seen": now - 1000, "pinged": True},
+            "apierr-stashabort:oldsid2": {"first_seen": now - 10000,
+                                         "last_seen": now - 1000, "pinged": True},
+        }
+        self.w.save_state(self.state, state)
+        fake = _FakeTmux(panes="")   # no live panes at all — nothing to act on
+        self.w.run_once(now=now, run=fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3, wait_clear=90)
+        st = self.w.load_state(self.state)
+        self.assertNotIn("apierr-busypane:oldsid", st,
+                         "a stale busy-pane episode key must be pruned, not leak forever")
+        self.assertNotIn("apierr-stashabort:oldsid2", st,
+                         "a stale stash-abort episode key must be pruned, not leak forever")
+
     def test_run_once_ignores_fresh_transcript(self):
         now = 1_000_000
         cwd = "/devel/fresh"

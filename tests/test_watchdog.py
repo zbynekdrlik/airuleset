@@ -623,6 +623,25 @@ class QueuedMessagesPlaceholderNotADraft(unittest.TestCase):
         self.assertEqual(wd._classify_boundary(cap), ("input", ""))
         self.assertTrue(wd.pane_at_idle_prompt(cap))
 
+    def test_a_draft_starting_with_the_real_prefix_but_with_extra_words_is_still_a_draft(self):
+        # #176 REOPENED F8: `test_a_genuine_draft_mentioning_similar_words_is_still_a_draft`
+        # above starts "press up LATER..." — it never even starts with the real
+        # "press up to edit" prefix, so it gives ZERO protection against a future
+        # widening of `_QUEUED_PLACEHOLDER_RX` to something like
+        # `press up to edit.*queued messages` (a `.*` in place of the tight
+        # `(?:\s+\d+)?\s+`). THIS fixture starts with the genuine prefix and
+        # inserts real words before "queued messages" — a real draft that a `.*`
+        # variant would wrongly swallow and discard as the empty-box placeholder.
+        cap = ("● hotovo\n❯ press up to edit the config, then flush queued "
+               "messages\n  ctx ░\n")
+        self.assertEqual(
+            wd._input_line_text(cap),
+            "press up to edit the config, then flush queued messages")
+        self.assertFalse(wd.pane_at_idle_prompt(cap))
+        self.assertEqual(
+            wd._classify_boundary(cap),
+            ("input", "press up to edit the config, then flush queued messages"))
+
 
 class PaneQuestionExcerpt(unittest.TestCase):
     """The job-2 "čaká na teba" ping must CARRY the question + options extracted from

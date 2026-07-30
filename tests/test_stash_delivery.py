@@ -125,14 +125,39 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertEqual(run.sent, [])
 
     def test_verify_bare_failed_aborts_before_any_typing(self):
-        # the re-capture after C-s still shows the draft (stash didn't take)
-        run = _Recorder([DRAFT_IDLE])
+        # the re-capture after C-s still shows the draft (stash didn't take) and
+        # NEVER settles across the bounded settle window (#176 F4:
+        # STASH_VERIFY_SETTLE_POLLS captures), so the abort path fires its own
+        # best-effort restoring C-s (one more send + one discard capture) before
+        # giving up — 1 stash attempt + 1 restore = 2 total C-s sends.
+        run = _Recorder([DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE])
         logs = []
-        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs)
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs,
+                                   sleep_fn=lambda s: None)
         self.assertFalse(ok)
         self.assertFalse(any("-l" in a for a in run.sent),
                          "must never type after a failed stash verify: %r" % run.sent)
         self.assertTrue(logs)
+        cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
+        self.assertEqual(cs_count, 2, run.sent)
+
+    def test_verify_bare_settles_after_a_raced_immediate_capture(self):
+        # #176 F4: the render of a `C-s` toggle can lag behind the keystroke
+        # actually landing — an IMMEDIATE re-capture can still show the OLD
+        # draft even though the toggle already took server-side. A bounded
+        # settle poll must retry before concluding the stash genuinely failed,
+        # or a raced false-negative here silently strands the user's draft in
+        # the invisible stash slot with nothing left to restore it (no turn
+        # was ever delivered). First capture still shows the draft (raced);
+        # second capture shows the real post-toggle state (settled).
+        run = _Recorder([DRAFT_IDLE, STASHED_BARE, TYPED_BOUNDARY, BARE_AFTER_SUBMIT])
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE,
+                                   sleep_fn=lambda s: None)
+        self.assertTrue(ok, run.sent)
+        self.assertTrue(any("-l" in a for a in run.sent), run.sent)
+        cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
+        self.assertEqual(cs_count, 1, "a settled stash must NOT trigger the "
+                         "restore attempt: %r" % run.sent)
 
     def test_type_verify_failed_sends_exactly_one_restoring_cs(self):
         wrong_boundary = "● x\n❯ totally unrelated text\n  ctx ░░\n"
