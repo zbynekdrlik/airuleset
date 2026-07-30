@@ -321,5 +321,103 @@ class TestTheReviewProbeCannotBeDrivenPastPcresLimit(_HookCase):
                     % self._violations(r))
 
 
+# --------------------------------------------------------------------------- #
+# Adversarial-review follow-ups on the #194 fix itself
+# --------------------------------------------------------------------------- #
+
+class TestTheReviewProbesBoundAcceptsRealAuditLines(_HookCase):
+    """The bound that removed the backtracking TRIGGER must not become a new way
+    to accuse a correct report of missing a line it carries.
+
+    The first cut used `.{0,120}` and rejected two ordinary shapes outright.
+    Measured against the real pattern, the gap between `/review[: ]` and the
+    first counter is 169 chars for a verbose standards sentence and 161 for a
+    found-and-fixed summary, so both fell outside — and the accusation reads
+    "missing", which the agent cannot act on because nothing names length. The
+    twin `requesting-code-review` probe is unbounded ERE (a DFA, so it cannot
+    hit a backtracking limit at all), which means the report was blocked on one
+    audit line and passed on its identical twin.
+
+    The bound costs nothing: with grep's required-literal pre-filter defeated,
+    every candidate from 120 to 1000 answers a 1 MB adversarial line in under
+    0.35 s. So it is sized by what real reports look like, not by speed."""
+
+    HEAD = "## ✅ Work Complete\n\n**Audits & deploy:**\n✅ /plan-check: 3/3 fulfilled\n"
+    RCR = "✅ /requesting-code-review: clean — 0 %s 0 %s 0 %s\n" % (RED, YELLOW, BLUE)
+    TAIL = "\n---\n\n**Goal:** x\n**What changed:** y\n"
+
+    LINES = (
+        ("canonical", "✅ /review: clean — 0 %s 0 %s 0 %s" % (RED, YELLOW, BLUE)),
+        ("verbose-standards",
+         "✅ /review: applied Correctness / Security / Performance / Maintainability"
+         " / Style standards across the whole diff and fixed everything found inside"
+         " it — 0 %s 0 %s 0 %s" % (RED, YELLOW, BLUE)),
+        ("found-and-fixed",
+         "✅ /review: 3 %s fixed (null deref in the parser, TOCTOU on the claim file,"
+         " off-by-one in the batch cursor), 2 %s fixed (naming, dead branch), 1 %s"
+         " fixed (stale comment) — now 0 %s 0 %s 0 %s"
+         % (RED, YELLOW, BLUE, RED, YELLOW, BLUE)),
+        ("multi-repo",
+         "✅ /review: clean across airuleset, camera-box and restreamer after the"
+         " shared helper landed in all three — 0 %s 0 %s 0 %s" % (RED, YELLOW, BLUE)),
+        ("all-findings", "✅ /review: all findings addressed"),
+        ("in-commit", "✅ /review: addressed in commit a1b2c3d"),
+    )
+
+    def test_every_real_audit_line_shape_is_accepted(self):
+        for name, line in self.LINES:
+            with self.subTest(shape=name):
+                r = self._run(self.HEAD + line + "\n" + self.RCR + self.TAIL)
+                self.assertEqual(
+                    [v for v in self._violations(r) if "/review audit line" in v],
+                    [], "a real audit line was reported MISSING (%s): %s"
+                    % (name, self._violations(r)))
+
+    def test_the_trigger_is_still_removed(self):
+        """Control: widening the bound must not re-open the backtracking hole."""
+        r = self._run(self._report(_TRIPS_PCRE))
+        self.assertNotIn("undeterminable", r.stderr.lower())
+
+
+class TestASelectorsUnknownWidensScopeInsteadOfBecomingAVerdict(_HookCase):
+    """A two-stage probe has a SELECTOR stage and a PATTERN stage. The selector
+    is neither incriminating nor exonerating — it only chooses what the real
+    pattern reads — so an unanswerable selector must WIDEN the scope and let the
+    pattern decide, exactly as the `/goal` filter does by falling back to the
+    full message. Resolving it as a verdict about a pattern that was never
+    attempted accuses a message that contains no 🌐 line at all, and then quotes
+    an empty offending-lines block."""
+
+    def _selective_stub(self, needle):
+        """grep that ERRORS only for the one pattern containing `needle`, and is
+        otherwise the real grep — so exactly ONE check goes undeterminable."""
+        d = Path(tempfile.mkdtemp(prefix="airuleset-sel-"))
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        stub = d / "grep"
+        stub.write_text(
+            '#!/bin/sh\nfor a in "$@"; do\n'
+            '  case "$a" in *%s*) exit 2 ;; esac\n'
+            'done\nexec /usr/bin/grep "$@"\n' % needle)
+        stub.chmod(0o755)
+        return {**os.environ, "PATH": "%s:%s" % (d, os.environ["PATH"])}
+
+    MSG = "Fixed the typo in the README. Nothing else to report.\n"
+
+    def test_an_unanswerable_globe_selector_does_not_accuse(self):
+        r = self._run(self.MSG, env=self._selective_stub("\U0001f310"))
+        self.assertEqual(
+            [v for v in self._violations(r) if "localhost" in v], [],
+            "a message with no 🌐 line at all was accused of pointing one at"
+            " localhost, because the SELECTOR could not be evaluated: %s"
+            % self._violations(r))
+
+    def test_a_real_localhost_line_still_blocks(self):
+        """Control: widening the selector must not disarm the gate."""
+        r = self._run("Preview is up.\n\n🌐 Dev: http://localhost:3000\n")
+        self.assertTrue(any("localhost" in v for v in self._violations(r)),
+                        "the localhost gate stopped firing: %s"
+                        % self._violations(r))
+
+
 if __name__ == "__main__":
     unittest.main()
