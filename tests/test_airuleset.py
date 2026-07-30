@@ -4552,6 +4552,89 @@ class TestApiWatchdog(TestCase):
                          "submitted in the same sweep: %r" % sent)
         self.assertTrue(any("skip raced" in ln for ln in logs), logs)
 
+    def test_run_once_apierror_raced_skip_pings_once_when_wedged(self):
+        # #176 R2: F3's own "skip raced" branch (job 1 re-verifying against a
+        # FRESH capture immediately before delivery) used to log and
+        # `continue` bare on a mismatch — no state, no ping, no counter, no
+        # bound — structurally the identical silent-unbounded-skip shape
+        # this whole ticket removed from the busy and stash-abort branches.
+        # It must now share the EXISTING `apierr-stashabort:` escalation:
+        # zero keystrokes, exactly one deduped ping per episode once the
+        # stall runs strictly past 2x grace of wall clock. Here the pane
+        # moves between the top-of-sweep capture (draft) and job 1's own
+        # fresh re-check (busy) for some OTHER reason than job 10 (which
+        # never sends a keystroke in this test at all).
+        now = 1_000_000
+        cwd = "/devel/projraced2"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 1000, now)
+        calls = {"n": 0}
+
+        def run(argv, timeout=8):
+            if argv[:2] == ["tmux", "list-panes"]:
+                return "%5\tclaude\t" + cwd + "\n"
+            if argv[:2] == ["tmux", "display-message"]:
+                return "0" if "pane_in_mode" in " ".join(argv) else ""
+            if argv[:2] == ["tmux", "capture-pane"]:
+                calls["n"] += 1
+                # capture #1 = the sweep's top-of-sweep read (idle-with-draft);
+                # every later capture = job 1's own fresh re-verification,
+                # which no longer agrees (busy) — the "raced" shape.
+                return self._DRAFT_PANE if calls["n"] == 1 else _BUSY_PANE
+            return ""
+
+        logs = self.w.run_once(now=now, run=run, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertTrue(any("skip raced" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, "exactly one raced-skip-wedged ping")
+        self.assertTrue(self.pings[0][1].startswith("apierr-stashabort:"))
+        self.assertTrue(any("stash-abort-wedged (api-error)" in ln for ln in logs), logs)
+        # second poll in the same episode, still racing → no second ping
+        calls["n"] = 0
+        self.w.run_once(now=now + 60, run=run, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3)
+        self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
+
+    def test_run_once_apierror_stashabort_pings_after_wall_clock_2x_grace_even_if_mtime_stays_fresh(self):
+        # #176 R4: a surviving mutant — reverting the stash-abort branch's
+        # own threshold from `(now - sb["first_seen"]) > 2 * grace` back to
+        # live `idle` (transcript mtime) is literally the F2 defect this
+        # ticket already fixed once, one branch over, and nothing pinned it.
+        # Same anchor requirement as the busy branch: a genuinely aborted
+        # stash must still ping once REAL wall-clock time passes 2x grace,
+        # even if something keeps re-touching the transcript so `idle`
+        # itself never crosses the threshold.
+        now = 1_000_000
+        cwd = "/devel/projstashabortfresh"
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._DRAFT_PANE)
+        grace = 300
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 100, now)
+        with m.patch.object(self.w, "deliver_with_stash", return_value=False):
+            self.w.run_once(now=now, run=fake, send_fn=self._send,
+                            projects_dir=self.projects, state_path=self.state,
+                            grace=grace, interval=300, max_nudges=3)
+        self.assertEqual(self.pings, [], "must not ping before 2x grace of wall clock")
+        # An aborted stash never persists state[key] (the "must not burn a
+        # retry" invariant), so `decide()` re-derives "nudge is due" fresh
+        # from the SAME frozen first_seen every sweep once idle >= grace —
+        # 8 sweeps of 100s is what carries (now - skey.first_seen) past
+        # 2*grace=600 (nudge first reaches the stash-abort branch at i=2,
+        # ping fires once the WALL CLOCK since then exceeds 600 at i=8).
+        for i in range(1, 9):
+            t = now + i * 100
+            self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 100, t)
+            with m.patch.object(self.w, "deliver_with_stash", return_value=False):
+                self.w.run_once(now=t, run=fake, send_fn=self._send,
+                                projects_dir=self.projects, state_path=self.state,
+                                grace=grace, interval=300, max_nudges=3)
+        self.assertEqual(len(self.pings), 1,
+                         "a genuinely aborted stash must ping once past 2x grace of "
+                         "REAL wall-clock time, even if something keeps the "
+                         "transcript's own mtime fresh")
+        self.assertTrue(self.pings[0][1].startswith("apierr-stashabort:"))
+
     def test_run_once_apierror_aborted_stash_pings_once_when_wedged(self):
         # #176 REOPENED F1: the shipped fix RELOCATED the silent unbounded skip
         # from the busy branch to the stash-abort branch instead of eliminating

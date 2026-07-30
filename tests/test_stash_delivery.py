@@ -124,12 +124,16 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(run.sent, [])
 
-    def test_verify_bare_failed_aborts_before_any_typing(self):
-        # the re-capture after C-s still shows the draft (stash didn't take) and
-        # NEVER settles across the bounded settle window (#176 F4:
-        # STASH_VERIFY_SETTLE_POLLS captures), so the abort path fires its own
-        # best-effort restoring C-s (one more send + one discard capture) before
-        # giving up — 1 stash attempt + 1 restore = 2 total C-s sends.
+    def test_verify_bare_failed_but_restore_alone_recovers_the_draft(self):
+        # #176 R3: the settle poll never confirms bare+marker (the FIRST C-s
+        # was either lost or lagged — indistinguishable from here), so the
+        # abort path sends a best-effort restoring C-s. Unlike the pre-R3
+        # shipped code, that restore's OWN effect must now be VERIFIED
+        # rather than trusted blindly: here the very next capture already
+        # shows the draft back in the box, so the restore alone recovered
+        # it — no corrective third toggle needed. 1 stash attempt + 1
+        # restore = 2 total C-s sends, and the draft's FATE (not just the
+        # keystroke count) must be logged as recovered.
         run = _Recorder([DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE])
         logs = []
         ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs,
@@ -140,6 +144,59 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertTrue(logs)
         cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
         self.assertEqual(cs_count, 2, run.sent)
+        self.assertTrue(any("draft-recovered" in ln for ln in logs), logs)
+        self.assertFalse(any("draft-still-hidden" in ln for ln in logs), logs)
+
+    def test_verify_bare_failed_first_cs_was_lost_corrective_toggle_recovers_the_draft(self):
+        # #176 R3 — THE regression this finding was reopened for. A faithful
+        # single-slot toggle model: when the FIRST C-s was genuinely LOST
+        # (never toggled anything at all — the pre-#176-F4 base's own
+        # accidental safety, since base never sent a second keystroke), the
+        # "restore" C-s is actually the FIRST real toggle CC ever receives —
+        # it genuinely STASHES the draft for real (the box shows
+        # bare+stashed for the whole post-restore settle window), with no
+        # delivered turn ever coming to auto-restore it. One corrective
+        # toggle must undo that and be VERIFIED to have actually worked
+        # (the box shows the draft again) rather than trusted blindly — 1
+        # stash attempt + 1 restore-that-stashed + 1 corrective-undo = 3
+        # total C-s sends, and the log must name both the hidden interlude
+        # and the eventual recovery.
+        run = _Recorder([DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE,
+                         STASHED_BARE, STASHED_BARE, STASHED_BARE,
+                         DRAFT_IDLE])
+        logs = []
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs,
+                                   sleep_fn=lambda s: None)
+        self.assertFalse(ok)
+        self.assertFalse(any("-l" in a for a in run.sent),
+                         "must never type after a failed stash verify: %r" % run.sent)
+        cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
+        self.assertEqual(cs_count, 3, run.sent)
+        self.assertTrue(any("draft-still-hidden" in ln for ln in logs), logs)
+        self.assertTrue(any("draft-recovered" in ln for ln in logs), logs)
+
+    def test_verify_bare_failed_draft_stays_hidden_after_two_restores_logged_honestly(self):
+        # #176 R3 residual: the pathological case where the draft never
+        # comes back even after the corrective toggle (an exceptionally
+        # slow render, or a genuinely wedged stash slot). Must still return
+        # False (never types), send exactly the 2 restore attempts (3 total
+        # C-s), and log the honest, unresolved outcome rather than silently
+        # claiming success or crashing.
+        run = _Recorder([DRAFT_IDLE, DRAFT_IDLE, DRAFT_IDLE,
+                         STASHED_BARE, STASHED_BARE, STASHED_BARE,
+                         STASHED_BARE, STASHED_BARE, STASHED_BARE])
+        logs = []
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs,
+                                   sleep_fn=lambda s: None)
+        self.assertFalse(ok)
+        self.assertFalse(any("-l" in a for a in run.sent),
+                         "must never type after a failed stash verify: %r" % run.sent)
+        cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
+        self.assertEqual(cs_count, 3, run.sent)
+        self.assertTrue(any("draft-still-hidden" in ln for ln in logs), logs)
+        self.assertTrue(any("draft-still-not-visible-after-2-restores" in ln
+                            for ln in logs), logs)
+        self.assertFalse(any("draft-recovered" in ln for ln in logs), logs)
 
     def test_verify_bare_settles_after_a_raced_immediate_capture(self):
         # #176 F4: the render of a `C-s` toggle can lag behind the keystroke
