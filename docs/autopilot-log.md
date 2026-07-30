@@ -2355,7 +2355,12 @@ is the only one able to move. Measured live on `zbynekdrlik/odoo-erp`
 set — #2396 and #2377 carry `stream:montalu` AND `needs-gatekeeper`, so a
 core-only proof cannot see them at all, plus 11 open `prio:bounce`. The
 gatekeeper closes its 41, the proof prints `0`, the loop stops, and 13 tickets
-stay blocked on the box that just stopped. #181 verbatim at a new address, and
+stay blocked on the box that just stopped. (**CORRECTION, round 4:** those
+figures and the skill's own — 83 / 40 / 13 — read as contradicting each other
+because two of them were different QUANTITIES: the skill's `13` was
+obligation-MINUS-core, this entry's `54` was the obligation TOTAL. Both are now
+stated in labelled units; see the round-4 entry's re-measurement.) #181
+verbatim at a new address, and
 a silent breach of cross-stream rule 4, which the pre-round-2 whole-repo proof
 had upheld only as a side effect of being whole-repo.
 
@@ -2437,3 +2442,100 @@ disclosed as `· streamy M`. Documented in the skill and locked by
 implementation files and re-running), every one for a BEHAVIOURAL reason —
 zero AttributeError, which was the tautology shape round 1 shipped once.
 3326 tests pass, ruff clean.
+
+## 2026-07-30 — issues 181 + 164, ROUND 4: the guard was wired into one path of two
+
+Round-4 adversarial review reopened both again. Same class every round: a gate
+that fails OPEN, printing a wrong `0` that silently ends an autonomous /goal
+loop, with genuine command output attached.
+
+CRITICAL. Round 3's `_search_index_healthy()` is the right guard, but it was
+installed as an extra validation for ONE caller's zero rather than as a
+precondition on trusting ANY zero derived from the GitHub issue SEARCH index.
+One call site, nested inside `cmd_slice_quals` behind
+`len(quals) == 1 and quals[0].startswith("label:")` — the SHARED-account shape.
+Two paths walked past it, both reproduced live on dev1 against the shipped
+code in a checkout whose `origin` still points at the pre-rename name (the
+search index does not follow a repo rename; the REST listing path does):
+
+    gh issue list --state open -L 1000 --json number --jq length        110
+    gh issue list --state open --search "sort:created-desc" -L 1000       0
+    python3 airuleset.py core-quals --count                              0  (rc 0)
+
+    _slice_quals("david") -> ['assignee:@me','author:@me','label:stream:david']
+    cmd_slice_quals(count=True), every search [] -> stdout '0', no SystemExit
+
+The second one is the command round 3 fixed: an own-account stream has three
+quals, so its own guard never ran. Rounds 1-3 each moved the guard one call
+frame outward instead of making the refusal a property of the RESULT, which is
+why the class survived three fixes.
+
+Fix: one shared `_refuse_unless_empty_is_trustworthy()`, called by BOTH
+stop-proof commands at the identical point — after the `failed` check, before
+either output path, and only when the union is empty (a non-empty union is
+itself proof the index answers, so the healthy path costs no extra gh call).
+Audit of "every command whose output a /goal stop condition can quote": the
+three templates name exactly `slice-quals --count` and `core-quals --count`,
+and `--list` on both is the mandated SELECTION source — both commands, both
+paths, covered.
+
+HIGH. `core-quals --list` is the mandated backlog SELECTION source and emitted
+no not-mine-to-implement discriminator: labels were never fetched at all. The
+full template seeds every new batch from the OLDEST open `prio:bounce` ticket,
+which on odoo-erp is 2150, `stream:david` — only a prose clause stood between
+that instruction and the gatekeeper writing code on a sub-dev's ticket.
+`_union_open_issues` now fetches `labels` (one extra field on queries already
+being made) and `_print_issue_rows` emits a third column, `action-only` vs
+`implement`, relative to THIS box so a stream's own tickets still read
+`implement`. `core-quals` gained `--extra`, and the skill's full-authority
+bounce seed now goes through it instead of a raw `gh issue list` — that seed
+was the one selection path with neither the guard nor the column.
+
+MEDIUM. The `prio:bounce` definition is now one statement in all three homes
+(airuleset.py's `MAINTAINER_ACTION_LABELS` comment, cross-stream rules 2 and
+3): the gatekeeper returns it to the SUB-DEV, the sub-dev fixes it, the
+sub-dev's worker or the repo automation clears it — and the full-authority
+loop HOLDS in review-watch while it is open, so `core-quals --count` never
+reaching 0 in that state is CORRECT, not the never-stops failure. Locked by
+`TestBounceMeansOneThingInAllThreeHomes`, whose window normalises comment
+markers and wrapping so it fails on the claim, never on the formatting.
+
+MEDIUM. `_notify_run_card` was the fourth I-5 call site and the only one still
+resolving identity against the PROCESS cwd — both `resolve_authority()` and
+`_slice_quals()` are now resolved against the repo root, so all four agree.
+
+LOW. The `ready-for-review` arm rests entirely on the repo's own hand-off-label
+workflow (a read-role stream gets a 403 adding the label). Live on odoo-erp:
+workflow `active`, 23 of its last 30 runs FAILED, 0 open `ready-for-review` —
+the ticket's own failure mode by another road, no longer hypothetical (filed
+as odoo-erp 2584). `core-quals` now verifies that mechanism at the moment a
+zero would rest on it and refuses if it is missing, disabled, or its newest
+run failed. A hand-off is still never GUESSED from comment text: GitHub
+tokenizes quoted phrases, so a phrase query over-matches, and over-counting
+the obligation set is the never-stops failure.
+
+LOW-MEDIUM (164's M-1 residual). The guard `if not bump_done and not
+within_window: return` is correct; its stated REASON was false for a
+review-only gatekeeper run, whose cards are all stream tickets so no progress
+file is ever created. Deliberately NOT reversed — `done` and `remaining` are
+both core-scoped by design, so opening a window there asserts `0/N` for a full
+6h window (M-1 verbatim), and scoping `remaining` to the obligation set while
+the idle render stays core-scoped is 164's own title. The false sentence is
+replaced with the real reason and the accepted consequence, and the
+review-only-run SHAPE is now locked by test rather than the single-stray-card
+case.
+
+Measurement, re-taken live on `zbynekdrlik/odoo-erp` 2026-07-30 and stated in
+LABELLED units so `outside-core` can never again be read as `obligation`:
+**83 open non-skip / 44 core / 56 obligation** (the 56 = 44 unioned with 7
+`needs-gatekeeper`, 11 `prio:bounce`, 0 `ready-for-review`). The skill and this
+log now carry the same triple, and `TestTheMeasurementIsStatedOnceInLabelledUnits`
+locks the SHAPE rather than the values, so the numbers may rot but the units
+cannot drift apart again.
+
+23 tests RED on disk BEFORE any implementation existed (the strongest form —
+no stash needed, the code was genuinely absent), every one an AssertionError,
+zero AttributeError/ImportError. Two of them then caught real self-inflicted
+bugs during the green pass: a docstring that quoted the false sentence it was
+correcting, and a canonical sentence that hard-wrapped across two comment
+lines.

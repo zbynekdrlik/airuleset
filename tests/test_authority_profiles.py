@@ -782,7 +782,7 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
         gh, searches = _fake_gh_by_search(
             self.POPULATIONS if populations is None else populations)
         buf = io.StringIO()
-        args = dict(count=True, list=False)
+        args = dict(count=True, list=False, extra=None)
         args.update(flags)
         with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
             with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
@@ -840,7 +840,8 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
             with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                 with contextlib.redirect_stdout(buf):
                     with self.assertRaises(SystemExit) as cm:
-                        airuleset.cmd_core_quals(mk.Mock(count=True, list=False))
+                        airuleset.cmd_core_quals(
+                            mk.Mock(count=True, list=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
 
@@ -854,7 +855,8 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
             with mk.patch.object(airuleset, "_gh_out", return_value="not json"):
                 with contextlib.redirect_stdout(buf):
                     with self.assertRaises(SystemExit) as cm:
-                        airuleset.cmd_core_quals(mk.Mock(count=True, list=False))
+                        airuleset.cmd_core_quals(
+                            mk.Mock(count=True, list=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
 
@@ -897,7 +899,8 @@ class TestObligationVsDisplayPartition(TestCase):
         with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
             with mk.patch.object(airuleset, "_gh_out", return_value="[]"):
                 with contextlib.redirect_stdout(buf):
-                    airuleset.cmd_core_quals(mk.Mock(count=False, list=False))
+                    airuleset.cmd_core_quals(
+                        mk.Mock(count=False, list=False, extra=None))
         printed = buf.getvalue()
         self.assertIn(airuleset._core_search_excl(), printed)
         for label in ("needs-gatekeeper", "prio:bounce", "ready-for-review"):

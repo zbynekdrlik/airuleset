@@ -2079,10 +2079,28 @@ def _write_autopilot_progress(name, remaining, bump_done=True):
     then rendered `Issues 0/40` for a full 6h window: an assertion that a run
     is active and has achieved nothing, replacing the correct `Issues 40 core`.
     Round 2 fixed a heartbeat that stopped too early by introducing one that
-    started too eagerly. Nothing is lost by declining that write — the run the
-    heartbeat exists to keep alive (I6's stream-ticket card mid-run) always
-    has an in-window file already, and `remaining` is overwritten from the
-    live 120s tickets cache on every render anyway (statusbar.py).
+    started too eagerly.
+
+    Round 4 corrects the REASON this docstring used to give for declining that
+    write. It used to justify the guard by asserting that the run a heartbeat
+    exists to keep alive must already have a progress file inside the window;
+    that is FALSE for a REVIEW-ONLY gatekeeper run,
+    whose cards are all sub-dev stream tickets, so nothing ever sets
+    `bump_done` and no file is ever created — a shape the obligation-set
+    change makes more common, since a gatekeeper's obligation set is
+    explicitly the action-only tickets. The real reason is simpler and holds
+    everywhere: a heartbeat carries no evidence of CORE progress, so opening a
+    window on one would assert `0/N` — an active run that has achieved nothing
+    — for a full 6h window, which is M-1 verbatim.
+
+    The accepted consequence, deliberately NOT "fixed": a review-only run
+    renders `Issues N core · streamy M` throughout instead of a D/T. That is
+    accurate — actioning a stream ticket genuinely does not change the core
+    count — and the only way to make D/T meaningful for such a run is to scope
+    `remaining` to the OBLIGATION set while the idle render stays core-scoped,
+    i.e. one label over two different populations depending on run state,
+    which is #164's own title. `remaining` is overwritten from the live 120s
+    tickets cache on every render anyway (statusbar.py).
 
     Best-effort — a failure here never blocks the card send."""
     import re
@@ -2698,7 +2716,16 @@ def _notify_run_card(args, compose_autopilot_card, send):
                   "sub-dev stream ticket (gh issue view returned no labels) "
                   "-- treating conservatively as non-core so this card does "
                   "not inflate 'done'." % issue, file=sys.stderr)
-        is_full = resolve_authority() == "full"
+        # #181 I-5 residual (round 4): resolve identity against the REPO ROOT,
+        # like cmd_tickets_status / cmd_slice_quals / cmd_core_quals already
+        # do. This was the FOURTH call site and the only one still resolving
+        # against the PROCESS cwd — so a session running from a subdirectory
+        # made the run-card and the footer disagree about which profile the
+        # box is even on (a project CLAUDE.md `airuleset:authority=` marker is
+        # invisible from a subdirectory), and "one definition, resolved per
+        # box" was not true until all four agreed.
+        card_root = _repo_root() or None
+        is_full = resolve_authority(cwd=card_root) == "full"
         # remaining feeds the statusline's D/T — on a reduced-authority box it
         # must be the STREAM's slice, not the whole repo (david saw 'Issues
         # 2/26' while his slice was 5 — 2026-07-19). Same quals as
@@ -2706,7 +2733,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
         if not is_full:
             nums, failed = set(), False
             try:
-                slice_quals = _slice_quals(_current_user())
+                slice_quals = _slice_quals(_current_user(), cwd=card_root)
             except SliceUnresolved:
                 # #181 I-2: an unresolvable gh identity is a gh error, and a
                 # gh error is never a wrong number here — remaining stays None.
@@ -3549,10 +3576,24 @@ def _slice_quals(user, cwd=None):
 # An open, non-skip ticket carrying ANY of these labels is an obligation of the
 # FULL-authority (core / gatekeeper) box even when it also carries a sub-dev
 # `stream:<user>` label: only this box can perform the action they stand for.
+#
 # `needs-gatekeeper` = a stream→supervisor action request (cross-stream
-# protocol rule 7 — by definition nobody else can do it); `prio:bounce` = a
-# ticket the gatekeeper returned with findings, whose re-review is this box's
-# ball (rule 4: "neither side ever finishes while the other holds its ball");
+# protocol rule 7 — by definition nobody else can do it).
+#
+# `prio:bounce` = the gatekeeper returned this ticket to the SUB-DEV with
+# findings that need a fix. The sub-dev fixes it; the sub-dev's own worker (or
+# the repo automation, since a read-role stream cannot remove labels) clears
+# the label at its done-point, and the gatekeeper clears any leftover at
+# re-review. While it is open the full-authority loop HOLDS — review-watch,
+# stay alive, re-check hourly, never end the loop (rule 4: "neither side ever
+# finishes while the other holds its ball") — so `core-quals --count`
+# legitimately never reaching 0 in that state is CORRECT, and is NOT the
+# never-stops failure the original ticket rejected. (#181 round 4: this
+# comment used to say the RE-REVIEW is this box's ball, which reads as "the
+# gatekeeper does the work now" and contradicted both cross-stream rules 2/3
+# and the branch-merge template, whose (B) makes "no open prio:bounce for my
+# stream" the SUB-DEV's own stop condition.)
+#
 # `ready-for-review` = a hand-off awaiting this box's review / merge / close
 # (rule 4 again, and the fork-no-merge template's "CLOSED by the maintainer").
 MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "prio:bounce", "ready-for-review")
@@ -3755,12 +3796,21 @@ def _union_open_issues(quals, base, cwd=None):
     space-joined qualifiers across qualifier types and cannot OR them, so a
     caller that needs a UNION (assignee ∪ author ∪ label; core ∪ the
     maintainer-action labels) must union client-side. `failed` is True if ANY
-    query failed to parse — a gh error is never an empty result."""
+    query failed to parse — a gh error is never an empty result.
+
+    `labels` is fetched alongside (#181 round 4): one extra field on queries
+    already being made, and the thing that lets `_print_issue_rows` mark every
+    row with what THIS box may DO with it. Without it the mandated backlog
+    SELECTION source emitted no not-mine-to-implement discriminator at all, so
+    the only thing between the FULL template's bounce-lane seed ("the OLDEST
+    open prio:bounce ticket" — live on odoo-erp that is #2150, `stream:david`)
+    and a gatekeeper writing code on a sub-dev's ticket was a prose clause the
+    worker may never have loaded."""
     seen, failed = {}, False
     for qual in quals:
         search = (base + " " + qual).strip() if qual else base
         raw = _gh_out("issue", "list", "--state", "open", "--search", search,
-                      "-L", "1000", "--json", "number,title,createdAt",
+                      "-L", "1000", "--json", "number,title,createdAt,labels",
                       cwd=cwd, timeout=20)
         try:
             for x in json.loads(raw):
@@ -3770,13 +3820,195 @@ def _union_open_issues(quals, base, cwd=None):
     return seen, failed
 
 
-def _print_issue_rows(rows):
-    """`number<TAB>createdAt<TAB>title`, OLDEST first (the bounce lane picks
-    the oldest — no client-side sort needed downstream)."""
+ROW_ACTION_ONLY = "action-only"
+ROW_IMPLEMENT = "implement"
+
+
+def _stream_owner_of(labels):
+    """The REDUCED-authority stream that owns this ticket, or "" — read from a
+    gh `--json labels` value (a list of {'name': ...} dicts, or None).
+
+    Only non-`full` AUTHORITY_BY_USER entries count, the same filter
+    `_core_search_excl()` applies (#181 M-5): a hypothetical `full` entry is
+    not a sub-dev stream, and treating its label as ownership would wrongly
+    mark its tickets untouchable."""
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    for user, profile in sorted(AUTHORITY_BY_USER.items()):
+        if profile != "full" and ("stream:%s" % user) in names:
+            return user
+    return ""
+
+
+def _row_action(labels, own_stream=None):
+    """What THIS box may do with a row: `action-only` or `implement`.
+
+    A ticket owned by a stream OTHER than this box's is in the obligation set
+    because only this box can REVIEW / MERGE / CLOSE / UNBLOCK it — never
+    because this box should write its code. The discriminator is deliberately
+    relative to this box (`own_stream`), not absolute: a reduced-authority
+    stream's own `stream:<me>` tickets ARE its to implement, and an absolute
+    "carries any stream label" rule would mark every row of its own slice
+    untouchable."""
+    owner = _stream_owner_of(labels)
+    if owner and owner != (own_stream or ""):
+        return ROW_ACTION_ONLY
+    return ROW_IMPLEMENT
+
+
+def _print_issue_rows(rows, own_stream=None):
+    """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
+    lane picks the oldest — no client-side sort needed downstream).
+
+    The action column is third, ahead of the title, so a title containing a
+    tab cannot shift it. It is the #181-round-4 fix for the SELECTION source
+    emitting no ownership discriminator: `action-only` = only this box can act
+    on it and it must never write its code; `implement` = ordinary work."""
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
-        print("%s\t%s\t%s" % (n, row.get("createdAt") or "",
-                              row.get("title") or ""))
+        print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
+                                  _row_action(row.get("labels"), own_stream),
+                                  row.get("title") or ""))
+
+
+def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
+    """Refuse (stderr + non-zero exit, nothing on stdout) unless an EMPTY
+    search-derived result is TRUSTWORTHY. Shared by BOTH `/goal` stop-proof
+    commands, called at the identical point.
+
+    #181 round 4, CRITICAL. `_search_index_healthy()` (round 3) is the right
+    guard for this defect class, but it was installed as an extra validation
+    for ONE caller's zero rather than as a precondition on trusting ANY zero
+    derived from the GitHub issue SEARCH index — one call site, nested inside
+    `cmd_slice_quals` behind `len(quals) == 1 and quals[0].startswith("label:")`,
+    the SHARED-account shape. Two paths walked straight past it, both
+    reproduced live on dev1 2026-07-30 against the shipped code:
+
+      * `cmd_core_quals` never called it at all. In a checkout whose `origin`
+        still points at the pre-rename name (GitHub's issue SEARCH index does
+        not follow a repo rename; the REST/repository-listing path does):
+        REST 110 open issues, every `--search` 0, `core-quals --count` -> `0`
+        with rc 0. The gatekeeper pastes that 0, writes the mandated BACKLOG
+        EMPTY line, and stops with the whole backlog outstanding.
+      * `cmd_slice_quals` on an OWN-account stream. `_slice_quals("david")` is
+        `['assignee:@me', 'author:@me', 'label:stream:david']`, so
+        `len(quals) == 1` is False and the guard was skipped in the very
+        command round 3 fixed: stdout `0`, no SystemExit.
+
+    The rename is only the cheapest trigger; ANY state where search answers
+    empty while REST does not reaches the same line. Rounds 1-3 each moved the
+    guard one call frame outward instead of making the refusal a property of
+    the RESULT — "this zero came out of the search index, and nothing has
+    shown the search index is answering" — which is why the class survived
+    three fixes. One helper, two callers, one contract: a third stop-proof
+    command gets it by calling this.
+
+    Runs ONLY when the union is empty; a non-empty union is itself proof the
+    index answers, so the healthy path costs no extra gh call."""
+    if len(quals) == 1 and quals[0].startswith("label:"):
+        # C2 (round 2) — a shared-account slice's ONLY signal is one label,
+        # and a forgotten/never-created label makes gh search return `[]` with
+        # exit 0 for a query that can never match anything.
+        label_name = quals[0].split(":", 1)[1]     # "label:stream:x" -> "stream:x"
+        exists = _label_exists_on_repo(label_name, cwd=cwd)
+        if exists is not True:
+            print(
+                "%s: cannot confirm label '%s' exists on this repo (%s) — a "
+                "single-label slice of 0 resting on an unconfirmed label is "
+                "UNRELIABLE. Refusing rather than reporting it (#181 C2)."
+                % (cmd, label_name,
+                   "not found" if exists is False else "the check itself failed"),
+                file=sys.stderr)
+            sys.exit(1)
+    healthy = _search_index_healthy(cwd=cwd)
+    if healthy is False:
+        print(
+            "%s: gh's SEARCH path is not answering for this identity/repo (a "
+            "sort-only search that must match every open issue came back "
+            "empty, or the probe itself failed, while the repository listing "
+            "path does show open issues) — an empty result here is NOT "
+            "evidence of an empty backlog. Refusing (#181 round 4)." % cmd,
+            file=sys.stderr)
+        sys.exit(1)
+    # healthy is True (search demonstrably works) or None (the repo has no
+    # open issues at all, so an empty result is trivially correct).
+
+
+HANDOFF_LABEL_WORKFLOW_HINT = "handoff"
+
+
+def _handoff_label_mechanism_health(cwd=None):
+    """Is the mechanism the `ready-for-review` arm rests on actually working?
+    Returns `(state, detail)` with state in `ok` / `broken` / `unknown` /
+    `n/a`.
+
+    #181 round 4. The obligation set detects an outstanding sub-dev hand-off
+    by the `ready-for-review` LABEL, and a read-role collaborator gets a 403
+    adding that label itself — so the arm depends ENTIRELY on the repo's own
+    hand-off-label workflow. Measured on zbynekdrlik/odoo-erp 2026-07-30: the
+    workflow is `active` but 23 of its last 30 runs FAILED (the 5 newest all
+    failed, job `label`, startup-shaped), and the repo carries 0 open
+    `ready-for-review` issues. So the arm contributes a zero while the only
+    thing that can produce a non-zero is failing three runs in four — this
+    ticket's own failure mode by a different road. Filed as odoo-erp #2584.
+
+    A miss is made DETECTABLE, never guessed: the alternative is a comment
+    query (`"READY-FOR-REVIEW:" in:comments`), and GitHub tokenizes quoted
+    phrases so that over-matches — over-counting the obligation set is the
+    never-stops failure the original ticket rejected.
+
+    `n/a` when the repo is not enrolled in the gatekeeper<->sub-dev flow, or
+    when enrollment itself cannot be determined: enrollment is a static local
+    fact, and if it is unknowable then nothing here depends on the workflow.
+    `unknown` (which the caller treats like `broken`, exactly as C2 treats a
+    failed label probe) when the repo IS enrolled but the health probe fails —
+    an unreachable gh is not evidence the mechanism is fine."""
+    try:
+        import notify
+        from watchdog import _CROSS_STREAM_REPOS as enrolled
+    except Exception:
+        return ("n/a", "the cross-stream registry is not resolvable here")
+    try:
+        name = notify.repo_name_for(cwd or os.getcwd())
+    except Exception:
+        name = ""
+    if not name:
+        return ("n/a", "the repo name is not resolvable from origin")
+    if name not in enrolled:
+        return ("n/a", "%s is not enrolled in the cross-stream flow" % name)
+
+    raw = _gh_out("workflow", "list", "--all", "--json", "name,state,path",
+                  cwd=cwd, timeout=20)
+    try:
+        flows = json.loads(raw)
+    except (ValueError, TypeError):
+        return ("unknown", "`gh workflow list` failed on %s" % name)
+    if not isinstance(flows, list):
+        return ("unknown", "`gh workflow list` returned no list on %s" % name)
+    match = [f for f in flows if isinstance(f, dict)
+             and HANDOFF_LABEL_WORKFLOW_HINT in str(f.get("path") or "").lower()]
+    if not match:
+        return ("broken",
+                "%s is enrolled in the cross-stream flow but carries no "
+                "hand-off-label workflow, so nothing can label a hand-off"
+                % name)
+    inactive = [f for f in match if f.get("state") != "active"]
+    if inactive:
+        return ("broken", "the hand-off-label workflow is %r, not active"
+                % (inactive[0].get("state"),))
+
+    path = str(match[0].get("path") or "")
+    raw = _gh_out("run", "list", "-w", path, "-L", "1",
+                  "--json", "conclusion,status", cwd=cwd, timeout=20)
+    try:
+        runs = json.loads(raw)
+    except (ValueError, TypeError):
+        return ("unknown", "`gh run list` failed for %s" % path)
+    if not isinstance(runs, list):
+        return ("unknown", "`gh run list` returned no list for %s" % path)
+    if runs and isinstance(runs[0], dict) and runs[0].get("conclusion") == "failure":
+        return ("broken", "the newest %s run FAILED" % path)
+    return ("ok", path)
 
 
 def cmd_slice_quals(args):
@@ -3817,9 +4049,11 @@ def cmd_slice_quals(args):
     refusing rather than trusting an unconfirmed zero.
 
     --count: prints an integer (0 = slice empty — the /goal stop-proof).
-    --list:  prints `number<TAB>createdAt<TAB>title`, one per open non-skip
-             issue in the slice, OLDEST first (the bounce lane picks the
-             oldest — no client-side sort needed).
+    --list:  prints `number<TAB>createdAt<TAB>action<TAB>title`, one per open
+             non-skip issue in the slice, OLDEST first (the bounce lane picks
+             the oldest — no client-side sort needed). `action` is relative to
+             THIS box, so a stream's own `stream:<me>` tickets read
+             `implement` (#181 round 4).
     --extra <qual>: ANDs one extra search qualifier onto every per-qual query
              (e.g. `label:prio:bounce` for the bounce-lane seed).
     No flag: prints each qual defining this box's slice, one per line
@@ -3868,37 +4102,17 @@ def cmd_slice_quals(args):
         print("slice-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
-    if not seen and len(quals) == 1 and quals[0].startswith("label:"):
-        # C2 — a shared-account slice's ONLY signal is one label; a zero
-        # here is UN-validated until confirmed both ways.
-        label_name = quals[0].split(":", 1)[1]     # "label:stream:x" -> "stream:x"
-        exists = _label_exists_on_repo(label_name, cwd=root)
-        if exists is not True:
-            print(
-                "slice-quals: cannot confirm label '%s' exists on this repo "
-                "(%s) — a shared-account slice of 0 resting on an "
-                "unconfirmed label is UNRELIABLE. Refusing rather than "
-                "reporting it (#181 C2)."
-                % (label_name,
-                   "not found" if exists is False else "the check itself failed"),
-                file=sys.stderr)
-            sys.exit(1)
-        healthy = _search_index_healthy(cwd=root)
-        if healthy is False:
-            print(
-                "slice-quals: label '%s' exists, but gh's SEARCH path is not "
-                "answering for this identity/repo (a sort-only search that "
-                "must match every open issue came back empty, or the probe "
-                "itself failed, while the repo does have open issues) — a 0 "
-                "here is UNRELIABLE. Refusing (#181 C2 / I-1)." % label_name,
-                file=sys.stderr)
-            sys.exit(1)
-        # healthy is True (search demonstrably works) or None (the repo has
-        # no open issues at all, so an empty slice is trivially correct).
+    if not seen:
+        # Round 4: the validation is no longer nested behind the SHARED-account
+        # shape. An own-account stream has THREE quals, so `len(quals) == 1`
+        # was False and this command skipped its own guard entirely — a false
+        # SLICE EMPTY for david@subdev whenever the search index is not
+        # answering. One shared helper, identical contract in both commands.
+        _refuse_unless_empty_is_trustworthy("slice-quals", quals, cwd=root)
     if want_count:
         print(len(seen))
         return
-    _print_issue_rows(seen)
+    _print_issue_rows(seen, own_stream=user)
 
 
 def cmd_core_quals(args):
@@ -3923,12 +4137,29 @@ def cmd_core_quals(args):
     regression test, never force two different questions to the same number.
 
     --count: prints an integer (0 = nothing left for this box to action).
-    --list:  prints `number<TAB>createdAt<TAB>title`, OLDEST first — so the
-             skill's backlog SELECTION and its stop-proof read the same set.
+    --list:  prints `number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first —
+             so the skill's backlog SELECTION and its stop-proof read the same
+             set. The `action` column is `action-only` for a ticket a SUB-DEV
+             stream owns (review / merge / close / unblock it, NEVER write its
+             code) and `implement` otherwise (#181 round 4): the discriminator
+             lives in the data the worker reads, not in a prose clause it may
+             never have loaded.
+    --extra <qual>: ANDs one extra search qualifier onto every per-qual query
+             (e.g. `label:prio:bounce` for the bounce-lane seed), mirroring
+             `slice-quals`. Without it the full-authority bounce seed went
+             through a raw `gh issue list`, so the single highest-priority
+             SELECTION path was the one path with neither this command's guard
+             nor its ownership column — while the oldest open `prio:bounce`
+             ticket on odoo-erp is #2150, `stream:david`.
     No flag: prints each qual whose union defines the obligation set.
 
     A gh query failure prints to stderr and exits non-zero — NEVER prints a
-    number on failure (mirrors `slice-quals`'s own contract)."""
+    number on failure (mirrors `slice-quals`'s own contract), and an EMPTY
+    result is refused unless it is demonstrably trustworthy — see
+    `_refuse_unless_empty_is_trustworthy` (#181 round 4, CRITICAL: this
+    command never consulted the search-index guard at all, so a repo whose
+    search index answers empty while its REST listing does not produced a
+    clean stop-proof `0` with the whole backlog open)."""
     root = _repo_root() or None
     authority = resolve_authority(cwd=root)
     if authority != "full":
@@ -3952,15 +4183,36 @@ def cmd_core_quals(args):
             print(q)
         return
 
-    seen, failed = _union_open_issues(quals, "-label:autopilot-skip", cwd=root)
+    extra = getattr(args, "extra", None)
+    base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
+    seen, failed = _union_open_issues(quals, base, cwd=root)
     if failed:
         print("core-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
+    if not seen:
+        _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
+        # The `ready-for-review` arm of this set rests ENTIRELY on the repo's
+        # own hand-off-label workflow (a read-role stream gets a 403 adding
+        # the label itself). A zero that rests on a mechanism which may have
+        # MISSED a hand-off is not evidence — same shape as C2's "validate
+        # the evidence's own existence before trusting its absence of hits".
+        health, detail = _handoff_label_mechanism_health(cwd=root)
+        if health not in ("ok", "n/a"):
+            print(
+                "core-quals: the obligation set is empty, but the "
+                "`ready-for-review` arm rests on this repo's hand-off-label "
+                "workflow and that mechanism is %s (%s) — a hand-off can be "
+                "outstanding with no label, so this 0 is NOT evidence. "
+                "Refusing (#181 round 4)." % (health, detail),
+                file=sys.stderr)
+            sys.exit(1)
     if want_count:
         print(len(seen))
         return
-    _print_issue_rows(seen)
+    # own_stream=None: a full-authority box owns no stream, so EVERY
+    # stream-labelled row in its obligation set is action-only.
+    _print_issue_rows(seen, own_stream=None)
 
 
 UPLOAD_LOG_DIR_ENV = "AIRULESET_UPLOAD_LOG_DIR"
@@ -5637,8 +5889,9 @@ def main():
     p_slice.add_argument("--count", action="store_true",
                          help="Print the slice's open non-skip issue count "
                               "(0 = slice empty)")
-    p_slice.add_argument("--list", action="store_true",
-                         help="Print number<TAB>createdAt<TAB>title, oldest first")
+    p_slice.add_argument(
+        "--list", action="store_true",
+        help="Print number<TAB>createdAt<TAB>action<TAB>title, oldest first")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
@@ -5651,8 +5904,14 @@ def main():
     p_core.add_argument("--count", action="store_true",
                         help="Print the obligation set's open non-skip issue "
                              "count (0 = nothing left for this box to action)")
-    p_core.add_argument("--list", action="store_true",
-                        help="Print number<TAB>createdAt<TAB>title, oldest first")
+    p_core.add_argument(
+        "--list", action="store_true",
+        help="Print number<TAB>createdAt<TAB>action<TAB>title, oldest first "
+             "(action = action-only for a sub-dev stream's ticket, implement "
+             "otherwise)")
+    p_core.add_argument("--extra", default=None,
+                        help="Extra search qualifier ANDed onto every query "
+                             "(e.g. label:prio:bounce for the bounce seed)")
 
     p_lock = sub.add_parser(
         "autopilot-lock",

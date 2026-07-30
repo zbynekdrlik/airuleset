@@ -205,9 +205,14 @@ class TestBounceMeansOneThingInAllThreeHomes(TestCase):
     SKILL = "skills/autopilot/SKILL.md"
 
     def _window(self, text, start, end):
+        """Comment markers stripped and whitespace collapsed: a canonical
+        sentence hard-wrapped across two lines (or two `# ` comment lines) is
+        still the same statement, and an assertion that fails on the wrapping
+        instead of on the claim locks nothing."""
         i = text.index(start)
         j = text.index(end, i)
-        return text[i:j].lower()
+        window = re.sub(r"(?m)^\s*#\s?", "", text[i:j])
+        return " ".join(window.split()).lower()
 
     def _assert_canonical(self, window, where):
         for needle in self.CANON:

@@ -102,7 +102,10 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   as an ACTION (review / merge / close / unblock), never as an implementation. On a full-authority
   box `python3 ~/devel/airuleset/airuleset.py core-quals --list` IS that set — use it wherever
   this skill lists the backlog, so SELECTION and the `/goal` stop-proof (which uses
-  `core-quals --count`) can never disagree about what "done" means.
+  `core-quals --count`) can never disagree about what "done" means. **Every row carries that
+  distinction in its own third column** (#181 round 4): `action-only` = a sub-dev stream owns it,
+  so you action it and NEVER write its code; `implement` = ordinary work. Read the column, not
+  your memory of this paragraph — the column is why it stopped being a prose promise.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
@@ -226,9 +229,12 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   tickets. But the CORE slice alone is the wrong set the other way (#181 round 3): it is the
   FOOTER's *display* partition ("which population am I showing"), and reusing it as the
   *obligation* partition ("what must I finish before I may stop") excluded the tickets ONLY this
-  box can move. Measured on `zbynekdrlik/odoo-erp` 2026-07-30: 83 open non-skip, 40 core, and 13
-  outside that partition that only the gatekeeper can act on — #2396 and #2377 carry
-  `stream:montalu` **and** `needs-gatekeeper`, plus 11 open `prio:bounce`. So `core-quals` counts
+  box can move. Measured on `zbynekdrlik/odoo-erp` 2026-07-30 (round 4 re-measurement, stated in
+  LABELLED units — the earlier figures here and in `docs/autopilot-log.md` looked contradictory
+  because two of them were different QUANTITIES: `13` was obligation-minus-core, `54` was the
+  obligation total): **83 open non-skip / 44 core / 56 obligation**, the 56 being the 44 unioned
+  with 7 `needs-gatekeeper`, 11 `prio:bounce` and 0 `ready-for-review`. #2396 and #2377 carry
+  `stream:montalu` **and** `needs-gatekeeper`, so a core-only count cannot see them. So `core-quals` counts
   the **obligation set**: the core slice UNIONED with every open ticket labelled
   `needs-gatekeeper` / `prio:bounce` / `ready-for-review`, whatever stream owns it. A stream
   ticket the sub-dev is actively working carries none of those and still does not block this box,
@@ -288,10 +294,15 @@ Each loop turn:
    - **Seed — PRIORITY LANE first (`prio:bounce`).** Open non-skip issues labeled `prio:bounce`
      (a reviewer/gatekeeper-INJECTED priority ticket — the bounce lane from odoo-erp #1599, but the
      label is a GENERIC cross-repo convention every repo/stream honors, never an odoo-specific
-     hardcode) jump the queue: seed = the **OLDEST open `prio:bounce`** ticket (`gh issue list
-     --state open --label prio:bounce --search "-label:autopilot-skip" --json number,createdAt` —
-     under reduced authority use `python3 ~/devel/airuleset/airuleset.py slice-quals --list --extra
-     "label:prio:bounce"` instead, THE single "my slice" definition #181, already oldest-first).
+     hardcode) jump the queue: seed = the **OLDEST open `prio:bounce`** ticket — full authority
+     `python3 ~/devel/airuleset/airuleset.py core-quals --list --extra "label:prio:bounce"`,
+     reduced authority `python3 ~/devel/airuleset/airuleset.py slice-quals --list --extra
+     "label:prio:bounce"` (THE single definitions #181, already oldest-first). **Never a raw
+     `gh issue list` here** (#181 round 4): the seed is the highest-priority SELECTION path, and a
+     raw query is the one path with neither the false-empty guard nor the ownership column — while
+     the oldest open bounce ticket on odoo-erp is #2150, `stream:david`. **A row marked
+     `action-only` is NOT yours to implement** — you review / merge / close / unblock it and never
+     write its code; only an `implement` row is ordinary work.
      Several open bounce tickets that pass the
      bundling gate bundle together like any other issues, bounce ones first. No bounce ticket open
      → seed = the next open non-`autopilot-skip` issue (highest priority / oldest first — the
@@ -646,8 +657,11 @@ re-review and no pickup).
 2. **Priority = labels, picked up between tasks.** `prio:bounce` (+ `stream:<name>`) jumps the
    queue at the NEXT batch seed (Step 3.1) — never preempts a running batch. High-priority work is
    inserted by labeling, never by interrupting. **`prio:bounce` is a PROTOCOL label, never a generic
-   "priority" marker** — it means exactly one thing: the gatekeeper returned this ticket with
-   findings that need a fix. Never add it to a ticket outside this flow to mean "do this first"
+   "priority" marker** — it means exactly one thing: the gatekeeper returned this ticket to the
+   **sub-dev** with findings that need a fix. The sub-dev fixes it; while it is open the
+   full-authority loop **HOLDS** in review-watch (stay alive, re-check hourly, never end the loop),
+   so `core-quals --count` legitimately never reaching 0 in that state is CORRECT and is **not the
+   never-stops failure** #181 rejected. Never add it to a ticket outside this flow to mean "do this first"
    (the restreamer #337 incident, 2026-07-26: the label alone on an unrelated repo's own ticket
    fired a confusing cross-project nudge — the api-watchdog's bounce backstop (job 8) now also
    scopes to repos that actually participate in this flow, but the label itself must still never be
@@ -656,7 +670,11 @@ re-review and no pickup).
    done-point (merge / re-ready hand-off comment), best-effort — but david's **read-only role cannot remove labels**, so the REPO automation (the `subdev-handoff-label.yml` workflow) must
    auto-remove `prio:bounce` when the re-ready comment lands, and the gatekeeper clears any
    leftover at re-review. A stale `prio:bounce` after a re-ready comment is a repo-automation gap,
-   not a sub-dev failure.
+   not a sub-dev failure. **Until it is cleared, the full-authority loop HOLDS** — review-watch,
+   never end the loop — which is why `core-quals` counts the label and why a count that cannot
+   reach 0 while a sub-dev bounce is open is CORRECT, **not the never-stops failure** (#181 round 4
+   reconciled this with rule 2 and with airuleset.py's own `MAINTAINER_ACTION_LABELS` comment,
+   which had described the re-review as the gatekeeper's ball to pick up NOW).
 4. **The ping-pong ends only when the ticket is CLOSED (fork streams) / the slice RELEASED to
    main (branch-merge streams) — so BOTH loops stay alive until then.** The sub-dev loop holds in
    hourly REVIEW-WATCH after hand-off (its /goal templates above); the **gatekeeper's own loop
