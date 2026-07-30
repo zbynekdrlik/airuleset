@@ -934,6 +934,23 @@ class SessionLimitDetector(unittest.TestCase):
         # the real, bottom-scoped banner must still detect.
         self.assertTrue(wd.pane_session_limited(SESSION_LIMIT_BANNER))
 
+    # --- #175 F2: the weekly and bare cap banners — no "session"/"usage"
+    # qualifier word at all, real Claude Code shapes.
+    WEEKLY_LIMIT_BANNER = (
+        "❯ continue\n"
+        "  ⎿  You've hit your weekly limit · resets 12pm (Europe/Prague)\n\n❯ ")
+    BARE_LIMIT_BANNER = (
+        "❯ continue\n"
+        "  ⎿  You've hit your limit · resets 11am (Europe/Prague)\n\n❯ ")
+
+    def test_weekly_and_bare_banner_match(self):
+        # The old regex only recognized "session"/"usage" before "limit" —
+        # the real weekly-cap and bare-cap banners use NEITHER qualifier
+        # word, so they used to fall through to job 1's generic nudge path
+        # (continue every ~30 min for the whole cap window) instead of job
+        # 6's bounded ping-once-then-wait-for-reset treatment.
+        self.assertTrue(wd.pane_session_limited(self.WEEKLY_LIMIT_BANNER))
+        self.assertTrue(wd.pane_session_limited(self.BARE_LIMIT_BANNER))
 
 class SessionLimitWiring(unittest.TestCase):
     """run_once job 6: ping once on the banner, NO `continue` before the reset,

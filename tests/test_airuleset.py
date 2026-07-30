@@ -4349,6 +4349,78 @@ class TestApiWatchdog(TestCase):
         # window (gatekeeper 4h28m / simap 6h31m) — and it is STILL nudging.
         self.assertGreater(cursor - now, 2 * 3600)
 
+    def test_decide_withholds_the_nudge_before_the_widened_interval_elapses(self):
+        # #175 F3: the flagship widening test above only ever calls decide()
+        # AT the cumulative due instants — a constant-300s (no-widening)
+        # schedule fires at every one of those instants too (e.g. 1500-900 =
+        # 600 >= 300), so it has NO TEETH proving the interval actually
+        # widens, only that decide() never permanently gives up. Calling
+        # decide() BETWEEN two consecutive due instants must WITHHOLD the
+        # nudge — proving the interval really doubled — at each widening
+        # step: 300->600 (nudge #4), 600->1200 (nudge #5), and 1200->1800
+        # capped (nudge #6, where the uncapped exponential would be 2400).
+        st, now = {}, 1_000_000
+        a, e = self._dec(st, "k", "h", now, seed=now)
+        self.assertEqual(a, "wait")
+        st["k"] = e
+        for t in (now + 300, now + 600, now + 900):     # nudges #1, #2, #3
+            a, e = self._dec(st, "k", "h", t, seed=now)
+            self.assertEqual(a, "nudge")
+            st["k"] = e
+        last = now + 900                                 # nudge #3 landed here
+
+        # nudge #4's real interval is 600s (2x base) — a call at the OLD,
+        # un-widened 300s interval must be withheld.
+        a, e = self._dec(st, "k", "h", last + 300, seed=now)
+        self.assertEqual(a, "wait", "nudge #4 must NOT fire at the "
+                         "un-widened 300s interval — the interval must "
+                         "have doubled")
+        a, e = self._dec(st, "k", "h", last + 600, seed=now)
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 4)
+        st["k"] = e
+        last += 600
+
+        # nudge #5's real interval is 1200s (4x base) — half that must be
+        # withheld.
+        a, e = self._dec(st, "k", "h", last + 600, seed=now)
+        self.assertEqual(a, "wait", "nudge #5 must NOT fire at half its "
+                         "real (1200s) interval")
+        a, e = self._dec(st, "k", "h", last + 1200, seed=now)
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 5)
+        st["k"] = e
+        last += 1200
+
+        # nudge #6's real interval hits the CAP (1800s — the uncapped
+        # exponential would be 300*2**3=2400) — a call before the cap must
+        # be withheld.
+        a, e = self._dec(st, "k", "h", last + 1200, seed=now)
+        self.assertEqual(a, "wait", "nudge #6 must NOT fire before the "
+                         "capped 1800s interval elapses")
+        a, e = self._dec(st, "k", "h", last + 1800, seed=now)
+        self.assertEqual(a, "nudge")
+        self.assertEqual(len(e["nudges"]), 6)
+
+    def test_backoff_cap_seconds_is_pinned_at_1800(self):
+        # #175 F3: BACKOFF_CAP_SECONDS had no dedicated assertion at all —
+        # 1e9, 300, or 7200 all left the whole suite green. Pin the ACTUAL
+        # shipped value AND prove decide() enforces it as a hard ceiling,
+        # not merely an unused constant, even when the uncapped exponential
+        # would be far larger.
+        self.assertEqual(self.w.BACKOFF_CAP_SECONDS, 1800)
+        st, now = {}, 1_000_000
+        # n=10 nudges → step=8 → uncapped interval = 300*2**8 = 76800s.
+        # Only the LAST entry's timestamp and the COUNT matter to decide().
+        st["k"] = {"hash": "h", "first_seen": now, "nudges": [now] * 10,
+                  "escalated": True}
+        a, e = self._dec(st, "k", "h", now + 1799, seed=now)
+        self.assertEqual(a, "wait",
+                         "must not fire one second before the capped interval")
+        a, e = self._dec(st, "k", "h", now + 1800, seed=now)
+        self.assertEqual(a, "nudge",
+                         "must fire exactly at the capped interval, not later")
+
     def test_decide_already_stale_nudges_on_first_sighting(self):
         # seed older than grace (the rate-limit / presenter case once detected) →
         # the first `continue` goes out immediately, no extra grace wait
@@ -4685,6 +4757,92 @@ class TestApiWatchdog(TestCase):
                          "a stale busy-pane episode key must be pruned, not leak forever")
         self.assertNotIn("apierr-stashabort:oldsid2", st,
                          "a stale stash-abort episode key must be pruned, not leak forever")
+
+    def test_run_once_gated_busy_sweep_preserves_the_nudge_schedule(self):
+        # #175 F1: job 1's safety gates used to `continue` BEFORE
+        # `stalled.add(key)` — so a single sweep where the pane merely LOOKS
+        # busy (e.g. right after our own `continue` landed) skipped the add,
+        # and the cleanup pass at the end of run_once then deleted the
+        # accumulated nudge/`escalated` entry (any bare-UUID key not in
+        # `stalled`). The very next sweep restarted the whole #175 widening
+        # schedule at nudge #1 instead of continuing it, and — separately —
+        # could re-arm the one-shot "gave up" ping under a fresh dedup key.
+        # This drives the REAL run_once through exactly that gated sweep and
+        # asserts the schedule survives intact, with the escalation ping
+        # staying single across it.
+        now = 1_000_000
+        cwd = "/devel/gatedbusy"
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        kw = dict(run=fake, send_fn=self._send, projects_dir=self.projects,
+                  state_path=self.state, grace=300, interval=300, max_nudges=3)
+
+        def _stale(t):
+            self._transcript(cwd, [self._ERR], 600, t)
+
+        _stale(now)
+        self.w.run_once(now=now, **kw)                      # nudge #1
+        _stale(now + 300)
+        self.w.run_once(now=now + 300, **kw)                 # nudge #2
+        _stale(now + 600)
+        self.w.run_once(now=now + 600, **kw)                 # nudge #3
+        state = self.w.load_state(self.state)
+        self.assertEqual(len(state[self._SID]["nudges"]), 3)
+
+        # ONE gated sweep: the pane looks busy — job 1 must skip typing, but
+        # the episode must survive the cleanup pass of THIS SAME run_once call.
+        busy_fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                              default_capture=_BUSY_PANE)
+        _stale(now + 900)
+        self.w.run_once(now=now + 900, run=busy_fake, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3)
+        state = self.w.load_state(self.state)
+        self.assertIn(self._SID, state,
+                      "a gated (busy-pane) sweep must not delete the "
+                      "accumulated nudge/escalation state")
+        self.assertEqual(len(state[self._SID]["nudges"]), 3,
+                         "the busy sweep itself must not add a phantom nudge")
+
+        # Idle again → nudge #4 must fire (widened interval), CONTINUING the
+        # schedule — never restarting at nudge #1 — and sets the one-shot
+        # escalation flag.
+        _stale(now + 1200)
+        self.w.run_once(now=now + 1200, **kw)
+        state = self.w.load_state(self.state)
+        self.assertEqual(len(state[self._SID]["nudges"]), 4,
+                         "nudge #4 must continue the preserved schedule, not "
+                         "restart at #1")
+        self.assertTrue(state[self._SID]["escalated"])
+        escalate_pings = [p for p in self.pings if "pretrváva" in p[0]]
+        self.assertEqual(len(escalate_pings), 1, "exactly one give-up ping so far")
+
+        # A SECOND gated sweep, this time AFTER escalation — must not wipe
+        # state or re-arm the one-shot escalation ping.
+        busy_fake2 = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                               default_capture=_BUSY_PANE)
+        _stale(now + 1500)
+        self.w.run_once(now=now + 1500, run=busy_fake2, send_fn=self._send,
+                        projects_dir=self.projects, state_path=self.state,
+                        grace=300, interval=300, max_nudges=3)
+        state = self.w.load_state(self.state)
+        self.assertIn(self._SID, state,
+                      "a second gated sweep after escalation must not wipe state")
+        self.assertTrue(state[self._SID]["escalated"],
+                        "escalated flag must survive the gated sweep")
+
+        # Idle again → nudge #5 continues the SAME schedule; the one-shot
+        # escalation ping must NOT re-fire a second time.
+        _stale(now + 2700)
+        self.w.run_once(now=now + 2700, **kw)
+        state = self.w.load_state(self.state)
+        self.assertEqual(len(state[self._SID]["nudges"]), 5,
+                         "nudge #5 must continue the schedule across two "
+                         "gated sweeps")
+        escalate_pings = [p for p in self.pings if "pretrváva" in p[0]]
+        self.assertEqual(len(escalate_pings), 1,
+                         "the one-shot escalation ping must stay single "
+                         "across a gated sweep, never re-arm just because "
+                         "the episode key was briefly untouched")
 
     def test_run_once_ignores_fresh_transcript(self):
         now = 1_000_000
@@ -5153,6 +5311,30 @@ class TestApiWatchdog(TestCase):
         self.assertFalse(self.w.is_usage_cap(
             "API Error: Server is temporarily limiting requests "
             "(not your usage limit) · Rate limited"))
+
+    def test_is_usage_cap_recognizes_the_weekly_and_bare_banner_shapes(self):
+        # #175 F2: the four real Claude Code banner strings quoted in the
+        # ticket, verbatim. The old regex only knew "session"/"usage" before
+        # "limit" and required a literal SPACE before "reached/resets" — so
+        # the weekly and bare shapes (which use neither qualifier word and
+        # separate "limit" from "resets" with a MIDDLE DOT, not a space)
+        # fell straight through to the generic nudge path instead of staying
+        # bounded.
+        self.assertTrue(self.w.is_usage_cap(
+            "You've hit your session limit · resets 11:20pm (Europe/Prague)"))
+        self.assertTrue(self.w.is_usage_cap(
+            "You've hit your weekly limit · resets 12pm (Europe/Prague)"))
+        self.assertTrue(self.w.is_usage_cap(
+            "You've hit your weekly limit · resets Jul 31, 9pm (Europe/Prague)"))
+        self.assertTrue(self.w.is_usage_cap(
+            "You've hit your limit · resets 11am (Europe/Prague)"))
+        # the transient banner must stay transient after the widening — it
+        # literally contains "usage limit" and would false-match a careless
+        # widening of the bare-qualifier alternative if that check ever ran
+        # before _TRANSIENT_RX.
+        self.assertFalse(self.w.is_usage_cap(
+            "Server is temporarily limiting requests (not your usage limit) "
+            "· Rate limited"))
 
     def test_run_once_skips_ambiguous_cwd(self):
         # two `claude` panes in the SAME cwd → one transcript, can't tell which pane
