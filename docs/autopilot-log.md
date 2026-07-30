@@ -2739,3 +2739,26 @@ Closes #171
   caller, a query shape, or a bookkeeping fact rather than the thing being
   trusted will be re-broken next round — read the condition out loud before
   believing it.
+  Adversarial review before push (Opus; `fable-gate` CLOSED at 84%) found six
+  more ways the same counter opened the same gate, three of them failures of
+  invariants the fix had just claimed in its own comments (90518ea red, 65382e2
+  green). The shape guard asked "is it digits" but not "can `[` parse it", and
+  asked with a RANGE — measured here, `*[!0-9]*` is locale-collated and does not
+  reject a fullwidth digit, so it reached `[ -lt ]` as a non-integer and exited
+  2: the original defect, different bytes, plus raw bash noise into the turn.
+  A NUL spliced `3\x004` into `34` past the cap, because bash strips NUL out of a
+  command substitution. The counter path was still a write primitive: `-f` alone
+  follows a symlink and `>` writes through one, a FIFO blocked the read until the
+  harness would kill the hook (no verdict printed at all), and the key is
+  ENUMERABLE rather than guessable, since live session ids are world-readable out
+  of /tmp from this repo's own markers. The TTL was bounded only in the past, so a
+  future-dated counter was immortal again after one backward clock step. And the
+  validate-never-mangle invariant was prose: the suite passed 16/16 against a
+  sanitising mutant, which is many-to-one and rebuilds the shared bucket. All read
+  guards now sit in one `_retry_count_of()` where every check is a positive
+  requirement returning 0 on failure, the write goes through mktemp + rename so a
+  planted key is displaced rather than written through, and the two new
+  assertions kill the sanitiser mutant (verified against a mutated COPY: control
+  passes, mutant fails on the sixth call, on a second distinct id, and on the
+  shared key it leaves behind). Suite 3423, ruff clean. The extended findings are
+  on the seven-hook port ticket, because the template shares every one of them.
