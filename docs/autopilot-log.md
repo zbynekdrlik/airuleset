@@ -2281,3 +2281,61 @@ must run one query per qual and union server-side (never join the quals
 into one `--search` string); and historical goal-stop archaeology is
 bounded by the same pane-only-announcement limit documented earlier in
 this file, reconfirmed live against three real sub-dev boxes.
+
+## #181 + #164 round 2 — the round-1 fix relocated the false-empty-0 failure instead of removing it
+
+2026-07-30, round 2 (b3bfe59[red]→a88d183[green]): an adversarial review of
+`49cd3d4..2612400` found two CRITICAL regressions the round-1 fix had merely
+moved. C1: `cmd_slice_quals` never consulted `resolve_authority()` — on a
+full-authority box (live-confirmed on dev1: 29 real open tickets) it printed
+a clean `0`, exit `0`. Fix: refuse (non-zero exit) up front when authority
+resolves to `full`. C2: a shared-account box's slice is one un-validated
+`label:stream:<user>` — a forgotten label also silently returns `0`/exit `0`.
+Fix: validate the label's existence (`gh label list --search`) AND an
+`involves:@me` cross-check before trusting a zero. I6 (regression): the
+D/T done-count gate also skipped the run-window `ts` heartbeat write for a
+stream ticket's card on a full-authority box — `_write_autopilot_progress`
+now takes `bump_done` so the heartbeat and the done-increment are
+independent; `_notify_run_card` always calls it. I4: the FULL `/goal`
+template's stop-proof still counted the whole repo while the footer/card
+already scope to CORE (#164) — new `airuleset.py core-quals` CLI (sharing
+`_core_search_excl()` with the footer/card) gives it a driftproof
+core-scoped proof, replacing the bare whole-repo `gh issue list`. I5: the
+core/total/remaining queries raised `-L 200` → `-L 1000` to remove the
+clamp-difference arithmetic that could zero out `streamy` exactly when the
+hidden population was largest. I7: the tautological regression test
+(asserted `_slice_quals()`'s own unchanged output) replaced with one that
+mocks `_slice_quals()` and proves `cmd_slice_quals` genuinely calls it.
+M11: `_notify_run_card`'s parse-failure path now defaults `is_core_ticket=
+False` (the safe direction) instead of silently restoring the pre-#164 bug.
+M8 + the round-1 log entry's over-claim (only 2 of 3 `/goal` templates
+called `slice-quals`, not all 3) corrected to match what actually shipped.
+I3 investigated and found NOT a bug: the footer's active/handed-off
+partition and `slice-quals`'s raw open count deliberately answer different
+questions — forcing them equal would let the proof read `0` while a
+handed-off ticket the gatekeeper has not yet closed sits open, defeating
+review-watch. Documented + locked with a regression test instead of
+"fixed". M10 (the #61 cwd-parent fallback `cmd_slice_quals` still lacks)
+investigated and deliberately deferred — not on the round-2 priority list,
+fails in the safe (errors, never misreports) direction.
+
+3295 tests pass (10 genuinely RED against b3bfe59 with airuleset.py/
+SKILL.md reverted to a88d183~1, confirmed via `git stash`), ruff clean.
+Deployed via `python3 airuleset.py push`: GitHub + all 6 targets landed,
+dev2/gatekeeper SHA verified byte-identical to local (`a88d183`). Both
+issues auto-closed on
+push (`Closes #181`/`Closes #164` on the green commit); both Discord
+run-cards delivered under a distinct `-round2` dedup key (the original
+`airuleset#181`/`airuleset#164` keys were already claimed by round 1's
+cards) — `~/.claude/autopilot-notify-sent/airuleset#181-round2`,
+`airuleset#164-round2`.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — a "refuse instead of
+guess" fix must be checked at EVERY caller context that can reach the
+guessed branch, not just the ticket's own repro (the new CLI wrapper
+inherited the exact bug its own callee had just been fixed for); two
+counters reading differently is not automatically a bug — check whether
+they answer different questions on purpose before forcing them equal; and
+a parse-failure fallback that reuses "absence looks like the negative
+case" silently re-enables the wrong-direction version of the bug the
+surrounding code exists to prevent.
