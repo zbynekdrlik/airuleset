@@ -12,13 +12,6 @@ command -v jq &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
 
-# MSG_NOGOAL: MSG minus printed /goal TEMPLATE lines. The autopilot /goal
-# templates are sanctioned machinery text and legitimately contain phrases the
-# prose checks below hunt ("start…run…immediately…or…check" tripped the
-# dispatch-or-hold regex once the review-watch clauses landed — every
-# /autopilot arm message then hard-looped on this hook; montalu, 2026-07-20).
-# Question/pause checks run on MSG_NOGOAL; report-structure checks keep MSG.
-MSG_NOGOAL=$(printf '%s\n' "$MSG" | grep -v '^[[:space:]]*/goal ' || true)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$MSG" ] && exit 0
 
@@ -61,7 +54,6 @@ sys.stdout.write(text)
 PYEOF
 }
 MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
-MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$MSG_NOGOAL")
 
 # #190 — every check below asks "does this text contain X". It must be
 # answered from the TEXT. It used to be answered by a pipeline's exit status:
@@ -84,31 +76,156 @@ MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$M
 #
 # A here-string has no concurrent writer process, so the race cannot exist.
 #
-# A grep exit >= 2 is an ERROR (unusable pattern, resource failure), not a
-# verdict — and the old idiom could not tell it from exit 1 (no match) either.
-# It is recorded to a FILE because every caller runs inside `$( )`, where a
-# variable assignment would not survive the subshell; the final decision then
-# declines to assert a hard violation it knows it could not evaluate.
+# #194 — the ERROR case needed the same treatment and did not get it. A grep
+# exit >= 2 (unusable pattern, resource failure, PCRE backtracking limit) means
+# THE QUESTION WAS NOT ANSWERED. Returning 1 there — "the pattern is not in the
+# message" — is a fabricated verdict of exactly the same class as the 141 -> 0
+# collapse above, and for a presence-triggered gate it meant no violation was
+# ever added, so the hook exited CLEAN while a merge bypass shipped.
+#
+# The unknown is therefore resolved HERE, where it arises, and the CALLER picks
+# the direction by picking which question to ask:
+#
+#     msg_has     "does the message CONTAIN this?"  unknown -> YES, it does
+#     msg_missing "does the message LACK this?"     unknown -> YES, it lacks it
+#
+# An undeterminable check answers YES to whatever it was asked, so the VERB at
+# each call site IS that site's declaration of its own fail direction:
+#
+#   * INCRIMINATING pattern (a banned phrase) -> msg_has -> the gate FIRES.
+#     FAIL CLOSED. Wrong-open ships a merge bypass silently and is
+#     unrecoverable; wrong-closed tells the agent to trim the message, which is
+#     actionable AND removes the trigger, because the trigger is message size.
+#   * EXONERATING pattern (a match would SUPPRESS an established violation)
+#     -> msg_missing -> the exemption is DENIED. FAIL CLOSED. An unsubstantiated
+#     exemption must never disarm a gate.
+#   * REQUIRED REPORT FIELD (is the mandated line present?) -> msg_has -> no
+#     violation is asserted. FAIL OPEN, deliberately: #190 measured that
+#     "missing canonical heading", on a message whose first line IS that
+#     heading, is an accusation the agent cannot act on — it burns the retry
+#     budget and is then overridden by Claude Code's own consecutive-block cap.
+#
+# Because every unknown is resolved at its own site, nothing downstream needs to
+# ask "did ANY check error" — so one check's failure can no longer reach another
+# check's verdict, and the global suppression that used to do exactly that is
+# gone. UNDET_FILE survives PURELY as a diagnostic accumulator: nothing gates on
+# it, so a failed `mktemp` now costs a NOTE and can no longer invert the fail
+# direction.
 UNDET_FILE=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-undet.XXXXXX" 2>/dev/null) || UNDET_FILE=""
 if [ -n "$UNDET_FILE" ]; then
     trap 'rm -f "$UNDET_FILE"' EXIT
 fi
 
-# msg_has <text> <grep-args...> — 0 when <text> matches, 1 when it does not.
-msg_has() {
+# Announce + record a question grep could not answer. Callers run inside `$( )`,
+# where a variable assignment would not survive the subshell — hence a file.
+record_undet() {
+    echo "stop-check-prose-violations: grep exited $1 for [$2] — this check is UNDETERMINABLE" >&2
+    if [ -n "$UNDET_FILE" ]; then
+        printf '%s\n' "$2" >>"$UNDET_FILE" 2>/dev/null || true
+    fi
+}
+
+# The one place grep is asked anything. 0 = match, 1 = no match, 2 = UNKNOWN.
+# Never a writer process, so #190's SIGPIPE race cannot exist.
+_msg_grep_rc() {
     local text="$1"
     shift
     local rc=0
     grep "$@" >/dev/null 2>&1 <<<"$text" || rc=$?
     if [ "$rc" -ge 2 ]; then
-        echo "stop-check-prose-violations: grep exited $rc for [$*] — this check is UNDETERMINABLE" >&2
-        if [ -n "$UNDET_FILE" ]; then
-            printf '%s\n' "$*" >>"$UNDET_FILE" 2>/dev/null || true
-        fi
-        return 1
+        record_undet "$rc" "$*"
+        return 2
     fi
     return "$rc"
 }
+
+# msg_has <text> <grep-args...> — 0 when <text> matches. UNKNOWN -> 0.
+msg_has() {
+    local rc=0
+    _msg_grep_rc "$@" || rc=$?
+    if [ "$rc" -ge 2 ]; then
+        return 0
+    fi
+    return "$rc"
+}
+
+# msg_missing <text> <grep-args...> — 0 when <text> does NOT match. UNKNOWN -> 0.
+msg_missing() {
+    local rc=0
+    _msg_grep_rc "$@" || rc=$?
+    if [ "$rc" -ge 2 ]; then
+        return 0
+    fi
+    if [ "$rc" = "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# msg_count <text> <grep-args...> — prints the match count, or `?` when the
+# question could not be answered. A count feeds REQUIRED-FIELD checks ("does the
+# report carry enough 🌐 lines"), so the caller must SKIP on `?` rather than
+# treat an unknown as zero and manufacture an accusation.
+msg_count() {
+    local text="$1"
+    shift
+    local out="" rc=0
+    out=$(grep -c "$@" <<<"$text" 2>/dev/null) || rc=$?
+    if [ "$rc" -ge 2 ]; then
+        record_undet "$rc" "-c $*"
+        printf '?\n'
+        return 0
+    fi
+    printf '%s\n' "${out:-0}"
+}
+
+# msg_lines <text> <grep-args...> — prints matching lines, returns 1 when the
+# question could not be answered, so a caller can tell "no match" from "could
+# not tell" instead of reading an empty string as both.
+msg_lines() {
+    local text="$1"
+    shift
+    local out="" rc=0
+    out=$(grep "$@" <<<"$text" 2>/dev/null) || rc=$?
+    if [ "$rc" -ge 2 ]; then
+        record_undet "$rc" "$*"
+        return 1
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
+# msg_line_no <text> <grep-args...> — 1-based line number of the first match,
+# or empty for "no match" AND for "could not tell". Feeds only the SOFT ordering
+# warning, so an unknown stays silent rather than manufacturing an order
+# violation out of a line number the hook never obtained.
+msg_line_no() {
+    local text="$1"
+    shift
+    local out="" rc=0
+    out=$(grep -m1 -n "$@" <<<"$text" 2>/dev/null) || rc=$?
+    if [ "$rc" -ge 2 ]; then
+        record_undet "$rc" "-m1 -n $*"
+        return 0
+    fi
+    printf '%s' "${out%%:*}"
+}
+
+# MSG_NOGOAL: MSG minus printed /goal TEMPLATE lines. The autopilot /goal
+# templates are sanctioned machinery text and legitimately contain phrases the
+# prose checks below hunt ("start…run…immediately…or…check" tripped the
+# dispatch-or-hold regex once the review-watch clauses landed — every
+# /autopilot arm message then hard-looped on this hook; montalu, 2026-07-20).
+# Question/pause checks run on MSG_NOGOAL; report-structure checks keep MSG.
+# The exemption EXONERATES, so an unanswerable filter must not grant it: fall
+# back to the full MSG rather than to an empty string that matches nothing.
+_NOGOAL_RC=0
+MSG_NOGOAL=$(grep -v '^[[:space:]]*/goal ' <<<"$MSG") || _NOGOAL_RC=$?
+if [ "$_NOGOAL_RC" -ge 2 ]; then
+    record_undet "$_NOGOAL_RC" "-v ^[[:space:]]*/goal "
+    MSG_NOGOAL="$MSG"
+fi
+MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$MSG_NOGOAL")
 
 # HARD violations collected here trigger {"decision":"block"} response.
 # SOFT violations go to stderr as warnings. Both can fire in the same hook run.
@@ -140,8 +257,10 @@ fi
 # to layout/position/component-placement questions — those are always visual.
 HAS_BOXDRAW=$(msg_has "$MSG" -qE "[┌┐└┘─│├┤┬┴┼╔╗╚╝═║█▓▒░▀▄■□]{3,}" && echo 1 || echo 0)
 HAS_LAYOUT_KW=$(msg_has "$MSG" -qiE "\b(header|footer|navbar|sidebar|toolbar|titlebar|status.?bar|menu.?bar|top border|bottom border|top.right|top.left|bottom.right|bottom.left|version label|version display|logo placement|page header|page footer|presenter (panel|view|placement)|top of (the )?(page|screen|window|view|border)|bottom of (the )?(page|screen|window|view|border)|above (the )?(header|footer|button|panel)|below (the )?(header|footer|button|panel)|position (of|the)|place (the )?[a-z]+ (on|in|at)|move (the )?[a-z]+ to|layout option|wizard step|dashboard layout|side.by.side layout|column layout|grid layout|component placement|fixed (top|bottom|header|footer)|sticky (top|header|footer))\b" && echo 1 || echo 0)
-HAS_COMPANION_URL=$(msg_has "$MSG" -qE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+|visual companion (live|running|started|at)|start-server\.sh" && echo 1 || echo 0)
-if [ "$HAS_LAYOUT_KW" = "1" ] && [ "$HAS_BOXDRAW" = "1" ] && [ "$HAS_COMPANION_URL" = "0" ]; then
+# A live companion URL EXONERATES (the mockup is already in a browser), so ask
+# whether it is MISSING — an unanswerable check must not grant the exemption.
+NO_COMPANION_URL=$(msg_missing "$MSG" -qE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+|visual companion (live|running|started|at)|start-server\.sh" && echo 1 || echo 0)
+if [ "$HAS_LAYOUT_KW" = "1" ] && [ "$HAS_BOXDRAW" = "1" ] && [ "$NO_COMPANION_URL" = "1" ]; then
     echo "VIOLATION: You drew a UI layout in ASCII / box-drawing text-art for a LAYOUT/POSITION question. The user has explicitly stated terminal ASCII art is UNREADABLE for visual design decisions, causing repeated wrong iterations. Visual companion is MANDATORY for layout/position/UI-design questions — not optional." >&2
     echo "" >&2
     echo "  Start it NOW:" >&2
@@ -162,8 +281,10 @@ fi
 # Escape: if the message contains "UNVERIFIED:" explicitly stating WHAT cannot be tested
 # and WHY (true user-only access), allow it — that is the documented exception.
 if msg_has "$MSG_MENTION" -qiE "(can|could|would) you (please )?(test|verify|confirm|try|click|reproduce|reload|refresh)( it| this| that| the| in| on)|please (test|verify|confirm|reproduce|try it|try this|click it|click this|reload it|reload this|refresh it|refresh this)|let me know (if|when|whether)[^.]{0,80}(works|breaks|fails|shows|renders|appears|crashes|errors|loads|is correct|is right|you see)|(tell|show) me what you see|ping me (when|if|once|after)|report back (when|if|what|with|after)|\bnext user test\b|us(ed|ing) you as( a| the| my)? tester|act(ing|s)? as( a| the| my)? tester|(test|verify|try|run|click|check|reproduce|exercise) (it|this|the [a-z]+) on your end|on your end[,. ]+(test|verify|check|click|try|run|please|and let me know)|on your end and let me know|in your (browser|terminal|environment|local|machine)[, ]+(test|verify|check|click|try|run)|you'?ll need to (test|verify|click|try|reproduce)|\bbefore (the |any )?next user test\b|stop using you as tester|going to simulate.*myself|fix locally before (next |the )?(user )?test"; then
-    # Allow if explicitly marked UNVERIFIED with a reason (the documented exception)
-    if ! msg_has "$MSG" -qE "UNVERIFIED:"; then
+    # Allow if explicitly marked UNVERIFIED with a reason (the documented
+    # exception). It EXONERATES, so ask whether it is MISSING — an
+    # unsubstantiated exemption must never disarm an established violation.
+    if msg_missing "$MSG" -qE "UNVERIFIED:"; then
         echo "VIOLATION: You handed verification to the user ('please test', 'let me know if it works', 'ping me when', 'tell me what you see', 'on your end', 'next user test', 'using you as tester', etc.). The user is NEVER your tester. You have Playwright, curl, SSH, MCP tools, your own test harness — use them. A blocker (MCP auth failure, timeout, 500 error, opaque reference ID) is YOUR work to debug, not a hand-off trigger." >&2
         echo "" >&2
         echo "  Decision tree:" >&2
@@ -240,7 +361,10 @@ fi
 # names ticket(s) #N together with done-vocab (SK/EN), or is paired with a
 # READY-FOR-REVIEW hand-off, IS a ticket completion — same template obligations.
 # (A conversational '✅ DONE: odpovedané na otázku o #123' has no done-vocab → clean.)
-DONE_LINE=$(echo "$MSG" | grep -E "^✅ DONE:" | tail -1 || echo "")
+DONE_LINE=""
+if _DONE_LINES=$(msg_lines "$MSG" -E "^✅ DONE:"); then
+    DONE_LINE=$(tail -1 <<<"$_DONE_LINES")
+fi
 if [ "$IS_COMPLETION_SIGNAL" = "0" ] && [ -n "$DONE_LINE" ]; then
     if msg_has "$DONE_LINE" -qE "#[0-9]+" \
        && msg_has "$DONE_LINE" -qiE "hotov|opraven|zavret|uzavret|vyrie[sš]en|dokon[cč]en|implementovan|nasaden|zmerg|zl[uú][cč]en|odovzdan|merged|deployed|fixed|closed|resolved|implemented|shipped|handed.?off"; then
@@ -252,7 +376,9 @@ fi
 
 # A message that ends still-working (⏳ marker) is not a completion report — the signal
 # route must not force the template mid-loop (e.g. fleet merged #N, dispatching the next).
-if [ "$IS_COMPLETION_SIGNAL" = "1" ] && msg_has "$MSG" -q "⏳"; then
+# The marker EXONERATES (it switches the audits OFF), so the question asked is
+# whether it is MISSING: an unanswerable check must not skip the audit block.
+if [ "$IS_COMPLETION_SIGNAL" = "1" ] && ! msg_missing "$MSG" -q "⏳"; then
     IS_COMPLETION_SIGNAL=0
 fi
 
@@ -307,7 +433,18 @@ if [ "$IS_COMPLETION" = "1" ]; then
     # Accept either explicit "0 🔴 0 🟡 0 🔵" or "all findings addressed" with 🔵 mentioned.
     # MUST disambiguate from /requesting-code-review which contains "/review" as substring.
     # Use perl negative lookbehind: /review preceded by NOT "code-" (rules out requesting-code-review).
-    HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].*0 🔴.*0 🟡.*0 🔵|(?<!code-)/review[: ].*all (findings|issues|items).*addressed|(?<!code-)/review[: ].*addressed in commit' && echo 1 || echo 0)
+    #
+    # #194 — the gaps are BOUNDED (`.{0,120}`), not `.*`. An unbounded `.*A.*B.*C`
+    # explores a split-point space quadratic in the number of candidate `A`s, and
+    # message text alone could drive it past PCRE's backtracking limit: measured on
+    # GNU grep 3.11, a `/review: ` line carrying ~5000 repeats of `0 🔴` (30 KB)
+    # exits 2 in 0.11 s, while the same size of neutral filler answers cleanly.
+    # That removed the TRIGGER as well as the amplifier. The bound is also the
+    # tighter reading of the rule: an audit line is a short fixed template, and an
+    # unbounded gap would happily match `/review:` at the head of a 300 KB line and
+    # its counters at the tail. 120 chars is ~6x the real template's widest gap;
+    # the worst case is then 121^3 ≈ 1.8M steps against a 10M limit.
+    HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,120}0 🔴.{0,120}0 🟡.{0,120}0 🔵|(?<!code-)/review[: ].{0,120}all (findings|issues|items).{0,120}addressed|(?<!code-)/review[: ].{0,120}addressed in commit' && echo 1 || echo 0)
     # requesting-code-review (superpowers skill, deep pass) — must also pass clean.
     # Distinguish from /review by requiring the literal token "requesting-code-review" or "request.*code.?review" or "superpowers:requesting".
     HAS_RCR=$(msg_has "$MSG" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
@@ -346,15 +483,21 @@ if [ "$IS_COMPLETION" = "1" ]; then
     fi
 
     # Check ORDER: Goal/What changed must appear AFTER audit lines (audits at top, Goal at bottom)
-    GOAL_LINE=$(grep -m1 -nE "\*\*Goal:?\*\*" <<<"$MSG" 2>/dev/null | cut -d: -f1 || echo "")
-    AUDIT_LINE=$(grep -m1 -nE "✅.*(/plan.?check|review.*clean|review.*0 🔴)" <<<"$MSG" 2>/dev/null | cut -d: -f1 || echo "")
+    # Routed through msg_line_no so an errored lookup is RECORDED rather than
+    # reading as "no Goal line" (#194 companion 5). An unknown line number stays
+    # empty and the ORDER check below simply does not fire — this warning is
+    # SOFT, and manufacturing an ordering claim from a number the hook never
+    # obtained is the one thing it must not do.
+    GOAL_LINE=$(msg_line_no "$MSG" -E "\*\*Goal:?\*\*")
+    AUDIT_LINE=$(msg_line_no "$MSG" -E "✅.*(/plan.?check|review.*clean|review.*0 🔴)")
     if [ -n "$GOAL_LINE" ] && [ -n "$AUDIT_LINE" ] && [ "$GOAL_LINE" -lt "$AUDIT_LINE" ]; then
         echo "VIOLATION: 'Goal' line appears BEFORE the audit lines. Wrong order. The terminal scrolls — the user only sees the LAST visible passage without scrolling back. Put audits/CI/plan-check/review at the TOP, then a '---' separator, then Goal + What changed + PR URL + ❓Question at the BOTTOM. See completion-report.md → 'Why this order'." >&2
     fi
 
     # Check trailing question is clearly marked with ❓
     LAST_CHAR=$(echo "$MSG" | tr -d '[:space:]' | tail -c 1)
-    if [ "$LAST_CHAR" = "?" ] && ! msg_has "$MSG" -qE "❓"; then
+    # The ❓ marker EXONERATES a trailing "?", so ask whether it is MISSING.
+    if [ "$LAST_CHAR" = "?" ] && msg_missing "$MSG" -qE "❓"; then
         echo "VIOLATION: Your message ends with '?' but no ❓ marker is present. Questions must be clearly marked so the user spots them in the terminal scroll — they can't tell a question from a status line at a glance. Use '❓ **Question:** <concise 1-2 sentence question>' as the very last line. If it isn't actually a question for the user, rephrase as a statement. See completion-report.md → 'Pending question'." >&2
     fi
 fi
@@ -370,10 +513,10 @@ fi
 # Right: 'PR #54: <title>' / '#42 (karaoke sanitizer)' / 'Closes #234 (driver.rs cap)'.
 BARE_REF=0
 # "issue|PR|pull request|pull #N" NOT immediately followed by ':' or ' (' (a title/topic).
-if msg_has "$MSG" -qPi "\b(issue|PR|pull request|pull) #[0-9]+(?! *[:(])(?![0-9])" 2>/dev/null; then BARE_REF=1; fi
+if msg_has "$MSG" -qPi "\b(issue|PR|pull request|pull) #[0-9]+(?! *[:(])(?![0-9])"; then BARE_REF=1; fi
 # action-verb "#N" (closes/fixes/resolves/filed/tracked/see/blocked by/depends on/addressed in)
 # NOT followed by ' (' (a parenthetical topic).
-if msg_has "$MSG" -qPi "\b(closes|fixes|resolves|fixed|filed as|filed:|tracked as|tracking|see|blocked by|depends on|address(ed)? in) #[0-9]+(?! *\()(?![0-9])" 2>/dev/null; then BARE_REF=1; fi
+if msg_has "$MSG" -qPi "\b(closes|fixes|resolves|fixed|filed as|filed:|tracked as|tracking|see|blocked by|depends on|address(ed)? in) #[0-9]+(?! *\()(?![0-9])"; then BARE_REF=1; fi
 if [ "$BARE_REF" = "1" ]; then
     echo "VIOLATION (soft): Bare issue/PR number without its title/topic. The user does NOT keep tickets open and cannot decode '#N' by number — this applies to EVERY message, not just completion reports." >&2
     echo "  - WRONG: 'PR #54 — mergeable, clean' / 'Fixes #234' / 'Working on #42' / 'See #91'" >&2
@@ -407,7 +550,9 @@ if [ "$IS_COMPLETION" = "1" ]; then
         # (PR #195 in the title doesn't prove the deferred work was filed). Require:
         #   "Filed as #N" / "Filed: #N" / "Tracked as #N" / "Tracking issue #N" /
         #   "Issue #N" / "Tracker: #N" / "TODO #N" / "filed under #N" / etc.
-        if ! msg_has "$MSG" -qiE "\b(filed|tracked|tracking|tracker|opened|created|logged|recorded)\b[^.]{0,60}#[0-9]+|issue\s+#[0-9]+\b|todo[: ]+#[0-9]+|see\s+#[0-9]+|follow.?up\s+(in|at|as)\s+#[0-9]+|deferred[^.]{0,60}#[0-9]+|root.?cause[^.]{0,60}#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+"; then
+        # A tracking reference EXONERATES the deferral, so ask whether it is
+        # MISSING — an unanswerable check must not grant that exemption.
+        if msg_missing "$MSG" -qiE "\b(filed|tracked|tracking|tracker|opened|created|logged|recorded)\b[^.]{0,60}#[0-9]+|issue\s+#[0-9]+\b|todo[: ]+#[0-9]+|see\s+#[0-9]+|follow.?up\s+(in|at|as)\s+#[0-9]+|deferred[^.]{0,60}#[0-9]+|root.?cause[^.]{0,60}#[0-9]+|address(ed)?\s+(in|by|via)\s+#[0-9]+"; then
             echo "VIOLATION: Completion report contains a deferral phrase ('deferred', 'root-cause fix later', 'will be addressed in follow-up', 'remains outstanding', 'workaround for now', 'patched around', 'this PR doesn't fix...', 'punted to...') but NO EXPLICIT tracking-issue reference. The current PR's own #N in the title does NOT count — the user needs proof the DEFERRED work was filed as its own tracked issue." >&2
             echo "" >&2
             echo "  Per complete-planned-work.md, any deferred work MUST be filed as a tracked GitHub issue BEFORE sending the completion report, and the report MUST cite it explicitly:" >&2
@@ -469,7 +614,8 @@ fi
 # Check for PR completion message missing the PR URL
 # Signal: completion language about a PR but no https://github.com/.../pull/N URL anywhere in message
 if msg_has "$MSG" -qiE "awaiting (your|merge)|pr (is )?(ready|mergeable)|mergeable[, ]+(clean|all)|all checks (are )?green|ready to merge|per pr-merge-policy|awaiting.*\"merge it\""; then
-    if ! msg_has "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+"; then
+    # The PR URL EXONERATES the announcement, so ask whether it is MISSING.
+    if msg_missing "$MSG" -qE "https?://github\.com/[^[:space:]]+/pull/[0-9]+"; then
         echo "VIOLATION: You announced PR completion ('mergeable clean', 'awaiting merge', 'all checks green', etc.) without providing the PR URL. completion-report.md and pr-merge-policy.md MANDATE the PR URL on the completion line: '✅ PR: <https://github.com/.../pull/N> — mergeable, clean'. Always paste the full URL — the user works remotely and cannot click 'PR #11'. Use the EXACT completion-report.md template, not a prose summary." >&2
     fi
 fi
@@ -483,8 +629,10 @@ fi
 # Casual "deployed to dev1+dev2" mentions (admin chitchat) must NOT trigger this rule.
 HAS_DEPLOY_LINE=$(msg_has "$MSG" -qE "✅ Deploy:" && echo 1 || echo 0)
 if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && msg_has "$MSG" -qiE "✅ Deploy:|deploy.*(verified|complete|done|success|redeploy|auto.?redeploy)|verified.*deploy|deployed.*(to|successfully)"; then
-    GLOBE_COUNT=$(echo "$MSG" | grep -cE "🌐.*https?://" || true)
-    [ -z "$GLOBE_COUNT" ] && GLOBE_COUNT=0
+    # "Does the report carry enough 🌐 lines" is a REQUIRED-FIELD question, so an
+    # unanswerable count must NOT read as zero and become an accusation — it
+    # prints `?` and both branches below are skipped.
+    GLOBE_COUNT=$(msg_count "$MSG" -E "🌐.*https?://")
 
     # Anti-pattern: 🌐 line listing a backend/API URL — clutters the user's clickable list.
     GLOBE_HAS_BACKEND=$(msg_has "$MSG" -qiE "🌐.*(backend|/api/|api[: ]|:8000|:8080|:5000|api endpoint|api server)" && echo 1 || echo 0)
@@ -503,7 +651,9 @@ if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && msg_has "$
         echo "VIOLATION: A 🌐 URL line lists a backend/API URL (matched ':8000' / ':8080' / '/api/' / 'backend:' / 'api:'). The user reads the 🌐 list to click in a browser — backend URLs are noise there. Backend evidence belongs in '✅ Deploy:' (e.g. 'dev backend serves v1.0.97-dev.9 via /api/version'), NOT in the 🌐 list. Remove backend/API entries from 🌐. See completion-report.md → 'Dashboards & URLs'." >&2
     fi
 
-    if [ "$MULTI_ENV" = "1" ] && [ "$GLOBE_COUNT" -lt 2 ]; then
+    if [ "$GLOBE_COUNT" = "?" ]; then
+        :  # unknown count — see msg_count; never accuse on a number we don't have
+    elif [ "$MULTI_ENV" = "1" ] && [ "$GLOBE_COUNT" -lt 2 ]; then
         echo "VIOLATION: Deploy mentions multiple environments (dev/staging/prod) but the report has only $GLOBE_COUNT clickable 🌐 URL line(s). List every USER-CLICKABLE web URL on its own '🌐 <env>: <url>' line — typically one per environment. Read the project's CLAUDE.md '## Dashboards' / '## URLs' section. Do NOT list backend/API URLs — only user-facing browser URLs. URLs in prose ('curl http://...') do NOT count. See completion-report.md → 'Dashboards & URLs'." >&2
         add_hard "Multi-env deploy with <2 🌐 URL lines"
     elif [ "$HAS_UI" = "1" ] && [ "$GLOBE_COUNT" -lt 1 ]; then
@@ -522,27 +672,43 @@ fi
 # no-localhost-urls.md violation ("the user works remotely and cannot open
 # localhost on their own machine"), completion report or not. HARD block:
 # no-localhost-urls.md documents no legitimate exception for presenting one.
-GLOBE_LOCALHOST=$(echo "$MSG" | grep -E "🌐" | grep -iE "localhost|127\.0\.0\.1|0\.0\.0\.0" || true)
-if [ -n "$GLOBE_LOCALHOST" ]; then
+# Two stages, both on here-strings. A localhost 🌐 line INCRIMINATES, so an
+# unanswerable stage resolves as "present" and the gate still fires — it simply
+# cannot quote the offending lines it never obtained.
+GLOBE_LOCALHOST=""
+GLOBE_LOCALHOST_UNKNOWN=0
+if _GLOBE_LINES=$(msg_lines "$MSG" -E "🌐"); then
+    if ! GLOBE_LOCALHOST=$(msg_lines "$_GLOBE_LINES" -iE "localhost|127\.0\.0\.1|0\.0\.0\.0"); then
+        GLOBE_LOCALHOST=""
+        GLOBE_LOCALHOST_UNKNOWN=1
+    fi
+else
+    GLOBE_LOCALHOST_UNKNOWN=1
+fi
+if [ -n "$GLOBE_LOCALHOST" ] || [ "$GLOBE_LOCALHOST_UNKNOWN" = "1" ]; then
     echo "VIOLATION: A 🌐 URL line points at localhost/127.0.0.1/0.0.0.0. The user works remotely and cannot open a localhost URL on their own machine. Use the machine's real LAN/tailscale IP instead (\`hostname -I\`), and verify it returns 200 before presenting it. See no-localhost-urls.md." >&2
     echo "  Offending line(s):" >&2
     echo "$GLOBE_LOCALHOST" | sed 's/^/    /' >&2
     add_hard "🌐 URL line points at localhost/127.0.0.1/0.0.0.0 — use the real LAN IP"
 fi
 
-# #190 — never assert a violation on evidence this hook could not evaluate.
-# If any `msg_has` call hit a grep ERROR (exit >= 2), the "absent" answers it
-# returned are guesses, and a HARD violation built on one is a false block.
-# The direction is deliberate: a Stop hook can only ever DELAY a stop, never
-# prevent one (Claude Code overrides a hook that blocks too many consecutive
-# times), so a false block costs real turns with no compensating guarantee,
-# while a missed check is recoverable on the next turn — and is now visible on
-# stderr instead of silently mis-decided.
-if [ -n "$UNDET_FILE" ] && [ -s "$UNDET_FILE" ] && [ -n "$HARD_VIOLATIONS" ]; then
-    echo "" >&2
-    echo "stop-check-prose-violations: NOT blocking — $(wc -l <"$UNDET_FILE" | tr -d ' ') check(s) were UNDETERMINABLE (grep errored), so the violations below cannot be trusted:" >&2
-    printf '%b' "$HARD_VIOLATIONS" | sed 's/^/    /' >&2
-    exit 0
+# #194 — the global suppression that used to sit here is GONE. It asked "did ANY
+# check error" and, on yes, discarded EVERY hard violation, including ones
+# decided by a different pattern on a different regex engine that never errored:
+# a grep error on check A silently deleted a verdict from check B. Its only job
+# was to undo the fabricated "absent" that `msg_has` used to return, and that no
+# longer exists — every unknown is now resolved at its own call site, in the
+# direction that site declares. There is nothing left to correct.
+#
+# What survives is a NOTE. Companion 2: this hook is non-blocking on stderr, so
+# the per-check UNDETERMINABLE diagnostic reaches an operator reading a journal
+# but never the model. The note therefore travels on the block REASON, which
+# does — so a listed violation resting on a check the hook could not evaluate is
+# visible to the agent that has to act on it.
+UNDET_NOTE=""
+if [ -n "$UNDET_FILE" ] && [ -s "$UNDET_FILE" ]; then
+    UNDET_N=$(wc -l <"$UNDET_FILE" | tr -d ' ')
+    UNDET_NOTE="\n\nNOTE: ${UNDET_N} check(s) were UNDETERMINABLE (grep errored — see this hook's stderr for which). An undeterminable check is resolved AGAINST the message, so a violation listed above may rest on a check that could not be evaluated. The usual cause is an oversized or pathological message: shortening it removes the cause as well as the symptom."
 fi
 
 # Final: if HARD violations found AND retry budget not exhausted, output JSON to block Stop.
@@ -550,7 +716,7 @@ fi
 # Retry limit prevents loops if a violation is genuinely unfixable in this session.
 if [ -n "$HARD_VIOLATIONS" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
-    REASON="Hard violations detected in your message:\n${HARD_VIOLATIONS}\nFix the message (rewrite or trim the offending content) and resend in this turn. See ask-before-assuming.md (pre-answered questions) and completion-report.md (report template) for details."
+    REASON="Hard violations detected in your message:\n${HARD_VIOLATIONS}\nFix the message (rewrite or trim the offending content) and resend in this turn. See ask-before-assuming.md (pre-answered questions) and completion-report.md (report template) for details.${UNDET_NOTE}"
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
 fi

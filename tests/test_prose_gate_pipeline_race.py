@@ -32,6 +32,7 @@ Both directions are covered, because the same idiom drives both polarities:
 
 import json
 import os
+import re as _re
 import subprocess
 import tempfile
 import unittest
@@ -210,8 +211,6 @@ class TestGrepErrorIsNotTreatedAsAVerdict(_HookCase):
 # --------------------------------------------------------------------------- #
 # Structural lock — the booby trap itself
 # --------------------------------------------------------------------------- #
-
-import re as _re
 
 # Quoted spans are stripped before FLAG matching, so a grep whose PATTERN
 # happens to contain `-q` is not misread as a quiet grep (#194 companion 4).
