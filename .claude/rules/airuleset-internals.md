@@ -669,3 +669,44 @@ against a baseline, once one exists.
   (the usage-cap ping, the plain `wait` action) still writes `state[key]` exactly
   where it always did, so the only behavioral change is confined to the one new
   verified-and-fallible path.
+
+- **A "which box am I" lookup against `REMOTE_HOSTS` should key on the system
+  USERNAME, never the hostname.** #151: `check_discord_notify_config()`'s install
+  hint used to print a literal `<this-host>` placeholder because it never
+  consulted `REMOTE_HOSTS` at all; the fix (`_current_remote_host_entry()`)
+  matches via `_whoami()` because usernames are unique across every entry today
+  (newlevel/gatekeeper/montalu/marek/david/simap), while `os.uname().nodename`
+  is NOT — the four subdev-stream users (montalu/marek/david/simap) all share
+  ONE physical VPS hostname, so a hostname-only match can't tell them apart and
+  would either pick an arbitrary one of the four or need a new disambiguating
+  field for no reason. Known accepted edge case: dev1's own local user is also
+  `newlevel`, same as the `dev2` entry, so a hypothetical unconfigured dev1
+  would print dev2's address — harmless since dev2 pins no ssh identity either,
+  and dev1 (the deploy source, always the primary already-configured host)
+  essentially never reaches that branch in practice. Reuse this username-keyed
+  lookup for any future "which deploy target is this box" question instead of
+  reaching for nodename matching.
+- **`cmd_push`'s own fail-closed test-suite step (`subprocess.run([...], cwd=...)`
+  with NO `capture_output`) makes the merged `stdout+stderr` log LOOK
+  chronologically scrambled when redirected to a file (`> log 2>&1`) — this is
+  a buffering artifact, not evidence of a bug.** unittest's dot-progress and its
+  final `Ran N tests ... OK/FAILED` summary go to **stderr** (effectively
+  unbuffered here), while every `print()` from application/test-fixture code
+  under test (the SAME noise the existing "gk-request `o/r`, notify-card
+  renders" bullet above documents) goes to **stdout**, which is FULLY
+  block-buffered once it's a file rather than a tty — so a big chunk of that
+  fixture noise can visually appear to print AFTER the real "Ran N tests"
+  summary line even though it was produced earlier in wall-clock time, because
+  the OS only flushes the stdout buffer in irregular chunks (partial mid-run,
+  the rest at interpreter shutdown). Live-hit verifying #151's deploy: a genuine
+  transient failure (the #179 wall-clock-timestamp-collision flake in
+  `test_vault_channel.py`) correctly aborted the real push at
+  `"  TESTS FAILED — refusing to push untested code."`, but that exact line sat
+  in the log SANDWICHED inside a huge trailing blob of unrelated
+  `cmd_push`/`gk-request`/notify fixture noise that had simply not been
+  flushed yet — reading the file top-to-bottom naively made it look like the
+  script kept running long after it had actually exited. Trust `grep -n "^Ran \|
+  ^OK$\|^FAILED\|TESTS FAILED — refusing\|Deploying to\|deployments complete"`
+  over the raw tail, and treat the REAL summary line (`Ran N tests ... OK`, then
+  `Deploying to <host>` lines actually appearing) as the only trustworthy
+  verdict — never the last few printed lines by position alone.
