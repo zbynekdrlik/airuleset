@@ -2126,3 +2126,111 @@ And isolating a mutant for one of several fixes sharing a commit/file: back
 up the whole file to `/tmp`, mutate with a targeted `str.replace` + `assert
 src2 != src` guard, restore with a plain `cp` — `git stash` reverts every
 fix at once and is the wrong tool here.
+
+## #172 (reopened) — five real defects in the shipped livelock fix, fixed at their own sites
+
+Post-merge adversarial review of `5b90a4e..79c0cd5` (the earlier livelock
+fix) found five genuine defects still shipping, none of them undoing the
+livelock fix itself (independently re-verified: persist-before-the-loop
+is correct and the SystemExit-modeled RED test is still green for the
+right reason):
+
+1. `log_fn=print` never flushes under systemd's piped, non-tty stdout, so
+   a killed sweep still printed nothing (measured: `print('x')` + SIGTERM
+   1s later captured `''`; `print('x', flush=True)` captured `'x'`).
+2. `AIRULESET_REPO_SWEEP_BATCH=0` (or negative) fell into the same branch
+   as "batch already covers the whole list", silently re-sweeping every
+   repo — the exact knob an operator disabling batching would reach for.
+3. Jobs 27/28's per-repo dedup memory reached `state` (and hence disk)
+   only at the very end of the loop, not the moment a ping fired — jobs
+   8/11's own "dedup memory BEFORE the ping" shape was copied only half
+   (the cadence stamp, not the per-repo write).
+4. The cadence marker was persisted only AFTER `repo_roots()` (an
+   `os.walk($HOME)`) already ran, not before.
+5. A failed `git fetch` in `stuck_main_sweep` fell through to measuring on
+   whatever refs already exist on disk — a repo behind a slow link could
+   read as stuck-main on stale data.
+
+Design comment posted BEFORE the first code commit
+(issuecomment-5126366260).
+
+RED → GREEN: `test: reopened #172 review findings 1-5 pin the regressions
+[red]` (81e9f2d) — 16 new/corrected assertions, ALL genuinely failing
+against pre-fix `main` (verified via `git stash push -- watchdog/__init__.py
+airuleset.py`, running the new/corrected tests against the untouched
+implementation, then `git stash pop`) → `fix(watchdog): flush log_fn, clamp
+batch-disable, persist dedup before the ping, persist marker before
+repo_roots(), skip stale refs [green]` (eed3f8f, `Closes #172`).
+
+Two pre-existing tests were CORRECTED rather than worked around:
+`test_run_once_is_wired_with_log_fn_print` asserted `log_fn is print` —
+exactly the regression it should have caught — replaced with an identity
+check plus a real subprocess+pipe+SIGTERM proof
+(`test_log_fn_survives_a_sigterm_under_a_real_pipe`) that drives the actual
+`cmd_watchdog` wiring under systemd-shaped conditions (non-tty piped
+stdout). `TestBatchingPreservesUntouchedDedup_172` passed one repo root
+with `max_repos=1`, so `_repo_sweep_batch`'s `max_repos >= n` fast path
+fired and the round-robin sit-out it claimed to test never actually
+happened — corrected to two repo roots so the sit-out is genuinely
+exercised (verified this correction has teeth: mutating the pruning
+filter's `k not in touched` clause out makes both corrected tests fail).
+
+Smaller items fixed in the same pass: `DEDUP_MEMORY_MAX_AGE_S` (30 days)
+ages out dedup memory for a repo that vanishes from `repo_roots()`
+entirely, while a repo merely sitting out one rotation (bounded well under
+30 days) is untouched; the short-list fast path no longer resets the
+round-robin cursor; jobs 24/25's own network timeouts
+(`_watchdog_delivery_probe`, `_watchdog_card_probe`/`_watchdog_closed_fetch`
+— all three dispatch before jobs 27/28 in the same sweep) cut 90s→15s /
+45s→10s, matching jobs 27/28's own cuts; every "one hour of stale drift
+data" claim (code comments, `run_once`'s docstring) restated as the real
+`interval * ceil(n_repos / batch)` bound (~14h at the current default);
+and the earlier autopilot-log entry's own unverifiable
+`net_drift_cursor=6` claim got a CORRECTION paragraph above rather than
+being left standing. Carried over from #175/#176's own closing pass
+(same file, well under 100 LoC, explicitly scoped into this ticket):
+`_RESET_TIME_RX` now parses a weekly cap's DATED reset clock ("resets Jul
+31, 9pm"), and `parse_reset_epoch` uses the named date (never "today")
+when it matches, so job 6 can finally compute a resume instant for that
+banner shape instead of pinging once and never auto-resuming.
+
+`python3 -m pytest tests/`: 3278 passed. `ruff check .`: clean.
+`python3 airuleset.py push`: ruff clean, its own internal
+`unittest discover` run reported "Ran 3235 tests ... OK" (the two runners
+disagree on the exact count on this codebase — pre-existing, not a
+regression; both agree 0 failed), pushed `d5cf312..eed3f8f`, deployed to
+all 7 managed targets (dev2, gatekeeper, montalu/marek/david/simap@subdev).
+Deployed SHA confirmed by `git rev-parse HEAD` over ssh on dev2 and
+gatekeeper — both `eed3f8f`, matching local HEAD.
+
+Live-verified on dev1: forced both cadence markers 2h stale, ran
+`systemctl --user start api-watchdog.service` once. The unit finished in
+19s wall / 8.14s CPU (well under the 120s budget): job 27 logged
+`net-drift zbynekdrlik/restreamer opened=26 closed=23 net=+3` and one more
+repo, job 28 logged three `stuck-main ...` lines, decision lines appeared
+in the journal at increasing timestamps as the sweep progressed (06:44:32
+→ 06:44:44 — direct confirmation the flush fix streams output live, not
+only at exit), and the state file afterward showed both cadence markers
+refreshed, `net_drift_cursor`/`stuck_main_cursor` advanced by exactly 3
+each (27→30, 24→27), and the pre-existing dedup entries for
+`camera-box`/`parovanie-produktov`/`airuleset` preserved untouched.
+
+`notify --run-card` for #172 returned `dedup` — a marker for
+`airuleset#172` from the FIRST (pre-reopen) pass genuinely exists at
+`~/.claude/autopilot-notify-sent/airuleset#172` (`1785360152.79 sent`),
+confirming the dedup is correct behavior (the marker keys on
+repo#issue, not on which round of work closed it), not a silent failure.
+
+No dropped work; nothing filed — every item the reopen review raised is
+fixed in this pass, and the review's own "narrative half is a separate
+question, filed on its own ticket" scoping note does not apply here (that
+was #176, already closed).
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — a cadence marker set
+only in an in-memory dict, saved once at the very end of a long function,
+is not durable against an uncaught process kill; the "persist before the
+loop" fix must extend to EVERY expensive step that precedes the loop
+(including local, non-network calls like `os.walk`), and to per-item
+dedup memory, not just the once-per-sweep cadence stamp — jobs 8/11's own
+"dedup memory BEFORE the ping" shape is the reusable template for any
+future cadence-gated sweep job with per-item duplicate-suppression state.
