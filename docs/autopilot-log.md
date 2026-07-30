@@ -2055,3 +2055,60 @@ ALSO carries genuine UNCOMMITTED work discards ALL of it, not just the
 mutation — use a targeted string-substitute-then-restore script (read,
 `.replace()`, write; revert the same way) for any in-place hand-mutation
 test on a file with uncommitted changes still pending, never `git checkout`.
+
+## #175 REOPENED — the api-error episode marker outran its own gates, and the quota-cap regex missed weekly/bare banners
+
+Adversarial review of the shipped #175 widening back-off found four defects:
+(F1) job 1's per-session pane loop called `stalled.add(key)` AFTER the
+copy-mode and busy-pane safety gates' own early `continue`, so any sweep that
+hit either gate skipped the cleanup pass's protection and deleted the
+accumulated nudge/`escalated` entry, resetting the widening to nudge #1 and
+re-arming the one-shot give-up ping under a fresh dedup key; (F2)
+`_USAGE_CAP_RX`/`_SESSION_LIMIT_RX` both required "session"/"usage" before
+"limit" and a literal space before "reached/resets", so the real weekly-cap
+and bare-cap banners (no qualifier word, separated by a MIDDLE DOT not a
+space — ~13% of 375 real api-error entries) fell into the unbounded generic
+nudge path; (F3) the flagship widening test only called `decide()` at
+cumulative due instants (no teeth for the widening itself) and
+`BACKOFF_CAP_SECONDS` had no dedicated assertion; (F4) the docstring/comment
+overclaimed "only a new err_hash clears dormant" when F1's cleanup pass could
+too (harmless in practice — `is_usage_cap` re-derives dormancy on rebuild).
+
+`test: reopened #175 review findings F1/F2/F3 pin the regressions [red]`
+(dda38d1) — 3 genuine behavioral RED failures (F1's gated-sweep integration
+test, F2's `is_usage_cap`/`pane_session_limited` corpus test against the four
+real banner strings quoted verbatim in the ticket), plus F3's two tests which
+pin ALREADY-SHIPPED widening behavior and are reported honestly as
+mutation-killers, not RED — verified against a throwaway no-widening mutant
+of `decide()` (both fail there). 718 passed / 3 failed pre-fix (matches the
+pre-existing 3257+3 full-tree count). →
+`fix(watchdog): keep the api-error episode alive across a gated sweep, widen
+the quota-cap regexes [green]` (99dfa4e, `Closes #175`) — hoisted the single
+`stalled.add(key)` to the top of `if err_text:`; widened both regexes with an
+optional session/usage/weekly qualifier and a `[\s·]*` separator; corrected
+the docstring/comment. `python3 -m pytest tests/`: 3260 passed, 0 failed.
+`ruff check .`: clean.
+
+Mutation evidence: F1's own mutant (reverting just the hoist) kills the new
+gated-sweep test; F2's own mutant (reverting just the regex widening) kills
+both new corpus tests; the no-widening mutant (F3's pre-existing scope) kills
+both new decide()-interval tests. Each mutant applied/verified/reverted via a
+targeted `str.replace` script against a `/tmp` backup copy of the file (NOT
+`git stash`, which would have reverted all three fixes at once since they
+share one file/commit) — see the playbook entry.
+
+`python3 airuleset.py push`: `ruff check .` clean, its own internal
+unittest-discover run reported "Ran 3217 tests ... OK", pushed
+`bef814c..99dfa4e` (+ a playbook-only follow-up `551198f`), deployed to all 6
+managed targets (dev2, gatekeeper, montalu/marek/david/simap@subdev). Deployed
+SHA confirmed by `git rev-parse HEAD` over ssh on dev2 and gatekeeper — both
+`99dfa4e`, matching local HEAD at the time of deploy.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — the `stalled.add(key)`
+marker-ordering trap in job 1's pane loop is a RECURRING shape (#176 already
+added two more early-continues below the old marker position without moving
+it); any future gate added to that loop goes BELOW the marker, never above.
+And isolating a mutant for one of several fixes sharing a commit/file: back
+up the whole file to `/tmp`, mutate with a targeted `str.replace` + `assert
+src2 != src` guard, restore with a plain `cp` — `git stash` reverts every
+fix at once and is the wrong tool here.
