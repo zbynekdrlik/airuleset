@@ -1436,10 +1436,10 @@ class TestTheHandoffArmVerifiesItsOwnMechanism(TestCase):
     `"READY-FOR-REVIEW:" in:comments` over-matches, and over-counting the
     obligation set is the never-stops failure."""
 
-    def _drive_enrolled(self, gh, repo="odoo-erp"):
+    def _drive_enrolled(self, gh, repo="odoo-erp", **flags):
         import unittest.mock as mk
         with mk.patch("notify.repo_name_for", return_value=repo):
-            return _drive(airuleset.cmd_core_quals, gh)
+            return _drive(airuleset.cmd_core_quals, gh, **flags)
 
     def test_an_empty_obligation_set_refuses_when_the_labeller_is_failing(self):
         out, err, exc = self._drive_enrolled(
@@ -1468,6 +1468,34 @@ class TestTheHandoffArmVerifiesItsOwnMechanism(TestCase):
         out, _, exc = self._drive_enrolled(_renamed_repo_gh(healthy=True))
         self.assertIsNone(exc)
         self.assertEqual(out.strip(), "0")
+
+    def test_an_extra_filtered_empty_result_is_NOT_gated_on_the_labeller(self):
+        """Self-found while reviewing the round-4 fix, and confirmed live on
+        odoo-erp: gating an `--extra`-filtered query on the hand-off labeller
+        is a FALSE REFUSAL.
+
+        `--extra "label:prio:bounce"` asks a filtered question — "any open
+        bounce ticket?" — and "none" is an ordinary answer with nothing to do
+        with hand-off labels. The hand-off arm is part of the UNFILTERED
+        obligation set, i.e. the stop-proof. Gating the seed on it breaks
+        Step 3.1 on the one repo the cross-stream flow actually runs on, the
+        moment its bounce lane empties. A guard that refuses a legitimate
+        answer spins the loop forever — the mirror of the bug this ticket is
+        about, not a safer version of it."""
+        out, err, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, newest_run="failure"),
+            extra="label:prio:bounce")
+        self.assertIsNone(
+            exc,
+            "the bounce seed refused because the hand-off labeller is "
+            "unhealthy, which that query does not depend on: %s" % err)
+        self.assertEqual(out.strip(), "0")
+
+    def test_the_unfiltered_stop_proof_is_still_gated(self):
+        """The companion control — narrowing the gate must not delete it."""
+        _, _, exc = self._drive_enrolled(
+            _renamed_repo_gh(healthy=True, newest_run="failure"))
+        self.assertIsNotNone(exc)
 
     def test_a_repo_outside_the_cross_stream_flow_is_never_gated_on_it(self):
         """airuleset itself has no sub-dev streams working it, so nothing here
@@ -1561,6 +1589,37 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
         row = [ln for ln in out.splitlines() if ln.startswith("11\t")]
         self.assertTrue(row, out)
         self.assertIn("implement", row[0])
+
+    def test_a_row_whose_ownership_cannot_be_read_defaults_to_action_only(self):
+        """M11's lesson, applied to the new column. `labels` ABSENT from a row
+        is undeterminable, not "unlabelled" — and the two failure directions
+        are not symmetric: a sub-dev's ticket printed `implement` invites the
+        gatekeeper to write code on a foreign stream's ticket (a silent
+        authority violation, the exact harm this column exists to prevent),
+        while a core ticket printed `action-only` merely stalls visibly. So an
+        unreadable row takes the conservative side. A row with `labels: []` is
+        a genuinely unlabelled core ticket and must still read `implement`."""
+        import json as _json
+
+        def gh(*a, **k):
+            args = [str(x) for x in a]
+            if "sort:created-desc" in " ".join(args):
+                return '[{"number": 999}]'
+            if "--search" in args:
+                return _json.dumps([
+                    {"number": 31, "title": "ownership unreadable",
+                     "createdAt": "2026-07-01T00:00:00Z"}])
+            return "[]"
+
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
+                             count=False, list=True)
+        self.assertIsNone(exc)
+        row = [ln for ln in out.splitlines() if ln.startswith("31\t")]
+        self.assertTrue(row, out)
+        self.assertIn(
+            "action-only", row[0],
+            "a row whose labels could not be read was advertised as ordinary "
+            "work — that is the dangerous direction")
 
     def test_my_OWN_streams_ticket_is_mine_to_implement(self):
         """A reduced-authority box's own `stream:<me>` tickets must not come
