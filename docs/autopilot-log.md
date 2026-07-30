@@ -1889,3 +1889,38 @@ the settle-poll-before-declaring-a-toggle-failed pattern, the
 stale-top-of-sweep-capture race (re-verify fresh immediately before ANY
 keystroke-sending decision, not just at the top of the sweep), and the
 three-independent-state-prefixes-per-session discipline.
+
+## #151 (engineer's half) — install ssh hint now carries this box's own pinned identity
+
+`check_discord_notify_config()`'s "wire it from an already-configured host"
+one-liner printed a literal `<this-host>` placeholder unconditionally, never
+consulting `REMOTE_HOSTS` — a copy-pasted placeholder on subdev means guessing
+the identity, and a wrong-key ssh attempt there trips fail2ban, banning dev1
+on every interface for an hour. Added `_current_remote_host_entry()`,
+matching the box running `install` to its own `REMOTE_HOSTS` entry via
+`_whoami()` (username-keyed, since usernames are unique across entries while
+the four subdev-stream users share one physical hostname). RED (e87064c):
+`tests/test_discord_notify_check.py::TestDiscordNotifyCheckSshHint`, exact-
+string assertions per user, failing against the unconditional placeholder.
+GREEN (c770230): the lookup + hint rebuild, unchanged fallback when nothing
+matches. Design comment posted to #151 before the RED commit (root cause /
+chosen approach / rejected hostname-keyed alternative).
+
+`python3 airuleset.py push`: ruff clean, 3208 tests OK (one run hit an
+unrelated pre-existing wall-clock-timestamp-collision flake in
+`test_vault_channel.py`, filed as #179, passed clean on retry), deployed to
+all 6 targets. simap@subdev's own live `install` output now shows
+`ssh -i ~/.secrets/gatekeeper_access_ed25519 simap@100.118.174.27` instead of
+the placeholder. Deploy confirmed via `git rev-parse HEAD` over ssh on dev2
+and gatekeeper (both matched local HEAD `1db16d7`, including a follow-on docs
+commit); simap@subdev was never ssh'd into directly — its own push-deploy
+output is the proof there. No Discord `.env`/token was read or transmitted.
+#151 stays OPEN with `needs-answer` — the credential-access decision is
+untouched. `watchdog/__init__.py` was not touched.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — added the username-vs-
+hostname REMOTE_HOSTS lookup rationale (four subdev users share one physical
+hostname, so only username disambiguates) and the `cmd_push` stdout-buffering
+trap (unittest's stderr summary vs. block-buffered stdout fixture noise can
+make a real abort line appear "sandwiched" inside unrelated trailing output
+when merged via `2>&1` — grep specific markers, never trust raw tail order).
