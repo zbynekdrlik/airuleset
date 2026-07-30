@@ -209,7 +209,7 @@ class TestTheHookNeverPipesIntoAnEarlyExitingGrep(unittest.TestCase):
     BAD = _re.compile(r'(echo|printf[^|]*)\s+"\$[A-Za-z_]+"\s*\|\s*grep\s+-[A-Za-z]*q')
     # A grep whose output is consumed by an early-exiting reader has the same
     # defect one stage along.
-    BAD_HEAD = _re.compile(r'\|\s*grep\s[^|]*\|\s*head\b')
+    BAD_HEAD = _re.compile(r'\bgrep\b.*\|\s*head\b')
 
     def _code_lines(self, path):
         out = []
