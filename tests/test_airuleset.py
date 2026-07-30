@@ -3167,6 +3167,26 @@ class TestManagedSettingsDefaults(TestCase):
         out = airuleset.apply_managed_settings_defaults({"tui": "fullscreen"})
         self.assertEqual(out["tui"], "default")
 
+    def test_disables_the_input_box_prompt_suggestion(self):
+        # #189: Claude Code renders its predicted-next-prompt suggestion as
+        # dim SGR 246 text after the `❯` glyph. `tmux capture-pane -p` strips
+        # attributes, so the watchdog's boundary classifiers cannot tell that
+        # ghost from a genuinely typed draft — it read as a held draft on
+        # every managed box. `promptSuggestionEnabled` is a REAL key in the
+        # installed build (2.1.220 carries it in the same global-settings key
+        # vector as effortLevel / autoCompactWindow / tui), never a guessed
+        # name; it was present on dev1 ONLY as an unmanaged local edit and
+        # absent on gatekeeper and montalu. Managed default so a push lands
+        # and self-heals it everywhere. It removes the current SOURCE of the
+        # ambiguity — it is NOT the delivery fix, which must work regardless
+        # (the value is latched at process init, so sessions already running
+        # keep rendering suggestions until they restart).
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertIs(out.get("promptSuggestionEnabled"), False)
+        out = airuleset.apply_managed_settings_defaults(
+            {"promptSuggestionEnabled": True})
+        self.assertIs(out.get("promptSuggestionEnabled"), False)
+
     def test_preserves_other_keys(self):
         out = airuleset.apply_managed_settings_defaults(
             {"hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
@@ -4667,6 +4687,53 @@ class TestApiWatchdog(TestCase):
                         projects_dir=self.projects, state_path=self.state,
                         grace=300, interval=300, max_nudges=3)
         self.assertEqual(len(self.pings), 1, "one ping per wedged episode, not per poll")
+
+    def test_run_once_apierror_delivers_when_the_fresh_recapture_reads_bare(self):
+        # #189: job 1's fresh-capture race check asked the SAME unanswerable
+        # question a second time — `if fkind != "input" or not ftxt` — so a
+        # pane whose apparent content was gone by the time we were about to
+        # act got skipped as "raced". But a BARE input line is perfectly
+        # deliverable: the boundary BEING an input line is the whole safety
+        # question, and whether it happens to look empty is not. With grey
+        # autocomplete in play the top-of-sweep "draft" was frequently never
+        # text at all, so this branch converted a deliverable pane into a
+        # permanent skip. Here capture #1 (top of sweep) shows content and
+        # every later capture shows a bare box.
+        now = 1_000_000
+        cwd = "/devel/projghostvanished"
+        self._transcript(cwd, [{"type": "user", "message": {}}, self._ERR], 1000, now)
+        calls, box, sent = {"n": 0}, {}, []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if argv[:2] == ["tmux", "list-panes"]:
+                return "%5\tclaude\t" + cwd + "\n"
+            if argv[:2] == ["tmux", "display-message"]:
+                return "0" if "pane_in_mode" in j else ""
+            if argv[:2] == ["tmux", "capture-pane"]:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return self._DRAFT_PANE
+                if box.get("typed") and not box.get("submitted"):
+                    return "❯\xa0" + box["typed"] + "\n"
+                return "❯\xa0\n"
+            if argv[:2] == ["tmux", "send-keys"]:
+                sent.append(argv)
+                if "-l" in argv:
+                    box["typed"] = argv[-1]
+                elif argv[-1] == "Enter":
+                    box["submitted"] = True
+                return ""
+            return ""
+
+        logs = self.w.run_once(now=now, run=run, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               grace=300, interval=300, max_nudges=3)
+        self.assertFalse(any("skip raced" in ln for ln in logs), logs)
+        self.assertEqual(box.get("typed"), self.w.NUDGE_TEXT,
+                         "a bare input line must be delivered into: %r" % sent)
+        self.assertTrue(box.get("submitted"), sent)
+        self.assertTrue(any("(stash)" in ln for ln in logs), logs)
 
     def test_run_once_apierror_stashabort_pings_after_wall_clock_2x_grace_even_if_mtime_stays_fresh(self):
         # #176 R4: a surviving mutant — reverting the stash-abort branch's
