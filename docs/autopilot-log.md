@@ -2539,3 +2539,66 @@ zero AttributeError/ImportError. Two of them then caught real self-inflicted
 bugs during the green pass: a docstring that quoted the false sentence it was
 correcting, and a canonical sentence that hard-wrapped across two comment
 lines.
+
+## 2026-07-30 — 189 (stash unconditionally) + 171 (btop on subdev)
+
+**189 — job 1 never delivered a single `continue` automatically.** Measured
+`stash-delivered = 0` fleet-wide in 24h; a 529 sat unattended on gatekeeper
+until the user typed `continue` by hand. `capture_pane` runs
+`tmux capture-pane -p` with no `-e`, so Claude Code's predicted-next-prompt
+ghost (dim SGR 246 after the glyph plus U+00A0) arrives stripped of its colour
+and is byte-identical to a typed draft. `deliver_with_stash` then asked the
+same unanswerable question twice — a precondition demanding a NON-EMPTY draft,
+and a verify demanding the box go bare WITH the marker — so it routed to a
+stash that had nothing to park and could never verify.
+
+Commits: `b33aa06` [red] -> `b38554f` [green]. RED proved twice: the new module
+failed 6/13 against pristine `main` with the implementation genuinely absent,
+and again via `git stash push -- watchdog/__init__.py airuleset.py` after the
+fix (7 failures, every one an AssertionError, zero AttributeError/ImportError).
+
+The design is the user's own directive: stash UNCONDITIONALLY, so the
+draft-vs-ghost question never has to be answered. The one decline left is an
+already-occupied slot. A bounded settle poll now reports four states instead of
+one boolean — PARKED, NOOP (bare, nothing to park; the state that used to abort
+every delivery), UNRESOLVED (content still showing, no marker: a ghost or a
+lost keystroke, deliberately not distinguished), NO_BOUNDARY. Typing is the
+discriminator the pane refuses to give: a suggestion is REPLACED by a
+keystroke, a real draft is APPENDED to, so the strict `_typed_exclusively`
+gates the submit after UNRESOLVED and an exact append signature is undone with
+exactly the characters we typed.
+
+The decisive design choice was refusing to depend on an unmeasured pane fact.
+Whether Ctrl+S dismisses a rendered suggestion is NOT established, and a design
+whose correctness hangs on it would have been settled by whichever pane model a
+fixture encoded — the precise failure that hid the space-vs-U+00A0 separator
+bug for the whole life of the stash mechanism. `test_stash_unconditional.py`
+therefore drives a pane MODEL (input buffer, single slot, ghost) and asserts
+the ghost case delivers under BOTH answers.
+
+Four caller-side tests were re-specified, not weakened. Each asserted that a
+pane holding text receives NO keystroke — true only because their fakes replay
+a frozen capture, which makes every Ctrl+S look like a no-op. Against a real
+pane the draft is parked and the payload delivered around it, which has been
+the behaviour since the stash shipped, so those fakes now model the box and the
+slot and assert the invariant that actually matters: parked, never submitted,
+never lost. The suite as a whole is the reason this surfaced at all — the first
+full run after the green pass failed 5, and each failure was a real contract
+collision rather than noise.
+
+`promptSuggestionEnabled: false` joins the managed settings defaults (a real
+key in the installed 2.1.220 build, verified in the binary's own
+global-settings key vector, not a guessed name). It removes the SOURCE of the
+ambiguity and is explicitly not the remedy: it is latched at process init, so
+every session already running keeps rendering suggestions until it restarts.
+
+**171 — btop on the subdev VPS.** No code change: `RUNTIME_DEPS` already lists
+btop and `check_runtime_deps` already installs it wherever sudo exists. The
+four managed accounts on subdev have none, so the loud MISSING warning was the
+designed outcome and the missing piece was one OS-level install only root can
+do, reachable solely from the gatekeeper VPS. Installed btop 1.3.0 there and
+verified `command -v btop` under montalu, marek, david and simap individually —
+under the accounts themselves, not under root, which is what the ticket asked
+for.
+
+Closes #171
