@@ -410,7 +410,10 @@ class MachineTailRecognition(unittest.TestCase):
 
     def test_recognized_machine_text_submits_and_never_pings(self):
         full_text = "Odpoveď z Discordu: bola ti položená otázka — tu je odpoveď."
-        state = {"dreply_typed": {"%2": {"tail": full_text[-160:], "ts": time.time()}}}
+        # Seed through the REAL writer rather than hand-building the record —
+        # #193 added a `head` half and a hand-built fixture silently drifts.
+        state = {}
+        wd._record_dreply_typed(state, "%2", full_text, time.time())
         captured = "✳ hotovo\n❯\xa0" + full_text + "\n  ctx ██░░  caveman\n"
         send = _FakeSend()
         run = self._run_recorder()

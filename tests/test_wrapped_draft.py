@@ -408,5 +408,199 @@ class PromptWedgeAndTheUnreadableBox(unittest.TestCase):
                       "wrapped tail: %r" % self.pings[0][0])
 
 
+# --------------------------------------------------------------------------- #
+# 5. Reading a wrapped box hands every SUFFIX/SUBSTRING test a one-character
+#    needle. Three consumers took that as identity; each would then have typed
+#    into, or submitted, a genuine user draft. Found by adversarial review of
+#    the fix itself, before it was deployed.
+# --------------------------------------------------------------------------- #
+
+def draft_with_tail(tail, filler="a"):
+    """A wrapped draft whose LAST rendered row is exactly `tail`.
+
+    Built by asking the renderer, not by arithmetic on the width — a
+    hand-counted fixture that fails to wrap where it was meant to silently
+    stops exercising the thing it was written for.
+    """
+    for n in range(1, 300):
+        d = " ".join([filler] * n) + " " + tail
+        rows = wd._input_box_rows_raw(render_box(d))
+        if len(rows) > 1 and rows[-1] == tail:
+            return d
+    raise AssertionError("could not build a draft with tail %r" % tail)
+
+
+class AShortTailIsNotAnIdentity(unittest.TestCase):
+    """Both tests drive the JOB, not the helper — a helper-level assertion
+    could only fail on a changed signature, which proves nothing about what
+    the job does to a live pane."""
+
+    def setUp(self):
+        self.sent = []
+        self.pings = []
+
+    def _run(self, argv, timeout=8):
+        self.sent.append(argv)
+        if "pane_in_mode" in " ".join(argv):
+            return "0"
+        return ""
+
+    def _tails(self):
+        return [a[-1] for a in self.sent if a]
+
+    def test_job7_never_submits_a_foreign_draft_that_merely_ends_like_ours(self):
+        # Job 7 pressed a BARE Enter whenever `prompt.endswith(box_tail)` — and
+        # every reply prompt ends with the same fixed sentence, so a wrapped
+        # foreign draft whose last row is "." satisfied it. That submits the
+        # user's unsent text AND marks the Discord answer delivered although it
+        # was never typed, so the answer is silently lost too.
+        import unittest.mock as m
+
+        import notify
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        qpath = str(Path(tmp.name) / "q.json")
+        owner = "773451844110385193"
+        env = {"DISCORD_BOT_TOKEN": "tok", "DISCORD_MENTION_ZBYNEK": owner,
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: qpath),
+                         ("_read_env", lambda: dict(env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=qpath)
+        msg = {"id": "rep1", "author": {"id": owner},
+               "message_reference": {"message_id": "888001"},
+               "content": "ano, zmerguj to"}
+
+        prompt = wd.compose_reply_prompt(
+            {"text": "ano, zmerguj to", "question": "?"})
+        cap = render_box(draft_with_tail(prompt[-1:]))
+        self.assertTrue(prompt.endswith(wd._input_line_text(cap)),
+                        "fixture must reproduce the naive suffix match")
+
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {"sid-abc": ("%1", cap)},
+            dry_run=False, discord_fetch=lambda ch, tok: [msg], env=env)
+        self.assertNotIn("Enter", self._tails(),
+                         "a foreign draft ending like our prompt must never be "
+                         "submitted: %r" % self.sent)
+        self.assertNotIn("rep1", (state.get("dreply_done") or {}),
+                         "the answer must not be marked delivered without "
+                         "having been typed")
+
+    def test_job10_never_auto_submits_a_draft_that_merely_occurs_in_ours(self):
+        # `_is_dreply_machine_text` was a `txt in tail` substring test. Once a
+        # wrapped box became readable, `txt` could be two characters — matching
+        # almost any draft. A MACHINE verdict SKIPS job 10's at-rest guards and
+        # sends Escape+Enter, submitting the user's half-written text: the one
+        # thing that job's own docstring forbids.
+        typed = ("ODPOVEĎ UŽÍVATEĽA Z DISCORDU: áno, zmerguj to. Zariaď sa "
+                 "podľa odpovede — číslo je poradie ponúknutej možnosti.")
+        state = {}
+        wd._record_dreply_typed(state, "%1", typed, time.time())
+        cap = render_box(draft_with_tail("sa"))
+        self.assertIn(wd._input_line_text(cap), typed,
+                      "fixture must reproduce the naive substring match")
+        now = 1.0e9
+        for _ in range(wd.PWEDGE_SWEEPS + 1):
+            wd.prompt_wedge_check(now, state, "%1", cap, now - 30,
+                                  "zbynek", "demo",
+                                  lambda body, **kw: self.pings.append(body),
+                                  run=self._run)
+        self.assertNotIn("Enter", self._tails(),
+                         "a foreign draft must never be auto-submitted: %r"
+                         % self.sent)
+        self.assertNotIn("Escape", self._tails(), self.sent)
+
+    def test_job10_still_auto_submits_our_own_recorded_delivery(self):
+        typed = ("ODPOVEĎ UŽÍVATEĽA Z DISCORDU: áno, zmerguj to. Zariaď sa "
+                 "podľa odpovede — číslo je poradie ponúknutej možnosti. "
+                 + " ".join(["doplnok"] * 20))
+        state = {}
+        wd._record_dreply_typed(state, "%1", typed, time.time())
+        cap = render_box(typed)
+        self.assertTrue(wd._find_input_box(cap)[2], "fixture must wrap")
+        now, logs = 1.0e9, []
+        for _ in range(wd.PWEDGE_SWEEPS):
+            logs = wd.prompt_wedge_check(now, state, "%1", cap, now - 30,
+                                         "zbynek", "demo",
+                                         lambda body, **kw: None,
+                                         run=self._run)
+        self.assertTrue(any("machine-nudge submit" in ln for ln in logs), logs)
+        self.assertIn("Enter", self._tails(), self.sent)
+
+
+class NeverTypeIntoABoxWeCouldNotUndo(unittest.TestCase):
+    def test_an_unresolved_wrapped_box_gets_no_keystrokes_at_all(self):
+        # Reading wrapped boxes newly ADMITS a pane holding a wrapped foreign
+        # draft. If our stash toggle is then lost, appending to it can neither
+        # be verified nor undone — so refuse while refusing is still free.
+        # Before the box was readable this shape aborted at the precondition;
+        # this restores exactly that guarantee.
+        class LostStash(WrapTmux):
+            def _key(self, k):
+                if k == "C-s":
+                    return                    # the toggle never lands
+                WrapTmux._key(self, k)
+
+        draft = "moja dlhá rozpísaná poznámka " + "q" * BOX_WIDTH
+        run = LostStash(box=draft)
+        logs = []
+        ok = wd.deliver_with_stash("%1", PAYLOAD, run, logs=logs,
+                                   sleep_fn=_nosleep)
+        self.assertFalse(ok, logs)
+        self.assertEqual(run.buf, draft,
+                         "the user's draft must be untouched: %r" % run.buf[:80])
+        self.assertEqual(run.typed(), [],
+                         "nothing may be typed into a box we cannot undo")
+        self.assertEqual(run.submitted, [])
+        self.assertTrue(any("unresolved wrapped box" in ln for ln in logs), logs)
+
+    def test_an_unresolved_single_row_box_undoes_what_it_typed(self):
+        # The box is single-row, so the pre-content is COMPLETE and known: our
+        # payload wraps it, which no exact `pre + text` signature can match,
+        # but the box provably ends with our text, so the undo is sound and is
+        # verified byte-for-byte afterwards.
+        class LostStash(WrapTmux):
+            def _key(self, k):
+                if k == "C-s":
+                    return
+                WrapTmux._key(self, k)
+
+        run = LostStash(box=USER_DRAFT)
+        logs = []
+        ok = wd.deliver_with_stash("%1", PAYLOAD, run, logs=logs,
+                                   sleep_fn=_nosleep)
+        self.assertFalse(ok, logs)
+        self.assertEqual(run.buf, USER_DRAFT,
+                         "our payload was left glued to the user's draft: %r"
+                         % run.buf[:90])
+        self.assertEqual(run.submitted, [])
+        self.assertTrue(any("append-undone" in ln for ln in logs), logs)
+
+    def test_a_truncated_type_onto_a_draft_sends_no_backspaces(self):
+        # The box does NOT end with our text, so we cannot prove which
+        # characters are ours. Protecting the possible draft wins over tidying.
+        class LostStash(WrapTmux):
+            def _key(self, k):
+                if k == "C-s":
+                    return
+                WrapTmux._key(self, k)
+
+        run = LostStash(box=USER_DRAFT, type_lands=120)
+        logs = []
+        ok = wd.deliver_with_stash("%1", PAYLOAD, run, logs=logs,
+                                   sleep_fn=_nosleep)
+        self.assertFalse(ok, logs)
+        self.assertNotIn("BSpace", [a[-1] for a in run.sent if a],
+                         "must not backspace an unproven buffer: %r" % run.sent)
+        self.assertTrue(run.buf.startswith(USER_DRAFT),
+                        "the user's draft must still be there: %r" % run.buf[:60])
+        self.assertTrue(any("append-unprovable" in ln for ln in logs), logs)
+
+
 if __name__ == "__main__":
     unittest.main()

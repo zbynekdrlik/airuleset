@@ -767,8 +767,15 @@ _QUEUED_PLACEHOLDER_RX = re.compile(r"^press up to edit(?:\s+\d+)?\s+queued mess
 
 
 def _find_boundary_line(captured):
-    """Locate the pane's INPUT-BOX boundary line — the row `_has_free_prompt`
-    and `_input_line_text` both test. Two strategies, issue #46:
+    """Locate the pane's INPUT-BOX boundary line — its LAST row.
+
+    Since #193 the consumers (`_has_free_prompt`, `_input_line_text`,
+    `_classify_boundary`) no longer test this row for the prompt glyph: it is
+    the box's TAIL, and a WRAPPED draft's tail never carries one. They resolve
+    through `_find_input_box`, which reads the glyph off the box's HEAD row.
+    This function remains the boundary/"is there anything there at all"
+    answer, and `_classify_boundary` still uses it to tell a real-but-not-a-box
+    boundary ("busy") from no boundary at all. Two strategies, issue #46:
 
     1. STRUCTURAL (tried first). The input box always renders as
        `separator / ❯ <draft> / separator`. Find the LAST pair of separator
@@ -804,8 +811,9 @@ def _find_boundary_line(captured):
     the user typed), singular or a COUNTED variant ("... 2 queued messages"),
     is normalized to a bare `❯` before returning (#65 acceptance, widened by
     #176 item 4: this placeholder is never mistaken for a real draft by any
-    caller — `_has_free_prompt`, `_input_line_text`, `_classify_boundary`
-    all resolve through this one function).
+    caller). The normalization itself lives in `_normalize_queued_hint`, which
+    `_find_input_box` applies to the head row too — so there is still exactly
+    ONE definition of that hint, applied wherever a glyph row is read.
 
     Returns the raw (stripped) boundary line, or None if NEITHER strategy
     locates one at all (e.g. the whole capture is chrome, or it's empty)."""
@@ -823,8 +831,11 @@ def _normalize_queued_hint(line):
 
 
 def _find_boundary_line_raw(captured):
-    """The LAST content row of the pane's input box — for a WRAPPED draft the
-    TAIL of the typed text, which is why callers match with `endswith()`. The
+    """The LAST row of whatever sits at the pane's chrome boundary — the input
+    box's tail when there IS a box (for a WRAPPED draft the tail of the typed
+    text, which is why callers match with `endswith()`), otherwise whatever
+    occupies that position instead: a running turn's spinner, an open dialog's
+    last row. Deciding WHICH of those it is belongs to `_find_input_box`. The
     two-strategy scan itself lives in `_input_box_rows_raw`; see
     `_find_boundary_line`'s docstring for its full rationale."""
     rows = _input_box_rows_raw(captured)
@@ -884,6 +895,14 @@ def _input_box_rows_raw(captured):
     return [lines[i - 1]]
 
 
+def _box_is_wrapped(captured):
+    """True if the pane's input box renders over more than one row — i.e. any
+    append to it re-flows the whole box, so neither an exact-content check nor
+    an exact append signature can be read back out of it."""
+    box = _find_input_box(captured)
+    return bool(box and box[2])
+
+
 def _is_draft_head(s):
     """True if `s` is an input-box row carrying the prompt glyph AND text —
     `❯`, CC's separator (a NON-BREAKING SPACE on a real pane), then a draft.
@@ -915,7 +934,12 @@ def _find_input_box(captured):
     to NO. The caller asking "is there a draft I would destroy?" (job 10)
     must NOT read it as "there is no draft" — an unreadable box is unknown,
     not empty."""
-    rows = _input_box_rows_raw(captured)
+    return _find_input_box_from(_input_box_rows_raw(captured))
+
+
+def _find_input_box_from(rows):
+    """`_find_input_box`'s decision over rows already scanned, so a caller that
+    needs BOTH the rows and the verdict pays for one scan instead of two."""
     if not rows:
         return None
     tail = _normalize_queued_hint(rows[-1])
@@ -1857,13 +1881,12 @@ def _classify_boundary(captured):
     used to land in the "busy" bucket, which is how every keystroke-sending
     job came to treat a pane holding a medium-length draft as a running turn.
     """
-    box = _find_input_box(captured)
+    rows = _input_box_rows_raw(captured)
+    box = _find_input_box_from(rows)
     if box is not None:
         head, tail, wrapped = box
         return ("input", tail if wrapped else head[1:].strip())
-    if _find_boundary_line(captured) is None:
-        return ("no-input-line", None)
-    return ("busy", None)
+    return ("busy", None) if rows else ("no-input-line", None)
 
 
 def _ticket_fallback_text(r):
@@ -2272,12 +2295,14 @@ def _typed_exclusively(text, itext):
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
 
 
-# Bounds how many backspaces an undo may ever spray at a pane. It used to sit
-# at 400, BELOW a real payload — the gk-request nudge is 458 chars — so the one
-# recovery that existed could not run for the very delivery that stranded its
-# text (#193). 4000 is the size of the largest payload this helper ever
-# carries: Claude Code's own `/goal` condition cap.
-STASH_UNDO_MAX_BACKSPACES = 4000
+# Bounds how many backspaces an undo may ever spray at a pane. It sat at 400,
+# BELOW a real payload — the gk-request nudge is 458 chars — so the recovery
+# #193 added for a box verified bare could not have run for the very delivery
+# that stranded its text. Sized off the largest payload this helper actually
+# carries: job 20 delivers `"/goal " + <condition>`, and Claude Code caps that
+# condition at 4000 (#169), so 4096 covers the whole line with headroom rather
+# than refusing it by six characters.
+STASH_UNDO_MAX_BACKSPACES = 4096
 
 
 def _undo_appended_text(pid, run, pre_text, text):
@@ -2371,10 +2396,12 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
          would PARK that text over the user's parked draft, since the slot is
          single and overwrites silently. UNRESOLVED → nothing is parked, so a
          Ctrl+S would jam the slot into step 1's decline; `_undo_appended_text`
-         backspaces only against the exact append signature. A payload that
-         WRAPPED re-flows the box and can never show that signature — then no
-         keystrokes are sent at all, because "is there a draft I would
-         destroy?" resolves an unknown to YES, and the reason is logged.
+         backspaces once the box provably ends with our own characters. When
+         it does not — a truncated type — no FURTHER keystrokes are sent and
+         the log says plainly that the payload we already typed is still in
+         the box, because "is there a draft I would destroy?" resolves an
+         unknown to YES. Typing into an already-WRAPPED unresolved box is
+         refused back at step 4, while refusing is still free.
       7. Enter submits. If the text is STILL at the boundary (a swallowed
          Enter — the agent-strip-selector class of bug, #36), ONE corrective
          Escape+Enter (never a second bare Enter, never two Escapes).
@@ -2413,6 +2440,18 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
         # a pane we can no longer read is exactly the #233 scar. Stop here.
         _log("stash-abort: input-line-vanished")
         return False
+    if outcome == STASH_UNRESOLVED and _box_is_wrapped(cap):
+        # The box still shows content our toggle did not park, AND it is
+        # already multi-row. Anything we append re-flows it, so neither
+        # `_typed_exclusively` (which needs the box to hold our text and
+        # nothing else) nor `_undo_appended_text` (which needs the exact
+        # `pre + text` signature) could ever succeed afterwards — we would be
+        # typing into a box we can neither verify nor undo, on top of what may
+        # be a real draft. Refuse while it is still free to refuse (#193).
+        # This shape was unreachable before wrapped boxes became readable, so
+        # refusing restores exactly the guarantee that reading them removed.
+        _log("stash-abort: unresolved wrapped box")
+        return False
     parked = outcome == STASH_PARKED
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=30)
@@ -2436,21 +2475,32 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
                 # single with a SILENT overwrite — destroying the very draft
                 # this protocol exists to protect (#193).
                 run(["tmux", "send-keys", "-t", pid, "C-s"])
-                capture_pane(pid, run, lines=30)
-                _log("stash-abort: typed-undone, parked draft popped back")
+                # Read the pop back rather than asserting it: a log line that
+                # claims a delivery it never checked is the #134 mistake.
+                _log("stash-abort: typed-undone, parked draft popped back"
+                     if _input_line_text(capture_pane(pid, run, lines=30))
+                     else "stash-abort: typed-undone, pop UNVERIFIED "
+                          "(draft still parked)")
             else:
                 _log("stash-abort: typed-NOT-undone, draft left parked")
-        elif itext == pre_text + text:
+        elif itext == pre_text + text or _typed_landed(text, itext):
+            # We only ever type into a SINGLE-ROW unresolved box — the wrapped
+            # shape is refused above — so `pre_text` is that box's COMPLETE
+            # content, and either signature proves our characters sit at its
+            # END: the exact `pre + text` when nothing re-flowed, or
+            # `_typed_landed` when our own payload wrapped the box. Backspacing
+            # exactly what we typed restores it, and `_undo_appended_text`
+            # verifies that byte-for-byte before reporting success.
             _log("stash-abort: append-undone" if
                  _undo_appended_text(pid, run, pre_text, text)
                  else "stash-abort: append-NOT-undone")
         else:
-            # UNRESOLVED and the append signature is unreadable — a payload
-            # that WRAPPED re-flows the box, so `pre + text` can never match.
-            # Backspacing on an unproven buffer could eat a real draft, and
-            # "is there a draft I would destroy?" resolves an unknown to YES.
-            # No further keystrokes; the reason is logged instead.
-            _log("stash-abort: append-unprovable, text left in box")
+            # The box does not end with our text at all — a truncated type, or
+            # something else moved it. Backspacing an unproven buffer could eat
+            # a real draft, and "is there a draft I would destroy?" resolves an
+            # unknown to YES. No FURTHER keystrokes; the payload we already
+            # typed stays where it is, said plainly rather than glossed.
+            _log("stash-abort: append-unprovable, typed text left in box")
         return False
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=30)
@@ -2493,20 +2543,61 @@ def _record_dreply_typed(state, pid, prompt, now):
     typed = ({k: v for k, v in typed.items()
              if isinstance(v, dict) and now - (v.get("ts") or 0) < _DREPLY_TYPED_TTL_S}
             if isinstance(typed, dict) else {})
-    typed[pid] = {"tail": prompt[-160:], "ts": now}
+    typed[pid] = {"head": prompt[:160], "tail": prompt[-160:], "ts": now}
     state["dreply_typed"] = typed
 
 
-def _is_dreply_machine_text(state, pid, txt):
-    """True if `txt` (the pane's current input-box text) is a SUFFIX of — or
-    contained in — the tail job 7 recorded for `pid` via
-    `_record_dreply_typed`. A wrapped input renders its TAIL at the
-    boundary, hence the endswith/contains check rather than equality."""
+def _is_dreply_machine_text(state, pid, head_txt, txt):
+    """True if the pane's input box holds text job 7 typed into `pid` — so job
+    10 auto-submits our OWN swallowed delivery instead of pinging the user
+    about it. `head_txt` is the box's HEAD row, `txt` its tail.
+
+    BOTH ENDS must agree (#193). The recorded value is a 160-char tail and a
+    WRAPPED box's boundary row can be a single character, so the original bare
+    `txt in tail` substring test was satisfied by very nearly any draft the
+    moment wrapped boxes became readable — which would have let job 10
+    classify a genuine USER draft as MACHINE, skip its at-rest guards, and
+    auto-submit it. That is the one thing job 10's own docstring forbids.
+
+    An entry recorded before this change carries no `head` and therefore never
+    matches: job 10 falls back to PINGING about it rather than typing, which
+    is the safe direction, and the 48h TTL retires such entries anyway."""
     rec = (state.get("dreply_typed") or {}).get(pid)
     if not isinstance(rec, dict):
         return False
     tail = str(rec.get("tail") or "")
-    return bool(tail) and (tail.endswith(txt) or txt in tail)
+    head = str(rec.get("head") or "")
+    if not tail or not head or not txt or not head_txt:
+        return False
+    if not (tail.endswith(txt) or txt in tail):
+        return False
+    return head.startswith(head_txt) or head_txt.startswith(head)
+
+
+def _box_holds_our_own_text(captured, text):
+    """True if the pane's input box holds OUR OWN `text` — a prior delivery
+    whose submit was swallowed — and not merely something that happens to END
+    the way `text` does (#193).
+
+    Job 7 used `text.endswith(_input_line_text(captured))` alone. That was
+    unreachable for a wrapped box (which read as None) and became lethal the
+    moment wrapped boxes were readable: the boundary row of a wrapped draft
+    can be a SINGLE character, and every reply prompt ends with the same fixed
+    sentence, so a FOREIGN draft would satisfy it — authorising a bare `Enter`
+    that submits the user's unsent text AND marking the Discord answer
+    delivered although it was never typed.
+
+    The box's HEAD row is the discriminator: our own stuck text starts where
+    `text` starts. Both ends must agree."""
+    box = _find_input_box(captured)
+    if box is None:
+        return False
+    head, tail, wrapped = box
+    if not wrapped:
+        content = head[1:].strip()
+        return bool(content) and text.endswith(content)
+    head_txt = head[1:].strip()
+    return bool(head_txt) and text.startswith(head_txt) and text.endswith(tail)
 
 
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
@@ -2646,10 +2737,10 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 continue
             pid, captured = pane
             prompt = compose_reply_prompt(r)
-            itext = _input_line_text(captured)
-            # a PRIOR wedged delivery of THIS reply left our own text at `❯`
-            # (endswith: a wrapped input renders its TAIL as the boundary line)
-            own_stuck = bool(itext) and prompt.endswith(itext)
+            # a PRIOR wedged delivery of THIS reply left our own text at `❯`.
+            # Both ENDS of the box must agree that it is ours — a tail-only
+            # suffix test submits a foreign draft (#193).
+            own_stuck = _box_holds_our_own_text(captured, prompt)
             if not (pane_at_idle_prompt(captured) or own_stuck):
                 # A genuinely busy mid-turn pane / open dialog we must never
                 # type over (#233) has no free `❯` at all — but an IDLE pane
@@ -2939,10 +3030,12 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
     Both callers used to pass none at all, so every internal reason went
     nowhere and a failed delivery was indistinguishable from a supervisor
     who simply chose not to act — 48h of gk-request nudges left no trace of
-    any kind (#193). A delivery that cannot run now always says why."""
+    any kind (#193). A delivery that cannot run now always says why.
+
+    A dry run records nothing, and its callers log nothing either — a
+    SIMULATED skip is not a failed delivery, and reporting it as one would
+    make `--dry-run` accuse a repo whose real sweep would have succeeded."""
     if dry_run:
-        if isinstance(logs, list):
-            logs.append("dry-run")
         return False
     return deliver_with_stash(pid, text, run, captured=captured, logs=logs)
 
@@ -3088,8 +3181,9 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 why = []
                 if not _try_stash_nudge(pid, captured, BOUNCE_NUDGE % (tick_str, name),
                                         run, dry_run, logs=why):
-                    logs.append("bounce-nudge-failed %s %s (%s)"
-                                % (name, tick_str, "; ".join(why) or "no reason"))
+                    if not dry_run:
+                        logs.append("bounce-nudge-failed %s %s (%s)"
+                                    % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
@@ -3265,8 +3359,9 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 why = []
                 if not _try_stash_nudge(pid, captured, GKREQ_NUDGE % (tick_str, name),
                                         run, dry_run, logs=why):
-                    logs.append("gkreq-nudge-failed %s %s (%s)"
-                                % (name, tick_str, "; ".join(why) or "no reason"))
+                    if not dry_run:
+                        logs.append("gkreq-nudge-failed %s %s (%s)"
+                                    % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
@@ -3389,7 +3484,7 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # submitting it.
     head_txt = head[1:].strip()
     machine = (head_txt.startswith(MACHINE_NUDGE_PREFIX)
-               or _is_dreply_machine_text(state, pid, txt))
+               or _is_dreply_machine_text(state, pid, head_txt, txt))
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")
                         or now - tmtime < PWEDGE_MIN_IDLE_S):
