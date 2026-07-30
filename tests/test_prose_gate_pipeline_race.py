@@ -163,8 +163,7 @@ class TestGrepErrorIsNotTreatedAsAVerdict(_HookCase):
     down, so it must at minimum be VISIBLE rather than silently mis-decided.
 
     Asserting on the diagnostic — not merely on "did not block" — is deliberate:
-    with every grep failing, the hook reaches no violation at all and therefore
-    does not block for the WRONG reason too. Only a hook that noticed says so."""
+    only a hook that noticed says so."""
 
     def _grep_stub(self, exit_code=2):
         d = Path(tempfile.mkdtemp(prefix="airuleset-greperr-"))
@@ -183,17 +182,81 @@ class TestGrepErrorIsNotTreatedAsAVerdict(_HookCase):
                       "a grep that ERRORED was silently taken as 'no match';"
                       " stderr was: %r" % r.stderr[:400])
 
-    def test_a_failing_grep_never_produces_a_hard_block(self):
+    def test_a_failing_grep_never_fabricates_a_missing_field(self):
+        """REPLACES `test_a_failing_grep_never_produces_a_hard_block` (#194).
+
+        That test asserted the hook must not block AT ALL when every check
+        errors. #194 showed that contract is the fail-OPEN half of this same
+        defect: it is satisfied by a hook whose PRESENCE-triggered gates read an
+        errored check as "no violation", so `merge --admin` ships with the hook
+        reporting success. The assertion is not weakened — it is split by
+        polarity and both halves are now required, here and in
+        `tests/test_prose_gate_undeterminable.py`:
+
+        * a REQUIRED-FIELD probe that could not be evaluated must NOT become an
+          accusation (this test — the half the old assertion was protecting);
+        * an INCRIMINATING pattern that could not be evaluated MUST still fire
+          (`TestAPresenceGateNeverReadsAnErrorAsNoViolation`).
+        """
         r = self._run("## ✅ Work Complete\n\n**Goal:** x\n"
                       "**What changed:** y\n\n✅ DONE: #1 hotové",
                       env=self._grep_stub())
-        self.assertFalse(self._blocked(r),
-                         "blocked on evidence the hook itself could not evaluate")
+        self.assertEqual(
+            [v for v in self._violations(r) if v.startswith("- Missing")], [],
+            "accused a correct report of missing a field on evidence the hook"
+            " itself could not evaluate: %s" % self._violations(r))
 
 
 # --------------------------------------------------------------------------- #
 # Structural lock — the booby trap itself
 # --------------------------------------------------------------------------- #
+
+import re as _re
+
+# Quoted spans are stripped before FLAG matching, so a grep whose PATTERN
+# happens to contain `-q` is not misread as a quiet grep (#194 companion 4).
+_QUOTED = _re.compile(r"'[^']*'|\"[^\"]*\"")
+
+# A feeder process piping into grep. The variable's spelling is deliberately
+# NOT part of the shape: `"$MSG"`, `"${MSG}"` and a bare `$MSG` are the same
+# bug, and the original lock only matched the first (#194 companion 4).
+_FEEDER_INTO_GREP = _re.compile(r"\b(?:echo|printf|cat)\b[^|]*\|\s*grep\b")
+
+# Every spelling of "this grep will exit before draining stdin": short `-q`
+# in any flag cluster, split flags, the long forms, and max-count in all its
+# spellings. `-m1` is the one the #190 fix itself recommends, so a lock that
+# misses it certifies the very replacement it proposes.
+_EARLY_EXIT_FLAG = _re.compile(
+    r"(?:^|\s)(?:-[A-Za-z]*q[A-Za-z]*|--quiet|--silent"
+    r"|-m\s*[0-9]+|--max-count(?:[= ][0-9]+)?)(?=\s|$)")
+
+# A grep whose OUTPUT is consumed by a reader that exits early has the same
+# defect one stage along. `head` was the only one covered; `sed q` (in any of
+# its spellings) and an `awk` early exit do it too. Readers that genuinely
+# drain (`cut`, `tail`, `tr`, `wc`) are deliberately absent.
+#
+# Quoted spans are NOT stripped here — unlike the flag check, the early-exit
+# signal lives INSIDE the quoted script (`sed -n '1p;q'`). The `q` is required
+# to be the sed script's LAST command, so a substitution that merely contains
+# the letter (`sed 's/q/x/'`) is not mistaken for one.
+_EARLY_EXIT_CONSUMER = _re.compile(
+    r"\bgrep\b[^|]*\|\s*(?:head\b"
+    r"|sed\b[^|]*\bq\b['\"]?\s*(?:\||\)|$)"
+    r"|awk\b[^|]*\bexit\b)")
+
+
+def _feeds_early_exiting_grep(line):
+    """The #190 idiom: a feeder piped into a grep that will not drain stdin."""
+    m = _FEEDER_INTO_GREP.search(line)
+    if not m:
+        return False
+    args = _QUOTED.sub(" ", line[m.end():])
+    return bool(_EARLY_EXIT_FLAG.search(args))
+
+
+def _greps_into_early_exiting_consumer(line):
+    return bool(_EARLY_EXIT_CONSUMER.search(line))
+
 
 class TestTheHookNeverPipesIntoAnEarlyExitingGrep(unittest.TestCase):
     """Locks the SHAPE of the bug, never a token the correct fix must contain.
@@ -201,15 +264,12 @@ class TestTheHookNeverPipesIntoAnEarlyExitingGrep(unittest.TestCase):
     The fix's own header comment necessarily QUOTES the banned idiom to explain
     it, so comment lines are stripped before matching — the same self-reference
     trap this repo has hit with lock tests three times before. Offending LINE
-    NUMBERS are reported rather than dumping the file into the assertion."""
+    NUMBERS are reported rather than dumping the file into the assertion.
 
-    import re as _re
-    # `<feeder> "$VAR" | grep …` where grep will exit early: -q (quiet) or -m
-    # (max-count). Either way the writer is left with a closed pipe.
-    BAD = _re.compile(r'(echo|printf[^|]*)\s+"\$[A-Za-z_]+"\s*\|\s*grep\s+-[A-Za-z]*q')
-    # A grep whose output is consumed by an early-exiting reader has the same
-    # defect one stage along.
-    BAD_HEAD = _re.compile(r'\bgrep\b.*\|\s*head\b')
+    #192 will apply the #190 conversion to 15 more hooks and reuse this lock to
+    certify them, so a lock matching ONE spelling would certify all of them
+    (#194 companion 4). `TestTheStructuralLockHasTeeth` below proves it does
+    not."""
 
     def _code_lines(self, path):
         out = []
@@ -219,19 +279,98 @@ class TestTheHookNeverPipesIntoAnEarlyExitingGrep(unittest.TestCase):
             out.append((n, raw))
         return out
 
-    def test_no_echo_into_grep_q(self):
-        hits = [n for n, ln in self._code_lines(HOOK) if self.BAD.search(ln)]
+    def test_no_feeder_into_early_exiting_grep(self):
+        hits = [n for n, ln in self._code_lines(HOOK)
+                if _feeds_early_exiting_grep(ln)]
         self.assertEqual(
             hits, [],
             "lines %s still pipe into an early-exiting grep — under `pipefail`"
             " the writer's SIGPIPE (141) becomes the gate's verdict (#190)" % hits)
 
-    def test_no_grep_piped_into_head(self):
-        hits = [n for n, ln in self._code_lines(HOOK) if self.BAD_HEAD.search(ln)]
+    def test_no_grep_piped_into_an_early_exiting_consumer(self):
+        hits = [n for n, ln in self._code_lines(HOOK)
+                if _greps_into_early_exiting_consumer(ln)]
         self.assertEqual(
             hits, [],
-            "lines %s pipe grep into `head`, which exits early and SIGPIPEs"
-            " grep — use `grep -m1` instead (#190)" % hits)
+            "lines %s pipe grep into a reader that exits early (head / sed q /"
+            " awk exit), which SIGPIPEs grep — use `grep -m1` on a here-string"
+            " instead (#190, #194)" % hits)
+
+    def test_the_hook_feeds_grep_from_a_here_string_only(self):
+        """Stronger than the two locks above, and available because the hook
+        now has no feeder pipes at all: a here-string has no writer PROCESS, so
+        the race cannot exist regardless of which flags the grep carries."""
+        hits = [n for n, ln in self._code_lines(HOOK)
+                if _FEEDER_INTO_GREP.search(ln)]
+        self.assertEqual(
+            hits, [],
+            "lines %s feed grep from a process instead of a here-string (#194)"
+            % hits)
+
+
+class TestTheStructuralLockHasTeeth(unittest.TestCase):
+    """A lock that matches nothing passes forever. Each evading spelling the
+    #194 review enumerated is asserted to be CAUGHT, and each safe shape to be
+    left alone — so the lock cannot silently degrade into a no-op."""
+
+    EVADES_FEEDER_LOCK = (
+        'X=$(echo "$MSG" | grep -q foo && echo 1 || echo 0)',
+        'X=$(echo "$MSG" | grep -i -q foo && echo 1 || echo 0)',      # split flags
+        'X=$(echo "$MSG" | grep --quiet foo && echo 1 || echo 0)',    # long flag
+        'X=$(echo "$MSG" | grep --silent foo && echo 1 || echo 0)',
+        'X=$(echo "${MSG}" | grep -q foo && echo 1 || echo 0)',       # braced
+        'X=$(echo $MSG | grep -q foo && echo 1 || echo 0)',           # unquoted
+        'X=$(printf "%s" "$MSG" | grep -qiE "foo" && echo 1)',        # printf feeder
+        'X=$(echo "$MSG" | grep -m1 foo)',                            # max-count
+        'X=$(echo "$MSG" | grep -m 1 foo)',
+        'X=$(echo "$MSG" | grep --max-count=1 foo)',
+        'X=$(cat "$F" | grep -q foo)',
+    )
+    SAFE_FOR_FEEDER_LOCK = (
+        'grep -qE "pat" <<<"$text"',                     # here-string, no writer
+        'X=$(echo "$MSG" | grep -cE "🌐.*https?://")',    # -c drains stdin
+        'X=$(printf "%s\\n" "$MSG" | grep -v "^/goal")',  # -v drains stdin
+        'X=$(echo "$MSG" | grep -E "^DONE:" | tail -1)',  # -E drains stdin
+        'grep -q "q-and-a -q inside a quoted pattern" <<<"$t"',
+    )
+    EVADES_CONSUMER_LOCK = (
+        'L=$(grep -nE "pat" <<<"$MSG" | head -1)',
+        'L=$(grep -nE "pat" <<<"$MSG" | sed q)',
+        "L=$(grep -nE 'pat' <<<\"$MSG\" | sed -n '1p;q')",
+        'L=$(grep -nE "pat" <<<"$MSG" | awk \'NR==1{print;exit}\')',
+    )
+    SAFE_FOR_CONSUMER_LOCK = (
+        'L=$(grep -m1 -nE "pat" <<<"$MSG" | cut -d: -f1)',   # cut drains
+        'L=$(grep -E "^DONE:" <<<"$MSG" | tail -1)',         # tail drains
+        'N=$(grep -cE "pat" <<<"$MSG" | tr -d " ")',         # tr drains
+        'L=$(grep -nE "head of the report" <<<"$MSG")',      # "head" in a pattern
+        "echo \"$X\" | sed 's/^/    /' >&2",                 # sed, but no grep
+        'L=$(grep -E "pat" <<<"$MSG" | sed \'s/q/Q/\')',     # q is substituted, not a command
+    )
+
+    def test_every_evading_spelling_of_the_feeder_idiom_is_caught(self):
+        for line in self.EVADES_FEEDER_LOCK:
+            with self.subTest(line=line):
+                self.assertTrue(_feeds_early_exiting_grep(line),
+                                "evading spelling not caught by the lock")
+
+    def test_safe_feeder_shapes_are_not_flagged(self):
+        for line in self.SAFE_FOR_FEEDER_LOCK:
+            with self.subTest(line=line):
+                self.assertFalse(_feeds_early_exiting_grep(line),
+                                 "a grep that drains stdin was flagged")
+
+    def test_every_early_exiting_consumer_is_caught(self):
+        for line in self.EVADES_CONSUMER_LOCK:
+            with self.subTest(line=line):
+                self.assertTrue(_greps_into_early_exiting_consumer(line),
+                                "early-exiting consumer not caught by the lock")
+
+    def test_draining_consumers_are_not_flagged(self):
+        for line in self.SAFE_FOR_CONSUMER_LOCK:
+            with self.subTest(line=line):
+                self.assertFalse(_greps_into_early_exiting_consumer(line),
+                                 "a reader that drains stdin was flagged")
 
 
 if __name__ == "__main__":
