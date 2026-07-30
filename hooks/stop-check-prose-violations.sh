@@ -12,7 +12,11 @@ command -v jq &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+# #198 — absence must stay DETECTABLE. The old `// "unknown"` fallback turned
+# every invocation that could not identify itself into the SAME retry-counter
+# key, i.e. one shared, never-expiring per-BOX bucket. An empty value here is
+# resolved to "no retry state" further down, never to a bucket.
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 [ -z "$MSG" ] && exit 0
 
 # #96: use vs MENTION — third occurrence of the exact classifier-blindness
@@ -236,9 +240,72 @@ add_hard() { HARD_VIOLATIONS="${HARD_VIOLATIONS}- $1\n"; }
 # Was 2; bumped to 5 because completion-report violations are deterministically
 # fixable and agent needs more room to iterate before the hook gives up.
 # State stored in /tmp under per-session counter file.
-RETRY_FILE="/tmp/airuleset-stop-block-${SESSION_ID}"
-RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
+#
+# #196/#198 — everything below is BOOKKEEPING, and bookkeeping must never be
+# able to suppress the verdict it is bookkeeping for. It used to, three ways:
+# a counter read with no shape guard (non-numeric content made `[` exit 2, the
+# `&&` chain false, and the whole block branch unreachable — rc 0, no block, no
+# complaint); a write that ran BEFORE the verdict under `set -e` (fixed at the
+# foot of this file); and a key that fell back to the literal "unknown", i.e.
+# ONE per-BOX bucket that nothing ever expired. Five session-id-less calls
+# disarmed the gate for the life of the box's /tmp — and did, on dev1, where
+# the independent verification of #194 consequently read a shipped, correct,
+# deployed fix as broken at every payload size.
+#
+# The rule, applied wherever an unknown arises: THE THROTTLE IS USED ONLY WHEN
+# THIS INVOCATION'S OWN RETRY STATE IS POSITIVELY ESTABLISHED. No id, an unsafe
+# id, a counter that is not digits, a counter of unknown or stale age — each is
+# NO state, so RETRIES stays 0 and the verdict goes out. That is the settled
+# fail direction for throttle state: never suppress a verdict.
+#
+# Losing the throttle is a degradation, not a runaway: Claude Code's own
+# CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (default 8) overrides ANY blocking Stop hook
+# after 8 consecutive blocking Stops, so this counter is a courtesy throttle
+# and never the loop's only bound.
 MAX_RETRIES=5
+# A counter older than this cannot belong to a live block loop — consecutive
+# blocks are one message rewrite apart, seconds to minutes. It has to expire
+# even though the key is per-session, because `claude -c` REUSES a session id
+# across a restart, so the key does NOT die with the session.
+RETRY_TTL_S=3600
+RETRIES=0
+RETRY_FILE=""
+
+# The id is VALIDATED, never mangled. A sanitiser (`tr -c 'A-Za-z0-9' _`) is
+# many-to-one, so two distinct hostile ids collapse onto ONE key — #198's
+# shared bucket again, with a new spelling. An id that is not already a safe
+# path component simply gets no state, which also keeps `/`, `..` and every
+# shell metacharacter out of the path by construction rather than by escaping.
+RETRY_KEY=""
+case "$SESSION_ID" in
+    "" | unknown) RETRY_KEY="" ;;             # unidentifiable — no state
+    .* | *[!A-Za-z0-9._-]*) RETRY_KEY="" ;;   # not a safe path component
+    *) RETRY_KEY="$SESSION_ID" ;;
+esac
+if [ -n "$RETRY_KEY" ] && [ "${#RETRY_KEY}" -le 200 ]; then
+    RETRY_FILE="/tmp/airuleset-stop-block-${RETRY_KEY}"
+fi
+
+if [ -n "$RETRY_FILE" ]; then
+    RETRY_RAW=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
+    case "$RETRY_RAW" in
+        "" | *[!0-9]*) RETRY_RAW=0 ;;         # unreadable or garbage — no state
+    esac
+    if [ "$RETRY_RAW" != "0" ]; then
+        RETRY_NOW=$(date +%s 2>/dev/null || echo 0)
+        RETRY_MTIME=$(stat -c %Y "$RETRY_FILE" 2>/dev/null || echo 0)
+        case "$RETRY_NOW" in "" | *[!0-9]*) RETRY_NOW=0 ;; esac
+        case "$RETRY_MTIME" in "" | *[!0-9]*) RETRY_MTIME=0 ;; esac
+        if [ "$RETRY_NOW" -gt 0 ] && [ "$RETRY_MTIME" -gt 0 ] \
+           && [ "$((RETRY_NOW - RETRY_MTIME))" -le "$RETRY_TTL_S" ]; then
+            RETRIES="$RETRY_RAW"
+        else
+            # Stale, or an age we could not establish. Either way it is not
+            # this loop's state and must not throttle it.
+            rm -f "$RETRY_FILE" 2>/dev/null || true
+        fi
+    fi
+fi
 
 # Check for subagent vs inline prose question (HARD block — repeat offender pattern).
 if msg_has "$MSG_MENTION" -qiE "subagent.?driven.*inline|two execution options|which (approach|execution)|subagent or (sequential|inline)|inline execution.*subagent|subagent.*inline execution|dispatch now or skim|dispatch now or hold|dispatch now or pause|dispatch.*subagents?.*or (hold|skim|pause|wait|review)"; then
@@ -731,14 +798,50 @@ fi
 # Final: if HARD violations found AND retry budget not exhausted, output JSON to block Stop.
 # Per Claude Code hooks docs: {"decision":"block","reason":"..."} prevents Claude from stopping.
 # Retry limit prevents loops if a violation is genuinely unfixable in this session.
-if [ -n "$HARD_VIOLATIONS" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
-    echo "$((RETRIES+1))" > "$RETRY_FILE"
-    REASON="Hard violations detected in your message:\n${HARD_VIOLATIONS}\nFix the message (rewrite or trim the offending content) and resend in this turn. See ask-before-assuming.md (pre-answered questions) and completion-report.md (report template) for details.${UNDET_NOTE}"
-    jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
+#
+# #196 — the ORDER below is load-bearing. The bookkeeping used to run FIRST,
+# so under this script's own `set -euo pipefail` a failed redirect (an
+# unwritable counter, a counter path that cannot be built) exited the shell
+# before the verdict existed: rc 1, no JSON, and a quality-bypass offer shipped.
+# The verdict now goes to stdout before anything else is attempted, and nothing
+# below the `jq` can unsay what it printed.
+if [ -n "$HARD_VIOLATIONS" ]; then
+    if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+        REASON="Hard violations detected in your message:\n${HARD_VIOLATIONS}\nFix the message (rewrite or trim the offending content) and resend in this turn. See ask-before-assuming.md (pre-answered questions) and completion-report.md (report template) for details.${UNDET_NOTE}"
+        jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
+        # Bookkeeping, and it decides NOTHING: it runs after the verdict is
+        # already on stdout, only when a key was established, and it cannot
+        # fail the hook.
+        if [ -n "$RETRY_FILE" ]; then
+            # Braces, not `echo … > "$F" 2>/dev/null`: a REDIRECTION failure is
+            # reported by the shell before that `2>` is in effect, so the naive
+            # form still prints "Permission denied" into the turn and reads like
+            # a hook malfunction. A counter that cannot be written just does not
+            # advance — worth at most one extra retry, never a warning per turn.
+            { echo "$((RETRIES+1))" > "$RETRY_FILE"; } 2>/dev/null || true
+        fi
+        exit 0
+    fi
+
+    # Cap exhausted: a REAL violation is being let through. SAY SO. The empty
+    # stdout this used to produce is indistinguishable from a clean message for
+    # every caller, which is exactly how a poisoned counter made an independent
+    # verification report a shipped, correct, deployed fix as broken (#198).
+    # stderr reaches an operator's journal; `systemMessage` is a documented,
+    # DECISION-FREE field, so it warns the user without re-blocking — blocking
+    # here would be the runaway the cap exists to stop, and Claude Code's own
+    # CLAUDE_CODE_STOP_HOOK_BLOCK_CAP would override it anyway.
+    CAP_MSG="airuleset prose gate: retry cap (${MAX_RETRIES}) exhausted for this session — Stop allowed with UNFIXED hard violations:\n${HARD_VIOLATIONS}"
+    printf '%b\n' "$CAP_MSG" >&2
+    jq -n --arg m "$CAP_MSG" '{systemMessage: $m}'
     exit 0
 fi
 
-# Either no hard violations, or retry budget exhausted — let Stop succeed.
-# Clear the counter on clean stop so next session starts fresh.
-[ -z "$HARD_VIOLATIONS" ] && rm -f "$RETRY_FILE"
+# No hard violations — clear the counter so the next block loop starts fresh.
+# `rm` used to be the command after the final `&&` of a `[ … ] && rm` list, so
+# an unremovable counter was a `set -e` exit: a hook ERROR reported for a
+# message that was perfectly clean.
+if [ -n "$RETRY_FILE" ]; then
+    rm -f "$RETRY_FILE" 2>/dev/null || true
+fi
 exit 0
