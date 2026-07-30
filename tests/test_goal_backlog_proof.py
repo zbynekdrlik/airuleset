@@ -75,8 +75,17 @@ FULL, BRANCH_MERGE, FORK_NO_MERGE = 0, 1, 2
 # the maintainer, so that key silently prints 0 with real work open.
 SLICE_QUALS_COUNT = "python3 ~/devel/airuleset/airuleset.py slice-quals --count"
 
+# The full-authority profile's FIRST proof is `airuleset.py core-quals
+# --count` (#181 I4, round 2) — never a bare whole-repo `gh issue list`. The
+# footer and the Discord card already scope their own counts to the CORE
+# slice (#164: every sub-dev stream's own stream:<user>-labeled tickets
+# excluded, since a core/gatekeeper box is forbidden from working them); a
+# whole-repo stop-proof could never legitimately reach 0 while any stream
+# still had open work.
+CORE_QUALS_COUNT = "python3 ~/devel/airuleset/airuleset.py core-quals --count"
+
 PROOF_SPEC = {
-    FULL: [("gh issue list", "0"), ("gh run list", "success")],
+    FULL: [(CORE_QUALS_COUNT, "0"), ("gh run list", "success")],
     BRANCH_MERGE: [(SLICE_QUALS_COUNT, "0"), ("gh run list", "success"),
                    ("git merge-base", "RELEASED")],
     FORK_NO_MERGE: [(SLICE_QUALS_COUNT, "0"), ("git merge-base", "RELEASED")],
@@ -247,6 +256,20 @@ class TestTemplatesRequireProofNotProse(TestCase):
             for _, expected in PROOF_SPEC[profile]:
                 self.assertIn("printing exactly `%s`" % expected, line)
 
+    def test_full_authority_proof_is_core_scoped_not_whole_repo(self):
+        # #181 I4 (round 2): the footer/card already scope their own counts
+        # to the CORE slice (#164) — a core/gatekeeper box is FORBIDDEN from
+        # working sub-dev-owned stream:<user> tickets, so a whole-repo
+        # stop-proof could never legitimately reach 0 while any stream
+        # still had open work. The FULL template's own proof must use the
+        # SAME core scope as the other two counters, not a bare
+        # repo-wide count.
+        line = goal_lines()[FULL]
+        self.assertIn("core-quals --count", line)
+        self.assertNotIn(
+            '`gh issue list --state open --search "-label:autopilot-skip" '
+            "--json number --jq 'length'`", line)
+
 
 class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
     """Acceptance: demonstrated against the real message, not argued."""
@@ -275,7 +298,7 @@ class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
         self.assertIn("no pasted output", reason)
 
     def test_a_nonzero_open_count_means_continue(self):
-        turn = (_proof_block(**{"gh issue list": "7"})
+        turn = (_proof_block(**{CORE_QUALS_COUNT: "7"})
                 + MARKER + " 0 open\n✅ DONE: hotovo\n")
         holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)
@@ -289,7 +312,7 @@ class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
         self.assertIn("'failure'", reason)
 
     def test_the_issue_count_alone_is_not_enough(self):
-        turn = ("```\n$ gh issue list ...\n0\n```\n"
+        turn = ("```\n$ %s ...\n0\n```\n" % CORE_QUALS_COUNT
                 + MARKER + " 0 open\n✅ DONE: hotovo\n")
         holds, reason = backlog_empty_holds(turn)
         self.assertFalse(holds)

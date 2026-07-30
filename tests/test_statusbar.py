@@ -291,7 +291,7 @@ class RefreshCLI(unittest.TestCase):
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
                 '  *"--search -label:autopilot-skip -label:stream:david"*) echo 28;;\n'
-                '  *"--search -label:autopilot-skip -L 200"*) echo 73;;\n'
+                '  *"--search -label:autopilot-skip -L 1000"*) echo 73;;\n'
                 '  *) echo 0;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -309,6 +309,18 @@ class RefreshCLI(unittest.TestCase):
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
             self.assertIn("Issues 28 core", seg)
             self.assertIn("streamy 45", seg)
+
+    def test_core_and_total_queries_no_longer_clamp_at_200(self):
+        # #181 I5 (round 2): cmd_tickets_status's core/total queries both
+        # clamped at -L 200 -- above 200 open non-skip issues both return
+        # the IDENTICAL clamped 200, so streamy = 0 exactly when the hidden
+        # population is LARGEST (180 core / 250 total would print
+        # "streamy 20" instead of the real 70). Locks that the full-
+        # authority core/total queries use a higher cap.
+        src = Path(airuleset.__file__).read_text()
+        i = src.index('entry["scope"] = "core"')
+        window = src[i:i + 2000]
+        self.assertNotIn('"-L", "200"', window)
 
     def test_streamy_bucket_still_renders_at_zero(self):
         # Same reasoning as the gk-zero rule: a hidden zero looks exactly

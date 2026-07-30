@@ -400,14 +400,45 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                             mk.Mock(count=True, list=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
 
-    def test_slice_quals_key_matches_the_footers_key_for_a_shared_account_box(self):
-        # The single-source-of-truth guarantee: slice-quals must resolve the
-        # SAME quals _slice_quals() itself returns for THIS box, not a
-        # parallel re-implementation that could drift.
+    def test_cmd_slice_quals_actually_calls_the_shared_slice_quals_function(self):
+        # I7 (round 2 review): the old test here only asserted
+        # _slice_quals()'s OWN output, which is byte-identical before and
+        # after the #181 round-1 fix (only cmd_slice_quals/its callers were
+        # added around it) -- so it passed UNCHANGED pre-fix and proved
+        # nothing about cmd_slice_quals itself. This one mocks
+        # _slice_quals() to return a DISTINCTIVE sentinel qual and proves
+        # cmd_slice_quals's own gh queries are genuinely built from THAT
+        # value -- it fails against a reimplementation that re-derives its
+        # own query instead of calling the shared function (the
+        # single-source-of-truth claim this mechanism exists to guarantee).
+        import contextlib
+        import io
         import unittest.mock as mk
-        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            self.assertEqual(airuleset._slice_quals("montalu"),
-                             ["label:stream:montalu"])
+
+        calls = []
+
+        def fake_gh(*a, **k):
+            calls.append(a)
+            # Non-empty so the C2 shared-account-zero validation path (a
+            # DIFFERENT, unrelated check) never engages here — this test is
+            # only about WHICH qual the query was built from.
+            return '[{"number": 1, "title": "t", "createdAt": "2026-07-01T00:00:00Z"}]'
+
+        with mk.patch.object(airuleset, "resolve_authority",
+                             return_value="fork-no-merge"):
+            with mk.patch.object(airuleset, "_slice_quals",
+                                 return_value=["label:__sentinel_qual__"]) as sq:
+                with mk.patch.object(airuleset, "_gh_out", side_effect=fake_gh):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        sq.assert_called()
+        self.assertTrue(
+            any("label:__sentinel_qual__" in " ".join(str(x) for x in c)
+                for c in calls),
+            "cmd_slice_quals never queried gh using _slice_quals()'s own "
+            "returned qual -- it is not actually the single source of truth")
 
     def test_own_account_box_still_unions_all_three_quals(self):
         # david/kvaskodev (own-account) must keep the full 3-way union — a
@@ -455,3 +486,221 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                                 mk.Mock(count=True, list=False, extra=None))
                     self.assertNotEqual(cm.exception.code, 0)
         self.assertNotIn("0", buf.getvalue())
+
+
+class TestSliceQualsRefusesRatherThanGuessing(TestCase):
+    """Round-2 adversarial review of 49cd3d4..2612400: the #181 round-1 fix
+    RELOCATED the false-empty-0 failure instead of removing it (C1, C2 —
+    both live-confirmed / reproduced). Also locks I3's finding: the
+    footer's gk-partitioned display and slice-quals's raw open count
+    deliberately answer DIFFERENT questions, and that difference is safe,
+    not a bug to "fix" into numeric equality."""
+
+    def test_full_authority_box_refuses_instead_of_printing_zero(self):
+        # C1: live-confirmed on dev1 -- cmd_slice_quals never consulted
+        # resolve_authority()/AUTHORITY_BY_USER, so on a full-authority box
+        # (no stream at all) it silently built label:stream:<linux-user>,
+        # which matches nothing, and printed a clean 0 with 29 real open
+        # tickets sitting untouched. It must refuse, never print a count.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="newlevel"):
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="zbynekdrlik"):
+                    with mk.patch.object(airuleset, "_gh_out",
+                                         return_value="[]"):
+                        buf = io.StringIO()
+                        with contextlib.redirect_stdout(buf):
+                            with self.assertRaises(SystemExit) as cm:
+                                airuleset.cmd_slice_quals(
+                                    mk.Mock(count=True, list=False, extra=None))
+                        self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotIn("0", buf.getvalue())
+
+    def test_shared_account_zero_refuses_when_the_label_does_not_exist(self):
+        # C2: a forgotten/never-created stream:<user> label makes gh search
+        # return [] with exit 0 for a query that can never match anything —
+        # a false-empty stop under a different key than round 1's @me.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            return "[]"   # the label itself was never created; every query empty
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        with self.assertRaises(SystemExit) as cm:
+                            airuleset.cmd_slice_quals(
+                                mk.Mock(count=True, list=False, extra=None))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotIn("0", buf.getvalue())
+
+    def test_shared_account_zero_refuses_when_the_cross_check_query_fails(self):
+        # C2: the label genuinely exists but nothing carries it — the
+        # involves:@me cross-check must ALSO succeed (proving gh search
+        # itself works for this identity/repo) before a 0 is trusted.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if a and a[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "involves:@me" in j:
+                return ""   # gh error on the cross-check query
+            return "[]"     # the slice query itself: empty
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        with self.assertRaises(SystemExit) as cm:
+                            airuleset.cmd_slice_quals(
+                                mk.Mock(count=True, list=False, extra=None))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertNotIn("0", buf.getvalue())
+
+    def test_shared_account_zero_is_trusted_once_validated(self):
+        # The genuinely legitimate case must still work: the label exists,
+        # nothing carries it, AND gh search is demonstrably healthy for
+        # this identity/repo (the cross-check succeeds) — 0 is real here.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if a and a[0] == "label":
+                return '[{"name": "stream:montalu"}]'
+            if "involves:@me" in j:
+                return '[{"number": 999}]'
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "0")
+
+    def test_a_handed_off_ticket_still_counts_until_actually_closed(self):
+        # I3 investigated and found NOT a bug (round 2): the footer's
+        # len(mine)-gk is a DISPLAY partition; slice-quals's raw count must
+        # keep counting a handed-off-but-still-OPEN ticket, or the /goal
+        # proof could read 0 while a ticket the gatekeeper has NOT yet
+        # closed sits open — silently defeating review-watch.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:david" in j:
+                return ('[{"number": 7, "title": "t", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "ready-for-review"}]}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "1")
+
+
+class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
+    """#181 I6 (round 2 regression): _write_autopilot_progress is the ONLY
+    writer of `ts`, which keeps statusbar's 6h AUTOPILOT_RUN_WINDOW_S run
+    window alive. #164's fix skipped calling it ENTIRELY for a stream
+    ticket's card on a full-authority box — that also skipped the
+    heartbeat, so a run carding only stream tickets never activates
+    'Issues D/T' at all. Also locks M11: a failed issue lookup must
+    default to NOT bumping `done`, never the pre-#164 wrong direction."""
+
+    def _args(self, **over):
+        import unittest.mock as mk
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+                    repo_name=False, newest_card=False,
+                    backfill_digest=False,
+                    record_question=False, edit_question=False, channel_id=False,
+                    owner=False, mirror_owners=False, body=None, run=None,
+                    repo="o/r", issue=5, pr=None,
+                    achieved="hotové", result=None, goal="cieľ", version=None,
+                    merge_sha=None, url=None, review="ok", handoff=False,
+                    dedup_key=None, dry_run=False)
+        base.update(over)
+        return mk.Mock(**base)
+
+    def test_stream_tickets_card_still_writes_the_heartbeat(self):
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            if a and a[0] == "issue" and "view" in a:
+                return '{"title": "t", "labels": [{"name": "stream:montalu"}]}'
+            return "3"
+
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with mk.patch("notify.send", return_value="sent"):
+                    with mk.patch.object(airuleset,
+                                         "_write_autopilot_progress") as wap:
+                        airuleset.cmd_notify(self._args())
+        wap.assert_called_once()
+        _, kwargs = wap.call_args
+        self.assertEqual(kwargs.get("bump_done"), False)
+
+    def test_core_tickets_card_still_bumps_done(self):
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            if a and a[0] == "issue" and "view" in a:
+                return '{"title": "t", "labels": []}'
+            return "3"
+
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with mk.patch("notify.send", return_value="sent"):
+                    with mk.patch.object(airuleset,
+                                         "_write_autopilot_progress") as wap:
+                        airuleset.cmd_notify(self._args())
+        wap.assert_called_once()
+        _, kwargs = wap.call_args
+        self.assertEqual(kwargs.get("bump_done"), True)
+
+    def test_a_failed_issue_lookup_defaults_to_not_bumping_done(self):
+        # M11: a parse/lookup failure used to leave is_core_ticket=True
+        # (view.get("labels") is None -> _ticket_is_stream_labeled(None) is
+        # False -> `not False` is True), silently restoring the PRE-#164
+        # wrong behaviour. It must default the SAFE direction: do not bump
+        # `done` when we could not tell.
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            if a and a[0] == "issue" and "view" in a:
+                return ""     # gh error / empty response
+            return "3"
+
+        with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with mk.patch("notify.send", return_value="sent"):
+                    with mk.patch.object(airuleset,
+                                         "_write_autopilot_progress") as wap:
+                        airuleset.cmd_notify(self._args())
+        wap.assert_called_once()
+        _, kwargs = wap.call_args
+        self.assertEqual(kwargs.get("bump_done"), False)

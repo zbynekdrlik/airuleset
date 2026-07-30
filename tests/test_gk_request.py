@@ -235,9 +235,10 @@ class TestStatuslineBadge(unittest.TestCase):
         src = Path(airuleset.__file__).read_text()
         i = src.index('entry["scope"] = "core"')
         # Window widened for the streamy bucket (#164) that now sits between
-        # the core-count query and the gk_req query.
-        self.assertIn("needs-gatekeeper", src[i:i + 2700])
-        self.assertIn('entry["gk_req"]', src[i:i + 2700])
+        # the core-count query and the gk_req query, and again for the #181
+        # I5/I6 round-2 comments (-L 1000, _core_search_excl()) between them.
+        self.assertIn("needs-gatekeeper", src[i:i + 3000])
+        self.assertIn('entry["gk_req"]', src[i:i + 3000])
 
 
 class TestCmdGkRequest(unittest.TestCase):
