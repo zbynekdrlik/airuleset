@@ -3862,7 +3862,16 @@ def _row_action(row, own_stream=None):
     genuinely unlabelled core ticket and stays `implement`."""
     if not isinstance(row, dict) or "labels" not in row:
         return ROW_ACTION_ONLY
-    owner = _stream_owner_of(row.get("labels"))
+    labels = row.get("labels")
+    if not isinstance(labels, list) or any(not isinstance(lb, dict)
+                                           for lb in labels):
+        # Present but not a list of dicts (bare strings, an explicit null):
+        # UNREADABLE ownership, not an absence of it. `_stream_owner_of` skips
+        # non-dict entries, which would silently render this as `implement` —
+        # the dangerous direction again, one layer down (adversarial review,
+        # round 4).
+        return ROW_ACTION_ONLY
+    owner = _stream_owner_of(labels)
     if owner and owner != (own_stream or ""):
         return ROW_ACTION_ONLY
     return ROW_IMPLEMENT
@@ -3948,6 +3957,17 @@ def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
 
 HANDOFF_LABEL_WORKFLOW_HINT = "handoff"
 
+# A COMPLETED hand-off-labeller run whose conclusion is not one of these did
+# not do its job. Stated as POSITIVE evidence rather than as a list of bad
+# conclusions (adversarial review, round 4): the first cut tested
+# `conclusion == "failure"` literally, so `startup_failure`, `timed_out`,
+# `cancelled` and `action_required` all passed as healthy — and the live
+# failing labeller this guard exists for is startup-SHAPED (its failing job
+# records no failing STEP), i.e. the neighbouring spelling of its own
+# motivating case. `skipped` is normal and must stay here: a labeller
+# legitimately skips every comment that is not a hand-off.
+HANDOFF_RUN_OK_CONCLUSIONS = frozenset({"success", "skipped"})
+
 
 def _handoff_label_mechanism_health(cwd=None):
     """Is the mechanism the `ready-for-review` arm rests on actually working?
@@ -4018,8 +4038,19 @@ def _handoff_label_mechanism_health(cwd=None):
         return ("unknown", "`gh run list` failed for %s" % path)
     if not isinstance(runs, list):
         return ("unknown", "`gh run list` returned no list for %s" % path)
-    if runs and isinstance(runs[0], dict) and runs[0].get("conclusion") == "failure":
-        return ("broken", "the newest %s run FAILED" % path)
+    if not runs:
+        # An enrolled repo whose labeller has never produced a run cannot have
+        # labelled any hand-off — exactly as much evidence as a failing run.
+        return ("unknown", "%s has never run on %s" % (path, name))
+    newest = runs[0] if isinstance(runs[0], dict) else {}
+    if newest.get("status") != "completed":
+        # A run still in flight has a null conclusion and is not evidence of
+        # breakage; refusing on it would spin the loop for the duration of
+        # every labeller run.
+        return ("ok", "%s (newest run still %s)" % (path, newest.get("status")))
+    if newest.get("conclusion") not in HANDOFF_RUN_OK_CONCLUSIONS:
+        return ("broken", "the newest %s run concluded %r"
+                % (path, newest.get("conclusion")))
     return ("ok", path)
 
 
