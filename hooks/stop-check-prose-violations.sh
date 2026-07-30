@@ -286,25 +286,50 @@ if [ -n "$RETRY_KEY" ] && [ "${#RETRY_KEY}" -le 200 ]; then
     RETRY_FILE="/tmp/airuleset-stop-block-${RETRY_KEY}"
 fi
 
+# This invocation's established retry count, or 0 meaning "there is no state".
+# Every guard is a POSITIVE requirement and every failure prints 0, so anything
+# unestablished lets the verdict out. It PRINTS rather than assigns, which keeps
+# the caller's `set -e` out of reach of everything in here.
+_retry_count_of() {
+    local _f="$1" _sz _v _now _mt
+    # A plain file, not a symlink, and OURS. `-f` alone follows a symlink, and
+    # this path is world-plantable: /tmp is sticky and shared with foreign uids
+    # by design here, while live session ids are readable straight out of /tmp
+    # from this repo's own markers. A FIFO is the sharpest of the three — `cat`
+    # would block on it until the harness kills the hook, so no verdict is ever
+    # printed, which is precisely the fail-open being removed.
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] || { echo 0; return 0; }
+    # This hook writes exactly one ASCII digit and a newline, because
+    # MAX_RETRIES is a single digit (locked by a test). Anything larger is not
+    # ours to interpret, and two shapes are actively dangerous: a long run of
+    # digits makes `[ -lt ]` exit 2 — #196's own defect, reached by a different
+    # byte sequence — and a NUL, which bash strips out of a command
+    # substitution, can splice two digits into a number past the cap.
+    _sz=$(stat -c %s "$_f" 2>/dev/null || echo "")
+    case "$_sz" in 1 | 2) : ;; *) echo 0; return 0 ;; esac
+    # Braces: the "ignored null byte in input" warning comes from the SHELL
+    # performing the substitution, so a `2>` inside it is already too late.
+    { _v=$(cat "$_f" 2>/dev/null || echo 0); } 2>/dev/null
+    # Literal alternatives, never a RANGE or a character class: `[!0-9]` is
+    # locale-collated and does NOT reject U+FF13, which then reaches `[ -lt ]`
+    # as a non-integer. Verified on this box.
+    case "$_v" in 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) : ;; *) echo 0; return 0 ;; esac
+    # An age we can establish, that is neither stale NOR IN THE FUTURE. Without
+    # the upper bound a negative difference passes every `-le` test, so one
+    # backward clock step (an NTP correction, a wrong RTC at boot, a restored
+    # snapshot) would make every existing counter permanently un-expirable —
+    # #198's immortal bucket, rebuilt.
+    _now=$(date +%s 2>/dev/null || echo "")
+    _mt=$(stat -c %Y "$_f" 2>/dev/null || echo "")
+    case "$_now" in "" | *[!0123456789]*) echo 0; return 0 ;; esac
+    case "$_mt" in "" | *[!0123456789]*) echo 0; return 0 ;; esac
+    [ "$_mt" -le "$_now" ] || { echo 0; return 0; }
+    [ "$((_now - _mt))" -le "$RETRY_TTL_S" ] || { echo 0; return 0; }
+    echo "$_v"
+}
+
 if [ -n "$RETRY_FILE" ]; then
-    RETRY_RAW=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
-    case "$RETRY_RAW" in
-        "" | *[!0-9]*) RETRY_RAW=0 ;;         # unreadable or garbage — no state
-    esac
-    if [ "$RETRY_RAW" != "0" ]; then
-        RETRY_NOW=$(date +%s 2>/dev/null || echo 0)
-        RETRY_MTIME=$(stat -c %Y "$RETRY_FILE" 2>/dev/null || echo 0)
-        case "$RETRY_NOW" in "" | *[!0-9]*) RETRY_NOW=0 ;; esac
-        case "$RETRY_MTIME" in "" | *[!0-9]*) RETRY_MTIME=0 ;; esac
-        if [ "$RETRY_NOW" -gt 0 ] && [ "$RETRY_MTIME" -gt 0 ] \
-           && [ "$((RETRY_NOW - RETRY_MTIME))" -le "$RETRY_TTL_S" ]; then
-            RETRIES="$RETRY_RAW"
-        else
-            # Stale, or an age we could not establish. Either way it is not
-            # this loop's state and must not throttle it.
-            rm -f "$RETRY_FILE" 2>/dev/null || true
-        fi
-    fi
+    RETRIES=$(_retry_count_of "$RETRY_FILE")
 fi
 
 # Check for subagent vs inline prose question (HARD block — repeat offender pattern).
@@ -813,12 +838,27 @@ if [ -n "$HARD_VIOLATIONS" ]; then
         # already on stdout, only when a key was established, and it cannot
         # fail the hook.
         if [ -n "$RETRY_FILE" ]; then
-            # Braces, not `echo … > "$F" 2>/dev/null`: a REDIRECTION failure is
-            # reported by the shell before that `2>` is in effect, so the naive
-            # form still prints "Permission denied" into the turn and reads like
-            # a hook malfunction. A counter that cannot be written just does not
-            # advance — worth at most one extra retry, never a warning per turn.
-            { echo "$((RETRIES+1))" > "$RETRY_FILE"; } 2>/dev/null || true
+            # Write through an unpredictable temp file and RENAME over the key,
+            # never a bare `>` at the key itself: `>` FOLLOWS a symlink, and the
+            # key is world-plantable on a sticky /tmp shared with foreign uids,
+            # so a bare redirect is a same-uid truncation primitive aimed at
+            # whatever someone else points it at. `mv` replaces the NAME, so a
+            # planted symlink — or a planted file holding a value that would
+            # disarm the gate — is displaced by our own 0600 file instead of
+            # being written through, which also self-heals the key.
+            #
+            # Braces, not `… 2>/dev/null` on the redirect itself: a REDIRECTION
+            # failure is reported by the shell before that `2>` is in effect, so
+            # the naive form still prints "Permission denied" into the turn and
+            # reads like a hook malfunction. A counter that cannot be written
+            # just does not advance — at most one extra retry, never a warning
+            # every turn.
+            RETRY_TMP=$(mktemp "/tmp/airuleset-stop-tmp.XXXXXXXX" 2>/dev/null || echo "")
+            if [ -n "$RETRY_TMP" ]; then
+                { echo "$((RETRIES+1))" > "$RETRY_TMP" \
+                    && mv -f "$RETRY_TMP" "$RETRY_FILE"; } 2>/dev/null || true
+                rm -f "$RETRY_TMP" 2>/dev/null || true
+            fi
         fi
         exit 0
     fi
