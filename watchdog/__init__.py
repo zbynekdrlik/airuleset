@@ -661,9 +661,20 @@ def project_label(cwd):
 # the reset clock can), so it is classified separately and only PINGED, never
 # nudged. Kept narrow so a transient 529 / "rate limited" / overloaded (which a
 # retry CAN clear) is NOT caught here and still gets the 3×continue lifecycle.
+# (#175 F2) The WEEKLY cap ("You've hit your weekly limit …") and the BARE cap
+# ("You've hit your limit …", no qualifier word at all) used to be invisible
+# here — only "session"/"usage" were recognized before "limit", and the literal
+# space required between "limit" and "reached/resets" never matched Claude
+# Code's real rendering, which separates them with a MIDDLE DOT ("limit ·
+# resets 11am …"), not a space. Both gaps let a real weekly/bare cap fall
+# through to the generic nudge path and get `continue`d every ~30 min for the
+# WHOLE cap window (days), instead of staying bounded (ping once, wait for the
+# reset). `[\s·]*` accepts any run of whitespace and/or the middle-dot
+# separator between "limit" and the reset wording; `(?:session|usage|weekly)?`
+# is now optional so the bare "hit your limit" shape matches too.
 _USAGE_CAP_RX = re.compile(
-    r"usage limit|quota|limit (?:reached|will reset|resets)|reset at|reached your"
-    r"|hit your (?:session|usage) limit", re.I)
+    r"usage limit|quota|limit[\s·]*(?:reached|will reset|resets)|reset at|reached your"
+    r"|hit your (?:(?:session|usage|weekly)\s+)?limit", re.I)
 # Transient SERVER-side throttles — a retry / `continue` CAN clear these, so they
 # must NOT be read as a quota cap. Checked FIRST. Critically this catches
 # "(not your usage limit)" — Claude Code's transient rate-limit banner literally
@@ -995,8 +1006,22 @@ def pane_at_idle_prompt(captured):
 # → "You've hit your session limit"). So job (6) reads it from the PANE, PINGS
 # ONCE with the reset time, does NOTHING until the reset clock, then sends ONE
 # `continue` AFTER it — never before.
+# (#175 F2) Claude Code also renders a WEEKLY cap ("You've hit your weekly
+# limit · resets Jul 31, 9pm (Europe/Prague)") and a BARE one ("You've hit
+# your limit · resets 11am (Europe/Prague)"), with no "session"/"usage" word
+# at all — this regex used to require one, so both shapes fell straight
+# through to job 1's generic nudge path and got `continue`d every ~30 min for
+# the whole cap window instead of getting job 6's bounded ping-once-then-wait
+# treatment. `(?:session|usage|weekly)?` is now optional. (A weekly cap whose
+# "resets Jul 31, 9pm" clock `_RESET_TIME_RX` cannot parse — no leading digit
+# right after "resets " — still stays bounded: `parse_reset_epoch` returns
+# None, job 6 pings once with "čoskoro" instead of the clock, and the
+# `elif ra and now >= ra:` resume branch below never fires again since `ra`
+# stays None — i.e. ping once, then silence, same as an unparseable date would
+# leave it. This module does not parse a dated reset clock; only the bare
+# clock-time shapes `_RESET_TIME_RX` already handles.)
 _SESSION_LIMIT_RX = re.compile(
-    r"hit your (?:session|usage) limit|/usage-credits to finish", re.I)
+    r"hit your (?:(?:session|usage|weekly)\s+)?limit|/usage-credits to finish", re.I)
 # "resets 6:10pm" / "resets 6pm" / "resets at 18:10" — capture the clock.
 _RESET_TIME_RX = re.compile(
     r"reset(?:s|ting)?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
@@ -1137,9 +1162,18 @@ def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
     including a fresh one-shot escalation.
 
     A caller-forced `entry['dormant']` (used for a usage/quota cap, where only
-    the external reset clock — not `continue` — can fix it) makes this return
-    'wait' forever regardless of the schedule above; only a new err_hash clears
-    it."""
+    the external reset clock — not `continue` — can fix it) makes THIS CALL
+    return 'wait' regardless of the schedule above. (#175 F4 correction: a new
+    err_hash is the COMMON way the flag goes away, not the ONLY one — the
+    caller's own state-cleanup pass can drop `state[key]` entirely, e.g. once
+    the session's pane is no longer visible. That is harmless here: the caller
+    re-derives `dormant` from `is_usage_cap(err_text)` on every sweep that
+    reaches a fresh 'nudge', so a rebuilt entry is immediately re-marked
+    dormant from the SAME live error text — no `continue` is ever typed into a
+    genuinely-capped session either way. What CAN differ is the ping: a
+    rebuilt entry reseeds `first_seen`, which changes the alert's dedup key, so
+    a wipe-and-rebuild can cost a second, otherwise-redundant ping — never a
+    keystroke.)"""
     e = state.get(key)
     if e is None or e.get("hash") != err_hash:
         fs = int(first_seen_seed) if first_seen_seed is not None else int(now)
@@ -8408,6 +8442,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # limited session (that bug left `presenter` unnudged).
             err_text = transcript_last_error(tpath)
             if err_text:
+                # (#175 F1) Mark this episode ALIVE for THIS sweep the instant we
+                # know the session is still api-error-stalled — BEFORE any of the
+                # gates below can `continue` out of this block. The cleanup pass
+                # at the end of run_once deletes any bare-UUID episode key not in
+                # `stalled`; with `stalled.add(key)` sitting AFTER the copy-mode /
+                # busy-pane gates (its old position), a single gated sweep — the
+                # pane busy precisely BECAUSE we had just typed `continue` into
+                # it, or genuinely in copy-mode — silently deleted the
+                # accumulated nudge-count/`escalated` entry and reset the #175
+                # widening back-off to nudge #1 on the very next sweep. Worse,
+                # the re-created entry re-seeds `first_seen` from transcript
+                # mtime (which Claude Code's own retries/queue writes keep
+                # moving), so the one-shot give-up ping re-armed under a
+                # DIFFERENT dedup key and fired twice for the same real episode.
+                # Hoisting the add here covers every early `continue` in this
+                # neighbourhood: the copy-mode gate and busy-pane gate right
+                # below, AND the #176 stash-abort/raced skips further down
+                # (which already ran after the old position and needed no
+                # change).
+                stalled.add(key)
                 # user scrolling / a menu open → keys would be swallowed or corrupt the
                 # selection. Skip WITHOUT advancing state (no retry burned).
                 if pane_in_mode(pid, run):
@@ -8492,7 +8546,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                     dedup_key="apierr-busypane:%s:%s" % (key, b["first_seen"]),
                                     dry_run=dry_run)
                         continue
-                stalled.add(key)
+                # (`stalled.add(key)` now happens above, right after `if err_text:`
+                # — see the #175 F1 comment there. Left uncalled here on purpose.)
                 err_hash = _hash(err_text)
                 # captured BEFORE decide() mutates state — the one-shot give-up ping
                 # (#175) fires on the False->True transition of entry["escalated"],
@@ -8508,10 +8563,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 fs = int(entry.get("first_seen", now))
                 if action == "nudge" and is_usage_cap(err_text):
                     # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,
-                    # mark dormant (decide() then returns 'wait' forever for this hash —
-                    # #175's widening back-off does NOT apply here: only the external
-                    # reset clock fixes a quota cap, never re-nudging). No pane interaction
-                    # at all, so draft_pending is irrelevant here.
+                    # mark dormant (decide() then returns 'wait' for this hash while the
+                    # entry survives — #175's widening back-off does NOT apply here: only
+                    # the external reset clock fixes a quota cap, never re-nudging). This
+                    # is RE-DERIVED from is_usage_cap(err_text) on every sweep that reaches
+                    # a fresh 'nudge', not solely remembered in the stored flag (#175 F4) —
+                    # so even if the cleanup pass below ever drops this entry (the
+                    # session's pane no longer visible, say), the next rebuild
+                    # reclassifies it dormant again from the SAME live error text; no
+                    # `continue` leaks into a capped session either way — only a
+                    # redundant re-ping is possible (see decide()'s own docstring). No
+                    # pane interaction at all here, so draft_pending is irrelevant.
                     entry["nudges"], entry["escalated"], entry["dormant"] = [], True, True
                     state[key] = entry
                     logs.append("usage-cap %s — ping only, no continue" % project)
