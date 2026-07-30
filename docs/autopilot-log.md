@@ -1826,3 +1826,66 @@ tunable nearby (a strict `>` instead of `>=` kept an existing fixture
 passing unmodified here); an aborted VERIFIED delivery must not be allowed
 to silently advance a decide()-style counter computed before the delivery
 was attempted.
+
+**CORRECTION (#176 REOPENED):** the claim above -- and the matching lines in
+the `run_once` docstring, the inline comment at job 1's busy-pane branch, and
+the playbook's own ">strict vs >=" bullet -- read as a SYSTEM-WIDE promise
+that job 1 could never again go silent. An independent adversarial review
+(issuecomment on the reopened #176) found that promise did not hold: the
+SEPARATE aborted-stash branch (`deliver_with_stash` returning False -- an
+occupied stash slot, or any `esc to interrupt` substring) had no state, no
+ping, no bound at all -- the exact silent-unbounded-skip this ticket was
+commissioned to remove, RELOCATED from the busy branch to the draft branch
+rather than eliminated (finding F1). The busy branch's own "strict >" threshold
+was also gated on live transcript `idle`, not on wall clock (finding F2) --
+CC's own retries / queue-snapshot writes can hold `idle` artificially low for
+as long as the busy stretch lasts, so a session could stay wedged past 2x
+grace of real time with zero pings. Both are now fixed: the aborted-stash
+branch gets the identical escalation shape under its own dedicated
+`apierr-stashabort:` state prefix, and BOTH branches anchor their 2x-grace
+threshold on the episode's own `first_seen` (wall clock), never live `idle`.
+Three further findings from the same review, also fixed here: (F3) job 1 used
+to act on the STALE top-of-sweep pane capture when deciding to stash-deliver,
+so a machine-submit from job 10 earlier in the SAME sweep could be followed by
+job 1's own `C-s` into the turn that had just started -- fixed by re-verifying
+against a FRESH capture immediately before delivery, job 20's own established
+pattern for the identical race; (F4) `deliver_with_stash`'s own step-4 abort
+(the post-`C-s` verify) read a single immediate capture with no settle window
+and no restore, so a raced render (the toggle landing before the redraw
+catches up) could silently strand the user's draft in the invisible stash slot
+with no delivered turn left to auto-restore it -- fixed with a bounded
+render-settle poll (mirroring `_await_typed`) plus a best-effort restoring
+`C-s` on genuine failure, symmetric with step 5's own abort-restore; (F5) the
+four "can never go silent" claims above are corrected in place (this entry,
+`.claude/rules/airuleset-internals.md`, the `run_once` docstring, the inline
+comment) to state which branch each guarantee actually covers.
+
+Design comment posted before the first code commit of this reopened pass
+(issuecomment-5124442344 is the review that supplied acceptance items 1-7;
+the design comment restates root cause / chosen approach / rejected
+alternative against that acceptance list). RED->GREEN: new/updated tests in
+`tests/test_stash_delivery.py` (the settle-poll + symmetrised-restore pair)
+and `tests/test_airuleset.py` (F1 aborted-stash-pings-once, F2
+wall-clock-anchored-busy-ping, F3 no-C-s-after-a-job10-submit-in-the-same-
+sweep, F7 both episode prefixes pruned by the cleanup loop) plus a new
+`tests/test_watchdog.py` teeth test pinning the queued-placeholder regex
+against over-match (F8) -> the implementation in `watchdog/__init__.py`. Every
+new/changed assertion was mutation-tested by hand (revert the specific fix,
+confirm the specific test fails, confirm sibling tests keep passing) before
+this entry was written.
+
+Item 6's DO-NOT-TOUCH boundary held: this diff does not touch `stalled.add`
+(`:8380`, byte-identical) or the cleanup predicate at `:8750`/`_SESSION_KEY_RX`
+(untouched) -- the only cleanup-loop edit is the one added
+`or k.startswith("apierr-stashabort:")` in the existing OR-chain, mirroring
+the pre-existing `apierr-busypane:` entry. #175's own scope (the episode-key
+reset on the `pane_in_mode`/busy `continue`s before `stalled.add`) is
+untouched.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` -- corrected the ">strict
+vs >=" bullet in place (a threshold-choice bullet must state WHICH branch it
+covers, not just which incident motivated it) and appended new bullets for
+the settle-poll-before-declaring-a-toggle-failed pattern, the
+stale-top-of-sweep-capture race (re-verify fresh immediately before ANY
+keystroke-sending decision, not just at the top of the sweep), and the
+three-independent-state-prefixes-per-session discipline.

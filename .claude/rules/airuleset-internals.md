@@ -574,6 +574,89 @@ against a baseline, once one exists.
   stall runs even one tick past the threshold — cheaper and safer than editing an
   existing locked test to accommodate a new one when a one-character `>`-vs-`>=`
   choice resolves the collision outright.
+
+  **CORRECTION (#176 REOPENED):** "guaranteeing the ping fires the moment a REAL
+  stall runs even one tick past the threshold" was true only for the ONE branch
+  this bullet is about (the genuinely-busy skip) — it read, alongside the
+  `run_once` docstring and this same ticket's own autopilot-log entry, as a
+  SYSTEM-WIDE promise that job 1 could never again go silent. An independent
+  adversarial review found a direct counterexample: the SEPARATE aborted-stash
+  branch (`deliver_with_stash` returning False) had no state, no ping, and no
+  bound at all — the exact silent-unbounded-skip this ticket was commissioned
+  to remove, just relocated from the busy branch to the draft branch (finding
+  F1). Fixed by giving that branch the identical escalation shape under its OWN
+  dedicated state prefix (`apierr-stashabort:`, never `apierr-busypane:` or job
+  4's own `busypane:` — three independent episodes on the same session id must
+  never share bookkeeping). The busy branch ALSO had a real gap: its own
+  threshold read live `idle` (`now - transcript mtime`), the one signal job 1's
+  documented grace deliberately avoids elsewhere, so an unrelated write
+  touching the transcript could hold it artificially low for as long as the
+  busy stretch lasted (finding F2) — fixed by anchoring on the episode's own
+  `first_seen` (wall clock) instead. Both fixes together are what makes the
+  "can never go silent" claim actually system-wide; state which branch a
+  threshold bullet like this one covers, not just which incident motivated it.
+- **A "poll once, abort" verify inside a keystroke-sending helper needs a
+  bounded render-SETTLE poll before it gives up, whenever the SAME repo has
+  already measured that the target's render can lag the keystroke landing.**
+  #176 REOPENED F4: `deliver_with_stash`'s step-4 abort (the post-`C-s`
+  verify that the box went bare-with-`STASH_MARKER`) took exactly ONE
+  immediate capture — but this file already documents (see the `_await_typed`
+  bullet above, and its own comment) that a render can lag a `send-keys`
+  toggle actually landing. A raced immediate capture reported "stash failed"
+  for a toggle that DID take, silently stranding the user's draft in the
+  invisible single-slot stash with no delivered turn ever started to trigger
+  its auto-restore — the worst possible outcome for a helper whose whole job
+  is protecting a draft. Fix: `_await_stash_bare`, the same bounded-poll
+  shape `_await_typed` already uses (never a blind timeout — returns the
+  instant the box agrees), THEN a best-effort restoring `C-s` (outcome
+  unchecked) only if it's still unverified after the settle window. Test
+  teeth for this shape specifically require TWO fixtures in the mocked
+  capture queue, not one: the first capture still showing the stale
+  (unsettled) state, the second showing the real post-toggle state — a
+  single-capture fixture can only ever test the "genuinely never settles"
+  path, never the "settles on retry" path the fix actually adds.
+- **A keystroke-sending decision computed from a TOP-OF-SWEEP capture can be
+  stale by the time it actually acts, even within the SAME `run_once` call —
+  re-verify against a FRESH capture immediately before the send, not once at
+  the top of the loop.** #176 REOPENED F3: job 1 classified `captured` (the
+  once-per-sweep capture taken before ANY job runs) as idle-with-a-draft, but
+  job 10 (`prompt_wedge_check`, gated on the SAME once-per-sweep `captured`
+  it was handed as a parameter) runs earlier in the sweep and CAN send real
+  keystrokes for a recognized MACHINE draft — submitting the exact draft job
+  1 was about to stash-deliver into. By the time job 1 reaches its own send
+  point, the pane has already moved. `_goal_template_drift` (job 20) already
+  had the right pattern for this exact race (`:6676-6679`, "by now the
+  sweep's own capture is several tmux round-trips old") — job 1 just hadn't
+  adopted it. The general rule: ANY job whose keystroke decision spans more
+  than the single capture-then-immediately-act step must re-verify
+  immediately before the send, not trust a capture taken earlier in the same
+  sweep, however recent that earlier capture felt.
+- **THREE independent "genuinely busy/failed, silence otherwise" escalation
+  episodes for the SAME session id need THREE independent state-key
+  prefixes, not two.** Extends the existing "two independent jobs... must use
+  DISTINCT state-key prefixes" bullet above: #176 REOPENED added a THIRD
+  escalation (the aborted-stash branch, `apierr-stashabort:`) alongside job
+  1's own busy-branch (`apierr-busypane:`) and job 4's working-stall branch
+  (`busypane:`) — all three can be live for the identical session id at
+  different times, and all three must own a completely separate `pinged`/
+  `first_seen` pair or one episode's bookkeeping silently corrupts another's.
+  The cleanup OR-chain (the generic `k.startswith(...)` loop) needs exactly
+  one new branch per new prefix, same as before — no new cleanup mechanism,
+  and (per F7 below) a test that actually seeds and prunes each prefix, since
+  a missing OR-chain branch leaves every PRE-EXISTING test green (nothing
+  else in the suite ever reads that key).
+- **A "never over-match" regression test for a tightened regex must use a
+  fixture that clears the regex's OWN anchor, not merely one that mentions
+  similar words.** #176 REOPENED F8: the existing near-miss fixture for
+  `_QUEUED_PLACEHOLDER_RX` started `"press up later..."` — it fails even a
+  naively WIDENED `.*`-based version of the regex trivially, since it never
+  even starts with the real `"press up to edit"` prefix, so it constrained
+  nothing about how tight the middle of the pattern has to stay. The teeth
+  fixture has to start with the genuine prefix and insert real words before
+  the tail (`"press up to edit the config, then flush queued messages"`) —
+  verified by hand-mutating the regex to `.*` and confirming ONLY that
+  fixture's test fails while the legitimate placeholder fixtures keep
+  passing.
 - **An aborted verified-delivery attempt (`deliver_with_stash` returning False) must
   not be allowed to silently advance a decide()-style nudge/backoff counter that was
   already computed before the delivery was attempted.** The pre-existing shape here
