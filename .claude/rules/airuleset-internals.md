@@ -592,9 +592,19 @@ against a baseline, once one exists.
   documented grace deliberately avoids elsewhere, so an unrelated write
   touching the transcript could hold it artificially low for as long as the
   busy stretch lasted (finding F2) — fixed by anchoring on the episode's own
-  `first_seen` (wall clock) instead. Both fixes together are what makes the
-  "can never go silent" claim actually system-wide; state which branch a
-  threshold bullet like this one covers, not just which incident motivated it.
+  `first_seen` (wall clock) instead. **CORRECTION (#176 R1):** the sentence
+  that used to stand here claimed these two fixes together made the guarantee
+  system-wide — false, and disproved from two directions in the very next
+  reopened pass: F3's own new "skip raced" branch (job 1 re-verifying against
+  a fresh capture immediately before delivery) was ITSELF a third stateless,
+  unbounded skip until that pass gave it the identical `apierr-stashabort:`
+  escalation shape (R2); and `skip in-mode` (pane in tmux copy-mode, #175's
+  own scope) remains a genuinely silent path this ticket never touches —
+  empirically 0 of 201 in-mode skips in a 7-day journal were job 1's, but
+  "never observed" is not the same claim as "cannot happen". State exactly
+  which branches a threshold bullet like this one covers, not just which
+  incident motivated it, and never claim a guarantee is system-wide without
+  naming every branch it would have to cover.
 - **A "poll once, abort" verify inside a keystroke-sending helper needs a
   bounded render-SETTLE poll before it gives up, whenever the SAME repo has
   already measured that the target's render can lag the keystroke landing.**

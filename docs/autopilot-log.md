@@ -1856,9 +1856,19 @@ catches up) could silently strand the user's draft in the invisible stash slot
 with no delivered turn left to auto-restore it -- fixed with a bounded
 render-settle poll (mirroring `_await_typed`) plus a best-effort restoring
 `C-s` on genuine failure, symmetric with step 5's own abort-restore; (F5) the
-four "can never go silent" claims above are corrected in place (this entry,
-`.claude/rules/airuleset-internals.md`, the `run_once` docstring, the inline
-comment) to state which branch each guarantee actually covers.
+over-claiming language identified by the review is corrected in place on
+THREE of its four surfaces (this entry, `.claude/rules/airuleset-internals.md`,
+the `run_once` docstring) to state which branch each guarantee actually
+covers. **CORRECTION (added on the NEXT reopened pass, R1):** the fourth
+surface -- the inline comment at job 1's busy-pane branch in
+`watchdog/__init__.py` -- was claimed above as corrected too, but a
+comment-stripped whole-file scan showed it still read the original
+over-claiming text verbatim; it was actually fixed only in that later pass,
+alongside a NEW over-claim the replacement prose itself introduced here and in
+the playbook (asserting the two fixes together made the guarantee
+"system-wide", which the same later pass's own R2 finding -- a third
+stateless skip path -- disproved). See that pass's own entry for the honest
+correction and its 0-hit re-scan.
 
 Design comment posted before the first code commit of this reopened pass
 (issuecomment-5124442344 is the review that supplied acceptance items 1-7;
@@ -1924,3 +1934,124 @@ hostname, so only username disambiguates) and the `cmd_push` stdout-buffering
 trap (unittest's stderr summary vs. block-buffered stdout fixture noise can
 make a real abort line appear "sandwiched" inside unrelated trailing output
 when merged via `2>&1` — grep specific markers, never trust raw tail order).
+
+## #176 (fourth reopened round) — R1-R4: the raced skip bounded, the restore verified, the overclaims actually corrected
+
+Fourth independent adversarial review (issuecomment-5125279406) confirmed the
+core fix genuinely holds this time and reopened on four residual findings.
+Design comment posted before the first code commit
+(issuecomment-5125437927), covering all four with root cause / chosen
+approach / rejected alternative each.
+
+R3 (do first — it can eat the user's typed text): `deliver_with_stash`'s
+step-4 abort sent an unconditional, UNCHECKED "best-effort" restoring
+Ctrl+S whenever the settle poll never confirmed bare+marker within budget.
+A faithful single-slot toggle model across BASE vs SHIPPED (the previous
+round's own F4 fix) shows this is safe when the FIRST Ctrl+S merely
+render-lagged (server state already toggled; the restore genuinely
+un-stashes it back to view) but genuinely regresses when the first Ctrl+S
+was LOST instead (never toggled anything at all — base's own accidental
+safety, since base never sent a second keystroke): the "restore" then IS the
+first real toggle CC ever receives, and it genuinely stashes the draft for
+real, with no delivered turn ever coming to auto-restore it. Fixed with a
+new `_await_draft_visible` helper — the structural complement of
+`_await_stash_bare` (polls for the input line to be NON-empty instead of
+bare+marker) — which VERIFIES the restore's own effect instead of trusting
+it blindly; if the draft is still hidden after a full settle window, ONE
+corrective toggle undoes it and is verified the same way, and the final
+outcome (`draft-recovered` / `draft-still-not-visible-after-2-restores`) is
+logged honestly either way. The old test
+(`test_verify_bare_failed_aborts_before_any_typing`) pinned `cs_count == 2`
+in exactly the lost-send state WITHOUT ever asserting the draft's fate —
+replaced with three tests asserting the new log lines: restore-alone
+recovers it (no corrective toggle needed), the regression case itself
+(first Ctrl+S lost, corrective toggle recovers it, `cs_count == 3`), and the
+honest-failure residual (never recovers, logged rather than silently
+claimed or crashed).
+
+R2: F3's own "skip raced" branch (job 1 re-verifying against a FRESH
+capture immediately before delivery, added earlier this same ticket) used
+to log and `continue` bare on a mismatch — no state, no ping, no counter, no
+bound, structurally the identical silent-unbounded-skip shape this ticket
+was reopened to remove from the busy and stash-abort branches, just
+relocated a second time. Fixed by factoring the shared "log the skip,
+escalate once past 2x grace of wall clock, never touch `state[key]`" logic
+into one small helper (`_apierr_stashabort_skip`) both the raced branch and
+the aborted-stash branch now call — sharing the SAME `apierr-stashabort:`
+episode rather than inventing a fourth prefix, since both mean the identical
+thing from the escalation's point of view ("delivery could not be verified
+for this pane, this poll"); the abort/raced reason text carried in the ping
+already distinguishes which one recurred. New test
+(`test_run_once_apierror_raced_skip_pings_once_when_wedged`) pins the bound:
+zero keystrokes, exactly one deduped ping per episode.
+
+R4: a mutation build reverting the stash-abort branch's own threshold
+(`(now - sb["first_seen"]) > 2 * grace`, added earlier this same ticket to
+fix F1) back to transcript-mtime `idle` — literally the F2 defect this
+ticket already fixed once, one branch over — survived the whole suite with
+nothing pinning it. New test
+(`test_run_once_apierror_stashabort_pings_after_wall_clock_2x_grace_even_if_mtime_stays_fresh`)
+mirrors the existing busy-branch wall-clock-anchor test exactly; it PASSES
+against current HEAD (the anchor was already correct there — this is a
+mutation-killer, not a behavioral RED) and was hand-verified by reverting
+the anchor line, confirming only the new test fails while every sibling
+stays green, then restoring.
+
+R1: three of the four "a 529 pane can never again go silent" overclaim
+surfaces were corrected in the previous pass to state which branch the
+guarantee covers — the FOURTH, the inline comment inside job 1's busy-pane
+branch, still read the literal uncorrected claim verbatim (a
+comment-stripped whole-file scan: base 2 hits → pre-this-pass 1 hit, that
+one). Separately, the replacement prose the previous pass added itself
+over-claimed: the playbook's own correction bullet asserted the two F1/F2
+fixes together made the guarantee "actually system-wide" (false — falsified
+by R2's own newly-found stateless "skip raced" branch and by the
+pre-existing, `#175`-owned `skip in-mode` path, neither bounded by this
+ticket), and the autopilot-log's own entry claimed all four surfaces were
+"corrected in place ... the inline comment" when the inline comment never
+was. Fixed: the inline comment corrected in place (scoped, branch-specific
+language, matching the `run_once` docstring's own already-correct wording);
+the playbook's "system-wide" sentence replaced with an honest statement of
+what is bounded after this pass (busy-pane, stash-abort, and — now that R2
+landed in this same pass — the raced-skip branch, all sharing the identical
+escalation shape) and what remains a named, deliberate exception outside
+this ticket's scope (`skip in-mode`, `#175`'s own scope, measured 0 hits in
+a 7-day journal); the autopilot-log's own "all four ... corrected in place"
+sentence corrected to state honestly that only three were done in that
+pass, with a pointer to this entry for the fourth. Verified with a
+comment-stripped, normalized-whitespace scan across all three surfaces for
+every overclaim string used across this ticket's history — 0 hits.
+
+RED→GREEN, verified via `git stash push -- watchdog/__init__.py` (the
+established technique — a true RED needs the implementation genuinely
+absent, not merely present-but-untested): 95953a4 [red] (4 of the 5
+new/changed tests genuinely fail against current HEAD on behavioral
+assertions — never a crash; the 5th, R4's mutant-killer, correctly PASSES
+against current HEAD and is reported as such, not misrepresented as red) →
+2d92293 [green] (the fix, `Closes #176`). Full suite 3255 passed (3247
+baseline + 8 net new/changed), `ruff check .` clean.
+
+`python3 airuleset.py push`: `ruff check .` clean, its own internal
+unittest-discover run reported "Ran 3212 tests ... OK" (the push runner's own
+count consistently differs from pytest's collection — pytest itself reported
+3255 passed on the same tree, matching the RED→GREEN delta above), deployed
+to all 6 managed targets (dev2, gatekeeper, montalu/marek/david/simap@subdev)
+via clean fast-forwards `08ff821..2d92293`. Deployed SHA confirmed by reading
+`git rev-parse HEAD` directly on two boxes over ssh — dev2 and gatekeeper —
+both at `2d92293` (full HEAD sha), matching local HEAD.
+
+📔 Playbook: `.claude/rules/airuleset-internals.md` — a `_await_X`
+render-settle-poll helper (e.g. `_await_stash_bare`) needs its structural
+COMPLEMENT (`_await_draft_visible`) whenever the caller must also VERIFY a
+corrective action's own effect, not just the original one — an unchecked
+"best-effort restore" is exactly as unsafe as the unverified original
+action it exists to fix; two skip REASONS at the SAME call site for the
+SAME underlying condition ("delivery could not be verified this poll")
+should share ONE episode/state record parameterized by reason text, never a
+fourth dedicated prefix — reserve a new prefix only for episodes that can be
+genuinely, independently live for the same session at the same time; and a
+`git checkout -- <file>` used to "revert a hand-mutation" on a file that
+ALSO carries genuine UNCOMMITTED work discards ALL of it, not just the
+mutation — use a targeted string-substitute-then-restore script (read,
+`.replace()`, write; revert the same way) for any in-place hand-mutation
+test on a file with uncommitted changes still pending, never `git checkout`.
