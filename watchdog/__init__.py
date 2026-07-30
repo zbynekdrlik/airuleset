@@ -1669,7 +1669,8 @@ def _input_line_text(captured):
 
 def _classify_boundary(captured):
     """Classify the pane's input-box boundary for the keystroke-sending jobs
-    (12/14/15) — splits `_input_line_text`'s collapsed-to-None result into
+    (1/9/14/20; jobs 12/15 that once used this are REMOVED, #132/#102) —
+    splits `_input_line_text`'s collapsed-to-None result into
     its two genuinely different causes (issue #46): a session that is truly
     BUSY (a foreground spinner / dialog occupies the boundary, and it just
     isn't `❯`-shaped) versus one where NO boundary could be located at all
@@ -2027,7 +2028,32 @@ def _typed_landed(text, itext):
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
 
 
-def deliver_with_stash(pid, text, run, captured=None, logs=None):
+STASH_VERIFY_SETTLE_POLLS = 3      # bounded: a `C-s` toggle's render can lag
+STASH_VERIFY_SETTLE_S = 0.3        # behind the keystroke actually landing (#176 F4)
+
+
+def _await_stash_bare(pid, run, sleep_fn):
+    """Poll (bounded) for the box to render bare-with-stash-marker after our
+    OWN `C-s` toggle. An IMMEDIATE re-capture can still show the UNCHANGED
+    draft even though the toggle already landed server-side — this is a
+    render-SETTLE poll (never a blind timeout — it returns the instant the
+    box agrees), the same shape `_await_typed` already uses for a typed
+    payload. Treating that render lag as a real failure used to silently
+    strand the user's draft in the invisible single-slot stash with no
+    delivered turn left to auto-restore it (#176 F4 — a raced immediate
+    capture moved the draft into the slot and the caller reported "nothing
+    happened").  Returns (last_capture, verified_bool)."""
+    cap = None
+    for i in range(STASH_VERIFY_SETTLE_POLLS):
+        cap = capture_pane(pid, run, lines=30)
+        if _input_line_text(cap) == "" and STASH_MARKER in (cap or ""):
+            return cap, True
+        if i < STASH_VERIFY_SETTLE_POLLS - 1:
+            sleep_fn(STASH_VERIFY_SETTLE_S)
+    return cap, False
+
+
+def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     """Deliver `text` into a pane that is IDLE but holds a foreign draft.
 
     Protocol (every step verified, any surprise aborts to the SAFEST state):
@@ -2040,9 +2066,15 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None):
       3. If the agent-strip selector holds focus (`_strip_selected`, #36),
          ONE Escape first — never two (a rapid double-Escape PERMANENTLY
          DELETES a draft, empirically confirmed).
-      4. Ctrl+S stashes the draft. Re-capture and verify the box is now bare
-         AND the `› stashed` indicator is lit — else abort (the draft is
-         presumably untouched; nothing lost, nothing typed).
+      4. Ctrl+S stashes the draft. Poll (bounded, render-SETTLE — never a
+         blind timeout) for the box to go bare with the `› stashed`
+         indicator lit; an immediate capture can lag behind the toggle
+         actually landing. Still unverified after the settle window →
+         best-effort RESTORE (one more Ctrl+S, outcome unchecked — same
+         "return False regardless" philosophy as step 5's own abort-restore
+         below) and abort: an unsettled false-negative here used to
+         silently strand the user's draft in the invisible stash slot with
+         no delivered turn left to auto-restore it (#176 F4).
       5. Type `text` literally, re-capture, verify the boundary line is `❯` +
          a TAIL of `text` (a wrapped input renders its tail at the
          boundary). Verify failure → ABORT-RESTORE: Ctrl+S pops the stashed
@@ -2056,12 +2088,15 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None):
 
     `logs`, if a list, gets one reason string appended on every abort/success
     path — callers that want visibility (or tests) pass one in; the default
-    (None) is silent, matching every other keystroke helper in this file."""
+    (None) is silent, matching every other keystroke helper in this file.
+    `sleep_fn` backs step 4's settle poll (default `time.sleep`; tests inject
+    a no-op)."""
     def _log(reason):
         if isinstance(logs, list):
             logs.append(reason)
 
     run = run or _default_run
+    sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else capture_pane(pid, run, lines=30)
     if cap and STASH_MARKER in cap:
         _log("stash-abort: slot occupied")
@@ -2075,9 +2110,11 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None):
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "C-s"])
-    cap = capture_pane(pid, run, lines=30)
-    if _input_line_text(cap) != "" or STASH_MARKER not in (cap or ""):
+    cap, bare_ok = _await_stash_bare(pid, run, sleep_fn)
+    if not bare_ok:
         _log("stash-abort: verify-bare-failed")
+        run(["tmux", "send-keys", "-t", pid, "C-s"])      # best-effort restore (#176 F4)
+        capture_pane(pid, run, lines=30)
         return False
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=30)
@@ -7760,8 +7797,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           keystroke over the draft; an aborted stash never burns a retry). A
           pane that IS genuinely busy (or has no locatable boundary at all)
           gets job 4's busypane shape: zero keystrokes, one deduped ping per
-          episode once the stall runs past 2x grace — a 529 pane can never
-          again go silent with no keystroke and no ping;
+          episode once the stall runs past 2x grace of WALL CLOCK (anchored on
+          the episode's own first_seen, NOT on transcript mtime — an unrelated
+          transcript write can hold `idle` artificially low for as long as the
+          busy stretch lasts). An ABORTED stash delivery gets the identical
+          bound under its OWN dedicated prefix (#176 REOPENED finding F1: the
+          first pass moved this exact silent-unbounded-skip from the busy
+          branch to the stash-abort branch instead of eliminating it) — so
+          EITHER job-1 skip path is now bounded to at most one ping, never
+          silent forever. That guarantee is about the USER being told, not a
+          proof the draft itself survives every possible race in
+          `deliver_with_stash` (its own internal render-race is mitigated by a
+          bounded settle poll + a best-effort restore, #176 F4, not eliminated
+          — the ping above is what still fires even in that residual case);
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
@@ -8308,19 +8356,36 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 draft_pending = False
                 if not pane_at_idle_prompt(captured):
                     boundary_kind, boundary_txt = _classify_boundary(captured)
+                    # `and boundary_txt` is never False here: reaching this line already
+                    # required `not pane_at_idle_prompt(captured)`, and a genuinely bare
+                    # `("input", "")` boundary WOULD have made that gate True — so
+                    # `kind == "input"` at this point always carries a non-empty draft
+                    # (#176 F9, harmless dead conjunction — kept for readability).
                     if boundary_kind == "input" and boundary_txt:
                         draft_pending = True
                     else:
                         # Genuinely busy (or no boundary at all) → NEVER type. Silence
-                        # must become impossible (#176 item 2): job 4's escalation shape
-                        # (`:8536`) — a state record and exactly ONE ping per episode —
-                        # so a 529 pane can never again go silent with no keystroke and
-                        # no ping. A DEDICATED state prefix ("apierr-busypane:", not job
-                        # 4's own "busypane:") keeps the two independent episodes from
-                        # ever clobbering each other's bookkeeping for the same session.
-                        # Logging the classified kind + a snippet of the offending text
-                        # (item 3) names the shape on every occurrence instead of every
-                        # skip being an indistinguishable "busy-pane".
+                        # must become impossible (#176 item 2): job 4's own escalation
+                        # shape (a dedicated state record + exactly ONE ping per episode,
+                        # below in this same function) — so a 529 pane can never again go
+                        # silent with no keystroke and no ping. A DEDICATED state prefix
+                        # ("apierr-busypane:", not job 4's own "busypane:") keeps the two
+                        # independent episodes from ever clobbering each other's
+                        # bookkeeping for the same session. Logging the classified kind +
+                        # a snippet of the offending text (item 3) names the shape on
+                        # every occurrence instead of every skip being an indistinguishable
+                        # "busy-pane".
+                        #
+                        # Threshold anchored on THIS EPISODE's own `first_seen` (wall
+                        # clock), NOT on live `idle` (= now - transcript mtime, #176 F2):
+                        # CC's own retries / queue-snapshot writes keep touching the
+                        # transcript while the pane stays genuinely busy, which can hold
+                        # `idle` artificially low for as long as the busy stretch lasts —
+                        # exactly the mtime trap job 1's OWN grace (above) already avoids
+                        # for the other branch. `first_seen` is fixed the moment this
+                        # episode is first observed and only accumulates real wall-clock
+                        # time on every later sweep, so it cannot be reset by an unrelated
+                        # transcript write.
                         bkey = "apierr-busypane:" + key
                         b = state.get(bkey) or {"first_seen": int(now - idle), "pinged": False}
                         b["last_seen"] = int(now)
@@ -8328,7 +8393,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         snippet = (boundary_txt or "")[:40]
                         logs.append("skip busy-pane (api-error) %s [%s txt=%r]"
                                     % (project or pid, boundary_kind, snippet))
-                        if not b["pinged"] and idle > 2 * grace:
+                        if not b["pinged"] and (now - b["first_seen"]) > 2 * grace:
                             b["pinged"] = True
                             logs.append("busy-pane-wedged (api-error) %s [%s] idle=%dm "
                                         "— ping only (never type)"
@@ -8375,11 +8440,57 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         # text. An ABORTED stash (#176 item 5) must NOT burn a
                         # retry — `state[key]` stays untouched (the pre-decide()
                         # value) and the next poll re-derives from scratch.
-                        delivered = True if dry_run else deliver_with_stash(
-                            pid, NUDGE_TEXT, run, captured=captured, logs=logs)
-                        if not delivered:
-                            logs.append("skip stash-abort (api-error) %s [%s]"
+                        #
+                        # #176 F3: `captured` is the TOP-OF-SWEEP capture — job 10
+                        # (prompt_wedge_check, above) already had a chance to send
+                        # real keystrokes into this exact pane (a recognized MACHINE
+                        # draft gets auto-submitted) BEFORE job 1 ever reaches this
+                        # line, so `captured` can be stale by the time we're about to
+                        # act. Re-verify against a FRESH capture right here (job 20's
+                        # own pattern for the identical race) instead of trusting it —
+                        # a pane that moved since the sweep started is skipped WITHOUT
+                        # burning a retry, exactly like an aborted stash below.
+                        fresh = capture_pane(pid, run, lines=30)
+                        fkind, ftxt = _classify_boundary(fresh)
+                        if fkind != "input" or not ftxt:
+                            logs.append("skip raced (api-error stash) %s [%s]"
                                         % (project or pid, key))
+                            continue
+                        _logs_before = len(logs)
+                        delivered = True if dry_run else deliver_with_stash(
+                            pid, NUDGE_TEXT, run, captured=fresh, logs=logs)
+                        if not delivered:
+                            # #176 F1: the shipped fix RELOCATED the silent unbounded
+                            # skip from the busy branch to HERE instead of eliminating
+                            # it — an occupied stash slot or a live-turn abort left
+                            # this branch with no state, no ping, no bound (the
+                            # gatekeeper incident's exact failure signature, just moved).
+                            # Bound it the SAME way as the busy branch above: a
+                            # DEDICATED state prefix (never job 4's/the busy branch's
+                            # own prefixes — three independent episodes must never share
+                            # bookkeeping for the same session), exactly one deduped ping
+                            # per episode past 2x grace of WALL CLOCK, the abort reason
+                            # named in the ping text.
+                            reason = (logs[-1] if len(logs) > _logs_before
+                                     else "stash-abort: unknown")
+                            skey = "apierr-stashabort:" + key
+                            sb = state.get(skey) or {"first_seen": int(now - idle), "pinged": False}
+                            sb["last_seen"] = int(now)
+                            state[skey] = sb
+                            logs.append("skip stash-abort (api-error) %s [%s] (%s)"
+                                        % (project or pid, key, reason))
+                            if not sb["pinged"] and (now - sb["first_seen"]) > 2 * grace:
+                                sb["pinged"] = True
+                                logs.append("stash-abort-wedged (api-error) %s [%s] (%s) "
+                                            "— ping only (never a raw keystroke)"
+                                            % (project, key, reason))
+                                send_fn("\U0001f6d1 **%s** — API chyba drží pane s "
+                                        "rozpísaným draftom, no doručenie zlyhalo (%s) "
+                                        "— over ju prosím ručne."
+                                        % (project, reason),
+                                        owner=owner,
+                                        dedup_key="apierr-stashabort:%s:%s" % (key, sb["first_seen"]),
+                                        dry_run=dry_run)
                             continue
                         state[key] = entry
                         logs.append("nudge#%d %s [%s] (stash)" % (n, project, key))
@@ -8731,7 +8842,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             continue                       # account-wide usage state, not a session
         if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
-                or k.startswith("apierr-busypane:")
+                or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")
                 or k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
                 or k.startswith("subagent-busypane:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
