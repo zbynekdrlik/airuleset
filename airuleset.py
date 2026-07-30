@@ -2029,12 +2029,28 @@ def cmd_notify(args):
     sys.exit(1)
 
 
-def _gh_out(*gh_args, timeout=8):
-    """Best-effort `gh ...` stdout (stripped), or "" on any failure/timeout."""
+def _gh_out(*gh_args, timeout=8, cwd=None):
+    """Best-effort `gh ...` stdout (stripped), or "" on any failure/timeout.
+
+    Runs under `_gh_env()` — the SAME token resolution `cmd_tickets_status`
+    has always used (#181 I-6, live-confirmed on david@subdev 2026-07-30).
+    A reduced-authority stream box never runs `gh auth login` and carries no
+    GH_TOKEN/GITHUB_TOKEN in its shell env; it authenticates per-command from
+    ~/.git-credentials instead. Without that env a bare `gh` there exits 4
+    ("To get started with GitHub CLI, please run: gh auth login"), so EVERY
+    query through this helper failed closed — `slice-quals --count` printed
+    "a gh query failed" and exited 1, which meant the fork-no-merge /goal
+    template's condition (B) could NEVER hold on that box and the loop could
+    never legitimately finish. A real token already in the env always wins,
+    so this is a no-op on every box that has one.
+
+    `cwd` runs gh inside a specific checkout (gh resolves the repo from the
+    git remote there), so a caller that resolved the repo ROOT does not
+    depend on the process cwd happening to be it (#181 I-5)."""
     import subprocess
     try:
         r = subprocess.run(["gh", *gh_args], capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, cwd=cwd, env=_gh_env())
         return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -2056,6 +2072,18 @@ def _write_autopilot_progress(name, remaining, bump_done=True):
     mid-run. Always call this function; use `bump_done` to separate the two
     concerns instead of skipping the call.
 
+    A heartbeat-only write REFRESHES an already-live run window; it never
+    OPENS one (#164 M-1, round 3). With no prior progress file — or one whose
+    `ts` has fallen outside AUTOPILOT_RUN_WINDOW_S, which zeroes `base_done` —
+    an unconditional heartbeat wrote `{"done": 0, "ts": now}`, and statusbar
+    then rendered `Issues 0/40` for a full 6h window: an assertion that a run
+    is active and has achieved nothing, replacing the correct `Issues 40 core`.
+    Round 2 fixed a heartbeat that stopped too early by introducing one that
+    started too eagerly. Nothing is lost by declining that write — the run the
+    heartbeat exists to keep alive (I6's stream-ticket card mid-run) always
+    has an in-window file already, and `remaining` is overwritten from the
+    live 120s tickets cache on every render anyway (statusbar.py).
+
     Best-effort — a failure here never blocks the card send."""
     import re
     import time
@@ -2076,6 +2104,8 @@ def _write_autopilot_progress(name, remaining, bump_done=True):
             prev = None
         within_window = bool(
             prev and now - (prev.get("ts") or 0) <= statusbar.AUTOPILOT_RUN_WINDOW_S)
+        if not bump_done and not within_window:
+            return          # refresh a live run, never open one (#164 M-1)
         base_done = int(prev.get("done") or 0) if within_window else 0
         done = base_done + 1 if bump_done else base_done
         if not isinstance(remaining, int):
@@ -2138,20 +2168,10 @@ def cmd_tickets_status(args):
             return ""
 
     entry = {"ts": int(time.time()), "open": None, "name": "", "root": ""}
-    root = _out(["git", "rev-parse", "--show-toplevel"], cwd)
-    if not root:
-        # #61: cwd may be the PARENT of the actual repo (montalu's session cwd
-        # ~/devel/odoo, repo at ~/devel/odoo/odoo-slovnormal) — git rev-parse
-        # only ever walks UPWARD, so it never finds a repo BELOW cwd. Scan
-        # cwd's immediate subdirectories for exactly one `.git` and descend
-        # into it; 0 or >1 candidates stays ambiguous — never guess.
-        try:
-            candidates = [p for p in Path(cwd).iterdir()
-                          if p.is_dir() and (p / ".git").exists()]
-        except OSError:
-            candidates = []
-        if len(candidates) == 1:
-            root = _out(["git", "rev-parse", "--show-toplevel"], str(candidates[0]))
+    # ONE root definition, shared with cmd_slice_quals / cmd_core_quals (#181
+    # I-5) — including #61's fallback for a session cwd that is the PARENT of
+    # the actual repo (montalu's ~/devel/odoo, repo at ~/devel/odoo/odoo-erp).
+    root = _repo_root(cwd, runner=_out)
     if root:
         entry["root"] = root
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
@@ -2177,7 +2197,15 @@ def cmd_tickets_status(args):
             # ticket and the footer showed foreign streams' numbers (2026-07-20);
             # there the slice is the stream LABEL alone.
             handed, mine, failed = {}, set(), False
-            for qual in _slice_quals(_current_user(), root):
+            # SliceUnresolved (#181 I-2): an unresolvable gh identity is a gh
+            # ERROR, and a gh error is never an empty slice — keep open=None,
+            # exactly as a failed query already does. Guessing a qual set here
+            # would show a shared-account box the maintainer's whole backlog.
+            try:
+                quals = _slice_quals(_current_user(), root)
+            except SliceUnresolved:
+                quals, failed = [], True
+            for qual in quals:
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "-label:autopilot-skip " + qual, "-L", "200",
                             "--json", "number,labels"], root)
@@ -2195,8 +2223,11 @@ def cmd_tickets_status(args):
             entry["gk"] = None if failed else gk
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
-            skipped, sfailed = set(), False
-            for qual in _slice_quals(_current_user(), root):
+            # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
+            # or 3 quals), so the skipped bucket stays None for the same
+            # reason the open count does.
+            skipped, sfailed = set(), not quals
+            for qual in quals:
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
                             "label:autopilot-skip " + qual, "-L", "200",
                             "--json", "number"], root)
@@ -2674,7 +2705,13 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # tickets-status; gh error → None, never a wrong number.
         if not is_full:
             nums, failed = set(), False
-            for qual in _slice_quals(_current_user()):
+            try:
+                slice_quals = _slice_quals(_current_user())
+            except SliceUnresolved:
+                # #181 I-2: an unresolvable gh identity is a gh error, and a
+                # gh error is never a wrong number here — remaining stays None.
+                slice_quals, failed = [], True
+            for qual in slice_quals:
                 raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
                               "--search", "-label:autopilot-skip " + qual,
                               "-L", "200", "--json", "number")
@@ -3438,35 +3475,163 @@ def _current_user() -> str:
     return getpass.getuser()
 
 
-def _gh_login(cwd=None) -> str:
-    """The active gh login for this box, '' on any error. Cheap single call."""
+def _gh_login(cwd=None):
+    """The active gh login for this box, or **None** when the query itself
+    FAILED. Cheap single call, run under `_gh_env()` (#181 I-6).
+
+    It used to return `""` on any error, which made "gh api user failed"
+    indistinguishable from "this box is not the maintainer" — and the ONE
+    caller (`_slice_quals`) treats those two oppositely (#181 I-2). A broken
+    `gh` therefore silently produced the own-account 3-qual union: the
+    shared-account C2 validation was skipped entirely, and on odoo-erp
+    `author:@me` re-opens the 2026-07-20 foreign-stream leak the branch
+    exists to prevent. Live-reproduced on david@subdev, where `slice-quals`
+    printed all three quals because this query fails, not because the login
+    differs. None forces the caller to decide explicitly."""
     import subprocess
     try:
         r = subprocess.run(["gh", "api", "user", "-q", ".login"], cwd=cwd,
-                           capture_output=True, text=True, timeout=15)
-        return r.stdout.strip() if r.returncode == 0 else ""
+                           capture_output=True, text=True, timeout=15,
+                           env=_gh_env())
     except Exception:
-        return ""
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+class SliceUnresolved(Exception):
+    """This box's own gh identity could not be resolved, so "my slice" is
+    undefined. Raised by `_slice_quals` instead of falling back to a default
+    qual set — every caller must handle it in ITS OWN established way
+    (the CLI refuses; the footer and the run-card keep `None`, never a
+    wrong number). #181 I-2."""
 
 
 def _core_search_excl():
-    """The full-authority CORE slice's exclusion fragment: every sub-dev
-    stream's own `stream:<user>` label, so the footer (`cmd_tickets_status`),
-    the Discord card (`_notify_run_card`), and the `/goal` stop-proof
-    (`cmd_core_quals`) all exclude EXACTLY the same sub-dev-owned tickets
-    from a full-authority box's own count — single source of truth
-    (#164 / #181 I4)."""
-    return " ".join("-label:stream:%s" % u for u in sorted(AUTHORITY_BY_USER))
+    """The full-authority CORE slice's exclusion fragment: every REDUCED-
+    authority sub-dev stream's own `stream:<user>` label, so the footer
+    (`cmd_tickets_status`), the Discord card (`_notify_run_card`), and the
+    `/goal` stop-proof (`cmd_core_quals`) all exclude EXACTLY the same
+    sub-dev-owned tickets from a full-authority box's own count — single
+    source of truth (#164 / #181 I4).
+
+    Only entries whose profile is NOT `full` are excluded (#181 M-5): a
+    hypothetical `full` entry in AUTHORITY_BY_USER is not a sub-dev stream
+    at all, and excluding its label would silently remove a whole population
+    from every full-authority count."""
+    return " ".join("-label:stream:%s" % u
+                    for u, profile in sorted(AUTHORITY_BY_USER.items())
+                    if profile != "full")
 
 
 def _slice_quals(user, cwd=None):
     """gh search quals for a reduced-authority stream's OWN ticket slice.
     Own-account streams (david/kvaskodev): assigned ∪ authored ∪ stream label.
     Shared-account boxes (gh login == the maintainer account): the stream
-    LABEL alone — @me there matches the whole maintainer-authored backlog."""
-    if _gh_login(cwd) == MAINTAINER_GH_LOGIN:
+    LABEL alone — @me there matches the whole maintainer-authored backlog.
+
+    Raises `SliceUnresolved` when the gh login cannot be resolved at all
+    (#181 I-2) — an unresolvable identity cannot pick between those two
+    branches, and guessing either one is a wrong answer on some box."""
+    login = _gh_login(cwd)
+    if login is None:
+        raise SliceUnresolved(
+            "gh api user failed — cannot tell whether this box authenticates "
+            "as the maintainer account (slice = the stream LABEL alone) or as "
+            "its own (assignee ∪ author ∪ label). Refusing to guess: the two "
+            "branches disagree on every shared-account box.")
+    if login == MAINTAINER_GH_LOGIN:
         return ["label:stream:" + user]
     return ["assignee:@me", "author:@me", "label:stream:" + user]
+
+
+# An open, non-skip ticket carrying ANY of these labels is an obligation of the
+# FULL-authority (core / gatekeeper) box even when it also carries a sub-dev
+# `stream:<user>` label: only this box can perform the action they stand for.
+# `needs-gatekeeper` = a stream→supervisor action request (cross-stream
+# protocol rule 7 — by definition nobody else can do it); `prio:bounce` = a
+# ticket the gatekeeper returned with findings, whose re-review is this box's
+# ball (rule 4: "neither side ever finishes while the other holds its ball");
+# `ready-for-review` = a hand-off awaiting this box's review / merge / close
+# (rule 4 again, and the fork-no-merge template's "CLOSED by the maintainer").
+MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "prio:bounce", "ready-for-review")
+
+
+def _obligation_quals():
+    """The per-qual search fragments whose UNION is a full-authority box's
+    OBLIGATION set: the CORE slice, PLUS every open ticket only this box can
+    action regardless of which stream owns it (#181 round 3, CRITICAL).
+
+    `_core_search_excl()` is the FOOTER's *display* partition — "which
+    population am I showing". Round 2 reused it as the `/goal` stop-proof's
+    *obligation* partition — "which tickets must I finish before I may stop" —
+    and those are not the same set. Measured on zbynekdrlik/odoo-erp
+    2026-07-30: 83 open non-skip, 40 in the core partition, and 13 tickets
+    outside it that only this box can move (#2396 and #2377 are
+    `stream:montalu` + `needs-gatekeeper`, plus 11 open `prio:bounce`). The
+    gatekeeper would close its 40, the proof would print 0, the loop would
+    stop — leaving 13 tickets blocked on the very box that just stopped. That
+    is #181 verbatim at a new address.
+
+    This is NOT a revert to the whole-repo count the original ticket rejected
+    (that was the never-stops failure): a stream ticket the sub-dev is
+    actively working carries none of these labels and still does not block
+    this box. Union in Python, one query per qual — gh's `--search` ANDs
+    space-joined qualifiers ACROSS qualifier types and cannot OR them.
+
+    Known residual, deliberate: a hand-off is detected by the
+    `ready-for-review` LABEL (the same signal the footer's `gk` bucket uses,
+    applied by the repo's own subdev-handoff-label workflow), not by the
+    `READY-FOR-REVIEW:` comment that is its primary signal. The only
+    single-query comment form is `"READY-FOR-REVIEW:" in:comments`, and
+    GitHub tokenizes quoted phrases (the 2026-07-24 `in:title` false match),
+    so it over-matches — and over-counting the obligation set is the
+    never-stops failure again."""
+    return [_core_search_excl()] + ["label:" + lb
+                                    for lb in MAINTAINER_ACTION_LABELS]
+
+
+def _repo_root(cwd=None, runner=None):
+    """The git repo root for `cwd`, or "" when it cannot be resolved.
+
+    ONE definition, so `cmd_tickets_status` (the footer), `cmd_slice_quals`
+    and `cmd_core_quals` all resolve authority — and run gh — against the
+    SAME root. #181 I-5: the CLI commands used a bare `resolve_authority()`,
+    which reads `Path.cwd()/CLAUDE.md`, while the footer passes the repo
+    root; a project marker `airuleset:authority=...` was therefore invisible
+    to the CLI whenever the session cwd was a subdirectory, so the "ONE
+    definition, resolved per box" claim held only when cwd was exactly the
+    repo root.
+
+    Carries #61's fallback: the session cwd may be the PARENT of the actual
+    repo (montalu's ~/devel/odoo with the repo at ~/devel/odoo/odoo-erp) and
+    `git rev-parse` only ever walks UPWARD. Exactly one `.git` subdirectory
+    is descended into; 0 or >1 stays ambiguous — never guess."""
+    import subprocess
+
+    cwd = cwd or os.getcwd()
+
+    def _default_run(argv, cd):
+        try:
+            r = subprocess.run(argv, cwd=cd, capture_output=True, text=True,
+                               timeout=20, env=_gh_env())
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    run = runner or _default_run
+    root = run(["git", "rev-parse", "--show-toplevel"], cwd)
+    if root:
+        return root
+    try:
+        candidates = [p for p in Path(cwd).iterdir()
+                      if p.is_dir() and (p / ".git").exists()]
+    except OSError:
+        candidates = []
+    if len(candidates) == 1:
+        return run(["git", "rev-parse", "--show-toplevel"], str(candidates[0]))
+    return ""
 
 
 def _ticket_is_stream_labeled(labels):
@@ -3527,18 +3692,91 @@ def cmd_authority(args):
               f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
 
 
-def _label_exists_on_repo(label):
+def _label_exists_on_repo(label, cwd=None):
     """True if `label` is a DEFINED label on the current repo (gh label list
     --search), False if confirmed absent, None if the query itself failed —
     an unreachable/erroring gh is NOT evidence the label is missing (#181
     C2, round 2)."""
     raw = _gh_out("label", "list", "--search", label, "--json", "name",
-                  "-L", "50")
+                  "-L", "50", cwd=cwd)
     try:
         names = {(x or {}).get("name") for x in json.loads(raw)}
     except (ValueError, TypeError):
         return None
     return label in names
+
+
+def _search_index_healthy(cwd=None):
+    """Does gh's SEARCH path demonstrably work for this identity/repo?
+    True = yes; False = demonstrably not (or unprovable); None = the repo
+    genuinely has no open issues at all, so an empty slice is trivially
+    correct.
+
+    #181 I-1: round 2's cross-check ran `involves:@me` and only required the
+    response to PARSE — but `[]` parses, and "search returns nothing
+    everywhere" IS `[]`, i.e. the exact state the check claimed to detect was
+    the state it accepted. The reviewer executed it: login zbynekdrlik, user
+    montalu, label present, every query `[]` → rc 0, stdout `0`. A real
+    cross-check must ASSERT NON-EMPTY on a query that cannot legitimately be
+    empty.
+
+    A SORT-ONLY search (`sort:created-desc`) is that query: it carries no
+    filtering qualifier, so it matches every open issue in the repo. If it
+    comes back empty the repo may genuinely have none — settled by the REST
+    listing path (`gh issue list` with no `--search`, a different gh code
+    path that does not touch the search index). REST sees issues but search
+    sees none ⇒ the search index is not answering ⇒ refuse."""
+    probe = _gh_out("issue", "list", "--state", "open", "--search",
+                    "sort:created-desc", "-L", "1", "--json", "number", cwd=cwd)
+    try:
+        rows = json.loads(probe)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(rows, list):
+        return False
+    if rows:
+        return True
+    rest = _gh_out("issue", "list", "--state", "open", "-L", "1",
+                   "--json", "number", cwd=cwd)
+    try:
+        rest_rows = json.loads(rest)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(rest_rows, list):
+        return False
+    return None if not rest_rows else False
+
+
+def _union_open_issues(quals, base, cwd=None):
+    """Run ONE `gh issue list --search` per qual and union the rows by issue
+    number, returning `(rows_by_number, failed)`.
+
+    Per-qual queries are not an optimisation choice: gh's `--search` ANDs
+    space-joined qualifiers across qualifier types and cannot OR them, so a
+    caller that needs a UNION (assignee ∪ author ∪ label; core ∪ the
+    maintainer-action labels) must union client-side. `failed` is True if ANY
+    query failed to parse — a gh error is never an empty result."""
+    seen, failed = {}, False
+    for qual in quals:
+        search = (base + " " + qual).strip() if qual else base
+        raw = _gh_out("issue", "list", "--state", "open", "--search", search,
+                      "-L", "1000", "--json", "number,title,createdAt",
+                      cwd=cwd, timeout=20)
+        try:
+            for x in json.loads(raw):
+                seen[x["number"]] = x
+        except (ValueError, TypeError, KeyError):
+            failed = True
+    return seen, failed
+
+
+def _print_issue_rows(rows):
+    """`number<TAB>createdAt<TAB>title`, OLDEST first (the bounce lane picks
+    the oldest — no client-side sort needed downstream)."""
+    for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
+        row = rows[n]
+        print("%s\t%s\t%s" % (n, row.get("createdAt") or "",
+                              row.get("title") or ""))
 
 
 def cmd_slice_quals(args):
@@ -3589,8 +3827,16 @@ def cmd_slice_quals(args):
 
     A gh query failure prints to stderr and exits non-zero — NEVER prints `0`
     on failure, which would be exactly the false-empty bug this exists to
-    fix."""
-    authority = resolve_authority()
+    fix.
+
+    Authority, the slice quals and every gh query resolve against the REPO
+    ROOT, not the process cwd (#181 I-5) — a project CLAUDE.md marker
+    `airuleset:authority=...` was invisible to this command whenever the
+    session cwd was a subdirectory, while the footer saw it, so the two
+    consumers of "THE one definition" could disagree about which profile the
+    box was even running."""
+    root = _repo_root() or None
+    authority = resolve_authority(cwd=root)
     if authority == "full":
         print(
             "slice-quals: this box resolves to FULL authority — there is no "
@@ -3600,7 +3846,11 @@ def cmd_slice_quals(args):
             "#181 C1).", file=sys.stderr)
         sys.exit(1)
     user = _current_user()
-    quals = _slice_quals(user)
+    try:
+        quals = _slice_quals(user, cwd=root)
+    except SliceUnresolved as exc:
+        print("slice-quals: %s" % exc, file=sys.stderr)
+        sys.exit(1)
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
     if not (want_count or want_list):
@@ -3610,17 +3860,10 @@ def cmd_slice_quals(args):
 
     extra = getattr(args, "extra", None)
     base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
-    seen = {}
-    failed = False
-    for qual in quals:
-        raw = _gh_out("issue", "list", "--state", "open", "--search",
-                      base + " " + qual, "-L", "200",
-                      "--json", "number,title,createdAt")
-        try:
-            for x in json.loads(raw):
-                seen[x["number"]] = x
-        except (ValueError, TypeError, KeyError):
-            failed = True
+    # -L 1000, matching core-quals (#181 M-2): a single population can only
+    # be UNDER-counted by a clamp, never zeroed — but the documented
+    # "0 = slice empty" contract must not silently cap either.
+    seen, failed = _union_open_issues(quals, base, cwd=root)
     if failed:
         print("slice-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
@@ -3629,7 +3872,7 @@ def cmd_slice_quals(args):
         # C2 — a shared-account slice's ONLY signal is one label; a zero
         # here is UN-validated until confirmed both ways.
         label_name = quals[0].split(":", 1)[1]     # "label:stream:x" -> "stream:x"
-        exists = _label_exists_on_repo(label_name)
+        exists = _label_exists_on_repo(label_name, cwd=root)
         if exists is not True:
             print(
                 "slice-quals: cannot confirm label '%s' exists on this repo "
@@ -3640,50 +3883,84 @@ def cmd_slice_quals(args):
                    "not found" if exists is False else "the check itself failed"),
                 file=sys.stderr)
             sys.exit(1)
-        cross_raw = _gh_out("issue", "list", "--state", "open", "--search",
-                            base + " involves:@me", "-L", "1", "--json", "number")
-        try:
-            json.loads(cross_raw)
-        except (ValueError, TypeError):
+        healthy = _search_index_healthy(cwd=root)
+        if healthy is False:
             print(
-                "slice-quals: label '%s' exists, but the involves:@me "
-                "cross-check query failed — a 0 here is UNRELIABLE (gh "
-                "search may not be working at all for this identity/repo). "
-                "Refusing (#181 C2)." % label_name, file=sys.stderr)
+                "slice-quals: label '%s' exists, but gh's SEARCH path is not "
+                "answering for this identity/repo (a sort-only search that "
+                "must match every open issue came back empty, or the probe "
+                "itself failed, while the repo does have open issues) — a 0 "
+                "here is UNRELIABLE. Refusing (#181 C2 / I-1)." % label_name,
+                file=sys.stderr)
             sys.exit(1)
+        # healthy is True (search demonstrably works) or None (the repo has
+        # no open issues at all, so an empty slice is trivially correct).
     if want_count:
         print(len(seen))
         return
-    for n in sorted(seen, key=lambda k: seen[k].get("createdAt") or ""):
-        row = seen[n]
-        print("%s\t%s\t%s" % (n, row.get("createdAt") or "", row.get("title") or ""))
+    _print_issue_rows(seen)
 
 
 def cmd_core_quals(args):
-    """Print the full-authority CORE slice's open, non-skip issue count
-    (#181 I4, round 2) — the SAME `stream:<user>` exclusion the footer
-    (`cmd_tickets_status`) and the Discord run-card (`_notify_run_card`)
-    already use, so the FULL `/goal` template's stop-proof counts EXACTLY
-    the same population those two already show. Before this command
-    existed, the FULL template's proof was a bare whole-repo count — which
-    could never reach 0 while ANY sub-dev stream still had open work, even
-    though a core/gatekeeper box is FORBIDDEN from working those tickets
-    (they belong to that stream's own box).
+    """The full-authority box's OBLIGATION set: every open, non-skip issue
+    THIS box must action before its `/goal` loop may stop (#181, round 3).
 
-    Always prints an integer. A gh query failure prints to stderr and exits
-    non-zero — NEVER prints a number on failure (mirrors `slice-quals`'s own
-    contract)."""
-    excl = _core_search_excl()
-    raw = _gh_out("issue", "list", "--state", "open", "--search",
-                  "-label:autopilot-skip " + excl, "-L", "1000",
-                  "--json", "number", "-q", "length", timeout=20)
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
+    That is the CORE slice — the backlog minus every reduced-authority
+    stream's own `stream:<user>` tickets, the SAME exclusion the footer
+    (`cmd_tickets_status`) and the Discord run-card (`_notify_run_card`) use
+    — UNIONED with every open ticket carrying a MAINTAINER_ACTION_LABELS
+    label, whatever stream owns it. See `_obligation_quals()` for why the
+    core partition alone is the wrong set (it excluded odoo-erp #2396/#2377,
+    `stream:montalu` + `needs-gatekeeper`, which only this box can move) and
+    why this is not a revert to the whole-repo count.
+
+    NOTE, deliberately: this is NOT the same number the footer renders as
+    `Issues N core`. The footer answers a DISPLAY question ("which population
+    am I showing, and how much is hidden behind `streamy M`"); this answers an
+    OBLIGATION question ("what must I finish before I may stop"). Round 2's
+    I3 finding settled the same shape for `slice-quals` vs the footer's `gk`
+    partition: document the deliberate difference and lock it with a
+    regression test, never force two different questions to the same number.
+
+    --count: prints an integer (0 = nothing left for this box to action).
+    --list:  prints `number<TAB>createdAt<TAB>title`, OLDEST first — so the
+             skill's backlog SELECTION and its stop-proof read the same set.
+    No flag: prints each qual whose union defines the obligation set.
+
+    A gh query failure prints to stderr and exits non-zero — NEVER prints a
+    number on failure (mirrors `slice-quals`'s own contract)."""
+    root = _repo_root() or None
+    authority = resolve_authority(cwd=root)
+    if authority != "full":
+        # I-3: C1's fix, applied in the mirror direction. `slice-quals`
+        # correctly refuses on a full box; this one answered on ANY box, so
+        # run on montalu it printed a number that is neither that box's slice
+        # nor a valid stop-proof for it.
+        print(
+            "core-quals: this box resolves to %s authority — the core/"
+            "obligation slice is a FULL-authority (core / gatekeeper) "
+            "question. Use `slice-quals` here. Refusing rather than printing "
+            "a plausible-looking number (#181 I-3)." % authority,
+            file=sys.stderr)
+        sys.exit(1)
+
+    quals = _obligation_quals()
+    want_count = getattr(args, "count", False)
+    want_list = getattr(args, "list", False)
+    if not (want_count or want_list):
+        for q in quals:
+            print(q)
+        return
+
+    seen, failed = _union_open_issues(quals, "-label:autopilot-skip", cwd=root)
+    if failed:
         print("core-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
-    print(n)
+    if want_count:
+        print(len(seen))
+        return
+    _print_issue_rows(seen)
 
 
 UPLOAD_LOG_DIR_ENV = "AIRULESET_UPLOAD_LOG_DIR"
@@ -5368,11 +5645,14 @@ def main():
 
     p_core = sub.add_parser(
         "core-quals",
-        help="The full-authority CORE slice's open non-skip issue count "
-             "(#181 I4) — used by the FULL /goal stop-proof template")
+        help="A full-authority box's OBLIGATION set — the CORE slice plus "
+             "every ticket only this box can action (#181) — used by the "
+             "FULL /goal stop-proof template and its backlog listing")
     p_core.add_argument("--count", action="store_true",
-                        help="No-op — the command always prints the count "
-                             "(kept for symmetry with slice-quals --count)")
+                        help="Print the obligation set's open non-skip issue "
+                             "count (0 = nothing left for this box to action)")
+    p_core.add_argument("--list", action="store_true",
+                        help="Print number<TAB>createdAt<TAB>title, oldest first")
 
     p_lock = sub.add_parser(
         "autopilot-lock",
