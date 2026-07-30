@@ -2,7 +2,7 @@
 
 **When the user says "issues N", "gk N", or "skipped N", they usually mean the airuleset statusline segment at the BOTTOM of Claude Code** (the footer next to the ctx meter) — not a GitHub query for you to invent (user directive, 2026-07-19). The segment's forms:
 
-- `Issues N` — open non-`autopilot-skip` GitHub issues for this repo (a reduced-authority sub-dev box counts only ITS OWN slice).
+- `Issues N` — open non-`autopilot-skip` GitHub issues for THIS BOX's own slice, never automatically the whole repo: a full-authority (core/gatekeeper) box EXCLUDES every sub-dev stream's `stream:<user>`-labeled tickets (renders `Issues N core · streamy M` when the excluded population is known, so it never hides behind a bare number — #164); a reduced-authority sub-dev box counts only ITS OWN assigned/authored/stream-labeled slice.
 - `Issues D/T` — an ACTIVE autopilot run: D tickets done of T total (green when the backlog empties).
 - `· gk N` — sub-dev boxes only: own tickets already handed off to the gatekeeper (`ready-for-review` label); gk 0 still renders.
 - `· skipped K` — tickets labeled `autopilot-skip` (excluded from runs); hidden at 0.

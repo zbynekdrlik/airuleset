@@ -244,7 +244,7 @@ def stream_qualified(name):
 
 def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
                            review_ok=True, done=None, remaining=None, urls=None,
-                           handoff=False):
+                           handoff=False, scope_label=None):
     """Build the canonical per-ticket completion card (Slovak, Discord markdown).
 
     `tickets` is a list of dicts {n, title, goal, achieved}. `urls` is a list of
@@ -253,6 +253,13 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
     but NOT rendered (the user wants the live view, not the code/diff). Structure is
     fixed here so every card is consistent regardless of who calls it. No @mention
     here — send() prepends it.
+
+    `scope_label` (#164): a short word appended to the 📊 progress line stating
+    WHICH POPULATION `remaining` counts (e.g. "core" on a full-authority box,
+    once `remaining` is scoped to the core slice) — a bare "ostáva 72" reads as
+    "remaining for this run" when it is really the whole repo; the footer has
+    the same self-description problem and the same fix. None (default) keeps
+    the line unlabeled — unchanged for every existing caller.
 
     `handoff=True` renders the FORK-NO-MERGE variant: the stream cannot merge or
     deploy, so instead of the 📦 "nasadené <version>" line it shows a 🔎 "odovzdané
@@ -326,6 +333,9 @@ def compose_autopilot_card(repo, tickets, pr=None, version=None, merge_sha=None,
             prog = "hotové %s · ostáva %s" % (done, rem)
         else:
             prog = "ostáva %s" % rem
+        label = _clean(scope_label)
+        if label:
+            prog += " " + label
         tail = " (backlog prázdny 🎉)" if rem == 0 else ""
         lines.append("📊 **Autopilot:** %s%s" % (prog, tail))
 

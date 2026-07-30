@@ -234,8 +234,10 @@ class TestStatuslineBadge(unittest.TestCase):
     def test_refresh_collects_the_count_for_full_authority(self):
         src = Path(airuleset.__file__).read_text()
         i = src.index('entry["scope"] = "core"')
-        self.assertIn("needs-gatekeeper", src[i:i + 2000])
-        self.assertIn('entry["gk_req"]', src[i:i + 2000])
+        # Window widened for the streamy bucket (#164) that now sits between
+        # the core-count query and the gk_req query.
+        self.assertIn("needs-gatekeeper", src[i:i + 2700])
+        self.assertIn('entry["gk_req"]', src[i:i + 2700])
 
 
 class TestCmdGkRequest(unittest.TestCase):

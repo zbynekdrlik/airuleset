@@ -143,6 +143,19 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         if isinstance(gk, int):
             return ("\033[38;5;75mIssues %d\033[0m \033[38;5;245m· gk %d\033[0m%s"
                     % (open_n, gk, skip_sfx))
+        # Full-authority (scope=core): self-describe the population (#164) —
+        # a bare "Issues 28" hid the 45 sub-dev-owned tickets excluded from
+        # it, which looks exactly like a broken counter (the same reasoning
+        # that already keeps `gk` visible at 0, just for a bigger number).
+        # Rendered whenever the cache actually carries a streamy count;
+        # falls back to the plain form on a stale/older cache.
+        if cache.get("scope") == "core":
+            streamy = cache.get("streamy")
+            if isinstance(streamy, int):
+                return ("\033[38;5;75mIssues %d core\033[0m "
+                        "\033[38;5;245m· streamy %d\033[0m%s"
+                        % (open_n, streamy, skip_sfx))
+            return "\033[38;5;75mIssues %d core\033[0m%s" % (open_n, skip_sfx)
         return "\033[38;5;75mIssues %d\033[0m%s" % (open_n, skip_sfx)
     return ""
 
