@@ -2102,87 +2102,154 @@ def _typed_landed(text, itext):
 STASH_VERIFY_SETTLE_POLLS = 3      # bounded: a `C-s` toggle's render can lag
 STASH_VERIFY_SETTLE_S = 0.3        # behind the keystroke actually landing (#176 F4)
 
+# The four honest outcomes of our own `C-s` toggle (#189). The mechanism used
+# to collapse them into one boolean ("did the box go bare WITH the marker?")
+# and treat everything else as a failed stash — which is how an EMPTY box
+# became an error condition, and why zero `continue`s were delivered in 24h
+# box-wide. Each outcome now names a genuinely different pane state and gets
+# a genuinely different recovery.
+STASH_PARKED = "parked"            # bare + marker lit: a real draft is in the slot
+STASH_NOOP = "noop"                # bare, no marker: there was nothing to park
+STASH_UNRESOLVED = "unresolved"    # still shows content, no marker: a rendered
+                                   # ghost suggestion, or a genuinely lost
+                                   # keystroke — DELIBERATELY not distinguished
+STASH_NO_BOUNDARY = "no-boundary"  # the input line itself is gone (spinner /
+                                   # dialog / unreadable): touch nothing more
 
-def _await_stash_bare(pid, run, sleep_fn):
-    """Poll (bounded) for the box to render bare-with-stash-marker after our
-    OWN `C-s` toggle. An IMMEDIATE re-capture can still show the UNCHANGED
-    draft even though the toggle already landed server-side — this is a
-    render-SETTLE poll (never a blind timeout — it returns the instant the
-    box agrees), the same shape `_await_typed` already uses for a typed
-    payload. Treating that render lag as a real failure used to silently
-    strand the user's draft in the invisible single-slot stash with no
-    delivered turn left to auto-restore it (#176 F4 — a raced immediate
-    capture moved the draft into the slot and the caller reported "nothing
-    happened").  Returns (last_capture, verified_bool)."""
+
+def _await_stash_settled(pid, run, sleep_fn):
+    """Poll (bounded) for the pane to settle after our OWN `C-s`, and report
+    WHICH of the four states above it settled into.
+
+    Still a render-SETTLE poll, never a blind timeout — it returns the instant
+    the box agrees, because an IMMEDIATE re-capture can show the UNCHANGED
+    screen even though the toggle already landed server-side (#176 F4).
+
+    What changed in #189 is the question being asked. The old poll demanded
+    `input == "" AND marker lit` and called anything else a failure. But a
+    bare box with NO marker is not a failure at all: it means there was
+    nothing to park, and stashing nothing is a no-op. Since Claude Code's grey
+    prompt suggestion renders as ordinary text once `capture-pane -p` strips
+    its SGR attributes, "the box looks non-empty" was never evidence that a
+    draft existed — so the poll reports what it can actually see and lets the
+    caller act on each state, rather than folding three deliverable states
+    into one abort. Returns (last_capture, outcome, boundary_text) where
+    boundary_text is the input line as it stands at the end (None when there
+    is no input line at all)."""
     cap = None
     for i in range(STASH_VERIFY_SETTLE_POLLS):
         cap = capture_pane(pid, run, lines=30)
-        if _input_line_text(cap) == "" and STASH_MARKER in (cap or ""):
-            return cap, True
+        if _input_line_text(cap) == "":
+            return cap, (STASH_PARKED if STASH_MARKER in (cap or "")
+                         else STASH_NOOP), ""
         if i < STASH_VERIFY_SETTLE_POLLS - 1:
             sleep_fn(STASH_VERIFY_SETTLE_S)
-    return cap, False
+    itext = _input_line_text(cap)
+    if itext is None:
+        return cap, STASH_NO_BOUNDARY, None
+    return cap, STASH_UNRESOLVED, itext
 
 
-def _await_draft_visible(pid, run, sleep_fn):
-    """Poll (bounded) for the box to show a NON-EMPTY input line again — the
-    structural complement of `_await_stash_bare` (which polls for the
-    opposite: bare-with-marker). Used to VERIFY that a restoring/corrective
-    `C-s` genuinely brought a draft back into view (#176 R3) instead of
-    trusting an unchecked restore blindly — a raced render can lag a toggle
-    landing here exactly as it can for the original stash, so this is a
-    render-SETTLE poll too, never a blind timeout: it returns the instant the
-    box agrees. Returns (last_capture, visible_bool)."""
-    cap = None
-    for i in range(STASH_VERIFY_SETTLE_POLLS):
-        cap = capture_pane(pid, run, lines=30)
-        if _input_line_text(cap):
-            return cap, True
-        if i < STASH_VERIFY_SETTLE_POLLS - 1:
-            sleep_fn(STASH_VERIFY_SETTLE_S)
-    return cap, False
+def _typed_exclusively(text, itext):
+    """True only if the input box holds NOTHING BUT `text` — the STRICT form of
+    `_typed_landed`, required when we typed into a box that visibly held
+    something (#189).
+
+    `_typed_landed` accepts a TAIL of `text` on the boundary line, because a
+    wrapped input renders its tail there. That allowance is safe on a box we
+    verified bare first, but not on a box that already showed content: if the
+    content was a real draft our text APPENDS to it, and a wrap landing inside
+    our own text would leave a boundary that is a legitimate suffix of `text`
+    — passing the loose check and submitting the user's draft with our text
+    glued on. Requiring an exact match (or Claude Code's collapsed
+    `[Pasted text #N]` placeholder for a long payload) has no such hole: a
+    ghost suggestion is REPLACED by the keystroke, so the box holds exactly
+    our text, while a real draft never can."""
+    if not itext:
+        return False
+    if itext == text:
+        return True
+    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
+
+
+# A wrapped append can never match the exact `pre + text` signature the undo
+# requires, so this cap is only ever a guard against a pathological payload;
+# it exists so the undo can never spray hundreds of backspaces at a pane.
+STASH_UNDO_MAX_BACKSPACES = 400
+
+
+def _undo_appended_text(pid, run, pre_text, text):
+    """Remove exactly the characters WE typed from a box that already held
+    `pre_text`, and VERIFY the box came back to `pre_text` (#189).
+
+    Reached only when nothing was parked and the box shows the exact append
+    signature `pre_text + text` — i.e. our own keystroke landed on top of a
+    real draft because the stash toggle was lost. A restoring `C-s` would be
+    the WRONG recovery here: with an empty slot it would PARK the polluted
+    text, jamming the single slot into the one decline this design keeps and
+    leaving the user's draft invisible. Backspacing our own characters is the
+    only recovery that touches nothing of the user's. Returns whether the
+    draft verifiably came back."""
+    if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
+        return False
+    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
+    return _input_line_text(capture_pane(pid, run, lines=30)) == pre_text
 
 
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
-    """Deliver `text` into a pane that is IDLE but holds a foreign draft.
+    """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
-    Protocol (every step verified, any surprise aborts to the SAFEST state):
-      1. Abort if a stash slot is already occupied (`› stashed` anywhere in
-         the capture) — stashing over it would SILENTLY destroy whatever is
-         already parked there.
-      2. Require idle-with-a-draft: a free `❯` prompt with non-empty text and
-         no live-turn signal ('esc to interrupt'). Anything else aborts —
-         this helper handles exactly one shape, never a guess.
+    #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
+    draft before it would act, and then required the box to go bare WITH the
+    `› stashed` marker before it would type. Both conditions are answers to
+    the same question — "is there really something in the prompt?" — and that
+    question is UNANSWERABLE from what we can see: `capture_pane` shells
+    `tmux capture-pane -p` with no `-e`, so Claude Code's dim (SGR 246) prompt
+    suggestion arrives stripped of its colour and is byte-identical to text
+    the user typed. Every classifier in this file therefore reported drafts
+    that did not exist; the stash then had nothing to park, no marker could
+    light, and the verify failed forever. Measured cost: `stash-delivered = 0`
+    across the whole fleet in 24h, with a 529 sitting unattended on gatekeeper
+    until the user typed `continue` by hand.
+
+    So we stop computing the answer. Park first, look after, and let each
+    OBSERVED outcome choose its own recovery:
+
+      1. Abort if the stash slot is ALREADY occupied (`› stashed` anywhere in
+         the capture). This is the ONE genuine decline that remains: the slot
+         is single and overwrites silently, so stashing over it would destroy
+         a parked draft with no way back.
+      2. Require only that the pane is idle at an input boundary — a free `❯`
+         (bare or holding anything at all) and no live-turn signal
+         ('esc to interrupt'). Emptiness is explicitly NOT a precondition.
       3. If the agent-strip selector holds focus (`_strip_selected`, #36),
          ONE Escape first — never two (a rapid double-Escape PERMANENTLY
          DELETES a draft, empirically confirmed).
-      4. Ctrl+S stashes the draft. Poll (bounded, render-SETTLE — never a
-         blind timeout) for the box to go bare with the `› stashed`
-         indicator lit; an immediate capture can lag behind the toggle
-         actually landing. Still unverified after the settle window → send a
-         best-effort restoring Ctrl+S and VERIFY IT (another bounded settle
-         poll for the input line to show non-empty text again) before
-         aborting — an unverified false-negative here used to silently
-         strand the user's draft in the invisible stash slot with no
-         delivered turn left to auto-restore it (#176 F4). That restore is
-         itself ambiguous whenever the FIRST Ctrl+S was genuinely LOST
-         rather than merely render-lagged: the restore is then the FIRST
-         real toggle CC ever receives, and it just genuinely stashes the
-         draft for real (the pre-#176-F4 base was accidentally safe here
-         only because it never sent this second keystroke at all). If the
-         verify still shows no draft after the restore, ONE corrective
-         Ctrl+S undoes it and is verified again the same way, and the
-         outcome (recovered or not) is logged honestly either way (#176 R3)
-         — never a blind, unchecked restore.
-      5. Type `text` literally, re-capture, verify the boundary line is `❯` +
-         a TAIL of `text` (a wrapped input renders its tail at the
-         boundary). Verify failure → ABORT-RESTORE: Ctrl+S pops the stashed
-         draft back, and we return False regardless of that restore's own
-         outcome (best-effort; the alternative is discarding state).
-      6. Enter submits. If the text is STILL at the boundary (a swallowed
+      4. Ctrl+S. Then a bounded render-SETTLE poll (never a blind timeout)
+         reports which of four states the pane is in: PARKED (bare + marker —
+         a real draft is in the slot), NOOP (bare, no marker — there was
+         nothing to park, which is a fine outcome and not an error),
+         UNRESOLVED (still shows content, no marker — a rendered ghost, or a
+         genuinely lost keystroke, deliberately NOT distinguished), or
+         NO_BOUNDARY (the input line is gone — abort, touch nothing else).
+      5. Type `text` literally and verify. Typing is itself the discriminator
+         the pane refuses to give us: a ghost suggestion is REPLACED by the
+         keystroke, while a real draft is APPENDED to. After PARKED/NOOP the
+         box was verified bare, so the usual tail-tolerant `_typed_landed`
+         applies; after UNRESOLVED the box held something, so the STRICT
+         `_typed_exclusively` is required — otherwise a wrap landing inside
+         our own text could pass an append off as a clean type.
+      6. Verify failure recovers by what actually happened, never blindly.
+         PARKED → one Ctrl+S pops the draft back. NOOP/UNRESOLVED → NEVER a
+         Ctrl+S: nothing is parked, so a toggle would park the polluted box
+         and jam the slot into step 1's decline. Instead, when the box shows
+         the exact append signature, `_undo_appended_text` backspaces exactly
+         the characters we typed and verifies the draft came back. Anything
+         else: no further keystrokes, logged honestly.
+      7. Enter submits. If the text is STILL at the boundary (a swallowed
          Enter — the agent-strip-selector class of bug, #36), ONE corrective
          Escape+Enter (never a second bare Enter, never two Escapes).
-      7. Success = the box no longer shows our text. The stashed draft
+      8. Success = the box no longer shows our text. A parked draft
          auto-restores itself once the delivered turn completes.
 
     `logs`, if a list, gets one reason string appended on every abort/success
@@ -2200,8 +2267,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     if cap and STASH_MARKER in cap:
         _log("stash-abort: slot occupied")
         return False
-    if not (_has_free_prompt(cap, bare_only=False) and _input_line_text(cap)):
-        _log("stash-abort: not idle-with-draft")
+    if not _has_free_prompt(cap, bare_only=False):
+        _log("stash-abort: no free prompt")
         return False
     if "esc to interrupt" in (cap or ""):
         _log("stash-abort: live turn")
@@ -2209,35 +2276,29 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "C-s"])
-    cap, bare_ok = _await_stash_bare(pid, run, sleep_fn)
-    if not bare_ok:
-        _log("stash-abort: verify-bare-failed")
-        run(["tmux", "send-keys", "-t", pid, "C-s"])      # best-effort restore (#176 F4)
-        # #176 R3: the restore above is ambiguous. If the FIRST Ctrl+S merely
-        # render-lagged (already toggled server-side), THIS restore correctly
-        # un-stashes it and the draft becomes visible again. If the FIRST
-        # Ctrl+S was genuinely LOST (never toggled anything), THIS restore is
-        # actually the first real toggle — it just genuinely stashed the
-        # draft for real, with no delivered turn ever coming to auto-restore
-        # it. VERIFY which one happened instead of trusting the restore
-        # blindly: if the draft is still not visible after a full settle
-        # window, send ONE corrective toggle to undo it and verify that
-        # actually worked too, logging the final outcome honestly either way.
-        _, draft_back = _await_draft_visible(pid, run, sleep_fn)
-        if not draft_back:
-            _log("stash-abort: draft-still-hidden — sending a corrective toggle")
-            run(["tmux", "send-keys", "-t", pid, "C-s"])
-            _, draft_back = _await_draft_visible(pid, run, sleep_fn)
-        _log("stash-abort: draft-recovered" if draft_back
-             else "stash-abort: draft-still-not-visible-after-2-restores")
+    cap, outcome, pre_text = _await_stash_settled(pid, run, sleep_fn)
+    if outcome == STASH_NO_BOUNDARY:
+        # The input line vanished between the toggle and the settle window (a
+        # turn started, a dialog opened). We already sent one keystroke, so
+        # this is not a free pre-send refusal — but sending anything MORE into
+        # a pane we can no longer read is exactly the #233 scar. Stop here.
+        _log("stash-abort: input-line-vanished")
         return False
+    parked = outcome == STASH_PARKED
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     cap = capture_pane(pid, run, lines=30)
     itext = _input_line_text(cap)
-    if not _typed_landed(text, itext):
+    landed = (_typed_exclusively(text, itext) if pre_text
+              else _typed_landed(text, itext))
+    if not landed:
         _log("stash-abort: type-verify-failed")
-        run(["tmux", "send-keys", "-t", pid, "C-s"])      # restore the draft
-        capture_pane(pid, run, lines=30)
+        if parked:
+            run(["tmux", "send-keys", "-t", pid, "C-s"])  # pop the parked draft back
+            capture_pane(pid, run, lines=30)
+        elif pre_text and itext == pre_text + text:
+            _log("stash-abort: append-undone" if
+                 _undo_appended_text(pid, run, pre_text, text)
+                 else "stash-abort: append-NOT-undone")
         return False
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=30)
@@ -6266,7 +6327,10 @@ GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
 # still the only one on record and got typed at as if it were current.
 _GOAL_REARM_TRANSIENT_STASH_REASONS = frozenset((
     "stash-abort: slot occupied",
-    "stash-abort: not idle-with-draft",
+    "stash-abort: no free prompt",       # #189 renamed: emptiness is no longer
+                                         # a precondition, so the old
+                                         # "not idle-with-draft" no longer
+                                         # describes what this refusal means
     "stash-abort: live turn",
 ))
 GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
@@ -8777,7 +8841,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         # burning a retry, exactly like an aborted stash below.
                         fresh = capture_pane(pid, run, lines=30)
                         fkind, ftxt = _classify_boundary(fresh)
-                        if fkind != "input" or not ftxt:
+                        if fkind != "input":
+                            # #189: this used to also require `ftxt` to be
+                            # non-empty, i.e. it re-asked the unanswerable
+                            # "does the box really hold something?" a second
+                            # time, one line before the send. A BARE input
+                            # line is perfectly deliverable — `deliver_with_stash`
+                            # now parks unconditionally and treats an empty box
+                            # as the no-op it is. What still matters is only
+                            # that the boundary IS an input line: a spinner or
+                            # dialog appearing here is the genuine race, and
+                            # typing into it is the #233 scar.
                             # #176 REOPENED R2: this "raced" mismatch used to
                             # `continue` bare — no state, no ping, no bound —
                             # a THIRD stateless skip path, structurally the

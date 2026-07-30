@@ -35,10 +35,53 @@ def seed_repo_cache(home, root, name):
 
 
 class FakeTmux:
-    def __init__(self, panes=None, captured=IDLE):
+    """Static capture by default. `model_stash=True` additionally models Claude
+    Code's SINGLE-SLOT prompt stash (Ctrl+S) and the input box, so the
+    stash-around delivery path (`_try_stash_nudge` -> `deliver_with_stash`) is
+    exercised against a pane that actually REACTS to keystrokes.
+
+    Without the model every capture is frozen, so a Ctrl+S never appears to do
+    anything and the delivery always aborted before typing — which made a pane
+    holding a user draft LOOK like it refused the nudge, when in production the
+    draft is parked and the nudge is delivered around it (issue 35, which is
+    what `_try_stash_nudge` exists for)."""
+
+    def __init__(self, panes=None, captured=IDLE, model_stash=False):
         self.panes = panes or []            # [(pane_id, cwd)]
         self.captured = captured
         self.sent = []
+        self.model_stash = model_stash
+        self.stash = None
+        self.submitted = []
+        self._box = self._box_of(captured)
+
+    @staticmethod
+    def _box_of(cap):
+        for ln in cap.splitlines():
+            if ln.strip().startswith("❯"):
+                return ln.strip()[1:].strip()
+        return ""
+
+    def _render(self):
+        out = []
+        for ln in self.captured.splitlines():
+            if ln.strip().startswith("❯"):
+                out.append("❯\xa0" + self._box if self._box else "❯\xa0")
+            elif ln.strip().startswith("ctx ") and self.stash is not None:
+                out.append(ln + "  " + wd.STASH_MARKER)
+            else:
+                out.append(ln)
+        return "\n".join(out) + "\n"
+
+    def _key(self, k):
+        if k == "C-s":
+            if self._box and self.stash is None:
+                self.stash, self._box = self._box, ""
+            elif not self._box and self.stash is not None:
+                self._box, self.stash = self.stash, None
+        elif k == "Enter" and self._box:
+            self.submitted.append(self._box)
+            self._box = ""
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
@@ -46,9 +89,15 @@ class FakeTmux:
         if "list-panes" in j:
             return "\n".join("%s\tclaude\t%s" % (p, c) for p, c in self.panes)
         if "capture-pane" in j:
-            return self.captured
+            return self._render() if self.model_stash else self.captured
         if "display" in j:
             return "0"
+        if self.model_stash and argv[:2] == ["tmux", "send-keys"]:
+            if "-l" in argv:
+                self._box += argv[-1]
+            else:
+                for k in argv[4:]:
+                    self._key(k)
         return ""
 
     def typed(self):
@@ -378,7 +427,11 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
     'the label alone is the insertion' was a dead assumption and the bounce
     rotted while the gatekeeper waited. A pane whose last output is ✅ DONE is
     AT REST — the ◎ /goal + turn-summary ✻ lines must not block the nudge.
-    (A pane with USER-TYPED unsubmitted text still always refuses.)"""
+    (A pane with USER-TYPED unsubmitted text gets the nudge STASHED AROUND
+    that text — parked, delivered, auto-restored — and its text is never
+    submitted. That has been the behaviour since issue 35 shipped
+    `_try_stash_nudge`; the assertion here used to read "always refuses"
+    only because a frozen capture made every Ctrl+S look like a no-op.)"""
 
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -388,8 +441,8 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
         Path(self.root).mkdir(parents=True)
         seed_repo_cache(self.home, self.root, "demo")
 
-    def _go(self, captured):
-        tmux = FakeTmux([("%1", self.root)], captured)
+    def _go(self, captured, model_stash=False):
+        tmux = FakeTmux([("%1", self.root)], captured, model_stash=model_stash)
         wd.bounce_backstop(time.time(), tmux, {}, lambda b, **k: None,
                            home=self.home, gh_fetch=lambda r: [1528],
                            cross_stream_repos={"demo"})
@@ -406,10 +459,16 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
             "● Hotovo, pokračujem ďalším ticketom.",
             "● Dispatchol som workera, pokračujem.")).typed())
 
-    def test_user_typed_text_always_refuses(self):
+    def test_user_typed_text_is_stashed_around_and_never_submitted(self):
         parked_with_input = DONE_PARKED.replace(
             "❯ \n", "❯ chekni ci nemas nieco nove\n")
-        self.assertFalse(self._go(parked_with_input).typed())
+        tmux = self._go(parked_with_input, model_stash=True)
+        self.assertTrue(tmux.typed(), tmux.sent)
+        self.assertEqual(len(tmux.submitted), 1, tmux.sent)
+        self.assertIn("bounce-backstop:", tmux.submitted[0])
+        self.assertNotIn("chekni ci nemas nieco nove", tmux.submitted[0])
+        self.assertEqual(tmux.stash, "chekni ci nemas nieco nove",
+                         "the user's draft stays parked for CC to auto-restore")
 
 
 class TestGhEnvCatSubstitution(unittest.TestCase):

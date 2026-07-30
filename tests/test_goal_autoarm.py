@@ -48,9 +48,49 @@ NO_QUESTION_PANE = ("● Bežná odpoveď bez arm otázky.\n❯ \n  ctx ██�
 
 
 class FakeTmux:
-    def __init__(self, captured):
+    """Static capture by default. `model_stash=True` additionally models the
+    input box and Claude Code's SINGLE-SLOT prompt stash (Ctrl+S), so the
+    stash-around delivery path reacts to keystrokes the way a real pane does.
+
+    A frozen capture makes every Ctrl+S look like a no-op, which made a pane
+    holding a draft LOOK like it refused the arm — when in production the
+    draft is parked and the goal is delivered around it (issue 35)."""
+
+    def __init__(self, captured, model_stash=False):
         self.captured = captured
         self.sent = []
+        self.model_stash = model_stash
+        self.stash = None
+        self.submitted = []
+        self._box = self._box_of(captured)
+
+    @staticmethod
+    def _box_of(cap):
+        for ln in cap.splitlines():
+            if ln.strip().startswith("❯"):
+                return ln.strip()[1:].strip()
+        return ""
+
+    def _render(self):
+        out = []
+        for ln in self.captured.splitlines():
+            if ln.strip().startswith("❯"):
+                out.append("❯\xa0" + self._box if self._box else "❯\xa0")
+            elif ln.strip().startswith("ctx ") and self.stash is not None:
+                out.append(ln + "  " + wd.STASH_MARKER)
+            else:
+                out.append(ln)
+        return "\n".join(out) + "\n"
+
+    def _key(self, k):
+        if k == "C-s":
+            if self._box and self.stash is None:
+                self.stash, self._box = self._box, ""
+            elif not self._box and self.stash is not None:
+                self._box, self.stash = self.stash, None
+        elif k == "Enter" and self._box:
+            self.submitted.append(self._box)
+            self._box = ""
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
@@ -58,17 +98,23 @@ class FakeTmux:
         if "list-panes" in j:
             return "%1\tclaude\t/home/x/devel/demo"
         if "capture-pane" in j:
-            return self.captured
+            return self._render() if self.model_stash else self.captured
         if "display" in j:
             return "0"
+        if self.model_stash and argv[:2] == ["tmux", "send-keys"]:
+            if "-l" in argv:
+                self._box += argv[-1]
+            else:
+                for k in argv[4:]:
+                    self._key(k)
         return ""
 
     def typed(self):
         return [a[-1] for a in self.sent if "-l" in a]
 
 
-def go(captured, state=None, now=None):
-    tmux = FakeTmux(captured)
+def go(captured, state=None, now=None, model_stash=False):
+    tmux = FakeTmux(captured, model_stash=model_stash)
     logs = wd.goal_autoarm(now or time.time(), tmux, state if state is not None
                            else {})
     return tmux, logs
@@ -95,9 +141,17 @@ class TestGoalAutoarm(unittest.TestCase):
         tmux, _ = go(BUSY_PANE)
         self.assertFalse(tmux.typed())
 
-    def test_user_typed_text_is_never_overwritten(self):
-        tmux, _ = go(USER_TEXT_PANE)
-        self.assertFalse(tmux.typed())
+    def test_user_typed_text_is_stashed_around_never_overwritten(self):
+        # The draft is PARKED (Ctrl+S), the goal is delivered into the box the
+        # park emptied, and Claude Code auto-restores the draft when that turn
+        # ends — issue 35's whole purpose. This used to assert that NOTHING was
+        # typed, which only held because a frozen capture made the park
+        # invisible to the delivery's own verify.
+        tmux, _ = go(USER_TEXT_PANE, model_stash=True)
+        self.assertTrue(tmux.typed(), tmux.sent)
+        self.assertEqual(tmux.submitted, [GOAL_LINE], tmux.sent)
+        self.assertEqual(tmux.stash, "rozpisany draft",
+                         "the user's draft must stay parked, never overwritten")
 
     def test_no_arm_question_no_typing(self):
         tmux, _ = go(NO_QUESTION_PANE)
@@ -252,7 +306,7 @@ class TestDraftGoesThroughStashDelivery(unittest.TestCase):
     def test_transient_refusal_is_retried_next_sweep_not_after_the_window(self):
         state = {}
         now = time.time()
-        _calls, patcher = self._stub(False, "stash-abort: not idle-with-draft")
+        _calls, patcher = self._stub(False, "stash-abort: no free prompt")
         with patcher:
             _tmux, logs = go(USER_TEXT_PANE, state, now)
         self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs), logs)

@@ -773,6 +773,21 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       treatment as effortLevel/disableAgentView/tui; the user can still switch
       per session with `/model`.
 
+    - `promptSuggestionEnabled = False` turns OFF Claude Code's predicted-next-
+      prompt suggestion in the input box (#189). CC renders that suggestion as
+      DIM (SGR 246) text after the `❯` glyph; `tmux capture-pane -p` strips
+      attributes, so the watchdog's boundary classifiers see it as byte-identical
+      to a draft the user typed, and every keystroke-sending job then refuses to
+      act (or routes to a stash that has nothing to park). It was present on dev1
+      only as an UNMANAGED local edit and absent on gatekeeper and montalu — a
+      managed default so a push lands and self-heals it on every box. The key is
+      real, not guessed: the installed 2.1.220 build carries it in the same
+      global-settings key vector as effortLevel / autoCompactWindow / tui.
+      NOTE this removes the SOURCE of the ambiguity, it is NOT the delivery fix —
+      the value is latched at process init, so sessions already running keep
+      rendering suggestions until they restart, which is precisely why
+      `deliver_with_stash` was made independent of what the box appears to hold.
+
     - `autoCompactWindow` is ACTIVELY STRIPPED (2026-07-25 correction batch —
       reverts the SAME-DAY "krok 1c" addition). A low auto-compact threshold
       cuts big tasks off mid-work and defeats the 1M context window; context
@@ -787,6 +802,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result["disableAgentView"] = True
     result["tui"] = "default"
     result["model"] = MANAGED_MODEL
+    result["promptSuggestionEnabled"] = False
     result.pop("autoCompactWindow", None)
     return result
 

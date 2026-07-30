@@ -161,6 +161,61 @@ class FakeTmux:
                 if "send-keys" in " ".join(a) and "-l" not in a]
 
 
+class StashTmux(FakeTmux):
+    """FakeTmux that MODELS the input box and Claude Code's single-slot prompt
+    stash (Ctrl+S) instead of replaying a fixed capture list.
+
+    A frozen capture makes every Ctrl+S look like a no-op, so a pane holding a
+    draft LOOKED like it refused the delivery — while in production the draft
+    is parked and the payload is delivered around it (issue 35)."""
+
+    def __init__(self, captured, cwd=CWD, in_mode=False):
+        super().__init__(captured, cwd=cwd, in_mode=in_mode)
+        self.stash = None
+        self.submitted = []
+        self._box = ""
+        for ln in captured.splitlines():
+            if ln.strip().startswith("❯"):
+                self._box = ln.strip()[1:].strip()
+                break
+
+    def _render(self):
+        out = []
+        for ln in self.captured.splitlines():
+            if ln.strip().startswith("❯"):
+                out.append("❯\xa0" + self._box if self._box else "❯\xa0")
+            elif ln.strip().startswith("ctx ") and self.stash is not None:
+                out.append(ln + "  " + wd.STASH_MARKER)
+            else:
+                out.append(ln)
+        return "\n".join(out) + "\n"
+
+    def _key(self, k):
+        if k == "C-s":
+            if self._box and self.stash is None:
+                self.stash, self._box = self._box, ""
+            elif not self._box and self.stash is not None:
+                self._box, self.stash = self.stash, None
+        elif k == "Enter" and self._box:
+            self.submitted.append(self._box)
+            self._box = ""
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            self.sent.append(argv)
+            return self._render()
+        if argv[:2] == ["tmux", "send-keys"]:
+            self.sent.append(argv)
+            if "-l" in argv:
+                self._box += argv[-1]
+            else:
+                for k in argv[4:]:
+                    self._key(k)
+            return ""
+        return super().__call__(argv, timeout)
+
+
 def isolate_claims(testcase):
     """#78 — never touch the real ~/.claude/compact-claims.json (the live
     systemd watchdog runs this working tree every 60s on this box)."""
@@ -300,14 +355,15 @@ class GoalRearmBase(unittest.TestCase):
         return write_transcript(entries, self.tmp.name)
 
     def _go(self, captured, entries=None, state=None, now=None, cap_seq=(),
-            handled=None, in_mode=False, dry_run=False):
+            handled=None, in_mode=False, dry_run=False, model_stash=False):
         # One `_go` call = ONE watchdog sweep. The transcript is written once
         # per test (appending it again would look like CC echoing a FRESH
         # `Goal set:` marker — a real signal this job keys on).
         if entries is not None or not getattr(self, "_wrote", False):
             self._write(entries or [marker_entry("set", PAYLOAD)])
             self._wrote = True
-        tmux = FakeTmux(captured, cap_seq=cap_seq, in_mode=in_mode)
+        tmux = (StashTmux(captured, in_mode=in_mode) if model_stash
+                else FakeTmux(captured, cap_seq=cap_seq, in_mode=in_mode))
         logs = wd.goal_rearm(now or time.time(), tmux,
                              state if state is not None else {},
                              send_fn=self._send, dry_run=dry_run,
@@ -404,9 +460,17 @@ class TestGoalRearmRefusals(GoalRearmBase):
         self.assertFalse(tmux.typed())
 
     def test_foreign_draft_goes_through_stash_delivery(self):
-        # never typed OVER a user's draft — deliver_with_stash or nothing
-        tmux, _logs = self._go(PANE_DRAFT)
-        self.assertNotIn(GOAL_LINE, tmux.typed())
+        # never typed OVER a user's draft: the draft is PARKED first, the goal
+        # is delivered into the box the park emptied, and Claude Code restores
+        # the draft when that turn ends. This used to assert the goal was NOT
+        # typed at all, which held only because a frozen capture made the park
+        # invisible to the delivery's own verify — the opposite of what
+        # `deliver_with_stash` does against a real pane (issue 35).
+        tmux, _logs = self._go(PANE_DRAFT, model_stash=True)
+        self.assertIn(GOAL_LINE, tmux.typed())
+        self.assertEqual(tmux.submitted, [GOAL_LINE], tmux.sent)
+        self.assertEqual(tmux.stash, "rozpisany draft",
+                         "the draft must stay parked, never submitted or lost")
 
     def test_multiline_payload_is_never_typed(self):
         bad = PAYLOAD + "\nsecond line"
@@ -523,7 +587,7 @@ class TestGoalRearmBounded(GoalRearmBase):
 
 class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     """#101 live incident (dev2, 2026-07-27): two `deliver_with_stash`
-    refusals in a row — both `stash-abort: not idle-with-draft`, neither ever
+    refusals in a row — both `stash-abort: no free prompt`, neither ever
     sent a single keystroke — permanently gave the backstop up for the whole
     2h streak window, even though the only real obstacle (a foreign draft
     sitting unsent) clears itself the moment it's submitted or cleared. A
@@ -541,7 +605,7 @@ class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     def test_pre_send_refusal_is_never_a_counted_attempt(self):
         state = {}
         now = time.time()
-        with self._stub("stash-abort: not idle-with-draft"):
+        with self._stub("stash-abort: no free prompt"):
             for i in range(wd.GOAL_REARM_MAX_ATTEMPTS + 3):
                 t, logs = self._go(PANE_DRAFT, state=state, now=now + i * 5,
                                    cap_seq=[PANE_DRAFT])
@@ -558,7 +622,7 @@ class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     def test_draft_clearing_still_delivers_after_repeated_refusals(self):
         state = {}
         now = time.time()
-        with self._stub("stash-abort: not idle-with-draft"):
+        with self._stub("stash-abort: no free prompt"):
             for i in range(wd.GOAL_REARM_MAX_ATTEMPTS + 1):
                 self._go(PANE_DRAFT, state=state, now=now + i * 5,
                         cap_seq=[PANE_DRAFT])
