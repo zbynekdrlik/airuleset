@@ -2704,3 +2704,38 @@ Closes #171
   Lesson worth keeping: the corpus replay and the unit suite were both green and
   neither could see any of this, because a fake that models one rendering cannot
   model the tails a real renderer produces.
+
+- **196 + 198 — prose gate: bookkeeping could delete the verdict it was
+  bookkeeping for** (5e12960 red, 82e7974 green). Worked as one pair because 198
+  poisons the environment 196 has to be tested in: dev1's
+  `/tmp/airuleset-stop-block-unknown` was already at the cap, so any test run
+  without a session id measured a fake "not blocked". Validated first against
+  03874a2 with unique ids — all six variants reproduced, and the last two rows of
+  that table are the whole point: at the cap, a message offering `merge --admin`
+  and a clean message were byte-identical to any caller (rc 0, empty stdout).
+  Root cause is one shape wearing four costumes, each condition naming something
+  other than what it decided: the counter write ran BEFORE the `jq` under
+  `set -e`, so "did the write succeed" decided "is the verdict emitted"; the
+  counter was read with no shape guard, so non-numeric content made `[` exit 2
+  and the branch unreachable (rc 0, no JSON, no complaint); the key fell back to
+  the literal `unknown`, so "how many times has SOME session retried" decided
+  "may THIS session's verdict be emitted"; and `rm` sat after the final `&&` of
+  the clean-stop line, so an unremovable counter was a hook ERROR on a clean
+  message. One rule replaces all four — the throttle is used ONLY when this
+  invocation's own state is positively established, and anything else is NO
+  state, so the verdict goes out. Safe because Claude Code's own
+  `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` bounds the loop at 8 regardless; the counter
+  was only ever a courtesy throttle. The id is VALIDATED, never mangled: a
+  sanitiser is many-to-one, so two hostile ids would collapse onto one key, which
+  is 198's bucket respelled. A TTL is still required after per-session keying,
+  because `claude -c` REUSES a session id across a restart. Cap exhaustion stops
+  being silent via a decision-free `systemMessage`, which cannot re-block.
+  RED replay in the post-GREEN order (`git checkout <red-sha> -- <impl>`, never
+  `stash` on a clean tree): 11 of 16 fail, every one an AssertionError, the other
+  5 being controls that must pass on both sides. Suite 3412, ruff clean. Filed
+  201 (the identical three defects sit in seven more Stop hooks, unchanged) and
+  202 (hook-driving tests leave ~1000 counter files a day in /tmp; 2418 cleared
+  by hand). Lesson worth keeping: a guard whose enclosing condition names a
+  caller, a query shape, or a bookkeeping fact rather than the thing being
+  trusted will be re-broken next round — read the condition out loud before
+  believing it.
