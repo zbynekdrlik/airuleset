@@ -809,23 +809,62 @@ def _find_boundary_line(captured):
 
     Returns the raw (stripped) boundary line, or None if NEITHER strategy
     locates one at all (e.g. the whole capture is chrome, or it's empty)."""
-    line = _find_boundary_line_raw(captured)
-    if line is not None and line.startswith("❯"):
-        if _QUEUED_PLACEHOLDER_RX.match(line[1:].strip().lower()):
-            return "❯"
+    return _normalize_queued_hint(_find_boundary_line_raw(captured))
+
+
+def _normalize_queued_hint(line):
+    """Collapse CC's greyed `Press up to edit [N] queued messages` HINT to a
+    bare `❯`. One place, so every caller resolving through this module agrees
+    (#65/#176 item 4)."""
+    if line is not None and line.startswith("❯") \
+            and _QUEUED_PLACEHOLDER_RX.match(line[1:].strip().lower()):
+        return "❯"
     return line
 
 
 def _find_boundary_line_raw(captured):
-    """The two-strategy scan `_find_boundary_line` normalizes — see its
-    docstring for the full rationale. Split out so the queued-placeholder
-    normalization has exactly ONE place to apply, regardless of which
-    strategy located the boundary."""
+    """The LAST content row of the pane's input box — for a WRAPPED draft the
+    TAIL of the typed text, which is why callers match with `endswith()`. The
+    two-strategy scan itself lives in `_input_box_rows_raw`; see
+    `_find_boundary_line`'s docstring for its full rationale."""
+    rows = _input_box_rows_raw(captured)
+    return rows[-1] if rows else None
+
+
+def _input_box_rows_raw(captured):
+    """The pane's bottom input-box candidate ROWS (stripped), HEAD FIRST.
+
+    The scan `_find_boundary_line_raw` has always performed, factored out so
+    the box's FIRST row is reachable and not only its last (#193). The glyph
+    that identifies a row as an input box sits on the box's first RENDERED
+    row; a wrapped draft's last row is its tail and never carries it, so
+    every consumer that tested the boundary row for `❯` read a wrapped draft
+    as "there is no input box at all".
+
+    1. STRUCTURAL (tried first). The rows strictly between the last pair of
+       separator lines ARE the box, bounded by its own borders — so reading
+       the head needs no scan into the transcript above. A live CC 2.1.220
+       pane renders exactly this shape (`────` / `❯\xa0…` / `────`, read off
+       three real panes 2026-07-30), which is why this is the strategy every
+       real capture resolves through.
+    2. GLYPH-BASED FALLBACK, for a borderless capture: peel the VARIABLE
+       trailing chrome (`_is_bottom_chrome`) and take the first non-chrome
+       row up from the bottom. It returns ONE row and deliberately never
+       more. Nothing bounds the box there, so walking further up is exactly
+       the #233 scar — during a running turn the boundary row IS the spinner
+       and the transcript above it can contain a lone `❯`, so an upward
+       window would call a BUSY pane idle and INTERRUPT it. Continuation rows
+       arrive stripped of the indentation that would identify them, and CC's
+       transcript rows are themselves indented, so no sound stop condition
+       exists. The unknown stays unknown and `_find_input_box` resolves it to
+       "no box" — the safe direction for the may-I-type question.
+
+    Returns [] when neither strategy locates anything."""
     if not captured:
-        return None
+        return []
     lines = [ln.strip() for ln in captured.splitlines() if ln.strip()]
     if not lines:
-        return None
+        return []
 
     seps = [i for i, ln in enumerate(lines) if _is_separator_line(ln)]
     if len(seps) >= 2:
@@ -834,15 +873,60 @@ def _find_boundary_line_raw(captured):
         if earlier:
             content = lines[earlier[-1] + 1:idx_b]
             if content:
-                return content[-1]
+                return content
 
     i, n = len(lines), 0
     while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
         i -= 1
         n += 1
     if i <= 0:
+        return []
+    return [lines[i - 1]]
+
+
+def _is_draft_head(s):
+    """True if `s` is an input-box row carrying the prompt glyph AND text —
+    `❯`, CC's separator (a NON-BREAKING SPACE on a real pane), then a draft.
+    A BARE box (`❯` alone) and a menu pointer (`❯ 1. Yes` — an open dialog,
+    never an input prompt) are both excluded."""
+    return bool(s) and len(s) > 1 and s[0] == "❯" and s[1] in " \xa0" \
+        and not _MENU_POINTER_RX.match(s)
+
+
+def _find_input_box(captured):
+    """Locate the pane's INPUT BOX. Returns `(head, tail, wrapped)` or None.
+
+    This is the one place that decides "is there an input box here", and it
+    decides it from the row that actually carries the prompt glyph — the
+    box's HEAD — rather than from whichever row happens to be its boundary
+    (#193). `head` is the glyph row, `tail` the box's last row (a wrapped
+    draft's TAIL, the documented `endswith()` contract), `wrapped` says
+    whether the two differ.
+
+    STRICTLY ADDITIVE by construction: when the BOUNDARY row itself starts
+    with `❯` that row is the box, exactly as every consumer has always read
+    it. Only when it does NOT — precisely where they all get None / "busy"
+    today — do we consult `rows[0]`, and only accept it as a box when it is a
+    genuine non-bare, non-menu prompt row with at least one further row below
+    it. So no capture that currently reads as an input box can change its
+    answer; the change can only turn a "no box" into a box.
+
+    Fail direction: None. The callers asking "may I type here?" resolve that
+    to NO. The caller asking "is there a draft I would destroy?" (job 10)
+    must NOT read it as "there is no draft" — an unreadable box is unknown,
+    not empty."""
+    rows = _input_box_rows_raw(captured)
+    if not rows:
         return None
-    return lines[i - 1]
+    tail = _normalize_queued_hint(rows[-1])
+    if tail.startswith("❯"):
+        return (tail, tail, False)
+    if len(rows) < 2:
+        return None
+    head = _normalize_queued_hint(rows[0])
+    if not _is_draft_head(head):
+        return None
+    return (head, rows[-1], True)
 
 
 def _has_free_prompt(captured, bare_only=False):
@@ -870,16 +954,21 @@ def _has_free_prompt(captured, bare_only=False):
     idle-with-draft precondition refuse EVERY real delivery with "not idle-with-draft" — the
     exact #101 incident signature — regardless of how genuinely idle the pane was. Both
     characters are accepted below; `_input_line_text` already worked correctly throughout
-    (`str.strip()` treats `\xa0` as whitespace)."""
-    s = _find_boundary_line(captured)
-    if s is None:
+    (`str.strip()` treats `\xa0` as whitespace).
+
+    The glyph is read off the box's HEAD row, never its boundary row (#193) —
+    a WRAPPED draft puts its tail at the boundary, so testing the boundary for
+    `❯` reported "no free prompt" for every payload long enough to wrap. That
+    condition NAMED "the boundary row begins with the glyph" while it was
+    asked to DECIDE "is there an input box I may type into". Fail direction is
+    unchanged and deliberate: an unlocatable box answers NO (do not type)."""
+    box = _find_input_box(captured)
+    if box is None:
         return False
-    if s == "❯":
+    head, _tail, _wrapped = box
+    if head == "❯":
         return True
-    if (not bare_only and len(s) > 1 and s[0] == "❯" and s[1] in " \xa0"
-            and not _MENU_POINTER_RX.match(s)):
-        return True
-    return False
+    return bool(not bare_only and _is_draft_head(head))
 
 
 def pane_waiting_on_user(captured):
@@ -1729,13 +1818,19 @@ def _input_line_text(captured):
     #46) — never scans the transcript above the box. For a long WRAPPED
     input, capture-pane (no -J) renders it as multiple lines and the
     boundary is the LAST one — i.e. the TAIL of the typed text — which is
-    why callers match with endswith()."""
-    s = _find_boundary_line(captured)
-    if s is None:
+    why callers match with endswith().
+
+    That contract was promised here and never delivered (#193): the function
+    required the BOUNDARY row to start with `❯`, which only a one-row box
+    ever does, so a wrapped draft returned None — indistinguishable from a
+    running turn. The box is now located by its HEAD row and the tail is
+    returned as documented. `''` still means exactly "bare box": blank rows
+    are filtered out upstream, so a wrapped box can never return it."""
+    box = _find_input_box(captured)
+    if box is None:
         return None
-    if not s.startswith("❯"):
-        return None
-    return s[1:].strip()
+    head, tail, wrapped = box
+    return tail if wrapped else head[1:].strip()
 
 
 def _classify_boundary(captured):
@@ -1757,12 +1852,17 @@ def _classify_boundary(captured):
       ("input", <draft text, "" if bare>) -- a real boundary, safe to inspect
       ("busy", None)                      -- a real boundary, not `❯`-shaped
       ("no-input-line", None)             -- no boundary found under either strategy
+
+    A WRAPPED draft is an "input" with its TAIL as the draft text (#193) — it
+    used to land in the "busy" bucket, which is how every keystroke-sending
+    job came to treat a pane holding a medium-length draft as a running turn.
     """
-    s = _find_boundary_line(captured)
-    if s is None:
+    box = _find_input_box(captured)
+    if box is not None:
+        head, tail, wrapped = box
+        return ("input", tail if wrapped else head[1:].strip())
+    if _find_boundary_line(captured) is None:
         return ("no-input-line", None)
-    if s.startswith("❯"):
-        return ("input", s[1:].strip())
     return ("busy", None)
 
 
@@ -2172,10 +2272,12 @@ def _typed_exclusively(text, itext):
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
 
 
-# A wrapped append can never match the exact `pre + text` signature the undo
-# requires, so this cap is only ever a guard against a pathological payload;
-# it exists so the undo can never spray hundreds of backspaces at a pane.
-STASH_UNDO_MAX_BACKSPACES = 400
+# Bounds how many backspaces an undo may ever spray at a pane. It used to sit
+# at 400, BELOW a real payload — the gk-request nudge is 458 chars — so the one
+# recovery that existed could not run for the very delivery that stranded its
+# text (#193). 4000 is the size of the largest payload this helper ever
+# carries: Claude Code's own `/goal` condition cap.
+STASH_UNDO_MAX_BACKSPACES = 4000
 
 
 def _undo_appended_text(pid, run, pre_text, text):
@@ -2194,6 +2296,27 @@ def _undo_appended_text(pid, run, pre_text, text):
         return False
     run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
     return _input_line_text(capture_pane(pid, run, lines=30)) == pre_text
+
+
+def _undo_typed_text(pid, run, text):
+    """Remove exactly the characters WE typed from a box that was VERIFIED
+    BARE immediately before we typed, and confirm it came back to bare (#193).
+
+    Reached only from the PARKED / NOOP outcomes, where the settle poll had
+    already read `_input_line_text(cap) == ""`. Every character in the box is
+    therefore ours, so backspacing exactly `len(text)` provably cannot reach
+    anything of the user's — whatever fraction of the type actually landed, a
+    surplus backspace lands on an empty box. That proof is a property of the
+    BOX (observed bare by this function's own caller a moment earlier), never
+    of who called or of what they passed.
+
+    Note it can only run at all when the verify FAILED: a payload Claude Code
+    collapsed into `[Pasted text #N]` verifies through that placeholder and is
+    submitted, so this never has to reason about a collapsed buffer."""
+    if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
+        return False
+    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
+    return _input_line_text(capture_pane(pid, run, lines=30)) == ""
 
 
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
@@ -2239,13 +2362,19 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
          applies; after UNRESOLVED the box held something, so the STRICT
          `_typed_exclusively` is required — otherwise a wrap landing inside
          our own text could pass an append off as a clean type.
-      6. Verify failure recovers by what actually happened, never blindly.
-         PARKED → one Ctrl+S pops the draft back. NOOP/UNRESOLVED → NEVER a
-         Ctrl+S: nothing is parked, so a toggle would park the polluted box
-         and jam the slot into step 1's decline. Instead, when the box shows
-         the exact append signature, `_undo_appended_text` backspaces exactly
-         the characters we typed and verifies the draft came back. Anything
-         else: no further keystrokes, logged honestly.
+      6. Verify failure recovers by what actually happened, never blindly, and
+         never leaves our own text behind (#193). PARKED/NOOP → the box was
+         VERIFIED BARE a moment ago, so every character in it is ours:
+         `_undo_typed_text` backspaces exactly what we typed and confirms the
+         box is bare again. Only THEN, and only when PARKED, does one Ctrl+S
+         pop the draft back — firing it while our text still sat in the box
+         would PARK that text over the user's parked draft, since the slot is
+         single and overwrites silently. UNRESOLVED → nothing is parked, so a
+         Ctrl+S would jam the slot into step 1's decline; `_undo_appended_text`
+         backspaces only against the exact append signature. A payload that
+         WRAPPED re-flows the box and can never show that signature — then no
+         keystrokes are sent at all, because "is there a draft I would
+         destroy?" resolves an unknown to YES, and the reason is logged.
       7. Enter submits. If the text is STILL at the boundary (a swallowed
          Enter — the agent-strip-selector class of bug, #36), ONE corrective
          Escape+Enter (never a second bare Enter, never two Escapes).
@@ -2292,13 +2421,36 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
               else _typed_landed(text, itext))
     if not landed:
         _log("stash-abort: type-verify-failed")
-        if parked:
-            run(["tmux", "send-keys", "-t", pid, "C-s"])  # pop the parked draft back
-            capture_pane(pid, run, lines=30)
-        elif pre_text and itext == pre_text + text:
+        if not pre_text:
+            # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
+            # ago, so every character in it is ours and backspacing exactly
+            # what we typed can reach nothing of the user's.
+            undone = _undo_typed_text(pid, run, text)
+            if not parked:
+                _log("stash-abort: typed-undone" if undone
+                     else "stash-abort: typed-NOT-undone")
+            elif undone:
+                # ONLY now, with the box confirmed bare again, may the toggle
+                # pop the parked draft back. Firing it while our own text was
+                # still in the box would PARK that text instead — the slot is
+                # single with a SILENT overwrite — destroying the very draft
+                # this protocol exists to protect (#193).
+                run(["tmux", "send-keys", "-t", pid, "C-s"])
+                capture_pane(pid, run, lines=30)
+                _log("stash-abort: typed-undone, parked draft popped back")
+            else:
+                _log("stash-abort: typed-NOT-undone, draft left parked")
+        elif itext == pre_text + text:
             _log("stash-abort: append-undone" if
                  _undo_appended_text(pid, run, pre_text, text)
                  else "stash-abort: append-NOT-undone")
+        else:
+            # UNRESOLVED and the append signature is unreadable — a payload
+            # that WRAPPED re-flows the box, so `pre + text` can never match.
+            # Backspacing on an unproven buffer could eat a real draft, and
+            # "is there a draft I would destroy?" resolves an unknown to YES.
+            # No further keystrokes; the reason is logged instead.
+            _log("stash-abort: append-unprovable, text left in box")
         return False
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = capture_pane(pid, run, lines=30)
@@ -2776,15 +2928,23 @@ def _cache_repo_roots(home=None, max_age_s=None):
     return roots
 
 
-def _try_stash_nudge(pid, captured, text, run, dry_run):
+def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
     """Shared bounce/gk-request helper (issue #35): attempt a stash-around
     delivery of `text` for a pane that already passed the live-work / armed
     -loop / already-nudged guards but isn't bare-idle — i.e. it holds a
     draft, not a running turn. dry_run never attempts it (keeps the
-    diagnostic simulation identical to the pre-#35 behavior)."""
+    diagnostic simulation identical to the pre-#35 behavior).
+
+    `logs`, if a list, collects `deliver_with_stash`'s own reason strings.
+    Both callers used to pass none at all, so every internal reason went
+    nowhere and a failed delivery was indistinguishable from a supervisor
+    who simply chose not to act — 48h of gk-request nudges left no trace of
+    any kind (#193). A delivery that cannot run now always says why."""
     if dry_run:
+        if isinstance(logs, list):
+            logs.append("dry-run")
         return False
-    return deliver_with_stash(pid, text, run, captured=captured)
+    return deliver_with_stash(pid, text, run, captured=captured, logs=logs)
 
 
 def _safe_to_bounce_nudge(captured, cwd, projects_dir):
@@ -2923,11 +3083,13 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             if not pane_at_idle_prompt(captured):
                 # not bare-idle but past every live-work guard above — an
                 # idle-with-a-FOREIGN-draft pane, not a running turn. Stash
-                # it, deliver the nudge, let CC restore it (issue #35). Any
-                # verify failure falls straight through to the pre-#35
-                # silent skip.
+                # it, deliver the nudge, let CC restore it (issue #35). A
+                # verify failure still skips, but never silently (#193).
+                why = []
                 if not _try_stash_nudge(pid, captured, BOUNCE_NUDGE % (tick_str, name),
-                                        run, dry_run):
+                                        run, dry_run, logs=why):
+                    logs.append("bounce-nudge-failed %s %s (%s)"
+                                % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
@@ -3096,10 +3258,15 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 continue
             if not pane_at_idle_prompt(captured):
                 # idle-with-a-FOREIGN-draft, not a running turn — stash it,
-                # deliver, let CC restore it (issue #35). Any verify failure
-                # falls straight through to the pre-#35 silent skip.
+                # deliver, let CC restore it (issue #35). A verify failure
+                # still skips, but never silently (#193): this job threaded no
+                # log list at all, which is why 48h of stranded nudges left
+                # not one `stash-*` line in the journal.
+                why = []
                 if not _try_stash_nudge(pid, captured, GKREQ_NUDGE % (tick_str, name),
-                                        run, dry_run):
+                                        run, dry_run, logs=why):
+                    logs.append("gkreq-nudge-failed %s %s (%s)"
+                                % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
@@ -3200,11 +3367,29 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     Deliberately NO auto-Enter on a genuine foreign draft (the ticket's
     decision — a machine must never submit a half-typed user draft)."""
     key = "pwedge:" + pid
-    txt = _input_line_text(captured)
-    if not txt:
-        state.pop(key, None)
+    box = _find_input_box(captured)
+    if box is None:
+        # We could not READ the input line — a running-turn spinner, an open
+        # dialog, or no locatable boundary at all. That is NOT evidence that
+        # there is no draft, and collapsing the two is what made this job
+        # blind to every wrapped draft (#193): `_input_line_text` returned
+        # None, the episode was forgotten on every sweep, and the two stable
+        # sweeps its auto-Enter recovery needs could never accumulate — so
+        # the one backstop for a stuck draft could not see the stuck draft.
+        # An unreadable sweep neither ADVANCES an episode nor FORGETS it.
         return []
-    machine = txt.startswith(MACHINE_NUDGE_PREFIX) or _is_dreply_machine_text(state, pid, txt)
+    head, tail, wrapped = box
+    txt = tail if wrapped else head[1:].strip()
+    if not txt:
+        state.pop(key, None)          # provably BARE — there really is no draft
+        return []
+    # A machine nudge's PREFIX lives on the box's HEAD row. A wrapped draft's
+    # boundary row is its TAIL and can never carry it, so testing `txt` alone
+    # mislabels our own stranded nudge a foreign draft and pings instead of
+    # submitting it.
+    head_txt = head[1:].strip()
+    machine = (head_txt.startswith(MACHINE_NUDGE_PREFIX)
+               or _is_dreply_machine_text(state, pid, txt))
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")
                         or now - tmtime < PWEDGE_MIN_IDLE_S):
@@ -3252,7 +3437,9 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             "ktorý sa po skončení bežiaceho ťahu vráti sám. Stlač v tom okne "
             "Enter (text sa odošle) alebo ho zmaž — dovtedy sa doň nedá nič "
             "doručiť."
-            % (project, loc, txt[:60]),
+            # the START of the draft, never its wrapped tail — a human
+            # recognises their own text by how it begins (#193).
+            % (project, loc, head_txt[:60]),
             owner=owner or None,
             dedup_key="pwedge:%s:%s" % (pid, h), dry_run=dry_run)
     return ["prompt-wedge ping %s (%s)" % (pid, project)]

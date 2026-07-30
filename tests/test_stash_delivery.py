@@ -183,17 +183,51 @@ class DeliverWithStashAborts(unittest.TestCase):
         self.assertEqual(cs_count, 1, "a settled stash must NOT trigger the "
                          "restore attempt: %r" % run.sent)
 
-    def test_type_verify_failed_sends_exactly_one_restoring_cs(self):
+    # SUPERSEDED CONTRACT, #193. This pair replaces a single test that asserted
+    # a failed verify always sends "1 stash + 1 restore" C-s. That restoring
+    # toggle fired while OUR OWN text was still sitting in the box — and a
+    # `C-s` into a NON-EMPTY box PARKS it, single slot, silent overwrite. So
+    # the "restore" destroyed the very draft the protocol exists to protect
+    # whenever the type had actually landed and merely failed to verify (which
+    # is the normal case for a payload long enough to wrap). The restore is now
+    # conditional on the box being CONFIRMED bare again first, and both
+    # branches are pinned below.
+
+    def test_the_restore_is_withheld_while_our_text_may_still_be_in_the_box(self):
         wrong_boundary = "● x\n❯ totally unrelated text\n  ctx ░░\n"
+        # 3rd capture = the undo's own verify: the box is NOT bare, so we
+        # cannot prove our characters are gone.
         run = _Recorder([STASHED_BARE, wrong_boundary, DRAFT_IDLE])
         logs = []
         ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs)
         self.assertFalse(ok)
         cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
-        self.assertEqual(cs_count, 2, run.sent)   # 1 stash + 1 restore
+        self.assertEqual(cs_count, 1, "the stash toggle only — a restoring "
+                         "C-s here would PARK our own text over the user's "
+                         "parked draft: %r" % run.sent)
+        self.assertTrue(any(a[-1] == "BSpace" for a in run.sent if a),
+                        "the undo must at least be attempted: %r" % run.sent)
         self.assertFalse(any("Enter" in a for a in run.sent),
                          "must never submit text that failed its own verify: %r" % run.sent)
-        self.assertTrue(logs)
+        self.assertTrue(any("left parked" in ln for ln in logs), logs)
+
+    def test_the_restore_fires_once_the_box_is_confirmed_bare_again(self):
+        wrong_boundary = "● x\n❯ totally unrelated text\n  ctx ░░\n"
+        # 3rd capture = the undo's own verify, now genuinely bare (and the
+        # marker still lit, so the draft is still parked and poppable).
+        run = _Recorder([STASHED_BARE, wrong_boundary, STASHED_BARE, DRAFT_IDLE])
+        logs = []
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs)
+        self.assertFalse(ok)
+        tails = [a[-1] for a in run.sent if a]
+        self.assertEqual(tails.count("C-s"), 2, run.sent)   # stash, then restore
+        first_bs = next(i for i, t in enumerate(tails) if t == "BSpace")
+        self.assertLess(first_bs, len(tails) - 1 - tails[::-1].index("C-s"),
+                        "the backspaces must come BEFORE the restoring "
+                        "toggle: %r" % run.sent)
+        self.assertFalse(any("Enter" in a for a in run.sent),
+                         "must never submit text that failed its own verify: %r" % run.sent)
+        self.assertTrue(any("popped back" in ln for ln in logs), logs)
 
 
 class DeliverWithStashRecognizesTheRealNbspSeparator(unittest.TestCase):
