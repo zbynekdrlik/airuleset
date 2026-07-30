@@ -2631,3 +2631,76 @@ Closes #171
   RED `9609016` → GREEN `7028118`; tests in `tests/test_compact_request.py`.
 - Filed **#192** — the same SIGPIPE idiom still decides 15 other hooks (100 sites);
   cross-cutting, so not bundled here.
+- **#193 a wrapped input box read as "there is no box".** CC renders the prompt as
+  `────` / `❯\xa0<draft>` / `────`; `_find_boundary_line_raw` returns the box's LAST
+  row (a wrapped draft's TAIL, by design), and `_input_line_text` /
+  `_has_free_prompt` then required THAT row to carry the `❯`. The glyph is on the
+  box's FIRST row, so the condition NAMED "the boundary begins with the glyph" while
+  it was asked to DECIDE "is there an input box here" — true only by the accident of
+  a one-row payload. Anything 400–800 chars (past that CC collapses a paste into
+  `[Pasted text #N]`, already handled) read exactly like a running turn. The
+  gk-request nudge (458 chars) therefore typed, failed its own read-back, aborted,
+  and LEFT ITS OWN TEXT in a live prompt; the retry read its leftovers as "no free
+  prompt" and no-opped forever; job 10, the dedicated stuck-draft backstop, popped
+  its episode every sweep. Nine `needs-gatekeeper` tickets went unanswered.
+  Three live panes captured READ-ONLY settled which rendering matters: CC 2.1.220
+  draws the box BORDERED, so the structural separator-pair strategy resolves every
+  real capture — and it already computed the box's complete row list before
+  discarding all but the last. The head was already in hand.
+  Fix `ab35157` — `_input_box_rows_raw` returns the ROWS (`_find_boundary_line_raw`
+  becomes its last element, byte-identical); `_find_input_box` is the ONE place
+  deciding "is this a box", from the head row, and is STRICTLY ADDITIVE by
+  construction (the head is consulted only where every consumer gets None/"busy"
+  today, so nothing that currently reads as a box can change its answer). The
+  borderless fallback still returns exactly ONE row and never walks upward —
+  nothing bounds the box there, so a scan would be the lone-glyph transcript scar.
+  Fail directions set per question, not blanket: "may I type here?" resolves an
+  unlocatable box to NO; "is there a draft I would destroy?" no longer reads an
+  unreadable box as "no draft" (job 10 now neither advances nor forgets an episode
+  it could not read, and tests the machine-nudge prefix against the HEAD row).
+  Item 3 turned up a live data-loss path nobody had filed: the restoring `C-s` fired
+  while OUR OWN text was still in the box, and a `C-s` into a non-empty box PARKS it
+  — single slot, silent overwrite — so the "restore" destroyed the user's parked
+  draft whenever the type had landed and merely failed to verify. It is now gated on
+  `_undo_typed_text` confirming the box bare first; that undo is provable because
+  the settle poll had already observed the box bare, so every character in it is
+  ours. The undo cap sat at 400, BELOW a real 458-char payload, so the one recovery
+  that existed could not run for the delivery that stranded the text; now 4000, the
+  size of the largest payload this helper carries. Jobs 8 and 11 thread a log list
+  through the shared helper — job 11 passed none at all, which is why 48h of
+  stranded nudges left not one `stash-*` line in the journal.
+  RED `dc3f152` → GREEN `ab35157` (16 failures against the pre-fix build, every one
+  an AssertionError); tests `tests/test_wrapped_draft.py` plus a rewritten pair in
+  `tests/test_stash_delivery.py` replacing a test that asserted the blind restoring
+  toggle. Suite 3390, ruff clean.
+  A fresh-context adversarial review, dispatched BEFORE the change reached any
+  live box, then found three ways reading those boxes made things WORSE — all one
+  shape: a suffix/substring test that was unreachable while a wrapped box read as
+  None, and that a one- or two-character tail row satisfies the instant it becomes
+  readable. Job 7 pressed a BARE Enter whenever `prompt.endswith(box_tail)`, and
+  every reply prompt ends with the same fixed sentence, so a wrapped FOREIGN draft
+  ending in "." submitted the user's unsent text AND marked the Discord answer
+  delivered although it was never typed. `_is_dreply_machine_text` was a
+  `txt in tail` substring test, so job 10 would classify a genuine user draft as
+  MACHINE, skip its at-rest guards and auto-submit it — the one thing its own
+  docstring forbids. And admitting wrapped boxes newly reached a pane holding a
+  wrapped foreign draft, where a lost stash toggle left our payload glued to that
+  draft with no recovery: this ticket's own defect, relocated one branch along.
+  Fix `dcf9aeb` — both ends of the box must now agree that its content is ours
+  (`_box_holds_our_own_text`; `_record_dreply_typed` stores a head half, and a
+  pre-change record matches nothing so job 10 PINGS rather than types);
+  `deliver_with_stash` refuses an already-wrapped UNRESOLVED box at step 4, while
+  refusing is still free, restoring exactly the guarantee that reading the box
+  removed; for a SINGLE-row unresolved box the pre-content is complete and known,
+  so `_typed_landed` is accepted as proof our characters sit at the end and the
+  undo runs, verified byte-for-byte. Same review: the restoring toggle logged a pop
+  it never read back, `--dry-run` reported a simulated skip as a failed delivery,
+  the undo cap sat six characters below job 20's `"/goal " + 4000` payload, and
+  three docstrings still claimed every consumer resolves through
+  `_find_boundary_line`. Every finding got a test driving the JOB, never the helper
+  — a helper-level assertion can only fail on a changed signature, which proves
+  nothing about what the job does to a live pane; against the pre-review build all
+  four fail as AssertionErrors showing the harm itself. Suite 3396, ruff clean.
+  Lesson worth keeping: the corpus replay and the unit suite were both green and
+  neither could see any of this, because a fake that models one rendering cannot
+  model the tails a real renderer produces.
