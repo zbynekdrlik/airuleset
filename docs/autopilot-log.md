@@ -2242,11 +2242,15 @@ hardcoded `--assignee @me`, silently 0 on a shared-gh-account box
 (montalu/marek/simap) while real labelled work was open — a genuine FALSE
 STOP, not a labeling issue. Fix: new `airuleset.py slice-quals` CLI wraps
 the existing `_slice_quals()` (the footer's own login-aware key) as
-`--count`/`--list`/`--extra`, resolved for the box it runs on; the three
-`/goal` templates in skills/autopilot/SKILL.md (Step 1 listing, bounce
-lane, both reduced-authority proof commands) now call it instead of
-hand-rolling `--assignee @me` — also SHRINKS each template by ~44 chars,
-comfortably inside the 4000-char cap (#169). Rejected: ANDing
+`--count`/`--list`/`--extra`, resolved for the box it runs on; TWO of the
+three `/goal` templates in skills/autopilot/SKILL.md (branch-merge and
+fork-no-merge — Step 1 listing, bounce lane, both reduced-authority proof
+commands) now call it instead of hand-rolling `--assignee @me` — also
+SHRINKS each of those two templates by ~44 chars, comfortably inside the
+4000-char cap (#169). CORRECTION (round 2, below): the FULL template's own
+proof was untouched here — it still counted the whole repo, which a
+round-2 review flagged (I4) since a core/gatekeeper box is forbidden from
+working sub-dev-owned tickets. Rejected: ANDing
 `label:stream:<me>` onto `--assignee @me` in one `--search` string — gh's
 `--search` cannot OR quals, so that would fix montalu while narrowing
 david's real union into an intersection (a different false-empty bug).

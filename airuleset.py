@@ -2040,10 +2040,22 @@ def _gh_out(*gh_args, timeout=8):
         return ""
 
 
-def _write_autopilot_progress(name, remaining):
+def _write_autopilot_progress(name, remaining, bump_done=True):
     """Persist per-repo autopilot run progress for the statusline github-tickets segment
     (~/.claude/autopilot-progress/<repo>.json). `done` counts the completion
     cards sent within ONE run window; a card after a ≥6h gap starts a new run.
+
+    `bump_done=False` (#181 I6, round 2 regression fix) writes the HEARTBEAT
+    (`ts`) and `remaining` WITHOUT incrementing `done`. This is the ONLY
+    writer of `ts`, which is what keeps the 6h AUTOPILOT_RUN_WINDOW_S run
+    window alive (statusbar.py). #164's original fix SKIPPED CALLING this
+    function entirely for a full-authority box's stream-ticket card, which
+    correctly kept `done` from inflating but ALSO stopped refreshing `ts` —
+    a run that cards only sub-dev stream tickets never opens/refreshes a
+    progress file, so 'Issues D/T' silently reverts to 'Issues N core'
+    mid-run. Always call this function; use `bump_done` to separate the two
+    concerns instead of skipping the call.
+
     Best-effort — a failure here never blocks the card send."""
     import re
     import time
@@ -2062,9 +2074,10 @@ def _write_autopilot_progress(name, remaining):
             prev = None
         if not isinstance(prev, dict):
             prev = None
-        done = 1
-        if prev and now - (prev.get("ts") or 0) <= statusbar.AUTOPILOT_RUN_WINDOW_S:
-            done = int(prev.get("done") or 0) + 1
+        within_window = bool(
+            prev and now - (prev.get("ts") or 0) <= statusbar.AUTOPILOT_RUN_WINDOW_S)
+        base_done = int(prev.get("done") or 0) if within_window else 0
+        done = base_done + 1 if bump_done else base_done
         if not isinstance(remaining, int):
             remaining = prev.get("remaining") if prev else None
         tmp = str(p) + ".tmp"
@@ -2198,9 +2211,14 @@ def cmd_tickets_status(args):
             # AUTHORITY_BY_USER). On repos without stream labels the exclusions
             # match nothing → the full count, unchanged.
             entry["scope"] = "core"
-            excl = " ".join("-label:stream:%s" % u for u in sorted(AUTHORITY_BY_USER))
+            excl = _core_search_excl()
+            # -L 1000 (#181 I5, round 2): was -L 200 -- above 200 open
+            # non-skip issues this AND the total query below both silently
+            # clamped to the SAME 200, so streamy=0 exactly when the hidden
+            # population was largest. 1000 comfortably exceeds any real
+            # backlog size seen on a managed repo.
             n = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "-label:autopilot-skip " + excl, "-L", "200",
+                      "-label:autopilot-skip " + excl, "-L", "1000",
                       "--json", "number", "-q", "length"], root)
             try:
                 entry["open"] = int(n)
@@ -2215,7 +2233,7 @@ def cmd_tickets_status(args):
             # reasoning that already keeps `gk` visible at 0 applies with far
             # more force here. total(non-skip, whole repo) - core = streamy.
             t = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "-label:autopilot-skip", "-L", "200",
+                      "-label:autopilot-skip", "-L", "1000",
                       "--json", "number", "-q", "length"], root)
             try:
                 total_open = int(t)
@@ -2226,7 +2244,7 @@ def cmd_tickets_status(args):
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # same core slice — how many tickets are excluded from autopilot.
             s = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "label:autopilot-skip " + excl, "-L", "200",
+                      "label:autopilot-skip " + excl, "-L", "1000",
                       "--json", "number", "-q", "length"], root)
             try:
                 entry["skipped"] = int(s)
@@ -2629,7 +2647,26 @@ def _notify_run_card(args, compose_autopilot_card, send):
         if not isinstance(view, dict):
             view = {}
         title = view.get("title") or ("#%s" % issue)
-        is_core_ticket = not _ticket_is_stream_labeled(view.get("labels"))
+        # M11 (round 2): on a parse/lookup FAILURE (empty view_raw, malformed
+        # JSON, non-dict) `view` is {} and `view.get("labels")` is None ->
+        # `_ticket_is_stream_labeled(None)` is False -> the OLD
+        # `not _ticket_is_stream_labeled(...)` collapsed to True, silently
+        # restoring the PRE-#164 wrong behaviour: a ticket we could not
+        # identify was treated as CORE and its card could inflate the
+        # core-scoped 'done'. A failed lookup now defaults the SAFE
+        # direction — the worst case is an undercounted 'done' (annoying),
+        # never a corrupted cross-population ratio (wrong).
+        view_ok = "labels" in view
+        is_core_ticket = view_ok and not _ticket_is_stream_labeled(view.get("labels"))
+        if not view_ok and not getattr(args, "dry_run", False):
+            # --dry-run stays silent on stderr (an established contract —
+            # test_dry_run_still_exits_zero_and_says_nothing_on_stderr); this
+            # diagnostic is genuinely best-effort visibility, not part of
+            # dry-run's "preview with no side effects, no noise" promise.
+            print("notify --run-card: could not determine whether #%s is a "
+                  "sub-dev stream ticket (gh issue view returned no labels) "
+                  "-- treating conservatively as non-core so this card does "
+                  "not inflate 'done'." % issue, file=sys.stderr)
         is_full = resolve_authority() == "full"
         # remaining feeds the statusline's D/T — on a reduced-authority box it
         # must be the STREAM's slice, not the whole repo (david saw 'Issues
@@ -2653,10 +2690,14 @@ def _notify_run_card(args, compose_autopilot_card, send):
             # 'ostáva 72' next to a core 'done' silently divides two
             # populations; scoping here makes the two agree by construction,
             # and the 'core' word states which population it is.
-            excl = " ".join("-label:stream:%s" % u for u in sorted(AUTHORITY_BY_USER))
+            excl = _core_search_excl()
+            # -L 1000, not 200 (#181 I5, round 2): the same clamp-difference
+            # arithmetic that could zero out the footer's `streamy` bucket
+            # also understated `remaining` here.
             rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
                               "--search", "-label:autopilot-skip " + excl,
-                              "-L", "200", "--json", "number", "-q", "length")
+                              "-L", "1000", "--json", "number", "-q", "length",
+                              timeout=20)
             try:
                 remaining = int(rem_raw)
             except (TypeError, ValueError):
@@ -2693,12 +2734,14 @@ def _notify_run_card(args, compose_autopilot_card, send):
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             # On a full-authority box a STREAM ticket's card must NOT advance
-            # the CORE-scoped D/T counter (#164 defect 2) — skip the write
-            # entirely so 'done' and 'remaining' never drift onto different
-            # populations. Reduced-authority boxes have no core/stream split
-            # (their own slice IS their whole population) — always write.
-            if not is_full or is_core_ticket:
-                _write_autopilot_progress(name, remaining)
+            # the CORE-scoped D/T counter (#164 defect 2) — but it must STILL
+            # refresh the `ts` window heartbeat, or a run that cards only
+            # stream tickets never keeps 'Issues D/T' alive at all (#181 I6,
+            # round 2 regression). ALWAYS write; only the done-bump is gated.
+            # Reduced-authority boxes have no core/stream split (their own
+            # slice IS their whole population) — always bump.
+            _write_autopilot_progress(
+                name, remaining, bump_done=(not is_full or is_core_ticket))
         elif status not in ("dedup", "dry-run"):
             # #135: a card that never reached Discord must NOT report success.
             # It still never raises and never blocks the work — but the
@@ -3406,6 +3449,16 @@ def _gh_login(cwd=None) -> str:
         return ""
 
 
+def _core_search_excl():
+    """The full-authority CORE slice's exclusion fragment: every sub-dev
+    stream's own `stream:<user>` label, so the footer (`cmd_tickets_status`),
+    the Discord card (`_notify_run_card`), and the `/goal` stop-proof
+    (`cmd_core_quals`) all exclude EXACTLY the same sub-dev-owned tickets
+    from a full-authority box's own count — single source of truth
+    (#164 / #181 I4)."""
+    return " ".join("-label:stream:%s" % u for u in sorted(AUTHORITY_BY_USER))
+
+
 def _slice_quals(user, cwd=None):
     """gh search quals for a reduced-authority stream's OWN ticket slice.
     Own-account streams (david/kvaskodev): assigned ∪ authored ∪ stream label.
@@ -3474,6 +3527,20 @@ def cmd_authority(args):
               f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
 
 
+def _label_exists_on_repo(label):
+    """True if `label` is a DEFINED label on the current repo (gh label list
+    --search), False if confirmed absent, None if the query itself failed —
+    an unreachable/erroring gh is NOT evidence the label is missing (#181
+    C2, round 2)."""
+    raw = _gh_out("label", "list", "--search", label, "--json", "name",
+                  "-L", "50")
+    try:
+        names = {(x or {}).get("name") for x in json.loads(raw)}
+    except (ValueError, TypeError):
+        return None
+    return label in names
+
+
 def cmd_slice_quals(args):
     """THE single definition of "my slice" (#181) — reused verbatim by the
     reduced-authority `/goal` stop-proof templates in skills/autopilot/SKILL.md
@@ -3493,6 +3560,24 @@ def cmd_slice_quals(args):
     `cmd_tickets_status`, and prints only the RESULT — never a raw fragment a
     template could misuse.
 
+    C1 (round 2, live-confirmed on dev1): this command used to build quals
+    unconditionally from `_current_user()`, never consulting
+    `resolve_authority()` — on a FULL-authority box (no stream at all) that
+    silently built `label:stream:<linux-user>`, which matches nothing, so
+    `--count` printed a clean `0` with real open work sitting untouched. It
+    now REFUSES outright when this box does not resolve to a
+    reduced-authority profile — never a printed count.
+
+    C2 (round 2): on a SHARED-gh-account box (montalu/marek/simap) the
+    slice is `label:stream:<user>` ALONE — a forgotten/never-created label
+    makes gh search return `[]` with exit 0 for a query that can never
+    match anything. A ZERO result from a single-label (shared-account)
+    slice is now VALIDATED before being trusted: the label must be
+    confirmed to exist on the repo, AND an `involves:@me` cross-check query
+    must itself succeed (proving gh search genuinely works for this
+    identity/repo, not just silently returning nothing everywhere) —
+    refusing rather than trusting an unconfirmed zero.
+
     --count: prints an integer (0 = slice empty — the /goal stop-proof).
     --list:  prints `number<TAB>createdAt<TAB>title`, one per open non-skip
              issue in the slice, OLDEST first (the bounce lane picks the
@@ -3505,6 +3590,15 @@ def cmd_slice_quals(args):
     A gh query failure prints to stderr and exits non-zero — NEVER prints `0`
     on failure, which would be exactly the false-empty bug this exists to
     fix."""
+    authority = resolve_authority()
+    if authority == "full":
+        print(
+            "slice-quals: this box resolves to FULL authority — there is no "
+            "stream slice to report here. Refusing rather than printing a "
+            "plausible-looking 0 (this command answers 'my slice' for a "
+            "reduced-authority branch-merge/fork-no-merge stream only; "
+            "#181 C1).", file=sys.stderr)
+        sys.exit(1)
     user = _current_user()
     quals = _slice_quals(user)
     want_count = getattr(args, "count", False)
@@ -3531,12 +3625,65 @@ def cmd_slice_quals(args):
         print("slice-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
+    if not seen and len(quals) == 1 and quals[0].startswith("label:"):
+        # C2 — a shared-account slice's ONLY signal is one label; a zero
+        # here is UN-validated until confirmed both ways.
+        label_name = quals[0].split(":", 1)[1]     # "label:stream:x" -> "stream:x"
+        exists = _label_exists_on_repo(label_name)
+        if exists is not True:
+            print(
+                "slice-quals: cannot confirm label '%s' exists on this repo "
+                "(%s) — a shared-account slice of 0 resting on an "
+                "unconfirmed label is UNRELIABLE. Refusing rather than "
+                "reporting it (#181 C2)."
+                % (label_name,
+                   "not found" if exists is False else "the check itself failed"),
+                file=sys.stderr)
+            sys.exit(1)
+        cross_raw = _gh_out("issue", "list", "--state", "open", "--search",
+                            base + " involves:@me", "-L", "1", "--json", "number")
+        try:
+            json.loads(cross_raw)
+        except (ValueError, TypeError):
+            print(
+                "slice-quals: label '%s' exists, but the involves:@me "
+                "cross-check query failed — a 0 here is UNRELIABLE (gh "
+                "search may not be working at all for this identity/repo). "
+                "Refusing (#181 C2)." % label_name, file=sys.stderr)
+            sys.exit(1)
     if want_count:
         print(len(seen))
         return
     for n in sorted(seen, key=lambda k: seen[k].get("createdAt") or ""):
         row = seen[n]
         print("%s\t%s\t%s" % (n, row.get("createdAt") or "", row.get("title") or ""))
+
+
+def cmd_core_quals(args):
+    """Print the full-authority CORE slice's open, non-skip issue count
+    (#181 I4, round 2) — the SAME `stream:<user>` exclusion the footer
+    (`cmd_tickets_status`) and the Discord run-card (`_notify_run_card`)
+    already use, so the FULL `/goal` template's stop-proof counts EXACTLY
+    the same population those two already show. Before this command
+    existed, the FULL template's proof was a bare whole-repo count — which
+    could never reach 0 while ANY sub-dev stream still had open work, even
+    though a core/gatekeeper box is FORBIDDEN from working those tickets
+    (they belong to that stream's own box).
+
+    Always prints an integer. A gh query failure prints to stderr and exits
+    non-zero — NEVER prints a number on failure (mirrors `slice-quals`'s own
+    contract)."""
+    excl = _core_search_excl()
+    raw = _gh_out("issue", "list", "--state", "open", "--search",
+                  "-label:autopilot-skip " + excl, "-L", "1000",
+                  "--json", "number", "-q", "length", timeout=20)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        print("core-quals: a gh query failed — this is NOT a reliable 0",
+              file=sys.stderr)
+        sys.exit(1)
+    print(n)
 
 
 UPLOAD_LOG_DIR_ENV = "AIRULESET_UPLOAD_LOG_DIR"
@@ -5219,6 +5366,14 @@ def main():
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
 
+    p_core = sub.add_parser(
+        "core-quals",
+        help="The full-authority CORE slice's open non-skip issue count "
+             "(#181 I4) — used by the FULL /goal stop-proof template")
+    p_core.add_argument("--count", action="store_true",
+                        help="No-op — the command always prints the count "
+                             "(kept for symmetry with slice-quals --count)")
+
     p_lock = sub.add_parser(
         "autopilot-lock",
         help="Cross-session serial-per-repo dispatch lock for /autopilot")
@@ -5260,6 +5415,7 @@ SUBCOMMANDS = {
     "delegation": cmd_delegation,
     "authority": cmd_authority,
     "slice-quals": cmd_slice_quals,
+    "core-quals": cmd_core_quals,
     "upload": cmd_upload,
     "secret": cmd_secret,
     "tickets-status": cmd_tickets_status,
