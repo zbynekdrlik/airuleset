@@ -434,7 +434,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
     # MUST disambiguate from /requesting-code-review which contains "/review" as substring.
     # Use perl negative lookbehind: /review preceded by NOT "code-" (rules out requesting-code-review).
     #
-    # #194 — the gaps are BOUNDED (`.{0,120}`), not `.*`. An unbounded `.*A.*B.*C`
+    # #194 — the gaps are BOUNDED (`.{0,300}`), not `.*`. An unbounded `.*A.*B.*C`
     # explores a split-point space quadratic in the number of candidate `A`s, and
     # message text alone could drive it past PCRE's backtracking limit: measured on
     # GNU grep 3.11, a `/review: ` line carrying ~5000 repeats of `0 🔴` (30 KB)
@@ -442,9 +442,21 @@ if [ "$IS_COMPLETION" = "1" ]; then
     # That removed the TRIGGER as well as the amplifier. The bound is also the
     # tighter reading of the rule: an audit line is a short fixed template, and an
     # unbounded gap would happily match `/review:` at the head of a 300 KB line and
-    # its counters at the tail. 120 chars is ~6x the real template's widest gap;
-    # the worst case is then 121^3 ≈ 1.8M steps against a 10M limit.
-    HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,120}0 🔴.{0,120}0 🟡.{0,120}0 🔵|(?<!code-)/review[: ].{0,120}all (findings|issues|items).{0,120}addressed|(?<!code-)/review[: ].{0,120}addressed in commit' && echo 1 || echo 0)
+    # its counters at the tail.
+    #
+    # The bound is sized by what REAL reports look like, never by speed: with
+    # grep's required-literal pre-filter defeated (decoys placed before the
+    # anchor), every candidate from 120 to 1000 answers a 1 MB adversarial line
+    # in under 0.35 s, while the unbounded form errors at 30 KB. 120 was too
+    # tight and rejected two ordinary shapes outright — a verbose standards
+    # sentence (gap 169) and a found-and-fixed summary (gap 161) — which turned
+    # the bound into a new way to report a line that is PRESENT as MISSING, an
+    # accusation the agent cannot act on because nothing names length. 300
+    # clears the longest real shape measured by ~1.8x. Note the twin HAS_RCR
+    # probe below is unbounded ERE (a DFA — no backtracking limit to hit), so a
+    # bound tight enough to reject a /review line passes its identical twin,
+    # which makes the resulting block undiagnosable from its own reason.
+    HAS_REVIEW=$(msg_has "$MSG" -qP '(?<!code-)/review[: ].{0,300}0 🔴.{0,300}0 🟡.{0,300}0 🔵|(?<!code-)/review[: ].{0,300}all (findings|issues|items).{0,300}addressed|(?<!code-)/review[: ].{0,300}addressed in commit' && echo 1 || echo 0)
     # requesting-code-review (superpowers skill, deep pass) — must also pass clean.
     # Distinguish from /review by requiring the literal token "requesting-code-review" or "request.*code.?review" or "superpowers:requesting".
     HAS_RCR=$(msg_has "$MSG" -qiE "requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|requesting.?code.?review.*all (findings|issues|items).*addressed|requesting.?code.?review.*addressed in commit|✅.*requesting.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*superpowers:requesting.*0 🔴.*0 🟡.*0 🔵|✅.*request.?code.?review.*0 🔴.*0 🟡.*0 🔵|✅.*code.?review.*\(deep\).*0 🔴.*0 🟡.*0 🔵" && echo 1 || echo 0)
@@ -672,17 +684,22 @@ fi
 # no-localhost-urls.md violation ("the user works remotely and cannot open
 # localhost on their own machine"), completion report or not. HARD block:
 # no-localhost-urls.md documents no legitimate exception for presenting one.
-# Two stages, both on here-strings. A localhost 🌐 line INCRIMINATES, so an
-# unanswerable stage resolves as "present" and the gate still fires — it simply
-# cannot quote the offending lines it never obtained.
+# Two stages, both on here-strings, and they are NOT the same kind of question.
+# Stage 1 is a SELECTOR — it only chooses which lines stage 2 reads — so it is
+# neither incriminating nor exonerating, and an unanswerable selector must WIDEN
+# the scope and let the real pattern decide, exactly as the /goal filter above
+# falls back to the full MSG. Resolving a selector as a VERDICT accuses a message
+# that carries no 🌐 line at all, prints an EMPTY offending-lines block, and
+# attaches a note blaming message size that points the wrong way. Stage 2 IS the
+# incriminating pattern, so its own unknown resolves as "present" and the gate
+# fires — it simply cannot quote the lines it never obtained.
 GLOBE_LOCALHOST=""
 GLOBE_LOCALHOST_UNKNOWN=0
-if _GLOBE_LINES=$(msg_lines "$MSG" -E "🌐"); then
-    if ! GLOBE_LOCALHOST=$(msg_lines "$_GLOBE_LINES" -iE "localhost|127\.0\.0\.1|0\.0\.0\.0"); then
-        GLOBE_LOCALHOST=""
-        GLOBE_LOCALHOST_UNKNOWN=1
-    fi
-else
+if ! _GLOBE_LINES=$(msg_lines "$MSG" -E "🌐"); then
+    _GLOBE_LINES="$MSG"
+fi
+if ! GLOBE_LOCALHOST=$(msg_lines "$_GLOBE_LINES" -iE "localhost|127\.0\.0\.1|0\.0\.0\.0"); then
+    GLOBE_LOCALHOST=""
     GLOBE_LOCALHOST_UNKNOWN=1
 fi
 if [ -n "$GLOBE_LOCALHOST" ] || [ "$GLOBE_LOCALHOST_UNKNOWN" = "1" ]; then
