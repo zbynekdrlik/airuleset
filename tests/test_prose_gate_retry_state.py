@@ -326,5 +326,174 @@ class TestCapExhaustionIsVisible(_HookCase):
             "the message does not say the retry cap was exhausted: %r" % payload)
 
 
+# --------------------------------------------------------------------------- #
+# Adversarial-review follow-ups on the fix itself
+# --------------------------------------------------------------------------- #
+
+class TestCounterContentCannotReachTheIntegerTest(_HookCase):
+    """The first cut guarded "is it digits" but not "can `[` parse it", and used
+    a RANGE to ask. Three byte sequences reached `[ -lt ]` anyway and landed in
+    exactly #196's own defect -- rc 0, no block, and raw bash noise naming the
+    script and line number, which reads as a hook malfunction.
+
+    The guard is now positive on all three axes: a size of 1-2 bytes (this hook
+    writes one digit and a newline), and a value matching one of ten LITERAL
+    alternatives. Never a range -- `[!0-9]` is locale-collated and, measured on
+    this box, does not reject U+FF13."""
+
+    NOISE = ("integer expression expected", "null byte", "line ")
+
+    def _assert_quiet(self, r):
+        for token in self.NOISE:
+            self.assertNotIn(
+                token, r.stderr,
+                "raw bash noise reached the turn (%r): %r"
+                % (token, r.stderr.strip()[-300:]))
+
+    def test_an_out_of_range_counter_does_not_disarm_the_gate(self):
+        for value in ("9" * 26, "9223372036854775808", "1" + "0" * 19):
+            with self.subTest(value=value[:12] + "..."):
+                sid = self._sid()
+                self._counter(sid).write_text(value + "\n")
+                r = self._run(sid=sid)
+                self.assertBlocks(r, "a counter of out-of-range digits")
+                self._assert_quiet(r)
+
+    def test_a_fullwidth_digit_counter_does_not_disarm_the_gate(self):
+        sid = self._sid()
+        self._counter(sid).write_text("３\n")
+        r = self._run(sid=sid)
+        self.assertBlocks(r, "a counter holding a fullwidth digit")
+        self._assert_quiet(r)
+
+    def test_a_counter_with_an_embedded_nul_does_not_disarm_the_gate(self):
+        """bash STRIPS a NUL out of a command substitution, so `3\\x004` used to
+        arrive as `34` -- past the cap, and with a warning into the turn."""
+        sid = self._sid()
+        self._counter(sid).write_bytes(b"3\x004\n")
+        r = self._run(sid=sid)
+        self.assertBlocks(r, "a counter with an embedded NUL")
+        self._assert_quiet(r)
+
+    def test_the_cap_fits_in_one_digit(self):
+        """The size bound above is only correct while the hook writes a single
+        digit. This is the lock, so raising the cap past 9 fails loudly here
+        rather than silently widening what the counter will accept."""
+        self.assertLessEqual(MAX_RETRIES, 9,
+                             "MAX_RETRIES no longer fits the 1-2 byte counter"
+                             " bound in _retry_count_of")
+
+
+class TestTheCounterPathIsNotAWritePrimitive(_HookCase):
+    """/tmp is sticky and shared with foreign uids by design on these boxes, and
+    live session ids are readable straight out of /tmp from this repo's own
+    markers -- so the counter key is enumerable and plantable by another uid.
+    `-f` alone follows a symlink and `>` writes through one."""
+
+    def test_a_symlinked_counter_is_neither_read_nor_written_through(self):
+        sid = self._sid()
+        target = Path("/tmp/airuleset-target-%s" % uuid.uuid4().hex[:10])
+        self.addCleanup(lambda: target.unlink(missing_ok=True))
+        target.write_text("PRECIOUS-CONTENT\n")
+        link = self._counter(sid)
+        link.symlink_to(target)
+        r = self._run(sid=sid)
+        self.assertBlocks(r, "a symlinked counter")
+        self.assertEqual(target.read_text(), "PRECIOUS-CONTENT\n",
+                         "the hook wrote THROUGH a symlink at its counter path"
+                         " -- a same-uid file-truncation primitive")
+
+    def test_a_fifo_counter_does_not_hang_the_hook(self):
+        """`cat` on a writer-less FIFO blocks until the harness kills the hook,
+        so no verdict is ever printed at all."""
+        sid = self._sid()
+        os.mkfifo(self._counter(sid))
+        try:
+            r = subprocess.run(
+                ["bash", str(HOOK)],
+                input=json.dumps({"last_assistant_message": BYPASS_MSG,
+                                  "session_id": sid}),
+                capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("the hook hung on a FIFO at its counter path -- in"
+                      " production the harness kills it and the message ships")
+        self.assertBlocks(r, "a FIFO at the counter path")
+
+    def test_the_counter_the_hook_writes_is_private_to_us(self):
+        """The write goes through mktemp + rename, so whatever was at the key
+        is DISPLACED by a 0600 file of ours rather than written into."""
+        sid = self._sid()
+        p = self._counter(sid)
+        p.write_text("1\n")
+        os.chmod(p, 0o666)
+        self._run(sid=sid)
+        self.assertEqual(oct(p.stat().st_mode)[-3:], "600",
+                         "the counter kept its permissive mode, so the write"
+                         " went into a file another uid can still control")
+
+
+class TestTheTtlIsBoundedInBothDirections(_HookCase):
+
+    def test_a_counter_dated_in_the_future_does_not_throttle(self):
+        """A negative age passes every `-le` test, so one backward clock step
+        (NTP, a wrong RTC at boot, a restored snapshot) would make every
+        existing counter permanently un-expirable -- #198's bucket rebuilt."""
+        for ahead in (86400, 315360000):
+            with self.subTest(seconds_ahead=ahead):
+                sid = self._sid()
+                p = self._counter(sid)
+                p.write_text("%d\n" % MAX_RETRIES)
+                future = os.stat(p).st_mtime + ahead
+                os.utime(p, (future, future))
+                r = self._run(sid=sid)
+                self.assertBlocks(r, "a counter dated %ds in the future" % ahead)
+
+
+class TestAnUnsafeIdIsValidatedNotMangled(_HookCase):
+    """Invariant 3 was prose: the suite passed against a version that SANITISED
+    the id (`tr -c 'A-Za-z0-9' _`) instead of refusing it, which is many-to-one
+    and so recreates #198's shared bucket under a new spelling."""
+
+    def _no_file_carries(self, tag):
+        return [str(p) for p in Path("/tmp").glob("*%s*" % tag)]
+
+    def test_two_distinct_unsafe_ids_do_not_share_a_counter(self):
+        """The mutant-killer. Under a sanitiser `x/TAG` and `x:TAG` collapse to
+        one key, so the sixth call is throttled by the first five and the
+        SECOND id is disarmed by the first id's counter."""
+        tag = uuid.uuid4().hex[:10]
+        self.addCleanup(
+            lambda: [Path(p).unlink(missing_ok=True)
+                     for p in self._no_file_carries(tag)])
+        for i in range(MAX_RETRIES + 1):
+            r = self._run(sid="x/%s" % tag)
+            self.assertBlocks(r, "call %d under an unsafe id" % (i + 1))
+        r = self._run(sid="x:%s" % tag)
+        self.assertBlocks(r, "a DIFFERENT unsafe id, after the first one's"
+                             " calls would have filled a shared counter")
+
+    def test_an_unsafe_id_leaves_no_state_anywhere_in_tmp(self):
+        tag = uuid.uuid4().hex[:10]
+        self.addCleanup(
+            lambda: [Path(p).unlink(missing_ok=True)
+                     for p in self._no_file_carries(tag)])
+        self._run(sid="x/%s" % tag)
+        self.assertEqual(
+            self._no_file_carries(tag), [],
+            "a refused id still became a key -- mangled, not validated")
+
+
+class TestAMessageWithNoSessionIdAtAll(_HookCase):
+    """The clean half of the no-id path had no test at all."""
+
+    def test_a_clean_message_with_no_session_id_is_silent(self):
+        r = self._run(CLEAN_MSG, sid=None)
+        self.assertEqual(r.returncode, 0, r.stderr.strip()[-300:])
+        self.assertEqual(r.stdout, "", "a clean message produced output: %r"
+                                       % r.stdout[:200])
+        self.assertEqual(r.stderr, "", "a clean message produced stderr: %r"
+                                       % r.stderr[:200])
+
+
 if __name__ == "__main__":
     unittest.main()
