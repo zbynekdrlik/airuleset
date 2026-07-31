@@ -51,6 +51,9 @@ HOOK = REPO / "hooks" / "block-main-implementation.sh"
 
 BIG = "x = 1\n" * 300          # way over any threshold
 SMALL = "x = 1\n"
+MID_1200 = "n" * 1200          # #178: over AIRULESET_FABLE_EDIT_MAX (800),
+                                # but a bookkeeping path (below) is exempt
+                                # from that threshold regardless of length
 
 # #128: arming the bypass now means WRITING A REASON into the marker, not
 # `touch`ing an empty file — so every test that arms one arms it the way a
@@ -119,7 +122,7 @@ class MainImplementationGuard(unittest.TestCase):
     def _run(self, tool="Edit", content=BIG, model="claude-fable-5",
              agent_id=None, transcript_text=None, sid=None, bypass=None,
              command=None, bypass_reason=None, presence_age=None,
-             extra_env=None):
+             extra_env=None, file_path=None):
         sid = sid or ("t-mg-" + uuid.uuid4().hex[:8])
         with TemporaryDirectory() as d:
             tp = str(Path(d) / "sess.jsonl")
@@ -144,10 +147,10 @@ class MainImplementationGuard(unittest.TestCase):
             if tool == "Bash":
                 ti = {"command": command if command is not None else content}
             elif tool == "Edit":
-                ti = {"file_path": "/x/app.py", "old_string": "a",
+                ti = {"file_path": file_path or "/x/app.py", "old_string": "a",
                       "new_string": content}
             else:
-                ti = {"file_path": "/x/app.py", "content": content}
+                ti = {"file_path": file_path or "/x/app.py", "content": content}
             payload = {"session_id": sid, "hook_event_name": "PreToolUse",
                        "tool_name": tool, "tool_input": ti,
                        "transcript_path": tp}
@@ -677,9 +680,15 @@ class CoordinatorOutputWrites80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_bulk_read_after_a_heredoc_write_still_blocked(self):
-        # the heredoc write passes; the SEPARATE read segment still doesn't
+        # the heredoc write passes; the SEPARATE read segment still doesn't.
+        # #178: was `/etc/passwd`, a REAL small existing file that the new
+        # size-aware `cat` exemption correctly now allows — replaced with a
+        # guaranteed-nonexistent absolute path so this keeps testing what
+        # it was meant to (an unbounded-looking read that ISN'T a small
+        # explicit existing file stays blocked).
         out = self._armed(
-            "cat > /tmp/b.md <<'EOF'\nbody\nEOF\ncat /etc/passwd")
+            "cat > /tmp/b.md <<'EOF'\nbody\nEOF\n"
+            "cat /etc/airuleset-does-not-exist-178.conf")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
@@ -733,8 +742,12 @@ class PipeReducers80(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_a_second_statement_is_still_its_own_first_stage(self):
-        # `;` and `&&` start a NEW pipeline — each one's first stage counts
-        out = self._armed("gh pr view 42 | tail -3; cat /etc/passwd")
+        # `;` and `&&` start a NEW pipeline — each one's first stage counts.
+        # #178: was `/etc/passwd` — see the identical note in
+        # CoordinatorOutputWrites80.test_bulk_read_after_a_heredoc_write_still_blocked.
+        out = self._armed(
+            "gh pr view 42 | tail -3; "
+            "cat /etc/airuleset-does-not-exist-178.conf")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_journalctl_scrape_still_blocks_with_a_reducer(self):
@@ -1555,6 +1568,210 @@ class CombinedAssertionFlags128(unittest.TestCase):
     def test_ordinary_sweep_still_blocks(self):
         out = self._armed("grep -rnE 'TODO|FIXME' .")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
+class SmallBoundedReadsAllowed178(unittest.TestCase):
+    """#178 (issue #178, user decision 2026-07-31, option 1): a genuinely
+    small, explicit, EXISTING file read is a bounded read — the SIZE that
+    comes back is what determines context cost, not the command name.
+    Production evidence, same day: a `cat` of a 20-line conf file and a
+    7-pattern `grep` sweep over `tests/` were both false blocks under a
+    Fable-armed main, despite being trivially bounded reads."""
+
+    def _fable(self, command):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript("claude-fable-5"))
+
+    def test_cat_one_real_small_file_allowed(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "conf.txt"
+            f.write_text("line\n" * 20)
+            out = self._fable("cat %s" % f)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_grep_two_real_small_files_allowed(self):
+        with TemporaryDirectory() as d:
+            f1 = Path(d) / "a.py"
+            f2 = Path(d) / "b.py"
+            f1.write_text("pattern one\n")
+            f2.write_text("pattern two\n")
+            out = self._fable("grep -n pattern %s %s" % (f1, f2))
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class BookkeepingWritesExempt178(unittest.TestCase):
+    """#178: a `/tmp/` scratchpad file or a
+    `~/.claude/projects/*/memory/` note is coordinator BOOKKEEPING, never
+    implementation — exempt from AIRULESET_FABLE_EDIT_MAX, up to
+    AIRULESET_MAIN_READ_MAX_BYTES (default 131072, review fix — NOT
+    unlimited), regardless of which arming condition holds. A repo file
+    is NOT exempt and keeps the existing AIRULESET_FABLE_EDIT_MAX
+    threshold unchanged. Same-day production evidence: two ~1KB
+    scratchpad writes were false-blocked under a Fable-armed main.
+
+    Also covers the fresh-context adversarial review of the first #178
+    diff: a `..`-bearing path must get NO exemption at all (path
+    traversal defeated the string-match exemption, reproducer:
+    `/tmp/../<repo>/PWNED.py`), and the exemption itself must be
+    SIZE-CAPPED, not unlimited (unlimited /tmp writes let a main session
+    stage an implementation to /tmp then `cp` it into the repo)."""
+
+    def _write(self, file_path, content=MID_1200, model="claude-fable-5"):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Write", content=content, file_path=file_path,
+                           transcript_text=transcript(model))
+
+    def test_write_to_tmp_scratchpad_allowed_over_edit_max(self):
+        out = self._write("/tmp/claude-x/scratchpad/note.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_write_to_memory_note_allowed_over_edit_max(self):
+        # the hook only STRING-MATCHES the path — no filesystem check, so
+        # the payload path is built literally rather than created on disk.
+        mem_path = str(Path.home() / ".claude" / "projects" / "x"
+                       / "memory" / "note.md")
+        out = self._write(mem_path)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_write_to_repo_relative_py_path_still_blocked(self):
+        # neither /tmp/ nor a memory path — the ordinary threshold applies
+        out = self._write("addons/models/sale_order.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- review fix: path traversal gets NO exemption ----
+
+    def test_tmp_path_with_traversal_out_of_tmp_is_never_exempt(self):
+        # `/tmp/../<repo>/x.py` string-matches `/tmp/*` but resolves
+        # OUTSIDE /tmp entirely — reviewer reproduced a 5000-char Write
+        # exiting 0 straight into the repo tree via this shape.
+        traversal_path = "/tmp/..%s/x.py" % REPO
+        out = self._write(traversal_path)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_memory_path_with_traversal_is_never_exempt(self):
+        mem_traversal = str(Path.home() / ".claude" / "projects" / "x"
+                            / "memory" / ".." / ".." / ".." / "app.py")
+        out = self._write(mem_traversal)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- review fix: the exemption is size-capped, not unlimited ----
+
+    def test_tmp_scratchpad_write_over_the_cap_is_blocked(self):
+        out = self._write("/tmp/claude-x/scratchpad/big.md",
+                          content="n" * (131072 + 1))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_tmp_scratchpad_write_at_the_cap_is_allowed(self):
+        out = self._write("/tmp/claude-x/scratchpad/atcap.md",
+                          content="n" * 131072)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
+    """#178 controls: the nonexistent / oversize / glob / poisoned-token
+    shapes must stay blocked exactly as before — the new exemption must
+    never widen past a genuinely small, explicit, EXISTING file. This is
+    also what keeps every OTHER pre-existing fixture in this file (fake
+    filenames that don't exist) blocked unchanged."""
+
+    def _fable(self, command):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript("claude-fable-5"))
+
+    def test_cat_of_a_file_just_over_the_byte_bound_blocked(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "big.txt"
+            with open(f, "wb") as fh:
+                fh.seek(131072)      # AIRULESET_MAIN_READ_MAX_BYTES default
+                fh.write(b"x")       # 131073 bytes — one over the bound
+            out = self._fable("cat %s" % f)
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cat_glob_still_blocked(self):
+        out = self._fable("cat *.jsonl")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cat_nonexistent_file_still_blocked(self):
+        out = self._fable("cat /nonexistent/x")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_recursive_grep_still_blocked(self):
+        out = self._fable("grep -rn pattern .")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_grep_with_one_nonexistent_file_token_still_blocked(self):
+        # one bad token poisons the whole small_files() check
+        with TemporaryDirectory() as d:
+            f1 = Path(d) / "real.py"
+            f1.write_text("pattern\n")
+            out = self._fable("grep -n pattern %s /nonexistent/fake.py" % f1)
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
+class AggregateReadBudget178Review(unittest.TestCase):
+    """Fresh-context adversarial review of the #178 diff, finding 3: N
+    small-file reads chained in ONE command, each individually under
+    AIRULESET_MAIN_READ_MAX_BYTES, must not sum to something huge —
+    reviewer reproduced 10 x 120000-byte `cat`s (1.2 MB aggregate) all
+    passing. The fix draws every small-file exemption in one command from
+    a SHARED per-command budget."""
+
+    def _fable(self, command):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript("claude-fable-5"))
+
+    def test_two_chained_reads_over_the_aggregate_budget_blocked(self):
+        with TemporaryDirectory() as d:
+            f1 = Path(d) / "a.log"
+            f2 = Path(d) / "b.log"
+            f1.write_bytes(b"a" * 80000)
+            f2.write_bytes(b"b" * 80000)   # 160000 aggregate > 131072
+            out = self._fable("cat %s ; cat %s" % (f1, f2))
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_one_read_of_the_same_size_alone_is_allowed(self):
+        # control: the SAME per-file size, on its own, fits the budget —
+        # proves the aggregate check (not a lowered per-file cap) is what
+        # blocks the chained case above.
+        with TemporaryDirectory() as d:
+            f1 = Path(d) / "a.log"
+            f1.write_bytes(b"a" * 80000)
+            out = self._fable("cat %s" % f1)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class GrepDereferenceRecursive178Review(unittest.TestCase):
+    """Fresh-context adversarial review of the #178 diff, finding 4:
+    `--dereference-recursive` (grep's long alias of `-R`) was not in the
+    explicit recursive block list. Against a DIRECTORY target it only
+    survived by accident via the downstream isfile() refusal — but
+    against a REAL SMALL FILE target (where `-R`'s recursion has nothing
+    to recurse into, yet the flag still declares recursive INTENT) the
+    old classifier fell through to the small-file exemption and allowed
+    it. Spelled out explicitly now so intent, not incidental target
+    shape, decides."""
+
+    def _fable(self, command):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript("claude-fable-5"))
+
+    def test_dereference_recursive_grep_against_a_directory_still_blocked(self):
+        out = self._fable("grep --dereference-recursive pattern .")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_dereference_recursive_grep_against_a_real_small_file_blocked(self):
+        # the genuinely RED-reproducible case: pre-fix, a real small FILE
+        # target fell through to the small-file exemption and passed —
+        # the directory-target case above was already blocked by accident.
+        with TemporaryDirectory() as d:
+            f = Path(d) / "real.txt"
+            f.write_text("pattern here\n")
+            out = self._fable("grep --dereference-recursive pattern %s" % f)
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
 class TestWiringAndSkill(unittest.TestCase):
