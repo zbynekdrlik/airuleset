@@ -78,10 +78,16 @@ def scan(root, days=7, now=None):
     counting every line inflated turns/tokens ~2.13x on real data. Each
     file's lines are first folded into per-request state via the shared
     `_fold_usage_line()` helper (the exact mechanism `scan_split()` already
-    uses), then aggregated ONCE per request. Tool-use counting is the one
+    uses), then aggregated ONCE per request — which also means an all-zero-
+    usage line (the `<synthetic>` interrupt/error placeholder shape) is
+    dropped before it ever reaches `by_model`/`msgs`, since
+    `_fold_usage_line()` folds nothing for it. Tool-use counting is the one
     exception: a request's `tool_use` blocks are spread across its several
     lines, so `by_hour_tools` still inspects every raw LINE's content,
-    independent of the request fold."""
+    independent of the request fold. A folded request whose timestamp is
+    OUTSIDE `[cutoff, now]` is dropped too — both too old AND future-dated
+    (a clock-skew/malformed-timestamp artifact), matching `scan_split()`'s
+    own `t < cutoff or t > now` check."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - datetime.timedelta(days=days)
     agg = defaultdict(_empty_row)
@@ -156,7 +162,7 @@ def scan(root, days=7, now=None):
             for rid in order:
                 r = reqs[rid]
                 t = r.get("ts")
-                if t is None or t < cutoff:
+                if t is None or t < cutoff or t > now:
                     continue
                 lines += 1
                 meta = req_meta.get(rid) or {}
@@ -645,21 +651,28 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     host at all") — both are excluded from the totals the same way, but
     they mean different things to the reader.
 
-    #149 (best-effort): when at least one CONTRIBUTING (non-error) host row
-    carries `"scope": "agents"` (the post-subagent-reconciliation shape
-    `hourly_snapshot()` now stamps), the merged row carries it too —
-    letting `hourly_burn_alert()`'s REL-median / weekly-step checks tell a
-    new-scope fleet row apart from an old one. This is a cheap pass-through,
-    not a strict "every host agrees" requirement — during a partial
-    rollout a merged row may be tagged from a subset of hosts; it
-    self-corrects once every host is pushed."""
+    #149/F6 (STRICT unanimity, not best-effort): the merged row carries
+    `"scope": "agents"` ONLY when EVERY CONTRIBUTING (non-error) host row
+    carries it (the post-subagent-reconciliation shape `hourly_snapshot()`
+    now stamps) — letting `hourly_burn_alert()`'s REL-median / weekly-step
+    checks tell a genuinely new-scope fleet row apart from an old one. An
+    earlier best-effort version tagged the merged row if ANY host carried
+    it — a mixed old+new fleet hour (one host already reconciled, one not)
+    got tagged anyway, poisoning the REL baseline with an hour that still
+    partly excludes subagent spend. A merged row with ZERO contributors
+    (every host errored) is never tagged either — "unanimous over an empty
+    set" is not the same claim as "confirmed new-scope". It still
+    self-corrects naturally: an untagged (mixed or contributor-less) row is
+    simply excluded from every scope-gated comparison, exactly like any
+    other pre-#149 row, until every contributing host is pushed."""
     per_host = {}
     total_usd = 0.0
     total_msgs = 0
     weighted_ctx_sum = 0.0
     total_main_bash = 0
     total_main_agent = 0
-    saw_agents_scope = False
+    saw_contributor = False
+    all_agents_scope = True
     for name, row in (host_rows or {}).items():
         if row is None or row == {}:
             per_host[name] = {"error": "no data"}
@@ -688,8 +701,9 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         weighted_ctx_sum += avg_ctx * msgs
         total_main_bash += main_bash
         total_main_agent += main_agent
-        if row.get("scope") == "agents":
-            saw_agents_scope = True
+        saw_contributor = True
+        if row.get("scope") != "agents":
+            all_agents_scope = False
     out = {
         "ts": ts,
         "per_host": per_host,
@@ -699,7 +713,7 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         "total_main_bash": total_main_bash,
         "total_main_agent": total_main_agent,
     }
-    if saw_agents_scope:
+    if saw_contributor and all_agents_scope:
         out["scope"] = "agents"
     if weekly_pct is not None:
         out["weekly_pct"] = weekly_pct
@@ -755,7 +769,15 @@ def fleet_trend(rows, n_prev=3):
     percent. The by-host comparison is UNAFFECTED — each host's own trend
     already tolerates a missing/error sample on either side (a host that
     goes stale for one hour still gets its own before/after compared on the
-    hours where it DID have data)."""
+    hours where it DID have data).
+
+    The TOTAL comparison ALSO requires a matching `scope` (#149) — a prior
+    hour whose host set happens to match latest's but whose `scope` doesn't
+    (a hour straddling the subagent-reconciliation deploy) is not a real
+    comparison either: live it printed a false "-21.5% (lepšie)" comparing
+    a tagged latest against an untagged prev. A latest row with no `scope`
+    key compares only against other untagged rows, so old-vs-old history
+    stays comparable mid-rollout too."""
     if len(rows) < 2:
         return None
     latest = rows[-1]
@@ -768,7 +790,10 @@ def fleet_trend(rows, n_prev=3):
         return sum(vals) / len(vals) if vals else None
 
     latest_hosts = _valid_host_set(latest)
-    comparable_prev = [r for r in prev if _valid_host_set(r) == latest_hosts]
+    latest_scope = latest.get("scope")
+    comparable_prev = [r for r in prev
+                       if _valid_host_set(r) == latest_hosts
+                       and r.get("scope") == latest_scope]
     total_latest = latest.get("total_usd")
     if comparable_prev:
         total_prev_mean = _mean(r.get("total_usd") for r in comparable_prev)
@@ -886,12 +911,24 @@ def fleet_budget_alert(rows, cache, now=None):
 
 def fleet_compare_rows(fleet_rows):
     """Normalize fleet.jsonl rows into the snapshot-shaped `{ts, usd,
-    avg_ctx, msgs}` `compare_changes()`/`_window_stats()` already understand
-    — reuses the SAME before/after windowing arithmetic for the whole-fleet
-    view (#55 point D), no duplicate logic."""
-    return [{"ts": r.get("ts"), "usd": r.get("total_usd", 0.0),
-             "avg_ctx": r.get("weighted_avg_ctx", 0), "msgs": r.get("total_msgs", 0)}
-            for r in fleet_rows]
+    avg_ctx, msgs[, scope]}` `compare_changes()`/`_window_stats()` already
+    understand — reuses the SAME before/after windowing arithmetic for the
+    whole-fleet view (#55 point D), no duplicate logic.
+
+    `scope` is carried through when the source fleet row carries it (key
+    omitted otherwise, mirroring `merge_fleet_row()`'s own conditional
+    tagging) — `_window_stats()` only counts rows tagged `scope ==
+    "agents"`, so dropping this field here silently discarded every fleet
+    row from `burn --compare`'s fleet half, no matter how much real history
+    existed."""
+    out = []
+    for r in fleet_rows:
+        row = {"ts": r.get("ts"), "usd": r.get("total_usd", 0.0),
+               "avg_ctx": r.get("weighted_avg_ctx", 0), "msgs": r.get("total_msgs", 0)}
+        if r.get("scope") is not None:
+            row["scope"] = r.get("scope")
+        out.append(row)
+    return out
 
 
 def render_fleet(rows, hours=24, cache=None, now=None):
@@ -989,12 +1026,25 @@ def render_fleet(rows, hours=24, cache=None, now=None):
 # $2311.90 (both trees, deduped) -- a 1.39x TOTAL ratio. The single busiest
 # hour moved from $88.67 (old) to $103.62 (new, a DIFFERENT hour) -- a 1.17x
 # PEAK ratio, smaller than the total ratio because request-dedup shrinks the
-# main-tree contribution even as subagent spend gets added. The total ratio
-# is the more stable of the two (44 hourly samples vs one), and is used
-# here with headroom, not the naive "roughly doubles" guess: 20.0 * 1.39 ~=
-# 27.8, rounded UP to the next clean number so the alert starts slightly
-# lenient post-deploy rather than immediately firing on ordinary traffic.
-BURN_ALERT_ABS_USD = 30.0          # one hour above this many USD alone triggers
+# main-tree contribution even as subagent spend gets added. The 1.39x TOTAL
+# ratio is the more stable of the two (44 hourly samples vs one) -- it is
+# what the F5 recalibration below scales by.
+#
+# F5 ABS recalibration (measured 2026-07-31, dev1, read-only against
+# `~/.claude/burn-history/fleet.jsonl`): the FIRST cut above (20.0 * 1.39,
+# rounded UP to 30.0) was calibrated against dev1's OWN hourly buckets --
+# but job 19 (`watchdog.burn_alert_job`) feeds `hourly_burn_alert()` job
+# 16's FLEET-WIDE MERGED `total_usd` (every managed host summed by
+# `merge_fleet_row()`), a materially bigger population. Against that
+# population $30 fired on 264 of 317 real old-scope (pre-#149) hourly rows
+# (83%, sample: 2026-07-25..2026-07-31) -- an alert that fires on 83% of
+# hours is noise, not an alarm. Recalibrated from the population that
+# actually hits the threshold: those 317 old-scope `fleet.jsonl` rows have
+# a p95 total_usd of $151.27; scaled by the SAME measured 1.39x old->new
+# ratio above (151.27 * 1.39 ~= 210.27) and rounded to a clean $210 -- a
+# threshold a p95-by-construction population crosses on roughly 1 hour in
+# 20 (<5%), not 5 in 6.
+BURN_ALERT_ABS_USD = 210.0         # one hour above this many USD alone triggers
 BURN_ALERT_REL_MULT = 3.0          # one hour more than this many x the median
                                     # of the last BURN_ALERT_REL_WINDOW hours
 BURN_ALERT_REL_WINDOW = 6
@@ -1037,19 +1087,29 @@ def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
     is user-facing; `reasons` is operator-facing).
 
     #149: the REL-median and weekly-step comparisons only consider PRIOR
-    rows tagged `scope == "agents"` (best-effort carried through by
-    `merge_fleet_row()` when at least one contributing host row has it) --
-    comparing the current (always post-#149) hour against pre-#149 history
-    would compare against a baseline that excluded subagent spend entirely,
-    roughly doubling every figure and firing on the discontinuity itself
-    rather than on a real spike. No matching prior rows yet -> the existing
-    `median_prev is None` / `prev_pct is None` guards already give an
-    automatic warm-up (no REL/weekly-step fire) until same-scope history
-    accumulates. ABS is unaffected -- it only ever reads the CURRENT
-    (latest) row, which is always new-scope once #149 is deployed. The
-    "previous N hours" $ figures in the rendered MESSAGE stay unscoped --
-    that is informational trend context for the reader, not a threshold
-    decision."""
+    rows whose `scope` matches the LATEST row's own `scope` (F3: an earlier
+    version filtered priors to a hardcoded `scope == "agents"` without ever
+    checking the latest row's own scope, so tagged priors + an untagged
+    latest still compared across the boundary -- fixture: tagged $1 priors
+    + an untagged $50 latest read as a false 50x median spike). Comparing
+    across the boundary would compare against a baseline that either
+    excludes or includes subagent spend differently, roughly doubling every
+    figure and firing on the discontinuity itself rather than on a real
+    spike. A latest row with NO `scope` key (pre-#149) matches only other
+    untagged priors, so old-vs-old history stays comparable mid-rollout
+    too. ABS is unaffected -- it only ever reads the CURRENT (latest) row.
+    The "previous N hours" $ figures in the rendered MESSAGE stay unscoped
+    -- that is informational trend context for the reader, not a threshold
+    decision.
+
+    REL also has an explicit WARM-UP (F4): fewer than `max(3, rel_window //
+    2)` same-scope prior samples means it may not fire at all, however far
+    above the median the latest hour sits -- with only 1-2 priors, a single
+    stale/uncharacteristic hour becomes the whole median (measured live: a
+    lone $2 prior let a $7 hour read as "3x the median"). The weekly-step
+    check has no equivalent warm-up threshold; its own `prev_pct is None`
+    guard is already a genuine warm-up, since a step-crossing check has
+    nothing to compare against without at least one prior sample."""
     if not rows:
         return None
     abs_usd = BURN_ALERT_ABS_USD if abs_usd is None else abs_usd
@@ -1061,14 +1121,18 @@ def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
     hb = hour_bucket_of_ts(latest.get("ts"))
     total_usd = latest.get("total_usd", 0.0) or 0.0
     prev_rows = rows[max(0, len(rows) - 1 - rel_window):-1]
-    scoped_prev = [r for r in rows[:-1] if r.get("scope") == "agents"]
+    want_scope = latest.get("scope")
+    scoped_prev = [r for r in rows[:-1] if r.get("scope") == want_scope]
     scoped_prev_window = scoped_prev[-rel_window:] if rel_window else scoped_prev
     prev_totals = [r.get("total_usd", 0.0) or 0.0 for r in scoped_prev_window]
     median_prev = _median(prev_totals)
+    min_rel_samples = max(3, rel_window // 2) if rel_window else 3
     reasons = []
     if total_usd > abs_usd:
         reasons.append("nad absolutnym prahom $%.2f" % abs_usd)
-    if median_prev is not None and median_prev > 0 and total_usd > rel_mult * median_prev:
+    if (median_prev is not None and median_prev > 0
+            and len(prev_totals) >= min_rel_samples
+            and total_usd > rel_mult * median_prev):
         reasons.append("%.1fx median poslednych %d hodin ($%.2f)"
                        % (rel_mult, len(prev_totals), median_prev))
     prev_pct = scoped_prev[-1].get("weekly_pct") if scoped_prev else None
