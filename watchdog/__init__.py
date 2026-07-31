@@ -3679,13 +3679,26 @@ def _goal_was_cleared_by_user(tpath):
     the structural filter that keeps a QUOTED marker (one session pasting
     another's transcript) from being read as state applies here too.
 
+    The clear stops governing once the session prints a NEW arm question
+    (`arm_after`). Without that exit the suppression could never release: a
+    clear stays the newest marker for the rest of the session's life, and the
+    only thing that would arm it again is the very job the clear is blocking
+    — a suppression whose exit condition is the action it suppresses. Live
+    regression (montalu@subdev, 2026-07-31): the user cleared a goal, later
+    asked the session to print the arm question again, and job 9 refused
+    forever, one `skip cleared` line per sweep against a `/goal` line sitting
+    unarmed on screen. #170's own case is the OPPOSITE order — its arm
+    question was printed BEFORE the clear and merely survives on screen,
+    which is exactly why the viewport could not decide it.
+
     Fail-open: unreadable, absent or markerless returns False, so a pane that
     used to arm keeps arming. Not provably cleared must never start blocking."""
     try:
         _off, mark = scan_goal_markers(tpath)
     except Exception:
         return False
-    return bool(mark) and mark.get("state") == "cleared"
+    return (bool(mark) and mark.get("state") == "cleared"
+            and not mark.get("arm_after"))
 
 
 def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
@@ -6902,6 +6915,39 @@ def _parse_goal_marker(content):
     return None
 
 
+# Cheap raw-bytes pre-filter for "this line might be the session asking to be
+# armed". Both alternatives of `_ARM_QUESTION_RX` require the literal `/goal`,
+# and CC does not escape `/` in its JSONL, so this is a provable superset.
+_GOAL_ASK_PROBE = b"/goal"
+
+
+def _entry_asks_to_arm(entry):
+    """True when this entry is an ASSISTANT turn printing the arm question.
+
+    TOP-LEVEL text blocks only. The same words arrive as a `tool_result` when
+    one session greps another's transcript — that content is always a LIST
+    inside a `user` entry, so the structural filter that keeps a quoted `Goal
+    set:` from being read as state (#54) applies here unchanged: somebody
+    else's question is not this session asking for anything.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return False
+    msg = entry.get("message")
+    if not isinstance(msg, dict):
+        return False
+    blocks = msg.get("content")
+    if isinstance(blocks, str):
+        return bool(_ARM_QUESTION_RX.search(blocks))
+    if not isinstance(blocks, list):
+        return False
+    for b in blocks:
+        if (isinstance(b, dict) and b.get("type") == "text"
+                and isinstance(b.get("text"), str)
+                and _ARM_QUESTION_RX.search(b["text"])):
+            return True
+    return False
+
+
 def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
     """`(new_off, marker_or_None)` — the NEWEST `/goal` marker in the bytes
     read, plus the offset to resume from next time.
@@ -6948,24 +6994,33 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
         # The arm probe deliberately stops BEFORE the prefix's opening quote:
         # in the JSON line that quote is escaped as `\"`, so matching the full
         # prefix here would never hit.
-        if (_GOAL_LCS_OPEN.encode() not in ln
-                and _GOAL_ARM_PROBE not in ln):
+        is_mark = (_GOAL_LCS_OPEN.encode() in ln or _GOAL_ARM_PROBE in ln)
+        # Only once a marker is in hand does a later arm question mean
+        # anything — before that there is nothing for it to qualify.
+        is_ask = best is not None and _GOAL_ASK_PROBE in ln
+        if not is_mark and not is_ask:
             continue
         try:
             entry = json.loads(ln)
         except Exception:
             continue
-        mark = _parse_goal_marker(_goal_marker_content(entry))
-        if mark is None:
-            continue
-        ts = None
-        try:
-            ts = datetime.fromisoformat(
-                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            ts = None
-        mark["ts"] = ts
-        best = mark
+        if is_mark:
+            mark = _parse_goal_marker(_goal_marker_content(entry))
+            if mark is not None:
+                ts = None
+                try:
+                    ts = datetime.fromisoformat(
+                        str(entry.get("timestamp")).replace(
+                            "Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = None
+                mark["ts"] = ts
+                # A fresh marker supersedes whatever asked before it.
+                mark["arm_after"] = False
+                best = mark
+                continue
+        if best is not None and _entry_asks_to_arm(entry):
+            best["arm_after"] = True
     return (new_off, best)
 
 
