@@ -172,6 +172,64 @@ set -euo pipefail
 # REFUTED by the same measurement and deliberately NOT built: 687 of 687
 # main turns carried exactly ONE Bash call, so a per-turn counter could
 # never fire. Batching pressure lives in the nudge's message instead.
+#
+# #178 (user decision, 2026-07-31, option 1): the classifier above judges
+# an operation by its CLASS (bulk read/search/build/test vs. coordination),
+# but a genuinely SMALL, bounded operation is cheap regardless of class —
+# and the user's standing directive is that small bounded operations run
+# on MAIN regardless of model; only genuinely large sweeps and repo
+# implementation stay blocked. Production evidence, all same day: five
+# false blocks in one session — a `cat` of a 20-line config file, a
+# 7-pattern `grep` sweep over `tests/`, and two ~1KB scratchpad writes —
+# each one a bounded, harmless read/write that had no business being
+# gated. This also matches Anthropic's own Opus 5 prompting guidance,
+# which advises against delegating small, cheap operations to a subagent
+# when the calling agent can just do them directly — dispatch overhead is
+# for genuinely bulk or unbounded work, not for reading one small file.
+#
+# Two additions, both size-based rather than class-based:
+#   1. Edit/Write to a `/tmp/` scratchpad path, or a path matching
+#      `~/.claude/projects/*/memory/*` (a memory note), is coordinator
+#      BOOKKEEPING — exempt from AIRULESET_FABLE_EDIT_MAX, up to a SIZE CAP
+#      (below), regardless of which arming condition holds. A repo file is
+#      NOT exempt and keeps the existing threshold.
+#   2. In the Bash classifier, `cat`/`grep`/`rg`/`ag` targeting ONLY
+#      explicit, EXISTING, non-glob file(s) whose combined size is under
+#      AIRULESET_MAIN_READ_MAX_BYTES (default 131072) are NOT blocked —
+#      the size that comes back is what determines context cost, not the
+#      command name. A glob, a nonexistent path, an oversize file, a
+#      recursive/`-f`/`-d` form, or any ONE bad token in a multi-file read
+#      still blocks exactly as before — this is deliberately what keeps
+#      every pre-existing fake-filename test fixture blocked unchanged.
+#
+# FIXED (fresh-context adversarial review of the #178 diff, same day): three
+# real holes in the first cut, all closed here.
+#   a) PATH TRAVERSAL defeated bullet 1 entirely — a `file_path` of
+#      `/tmp/../home/.../PWNED.py` string-matches `/tmp/*` and a 5000-char
+#      Write exited 0 straight into the repo tree (reproduced live). Any
+#      `file_path` containing `..` now gets NO bookkeeping exemption at
+#      all — it falls through to the ordinary AIRULESET_FABLE_EDIT_MAX
+#      threshold, fail-closed. A legitimate scratchpad/memory path never
+#      contains `..`, so nothing real is lost.
+#   b) UNBOUNDED bookkeeping writes let a main session stage an arbitrarily
+#      large implementation to `/tmp` and `cp` it into the repo (`cp` is
+#      ambiguous -> allow in the Bash classifier, and this fix deliberately
+#      does NOT add `cp` gating — that is a materially different, more
+#      invasive change than the ticket asked for, and would false-block
+#      routine copies). So bullet 1's exemption is now SIZE-CAPPED at
+#      AIRULESET_MAIN_READ_MAX_BYTES too (same env as bullet 2, default
+#      131072 — ~100x the production false blocks this was built for,
+#      ~1 KB scratchpad notes) — a non-numeric length gets NO exemption,
+#      fail-closed. The residual — staging up to that cap in `/tmp` then
+#      `cp`-ing it in — is accepted, bounded by the same 128 KB cap.
+#   c) AGGREGATE-SIZE bypass in bullet 2 — N `cat`/`grep` segments chained
+#      with `;`/`&&`, each just under the per-file cap, summed to 1.2 MB in
+#      one command (10 x 120000-byte `cat`s, reproduced live). The
+#      exemption now draws from ONE shared per-command budget
+#      (`READ_BUDGET`, seeded at AIRULESET_MAIN_READ_MAX_BYTES and consumed,
+#      never refunded, by every segment that draws from it) — the WHOLE
+#      command's aggregate small-file exemption is bounded to the same cap,
+#      not each segment independently.
 
 command -v jq &>/dev/null || exit 0
 
@@ -224,9 +282,32 @@ if [ "$TOOL_NAME" = "Bash" ]; then
             ;;
     esac
 else
+    # #178: a /tmp scratchpad file or a ~/.claude/projects/*/memory/ note
+    # is coordinator BOOKKEEPING, never implementation — exempt from the
+    # AIRULESET_FABLE_EDIT_MAX threshold, checked BEFORE the ordinary
+    # length gate below. The hook only STRING-MATCHES the path; no
+    # filesystem check. Repo files keep the existing threshold unchanged.
+    FILE_PATH_EARLY=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' \
+        2>/dev/null || echo "")
     LEN=$(echo "$INPUT" | jq -r \
         '(.tool_input.new_string // .tool_input.content // "") | length' \
         2>/dev/null || echo 0)
+    BOOKKEEPING_READ_MAX="${AIRULESET_MAIN_READ_MAX_BYTES:-131072}"
+    case "$BOOKKEEPING_READ_MAX" in
+        ''|*[!0-9]*) BOOKKEEPING_READ_MAX=131072 ;;
+    esac
+    case "$FILE_PATH_EARLY" in
+        # fresh-context #178 review: path traversal (`..` anywhere) NEVER
+        # gets the bookkeeping exemption — a `/tmp/../<repo>/x.py`-shaped
+        # path string-matches `/tmp/*` but resolves outside it, so it falls
+        # straight through to the ordinary threshold below, fail-closed.
+        *..*) : ;;
+        /tmp/*|*/.claude/projects/*/memory/*)
+            # size-capped, not unlimited (#178 review) — a non-numeric LEN
+            # gets no exemption either, fail-closed to the ordinary check.
+            [ "$LEN" -le "$BOOKKEEPING_READ_MAX" ] 2>/dev/null && exit 0
+            ;;
+    esac
     MAX="${AIRULESET_FABLE_EDIT_MAX:-800}"
     [ "$LEN" -gt "$MAX" ] 2>/dev/null || exit 0     # surgical edit — oversight
 fi
@@ -465,13 +546,19 @@ log_block() {
 
 # ---- Bash path (#66): classify, don't size-gate ----
 if [ "$TOOL_NAME" = "Bash" ]; then
-    CLASS=$(python3 - "$BASH_CMD" <<'PYEOF'
+    # #178: the payload's cwd is what makes a RELATIVE file argument
+    # resolvable for the small-file read exemption below; empty when the
+    # payload doesn't carry one (the classifier then refuses any relative
+    # path rather than guessing).
+    CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+    CLASS=$(python3 - "$BASH_CMD" "$CWD" <<'PYEOF'
 import os
 import re
 import shlex
 import sys
 
 cmd = sys.argv[1]
+cwd = sys.argv[2] if len(sys.argv) > 2 else ""
 
 # ---- #80: strip heredoc BODIES before anything else. A heredoc body is
 # PAYLOAD text (a PR/issue body, a playbook section), never command tokens —
@@ -786,6 +873,60 @@ def is_bounded_sed(tk):
     return False
 
 
+# #178: a genuinely small, EXPLICIT, EXISTING file read is a bounded read —
+# size is what determines context cost, not the command name. A glob is
+# never provably bounded (the shell could expand it to anything), a
+# relative path with no known cwd cannot be resolved safely, and a
+# nonexistent/unstatable/oversize path is refused — which is exactly what
+# keeps every pre-existing fake-filename fixture in this repo's own test
+# suite BLOCKED unchanged.
+try:
+    READ_MAX_BYTES = int(os.environ.get("AIRULESET_MAIN_READ_MAX_BYTES") or 131072)
+except ValueError:
+    READ_MAX_BYTES = 131072
+
+# fresh-context #178 review: N small-file reads chained in ONE command
+# (`;`/`&&`), each individually under READ_MAX_BYTES, must not sum to
+# something huge (reproduced live: 10 x 120000-byte `cat`s, 1.2 MB total,
+# all ten independently under the per-segment cap). A SHARED per-command
+# budget, seeded once per classify() invocation (i.e. once per Bash tool
+# call) and CONSUMED — never refunded — by every segment that draws from
+# it, bounds the WHOLE command's aggregate small-file exemption to
+# READ_MAX_BYTES, not each segment independently.
+READ_BUDGET = [READ_MAX_BYTES]
+
+
+def small_files(paths, base_cwd):
+    total = 0
+    for p in paths:
+        if any(c in p for c in "*?["):
+            return False                      # a glob is never provably bounded
+        expanded = os.path.expanduser(p)
+        if not os.path.isabs(expanded):
+            if not base_cwd:
+                return False                   # relative + no known cwd -> refuse
+            expanded = os.path.join(base_cwd, expanded)
+        try:
+            if not os.path.isfile(expanded):
+                return False
+            total += os.path.getsize(expanded)
+        except OSError:
+            return False
+    if total > READ_BUDGET[0]:
+        return False
+    READ_BUDGET[0] -= total
+    return True
+
+
+def cat_files(tk):
+    # #178: skip only the LEADING run of flag-shaped tokens (`cat -n f`) —
+    # everything from the first non-flag token onward is a file argument.
+    i = 1
+    while i < len(tk) and tk[i].startswith("-"):
+        i += 1
+    return tk[i:]
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
@@ -803,18 +944,50 @@ def is_blocked_segment(tk):
         # (`-[A-Za-z]+`, so `-C3`/`--color` are excluded) containing `c` or
         # `q` is the same assertion — case matters, since `-C` is CONTEXT
         # and dumps matches with surrounding lines.
-        return not any(
+        if any(
             t in ("-c", "-q", "--count", "--quiet", "--silent")
             or (re.match(r"^-[A-Za-z]+$", t)
                 and ("c" in t[1:] or "q" in t[1:]))
-            for t in tk[1:])
+            for t in tk[1:]):
+            return False
+        # #178: a recursive / directory / pattern-from-file form is never
+        # a small explicit-file read — keep it blocked outright rather
+        # than letting it fall through to the file-size exemption below.
+        # `--dereference-recursive` (review finding) is the long alias of
+        # `-R` — spelled out explicitly rather than surviving only by
+        # accident via the downstream isfile() refusal on a directory arg.
+        if any(
+            t in ("-r", "-R", "--recursive", "--dereference-recursive",
+                  "-f", "-d")
+            or (re.match(r"^-[A-Za-z]+$", t)
+                and ("r" in t[1:] or "R" in t[1:]))
+            for t in tk[1:]):
+            return True
+        # #178: otherwise the FIRST non-flag token is the pattern and the
+        # rest are files — unless `-e` supplies the pattern separately (its
+        # argument is indistinguishable from a positional token here), in
+        # which case every non-flag token is treated as a file. A small,
+        # explicit, EXISTING file read is a bounded read, not a bulk one.
+        non_flags = [t for t in tk[1:] if not t.startswith("-")]
+        has_e = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
+        files = non_flags if has_e else non_flags[1:]
+        if files and small_files(files, cwd):
+            return False
+        return True
     if head == "find":
         return True
     if head in ("head", "tail"):
         return not is_bounded_peek(tk)
     if head == "sed":
         return not is_bounded_sed(tk)
-    if head in ("cat", "awk"):
+    if head == "awk":
+        return True
+    if head == "cat":
+        # #178: a small, explicit, EXISTING file read is bounded — judge
+        # the SIZE that comes back, not the command name.
+        files = cat_files(tk)
+        if files and small_files(files, cwd):
+            return False
         return True
     if head == "pytest":
         return True
@@ -985,6 +1158,10 @@ david@subdev inline-354-edits incident):
     work under an armed /goal use the autopilot-worker; for plan execution
     use superpowers:subagent-driven-development.
   • then REVIEW the worker's diff here — that is the coordinator's job.
+  • a /tmp scratchpad file or a ~/.claude/projects/*/memory/ note is
+    exempt from this threshold up to AIRULESET_MAIN_READ_MAX_BYTES
+    (default 128 KB, #178) — this file is neither, is over that cap, or
+    its path contains ".." (never exempt, #178 review).
 
 Deliberate exception (one-shot, logged, and it must SAY WHY):
   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
