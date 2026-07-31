@@ -120,9 +120,14 @@ print(bad)
 ' 2>/dev/null || echo "")
 
     if [ -n "$BAD" ]; then
-        echo "BLOCKED: refusing to stage sensitive file '${BAD}'."
-        echo "If you really need to stage it, do it manually outside Claude Code,"
-        echo "or rename/relocate it out of the secret-file patterns."
+        # Claude Code shows only STDERR on an exit-2 block — stdout keeps a
+        # copy for terminal runs (live incident 2026-07-31: stdout-only
+        # reason rendered as "No stderr output").
+        MSG="BLOCKED: refusing to stage sensitive file '${BAD}'.
+If you really need to stage it, do it manually outside Claude Code,
+or rename/relocate it out of the secret-file patterns."
+        printf '%s\n' "$MSG"
+        printf '%s\n' "$MSG" >&2
         exit 2
     fi
 fi
@@ -323,17 +328,23 @@ PYEOF
 )
 
 if [ -n "$VIOLATIONS" ]; then
-    echo ""
-    echo "🚫 BLOCKED: staged content contains an inlined secret VALUE."
-    echo ""
-    echo "$VIOLATIONS" | sed 's/^/    /'
-    echo ""
-    echo "  Scrub the literal value (use an env var / placeholder instead)."
-    echo "  If this is genuinely NOT a secret, bypass with:"
-    echo "    # airuleset:secret-ok <reason>"
-    echo "  appended to the command (logged to audits/secret-scan-bypasses.log)."
-    echo "  See modules/quality/security-basics.md."
-    echo ""
+    # Claude Code shows only STDERR on an exit-2 block — stdout keeps a copy
+    # for terminal runs (live incident 2026-07-31: stdout-only reason
+    # rendered as "No stderr output").
+    IND=$(printf '%s\n' "$VIOLATIONS" | sed 's/^/    /')
+    MSG="
+🚫 BLOCKED: staged content contains an inlined secret VALUE.
+
+$IND
+
+  Scrub the literal value (use an env var / placeholder instead).
+  If this is genuinely NOT a secret, bypass with:
+    # airuleset:secret-ok <reason>
+  appended to the command (logged to audits/secret-scan-bypasses.log).
+  See modules/quality/security-basics.md.
+"
+    printf '%s\n' "$MSG"
+    printf '%s\n' "$MSG" >&2
     exit 2
 fi
 
