@@ -105,6 +105,21 @@ class TestScan(unittest.TestCase):
             report = burn.scan(tmp, days=7, now=now)
             self.assertEqual(report["usage_lines"], 1)
 
+    def test_a_future_dated_line_is_dropped_like_scan_split_already_drops_it(self):
+        # F10: scan()'s request loop only checked `t < cutoff`, never
+        # `t > now` -- scan_split() (line ~1364) already drops future-dated
+        # lines (a clock-skew / malformed-timestamp artifact). Bring scan()
+        # to the same shape.
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            future_ts = (now + datetime.timedelta(days=1)).isoformat()
+            _write(tmp, "proj-future", "s1", [
+                _line("claude-sonnet-5", i=5, cr=10, o=5, ts=future_ts),
+            ])
+            report = burn.scan(tmp, days=7, now=now)
+            self.assertEqual(report["usage_lines"], 0)
+            self.assertEqual(report["by_model"], {})
+
 
 class TestLocalReport(unittest.TestCase):
     def test_adds_host_and_user(self):
@@ -716,19 +731,49 @@ class TestFleetMerge(unittest.TestCase):
         self.assertNotIn("stale", row["per_host"]["gk"])
 
     def test_scope_agents_is_carried_through_when_a_host_row_has_it(self):
-        # #149: at least one contributing host row tagged "scope": "agents"
-        # (the post-subagent-reconciliation hourly_snapshot() shape) makes
-        # the MERGED fleet row carry it too -- best-effort, not a strict
-        # "every host agrees" requirement.
+        # #149/F6: a SINGLE contributing host row tagged "scope": "agents"
+        # makes the MERGED fleet row carry it too -- unanimous is trivially
+        # satisfied when there is only one contributor.
         row = dict(_host_row(1.0, 10, 100000))
         row["scope"] = "agents"
         merged = burn.merge_fleet_row("t", {"dev1": row})
         self.assertEqual(merged.get("scope"), "agents")
 
+    def test_scope_agents_requires_every_contributing_host_to_carry_it(self):
+        # F6: merge_fleet_row() used to tag scope:"agents" if ANY host row
+        # carried it -- a mixed old+new fleet hour (one host already
+        # reconciled, one not) got tagged anyway, poisoning the REL/weekly-
+        # step baseline with a hour that still includes old-scope spend.
+        # Requiring UNANIMITY across every contributing (non-error) host is
+        # the fix: two hosts, both tagged, DOES tag the merged row.
+        row1 = dict(_host_row(1.0, 10, 100000))
+        row1["scope"] = "agents"
+        row2 = dict(_host_row(2.0, 20, 100000))
+        row2["scope"] = "agents"
+        merged = burn.merge_fleet_row("t", {"dev1": row1, "dev2": row2})
+        self.assertEqual(merged.get("scope"), "agents")
+
+    def test_mixed_scope_fleet_is_not_tagged(self):
+        # F6 negative case: dev1 already reconciled (scope="agents"), dev2
+        # not yet pushed (no scope key at all) -- the merged row must NOT
+        # be tagged, because it is not genuinely a post-#149 hour for every
+        # contributor.
+        row1 = dict(_host_row(1.0, 10, 100000))
+        row1["scope"] = "agents"
+        row2 = _host_row(2.0, 20, 100000)   # no scope key -- old host
+        merged = burn.merge_fleet_row("t", {"dev1": row1, "dev2": row2})
+        self.assertNotIn("scope", merged)
+
     def test_no_scope_key_when_no_host_row_has_it(self):
         # every existing host row shape (pre-#149, or an old box not yet
         # pushed) — the merged row must not gain a scope it never earned.
         merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
+        self.assertNotIn("scope", merged)
+
+    def test_error_only_hosts_never_gain_a_scope_tag(self):
+        # F6: a fleet cycle where every host errored has ZERO contributors --
+        # "unanimous" over an empty set must not be misread as "tagged".
+        merged = burn.merge_fleet_row("t", {"gk": {"error": "ssh timeout"}})
         self.assertNotIn("scope", merged)
 
 
@@ -843,7 +888,34 @@ class TestFleetTrend(unittest.TestCase):
         self.assertIsNone(trend["total"]["prev_mean"])
         # by_host for dev1 (present + valid every hour) still works normally
         self.assertEqual(trend["by_host"]["dev1"]["latest"], 2.0)
-        self.assertEqual(trend["by_host"]["dev1"]["prev_mean"], 2.0)
+
+    def test_total_not_comparable_across_a_scope_boundary(self):
+        # F2: fleet_trend() compared total_usd across the #149 scope
+        # boundary -- a tagged latest hour against an untagged prev hour
+        # (SAME host set) live printed a false "-21.5% (lepšie)". comparable_
+        # prev must additionally require the SAME scope as latest, not just
+        # the same host set.
+        prev = self._row("t0", 5.0, {"dev1": _host_row(5.0, 5, 1000)})
+        # prev carries no "scope" key at all -- pre-#149 shaped.
+        latest = self._row("t1", 100.0, {"dev1": _host_row(100.0, 5, 1000)})
+        latest["scope"] = "agents"
+        trend = burn.fleet_trend([prev, latest])
+        self.assertFalse(trend["total"]["comparable"])
+        self.assertIsNone(trend["total"]["prev_mean"])
+
+    def test_total_comparable_when_scope_matches_across_hours(self):
+        # F2, positive case: SAME scope on both sides (same host set too)
+        # still compares normally -- the fix narrows the comparison, it
+        # doesn't disable it.
+        prev = self._row("t0", 5.0, {"dev1": _host_row(5.0, 5, 1000)})
+        prev["scope"] = "agents"
+        latest = self._row("t1", 100.0, {"dev1": _host_row(100.0, 5, 1000)})
+        latest["scope"] = "agents"
+        trend = burn.fleet_trend([prev, latest])
+        self.assertTrue(trend["total"]["comparable"])
+        self.assertEqual(trend["total"]["prev_mean"], 5.0)
+        self.assertEqual(trend["total"]["latest"], 100.0)
+        self.assertEqual(trend["by_host"]["dev1"]["prev_mean"], 5.0)
 
 
 class TestObservedPctPerDay(unittest.TestCase):
@@ -1029,6 +1101,55 @@ class TestHourlyBurnAlert(unittest.TestCase):
         self.assertIsNotNone(alert2)
         self.assertTrue(any("median" in r for r in alert2["reasons"]), alert2)
 
+    def test_relative_check_only_compares_priors_matching_the_latest_rows_own_scope(self):
+        # F3: hourly_burn_alert() filtered PRIOR rows to scope=="agents" but
+        # never checked the LATEST row's own scope. Fixture: tagged priors
+        # at $1 + an UNTAGGED latest at $50 -- crossing the scope boundary
+        # must not fire the median check (comparing a new-scope $50 hour
+        # against an old-scope $1 median is meaningless, not a real spike).
+        prev = [self._row("2026-07-26T%02d:00:00+00:00" % h, 1.0)
+               for h in range(4, 10)]              # default scope="agents"
+        latest = self._row("2026-07-26T10:00:00+00:00", 50.0, scope=None)
+        alert = burn.hourly_burn_alert(prev + [latest], abs_usd=1000.0,
+                                       rel_mult=3.0, rel_window=6)
+        self.assertIsNone(alert, alert)
+
+        # Same shape, but the priors are ALSO untagged (old-vs-old) -- must
+        # still compare and fire, since both sides share the SAME (missing)
+        # scope -- old-vs-old stays consistent mid-rollout too.
+        prev2 = [self._row("2026-07-26T%02d:00:00+00:00" % h, 1.0, scope=None)
+                for h in range(4, 10)]
+        latest2 = self._row("2026-07-26T10:00:00+00:00", 50.0, scope=None)
+        alert2 = burn.hourly_burn_alert(prev2 + [latest2], abs_usd=1000.0,
+                                        rel_mult=3.0, rel_window=6)
+        self.assertIsNotNone(alert2)
+        self.assertTrue(any("median" in r for r in alert2["reasons"]), alert2)
+
+    def test_relative_check_requires_a_warmup_of_same_scope_priors(self):
+        # F4: with only 1 or 2 same-scope prior hours the median is not a
+        # reliable baseline -- REL must not fire regardless of how far
+        # above it the latest hour sits (fixture: a single $2 prior would
+        # let a $7 hour read as "3x the median"). Needs
+        # max(3, rel_window // 2) same-scope priors before it may fire.
+        latest = self._row("2026-07-26T10:00:00+00:00", 7.0)
+        one_prior = [self._row("2026-07-26T09:00:00+00:00", 2.0)]
+        alert = burn.hourly_burn_alert(one_prior + [latest], abs_usd=1000.0,
+                                       rel_mult=3.0, rel_window=6)
+        self.assertIsNone(alert, alert)
+
+        two_priors = [self._row("2026-07-26T%02d:00:00+00:00" % h, 2.0)
+                     for h in (8, 9)]
+        alert2 = burn.hourly_burn_alert(two_priors + [latest], abs_usd=1000.0,
+                                        rel_mult=3.0, rel_window=6)
+        self.assertIsNone(alert2, alert2)
+
+        three_priors = [self._row("2026-07-26T%02d:00:00+00:00" % h, 2.0)
+                       for h in (7, 8, 9)]
+        alert3 = burn.hourly_burn_alert(three_priors + [latest], abs_usd=1000.0,
+                                        rel_mult=3.0, rel_window=6)
+        self.assertIsNotNone(alert3)
+        self.assertTrue(any("median" in r for r in alert3["reasons"]), alert3)
+
     def test_weekly_step_crossing_triggers(self):
         rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=77),
                self._row("2026-07-26T14:00:00+00:00", 1.0, weekly_pct=80)]
@@ -1104,6 +1225,19 @@ class TestHourlyBurnAlert(unittest.TestCase):
         self.assertEqual(alert["hour_bucket"], burn.hour_bucket_of_ts(ts))
 
 
+class TestBurnAlertAbsRecalibration(unittest.TestCase):
+    def test_abs_threshold_recalibrated_against_measured_fleet_p95(self):
+        # F5: BURN_ALERT_ABS_USD=30.0 was calibrated against dev1's own
+        # hourly buckets, but job 19 feeds hourly_burn_alert() job 16's
+        # FLEET-WIDE merged total_usd -- against that population $30 fired
+        # on 264/317 (83%) of real ~/.claude/burn-history/fleet.jsonl
+        # old-scope hourly rows (2026-07-25..2026-07-31). Recalibrated:
+        # p95 total_usd of those 317 rows is $151.27; scaled by the
+        # measured 1.39x old->new ratio (#149) that's ~=$210.27, rounded to
+        # a clean $210.
+        self.assertEqual(burn.BURN_ALERT_ABS_USD, 210.0)
+
+
 class TestWeeklyStepCrossed(unittest.TestCase):
     def test_crossing_upward_is_true(self):
         self.assertTrue(burn._weekly_step_crossed(77, 80, 5))
@@ -1142,6 +1276,33 @@ class TestFleetCompareRows(unittest.TestCase):
         rows = [{"ts": "t0", "total_usd": 3.0, "weighted_avg_ctx": 500, "total_msgs": 7}]
         got = burn.fleet_compare_rows(rows)
         self.assertEqual(got, [{"ts": "t0", "usd": 3.0, "avg_ctx": 500, "msgs": 7}])
+
+    def test_scope_is_carried_through(self):
+        # F1: fleet_compare_rows() used to rebuild rows without "scope" --
+        # _window_stats() (via compare_changes()) filters on
+        # r.get("scope") == "agents", so every normalized row got silently
+        # dropped and `burn --compare`'s fleet half never had any data.
+        rows = [{"ts": "t0", "total_usd": 3.0, "weighted_avg_ctx": 500,
+                "total_msgs": 7, "scope": "agents"}]
+        got = burn.fleet_compare_rows(rows)
+        self.assertEqual(got[0]["scope"], "agents")
+
+    def test_scope_tag_end_to_end_through_compare_changes(self):
+        # F1: the real regression -- fleet_compare_rows() feeding
+        # compare_changes() with genuinely scope-tagged fleet rows must
+        # yield NON-EMPTY before/after stats, not "ziadne data" forever.
+        fleet_rows = [
+            {"ts": "2026-07-31T09:00:00+00:00", "total_usd": 4.0,
+             "weighted_avg_ctx": 900, "total_msgs": 9, "scope": "agents"},
+            {"ts": "2026-07-31T10:00:00+00:00", "total_usd": 5.0,
+             "weighted_avg_ctx": 1000, "total_msgs": 10, "scope": "agents"},
+        ]
+        snap_rows = burn.fleet_compare_rows(fleet_rows)
+        changes = [{"ts": "2026-07-31T10:30:00+00:00", "host": "dev1",
+                   "text": "zmena"}]
+        results = burn.compare_changes(snap_rows, changes, window_hours=6)
+        self.assertEqual(len(results), 1)
+        self.assertGreater(results[0]["before"]["n"], 0, results[0])
 
 
 class TestRenderFleet(unittest.TestCase):
