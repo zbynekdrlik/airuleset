@@ -236,3 +236,25 @@ class TestLockfileWhitelist(SecretScanTestCase):
         self._write("notes.md", self.BLOB)
         r = self._run("git add notes.md")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class TestBlockReasonOnStderr(SecretScanTestCase):
+    """Claude Code surfaces ONLY stderr to the model on a PreToolUse
+    exit-2 block — a reason printed to stdout alone is invisible (live
+    incident, 2026-07-31: a Gate-2 block during the #178 commits rendered
+    as 'hook error: ... No stderr output' and cost a diagnosis
+    round-trip). The block reason must reach stderr; stdout keeps a copy
+    for terminal runs and the existing assertions above."""
+
+    def test_gate1_filename_block_reason_on_stderr(self):
+        self._write(".env", "FOO=bar\n")
+        r = self._run("git add .env")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+
+    def test_gate2_content_block_reason_on_stderr(self):
+        self._write("skills/bar/SKILL.md", 'FB_APP_SECRET: "abcd1234efgh5678"\n')
+        _git(self.repo, "add", "skills/bar/SKILL.md")
+        r = self._run('git commit -m "add playbook notes"')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("SKILL.md", r.stderr)
