@@ -205,14 +205,20 @@ class TestOpus5EraLineup(TestCase):
         # the pre-existing anchor phrase must survive byte-for-byte — this one
         # is ACTIONABLE (it governs every session's model handling), stays inline
         self.assertIn("MAIN interactive session runs whatever the user set via `/model`", t)
-        self.assertIn("say so plainly ONCE per session", t)
+        # 2026-07-31 policy reversal (user-directed): the once-per-session
+        # "recommend Opus 5" nudge is RETIRED — main is NEVER re-recommended
+        # against, in either direction. The literal phrase "recommend Opus 5"
+        # still survives (it names the retired line), so this stays a valid
+        # substring check; the governing sentence is pinned separately below.
+        self.assertIn("NEVER recommend switching it, in either direction", t)
         self.assertIn("recommend Opus 5", t)
         # WHY Opus 5 replaced the Fable-as-main workaround is justification, not
         # an instruction — it moved with the rest of the history.
         self.assertIn("Opus 5 retires that workaround", a)
         self.assertIn("Sonnet 5 could not reliably carry the coordinator role", a)
-        # explicitly NOT a ban — the corrected 2026-07-25 principle
-        self.assertIn("This is NOT a ban on Fable as main", t)
+        # 2026-07-31: never a ban in EITHER direction — pins the new sentence
+        # that replaced the retired "This is NOT a ban on Fable as main" line
+        self.assertIn("their choice is final and never re-recommended against", t)
         for txt in (t, a):
             self.assertNotIn("Fable 5 is BANNED", txt)
             self.assertNotIn("Fable is forbidden", txt)
