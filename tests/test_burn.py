@@ -335,6 +335,16 @@ class TestHourlySnapshot(unittest.TestCase):
             self.assertEqual(row["avg_ctx"], 0)
             self.assertEqual(row["by_model"], {})
 
+    def test_row_carries_the_agents_scope_tag(self):
+        # #149: every row is stamped "scope": "agents" — the post-subagent-
+        # reconciliation marker _window_stats()/compare_changes() and
+        # hourly_burn_alert() use to keep pre- and post-#149 history from
+        # ever being compared as one continuous series.
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z")
+            self.assertEqual(row["scope"], "agents")
+
 
 class TestDispatchRatioMeasurement80(unittest.TestCase):
     """#80: the acceptance metric ("main Bash : Agent under 5:1, measured
@@ -480,9 +490,17 @@ class TestChangesAndSnapshotsIO(unittest.TestCase):
 
 
 class TestCompareChanges(unittest.TestCase):
-    def _snap(self, ts, usd, avg_ctx, msgs):
-        return {"ts": ts, "host": "dev1", "user": "z", "window_h": 1,
-                "usd": usd, "msgs": msgs, "avg_ctx": avg_ctx, "by_model": {}}
+    # #149: every fixture row defaults to "scope": "agents" (the shape a
+    # real post-#149 hourly_snapshot() row now carries), since
+    # _window_stats() ignores any row that lacks it — pass scope=None to
+    # build a pre-#149-shaped row for the tests that specifically exercise
+    # that exclusion.
+    def _snap(self, ts, usd, avg_ctx, msgs, scope="agents"):
+        row = {"ts": ts, "host": "dev1", "user": "z", "window_h": 1,
+               "usd": usd, "msgs": msgs, "avg_ctx": avg_ctx, "by_model": {}}
+        if scope is not None:
+            row["scope"] = scope
+        return row
 
     def test_computes_before_after_means_and_deltas(self):
         change_ts = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc)
@@ -514,6 +532,22 @@ class TestCompareChanges(unittest.TestCase):
         c2 = {"ts": "2026-07-25T08:00:00+00:00", "host": "dev1", "text": "first"}
         results = burn.compare_changes([], [c1, c2], window_hours=1)
         self.assertEqual([r["text"] for r in results], ["first", "second"])
+
+    def test_rows_without_the_scope_tag_are_excluded_not_mixed_in(self):
+        # #149: a snapshot row from before the scope tag existed (the
+        # main-only era) must never silently participate in a comparison —
+        # a window containing ONLY such rows reports the SAME empty shape
+        # (n=0) as a window with no rows at all, never a false "before" or
+        # "after" figure built from pre-#149 data.
+        change_ts = datetime.datetime(2026, 7, 25, 12, 0, tzinfo=datetime.timezone.utc)
+        snaps = [
+            self._snap("2026-07-25T10:00:00+00:00", 1.0, 200000, 10, scope=None),
+            self._snap("2026-07-25T13:00:00+00:00", 0.5, 100000, 12, scope=None),
+        ]
+        changes = [{"ts": change_ts.isoformat(), "host": "dev1", "text": "krok 1"}]
+        results = burn.compare_changes(snaps, changes, window_hours=2)
+        self.assertEqual(results[0]["before"]["n"], 0)
+        self.assertEqual(results[0]["after"]["n"], 0)
 
     def test_bad_ts_change_is_skipped_not_crashed(self):
         results = burn.compare_changes([], [{"ts": "not-a-date", "text": "bad"}],
@@ -680,6 +714,22 @@ class TestFleetMerge(unittest.TestCase):
         row = burn.merge_fleet_row("t", {"gk": {"error": "ssh timeout"}})
         self.assertEqual(row["per_host"]["gk"], {"error": "ssh timeout"})
         self.assertNotIn("stale", row["per_host"]["gk"])
+
+    def test_scope_agents_is_carried_through_when_a_host_row_has_it(self):
+        # #149: at least one contributing host row tagged "scope": "agents"
+        # (the post-subagent-reconciliation hourly_snapshot() shape) makes
+        # the MERGED fleet row carry it too -- best-effort, not a strict
+        # "every host agrees" requirement.
+        row = dict(_host_row(1.0, 10, 100000))
+        row["scope"] = "agents"
+        merged = burn.merge_fleet_row("t", {"dev1": row})
+        self.assertEqual(merged.get("scope"), "agents")
+
+    def test_no_scope_key_when_no_host_row_has_it(self):
+        # every existing host row shape (pre-#149, or an old box not yet
+        # pushed) — the merged row must not gain a scope it never earned.
+        merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
+        self.assertNotIn("scope", merged)
 
 
 class TestFleetPathAndIO(unittest.TestCase):
@@ -893,12 +943,22 @@ class TestHourlyBurnAlert(unittest.TestCase):
     """#81 -- `burn.hourly_burn_alert` / `burn.render_burn_alert`: the pure
     comparison + Slovak message-render behind job 19's hourly Discord ping."""
 
-    def _row(self, ts, total_usd, total_msgs=0, weekly_pct=None, per_host=None):
+    # #149: every fixture row defaults to "scope": "agents" (the shape a
+    # real post-#149 merge_fleet_row() now carries, best-effort) -- the
+    # REL-median and weekly-step checks only consider same-scope PRIOR rows,
+    # so leaving every row in a test at the same default scope keeps this
+    # whole class behaving exactly as it did pre-#149. Pass scope=None to
+    # build a pre-#149-shaped row for the test that specifically exercises
+    # that exclusion.
+    def _row(self, ts, total_usd, total_msgs=0, weekly_pct=None, per_host=None,
+            scope="agents"):
         row = {"ts": ts, "total_usd": total_usd, "total_msgs": total_msgs}
         if weekly_pct is not None:
             row["weekly_pct"] = weekly_pct
         if per_host is not None:
             row["per_host"] = per_host
+        if scope is not None:
+            row["scope"] = scope
         return row
 
     def test_empty_rows_is_none(self):
@@ -944,6 +1004,30 @@ class TestHourlyBurnAlert(unittest.TestCase):
         # spuriously trigger the relative check.
         self.assertIsNone(burn.hourly_burn_alert(rows, abs_usd=1000.0,
                                                  rel_mult=3.0))
+
+    def test_relative_check_ignores_prior_rows_without_the_scope_tag(self):
+        # #149: 6 tiny pre-#149-shaped rows (no scope tag) would give a
+        # median of $0.10 -- comparing the current (always post-#149) hour
+        # against that would fire the relative check on the scope
+        # DISCONTINUITY itself, not on a real spike. They must be ignored
+        # outright, exactly as if no prior hours existed at all.
+        old_prev = [self._row("2026-07-26T%02d:00:00+00:00" % h, 0.10, scope=None)
+                   for h in range(4, 10)]
+        rows = old_prev + [self._row("2026-07-26T10:00:00+00:00", 6.5)]
+        alert = burn.hourly_burn_alert(rows, abs_usd=1000.0, rel_mult=3.0,
+                                       rel_window=6)
+        self.assertIsNone(alert, alert)
+
+        # The SAME shape, but every prior row also carries the scope tag,
+        # DOES fire the relative check -- proving the exclusion above is
+        # about the tag, not about the values.
+        scoped_prev = [self._row("2026-07-26T%02d:00:00+00:00" % h, 0.10)
+                      for h in range(4, 10)]
+        rows2 = scoped_prev + [self._row("2026-07-26T10:00:00+00:00", 6.5)]
+        alert2 = burn.hourly_burn_alert(rows2, abs_usd=1000.0, rel_mult=3.0,
+                                        rel_window=6)
+        self.assertIsNotNone(alert2)
+        self.assertTrue(any("median" in r for r in alert2["reasons"]), alert2)
 
     def test_weekly_step_crossing_triggers(self):
         rows = [self._row("2026-07-26T13:00:00+00:00", 1.0, weekly_pct=77),

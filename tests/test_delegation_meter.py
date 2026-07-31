@@ -68,20 +68,25 @@ def _write_sub(root, project, session, agent, lines):
 
 
 class TestTheBlindnessThisFixes(unittest.TestCase):
-    """The root cause, locked so it cannot silently come back."""
+    """The root cause, locked so it cannot silently come back.
 
-    def test_old_scan_glob_cannot_reach_subagent_transcripts(self):
+    #149: `scan()` used to glob `root/*/*.jsonl` — two-level-only, so it
+    never reached a subagent transcript at all and `main_vs_sidechain`
+    reported a false 100%-MAIN split. This test used to lock THAT blind
+    behavior as documentation of the bug (`test_old_scan_glob_cannot_reach_
+    subagent_transcripts`); it is now inverted to lock the FIX — `scan()`
+    reaches both trees, exactly like `scan_split()` below always has."""
+
+    def test_scan_now_reaches_subagent_transcripts_too(self):
         now = datetime.datetime.now(UTC)
         with TemporaryDirectory() as root:
             _write_main(root, "proj", "s1", [_usage_line(now, cr=1000)])
             _write_sub(root, "proj", "s1", "agent-a1",
                        [_usage_line(now, cr=999000, sidechain=True)])
-            old = burn.scan(root, days=1, now=now)
-        # The pre-existing instrument sees the main file only, and its
-        # main-vs-sidechain bucket therefore reports a pure-MAIN world.
-        self.assertEqual(old["files_scanned"], 1)
-        self.assertTrue(all(k.startswith("main|") for k in old["main_vs_sidechain"]),
-                        old["main_vs_sidechain"])
+            report = burn.scan(root, days=1, now=now)
+        self.assertEqual(report["files_scanned"], 2)
+        self.assertTrue(any(k.startswith("sidechain|") for k in report["main_vs_sidechain"]),
+                        report["main_vs_sidechain"])
 
     def test_scan_split_reaches_both_trees(self):
         now = datetime.datetime.now(UTC)
@@ -96,6 +101,73 @@ class TestTheBlindnessThisFixes(unittest.TestCase):
         self.assertEqual(row["sub"]["turns"], 1)
         self.assertEqual(row["main"]["cache_r"], 1000)
         self.assertEqual(row["sub"]["cache_r"], 999000)
+
+
+def _tool_usage_line(ts, tools, rid, cr=0, o=0, sidechain=False,
+                     model="claude-opus-5"):
+    """A `scan()`-shaped assistant line carrying BOTH a `usage` snapshot AND
+    `tool_use` content blocks — mirrors `TestDispatchRatioMeasurement80.
+    _tool_line` in test_burn.py, plus a `requestId` so several such lines
+    can share one folded request."""
+    content = [{"type": "tool_use", "id": "t%d" % i, "name": n, "input": {}}
+              for i, n in enumerate(tools)]
+    return json.dumps({
+        "timestamp": ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "isSidechain": sidechain,
+        "requestId": rid,
+        "type": "assistant",
+        "message": {"model": model, "content": content, "usage": {
+            "input_tokens": 0, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": cr, "output_tokens": o}},
+    })
+
+
+class TestScanRequestDedup(unittest.TestCase):
+    """#149: `scan()` now folds usage lines per REQUEST via the shared
+    `_fold_usage_line()` helper (the exact mechanism `scan_split()` already
+    uses, #150) instead of per LINE — one request spread over several
+    transcript lines counts as ONE message with the LAST usage snapshot,
+    both on the main tree and (newly reachable, #149) the subagents tree.
+    Without this, adding subagent files to `scan()`'s discovery alone would
+    have inflated the new totals ~2x and multiply-counted tokens, exactly
+    the second half of the root cause the ticket names."""
+
+    def test_two_lines_sharing_a_request_id_count_as_one_msg_with_the_last_snapshot(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1", [
+                _usage_line(now, cr=1000, o=5, rid="req-1", sidechain=True),   # partial
+                _usage_line(now, cr=1000, o=42, rid="req-1", sidechain=True),  # final
+            ])
+            report = burn.scan(root, days=1, now=now)
+        side = report["main_vs_sidechain"]
+        self.assertEqual(sum(v["msgs"] for v in side.values()), 1, side)
+        self.assertEqual(sum(v["out"] for v in side.values()), 42, side)
+        self.assertEqual(report["usage_lines"], 1)
+
+    def test_tool_use_counting_still_sees_every_line_of_a_multi_line_request(self):
+        # One MAIN request spread over two lines (thinking-block usage
+        # snapshot restated on the tool_use line too, as Claude Code really
+        # writes it) — the Bash block on line 1 and the Agent block on line
+        # 2 must BOTH be counted, even though token/usd/msgs aggregation
+        # folds the whole request down to a single message.
+        now = datetime.datetime(2026, 7, 26, 15, 5, 0, tzinfo=UTC)
+        prev_hour = (now - datetime.timedelta(hours=1)).astimezone().replace(
+            minute=0, second=0, microsecond=0)
+        with TemporaryDirectory() as root:
+            _write_main(root, "proj", "s1", [
+                _tool_usage_line(prev_hour, ["Bash"], "req-1", cr=1000, o=0),
+                _tool_usage_line(prev_hour, ["Agent"], "req-1", cr=1000, o=7),
+            ])
+            report = burn.scan(root, days=1, now=now)
+        hour_key = prev_hour.strftime("%Y-%m-%dT%H:00")
+        tools = report["by_hour_main_tools"][hour_key]
+        self.assertEqual(tools["bash"], 1, tools)
+        self.assertEqual(tools["agent"], 1, tools)
+        # and the request itself still folds to ONE message with the LAST
+        # (final) usage snapshot.
+        self.assertEqual(report["usage_lines"], 1)
+        self.assertEqual(report["by_model"]["claude-opus-5"]["out"], 7)
 
 
 class TestRequestDedup(unittest.TestCase):
