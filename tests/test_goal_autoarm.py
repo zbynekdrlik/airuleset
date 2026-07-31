@@ -265,6 +265,126 @@ class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
         self.assertEqual(n, [1, 0, 0], "the skip must be logged once")
 
 
+class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
+        unittest.TestCase):
+    """The #170 suppression had no exit condition, so it never expired.
+
+    Live regression (montalu@subdev, 2026-07-31): the user cleared a goal at
+    some point, later came back, asked the session to print the arm question
+    again — and job 9 refused forever, one `skip cleared (goal-autoarm) %0
+    (odoo)` line per sweep, with a fresh `/goal` line sitting unarmed on
+    screen. The user reported it as the watchdog no longer arming anything.
+
+    `_goal_was_cleared_by_user` asked only "is the NEWEST marker a clear?".
+    That is true for the rest of the session's life: a clear is the last
+    marker until something arms again, and the only thing that would arm it
+    is the very job the clear is blocking. A suppression whose exit condition
+    is the action it suppresses can never release — the same shape as the
+    #134 device-ping guard that produced five silent days.
+
+    The discriminator both cases already carry: WHERE the arm question sits
+    relative to the clear. #170's arm question was printed BEFORE the clear
+    (it survives on screen untouched, which is exactly why the viewport
+    could not decide). A session that asks again does so AFTER it. So a
+    clear suppresses until the session prints a NEW arm question, and the
+    user's one paste is replaced by their one `/goal clear` — symmetric, and
+    neither costs them a loop they did not choose.
+    """
+
+    def _projects(self, cwd, *lines):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        d = root / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True)
+        (d / "sess-relapse.jsonl").write_text("\n".join(lines) + "\n",
+                                              encoding="utf-8")
+        return root
+
+    @staticmethod
+    def _marker(state):
+        return _json.dumps({
+            "type": "system",
+            "timestamp": "2026-07-31T09:55:51.000Z",
+            "content": "<local-command-stdout>Goal %s: STOP CONDITIONS — the "
+                       "loop is DONE ...</local-command-stdout>" % state,
+        })
+
+    @staticmethod
+    def _asks_again():
+        """An assistant turn re-printing the arm question — a TOP-LEVEL text
+        block, the only shape that counts as this session asking."""
+        return _json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-07-31T11:02:03.000Z",
+            "message": {"content": [{
+                "type": "text",
+                "text": "Autopilot je pripravený.\n"
+                        "• Vlož /goal riadok vyššie (odporúčam)\n"
+                        "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot "
+                        "sa rozbehne",
+            }]},
+        })
+
+    @staticmethod
+    def _quoted_ask():
+        """The SAME words arriving as a tool_result — one session grepping
+        another's transcript. Structurally excluded, exactly as the marker
+        reader excludes a quoted `Goal set:` (#54)."""
+        return _json.dumps({
+            "type": "user",
+            "timestamp": "2026-07-31T11:02:03.000Z",
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": "❓ NEEDS YOU: vlož /goal riadok vyššie",
+            }]},
+        })
+
+    def test_the_session_asking_again_releases_the_suppression(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(
+            tmux.typed(),
+            "the session printed a NEW arm question after the clear — the "
+            "user is being asked again, so the old clear no longer governs")
+        self.assertFalse([ln for ln in logs if "skip cleared" in ln], logs)
+
+    def test_170_stays_fixed_when_the_ask_predates_the_clear(self):
+        """The arm question #170 re-armed from was on screen BEFORE the
+        clear. Order is the whole discriminator — reversing it must still
+        suppress, or this fix simply reopens #170."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._asks_again(), self._marker("cleared"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a goal cleared AFTER the ask must stay off")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_a_quoted_arm_question_never_releases_the_suppression(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"), self._quoted_ask())
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "a tool_result quoting another session's arm question is not "
+            "this session asking for anything")
+
+    def test_the_release_is_readable_from_the_marker_alone(self):
+        """`scan_goal_markers` carries the flag, so any future reader of goal
+        state gets the same answer without re-deriving it."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
+        tr = pd / wd.encode_project_dir(cwd) / "sess-relapse.jsonl"
+        _off, mark = wd.scan_goal_markers(tr)
+        self.assertEqual(mark["state"], "cleared")
+        self.assertTrue(mark.get("arm_after"))
+        self.assertFalse(wd._goal_was_cleared_by_user(tr))
+
+
 if __name__ == "__main__":
     unittest.main()
 
