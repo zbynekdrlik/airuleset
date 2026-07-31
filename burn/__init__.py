@@ -8,14 +8,14 @@ write) vs 8% output. See `modules/core/model-awareness.md` for the pricing
 table this module mirrors and the Opus-5-era default-tier policy this
 measurement justified (`MANAGED_MODEL` in airuleset.py).
 
-Walks `~/.claude/projects/*/*.jsonl` (Claude Code's own transcript store),
+Walks `~/.claude/projects/` (Claude Code's own transcript store — every
+top-level session file AND every nested `subagents/agent-*.jsonl`, #149),
 parses each assistant `message.usage` entry, and aggregates by model / day /
 project / main-vs-sidechain. stdlib only — no deps, so a report can be piped
 back from a remote box by invoking that box's own already-deployed
 `airuleset.py burn --json` over ssh (see `airuleset._burn_remote`).
 """
 import datetime
-import glob
 import json
 import os
 from collections import defaultdict
@@ -56,12 +56,32 @@ def _dump(d, top=None):
 
 
 def scan(root, days=7, now=None):
-    """Walk `root/*/*.jsonl` and aggregate assistant-message usage. Returns
-    the printable {in, cache_w, cache_r, out, usd, msgs} shape per bucket,
-    grouped by model / day / project / main-vs-sidechain. A file whose mtime
-    is older than the cutoff is skipped WITHOUT being opened (cheap on a
-    directory with years of transcripts); a line without `usage` or with an
-    unparsable timestamp is skipped."""
+    """Walk EVERY transcript under `root` — the top-level session file AND
+    any nested transcript (`subagents/agent-*.jsonl` at any depth) reachable
+    via `_split_transcripts()` (#149: the old `root/*/*.jsonl` glob was
+    two-level-only and never reached a subagent transcript at all, so
+    `isSidechain` — which appears ONLY there — was always False and
+    `main_vs_sidechain` reported a false 100%-MAIN split). All three of
+    `_split_transcripts()`'s kinds (main/sub/other) are scanned here — spend
+    is spend, unlike `scan_split()` which deliberately skips "other".
+
+    Returns the printable {in, cache_w, cache_r, out, usd, msgs} shape per
+    bucket, grouped by model / day / project / main-vs-sidechain. A file
+    whose mtime is older than the cutoff is skipped WITHOUT being opened
+    (cheap on a directory with years of transcripts); a line without `usage`
+    or with an unparsable timestamp is skipped.
+
+    Aggregation is per-REQUEST, not per-line (#149, same fix as #150 gave
+    `scan_split()`): Claude Code writes one API response as several
+    transcript lines (one per content block — `thinking`, then each
+    `tool_use`), each carrying a COPY of the same request-level `usage` —
+    counting every line inflated turns/tokens ~2.13x on real data. Each
+    file's lines are first folded into per-request state via the shared
+    `_fold_usage_line()` helper (the exact mechanism `scan_split()` already
+    uses), then aggregated ONCE per request. Tool-use counting is the one
+    exception: a request's `tool_use` blocks are spread across its several
+    lines, so `by_hour_tools` still inspects every raw LINE's content,
+    independent of the request fold."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - datetime.timedelta(days=days)
     agg = defaultdict(_empty_row)
@@ -78,7 +98,7 @@ def scan(root, days=7, now=None):
     by_hour_tools = defaultdict(lambda: [0, 0])       # hour -> [bash, agent]
     files = 0
     lines = 0
-    for path in glob.glob(os.path.join(root, "*", "*.jsonl")):
+    for path, proj, _kind in _split_transcripts(root):
         try:
             mt = datetime.datetime.fromtimestamp(
                 os.path.getmtime(path), datetime.timezone.utc)
@@ -87,12 +107,14 @@ def scan(root, days=7, now=None):
         except OSError:
             continue
         files += 1
-        proj = os.path.basename(os.path.dirname(path))
         try:
             fh = open(path, "r", errors="replace")
         except OSError:
             continue
         with fh:
+            order = []
+            reqs = {}
+            req_meta = {}
             for line in fh:
                 if '"usage"' not in line:
                     continue
@@ -101,54 +123,65 @@ def scan(root, days=7, now=None):
                 except ValueError:
                     continue
                 msg = e.get("message") or {}
-                u = msg.get("usage") or {}
-                if not u:
+                sc = bool(e.get("isSidechain"))
+                # Tool-use counting sees every raw LINE (a request's blocks
+                # are spread across several lines) — independent of the
+                # per-request fold below.
+                if not sc:
+                    blocks = msg.get("content")
+                    if isinstance(blocks, list):
+                        ts_line = e.get("timestamp") or ""
+                        try:
+                            t_line = datetime.datetime.fromisoformat(
+                                ts_line.replace("Z", "+00:00"))
+                        except ValueError:
+                            t_line = None
+                        if t_line is not None and t_line >= cutoff:
+                            hour_line = t_line.astimezone().strftime("%Y-%m-%dT%H:00")
+                            counts = by_hour_tools[hour_line]
+                            for b in blocks:
+                                if not isinstance(b, dict) or b.get("type") != "tool_use":
+                                    continue
+                                nm = b.get("name")
+                                if nm == "Bash":
+                                    counts[0] += 1
+                                elif nm in ("Agent", "Task"):
+                                    counts[1] += 1
+                rid = _fold_usage_line(e, order, reqs)
+                if rid is not None:
+                    meta = req_meta.setdefault(rid, {})
+                    if msg.get("model"):
+                        meta["model"] = msg.get("model")
+                    meta["sc"] = meta.get("sc", False) or sc
+            for rid in order:
+                r = reqs[rid]
+                t = r.get("ts")
+                if t is None or t < cutoff:
                     continue
                 lines += 1
-                ts = e.get("timestamp") or ""
-                try:
-                    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                if t < cutoff:
-                    continue
-                model = msg.get("model") or "?"
+                meta = req_meta.get(rid) or {}
+                model = meta.get("model") or "?"
                 tr = tier(model)
-                i = int(u.get("input_tokens") or 0)
-                cw = int(u.get("cache_creation_input_tokens") or 0)
-                cr = int(u.get("cache_read_input_tokens") or 0)
-                o = int(u.get("output_tokens") or 0)
+                i, cw, cr, o = r["in"], r["cache_w"], r["cache_r"], r["out"]
                 p = PRICE.get(tr)
                 usd = (i * p[0] + cw * p[1] + cr * p[2] + o * p[3]) / 1e6 if p else 0.0
                 local_t = t.astimezone()
                 day = local_t.strftime("%Y-%m-%d")
                 hour = local_t.strftime("%Y-%m-%dT%H:00")
-                sc = bool(e.get("isSidechain"))
-                if not sc:
-                    blocks = msg.get("content")
-                    if isinstance(blocks, list):
-                        counts = by_hour_tools[hour]
-                        for b in blocks:
-                            if not isinstance(b, dict) or b.get("type") != "tool_use":
-                                continue
-                            nm = b.get("name")
-                            if nm == "Bash":
-                                counts[0] += 1
-                            elif nm in ("Agent", "Task"):
-                                counts[1] += 1
+                sc = meta.get("sc", False)
                 for d, k in (
                     (agg, model), (by_day, day), (by_proj, proj),
                     (by_day_model, day + "|" + tr),
                     (by_hour, hour), (by_hour_model, hour + "|" + model),
                     (side, ("sidechain" if sc else "main") + "|" + tr),
                 ):
-                    r = d[k]
-                    r[0] += i
-                    r[1] += cw
-                    r[2] += cr
-                    r[3] += o
-                    r[4] += usd
-                    r[5] += 1
+                    row = d[k]
+                    row[0] += i
+                    row[1] += cw
+                    row[2] += cr
+                    row[3] += o
+                    row[4] += usd
+                    row[5] += 1
     return {
         "files_scanned": files,
         "usage_lines": lines,
@@ -291,7 +324,7 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
     """Aggregate the PREVIOUS full hour (the hour immediately before the one
     `now` falls in) into the single-JSON-line shape `snapshots.jsonl` wants:
     `{"ts", "host", "user", "window_h": 1, "usd", "msgs", "avg_ctx",
-    "by_model": {<model>: <usd>, ...}}`.
+    "scope": "agents", "by_model": {<model>: <usd>, ...}}`.
 
     Reuses `scan()`'s per-line parser (no second transcript parser) — this
     just picks the ONE hour bucket out of its `by_hour` / `by_hour_model`
@@ -299,7 +332,15 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
     opens (a small window trivially covers "the previous hour" since a
     file's mtime cutoff check is on WALL-CLOCK age, not on the target hour);
     it is not the reporting window itself. `now` must be a timezone-aware
-    datetime (the same convention `scan()`/`local_report()` use)."""
+    datetime (the same convention `scan()`/`local_report()` use).
+
+    `"scope": "agents"` (#149) marks this row as belonging to the post-
+    reconciliation era, where `scan()` (and therefore this figure) includes
+    subagent spend alongside main-session spend. A row written before #149
+    has NO `scope` key at all — `_window_stats()`/`compare_changes()` and
+    `hourly_burn_alert()` both only compare rows that carry the SAME scope,
+    so a before/after that straddles the deploy boundary never reads as a
+    false regression or a false spike."""
     root = root or os.path.expanduser("~/.claude/projects")
     data = scan(root, days=days, now=now)
     end = now.astimezone().replace(minute=0, second=0, microsecond=0)
@@ -317,6 +358,7 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
         "host": host or os.uname().nodename,
         "user": user or os.environ.get("USER", "?"),
         "window_h": 1,
+        "scope": "agents",
         "usd": round(row["usd"], 4),
         "msgs": msgs,
         "avg_ctx": avg_ctx,
@@ -405,9 +447,20 @@ def _window_stats(rows, start, end):
     """Mean usd / avg_ctx / msgs across snapshot rows whose `ts` falls in
     [start, end). `n=0` (all other fields None) when the window is empty —
     e.g. a change made minutes ago has no "after" data yet. Never raises on
-    a malformed row (a bad `ts` is simply excluded)."""
+    a malformed row (a bad `ts` is simply excluded).
+
+    #149: ONLY rows tagged `scope == "agents"` (the post-subagent-
+    reconciliation era `hourly_snapshot()` stamps) participate. A row from
+    before #149 has no `scope` key and is excluded outright — never
+    silently mixed with post-#149 figures, which would otherwise read a
+    genuine ~2x jump at the deploy boundary as a real regression. A window
+    containing only pre-#149 rows returns the SAME empty shape as a window
+    with no rows at all (`n=0`) — history is never rewritten, it simply
+    doesn't count toward a scope-tagged comparison."""
     sel = []
     for r in rows:
+        if r.get("scope") != "agents":
+            continue
         t = _parse_ts(r.get("ts"))
         if t is not None and start <= t < end:
             sel.append(r)
@@ -590,13 +643,23 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     `render_fleet` can render it distinctly (a dash, "no sample for this
     hour yet") from a hard collection failure (`ERR`, "couldn't reach the
     host at all") — both are excluded from the totals the same way, but
-    they mean different things to the reader."""
+    they mean different things to the reader.
+
+    #149 (best-effort): when at least one CONTRIBUTING (non-error) host row
+    carries `"scope": "agents"` (the post-subagent-reconciliation shape
+    `hourly_snapshot()` now stamps), the merged row carries it too —
+    letting `hourly_burn_alert()`'s REL-median / weekly-step checks tell a
+    new-scope fleet row apart from an old one. This is a cheap pass-through,
+    not a strict "every host agrees" requirement — during a partial
+    rollout a merged row may be tagged from a subset of hosts; it
+    self-corrects once every host is pushed."""
     per_host = {}
     total_usd = 0.0
     total_msgs = 0
     weighted_ctx_sum = 0.0
     total_main_bash = 0
     total_main_agent = 0
+    saw_agents_scope = False
     for name, row in (host_rows or {}).items():
         if row is None or row == {}:
             per_host[name] = {"error": "no data"}
@@ -625,6 +688,8 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         weighted_ctx_sum += avg_ctx * msgs
         total_main_bash += main_bash
         total_main_agent += main_agent
+        if row.get("scope") == "agents":
+            saw_agents_scope = True
     out = {
         "ts": ts,
         "per_host": per_host,
@@ -634,6 +699,8 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         "total_main_bash": total_main_bash,
         "total_main_agent": total_main_agent,
     }
+    if saw_agents_scope:
+        out["scope"] = "agents"
     if weekly_pct is not None:
         out["weekly_pct"] = weekly_pct
     if resets_at is not None:
@@ -913,7 +980,21 @@ def render_fleet(rows, hours=24, cache=None, now=None):
 # row, #55) -- any one firing sends ONE combined message.
 # --------------------------------------------------------------------------- #
 
-BURN_ALERT_ABS_USD = 20.0          # one hour above this many USD alone triggers
+# #149 re-baseline (measured 2026-07-31, dev1, `~/.claude/projects`, 48h
+# window ending ~2026-07-31T16:xx UTC, throwaway script under
+# /tmp/claude-149/): OLD (pre-#149) discovery+per-line `scan()` totaled
+# $1666.09 across that window (main-tree only, no request dedup — itself
+# inflated ~2.13x by the #150-class per-line duplicate counting the OLD code
+# never corrected); NEW (post-#149) discovery+per-request `scan()` totaled
+# $2311.90 (both trees, deduped) -- a 1.39x TOTAL ratio. The single busiest
+# hour moved from $88.67 (old) to $103.62 (new, a DIFFERENT hour) -- a 1.17x
+# PEAK ratio, smaller than the total ratio because request-dedup shrinks the
+# main-tree contribution even as subagent spend gets added. The total ratio
+# is the more stable of the two (44 hourly samples vs one), and is used
+# here with headroom, not the naive "roughly doubles" guess: 20.0 * 1.39 ~=
+# 27.8, rounded UP to the next clean number so the alert starts slightly
+# lenient post-deploy rather than immediately firing on ordinary traffic.
+BURN_ALERT_ABS_USD = 30.0          # one hour above this many USD alone triggers
 BURN_ALERT_REL_MULT = 3.0          # one hour more than this many x the median
                                     # of the last BURN_ALERT_REL_WINDOW hours
 BURN_ALERT_REL_WINDOW = 6
@@ -953,7 +1034,22 @@ def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
     combined message (never a ping per threshold) via `render_burn_alert`.
     `reasons` lists which threshold(s) actually fired, in plain terms, for
     the job's own log line -- never shown to the user (the message itself
-    is user-facing; `reasons` is operator-facing)."""
+    is user-facing; `reasons` is operator-facing).
+
+    #149: the REL-median and weekly-step comparisons only consider PRIOR
+    rows tagged `scope == "agents"` (best-effort carried through by
+    `merge_fleet_row()` when at least one contributing host row has it) --
+    comparing the current (always post-#149) hour against pre-#149 history
+    would compare against a baseline that excluded subagent spend entirely,
+    roughly doubling every figure and firing on the discontinuity itself
+    rather than on a real spike. No matching prior rows yet -> the existing
+    `median_prev is None` / `prev_pct is None` guards already give an
+    automatic warm-up (no REL/weekly-step fire) until same-scope history
+    accumulates. ABS is unaffected -- it only ever reads the CURRENT
+    (latest) row, which is always new-scope once #149 is deployed. The
+    "previous N hours" $ figures in the rendered MESSAGE stay unscoped --
+    that is informational trend context for the reader, not a threshold
+    decision."""
     if not rows:
         return None
     abs_usd = BURN_ALERT_ABS_USD if abs_usd is None else abs_usd
@@ -965,7 +1061,9 @@ def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
     hb = hour_bucket_of_ts(latest.get("ts"))
     total_usd = latest.get("total_usd", 0.0) or 0.0
     prev_rows = rows[max(0, len(rows) - 1 - rel_window):-1]
-    prev_totals = [r.get("total_usd", 0.0) or 0.0 for r in prev_rows]
+    scoped_prev = [r for r in rows[:-1] if r.get("scope") == "agents"]
+    scoped_prev_window = scoped_prev[-rel_window:] if rel_window else scoped_prev
+    prev_totals = [r.get("total_usd", 0.0) or 0.0 for r in scoped_prev_window]
     median_prev = _median(prev_totals)
     reasons = []
     if total_usd > abs_usd:
@@ -973,7 +1071,7 @@ def hourly_burn_alert(rows, abs_usd=None, rel_mult=None, rel_window=None,
     if median_prev is not None and median_prev > 0 and total_usd > rel_mult * median_prev:
         reasons.append("%.1fx median poslednych %d hodin ($%.2f)"
                        % (rel_mult, len(prev_totals), median_prev))
-    prev_pct = rows[-2].get("weekly_pct") if len(rows) >= 2 else None
+    prev_pct = scoped_prev[-1].get("weekly_pct") if scoped_prev else None
     cur_pct = latest.get("weekly_pct")
     if _weekly_step_crossed(prev_pct, cur_pct, weekly_step_pct):
         reasons.append("tyzdenny krok %.0f%% -> %.0f%%" % (prev_pct, cur_pct))
@@ -1018,23 +1116,26 @@ def render_burn_alert(latest, prev_rows, prev_pct=None, cur_pct=None):
 # --------------------------------------------------------------------------- #
 # #130 — the standing MAIN vs SUBAGENT cost meter (`airuleset.py delegation`).
 #
-# ROOT CAUSE this exists to fix: `scan()` above globs `<root>/*/*.jsonl`, which
-# reaches ONLY the top-level session transcript. Claude Code writes subagent
-# transcripts one directory level deeper, at
-# `<root>/<project>/<sid>/subagents/agent-*.jsonl`, and that is also the only
-# place `isSidechain` ever appears — so `scan()`'s `main_vs_sidechain` bucket
-# does not merely under-report the split, it reports a FALSE 100%-MAIN answer
-# (measured on dev1: 100 top-level files / 2.2 GB reachable by that glob,
-# 5,281 subagent files / 2.4 GB invisible to it). That is why the two
-# measurements on the ticket had to be taken by hand.
+# ROOT CAUSE this exists to fix: a PER-PROJECT, per-request-deduped MAIN vs
+# SUBAGENT split over a short (default 12h) window — `scan()`'s own bucket
+# set (by model / day / hour / project) had no such split at all, and
+# building one required the SAME request-dedup fix #150 later gave `scan()`
+# itself (below). `scan_split()` was purpose-built rather than retrofitted
+# onto `scan()`'s older shape.
 #
-# This is deliberately ADDITIVE: `scan()` is left byte-for-byte alone, because
-# it feeds `hourly_snapshot()` -> the watchdog's hourly `snapshots.jsonl` ->
+# Until #149 re-baselined it, `scan()` was ALSO left deliberately additive-
+# only next to this module, for a separate reason: `scan()` fed
+# `hourly_snapshot()` -> the watchdog's hourly `snapshots.jsonl` ->
 # `compare_changes()`, the fleet feed, and `hourly_burn_alert()`'s live
-# thresholds. Folding subagents into it would roughly double every hourly
-# figure against a history recorded without them, re-firing the burn alerts on
-# the discontinuity — a threshold change, which #130 explicitly excludes.
-# Reconciling those baselines is filed separately.
+# thresholds, and folding subagent spend into it would have roughly doubled
+# every hourly figure against a history recorded without it — re-firing the
+# burn alerts on the discontinuity itself rather than on a real spike, which
+# #130 explicitly excluded as out of scope. #149 reconciled that
+# discontinuity directly: `scan()` now walks the same subagent-reachable
+# tree this module always has (`_split_transcripts()`), and every row this
+# module's `hourly_snapshot()`/`merge_fleet_row()` produce carries a
+# `scope` tag so pre- and post-#149 history is never compared as if it were
+# one continuous series.
 # --------------------------------------------------------------------------- #
 
 # Relative units, NOT a price. This is the Opus row of PRICE divided by 5, i.e.
