@@ -66,6 +66,38 @@ Every new rule originates from a real problem — but it must land on the RIGHT 
 3. **Topic already owned by an existing module?** → extend that module; never create a parallel new one.
 4. Only a genuinely always-relevant, cross-project discipline becomes a NEW module — and its body cites the originating incident + date, so future `/mdreview` native-now passes have something to re-validate against.
 
+## FREEZE on the supervision machinery (user decision, 2026-07-31)
+
+**No NEW watchdog job. No NEW hook.** In the seven days to 2026-07-31 nearly all
+effort went into the machinery that watches Claude (28 watchdog jobs, ~40 hooks)
+rather than into the projects: 74 issues closed, 46 opened, and at least five
+regressions of behaviour that already worked — #169 (all three `/goal` templates
+crossed the 4000-char cap, so no goal could be armed anywhere on the fleet),
+#172 (livelock, every sweep killed at its systemd timeout), #170 → the montalu
+goal-autoarm regression (a guard with no reachable exit condition). The
+machinery grew faster than it can be verified.
+
+What this changes on every ticket in this repo:
+
+- **This OVERRIDES step 1 of the rule intake gate above.** "Mechanically
+  checkable → a hook" now means EXTEND an existing hook. A brand-new hook, or a
+  new numbered watchdog job, is out of scope regardless of how well it scores on
+  that gate.
+- **Fix only what has actually failed in production** — a journal line, a
+  transcript, or the user reporting it. A ticket whose content is "the same
+  defect exists in N more places" is NOT done pre-emptively (#192 — the pipefail
+  + `grep -q` race in 15 other hooks; #201 — the retry-state fail-OPEN in seven
+  more Stop gates). Each waits until one of those places genuinely misbehaves.
+- **Verify every fix on a LIVE box, not on a green suite.** Old build and new
+  build side by side against the real data, then the journal or the pane. The
+  full 3427-test suite passed throughout the montalu regression and would have
+  passed tomorrow too.
+- **Projects come before the tooling.** When both are open, the project wins.
+
+**How the freeze lifts:** a production failure the machinery caused or failed to
+catch — never an accumulation of good ideas. A suppression needs a reachable
+exit condition, which is precisely the defect that prompted the freeze.
+
 ## Skill Ownership — DO NOT manage skills belonging to other projects
 
 airuleset only manages skills it created: `ci-monitor`, `deploy-ssh`, `windows-remote-gui`.
