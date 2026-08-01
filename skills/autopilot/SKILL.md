@@ -344,6 +344,13 @@ Each loop turn:
    2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in <repo>
    as ONE bundled PR (Closes all).` (or `Work issue #<N> in <repo>.` for a solo batch) plus any
    repo-specific note. ONE worker, ONE `dev` branch, ONE PR, ONE CI cycle.
+   - **Include the Step 1b validator verdict in the dispatch prompt when you ran it** (`Validator:
+     STILL_VALID — <one-line note>` per member) — it saves the worker re-deriving what you already
+     found. This is a courtesy, not the enforcement mechanism (#213): even when Step 1b was skipped
+     for this dispatch (a notification-driven mid-run nudge, a long `/goal` loop that drifted), the
+     worker's OWN Step 0 now posts its own validation evidence per issue as a durable `gh issue
+     comment`, mechanically checked at its SubagentStop (`design_gate.py`) — so validation coverage
+     no longer depends on your Step 1b prose actually having run for this specific dispatch.
    - **Model = Sonnet 5 by default; HARD tickets escalate — Fable through the budget gate**
      (`model-awareness.md` ACTIVE policy 2026-07-03). The `autopilot-worker` frontmatter defaults to
      `model: sonnet` — dispatch it AS-IS for a routine ticket (bug fix, scoped feature). When the
@@ -459,8 +466,11 @@ Each loop turn:
    the loop (2026-07-25 revision).** Once verification + the per-member run-cards are done and the
    lock is released, end THIS turn with the FULL `## ✅ Work Complete` template
    (`completion-report.md`) for the batch: audits — `✅ CI: green`, `✅ /plan-check: <N>/<N> fulfilled`
-   (the validated batch scope from Step 1b), `✅ /review: clean — 0 🔴 0 🟡 0 🔵` and
-   `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what the worker already
+   (this line RELAYS the worker's own `plan:` evidence-block field — a per-issue self-audit against
+   the issue's acceptance criteria that the worker produces every dispatch; you do NOT independently
+   re-run a `plan-check` skill call yourself — `agents/autopilot-worker.md` has never told the
+   worker to invoke it either, only to self-audit and report, #215/#216), `✅ /review: clean — 0 🔴
+   0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what the worker already
    confirmed before merging (its own PR gate, `agents/autopilot-worker.md`), never re-running the
    skills yourself), `✅ Deploy: <version>`
    — then Goal/What changed in plain language, the 🌐 URL(s) from the worker's `--url`, and the PR

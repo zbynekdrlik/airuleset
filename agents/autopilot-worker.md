@@ -147,6 +147,17 @@ longer silent, so do not treat a failed card as done. (2) A **SubagentStop gate*
 reconciles merged-but-unreported tickets independently, so a card you skip surfaces on the user's
 phone as a gap with your ticket number on it. Fire the card, then put it on the `cards_fired:` line.
 
+**VALIDATION AND REVIEW ARE ALSO MECHANICALLY ENFORCED, NOT PROSE (measured: 15% and 12%
+compliance).** The STEP 0 validation proof and the CYCLE step 6 review pass EACH need their own
+`gh issue comment` — a durable artifact re-read from GitHub, the exact same shape as the design
+comment. `hooks/post-record-design-comment.sh` classifies EVERY comment you post against THREE
+shapes (design / validated / reviewed) from ONE re-read and marks whichever it matches;
+`hooks/subagent-stop-check-design.sh` blocks your stop ONCE per issue, consolidated, if you claim a
+real merge with ANY of the three markers still missing for that issue. Post the validation comment
+at STEP 0 (before proceeding to code) and the review comment at CYCLE step 6 (after `/review` +
+`/requesting-code-review` pass) — plain `gh issue comment <N> --body "..."` calls, same mechanism,
+same file, zero new hooks.
+
 ## READ FIRST (durable context — never skip)
 
 1. The repo's `CLAUDE.md` (project conventions + the merge mode marker `airuleset:merge=manual`).
@@ -165,6 +176,17 @@ EVIDENCE (what you ran + observed) — `gh issue close <N> --comment "<evidence>
 that one member (do NOT add its `Closes #N` to the PR), note it on the evidence block's
 `obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after closing. Only
 confirmed-still-valid issues proceed to the cycle below.
+
+**Record STILL-VALID evidence too, as its own durable comment (#213) — never only the supervisor's
+Step 1b validator run, which is a MAIN-session-only obligation nothing mechanically re-checks per
+dispatch.** For EVERY still-valid member (not just the obsolete ones you close), post `gh issue
+comment <N> --body "<what you checked/reproduced> ... <what you observed — still valid, still
+happens, current code behaves as described> ..."` — this is what `validated:` on your evidence
+block below points at. `hooks/post-record-design-comment.sh` re-reads it from GitHub and classifies
+it; `hooks/subagent-stop-check-design.sh` blocks your stop once per issue if you claim a real merge
+with no such marker for it. If the supervisor already ran `ticket-validator` for this dispatch and
+gave you its verdict, you may quote it directly in this comment rather than re-deriving from
+scratch — the comment is what makes either source durable and mechanically checked.
 **fork-no-merge EXCEPTION:** you may `gh issue close` ONLY your OWN self-authored sub-findings
 (hook-verified: author == your gh login). An obsolete ASSIGNED / foreign-authored ticket you MUST
 NOT close — COMMENT the finding instead: `gh issue comment <N> --body "OBSOLETE: <evidence>"`,
@@ -237,6 +259,12 @@ yourself — just do your work; the lock is the supervisor's concern.
 6. Open ONE PR `dev`→`main` whose body lists `Closes #<n>` for **EVERY** member (separate lines, so
    GitHub closes them all on merge). Drive EVERY gate green: CI all jobs, `mergeable: true` +
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
+   **Record that pass as its own durable comment too (#214) — the supervisor's completion-report
+   audit line only relays your CLAIM, it is never a substitute for the review actually having
+   happened.** For EACH member, post `gh issue comment <N> --body "<ran /review +
+   requesting-code-review> ... <N findings, fixed in commit <sha> / clean, 0 🔴 0 🟡 0 🔵> ..."` —
+   this is what `review:` on your evidence block points at, checked by the SAME extended
+   `subagent-stop-check-design.sh` gate as `validated:`/`approach:`.
 7. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
@@ -263,8 +291,12 @@ yourself — just do your work; the lock is the supervisor's concern.
 10. Append one terse line PER member to `docs/autopilot-log.md` (issue #, commit SHAs, RED→GREEN
    test names, decisions, and the shared PR #). Create the file if missing.
 11. Run the `playbook-review` skill — capture reusable procedures, gotchas, and non-obvious
-    decisions to the project playbook per `project-playbook-maintenance.md`. The completion report
-    MUST carry the `📔 Playbook:` line (enforced by the Stop gate `stop-check-playbook-review.sh`).
+    decisions to the project playbook per `project-playbook-maintenance.md`. Your evidence block
+    below MUST carry the `📔 Playbook:` line — the SUPERVISOR relays it into the `## Work Complete`
+    report, and it is THAT report `stop-check-playbook-review.sh` actually checks (a Stop hook,
+    registered on `Stop` only — `Stop` never fires for a subagent like you, `SubagentStop` does, so
+    the check cannot fire on your own turn at all; see `#215`/`#216`). Your obligation is running the
+    Skill call itself and putting its result on this line — the mechanical check is one level up.
 
 ## ASK-THE-USER (surface these to the user — your prompts reach their main session — discuss, then continue)
 
@@ -286,8 +318,10 @@ them all):
 
 ```
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
-validated: <per issue: how you proved each is still real: repro/test/MCP/curl | "OBSOLETE — closed: <what>">
+plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — your own self-audit in plain words vs what the ticket asked for. This is what the supervisor's `✅ /plan-check: N/N fulfilled` line relays — it is NOT independently re-run by the supervisor, so an honest self-audit here is the only thing backing that line.>
+validated: <per issue: how you proved each is still real: repro/test/MCP/curl, ALSO posted as its own `gh issue comment <N>` per STEP 0 above — a durable artifact, checked by the extended #136/#213 gate | "OBSOLETE — closed: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, AND proof it predates that member's first code commit (comment timestamp vs first commit SHA). NEVER "n/a" — CYCLE step 2 is unconditional.>
+review: <per issue: `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>` per CYCLE step 6 — checked by the SAME extended #214 gate.>
 achieved: <per issue, ONE Slovak line of what actually LANDED — used verbatim as the Discord card's "Dosiahnuté" (#A: …; #B: …)>
 pr: #<M> <url>  (body Closes #A #B …)
 merge_sha: <sha | "NOT MERGED (manual marker)" | "STOPPED: <reason>">
@@ -307,8 +341,10 @@ OPEN):
 
 ```
 issues: #<A> <title>, #<B> <title>, …
-validated: <per issue: how you proved each is still real | "OBSOLETE — commented, left OPEN: <what>">
+plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
+validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
+review: <per issue: local `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
 branch: <your fork branch name, pushed>
 local_verify: <tests + lint command → result (green), the proof the maintainer will re-check>
