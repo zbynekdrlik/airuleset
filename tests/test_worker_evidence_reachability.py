@@ -55,27 +55,59 @@ def _hook_registrations():
 
 
 # Events that genuinely fire FOR A SUBAGENT (agents/*.md is always
-# subagent-context -- it IS the dispatched worker's system prompt). `Stop`
-# is deliberately excluded: it fires for the SUPERVISOR/main session only.
-SUBAGENT_REACHABLE_EVENTS = {"SubagentStop", "PreToolUse"}
+# subagent-context -- it IS the dispatched worker's system prompt).
+# `PostToolUse` fires per-tool-call same as `PreToolUse`, just after
+# instead of before -- confirmed by `post-record-subagent-bg-launch.sh`
+# (PostToolUse on Bash|Monitor|Agent), whose own docstring documents it
+# firing "from SUBAGENT context (payload carries agent_id)". `Stop` is
+# deliberately EXCLUDED: it fires for the SUPERVISOR/main session only.
+SUBAGENT_REACHABLE_EVENTS = {"SubagentStop", "PreToolUse", "PostToolUse"}
 
-# "enforced by <the Stop hook | a Stop hook | the SubagentStop gate>
-# `<hook>.sh`" -- matches the real shapes seen in this repo's prose
-# (case-insensitive, tolerant of the exact wording around the hook name).
-_ENFORCED_BY_RE = re.compile(
-    r"enforced by(?: the)?(?: [A-Za-z]+)*?\s*`([\w.-]+\.sh)`", re.IGNORECASE)
+# Any backtick-quoted `<hook>.sh` mention (with or without a `hooks/`
+# prefix). Deliberately NOT anchored to one exact enforcement phrase --
+# an earlier version anchored on "enforced by ... `hook.sh`" and went
+# VACUOUS the moment this diff's own prose stopped using that exact
+# wording (adversarial-review finding, #216 hardening): 0 real matches,
+# only the hardcoded self-check sample ever exercised the regex. Instead,
+# find every hook MENTION, then separately judge whether the surrounding
+# text actually CLAIMS enforcement.
+_HOOK_MENTION_RE = re.compile(r"`(?:hooks/)?([\w.-]+\.sh)`")
+
+# An enforcement CLAIM near a hook mention -- deliberately narrower than a
+# bare "check"/"checks" (which also fires on an HONEST non-claim like "the
+# check fires at the SUPERVISOR's stop... `X.sh` actually checks" --
+# confirmed live: a naive "checks?" keyword flagged the #215 CORRECTED,
+# honest text as a false claim, which would be exactly the kind of
+# self-tripping bug this repo's own playbook warns about repeatedly).
+_ENFORCEMENT_CLAIM_RE = re.compile(
+    r"enforc|hook-enforced|block(?:s|ed)?\s+your\s+stop|"
+    r"block(?:s|ed)?\s+(?:the\s+)?commit|checked\s+by",
+    re.IGNORECASE,
+)
+_CLAIM_WINDOW = 150
+
+
+def _hook_claims(text):
+    """[(hook_filename, window_text), ...] for every hook mention in
+    `text` whose surrounding window contains an enforcement CLAIM (not
+    just an incidental mention)."""
+    out = []
+    for m in _HOOK_MENTION_RE.finditer(text):
+        window = text[max(0, m.start() - _CLAIM_WINDOW):m.end() + _CLAIM_WINDOW]
+        if _ENFORCEMENT_CLAIM_RE.search(window):
+            out.append((m.group(1), window))
+    return out
 
 
 class TestEnforcedByClaimsInAgentsAreReachable(unittest.TestCase):
     """#216 item 1 -- the #215 false-claim shape, generalized."""
 
-    def test_every_enforced_by_claim_in_agents_names_a_subagent_reachable_hook(self):
+    def test_every_enforcement_claim_in_agents_names_a_subagent_reachable_hook(self):
         registrations = _hook_registrations()
         offenders = []
         for path in sorted(AGENTS_DIR.glob("*.md")):
             text = path.read_text(encoding="utf-8")
-            for m in _ENFORCED_BY_RE.finditer(text):
-                hook = m.group(1)
+            for hook, _window in _hook_claims(text):
                 events = {ev for ev, _ in registrations.get(hook, set())}
                 if not events:
                     offenders.append(
@@ -91,15 +123,42 @@ class TestEnforcedByClaimsInAgentsAreReachable(unittest.TestCase):
                         "or PreToolUse)" % (path.name, hook, sorted(events)))
         self.assertEqual(offenders, [], "\n".join(offenders))
 
-    def test_the_regex_itself_catches_the_215_false_claim_shape(self):
+    def test_the_detector_is_not_vacuous_against_current_content(self):
+        # The exact regression the adversarial review caught: a detector
+        # that finds ZERO real claims in the current file gives false
+        # confidence -- only its own hardcoded self-check sample would be
+        # exercising it. There must be real, non-hardcoded claims found.
+        text = WORKER_MD.read_text(encoding="utf-8")
+        claims = _hook_claims(text)
+        self.assertGreater(len(claims), 0,
+                           "the detector found ZERO real enforcement claims "
+                           "in agents/autopilot-worker.md -- it is vacuous "
+                           "against current content")
+
+    def test_an_honest_non_claim_is_not_flagged(self):
+        # The #215 CORRECTED text explicitly says a hook does NOT fire for
+        # the worker -- "the check fires at the SUPERVISOR's stop... it is
+        # THAT report `stop-check-playbook-review.sh` actually checks". A
+        # naive "checks?" keyword would misread this honest disclaimer as
+        # a claim (confirmed while building this detector) and flag
+        # correct, honest prose as a violation.
+        sample = (
+            "the check fires at the SUPERVISOR's stop, once the worker's "
+            "evidence is relayed into the report, and it is THAT report "
+            "`stop-check-playbook-review.sh` actually checks -- never your "
+            "own SubagentStop turn."
+        )
+        self.assertEqual(_hook_claims(sample), [])
+
+    def test_the_detector_catches_the_215_false_claim_shape(self):
         # Self-check: the detector must actually MATCH the historical false
         # claim's exact wording, or item 1 above is silently vacuous.
         sample = ("MUST carry the line (enforced by the Stop gate "
                   "`stop-check-playbook-review.sh`).")
-        m = _ENFORCED_BY_RE.search(sample)
-        self.assertIsNotNone(m, "detector regex does not match the #215 "
-                             "false-claim shape it exists to catch")
-        self.assertEqual(m.group(1), "stop-check-playbook-review.sh")
+        claims = _hook_claims(sample)
+        self.assertEqual([c[0] for c in claims], ["stop-check-playbook-review.sh"],
+                         "detector does not match the #215 false-claim "
+                         "shape it exists to catch")
 
 
 # --------------------------------------------------------------------------- #
