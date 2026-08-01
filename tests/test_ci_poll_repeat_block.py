@@ -655,5 +655,130 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         self.assertIn("fanning 9 repos", log.read_text())
 
 
+class OneShotReviewFollowupTest(unittest.TestCase):
+    """Review follow-up on the #210 one-shot extension (post-cf5f4cd/76d8e9c).
+
+    Two 🔴 findings from the adversarial review of #210:
+
+    1. DEAD END: once the 3rd+ oneshot blocks a (session, run-id), the exact
+       command the block message prints as the permanent escape (`gh run view
+       <id> --json status,conclusion`) is blocked again on EVERY subsequent
+       call, forever — no decay. Contradicts the file's own invariant that no
+       plain status check ever dead-ends. Fix: a sliding TTL window on the
+       oneshot counter, same mtime-based decay style the generic loop bucket
+       already uses.
+    2. The oneshot block writes the SHARED BLOCKED_FILE, and the #118
+       "loop 1 is free" carve-out gates only on that file's existence,
+       agnostic of WHY it was set — so 3 oneshots (3rd blocks) permanently
+       poison the free-first-loop carve-out for that run-id, even though no
+       loop ever ran. Fix: the oneshot mechanism gets its OWN state; only an
+       actual LOOP (or burst) block may consume the loop carve-out.
+
+    Plus the 🔵 closed in the same pass: a bare `gh run view --json
+    status,conclusion` with NO run-id argument (defaults to the latest run on
+    the current branch) previously evaded the oneshot counter entirely, since
+    the whole counting block was gated on `-n "$RUN_ID"`.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, extra_env=None, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    def oneshot(self, run_id, json_val="status,conclusion"):
+        if json_val is None:
+            return "gh run view %s" % run_id
+        return "gh run view %s --json %s" % (run_id, json_val)
+
+    # ---- 🔴 1: no dead end — the promised escape must decay, not vanish ----
+    def test_the_promised_escape_is_blocked_forever_without_decay(self):
+        # Live-verified sequence from the review: calls 1,2 allowed; 3,4,5,6
+        # all blocked. This locks the CURRENT (broken) shape so a future
+        # change to the free budget doesn't silently un-notice a regression
+        # of the SAME dead-end class reappearing at a different count.
+        results = [self.run_hook(self.oneshot(RUN_A)).returncode for _ in range(6)]
+        self.assertEqual(results, [0, 0, 2, 2, 2, 2])
+
+    def test_oneshot_dead_end_decays_once_the_ttl_genuinely_passes(self):
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(self.run_hook(self.oneshot(RUN_A)).returncode, 2)
+
+        oneshot_file = Path(self.state) / (
+            "airuleset-cipoll-oneshot-sess-118-run-%s" % RUN_A)
+        self.assertTrue(
+            oneshot_file.exists(),
+            "the oneshot mechanism must persist its own per-key state file")
+        old = os.path.getmtime(oneshot_file) - 1900  # past the default 1800s TTL
+        os.utime(oneshot_file, (old, old))
+
+        out = self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(
+            out.returncode, 0, out.stderr +
+            " — the window genuinely passed, so this must be a fresh count")
+
+    def test_oneshot_ttl_is_configurable_and_short_ttls_decay_fast(self):
+        env = {"AIRULESET_CIPOLL_ONESHOT_TTL_S": "1"}
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A), extra_env=env)
+        self.assertEqual(
+            self.run_hook(self.oneshot(RUN_A), extra_env=env).returncode, 2)
+
+        oneshot_file = Path(self.state) / (
+            "airuleset-cipoll-oneshot-sess-118-run-%s" % RUN_A)
+        old = os.path.getmtime(oneshot_file) - 2
+        os.utime(oneshot_file, (old, old))
+
+        out = self.run_hook(self.oneshot(RUN_A), extra_env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- 🔴 2: oneshot must never consume the #118 loop free-carve-out ----
+    def test_oneshot_block_never_consumes_the_loop_free_carveout(self):
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(self.run_hook(self.oneshot(RUN_A)).returncode, 2)
+
+        # a genuine loop-shaped poll for the SAME run-id must still get its
+        # free first pass — no loop has run yet, only oneshots
+        out = self.run_hook(poll_loop(RUN_A))
+        self.assertEqual(
+            out.returncode, 0, out.stderr +
+            " — an oneshot block must never poison the #118 loop carve-out")
+        self.assertNotIn("Loop 1 already came back non-terminal", out.stderr)
+
+        # and its behavior from here is unchanged from a fresh key: the loop
+        # mechanism's OWN second call is what blocks it, with the #118 message
+        out = self.run_hook(poll_loop(RUN_A))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#118", out.stderr)
+        self.assertIn("Loop 1 already came back non-terminal", out.stderr)
+
+    # ---- 🔵: a bare no-run-id status poll must be counted somewhere -------
+    def test_bare_no_run_id_status_poll_is_counted_and_eventually_blocked(self):
+        cmd = "gh run view --json status,conclusion"
+        self.assertEqual(self.run_hook(cmd).returncode, 0)
+        self.assertEqual(self.run_hook(cmd).returncode, 0)
+        out = self.run_hook(cmd)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#210", out.stderr)
+
+    def test_bare_no_run_id_gh_run_list_is_still_never_counted_as_oneshot(self):
+        # `gh run list` (no `view`) must stay completely outside the oneshot
+        # mechanism — only the loop mechanism's own generic bucket governs it.
+        cmd = "gh run list --limit 3 --json databaseId,status"
+        for _ in range(5):
+            self.assertEqual(self.run_hook(cmd).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
