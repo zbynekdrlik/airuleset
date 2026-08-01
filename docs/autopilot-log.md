@@ -2762,3 +2762,52 @@ Closes #171
   passes, mutant fails on the sixth call, on a second distinct id, and on the
   shared key it leaves behind). Suite 3423, ruff clean. The extended findings are
   on the seven-hook port ticket, because the template shares every one of them.
+
+## 2026-08-01 — batch: #213 (validated) + #214 (reviewed) + #215 (attestation gaps) + #216 (reachability guarantee)
+
+Same-day audit found three worker-side obligations decaying to prose despite the #136 design-gate
+precedent: validator dispatch clustered only at each session's initial backlog sweep (15% real
+coverage), code review ran in 12% of worker runs, and a supervisor Stop-hook line ("plan-check")
+had nothing worker-side backing it while a second line falsely claimed a Stop-only hook checks the
+worker's own turn. Fix: generalized `design_gate.py`'s single "design" marker into a `kind`
+parameter (design/validated/reviewed), added `classify_validation_comment` and
+`classify_review_comment`, and extended the two SAME existing hooks
+(`post-record-design-comment.sh` PostToolUse recorder, `subagent-stop-check-design.sh` SubagentStop
+backstop) to classify and enforce all three from one re-read — zero new hooks, per the FREEZE.
+`agents/autopilot-worker.md` gained: an instruction to post validation evidence at STEP 0 and
+review evidence at CYCLE step 6 (each its own `gh issue comment`), a `plan:` self-audit evidence
+line so the supervisor's `✅ /plan-check:` attestation now relays something real, and a corrected
+line 267 (the check fires at the SUPERVISOR's Stop, after relay — Stop never fires for a subagent).
+`skills/autopilot/SKILL.md` updated to match.
+
+TDD: #213 (6aa806a red / 33f1346 green — validated marker + classifier + gate wiring), #214
+(85d10db red / 9457758 green — reviewed marker, staged behind a temporary ALL_KINDS restriction so
+the two tickets got independently provable red/green pairs sharing one implementation), #215
+(35afa05 red / 9734bc4 green — doc fix locked by tests/test_worker_attestation.py), #216 (d40b4eb —
+a new push-suite meta-test module, tests/test_worker_evidence_reachability.py; proved its teeth by
+temporarily swapping in agents/autopilot-worker.md's pre-#215 content and confirming the detector
+correctly failed against it, then restoring). 8a2f004 fixed a collateral regression in a pinned
+Step-5 scan-window test the plan-check clause pushed past its 2500-char bound.
+
+Live-payload verification: manually exercised both extended hooks with constructed SubagentStop/
+PostToolUse payloads (all three markers present → pass; each single marker present alone → blocks
+naming exactly what's missing; a 3-issue/mixed-marker-state batch → well-formed consolidated JSON
+naming per-issue missing kinds). Full suite 3587 passed, `airuleset.py validate` clean, ruff clean.
+
+A dispatched fresh-context adversarial review (Explore) then found two CRITICAL + two MAJOR issues
+in the new marker family, all fixed with their own red/green pairs: (1) one rich comment posted
+before any code existed could plausibly satisfy design+validated+reviewed at once, defeating the
+premise each kind proves its own step happened -- fixed via `design_gate.claimed_urls()` (a marker
+kind can only come from a comment url that hasn't already granted a different kind) plus stopping
+the classify loop at the first still-missing match instead of writing every kind that classifies.
+(2) the review classifier's bare `[0-9a-f]{7,40}` alternative matched any 7+ digit decimal number
+and pure-a-f-letter English words ("defaced") -- fixed by requiring the hex token sit near an
+actual commit/sha/fix keyword, same shape as notify.py's own `_SHA_PER_ISSUE_RE`. (3) the
+reachability test's `_ENFORCED_BY_RE` only matched the retired exact "enforced by" phrasing, so it
+was VACUOUS against this diff's own "checked by" wording (confirmed empirically: 0 matches) -- fixed
+with a two-stage mention+claim detector, which also surfaced a real scope bug (`PostToolUse` was
+missing from `SUBAGENT_REACHABLE_EVENTS`) and needed its own keyword-set narrowing after a naive
+"checks?" match first mis-flagged the #215 CORRECTED honest text as a false claim. (4) an issue
+closed via STEP 0's `gh issue close --comment` path (never coded) could still need 3 unmeetable
+markers -- fixed by excluding issues named on `obsolete_closed:`/`obsolete_handed_off:` lines.
+Full suite green again after each fix; final count 3607 passed, ruff clean, `validate` clean.
