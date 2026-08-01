@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PostToolUse (Bash matcher) — #136, design-before-code gate, half 1/3.
+# Hook: PostToolUse (Bash matcher) — #136 design-before-code gate half 1/3,
+# EXTENDED by #213 (validated-posted) and #214 (reviewed-posted) to the same
+# artifact pattern: EVERY posted `gh issue comment` is classified against
+# ALL THREE shapes (design / validated / reviewed) from the SAME single
+# re-read — a worker's Step 0 validation comment and Step 6 review comment
+# get their own markers exactly like a design comment does, with zero new
+# hook registrations. `subagent-stop-check-design.sh` is the consumer for
+# all three.
 #
-# The ONLY place a design marker (~/.claude/design-posted/<repo>#<issue>) is
-# ever written. Never speculative, never trusted from the command that was
-# about to run — this hook re-reads the ACTUAL posted comment back from
-# GitHub (`gh issue view --json comments`), the same #135 lesson
-# `notify.marker_delivered` encodes: a marker's presence must be backed by
-# an OBSERVED delivery, not an intent.
+# The ONLY place a design/validated/reviewed marker
+# (~/.claude/<kind>-posted/<repo>#<issue>) is ever written. Never
+# speculative, never trusted from the command that was about to run — this
+# hook re-reads the ACTUAL posted comment back from GitHub (`gh issue view
+# --json comments`), the same #135 lesson `notify.marker_delivered` encodes:
+# a marker's presence must be backed by an OBSERVED delivery, not an intent.
 #
 # Why re-query instead of trusting Bash's own tool_response: this repo has
 # no prior art anywhere for a Bash PostToolUse hook reading tool_response
@@ -98,8 +105,11 @@ else:
 if not repo_key:
     sys.exit(0)
 
-# Already recorded — never re-hit the network for a settled issue.
-if dg.marker_exists(repo_key, issue):
+# Already recorded — never re-hit the network for a settled issue. "Settled"
+# now means ALL THREE kinds are marked (#213/#214) -- if even one is still
+# missing, a LATER comment for this same issue might supply it, so we must
+# keep re-reading until design+validated+reviewed are all in.
+if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
     sys.exit(0)
 
 try:
@@ -144,11 +154,16 @@ if not candidates:
 candidates.sort(key=lambda pair: pair[0])
 _, latest = candidates[-1]
 
-ok, reason = dg.classify_design_comment(latest.get("body", ""))
-if not ok:
-    sys.exit(0)
-
-dg.write_marker(repo_key, issue, latest.get("url", ""), reason)
+body = latest.get("body", "")
+url = latest.get("url", "")
+classifiers = {
+    "design": dg.classify_design_comment,
+    "validated": dg.classify_validation_comment,
+}  # #214 adds "reviewed" next, staged for TDD
+for kind, classify in classifiers.items():
+    ok, reason = classify(body)
+    if ok:
+        dg.write_marker(repo_key, issue, url, reason, kind=kind)
 PYEOF
 
 exit 0

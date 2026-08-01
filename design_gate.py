@@ -58,6 +58,23 @@ import time
 
 _DESIGN_DIRNAME = "design-posted"
 
+# #213/#214 -- the SAME artifact pattern extended to two more evidence
+# kinds: "validated" (Step 0's live-reproduction proof) and "reviewed"
+# (the /review + /requesting-code-review pass). One marker directory per
+# kind, same sanitized-key convention as design. See `_dir_for_kind`.
+_VALIDATED_DIRNAME = "validated-posted"
+_REVIEWED_DIRNAME = "reviewed-posted"
+_KIND_DIRNAMES = {
+    "design": _DESIGN_DIRNAME,
+    "validated": _VALIDATED_DIRNAME,
+    "reviewed": _REVIEWED_DIRNAME,
+}
+ALL_KINDS = ("design", "validated")  # #214 adds "reviewed" next, staged for TDD
+
+
+def _dir_for_kind(kind):
+    return _KIND_DIRNAMES.get(kind, _DESIGN_DIRNAME)
+
 # A real "one honest paragraph" (the worker system prompt's own phrase for
 # the minimum acceptable depth) reliably clears this; "on it" / "working on
 # this now" does not. Calibrated, not derived -- see the classifier's known
@@ -113,37 +130,38 @@ def _claude_dir():
     return os.path.join(os.path.expanduser("~"), ".claude")
 
 
-def design_dir():
-    return os.path.join(_claude_dir(), _DESIGN_DIRNAME)
+def design_dir(kind="design"):
+    return os.path.join(_claude_dir(), _dir_for_kind(kind))
 
 
 def marker_key(repo_key, issue):
     return "%s#%s" % (repo_key, issue)
 
 
-def marker_path(repo_key, issue):
+def marker_path(repo_key, issue, kind="design"):
     safe = re.sub(r"[^A-Za-z0-9._#-]", "_", marker_key(repo_key, issue))
-    return os.path.join(design_dir(), safe)
+    return os.path.join(design_dir(kind), safe)
 
 
-def marker_exists(repo_key, issue):
+def marker_exists(repo_key, issue, kind="design"):
     if not repo_key or issue in (None, ""):
         return False
-    return os.path.isfile(marker_path(repo_key, issue))
+    return os.path.isfile(marker_path(repo_key, issue, kind))
 
 
-def write_marker(repo_key, issue, comment_url, reason="ok", ts=None):
-    """Record DELIVERED evidence for `<repo_key>#<issue>`. Never call this
-    speculatively -- only from a code path that has just observed a REAL
-    posted comment (see `hooks/post-record-design-comment.sh`). Best-effort:
-    an unwritable ~/.claude never raises, it just means the gate stays
-    active (fail toward re-asking, never toward silently trusting)."""
+def write_marker(repo_key, issue, comment_url, reason="ok", ts=None, kind="design"):
+    """Record DELIVERED evidence for `<repo_key>#<issue>` (kind =
+    "design" / "validated" / "reviewed"). Never call this speculatively --
+    only from a code path that has just observed a REAL posted comment (see
+    `hooks/post-record-design-comment.sh`). Best-effort: an unwritable
+    ~/.claude never raises, it just means the gate stays active (fail
+    toward re-asking, never toward silently trusting)."""
     if not repo_key or issue in (None, ""):
         return False
-    d = design_dir()
+    d = design_dir(kind)
     try:
         os.makedirs(d, exist_ok=True)
-        with open(marker_path(repo_key, issue), "w", encoding="utf-8") as fh:
+        with open(marker_path(repo_key, issue, kind), "w", encoding="utf-8") as fh:
             fh.write("%s\t%s\t%s\n" % (ts if ts is not None else time.time(),
                                        comment_url or "-", reason or "ok"))
         return True
@@ -151,11 +169,11 @@ def write_marker(repo_key, issue, comment_url, reason="ok", ts=None):
         return False
 
 
-def read_marker(repo_key, issue):
+def read_marker(repo_key, issue, kind="design"):
     """`{"ts": float, "url": str, "reason": str}` or None. Tolerates the
     legacy/short shape (fewer than 3 fields) rather than raising."""
     try:
-        with open(marker_path(repo_key, issue), encoding="utf-8") as fh:
+        with open(marker_path(repo_key, issue, kind), encoding="utf-8") as fh:
             body = fh.read(2000).strip()
     except OSError:
         return None
@@ -171,6 +189,90 @@ def read_marker(repo_key, issue):
         "url": parts[1] if len(parts) > 1 else "",
         "reason": parts[2] if len(parts) > 2 else "",
     }
+
+
+# --------------------------------------------------------------------------- #
+# #213 -- validation classifier: does `body` plausibly carry Step 0's
+# live-reproduction proof (an action taken + what it showed)? Same shape as
+# `classify_design_comment` (bilingual, shape-not-content, two concept
+# families instead of three -- validation evidence is naturally a tighter
+# claim than a full root-cause/approach/alternative design).
+# --------------------------------------------------------------------------- #
+
+MIN_LEN_VALIDATION = 60
+
+_VALIDATE_ACTION_RE = re.compile(
+    r"reproduc|repro\b|reprodukov|overil|overen|skontrolov|verified|"
+    r"validated|confirm|potvrd|checked\s+(?:the\s+)?(?:live|current)|"
+    r"tested\s+live|preveril",
+    re.IGNORECASE,
+)
+_VALIDATE_EVIDENCE_RE = re.compile(
+    r"still\s+(?:valid|real|happens|reproduces)|st[áa]le\s+plat|"
+    r"already\s+(?:fixed|resolved|obsolete)|u[žz]\s+(?:opraven|vyrie[šs]en|neplat)|"
+    r"obsolete|zastaran|no\s+longer\s+(?:valid|happens)|live\s+repro|"
+    r"na[žz]ivo|test\s+(?:still\s+)?fails?|test\s+passes?|current\s+code",
+    re.IGNORECASE,
+)
+
+
+def classify_validation_comment(body):
+    """Heuristic verdict for #213: does `body` plausibly carry a validation
+    ACTION (what you did to check) plus a validation EVIDENCE/verdict (what
+    you observed)? Returns `(ok: bool, reason: str)`, same contract as
+    `classify_design_comment`."""
+    text = (body or "").strip()
+    if len(text) < MIN_LEN_VALIDATION:
+        return False, "too short (%d chars, need >= %d)" % (
+            len(text), MIN_LEN_VALIDATION)
+    missing = []
+    if not _VALIDATE_ACTION_RE.search(text):
+        missing.append("validation action")
+    if not _VALIDATE_EVIDENCE_RE.search(text):
+        missing.append("validation evidence")
+    if missing:
+        return False, "missing: " + ", ".join(missing)
+    return True, "ok"
+
+
+# --------------------------------------------------------------------------- #
+# #214 -- review classifier: does `body` plausibly carry the review PASS
+# (that a review happened) plus its RESULT (findings/clean + a fixing
+# commit)? Same shape family as the two above.
+# --------------------------------------------------------------------------- #
+
+MIN_LEN_REVIEW = 60
+
+_REVIEW_ACTION_RE = re.compile(
+    r"/review\b|requesting-code-review|code\s*review|\breview(?:ed|ing)?\b|"
+    r"kontrol[a-z]*\s+k[óo]du|revidova",
+    re.IGNORECASE,
+)
+_REVIEW_RESULT_RE = re.compile(
+    r"0\s*\U0001F534|\U0001F534|\U0001F7E1|\U0001F535|clean\b|"
+    r"no\s+(?:findings|issues)|[žz]iadne\s+n[áa]lezy|"
+    r"fix(?:ed|ing)?\s+(?:commit|in)\b|opraven[éeí]\s+v\s+commit|"
+    r"\b[0-9a-f]{7,40}\b",
+    re.IGNORECASE,
+)
+
+
+def classify_review_comment(body):
+    """Heuristic verdict for #214: does `body` plausibly carry a review
+    ACTION plus a review RESULT (finding counts, "clean", or a fixing
+    commit sha)? Returns `(ok: bool, reason: str)`, same contract."""
+    text = (body or "").strip()
+    if len(text) < MIN_LEN_REVIEW:
+        return False, "too short (%d chars, need >= %d)" % (
+            len(text), MIN_LEN_REVIEW)
+    missing = []
+    if not _REVIEW_ACTION_RE.search(text):
+        missing.append("review action")
+    if not _REVIEW_RESULT_RE.search(text):
+        missing.append("findings/fix evidence")
+    if missing:
+        return False, "missing: " + ", ".join(missing)
+    return True, "ok"
 
 
 # Matches a commit-message issue reference: `(#41)`, `Closes #41`, `#41:`,
