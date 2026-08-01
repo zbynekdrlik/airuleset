@@ -338,6 +338,114 @@ class TestAgentTypeJoin(unittest.TestCase):
         self.assertIsNone(data["dispatches"][0]["agent_type"])
 
 
+class TestAgentTypeJoinSurvivesLaterUnrelatedMentions(unittest.TestCase):
+    """#211: the filed hypothesis (a window-straddling parent turn) does NOT
+    reproduce against the shipped join -- `agent_types_from_parent` has
+    never applied a window to the PARENT read, only `scan_dispatches` windows
+    the CHILD rows it reports. Reproducing empirically against a real
+    unresolved dispatch (camera-box #894 worker) found the REAL cause
+    instead: `pending[aid] = b.get("tool_use_id")` unconditionally
+    OVERWRITES on every tool_result that happens to mention the agent id
+    substring -- and a `TaskStop` call's own confirmation text
+    ("Successfully stopped task: <id> ...") mentions it too. That LATER,
+    unrelated tool_use_id is never in `uses` (TaskStop is not Agent/Task),
+    so the correct EARLIER match (the real launch, which DOES resolve) gets
+    silently discarded in favor of one that can never resolve.
+    """
+
+    def _parent_lines(self, now, agent_id, subagent_type):
+        ts = now.isoformat().replace("+00:00", "Z")
+        launch_use = {"timestamp": ts, "type": "assistant", "message": {
+            "content": [{"type": "tool_use", "id": "toolu_launch",
+                         "name": "Agent",
+                         "input": {"subagent_type": subagent_type,
+                                   "prompt": "do the thing"}}]}}
+        launch_res = {"timestamp": ts, "type": "user", "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_launch",
+                        "content": [{"type": "text",
+                                     "text": "Async agent launched "
+                                             "successfully. agentId: %s"
+                                             % agent_id}]}]}}
+        # An UNRELATED later call whose own result text also happens to
+        # echo the agent id -- the real #211 shape.
+        stop_use = {"timestamp": ts, "type": "assistant", "message": {
+            "content": [{"type": "tool_use", "id": "toolu_stop",
+                         "name": "TaskStop",
+                         "input": {"task_id": agent_id}}]}}
+        stop_res = {"timestamp": ts, "type": "user", "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_stop",
+                        "content": [{"type": "text",
+                                     "text": "Successfully stopped task: "
+                                             "%s (Work #894 fix)"
+                                             % agent_id}]}]}}
+        return [json.dumps(x) for x in
+                (launch_use, launch_res, stop_use, stop_res)]
+
+    def test_a_later_taskstop_mention_does_not_clobber_the_real_join(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_parent(root, "proj", "s1",
+                          self._parent_lines(now, "a1", "autopilot-worker"))
+            _write_sub(root, "proj", "s1", "agent-a1",
+                       [_line(now, "req_1", cw=20000)])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"][0]["agent_type"],
+                         "autopilot-worker")
+
+    def test_window_of_the_parent_turn_is_never_the_constraint(self):
+        # #211's own filed hypothesis, locked as a permanent regression
+        # guard even though it was never actually broken: a launching
+        # tool_use FAR outside the report window must still resolve the
+        # type -- only the dispatch's SPEND is windowed, never the join.
+        now = datetime.datetime.now(UTC)
+        long_before = now - datetime.timedelta(hours=100)  # window is 12h
+        with TemporaryDirectory() as root:
+            _write_parent(root, "proj", "s1",
+                          self._parent_lines(long_before, "a1", "Explore"))
+            _write_sub(root, "proj", "s1", "agent-a1",
+                       [_line(now, "req_1", cw=20000)])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"][0]["agent_type"], "Explore")
+
+
+class TestAgentTypeFallsBackToChildAttribution(unittest.TestCase):
+    """#211: when the parent-transcript join yields nothing at all -- no
+    parent file, or a genuinely unresolvable one -- fall back to
+    `attributionAgent`, Claude Code's own per-line stamp on the CHILD
+    transcript's assistant entries. Measured live (camera-box #894 worker,
+    2026-08-01): every assistant line on a dispatched worker's own
+    transcript carries `"attributionAgent": "autopilot-worker"`, even though
+    the child never records `subagent_type` directly.
+    """
+
+    def _sub_line_with_attribution(self, ts, rid, attribution, cw=0):
+        d = json.loads(_line(ts, rid, cw=cw))
+        d["attributionAgent"] = attribution
+        return json.dumps(d)
+
+    def test_falls_back_to_child_attribution_when_the_parent_is_missing(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_sub(root, "proj", "s1", "agent-a1",
+                       [self._sub_line_with_attribution(
+                           now, "req_1", "autopilot-worker", cw=20000)])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"][0]["agent_type"],
+                         "autopilot-worker")
+
+    def test_parent_resolved_type_still_wins_over_the_fallback(self):
+        now = datetime.datetime.now(UTC)
+        with TemporaryDirectory() as root:
+            _write_parent(root, "proj", "s1",
+                          TestAgentTypeJoin()._parent_lines(
+                              now, "toolu_1", "a1", "Explore"))
+            _write_sub(root, "proj", "s1", "agent-a1",
+                       [self._sub_line_with_attribution(
+                           now, "req_1", "general-purpose", cw=20000)])
+            data = burn.scan_dispatches(root, hours=12, now=now)
+        self.assertEqual(data["dispatches"][0]["agent_type"], "Explore")
+
+
 class TestFloorComponentsAreMeasuredNotGuessed(unittest.TestCase):
     def test_import_closure_counts_every_imported_file_once(self):
         with TemporaryDirectory() as d:
