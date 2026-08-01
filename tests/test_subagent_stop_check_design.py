@@ -165,6 +165,44 @@ class TestGateChecksEveryKind(_GateBase):
         self.assertFalse(self.blocked(second))
 
 
+class TestObsoleteClosedIssuesAreExcluded(_GateBase):
+    """Adversarial-review finding (amplification, not new): an issue closed
+    via STEP 0's documented `gh issue close --comment` path (OBSOLETE, never
+    coded) can still appear in `issue_state:` as closed -- and now needs all
+    THREE markers instead of one, none of which the documented close
+    pattern ever produces. The evidence block's own `obsolete_closed:` line
+    already names exactly which issues these are; the gate must exclude
+    them from the required set."""
+
+    def test_an_obsolete_closed_issue_is_excluded_from_the_required_set(self):
+        msg = ("issues: #41 x, #99 y\nmerge_sha: " + SHA40 + "\n"
+              "issue_state: #41=closed, #99=closed\n"
+              "obsolete_closed: #99 closed-as-obsolete in STEP 0 with evidence")
+        self.mark_all(41)
+        r = self.run_gate(msg)
+        self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
+
+    def test_a_non_obsolete_issue_is_still_required_in_the_same_message(self):
+        msg = ("issues: #41 x, #99 y\nmerge_sha: " + SHA40 + "\n"
+              "issue_state: #41=closed, #99=closed\n"
+              "obsolete_closed: #99 closed-as-obsolete in STEP 0 with evidence")
+        # #41 left unmarked this time -- must still block for #41.
+        r = self.run_gate(msg)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        self.assertIn("41", r.stdout)
+        self.assertNotIn("#99", r.stdout)
+
+    def test_obsolete_handed_off_is_also_excluded(self):
+        # fork-no-merge's equivalent line for a foreign-authored obsolete
+        # ticket it could not close itself.
+        msg = ("issues: #41 x, #99 y\nmerge_sha: " + SHA40 + "\n"
+              "issue_state: #41=closed, #99=closed\n"
+              "obsolete_handed_off: #99 commented OBSOLETE, left OPEN")
+        self.mark_all(41)
+        r = self.run_gate(msg)
+        self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
+
+
 class TestGateStaysOutOfTheWay(_GateBase):
 
     def test_a_non_worker_subagent_is_ignored(self):
