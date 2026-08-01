@@ -447,6 +447,42 @@ class TestClassifyReviewComment(unittest.TestCase):
         ok, reason = dg.classify_review_comment(body)
         self.assertFalse(ok, reason)
 
+    def test_a_bare_decimal_number_is_not_mistaken_for_a_fixing_commit(self):
+        # Adversarial-review finding: the bare hex-run alternative matched
+        # ANY 7+ digit decimal number too (digits are a subset of hex
+        # chars), so an unrelated build/date number satisfied the result
+        # half of the classifier with zero real findings/fix evidence.
+        body = (
+            "I reviewed the current implementation carefully and "
+            "confirmed the behavior looks correct. The build number as "
+            "of today is 20260801, everything checks out fine overall."
+        )
+        ok, reason = dg.classify_review_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("findings/fix evidence", reason)
+
+    def test_a_hex_looking_english_word_is_not_mistaken_for_a_sha(self):
+        # "defaced"/"effaced" are real English words made entirely of a-f
+        # letters at >=7 chars -- must not count as a fixing commit sha on
+        # their own, with no commit/sha/fix keyword anywhere nearby.
+        body = (
+            "Reviewed the diff and it honestly looks a bit defaced "
+            "somehow in the rendered output, not entirely sure why, will "
+            "need to dig into it further before saying anything more."
+        )
+        ok, reason = dg.classify_review_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("findings/fix evidence", reason)
+
+    def test_a_sha_actually_attached_to_a_fix_keyword_still_passes(self):
+        body = (
+            "Ran /review over the diff and found one real issue -- fixed "
+            "it in commit 1234567abcdef, then everything was clean on the "
+            "second pass through the same file."
+        )
+        ok, reason = dg.classify_review_comment(body)
+        self.assertTrue(ok, reason)
+
 
 if __name__ == "__main__":
     unittest.main()
