@@ -69,7 +69,7 @@ _KIND_DIRNAMES = {
     "validated": _VALIDATED_DIRNAME,
     "reviewed": _REVIEWED_DIRNAME,
 }
-ALL_KINDS = ("design", "validated")  # #214 adds "reviewed" next, staged for TDD
+ALL_KINDS = ("design", "validated", "reviewed")
 
 
 def _dir_for_kind(kind):

@@ -159,7 +159,8 @@ url = latest.get("url", "")
 classifiers = {
     "design": dg.classify_design_comment,
     "validated": dg.classify_validation_comment,
-}  # #214 adds "reviewed" next, staged for TDD
+    "reviewed": dg.classify_review_comment,
+}
 for kind, classify in classifiers.items():
     ok, reason = classify(body)
     if ok:
