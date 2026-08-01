@@ -70,9 +70,14 @@ set -euo pipefail
 # while the observed 9-minutes-apart chain still collides.
 #
 # NEVER BLOCKED, in any state: a `run_in_background` waiter (the compliant
-# path), and a single `gh run view <id>` status check — the model must always
-# be able to learn the run finished, so this hook has no dead end. Plus the
-# logged inline escape hatch `# airuleset:poll-ok <reason>`.
+# path). Plus the logged inline escape hatch `# airuleset:poll-ok <reason>`.
+# A single `gh run view <id>` status check is free for the first
+# AIRULESET_CIPOLL_ONESHOT_FREE (default 2) touches per (session, run-id) and
+# DECAYS after AIRULESET_CIPOLL_ONESHOT_TTL_S (default 1800s) of no further
+# touches on that key — see the #210 oneshot throttle below. It is not a
+# literal "any time, forever" exemption: repeating the SAME bare status check
+# many times in a tight window is exactly the #210 burn shape and is bounded
+# like everything else, then forgiven once the window genuinely passes.
 #
 # EVASION is bounded by logging, not by pattern whack-a-mole (which would be
 # prose accumulation in hook form). Every block, every post-block poll burst
@@ -114,7 +119,22 @@ set -euo pipefail
 # and any `--json` value naming a field other than status/conclusion are
 # never counted, and neither is a command carrying TWO `gh run view`
 # invocations (the #118-documented post-mortem shape) — both are the actual
-# debugging work, not a wasted poll.
+# debugging work, not a wasted poll. A `gh run view` with NO run-id argument
+# at all (defaults to the latest run on the current branch) is counted too,
+# under the SAME per-session generic bucket the loop mechanism already uses
+# for a key-less command — it used to evade the counter entirely, since the
+# whole block below used to be gated on a non-empty run-id.
+#
+# Review follow-up (same day): the oneshot counter had NO decay (a 3rd+
+# block on a key stayed blocked on every later call, forever — contradicting
+# the "no dead end" invariant above) and its block wrote the SAME shared
+# BLOCKED_FILE the #118 loop carve-out gates on, so a few oneshot blocks could
+# permanently consume a run-id's free-first-loop pass before any loop ever
+# ran. Fixed by giving the oneshot mechanism its OWN state file (a sliding
+# TTL counter — AIRULESET_CIPOLL_ONESHOT_TTL_S, default 1800s, refreshed on
+# every touch and reset to a fresh count once it has genuinely gone stale)
+# that only LOOP_BLOCKED_FILE (written on a loop or burst block, never an
+# oneshot block) can consume the loop carve-out.
 
 command -v jq &>/dev/null || exit 0
 
@@ -176,6 +196,14 @@ fi
 
 FIRST_FILE="$STATE_DIR/airuleset-cipoll-first-${SID}-${KEY}"
 BLOCKED_FILE="$STATE_DIR/airuleset-cipoll-blocked-${SID}-${KEY}"
+# LOOP_BLOCKED_FILE is DELIBERATELY separate from BLOCKED_FILE: it is what the
+# #118 "loop 1 is free" carve-out gates on, and it must only ever be set by an
+# actual LOOP or BURST block — never by a oneshot block (review follow-up on
+# #210: a oneshot block used to write BLOCKED_FILE too, so 3 oneshots
+# permanently poisoned the free-first-loop carve-out for a run-id no loop had
+# ever polled). BLOCKED_FILE itself stays general-purpose (postblock corpus
+# logging + the burst backstop below), unaffected by this split.
+LOOP_BLOCKED_FILE="$STATE_DIR/airuleset-cipoll-loopblocked-${SID}-${KEY}"
 BLOCK_LOG="$STATE_DIR/airuleset-cipoll-block.log"
 POSTBLOCK_LOG="$STATE_DIR/airuleset-cipoll-postblock.log"
 BYPASS_LOG="$STATE_DIR/airuleset-cipoll-bypass.log"
@@ -253,14 +281,26 @@ if [ -e "$BLOCKED_FILE" ] && [ "$IS_LOOP" = "0" ]; then
 fi
 
 # ---- #210: bare one-shot status-poll counting --------------------------
-# Only ever engages for a RUN-KEYED command (no generic bucket — with no
-# run-id there is nothing to prove two one-shots are the SAME wait, same
-# reasoning the loop mechanism already applies to its generic bucket). A
+# Engages for a RUN-KEYED command (KEY="run-<id>") AND for the generic bucket
+# (KEY="generic") — a bare `gh run view` with NO run-id argument at all
+# defaults to the latest run on the current branch and is a real status-poll
+# shape too; it used to evade this counter entirely because this whole block
+# was gated on a non-empty $RUN_ID. Both share the SAME per-session generic
+# bucket the loop mechanism already keys its own generic state on — a
+# different file prefix (oneshot- vs first-/blocked-), so no collision. A
 # loop-shaped command is governed by IS_LOOP above, never here.
 IS_ONESHOT_BLOCK=0
-if [ "$IS_LOOP" = "0" ] && [ -n "$RUN_ID" ]; then
+if [ "$IS_LOOP" = "0" ]; then
+    # `|| true`: under `set -e` a failing command substitution used in a
+    # plain assignment kills the whole hook (this repo's own documented
+    # gotcha) — a command with ZERO "gh run view" occurrences (e.g. "gh run
+    # list ..." or "gh run watch <id>") makes the grep exit non-zero, and
+    # this branch is now reached for every non-loop CI-wait command, not just
+    # run-id-bearing ones (#210 review follow-up widened it to the generic
+    # bucket too).
     VIEW_COUNT=$(grep -oE 'gh[[:space:]]+run[[:space:]]+view' <<<"$FLAT" \
-        | wc -l | tr -d ' ')
+        | wc -l | tr -d ' ' || true)
+    case "$VIEW_COUNT" in ''|*[!0-9]*) VIEW_COUNT=0 ;; esac
     HAS_LOG=0
     if grep -qE -- '--log(-failed)?([[:space:]]|=|$)' <<<"$FLAT"; then
         HAS_LOG=1
@@ -275,19 +315,47 @@ if [ "$IS_LOOP" = "0" ] && [ -n "$RUN_ID" ]; then
         <<<"$FLAT"; then
         JSON_STATUS_OK=1
     fi
+    VIEW_ANCHOR_OK=0
+    if [ -n "$RUN_ID" ]; then
+        # the view command must be watching THIS specific run
+        if grep -qE "gh[[:space:]]+run[[:space:]]+view[[:space:]]+${RUN_ID}([[:space:]]|\$)" \
+                <<<"$FLAT"; then
+            VIEW_ANCHOR_OK=1
+        fi
+    else
+        # no numeric run-id anywhere in the command (a real one would already
+        # have been extracted as $RUN_ID above) — `view` immediately followed
+        # by a flag, or by nothing at all, is the bare "latest run" shape.
+        if grep -qE "gh[[:space:]]+run[[:space:]]+view([[:space:]]+-|[[:space:]]*\$)" \
+                <<<"$FLAT"; then
+            VIEW_ANCHOR_OK=1
+        fi
+    fi
     STATUS_SHAPE=0
     if [ "$VIEW_COUNT" = "1" ] && [ "$HAS_LOG" = "0" ] \
         && { [ "$HAS_JSON" = "0" ] || [ "$JSON_STATUS_OK" = "1" ]; } \
-        && grep -qE "gh[[:space:]]+run[[:space:]]+view[[:space:]]+${RUN_ID}([[:space:]]|\$)" \
-            <<<"$FLAT"; then
+        && [ "$VIEW_ANCHOR_OK" = "1" ]; then
         STATUS_SHAPE=1
     fi
     if [ "$STATUS_SHAPE" = "1" ]; then
         ONESHOT_FREE="${AIRULESET_CIPOLL_ONESHOT_FREE:-2}"
         case "$ONESHOT_FREE" in ''|*[!0-9]*) ONESHOT_FREE=2 ;; esac
+        ONESHOT_TTL="${AIRULESET_CIPOLL_ONESHOT_TTL_S:-1800}"
+        case "$ONESHOT_TTL" in ''|*[!0-9]*) ONESHOT_TTL=1800 ;; esac
         ONESHOT_FILE="$STATE_DIR/airuleset-cipoll-oneshot-${SID}-${KEY}"
-        OS_COUNT=$(cat "$ONESHOT_FILE" 2>/dev/null || echo 0)
-        case "$OS_COUNT" in ''|*[!0-9]*) OS_COUNT=0 ;; esac
+        # A sliding TTL window, mirroring the generic loop bucket's own decay
+        # style: no dead end for the promised single-status-check escape — a
+        # run-id whose oneshots have gone quiet for ONESHOT_TTL genuinely
+        # stopped being a rapid-fire burn, so the next touch starts fresh.
+        OS_COUNT=0
+        if [ -e "$ONESHOT_FILE" ]; then
+            NOW=$(date +%s)
+            MTIME=$(stat -c %Y "$ONESHOT_FILE" 2>/dev/null || echo "$NOW")
+            if [ $((NOW - MTIME)) -lt "$ONESHOT_TTL" ]; then
+                OS_COUNT=$(cat "$ONESHOT_FILE" 2>/dev/null || echo 0)
+                case "$OS_COUNT" in ''|*[!0-9]*) OS_COUNT=0 ;; esac
+            fi
+        fi
         OS_COUNT=$((OS_COUNT + 1))
         printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
         if [ "$OS_COUNT" -gt "$ONESHOT_FREE" ]; then
@@ -309,7 +377,9 @@ fi
 # interval; an unmeasurable one (`sleep "$T"`) is treated as short, because
 # this bucket must never be the thing that stops real work. A run-KEYED repeat
 # is unaffected at any interval — the id already proves it is the same run.
-if [ "$KEY" = "generic" ]; then
+# NEVER applied to a oneshot block: a bare status-poll one-shot has no sleep
+# at all by definition, and it is already bounded by its own count+TTL above.
+if [ "$KEY" = "generic" ] && [ "$IS_ONESHOT_BLOCK" = "0" ]; then
     MIN_SLEEP="${AIRULESET_CIPOLL_GENERIC_MIN_SLEEP_S:-20}"
     case "$MIN_SLEEP" in ''|*[!0-9]*) MIN_SLEEP=20 ;; esac
     MAX_SLEEP=$(printf '%s' "$FLAT" \
@@ -322,7 +392,10 @@ if [ "$KEY" = "generic" ]; then
 fi
 
 # ---- the carve-out: loop 1 per key is free -----------------------------
-if [ "$IS_LOOP" = "1" ] && [ ! -e "$BLOCKED_FILE" ]; then
+# Gated on LOOP_BLOCKED_FILE, never the general BLOCKED_FILE — a oneshot
+# block must never consume this (review follow-up on #210, see the top-of
+# -file note and the LOOP_BLOCKED_FILE declaration above).
+if [ "$IS_LOOP" = "1" ] && [ ! -e "$LOOP_BLOCKED_FILE" ]; then
     FRESH=1
     if [ -e "$FIRST_FILE" ]; then
         FRESH=0
@@ -350,6 +423,11 @@ if [ "$IS_LOOP" = "1" ]; then
     BLOCK_SHAPE="loop"
 elif [ "$IS_ONESHOT_BLOCK" = "1" ]; then
     BLOCK_SHAPE="oneshot"
+fi
+# Only a LOOP or BURST block may consume the #118 free-first-loop carve-out —
+# a oneshot block never does (that is the whole point of the split state).
+if [ "$BLOCK_SHAPE" != "oneshot" ]; then
+    : > "$LOOP_BLOCKED_FILE" 2>/dev/null || true
 fi
 printf '%s cipoll BLOCK session=%s key=%s agent=%s shape=%s cmd=%s\n' \
     "$(date -Is)" "$SID" "$KEY" "${AGENT_ID:-main}" \
@@ -396,7 +474,9 @@ Do this instead, now:
     FINAL message and RETURN. The supervisor owns long waits and will
     re-dispatch a fresh worker for the next stage.
 
-Still allowed, any time: ONE plain status check —
+This exact check is what just got blocked — it decays: once a short quiet
+period passes with no further polls on this run, a plain status check works
+again on its own:
   gh run view __RUNID__ --json status,conclusion
 Deliberate exception (logged): append `# airuleset:poll-ok <reason>`.
 ONESHOT_SUBMSG
@@ -432,7 +512,9 @@ If you are a SUBAGENT (autopilot-worker or any dispatched worker): do NOT run
 the background waiter. Backgrounding a wait TERMINATES you. Report the run-id
 + current stage in your final message and RETURN — the supervisor owns it.
 
-Still allowed, any time: ONE plain status check —
+This exact check is what just got blocked — it decays: once a short quiet
+period passes with no further polls on this run, a plain status check works
+again on its own:
   gh run view __RUNID__ --json status,conclusion
 Deliberate exception (logged): append `# airuleset:poll-ok <reason>`.
 ONESHOT_MAINMSG
@@ -457,8 +539,10 @@ Do this instead, now:
     The supervisor owns long / multi-stage waits (ci-monitoring.md); it will
     re-dispatch a fresh worker for the next stage.
 
-Still allowed, any time: ONE plain status check —
+Still allowed right now: ONE plain status check —
   gh run view __RUNID__ --json status,conclusion
+(repeating that single check many times throttles too, then decays after a
+short quiet period — see #210 — it is never a permanent dead end)
 Deliberate exception (logged): append `# airuleset:poll-ok <reason>`.
 SUBMSG
 )
@@ -487,8 +571,10 @@ If you are a SUBAGENT (autopilot-worker or any dispatched worker): do NOT run
 the above. Backgrounding a wait TERMINATES you. Report the run-id + current
 stage in your final message and RETURN — the supervisor owns the wait.
 
-Still allowed, any time: ONE plain status check —
+Still allowed right now: ONE plain status check —
   gh run view __RUNID__ --json status,conclusion
+(repeating that single check many times throttles too, then decays after a
+short quiet period — see #210 — it is never a permanent dead end)
 A bare foreground `sleep` is separately blocked by the harness, so it is not a
 way around this. Deliberate exception (logged): append
 `# airuleset:poll-ok <reason>`.

@@ -1859,10 +1859,18 @@ def agent_types_from_parent(parent_path, agent_ids):
                         if aid in blob:
                             pending.setdefault(aid, []).append(
                                 b.get("tool_use_id"))
+    # Review follow-up (#210 sibling pass): a resolved value is ALWAYS drawn
+    # from `uses`, never invented — `tid in uses` is the sole resolution
+    # test, and `uses` is populated ONLY by a real Agent/Task `tool_use`
+    # block (the launch itself, added above). That is the launch-before-
+    # mention invariant this whole function relies on: a candidate resolves
+    # only because its launch was genuinely seen, never through a coincidental
+    # substring match on some OTHER tool's tool_use_id.
     for aid, tids in pending.items():
         for tid in tids:
             if tid in uses:
                 out[aid] = uses[tid]
+                assert out[aid] in uses.values()  # cheap: drawn from uses, not invented
                 break
     return out
 
@@ -1910,7 +1918,12 @@ def scan_dispatches(root, hours=12, now=None):
     for row in rows:
         # #211: the parent-transcript join is the primary source; fall back
         # to the child's own `attributionAgent` stamp only when the join
-        # resolves nothing at all.
+        # resolves nothing at all. This `or` fallback depends on a join hit
+        # NEVER being falsy: `agent_types_from_parent` only ever stores
+        # `inp.get("subagent_type") or "(default)"` into `uses` (never "",
+        # never None), so `types.get(...)` is either a genuine non-empty
+        # string or a real miss (None) — never a falsy hit that would wrongly
+        # fall through to the attribution stamp.
         row["agent_type"] = (types.get(row["agent_id"])
                              or row.get("attribution_agent"))
         row["started"] = row["started"].isoformat() if row["started"] else None
