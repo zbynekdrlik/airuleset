@@ -446,5 +446,214 @@ class ModulePointerTest(unittest.TestCase):
         self.assertIn("nudge-poll-loop-timeout.sh", head[-600:])
 
 
+class OneShotStatusPollBlockTest(unittest.TestCase):
+    """#210: a bare, non-loop `gh run view <run-id>` status poll — no sleep,
+    no `do...done` — is invisible to #118's loop detector, but production
+    transcripts show workers doing hundreds of them, one per TURN (one real
+    dispatch: 157 `gh run view` calls, 157 non-loop, one run polled across 35
+    separate turns). Each one-shot re-sends the whole accumulated context for
+    a single line of status, same burn shape as the repeat LOOP #118 already
+    blocks — just without a `sleep` in the same Bash call.
+
+    Decided shape: the 1st and 2nd one-shot status poll per (session, run-id)
+    stay ALLOWED (a worker legitimately checks once, then again a moment
+    later); the 3rd+ is BLOCKED, same as the loop mechanism's own carve-out
+    philosophy but with a 2-free budget instead of 1, since a bare one-shot
+    carries no evidence by itself that the wait is long.
+
+    Only a STATUS-POLL shape counts: `--json status`, `--json
+    status,conclusion` (either order), or a fully bare `gh run view <id>`
+    with no `--json` at all. `--log` / `--log-failed` (reading WHY a run
+    failed) and any `--json` value naming a field other than status/
+    conclusion (`jobs`, etc.) are never counted — that is the actual
+    debugging work, not a wasted poll. A command with TWO `gh run view`
+    invocations (the post-mortem shape: one to inspect failed jobs, one for
+    `--log-failed`) is never counted either, regardless of repeats.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    def oneshot(self, run_id, json_val="status,conclusion"):
+        if json_val is None:
+            return "gh run view %s" % run_id
+        return "gh run view %s --json %s" % (run_id, json_val)
+
+    # ---- the carve-out: the first two one-shots per (session, run) --------
+    def test_first_oneshot_status_poll_is_allowed(self):
+        out = self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stderr.strip(), "")
+
+    def test_second_oneshot_status_poll_is_still_allowed(self):
+        self.run_hook(self.oneshot(RUN_A))
+        out = self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_third_oneshot_status_poll_is_blocked(self):
+        self.run_hook(self.oneshot(RUN_A))
+        self.run_hook(self.oneshot(RUN_A))
+        out = self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#210", out.stderr)
+
+    def test_fourth_and_later_oneshots_stay_blocked(self):
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        out = self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_bare_view_with_no_json_flag_counts_as_a_status_poll(self):
+        # ci-monitoring.md's own "ONE plain status check" carve-out is a bare
+        # `gh run view <id>` with no --json at all — still a status-poll
+        # shape, still counted once it repeats past the free budget.
+        self.run_hook(self.oneshot(RUN_A, json_val=None))
+        self.run_hook(self.oneshot(RUN_A, json_val=None))
+        out = self.run_hook(self.oneshot(RUN_A, json_val=None))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_json_status_alone_and_conclusion_first_both_count(self):
+        self.run_hook(self.oneshot(RUN_A, json_val="status"))
+        self.run_hook(self.oneshot(RUN_A, json_val="conclusion,status"))
+        out = self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- state keying, mirrors the loop mechanism -------------------------
+    def test_a_second_run_id_gets_its_own_free_first_two(self):
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(self.run_hook(self.oneshot(RUN_A)).returncode, 2)
+        out = self.run_hook(self.oneshot(RUN_B))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = self.run_hook(self.oneshot(RUN_B))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = self.run_hook(self.oneshot(RUN_B))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_state_is_per_session(self):
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(self.run_hook(self.oneshot(RUN_A)).returncode, 2)
+        out = self.run_hook(self.oneshot(RUN_A), session="other-session-210")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- what must NEVER count as a one-shot poll --------------------------
+    def test_log_failed_reads_are_never_counted_however_often_repeated(self):
+        cmd = "gh run view %s --log-failed | tail -50" % RUN_A
+        for _ in range(5):
+            out = self.run_hook(cmd)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_plain_log_reads_are_never_counted(self):
+        cmd = "gh run view %s --log" % RUN_A
+        for _ in range(5):
+            self.assertEqual(self.run_hook(cmd).returncode, 0)
+
+    def test_json_jobs_field_reads_are_never_counted(self):
+        # not a status-poll shape — inspecting WHY a run failed, not waiting
+        cmd = "gh run view %s --json jobs -q '.jobs[]'" % RUN_A
+        for _ in range(5):
+            self.assertEqual(self.run_hook(cmd).returncode, 0)
+
+    def test_two_view_invocations_in_one_command_is_never_counted(self):
+        # the #118 post-mortem shape: inspect the failed job, then the log.
+        # Neither call alone repeats, and the pair must never trip the
+        # one-shot counter no matter how many times it is issued.
+        cmd = (
+            "gh run view %s --json jobs -q 'select(.conclusion==\"failure\")' "
+            "2>&1\ngh run view %s --log-failed 2>&1 | tail -30" % (RUN_A, RUN_A))
+        for _ in range(4):
+            out = self.run_hook(cmd)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_loop_shaped_poll_is_governed_by_the_loop_mechanism_not_this_one(self):
+        # a real `do...sleep...done` loop must keep working exactly as #118
+        # already specifies — this ticket must not perturb that mechanism.
+        loop = poll_loop(RUN_A)
+        self.assertEqual(self.run_hook(loop).returncode, 0)
+        out = self.run_hook(loop)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#118", out.stderr)
+
+    def test_a_mutating_command_is_never_counted_even_with_a_view_tail(self):
+        cmd = ('gh pr merge 312 --merge && gh run view %s '
+               '--json status,conclusion' % RUN_A)
+        for _ in range(4):
+            self.assertEqual(self.run_hook(cmd).returncode, 0)
+
+    def test_background_waiter_is_never_counted(self):
+        waiter = ('timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c '
+                  '\'while :; do s=$(gh run view %s --json status,conclusion) '
+                  '|| s="ERROR"; case "$s" in completed*) exit 0 ;; esac; '
+                  'sleep 60; done\'' % RUN_A)
+        for _ in range(4):
+            out = self.run_hook(waiter, background=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- the block message IS the fix --------------------------------------
+    def test_block_message_carries_the_run_id_and_both_wait_shapes(self):
+        self.run_hook(self.oneshot(RUN_A))
+        self.run_hook(self.oneshot(RUN_A))
+        err = self.run_hook(self.oneshot(RUN_A)).stderr
+        self.assertIn(RUN_A, err)
+        self.assertIn("run_in_background", err)
+        self.assertIn("AIRULESET_LONG_POLL_BUDGET_S", err)
+        self.assertIn("AIRULESET_POLL_BUDGET_S", err)
+        self.assertIn("SUBAGENT", err)
+        self.assertIn("RETURN", err)
+
+    def test_subagent_block_never_offers_a_background_waiter(self):
+        kw = {"agent_id": "a2afddb67fb83f7c7210"}
+        self.run_hook(self.oneshot(RUN_A), **kw)
+        self.run_hook(self.oneshot(RUN_A), **kw)
+        out = self.run_hook(self.oneshot(RUN_A), **kw)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertNotIn(
+            "run_in_background", out.stderr,
+            "a subagent that backgrounds a wait TERMINATES — never offer it")
+        self.assertIn("supervisor", out.stderr)
+        self.assertIn("RETURN", out.stderr)
+        self.assertIn(RUN_A, out.stderr)
+
+    # ---- corpus logging: the one-shot block is a real block ---------------
+    def test_every_oneshot_block_is_logged(self):
+        self.run_hook(self.oneshot(RUN_A))
+        self.run_hook(self.oneshot(RUN_A))
+        self.run_hook(self.oneshot(RUN_A))
+        log = Path(self.state) / "airuleset-cipoll-block.log"
+        self.assertTrue(log.exists(), "every block must be logged")
+        body = log.read_text()
+        self.assertIn(RUN_A, body)
+
+    def test_still_allowed_after_a_oneshot_block_a_single_plain_status_check(self):
+        # the hook must never dead-end a session: `--log-failed` still works
+        # even once the run-id's one-shot budget is exhausted.
+        for _ in range(3):
+            self.run_hook(self.oneshot(RUN_A))
+        self.assertEqual(self.run_hook(self.oneshot(RUN_A)).returncode, 2)
+        out = self.run_hook("gh run view %s --log-failed | tail -50" % RUN_A)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_inline_bypass_is_honoured_and_logged(self):
+        self.run_hook(self.oneshot(RUN_A))
+        self.run_hook(self.oneshot(RUN_A))
+        cmd = self.oneshot(RUN_A) + "  # airuleset:poll-ok fanning 9 repos, not a wait"
+        out = self.run_hook(cmd)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        log = Path(self.state) / "airuleset-cipoll-bypass.log"
+        self.assertTrue(log.exists(), "bypass must be logged for corpus review")
+        self.assertIn("fanning 9 repos", log.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
