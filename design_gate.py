@@ -191,6 +191,22 @@ def read_marker(repo_key, issue, kind="design"):
     }
 
 
+def claimed_urls(repo_key, issue):
+    """The set of comment URLs already used by an EXISTING marker of any
+    kind for `<repo_key>#<issue>`. Adversarial-review finding (post-#214):
+    one comment posted before any code exists could plausibly satisfy
+    design + validated + reviewed all at once, which defeats the premise
+    that each kind proves its own step happened. A caller uses this to
+    refuse granting a SECOND kind from a comment url that already granted
+    one -- distinct evidence kinds must come from distinct comments."""
+    urls = set()
+    for kind in ALL_KINDS:
+        m = read_marker(repo_key, issue, kind)
+        if m and m.get("url"):
+            urls.add(m["url"])
+    return urls
+
+
 # --------------------------------------------------------------------------- #
 # #213 -- validation classifier: does `body` plausibly carry Step 0's
 # live-reproduction proof (an action taken + what it showed)? Same shape as

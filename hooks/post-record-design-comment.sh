@@ -156,15 +156,29 @@ _, latest = candidates[-1]
 
 body = latest.get("body", "")
 url = latest.get("url", "")
+
+# Adversarial-review finding: one comment must not grant more than one
+# evidence kind -- (a) never re-use a comment url that already granted a
+# DIFFERENT kind (a stale/unchanged "latest" comment re-read on a later,
+# trivial `gh issue comment` call must not let a rich earlier comment keep
+# paying out new kinds), and (b) even within ONE pass over a fresh comment,
+# grant at most the FIRST still-missing kind it classifies for, never all
+# that happen to match at once.
+if url and url in dg.claimed_urls(repo_key, issue):
+    sys.exit(0)
+
 classifiers = {
     "design": dg.classify_design_comment,
     "validated": dg.classify_validation_comment,
     "reviewed": dg.classify_review_comment,
 }
-for kind, classify in classifiers.items():
-    ok, reason = classify(body)
+for kind in dg.ALL_KINDS:
+    if dg.marker_exists(repo_key, issue, kind):
+        continue
+    ok, reason = classifiers[kind](body)
     if ok:
         dg.write_marker(repo_key, issue, url, reason, kind=kind)
+        break
 PYEOF
 
 exit 0
