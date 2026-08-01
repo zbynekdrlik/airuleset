@@ -130,6 +130,23 @@ class TestGateChecksEveryKind(_GateBase):
         self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
         self.assertIn("design", r.stdout)
 
+    def test_reviewed_only_still_blocks(self):
+        # #214
+        self.mark(41, kind="reviewed")
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        self.assertIn("design", r.stdout)
+        self.assertIn("validated", r.stdout)
+
+    def test_design_and_validated_without_reviewed_still_blocks(self):
+        # #214
+        self.mark(41, kind="design")
+        self.mark(41, kind="validated")
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        reason = json.loads(r.stdout)["reason"]
+        self.assertIn("missing: reviewed", reason)
+
     def test_the_missing_list_names_only_what_is_actually_missing(self):
         self.mark(41, kind="design")
         r = self.run_gate(MERGED)

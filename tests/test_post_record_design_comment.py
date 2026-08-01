@@ -71,6 +71,13 @@ GOOD_VALIDATED_BODY = (
     "counter improperly -- the issue is still valid and still real today."
 )
 
+# #214 -- review-shaped body (no design/validation content at all).
+GOOD_REVIEWED_BODY = (
+    "Ran /review and requesting-code-review over the diff -- both came "
+    "back 0 🔴 0 🟡 0 🔵 after fixing the one finding in commit "
+    "1234567abcdef, then everything was clean."
+)
+
 
 def _iso(delta_seconds=0):
     import datetime
@@ -228,6 +235,19 @@ class TestClassifiesEveryKindFromOneComment(_Base):
             "url": "https://x/issues/41#issuecomment-22",
         }])
         self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNone(self.marker(41, "design"))
+        self.assertIsNone(self.marker(41, "validated"))
+
+    def test_a_review_shaped_comment_writes_only_reviewed(self):
+        # #214
+        comments = _comments_json([{
+            "body": GOOD_REVIEWED_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-24",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "reviewed"))
         self.assertIsNone(self.marker(41, "design"))
         self.assertIsNone(self.marker(41, "validated"))
 

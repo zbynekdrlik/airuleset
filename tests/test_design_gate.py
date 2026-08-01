@@ -268,6 +268,16 @@ class TestMultiKindMarkerIO(unittest.TestCase):
         self.assertIn("design", dg.ALL_KINDS)
         self.assertIn("validated", dg.ALL_KINDS)
 
+    def test_all_kinds_includes_reviewed(self):
+        # #214 -- reviewed joins design/validated in the same marker family.
+        self.assertIn("reviewed", dg.ALL_KINDS)
+
+    def test_reviewed_kind_is_independent_of_the_other_two(self):
+        dg.write_marker("airuleset", 999, "u1", kind="reviewed")
+        self.assertFalse(dg.marker_exists("airuleset", 999, "design"))
+        self.assertFalse(dg.marker_exists("airuleset", 999, "validated"))
+        self.assertTrue(dg.marker_exists("airuleset", 999, "reviewed"))
+
 
 # --------------------------------------------------------------------------- #
 # #213 -- validation classifier
@@ -356,6 +366,85 @@ class TestClassifyValidationComment(unittest.TestCase):
             "organized before deciding what to do about this ticket."
         )
         ok, reason = dg.classify_validation_comment(body)
+        self.assertFalse(ok, reason)
+
+
+# --------------------------------------------------------------------------- #
+# #214 -- review classifier
+# --------------------------------------------------------------------------- #
+
+GOOD_REVIEW = (
+    "Ran /review and requesting-code-review over the diff -- both came "
+    "back 0 🔴 0 🟡 0 🔵 after fixing the one missing null check the first "
+    "pass found, landed in commit 1234567abcdef on top of the feature."
+)
+
+GOOD_REVIEW_SLOVAK = (
+    "Spravil som code review (requesting-code-review) diffu -- nasiel "
+    "jeden nález (chýbajúca kontrola null), opravené v commite "
+    "fedcba7654321, potom uz bolo cisto."
+)
+
+
+class TestClassifyReviewComment(unittest.TestCase):
+
+    def test_a_real_review_pass_passes(self):
+        ok, reason = dg.classify_review_comment(GOOD_REVIEW)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
+    def test_slovak_phrasing_also_passes(self):
+        ok, reason = dg.classify_review_comment(GOOD_REVIEW_SLOVAK)
+        self.assertTrue(ok, reason)
+
+    def test_empty_body_fails(self):
+        ok, reason = dg.classify_review_comment("")
+        self.assertFalse(ok)
+        self.assertIn("short", reason)
+
+    def test_none_body_fails(self):
+        ok, reason = dg.classify_review_comment(None)
+        self.assertFalse(ok)
+
+    def test_trivial_chatter_fails_on_length(self):
+        for chatter in ("on it", "reviewing now", "ok", "will check"):
+            ok, reason = dg.classify_review_comment(chatter)
+            self.assertFalse(ok, chatter)
+            self.assertIn("short", reason)
+
+    def test_long_but_no_review_action_fails(self):
+        body = (
+            "The change to the retry loop looks correct to me -- the "
+            "counter resets on the first success after any failure, "
+            "which matches what the ticket asked for, and there is a "
+            "test covering the new behaviour so it should hold up fine "
+            "in the field without any further changes being needed."
+        )
+        ok, reason = dg.classify_review_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("review action", reason)
+
+    def test_long_but_no_result_fails(self):
+        body = (
+            "Ran /review over the diff and also went through it with "
+            "requesting-code-review to double check the logic once more, "
+            "reading every changed line carefully and comparing it "
+            "against the original ticket description before deciding "
+            "the change was worth landing as it stands right now."
+        )
+        ok, reason = dg.classify_review_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("findings/fix evidence", reason)
+
+    def test_a_long_purely_narrative_review_comment_fails(self):
+        body = (
+            "Took a look at the diff for a while, scrolled through the "
+            "whole file a couple of times and compared it against the "
+            "old version, then read the ticket again to remind myself "
+            "what it was originally asking for before moving on to the "
+            "next item on the list without writing anything down."
+        )
+        ok, reason = dg.classify_review_comment(body)
         self.assertFalse(ok, reason)
 
 
