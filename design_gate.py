@@ -264,11 +264,22 @@ _REVIEW_ACTION_RE = re.compile(
     r"kontrol[a-z]*\s+k[óo]du|revidova",
     re.IGNORECASE,
 )
+# The hex-run alternative REQUIRES a commit/sha/fix keyword within a short
+# distance BEFORE the hex-looking token -- a bare `\b[0-9a-f]{7,40}\b`
+# (an earlier draft) also matched any 7+ digit decimal number (digits are
+# a subset of hex chars) and any English/Slovak word spelled entirely with
+# a-f letters at that length ("defaced", "effaced"), an adversarial-review
+# finding. Same `keyword + up to N chars + token` shape as notify.py's own
+# `_SHA_PER_ISSUE_RE`.
+_REVIEW_SHA_RE = re.compile(
+    r"(?:\bcommit\b|\bsha\b|fix(?:ed|ing)?(?:\s+it)?(?:\s+in)?|"
+    r"opraven[éeí]?\s+v(?:\s+commit)?)"
+    r".{0,20}?\b[0-9a-f]{7,40}\b",
+    re.IGNORECASE,
+)
 _REVIEW_RESULT_RE = re.compile(
     r"0\s*\U0001F534|\U0001F534|\U0001F7E1|\U0001F535|clean\b|"
-    r"no\s+(?:findings|issues)|[žz]iadne\s+n[áa]lezy|"
-    r"fix(?:ed|ing)?\s+(?:commit|in)\b|opraven[éeí]\s+v\s+commit|"
-    r"\b[0-9a-f]{7,40}\b",
+    r"no\s+(?:findings|issues)|[žz]iadne\s+n[áa]lezy",
     re.IGNORECASE,
 )
 
@@ -284,7 +295,7 @@ def classify_review_comment(body):
     missing = []
     if not _REVIEW_ACTION_RE.search(text):
         missing.append("review action")
-    if not _REVIEW_RESULT_RE.search(text):
+    if not (_REVIEW_RESULT_RE.search(text) or _REVIEW_SHA_RE.search(text)):
         missing.append("findings/fix evidence")
     if missing:
         return False, "missing: " + ", ".join(missing)
