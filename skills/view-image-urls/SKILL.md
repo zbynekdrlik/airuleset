@@ -1,7 +1,7 @@
 ---
 name: view-image-urls
-description: How to VIEW a URL the user pasted when it must be SEEN, or when WebFetch can't read it — image/screenshot hosts (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg/.webp links) AND JS-walled / bot-blocked social pages (X.com, twitter.com, mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts). ALWAYS render in Playwright; for images take a screenshot, for JS-walled pages use browser_snapshot (and screenshot when the visual matters). NEVER WebFetch/Read these — WebFetch is JS-blind and gets bounced by login/bot walls. Load the moment a user message contains such a URL to look at, or when WebFetch already failed/refused to read a pasted link.
 user-invocable: false
+description: How to VIEW a URL the user pasted when it must be SEEN, or when WebFetch can't read it — image/screenshot hosts (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg/.webp links) AND JS-walled / bot-blocked social pages (X.com, twitter.com, mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts). ALWAYS render in Playwright; for images take a screenshot, for JS-walled pages use browser_snapshot (and screenshot when the visual matters). NEVER WebFetch/Read these — WebFetch is JS-blind and gets bounced by login/bot walls. Load the moment a user message contains such a URL to look at, or when WebFetch already failed/refused to read a pasted link.
 ---
 
 ### Viewing Image URLs and JS-Walled Pages — ALWAYS Playwright, NEVER "I can't read this"
