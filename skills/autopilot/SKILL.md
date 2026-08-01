@@ -466,10 +466,8 @@ Each loop turn:
    the loop (2026-07-25 revision).** Once verification + the per-member run-cards are done and the
    lock is released, end THIS turn with the FULL `## ✅ Work Complete` template
    (`completion-report.md`) for the batch: audits — `✅ CI: green`, `✅ /plan-check: <N>/<N> fulfilled`
-   (this line RELAYS the worker's own `plan:` evidence-block field — a per-issue self-audit against
-   the issue's acceptance criteria that the worker produces every dispatch; you do NOT independently
-   re-run a `plan-check` skill call yourself — `agents/autopilot-worker.md` has never told the
-   worker to invoke it either, only to self-audit and report, #215/#216), `✅ /review: clean — 0 🔴
+   (RELAYS the worker's own `plan:` field — a per-issue self-audit; you never independently re-run
+   plan-check yourself, #215/#216), `✅ /review: clean — 0 🔴
    0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what the worker already
    confirmed before merging (its own PR gate, `agents/autopilot-worker.md`), never re-running the
    skills yourself), `✅ Deploy: <version>`
