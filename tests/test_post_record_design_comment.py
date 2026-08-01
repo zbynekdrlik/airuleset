@@ -64,6 +64,13 @@ GOOD_BODY = (
 )
 BAD_BODY = "still looking into this, will update soon"
 
+# #213 -- validation-shaped body (no design content at all).
+GOOD_VALIDATED_BODY = (
+    "Reproduced the bug live against current HEAD: ran the exact steps "
+    "from the ticket against staging and the retry loop still resets the "
+    "counter improperly -- the issue is still valid and still real today."
+)
+
 
 def _iso(delta_seconds=0):
     import datetime
@@ -99,9 +106,9 @@ class _Base(TestCase):
         return subprocess.run(["bash", str(HOOK)], input=payload,
                               capture_output=True, text=True, env=env)
 
-    def marker(self, issue):
+    def marker(self, issue, kind="design"):
         os.environ["HOME"] = str(self.home)
-        return dg.read_marker("airuleset", issue)
+        return dg.read_marker("airuleset", issue, kind)
 
 
 class TestWritesMarkerOnDeliveredDesignComment(_Base):
@@ -188,11 +195,50 @@ class TestNeverWritesOnNonEvidence(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestClassifiesEveryKindFromOneComment(_Base):
+    """#213 -- a validation-shaped comment writes ONLY the validated marker;
+    a design-shaped comment writes ONLY the design marker. `dg.ALL_KINDS`
+    is checked, not a hardcoded pair, so this test survives the #214
+    extension that adds "reviewed" to it."""
+
+    def test_a_validation_shaped_comment_writes_only_validated(self):
+        comments = _comments_json([{
+            "body": GOOD_VALIDATED_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-20",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "validated"))
+        self.assertIsNone(self.marker(41, "design"))
+
+    def test_a_design_shaped_comment_writes_only_design(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-21",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "design"))
+        self.assertIsNone(self.marker(41, "validated"))
+
+    def test_a_bad_body_writes_neither_kind(self):
+        comments = _comments_json([{
+            "body": BAD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://x/issues/41#issuecomment-22",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNone(self.marker(41, "design"))
+        self.assertIsNone(self.marker(41, "validated"))
+
+
 class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
 
     def test_existing_marker_skips_the_gh_call_entirely(self):
         os.environ["HOME"] = str(self.home)
-        dg.write_marker("airuleset", 41, "https://x/issues/41#issuecomment-old")
+        for kind in dg.ALL_KINDS:
+            dg.write_marker("airuleset", 41,
+                            "https://x/issues/41#issuecomment-old", kind=kind)
         log = self.home / "gh.log"
         env = dict(os.environ)
         env["HOME"] = str(self.home)
@@ -205,6 +251,21 @@ class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(log.exists(), "gh should never have been invoked")
+
+    def test_partial_marking_still_hits_the_network(self):
+        # #213 -- only DESIGN marked, validated still missing: a LATER
+        # comment might supply it, so the hook must still re-read GitHub
+        # rather than treating the issue as fully settled.
+        os.environ["HOME"] = str(self.home)
+        dg.write_marker("airuleset", 41, "https://x/issues/41#issuecomment-old")
+        comments = _comments_json([{
+            "body": GOOD_VALIDATED_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-23",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "validated"))
 
 
 if __name__ == "__main__":

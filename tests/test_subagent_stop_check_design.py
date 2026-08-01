@@ -61,9 +61,14 @@ class _GateBase(TestCase):
             Path("/tmp").glob("airuleset-designgate-designstop-*")
             if os.path.exists(f)])
 
-    def mark(self, issue, repo="airuleset"):
+    def mark(self, issue, repo="airuleset", kind="design"):
         os.environ["HOME"] = str(self.home)
-        dg.write_marker(repo, issue, "https://x/issues/%s#issuecomment-1" % issue)
+        dg.write_marker(repo, issue, "https://x/issues/%s#issuecomment-1" % issue,
+                        kind=kind)
+
+    def mark_all(self, issue, repo="airuleset"):
+        for kind in dg.ALL_KINDS:
+            self.mark(issue, repo, kind)
 
     def run_gate(self, msg, agent_type="autopilot-worker", cwd=None, sid=None):
         payload = {"session_id": sid or self.sid, "agent_id": "aG1",
@@ -90,8 +95,8 @@ class TestGateBlocksAMissingDesignComment(_GateBase):
         self.assertTrue(self.blocked(r), (r.returncode, r.stdout, r.stderr))
         self.assertIn("41", r.stdout + r.stderr)
 
-    def test_a_marker_lets_the_worker_stop(self):
-        self.mark(41)
+    def test_a_marker_for_every_kind_lets_the_worker_stop(self):
+        self.mark_all(41)
         r = self.run_gate(MERGED)
         self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
 
@@ -107,6 +112,40 @@ class TestGateBlocksAMissingDesignComment(_GateBase):
         self.run_gate(MERGED)
         other = MERGED.replace("#41", "#42")
         self.assertTrue(self.blocked(self.run_gate(other)))
+
+
+class TestGateChecksEveryKind(_GateBase):
+    """#213 -- design alone is no longer sufficient; validated is ALSO
+    required (and #214 will add reviewed to the same check)."""
+
+    def test_design_only_still_blocks(self):
+        self.mark(41, kind="design")
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        self.assertIn("validated", r.stdout)
+
+    def test_validated_only_still_blocks(self):
+        self.mark(41, kind="validated")
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        self.assertIn("design", r.stdout)
+
+    def test_the_missing_list_names_only_what_is_actually_missing(self):
+        self.mark(41, kind="design")
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r))
+        reason = json.loads(r.stdout)["reason"]
+        self.assertIn("missing: validated", reason)
+        self.assertNotIn("missing: design", reason)
+
+    def test_fixing_only_one_missing_kind_does_not_get_a_second_block(self):
+        # First block (both kinds missing) consumes the session's one nudge
+        # for #41 -- marking validated afterward must NOT re-trigger it.
+        first = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(first))
+        self.mark_all(41)
+        second = self.run_gate(MERGED)
+        self.assertFalse(self.blocked(second))
 
 
 class TestGateStaysOutOfTheWay(_GateBase):

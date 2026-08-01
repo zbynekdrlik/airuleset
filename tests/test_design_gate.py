@@ -226,5 +226,138 @@ class TestMarkerIO(unittest.TestCase):
         self.assertNotIn("/", os.path.basename(p))
 
 
+# --------------------------------------------------------------------------- #
+# #213 -- multi-kind marker I/O (design/validated/reviewed share the same
+# machinery, isolated by `kind`)
+# --------------------------------------------------------------------------- #
+
+class TestMultiKindMarkerIO(unittest.TestCase):
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-kinds-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        os.environ["HOME"] = str(self.home)
+
+    def test_default_kind_is_design_backward_compatible(self):
+        dg.write_marker("airuleset", 999, "u1")
+        self.assertTrue(dg.marker_exists("airuleset", 999))
+        self.assertTrue(dg.marker_exists("airuleset", 999, "design"))
+        self.assertFalse(dg.marker_exists("airuleset", 999, "validated"))
+
+    def test_validated_kind_is_independent_of_design(self):
+        dg.write_marker("airuleset", 999, "u1", kind="validated")
+        self.assertFalse(dg.marker_exists("airuleset", 999, "design"))
+        self.assertTrue(dg.marker_exists("airuleset", 999, "validated"))
+
+    def test_both_kinds_can_coexist_for_the_same_issue(self):
+        dg.write_marker("airuleset", 999, "u1", kind="design")
+        dg.write_marker("airuleset", 999, "u2", kind="validated")
+        self.assertTrue(dg.marker_exists("airuleset", 999, "design"))
+        self.assertTrue(dg.marker_exists("airuleset", 999, "validated"))
+        d = dg.read_marker("airuleset", 999, "design")
+        v = dg.read_marker("airuleset", 999, "validated")
+        self.assertEqual(d["url"], "u1")
+        self.assertEqual(v["url"], "u2")
+
+    def test_marker_path_differs_by_kind(self):
+        self.assertNotEqual(
+            dg.marker_path("airuleset", 41, "design"),
+            dg.marker_path("airuleset", 41, "validated"))
+
+    def test_all_kinds_includes_design_and_validated(self):
+        self.assertIn("design", dg.ALL_KINDS)
+        self.assertIn("validated", dg.ALL_KINDS)
+
+
+# --------------------------------------------------------------------------- #
+# #213 -- validation classifier
+# --------------------------------------------------------------------------- #
+
+GOOD_VALIDATION = (
+    "Reproduced the bug live against current HEAD: ran the failing curl "
+    "request against the staging endpoint and confirmed the retry loop "
+    "still resets the counter improperly -- the test still fails on this "
+    "exact code path, so the issue is still valid and real today."
+)
+
+GOOD_VALIDATION_SLOVAK = (
+    "Overil som naživo oproti aktuálnemu kódu -- spustil som ten istý "
+    "test a potvrdil som, že chyba je stále platná a reprodukuje sa "
+    "presne tak, ako píše ticket."
+)
+
+GOOD_OBSOLETE_VALIDATION = (
+    "Checked the current code and confirmed this is already fixed -- "
+    "the retry counter was reset in a merged PR three weeks ago, so the "
+    "bug described here is now obsolete and no longer happens."
+)
+
+
+class TestClassifyValidationComment(unittest.TestCase):
+
+    def test_a_real_reproduction_passes(self):
+        ok, reason = dg.classify_validation_comment(GOOD_VALIDATION)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
+    def test_slovak_phrasing_also_passes(self):
+        ok, reason = dg.classify_validation_comment(GOOD_VALIDATION_SLOVAK)
+        self.assertTrue(ok, reason)
+
+    def test_an_obsolete_finding_also_passes(self):
+        ok, reason = dg.classify_validation_comment(GOOD_OBSOLETE_VALIDATION)
+        self.assertTrue(ok, reason)
+
+    def test_empty_body_fails(self):
+        ok, reason = dg.classify_validation_comment("")
+        self.assertFalse(ok)
+        self.assertIn("short", reason)
+
+    def test_none_body_fails(self):
+        ok, reason = dg.classify_validation_comment(None)
+        self.assertFalse(ok)
+
+    def test_trivial_chatter_fails_on_length(self):
+        for chatter in ("on it", "checking now", "ok", "will look"):
+            ok, reason = dg.classify_validation_comment(chatter)
+            self.assertFalse(ok, chatter)
+            self.assertIn("short", reason)
+
+    def test_long_but_no_action_fails(self):
+        body = (
+            "This ticket describes a retry loop that resets its backoff "
+            "counter incorrectly, which throttles later calls for the "
+            "rest of the session. The behaviour is still valid and still "
+            "happens today on the current code, and the reported symptom "
+            "matches what the test suite currently shows for this path."
+        )
+        ok, reason = dg.classify_validation_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("validation action", reason)
+
+    def test_long_but_no_evidence_fails(self):
+        body = (
+            "Ran the failing curl request against the staging endpoint "
+            "and reproduced the exact request from the ticket, checked "
+            "the response headers and the timing, tried it three more "
+            "times against different accounts to be sure it was not a "
+            "fluke, and looked at the surrounding logs for context."
+        )
+        ok, reason = dg.classify_validation_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("validation evidence", reason)
+
+    def test_a_long_purely_narrative_comment_fails(self):
+        body = (
+            "Spent the last hour poking around the dashboard, clicking "
+            "through several menus and trying a few different accounts "
+            "to see what would happen, then read through some of the "
+            "surrounding code to get a feel for how the module is "
+            "organized before deciding what to do about this ticket."
+        )
+        ok, reason = dg.classify_validation_comment(body)
+        self.assertFalse(ok, reason)
+
+
 if __name__ == "__main__":
     unittest.main()
