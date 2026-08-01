@@ -1,3 +1,3 @@
-### Viewing Image/Screenshot URLs → on-demand skill `view-image-urls`
+### Viewing Image URLs and JS-Walled Pages → on-demand skill `view-image-urls`
 
-The user pasted an image/screenshot URL (prnt.sc, imgur, gyazo, direct .png/.jpg/...)? Load the `view-image-urls` skill NOW. Iron rule that survives here: to SEE an image URL, render it in Playwright and screenshot it — WebFetch/Read cannot show pixels and are banned for this.
+The user pasted an image/screenshot URL (prnt.sc, imgur, gyazo, direct .png/.jpg/...) OR a link to a JS-walled/bot-blocked page — X.com / twitter.com / mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts — that WebFetch can't read? Load the `view-image-urls` skill NOW. Iron rule that survives here: to SEE or READ such a URL, render it in Playwright — screenshot for pixels, `browser_snapshot` for a JS-walled page's text — WebFetch/Read cannot execute JS or show pixels and are banned for this; NEVER answer "I can't read X.com / this site" while Playwright is available and untried.
