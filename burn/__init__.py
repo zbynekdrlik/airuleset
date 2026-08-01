@@ -1712,6 +1712,12 @@ def read_dispatch(path):
     side is identical on every line of a request, so taking the last is also
     correct for context.
 
+    `attribution_agent` (#211) is the FIRST `attributionAgent` value seen on
+    any line -- Claude Code's own per-line stamp on a dispatched worker's
+    transcript (present even though the child transcript never records
+    `subagent_type` directly). It is a FALLBACK for `scan_dispatches`, used
+    only when the parent-transcript join yields nothing.
+
     Returns None when the file holds no usage line at all.
     """
     order = []
@@ -1721,6 +1727,7 @@ def read_dispatch(path):
     tool_names = 0
     cwd = None
     model = None
+    attribution = None
     try:
         fh = open(path, "r", errors="replace")
     except OSError:
@@ -1733,6 +1740,8 @@ def read_dispatch(path):
                 continue
             if cwd is None:
                 cwd = e.get("cwd")
+            if attribution is None:
+                attribution = e.get("attributionAgent")
             etype = e.get("type")
             if etype == "attachment":
                 a = e.get("attachment") or {}
@@ -1771,6 +1780,7 @@ def read_dispatch(path):
         "prompt_chars": prompt_chars or 0,
         "skill_listing_chars": skill_chars,
         "deferred_tool_names": tool_names,
+        "attribution_agent": attribution,
     }
     for k in _DISPATCH_COUNTERS:
         row[k] = sum(reqs[j][k] for j in order)
@@ -1795,8 +1805,25 @@ def agent_types_from_parent(parent_path, agent_ids):
     the measurement shows the dispatch floor is bimodal by agent TYPE and by
     almost nothing else.
 
-    An id that cannot be resolved is simply absent from the mapping — callers
-    report None rather than guessing a type.
+    Deliberately UNWINDOWED — this reads the whole parent file regardless of
+    any report window; only the caller's SPEND stays windowed (#211: a filed
+    hypothesis that a launching `tool_use` outside the window broke the join
+    did not reproduce empirically, because this was already true).
+
+    #211: `pending[aid]` keeps EVERY candidate `tool_use_id` a matching
+    `tool_result` names, in file order, not just the last one seen. A single
+    overwrite was the real bug — a LATER, unrelated tool_result can mention
+    the same agent id substring (measured live: a `TaskStop` call's own
+    confirmation text, "Successfully stopped task: <id> ...", echoes it) and
+    its tool_use_id is never in `uses` (TaskStop is not Agent/Task), so an
+    unconditional overwrite silently discarded the correct EARLIER match —
+    the real launch, which does resolve. Trying every candidate in order and
+    keeping the first that resolves survives any number of such later
+    mentions.
+
+    An id that cannot be resolved through any candidate is simply absent
+    from the mapping — callers report None (or fall back to the child
+    transcript's own `attributionAgent` stamp) rather than guessing a type.
     """
     wanted = set(agent_ids or ())
     out = {}
@@ -1830,10 +1857,13 @@ def agent_types_from_parent(parent_path, agent_ids):
                     blob = json.dumps(b.get("content"))
                     for aid in wanted:
                         if aid in blob:
-                            pending[aid] = b.get("tool_use_id")
-    for aid, tid in pending.items():
-        if tid in uses:
-            out[aid] = uses[tid]
+                            pending.setdefault(aid, []).append(
+                                b.get("tool_use_id"))
+    for aid, tids in pending.items():
+        for tid in tids:
+            if tid in uses:
+                out[aid] = uses[tid]
+                break
     return out
 
 
@@ -1878,7 +1908,11 @@ def scan_dispatches(root, hours=12, now=None):
     for parent, ids in by_parent.items():
         types.update(agent_types_from_parent(parent, ids))
     for row in rows:
-        row["agent_type"] = types.get(row["agent_id"])
+        # #211: the parent-transcript join is the primary source; fall back
+        # to the child's own `attributionAgent` stamp only when the join
+        # resolves nothing at all.
+        row["agent_type"] = (types.get(row["agent_id"])
+                             or row.get("attribution_agent"))
         row["started"] = row["started"].isoformat() if row["started"] else None
         row["ended"] = row["ended"].isoformat() if row["ended"] else None
     rows.sort(key=lambda r: -r["total_ctx"])
