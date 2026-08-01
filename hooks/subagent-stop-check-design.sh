@@ -52,7 +52,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 # Data via ARGV, never a pipe into a `python3 -` heredoc (see
 # subagent-stop-check-run-card.sh for why).
 MISSING=$(python3 - "$REPO_ROOT" "$CWD" "$MSG" <<'PYEOF' 2>/dev/null || true
-import sys, os
+import re, sys, os
 sys.path.insert(0, sys.argv[1])
 try:
     import design_gate as dg
@@ -66,8 +66,25 @@ if not ev["merged"] or not ev["closed"]:
 repo = notify.repo_name_for(cwd)
 if not repo:
     sys.exit(0)
+
+# Adversarial-review finding: an issue closed via STEP 0's documented
+# `gh issue close --comment` path (OBSOLETE, never coded at all) can still
+# appear in `issue_state:` as closed -- but that command is never
+# classified by post-record-design-comment.sh (it only watches
+# `gh issue comment`), so demanding design/validated/reviewed evidence for
+# it is unmeetable by construction. The evidence block's own
+# `obsolete_closed:` (full-authority) / `obsolete_handed_off:`
+# (fork-no-merge) line already names exactly which issues these are.
+_EXCLUDE_LINE_RE = re.compile(
+    r"^\s*obsolete_(?:closed|handed_off)\s*:(.*)$", re.I | re.M)
+excluded = set()
+for m in _EXCLUDE_LINE_RE.finditer(msg):
+    excluded.update(dg.issue_refs(m.group(1)))
+
 print(repo)
 for n in ev["closed"]:
+    if n in excluded:
+        continue
     missing_kinds = [k for k in dg.ALL_KINDS if not dg.marker_exists(repo, n, k)]
     if missing_kinds:
         print("%d:%s" % (n, ",".join(missing_kinds)))
