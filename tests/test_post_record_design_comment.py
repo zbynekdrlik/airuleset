@@ -78,6 +78,20 @@ GOOD_REVIEWED_BODY = (
     "1234567abcdef, then everything was clean."
 )
 
+# Adversarial-review finding (post-#214) -- a SINGLE comment plausibly
+# carrying all THREE shapes at once (design + validation language +
+# review-sounding language with an incidental sha), which must NOT be
+# allowed to grant all three markers from one posted comment.
+ALL_THREE_SHAPES_BODY = (
+    "Root cause: the retry loop never reset its backoff counter after a "
+    "successful call, so a single blip left every later call throttled. "
+    "Chosen approach: I will implement a reset on the first success after "
+    "any failure, confirming this still happens on the current code after "
+    "reviewing the retry path closely, similar to the earlier regression "
+    "fixed in a1b2c3d. Rejected alternative: replacing the whole backoff "
+    "strategy with a token bucket -- too big a change for this bug."
+)
+
 
 def _iso(delta_seconds=0):
     import datetime
@@ -237,6 +251,50 @@ class TestClassifiesEveryKindFromOneComment(_Base):
         self.run_hook('gh issue comment 41 --body "x"', comments)
         self.assertIsNone(self.marker(41, "design"))
         self.assertIsNone(self.marker(41, "validated"))
+
+    def test_one_comment_satisfying_all_three_shapes_grants_only_one_marker(self):
+        # Adversarial-review finding: a rich comment posted BEFORE any code
+        # exists could plausibly satisfy design + validated + reviewed at
+        # once, defeating the whole premise that each kind proves its own
+        # step actually happened. Confirm the classifiers really do all
+        # match this body (the exploit precondition)...
+        self.assertTrue(dg.classify_design_comment(ALL_THREE_SHAPES_BODY)[0])
+        self.assertTrue(dg.classify_validation_comment(ALL_THREE_SHAPES_BODY)[0])
+        self.assertTrue(dg.classify_review_comment(ALL_THREE_SHAPES_BODY)[0])
+        # ... then confirm the HOOK grants at most ONE marker from it.
+        comments = _comments_json([{
+            "body": ALL_THREE_SHAPES_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-30",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        granted = [k for k in dg.ALL_KINDS if self.marker(41, k) is not None]
+        self.assertEqual(len(granted), 1,
+                         "one comment granted %d markers, expected exactly "
+                         "1: %r" % (len(granted), granted))
+
+    def test_the_same_comment_url_cannot_grant_a_second_kind_later(self):
+        # Even across TWO separate hook invocations that both see the SAME
+        # (unchanged) latest comment as "fresh" -- e.g. a worker re-running
+        # a trivial `gh issue comment` call to re-trigger the recorder
+        # without posting anything new -- the SAME url must not be able to
+        # claim a second kind.
+        comments = _comments_json([{
+            "body": ALL_THREE_SHAPES_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-31",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        granted_after_first = {k for k in dg.ALL_KINDS if self.marker(41, k)}
+        self.assertEqual(len(granted_after_first), 1)
+        # Same url, same fresh comment, a SECOND invocation.
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        granted_after_second = {k for k in dg.ALL_KINDS if self.marker(41, k)}
+        self.assertEqual(granted_after_first, granted_after_second,
+                         "a second invocation against the SAME comment url "
+                         "granted an additional kind -- distinct evidence "
+                         "kinds must come from distinct comments")
 
     def test_a_review_shaped_comment_writes_only_reviewed(self):
         # #214
