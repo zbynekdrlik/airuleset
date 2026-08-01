@@ -725,6 +725,18 @@ rather than one that silently doubled underneath it.
   `Deploying to <host>` lines actually appearing) as the only trustworthy
   verdict — never the last few printed lines by position alone.
 
+- **`airuleset.py push` races a concurrently-running TDD worker.** push runs
+  the full test suite from the WORKING TREE fail-closed before pushing; a
+  subagent doing RED→GREEN TDD in the same checkout will have its committed
+  `[red]` failing test picked up by push's suite run, failing the push
+  spuriously (live incident 2026-08-01: push failed with 1 failure that was
+  the in-flight worker's `[red]` commit; second cause the same day: a
+  background push task got killed mid-suite). Never launch `airuleset.py push`
+  while an implementation worker is mid-flight in this repo — dispatch workers
+  first, push ONCE after they finish; and launch push detached (`setsid
+  nohup ... &` + a separate bounded waiter) so a killed background wrapper
+  can't abort the deploy mid-run.
+
 - **A single `stalled.add(key)` (or any per-session "still alive" marker) sitting AFTER several early-`continue` safety gates inside job 1's per-session pane loop is a RECURRING shape, not a one-off bug (#175 F1, reopened after #176 had already added TWO more early-continues below the old marker position without anyone noticing the marker was in the wrong place).** The end-of-sweep cleanup pass deletes any bare-UUID episode key not in `stalled`, so ANY gate that can `continue` before the marker silently resets that session's accumulated nudge/backoff/`escalated` state on the very next sweep — and because the marker only needs to mean "this session is still stalled right now" (which a truthy `err_text` already establishes), the fix is always the same: move the ONE existing `stalled.add(key)` call to the very first statement inside the enclosing `if err_text:`, above every gate, rather than adding a second marker call per gate. **When adding a new early-continue gate to this loop in the future, add it BELOW the marker, never re-introduce one above it.**
 - **Isolating a mutant test PER FIX when several unrelated fixes land in the SAME commit and the SAME file: back up the whole file to `/tmp` (`cp watchdog/__init__.py /tmp/wd_backup.py`) before mutating, restore with a plain `cp` afterward — do NOT reach for `git stash`.** `git stash` would revert every uncommitted change in the file at once, which is fine when proving ONE fix against a clean-HEAD baseline (the existing RED/GREEN `git stash` techniques), but is the wrong tool for proving fix A's mutant dies while fix B and fix C's code stays in place (#175: F1's mutant needed F2/F4 still applied, and vice versa). A `python3 -c`/heredoc script doing a targeted `str.replace` with an `assert src2 != src` guard on each substitution, followed by a plain `cp` restore, isolates exactly one fix per mutation run.
 
