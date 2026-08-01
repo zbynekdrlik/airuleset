@@ -111,6 +111,23 @@ The ruleset should track Anthropic's current guidance, not last quarter's. Use `
 - [ ] Cross-check the live model: did the new generation change effort tiers, tool-use behavior, context window, or subagent model defaults? If yes → update `model-awareness.md`
 - [ ] Cite each proposed change with its source URL in the punch list — no uncited "best practice" claims
 
+### 9. Reachability guarantee (#216 — worker-path enforcement claims)
+A claimed enforcement only holds when it lives on a surface that reaches the agent making the
+claim AND a mechanical gate checks a produced artifact. Both e9d1022 (skill-body content silently
+unreachable to a dispatched worker for 18 days) and #215 (a Stop-only hook claimed as enforcing a
+subagent's own line) are this class:
+- [ ] `python3 -m pytest tests/test_worker_evidence_reachability.py -q` — the push-suite meta-test
+      that locks this axis mechanically; a red run here IS a finding, report it verbatim
+- [ ] `grep -rn "enforced by" agents/*.md` — for each hit, confirm the named hook is registered in
+      `settings/hooks.json` under `SubagentStop` or a matching `PreToolUse`, never a bare `Stop`-only
+      registration (agents/*.md is always subagent-context)
+- [ ] Any NEW required line added to the autopilot-worker evidence-block templates → confirm it was
+      also added to `COVERAGE_TABLE` in `tests/test_worker_evidence_reachability.py` (hook-backed /
+      supervisor-reverified / self-audit — pick one, never leave it undecided)
+- [ ] A module `→ skill` stub that a dispatched worker is supposed to act on → confirm
+      `agents/autopilot-worker.md` restates the obligation inline (a skill BODY never reaches a
+      dispatched subagent — only its one-line description does)
+
 ## Process
 
 1. **Read** `~/.claude/CLAUDE.md` and run `wc -l` on it + the target modules

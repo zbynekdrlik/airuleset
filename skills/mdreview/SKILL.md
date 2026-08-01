@@ -73,6 +73,16 @@ Sources: code.claude.com/docs/en/best-practices · platform.claude.com/docs/en/a
 **E. Model-combination audit (AXIS 2 — read the live docs).** WebFetch the current generation's prompting + models docs; propagate to `model-awareness.md`. Verify the whole COMBINATION, not just version strings: (a) `model-awareness.md` tiering matches the live lineup (judgment / execution / mechanical / gated escalation tiers still name the right models + efforts); (b) every dispatch surface agrees — grep skills/, agents/, hooks/ for `model:` / `opts.model` / effort values that lag the policy; (c) the escalation gate (fable-gate) still matches how the top tier is priced/limited. Also flag per the live gen: pure-negative rules with no positive exemplar (positive examples beat bans); rules using "only-high-severity / only-important" language (the harness now honors it → suppresses findings → prefer report-everything-then-filter); rules that rely on the model silently generalizing one example (state scope + "applies to all rewordings").
 Source: platform.claude.com/docs/en/build-with-claude/prompt-engineering (substitute the live model's prompting page) + the live models overview
 
+**F. Reachability triage (AXIS 4 — #216, worker-path enforcement claims).** Run
+`python3 -m pytest tests/test_worker_evidence_reachability.py -q` (a red run IS a finding, not a
+skip-and-continue). Then `grep -rn "enforced by" agents/*.md` and confirm each named hook is
+registered in `settings/hooks.json` under `SubagentStop` or a matching `PreToolUse` — a bare
+`Stop`-only registration is the exact #215 false-claim shape (Stop never fires for a subagent). Any
+module `→ skill` stub the worker path is supposed to execute needs either a restatement inline in
+`agents/autopilot-worker.md` or a hook backing it directly — a stub with neither is the e9d1022
+regression shape (18 days silently unreachable before anyone noticed).
+Sources: this repo's own #215/#216 incident + `tests/test_worker_evidence_reachability.py`
+
 ## Step B — Installed skills & plugins: health + upgrade
 
 Two SEPARATE worlds; commands do NOT overlap.
