@@ -95,6 +95,26 @@ set -euo pipefail
 # message. The generic bucket's 1800s TTL would also intermittently reset
 # "first loop free" for these naturally slower-cadence waits, weakening a
 # guard that today never decays. Split stands; see #127 for the full replay.
+#
+# #210: a BARE one-shot poll is the SAME burn wearing a different shape. The
+# #111/#118 loop detector only sees a `do...sleep...done` body — a worker
+# that just calls `gh run view <id> --json status,conclusion` once per TURN,
+# with no sleep and no loop, is invisible to it. Production burn (2026-08-01):
+# 260 of 474 `gh run view` calls across 107 subagent transcripts were exactly
+# this — non-loop, one-shot, each its own turn — and the worst dispatch did
+# 157 of them, one run polled across 35 separate turns. Fix: count bare
+# STATUS-POLL one-shots (`--json status`, `--json status,conclusion` either
+# order, or no `--json` at all) per (session, run-id), reusing the same
+# STATE_DIR the loop mechanism already uses. The first TWO stay free — a
+# single one-shot repeat is not by itself proof of a long wait the way loop 1
+# returning non-terminal is — the 3rd+ hard-blocks with the SAME two-shape
+# message the loop block already prints (bounded foreground loop for a short
+# wait, background waiter for a long one, subagent hand-back either way).
+# Deliberately narrow: `--log` / `--log-failed` (reading WHY a run failed)
+# and any `--json` value naming a field other than status/conclusion are
+# never counted, and neither is a command carrying TWO `gh run view`
+# invocations (the #118-documented post-mortem shape) — both are the actual
+# debugging work, not a wasted poll.
 
 command -v jq &>/dev/null || exit 0
 
@@ -232,7 +252,51 @@ if [ -e "$BLOCKED_FILE" ] && [ "$IS_LOOP" = "0" ]; then
     fi
 fi
 
-if [ "$IS_LOOP" = "0" ] && [ "$IS_BURST" = "0" ]; then
+# ---- #210: bare one-shot status-poll counting --------------------------
+# Only ever engages for a RUN-KEYED command (no generic bucket — with no
+# run-id there is nothing to prove two one-shots are the SAME wait, same
+# reasoning the loop mechanism already applies to its generic bucket). A
+# loop-shaped command is governed by IS_LOOP above, never here.
+IS_ONESHOT_BLOCK=0
+if [ "$IS_LOOP" = "0" ] && [ -n "$RUN_ID" ]; then
+    VIEW_COUNT=$(grep -oE 'gh[[:space:]]+run[[:space:]]+view' <<<"$FLAT" \
+        | wc -l | tr -d ' ')
+    HAS_LOG=0
+    if grep -qE -- '--log(-failed)?([[:space:]]|=|$)' <<<"$FLAT"; then
+        HAS_LOG=1
+    fi
+    HAS_JSON=0
+    if grep -qE -- '--json' <<<"$FLAT"; then
+        HAS_JSON=1
+    fi
+    JSON_STATUS_OK=0
+    if grep -qE -- \
+        '--json[[:space:]]+"?(status,conclusion|conclusion,status|status)"?([[:space:]"'"'"'|]|$)' \
+        <<<"$FLAT"; then
+        JSON_STATUS_OK=1
+    fi
+    STATUS_SHAPE=0
+    if [ "$VIEW_COUNT" = "1" ] && [ "$HAS_LOG" = "0" ] \
+        && { [ "$HAS_JSON" = "0" ] || [ "$JSON_STATUS_OK" = "1" ]; } \
+        && grep -qE "gh[[:space:]]+run[[:space:]]+view[[:space:]]+${RUN_ID}([[:space:]]|\$)" \
+            <<<"$FLAT"; then
+        STATUS_SHAPE=1
+    fi
+    if [ "$STATUS_SHAPE" = "1" ]; then
+        ONESHOT_FREE="${AIRULESET_CIPOLL_ONESHOT_FREE:-2}"
+        case "$ONESHOT_FREE" in ''|*[!0-9]*) ONESHOT_FREE=2 ;; esac
+        ONESHOT_FILE="$STATE_DIR/airuleset-cipoll-oneshot-${SID}-${KEY}"
+        OS_COUNT=$(cat "$ONESHOT_FILE" 2>/dev/null || echo 0)
+        case "$OS_COUNT" in ''|*[!0-9]*) OS_COUNT=0 ;; esac
+        OS_COUNT=$((OS_COUNT + 1))
+        printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
+        if [ "$OS_COUNT" -gt "$ONESHOT_FREE" ]; then
+            IS_ONESHOT_BLOCK=1
+        fi
+    fi
+fi
+
+if [ "$IS_LOOP" = "0" ] && [ "$IS_BURST" = "0" ] && [ "$IS_ONESHOT_BLOCK" = "0" ]; then
     exit 0
 fi
 
@@ -281,9 +345,15 @@ fi
 
 # ---- BLOCK -------------------------------------------------------------
 : > "$BLOCKED_FILE" 2>/dev/null || true
+BLOCK_SHAPE="burst"
+if [ "$IS_LOOP" = "1" ]; then
+    BLOCK_SHAPE="loop"
+elif [ "$IS_ONESHOT_BLOCK" = "1" ]; then
+    BLOCK_SHAPE="oneshot"
+fi
 printf '%s cipoll BLOCK session=%s key=%s agent=%s shape=%s cmd=%s\n' \
     "$(date -Is)" "$SID" "$KEY" "${AGENT_ID:-main}" \
-    "$([ "$IS_LOOP" = 1 ] && echo loop || echo burst)" "$SNIPPET" \
+    "$BLOCK_SHAPE" "$SNIPPET" \
     >> "$BLOCK_LOG" 2>/dev/null || true
 
 # The compliant command must be paste-ready. With a run-id, substitute it. In
@@ -301,7 +371,74 @@ else
     PRELUDE="RID=\$(gh run list -L 1 --json databaseId --jq '.[0].databaseId')${NL}  "
 fi
 
-if [ -n "$AGENT_ID" ]; then
+if [ "$IS_ONESHOT_BLOCK" = "1" ]; then
+    # #210: N one-shot polls have already gone by, one per TURN, with no
+    # loop's non-terminal-return evidence that the wait is long — so the
+    # message offers BOTH shapes and lets the caller pick, rather than
+    # assuming (as the loop-repeat message can) that the wait is long.
+    if [ -n "$AGENT_ID" ]; then
+        MSG=$(cat <<'ONESHOT_SUBMSG'
+BLOCKED (airuleset #210): this is the 3rd+ ONE-SHOT foreground CI status poll
+for __RUNID__ in this session — each one its OWN turn, re-sending your whole
+context for a single line of status (production burn: one dispatch did 157
+one-shot `gh run view` calls across 35 separate turns polling ONE run).
+
+You are a SUBAGENT. Do NOT launch a background waiter — a subagent with no
+pending foreground tool call is returned as "completed" and TERMINATES, so the
+poll's completion would fire to your parent and your work would silently die.
+
+Do this instead, now:
+
+  • Wait is probably SHORT: run ONE bounded foreground loop in a single Bash
+    call (covers up to ~9 minutes — see ci-monitoring.md's "Foreground
+    bounded poll loop").
+  • Wait is LONG / multi-stage: report the run-id and current stage in your
+    FINAL message and RETURN. The supervisor owns long waits and will
+    re-dispatch a fresh worker for the next stage.
+
+Still allowed, any time: ONE plain status check —
+  gh run view __RUNID__ --json status,conclusion
+Deliberate exception (logged): append `# airuleset:poll-ok <reason>`.
+ONESHOT_SUBMSG
+)
+    else
+        MSG=$(cat <<'ONESHOT_MAINMSG'
+BLOCKED (airuleset #210): this is the 3rd+ ONE-SHOT foreground CI status poll
+for __RUNID__ in this session — each one its OWN turn, re-sending your whole
+context for a single line of status (production burn: one dispatch did 157
+one-shot `gh run view` calls across 35 separate turns polling ONE run).
+
+Pick ONE of these and stick to it — never keep issuing bare one-shot polls:
+
+  • SHORT wait — ONE bounded foreground loop in a single Bash call:
+
+  DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-540}))
+  for i in $(seq 1 18); do
+    s=$(gh run view __RUNID__ --json status,conclusion --jq '.status+" "+(.conclusion//"")')
+    case "$s" in completed*) echo "TERMINAL: $s"; break;; esac
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then echo "POLL BUDGET REACHED"; break; fi
+    sleep 30
+  done
+
+  • LONG wait — ONE background waiter, `run_in_background: true`:
+
+  timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'while :; do
+    s=$(gh run view __TARGET__ --json status,conclusion --jq ".status+\" \"+(.conclusion//\"\")" 2>/dev/null) || s="ERROR"
+    case "$s" in completed*) echo "TERMINAL: $s"; exit 0 ;; esac
+    sleep 60
+  done'
+
+If you are a SUBAGENT (autopilot-worker or any dispatched worker): do NOT run
+the background waiter. Backgrounding a wait TERMINATES you. Report the run-id
++ current stage in your final message and RETURN — the supervisor owns it.
+
+Still allowed, any time: ONE plain status check —
+  gh run view __RUNID__ --json status,conclusion
+Deliberate exception (logged): append `# airuleset:poll-ok <reason>`.
+ONESHOT_MAINMSG
+)
+    fi
+elif [ -n "$AGENT_ID" ]; then
     # SUBAGENT: never offer a background waiter — launching one ends this
     # worker's life mid-CI. The long-wait contract is to hand back and return.
     MSG=$(cat <<'SUBMSG'
