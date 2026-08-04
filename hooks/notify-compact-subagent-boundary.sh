@@ -109,9 +109,16 @@ set -euo pipefail
 # three minutes), so `not-autopilot-worker` runs to thousands a day while the
 # decisions this ticket cares about run to a few dozen. Therefore every
 # `autopilot-worker` decision is logged unconditionally, and the non-worker
-# class is a THROTTLED heartbeat — at most one line per minute, gated on the
-# mtime of a marker file, so liveness stays provable without flushing the
-# signal away. A `stat`-size check rotates the log to `.log.1` at 512 KB
+# class is logged ONCE PER (session, reason) — never again for that session,
+# however long it runs (#146, 2026-08-04). This replaces a GLOBAL 60s
+# heartbeat (#123): a served session's `agent_type` never changes mid-
+# session, so re-logging the SAME already-established decline every ~60s is
+# pure noise once the fact is known — live evidence, one 8.5h+ forestshop
+# session alone wrote 1465 of the shared log's 2842 lines (51.5%) and
+# rotated it on its own. A tiny marker file per (session, reason) pair under
+# `.compact-decisions-seen/` remembers what has already been logged, pruned
+# past a 14-day TTL so the directory cannot grow forever. A `stat`-size
+# check still rotates the decision log itself to `.log.1` at 512 KB
 # (ceiling ≈ 1 MB, two generations, no cron).
 #
 # Logging is diagnostics: every write is `|| true`-guarded so a read-only
@@ -126,9 +133,9 @@ INPUT=$(cat 2>/dev/null || echo "")
 [ -n "$INPUT" ] || exit 0
 
 DECISION_LOG="$HOME/.claude/compact-decisions.log"
-DECISION_HB="$HOME/.claude/.compact-decisions-hb"
+DECISION_SEEN_DIR="$HOME/.claude/.compact-decisions-seen"
 DECISION_CAP=512000
-DECISION_THROTTLE_S=60
+DECISION_SEEN_TTL_DAYS=14
 
 # `_decide_log <OUTCOME> [extra k=v tokens]` — one line, never fatal.
 _decide_log() {
@@ -149,20 +156,26 @@ _decide_log() {
     } 2>/dev/null || true
 }
 
-# The high-volume class: keep it provable, keep it cheap. O(1) — one `stat`,
-# no read-modify-write, so concurrent stops cannot corrupt anything (the worst
-# case is two heartbeats in the same second, which is harmless).
-_decide_log_throttled() {
-    local now hb
-    now=$(date +%s 2>/dev/null || echo 0)
-    hb=$(stat -c %Y "$DECISION_HB" 2>/dev/null || echo 0)
-    case "$hb" in ''|*[!0-9]*) hb=0 ;; esac
-    if [ "$((now - hb))" -lt "$DECISION_THROTTLE_S" ]; then
-        return 0
-    fi
-    mkdir -p "$(dirname "$DECISION_HB")" 2>/dev/null || true
-    touch "$DECISION_HB" 2>/dev/null || true
-    _decide_log "$@"
+# The high-volume class: log the FIRST decline for a (session, reason) pair,
+# then suppress every later one for that SAME pair — the cause cannot change
+# mid-session (agent_type is fixed at launch), so a repeat is pure noise
+# (#146). O(1) — one `[ -e ]` check, no read-modify-write, so concurrent
+# stops cannot corrupt anything (the worst case is two markers written for
+# the same pair in the same instant, which is harmless).
+_decide_log_once_per_session() {
+    local outcome="$1"
+    local extra="${2:-}"
+    local key seen_file
+    key=$(printf '%s|%s' "${SID:-}" "$extra" | tr -c 'A-Za-z0-9=_|-' '_')
+    seen_file="$DECISION_SEEN_DIR/$key"
+    [ -e "$seen_file" ] && return 0
+    mkdir -p "$DECISION_SEEN_DIR" 2>/dev/null || true
+    # bound the directory's growth -- a marker no session will ever revisit
+    # must not survive forever.
+    find "$DECISION_SEEN_DIR" -maxdepth 1 -type f \
+        -mtime "+$DECISION_SEEN_TTL_DAYS" -delete 2>/dev/null || true
+    _decide_log "$outcome" "$extra"
+    touch "$seen_file" 2>/dev/null || true
 }
 
 _field() {
@@ -180,7 +193,7 @@ CWD=$(_field '.cwd // empty')
 CWD_LOG=${CWD// /_}
 
 [ "$AGENT_TYPE" = "autopilot-worker" ] || {
-    _decide_log_throttled DECLINE "reason=not-autopilot-worker"
+    _decide_log_once_per_session DECLINE "reason=not-autopilot-worker"
     exit 0
 }
 
