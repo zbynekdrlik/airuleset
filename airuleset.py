@@ -3091,6 +3091,39 @@ def _watchdog_card_probe(root, base):
     return None
 
 
+# #230: the fallback used to run `gh issue list --state closed`, which
+# cannot tell WHO closed a ticket — a hand close, a close-by-a-bare-commit,
+# and a close-by-a-genuinely-merged-PR all looked identical, so every
+# closed issue in the window read as "merged but unreported". This
+# GraphQL query reads each closed issue's CLOSED_EVENT `closer` in the SAME
+# single call (never one call per issue — that would be N+1 against the
+# "roughly one call per trailer-less repo per sweep" budget below); only a
+# `closer` that is a PullRequest with `merged: true` is kept.
+_CLOSED_FETCH_GRAPHQL = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(states: CLOSED, first: 100,
+           orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        closedAt
+        timelineItems(itemTypes: CLOSED_EVENT, last: 1) {
+          nodes {
+            ... on ClosedEvent {
+              closer {
+                __typename
+                ... on PullRequest { merged }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
 def _watchdog_closed_fetch(root, since_ts):
     """Job 25's fallback for a repo that never writes `Closes #N` trailers.
 
@@ -3117,6 +3150,15 @@ def _watchdog_closed_fetch(root, since_ts):
     path also applies here — `gh` already hands back `closedAt`, so this
     costs nothing extra. A ticket whose `closedAt` fails to parse still gets
     reported (`ts=None`), never dropped for lack of a clean timestamp.
+
+    #230: only counts an issue whose CLOSED_EVENT `closer` is a merged pull
+    request — a hand close or a close-by-commit is not a report anyone was
+    ever owed. `owner`/`name` are resolved via `-F owner='{owner}' -F
+    name='{repo}'`: gh's raw-field (`-F`) values expand the `{owner}`/
+    `{repo}` placeholders from `cwd`'s git remote, `-f`/string-field values
+    do NOT (verified empirically before writing this) — so this stays one
+    `gh` call, exactly like before, with no separate `gh repo view` needed
+    to learn the owner/name first.
     """
     import burn
     import subprocess
@@ -3124,15 +3166,27 @@ def _watchdog_closed_fetch(root, since_ts):
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since_ts))
     try:
         r = subprocess.run(
-            ["gh", "issue", "list", "--state", "closed", "--limit", "100",
-             "--json", "number,closedAt"],
+            ["gh", "api", "graphql",
+             "-f", "query=" + _CLOSED_FETCH_GRAPHQL,
+             "-F", "owner={owner}", "-F", "name={repo}"],
             cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
+        data = json.loads(r.stdout or "{}")
+        if data.get("errors"):
+            return None
+        repo_data = (data.get("data") or {}).get("repository") or {}
+        nodes = (repo_data.get("issues") or {}).get("nodes") or []
         out = {}
-        for i in json.loads(r.stdout or "[]"):
+        for i in nodes:
             closed_at = i.get("closedAt") or ""
             if closed_at < since:
+                continue
+            items = (i.get("timelineItems") or {}).get("nodes") or []
+            closer = items[0].get("closer") if items else None
+            if not closer or closer.get("__typename") != "PullRequest":
+                continue
+            if not closer.get("merged"):
                 continue
             dt = burn._parse_ts(closed_at)
             out[i["number"]] = dt.timestamp() if dt is not None else None

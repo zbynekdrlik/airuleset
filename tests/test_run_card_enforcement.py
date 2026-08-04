@@ -1507,6 +1507,14 @@ class TestWatchdogClosedFetchEndToEndThroughCardReconcile(unittest.TestCase):
 
     def test_hand_closed_tickets_never_ping_but_a_merged_one_does(self):
         import airuleset
+        import time
+
+        def iso(age_s):
+            # past grace (CARD_GRACE_S=1200), inside the 48h window — the
+            # same shape the repo()/close_more() git helpers already use
+            # for commit timestamps, just formatted as GitHub's closedAt.
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                 time.gmtime(NOW - age_s))
 
         def graphql_stdout(issues):
             nodes = [
@@ -1518,14 +1526,23 @@ class TestWatchdogClosedFetchEndToEndThroughCardReconcile(unittest.TestCase):
                 {"data": {"repository": {"issues": {"nodes": nodes}}}})
 
         out = m.Mock(returncode=0, stdout=graphql_stdout([
-            (2181, "2026-08-04T11:18:52Z", None),
-            (2300, "2026-08-04T10:54:49Z", None),
-            (1768, "2026-08-04T16:10:45Z", {"__typename": "Commit"}),
-            (940, "2026-08-04T15:18:18Z",
-             {"__typename": "PullRequest", "merged": True}),
+            (2181, iso(3600), None),
+            (2300, iso(7200), None),
+            (1768, iso(1800), {"__typename": "Commit"}),
+            (940, iso(3600), {"__typename": "PullRequest", "merged": True}),
         ]))
         r = self.repo()
-        with m.patch("subprocess.run", return_value=out):
+        # card_reconcile also runs real `git` subprocess calls internally
+        # (rev-parse, log, rev-list) — only the `gh` call is faked, every
+        # other subprocess.run passes straight through to the real thing.
+        real_run = subprocess.run
+
+        def fake_run(args, *a, **kw):
+            if args and args[0] == "gh":
+                return out
+            return real_run(args, *a, **kw)
+
+        with m.patch("subprocess.run", side_effect=fake_run):
             wd.card_reconcile(
                 NOW, None, self.state, {"s": str(r)},
                 card_probe=lambda root, base: None,
