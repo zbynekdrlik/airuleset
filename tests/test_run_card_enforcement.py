@@ -410,11 +410,28 @@ class TestCardReconcile(unittest.TestCase):
         _git(r, "remote", "set-head", "origin", base)
         return r
 
+    def close_more(self, r, n, age):
+        """Add and PUSH a second closing commit — `merged_closes` reads
+        `origin/<base>` (a remote-tracking ref), so a commit only on the
+        local branch is invisible to it until it is actually pushed."""
+        (r / "f").write_text(str(n))
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "feat: another thing\n\nCloses #%d" % n,
+             ts=NOW - age)
+        _git(r, "push", "-q", "origin", "main")
+        _git(r, "fetch", "-q", "origin")
+
     def reconcile(self, cwds, **kw):
+        return self.reconcile_at(NOW, cwds, **kw)
+
+    def reconcile_at(self, now_val, cwds, **kw):
+        """Like `reconcile`, but with an explicit `now` — lets a test
+        simulate the clock advancing past `grace` against a repo whose
+        commits (and therefore whose closing timestamps) never change."""
         kw.setdefault("card_probe", lambda root, base: None)
         kw.setdefault("marker_ok", lambda key: key in self.delivered)
         kw.setdefault("send_fn", self.send)
-        return wd.card_reconcile(NOW, None, self.state,
+        return wd.card_reconcile(now_val, None, self.state,
                                  {("s%d" % i): str(c)
                                   for i, c in enumerate(cwds)}, **kw)
 
@@ -455,12 +472,65 @@ class TestCardReconcile(unittest.TestCase):
         self.reconcile([d])
         self.assertEqual(self.sent, [])
 
-    def test_the_ping_is_deduped_per_repo_per_window(self):
+    def test_the_ping_is_deduped_per_ticket_forever(self):
+        # #224 defect 2 — this used to be a per-repo-per-day bucket
+        # (CARD_REPING_S); a repeat call on the same still-unreported
+        # ticket, however soon, must never ping it twice AT ALL, not just
+        # "not again today".
         r = self.repo(closes=(3,))
         self.reconcile([r])
         self.reconcile([r])
         self.assertEqual(len(self.sent), 1,
-                         "a daily reminder, not one per 60s sweep")
+                         "a given ticket earns exactly one nag, ever")
+
+    # --- #224 defect 1: a grace period, gated on the CLOSING COMMIT'S OWN --
+    # timestamp, not the window edge --------------------------------------
+
+    def test_a_fresh_merge_is_silent_within_grace(self):
+        r = self.repo(closes=(3,), age=30)              # merged 30s ago
+        self.reconcile_at(NOW, [r])
+        self.assertEqual(self.sent, [],
+                         "the worker's own post-merge sequence (deploy, "
+                         "verify, THEN the card) takes minutes by design")
+
+    def test_the_same_merge_pings_once_grace_passes(self):
+        r = self.repo(closes=(3,), age=30)              # merged 30s ago
+        self.reconcile_at(NOW, [r])                      # too fresh: silent
+        self.assertEqual(self.sent, [])
+        self.reconcile_at(NOW + 30 * 60, [r])             # 30m30s later
+        self.assertTrue(self.sent, "the grace window must not block forever")
+        self.assertIn("#3", self.sent[0]["msg"])
+
+    def test_grace_is_per_ticket_not_per_repo(self):
+        # An OLD unreported ticket (#3, past grace) sharing a repo with a
+        # BRAND NEW one (#5, still inside grace) — #3 must ping, #5 must
+        # not, in the SAME sweep. The grace check reads each ticket's own
+        # closing commit, never the repo's newest or oldest commit.
+        r = self.repo(closes=(3,), age=3600)
+        self.close_more(r, 5, age=30)
+        self.reconcile([r])
+        self.assertTrue(self.sent)
+        self.assertIn("#3", self.sent[0]["msg"])
+        self.assertNotIn("#5", self.sent[0]["msg"],
+                         "#5 is still inside its own grace window")
+
+    # --- #224 defect 2: dedup per TICKET, not per repo per day ------------
+
+    def test_the_same_ticket_twice_yields_one_ping_a_new_ticket_yields_a_new_one(self):
+        r = self.repo(closes=(3,))                       # default age: past grace
+        self.reconcile([r])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("#3", self.sent[0]["msg"])
+
+        # a genuinely NEW ticket closes in the same repo, also past grace
+        self.close_more(r, 5, age=3600)
+        self.reconcile([r])
+        self.assertEqual(len(self.sent), 2,
+                         "a genuinely new unreported ticket must still "
+                         "ping immediately")
+        self.assertIn("#5", self.sent[1]["msg"])
+        self.assertNotIn("#3", self.sent[1]["msg"],
+                         "a ticket already pinged must never be repeated")
 
     def test_detection_is_logged_every_sweep_even_when_the_ping_is_deduped(self):
         r = self.repo(closes=(3,))
