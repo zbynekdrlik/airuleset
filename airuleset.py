@@ -3111,7 +3111,14 @@ def _watchdog_closed_fetch(root, since_ts):
     27/28's own `gh` cuts (`_watchdog_issue_counts_fetch`) for the same
     reason `_watchdog_card_probe` above was cut — this call dispatches
     before jobs 27/28 in every sweep.
+
+    #224: returns `{number: closed_epoch}` rather than a bare list, so the
+    same per-ticket grace period `merged_closes` applies to the local-git
+    path also applies here — `gh` already hands back `closedAt`, so this
+    costs nothing extra. A ticket whose `closedAt` fails to parse still gets
+    reported (`ts=None`), never dropped for lack of a clean timestamp.
     """
+    import burn
     import subprocess
     import time
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since_ts))
@@ -3122,8 +3129,14 @@ def _watchdog_closed_fetch(root, since_ts):
             cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
-        return [i["number"] for i in json.loads(r.stdout or "[]")
-                if (i.get("closedAt") or "") >= since]
+        out = {}
+        for i in json.loads(r.stdout or "[]"):
+            closed_at = i.get("closedAt") or ""
+            if closed_at < since:
+                continue
+            dt = burn._parse_ts(closed_at)
+            out[i["number"]] = dt.timestamp() if dt is not None else None
+        return out
     except Exception:
         return None
 

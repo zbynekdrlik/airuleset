@@ -6417,7 +6417,13 @@ def compact_stall_watch(now, state, cwd_by_sid, send_fn=None, dry_run=False,
 # --------------------------------------------------------------------------- #
 
 CARD_WINDOW_S = 172800            # merges older than 48h are history, not a gap
-CARD_REPING_S = 86400             # a daily reminder, never one per 60s sweep
+CARD_GRACE_S = 1200               # a ticket younger than this hasn't had time
+                                   # to be carded yet (#224) — the worker's own
+                                   # post-merge sequence (deploy, verify, THEN
+                                   # the card) takes minutes by design, and the
+                                   # original code had no minimum age at all,
+                                   # so it beat the worker's own card by
+                                   # seconds on every clean run
 CARD_MAX_LISTED = 8               # the phone gets numbers, not a wall
 
 _CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
@@ -6425,20 +6431,60 @@ _CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
 
 
 def merged_closes(root, base, since_ts, git_run=None):
-    """Issue numbers closed by commits on `base` since `since_ts`.
+    """`{issue_num: commit_epoch_ts}` for every issue closed by a commit on
+    `base` since `since_ts`.
 
     GitHub closes an issue from a `Closes #N` in a commit reachable from the
-    default branch, so this is the delivery event itself, read locally."""
+    default branch, so this is the delivery event itself, read locally — and
+    the commit's OWN timestamp is carried forward so `card_reconcile` can
+    gate a fresh merge with a per-TICKET grace period (#224), not just the
+    window's edge. A record separator (`%x1e`) marks the start of each
+    commit's block and a field separator (`%x1f`) splits its timestamp from
+    the message, so a `Closes #N` mentioned in either the subject or the
+    body is still found — the whole message stays in the same record. When
+    the same issue is mentioned in more than one commit within the window
+    (rare), the MOST RECENT commit's timestamp wins — the newest mention is
+    the honest "when did this actually settle" answer."""
     text = (git_run or _default_git_run)(
         ["git", "-C", str(root), "log", base,
-         "--since=@%d" % int(since_ts), "--format=%s%n%b"])
-    nums, seen = [], set()
-    for m in _CLOSES_RE.finditer(text or ""):
-        n = int(m.group(1))
-        if n not in seen:
-            seen.add(n)
-            nums.append(n)
-    return sorted(nums)
+         "--since=@%d" % int(since_ts), "--format=%x1e%ct%x1f%s%n%b"])
+    result = {}
+    for rec in (text or "").split("\x1e"):
+        ts_str, sep, rest = rec.partition("\x1f")
+        if not sep:
+            continue
+        try:
+            ts = float(ts_str)
+        except (TypeError, ValueError):
+            continue
+        for m in _CLOSES_RE.finditer(rest):
+            n = int(m.group(1))
+            result[n] = max(ts, result.get(n, ts))
+    return result
+
+
+def _normalize_closed(value):
+    """Normalize what a `closed_fetch` callback returns into the same
+    `{issue_num: ts_or_None}` shape `merged_closes` produces.
+
+    Accepts a `{n: ts}` dict, a list of `(n, ts)` pairs, or a bare list of
+    ints (the pre-#224 contract some callers — and this job's own existing
+    tests — still use). A bare int gets `ts=None`, and `card_reconcile`
+    treats an unknown timestamp as ALREADY past grace: not knowing when a
+    ticket closed must never suppress a report the pre-grace code would
+    have sent instantly — "report now" is the safe default, never "wait
+    forever for a timestamp that will never arrive"."""
+    if isinstance(value, dict):
+        return {int(k): (None if v is None else float(v))
+                for k, v in value.items()}
+    out = {}
+    for item in value or ():
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            n, ts = item
+            out[int(n)] = None if ts is None else float(ts)
+        else:
+            out[int(item)] = None
+    return out
 
 
 def _commits_in_window(root, base, since_ts, git_run=None):
@@ -6452,7 +6498,7 @@ def _commits_in_window(root, base, since_ts, git_run=None):
 
 def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                    git_run=None, card_probe=None, marker_ok=None,
-                   owner_by_sid=None, window=None, reping=None,
+                   owner_by_sid=None, window=None, grace=None,
                    closed_fetch=None):
     """Job 25 — see the section comment.
 
@@ -6460,13 +6506,40 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
     the probe carries the confirming fetch, so a base ref that had merely
     gone stale locally cannot on its own claim a ticket went unreported.
 
-    One repo is examined once per sweep however many panes sit in it, the
-    DETECTION is logged every sweep (issue #36's print-always convention),
-    and the PING is deduped per repo per `reping` window."""
+    Two independent fixes over the original #134 shape, both from live
+    false positives measured on this box (#224):
+
+      * GRACE PERIOD, per ticket. The original code had no minimum age at
+        all — only `window`, a MAXIMUM age — so it beat the worker's own
+        delivered card by seconds on every clean run (merge closed 3
+        tickets at 11:46:21, this job pinged "unreported" at 11:46:24,
+        the worker's cards were `sent` at 11:49:06-11:49:14). A ticket is
+        only "pingable" once `now - <its own closing commit's timestamp>
+        >= grace` — read from `merged_closes`'s per-ticket dict, never
+        derived from the window's edge, so the grace genuinely applies
+        per ticket rather than per repo (two tickets in the same repo, one
+        old and one fresh, are judged independently in the same sweep).
+      * DEDUP, per ticket, forever — not per repo per calendar day. A
+        ticket whose card can never arrive (the worker died, or the issue
+        closed with no PR at all) used to be re-announced once a day for
+        as long as it sat inside the 48h window, and any NEWLY stuck
+        ticket restarted that clock for every OTHER ticket in the same
+        repo (834 consecutive sweeps of the same six camera-box tickets,
+        ~14h). `state["card_unreported"][root]["pinged"]` now remembers
+        every issue number this job has ever pinged for that repo — a
+        ticket earns exactly one nag, and a genuinely NEW unreported
+        ticket still pings immediately, even in the sweep that just
+        deduped an old one. Entries are pruned once their ticket ages out
+        of `closed` (the 48h window), so the memory stays bounded.
+
+    One repo is examined once per sweep however many panes sit in it, and
+    DETECTION is logged every sweep regardless of grace/dedup (issue #36's
+    print-always convention — the log is a local journal line, never the
+    thing that reaches the user's phone)."""
     if card_probe is None:
         return []
     window = CARD_WINDOW_S if window is None else window
-    reping = CARD_REPING_S if reping is None else reping
+    grace = CARD_GRACE_S if grace is None else grace
     if marker_ok is None:
         try:
             from notify import marker_delivered as marker_ok
@@ -6504,11 +6577,11 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             # an API call, and a parked repo never costs one either.
             if _commits_in_window(root, base, now - window, git_run) > 0:
                 try:
-                    closed = sorted(set(closed_fetch(root, now - window) or []))
+                    closed = _normalize_closed(closed_fetch(root, now - window))
                 except Exception as e:
                     logs.append("card-reconcile closed-fetch-failed %s: %r"
                                 % (root, e))
-                    closed = []
+                    closed = {}
         if not closed:
             seen.pop(root, None)
             continue
@@ -6541,7 +6614,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             backfill_marker_key = None
             logs.append("card-reconcile backfill-namespace-unavailable %s"
                         % name)
-        missing = [n for n in closed
+        missing = [n for n in sorted(closed)
                    if not marker_ok("%s#%d" % (name, n))
                    and not (backfill_marker_key is not None
                             and marker_ok(backfill_marker_key(name, n)))]
@@ -6549,31 +6622,56 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             seen.pop(root, None)
             continue
 
+        # Detection is logged unconditionally, on `missing` alone (never
+        # gated on grace or on per-ticket dedup) — this is a local journal
+        # line, not the phone ping, so it stays true to issue #36's
+        # print-always convention regardless of what happens next.
         logs.append("card-unreported %s n=%d issues=%s"
                     % (name, len(missing),
                        ",".join(str(n) for n in missing[:CARD_MAX_LISTED])))
+
         prev = seen.get(root) or {}
-        pinged = prev.get("pinged_ts")
-        if dry_run or send_fn is None or (
-                pinged is not None and now - float(pinged) < reping):
-            # `send_fn is None` must NOT mark this pinged — nothing was
+        # Per-ticket "already pinged, ever" memory. Pruned to tickets still
+        # inside `closed` — once a ticket ages out of the 48h window it can
+        # never be "missing" again, so its entry is dead weight.
+        pinged = {k: v for k, v in (prev.get("pinged") or {}).items()
+                  if int(k) in closed}
+        # A ticket is still inside its own grace window when its closing
+        # commit's timestamp is known AND recent. An UNKNOWN timestamp
+        # (the `closed_fetch` bare-int-list fallback) is never treated as
+        # "inside grace" — not knowing when a ticket closed must never
+        # suppress a report the pre-#224 code would have sent instantly.
+        pingable = [n for n in missing
+                    if not (closed.get(n) is not None
+                            and now - closed[n] < grace)
+                    and str(n) not in pinged]
+
+        if dry_run or send_fn is None or not pingable:
+            # `send_fn is None` must NOT mark anything pinged — nothing was
             # delivered, so a later sweep still owes the user the alert
-            # (jobs 21/24's contract).
+            # (jobs 21/24's contract, reused verbatim). A `pingable` empty
+            # only because everything is still inside grace, or already
+            # pinged, is equally a no-op this sweep.
+            seen[root] = {"pinged": pinged}
             continue
-        shown = ", ".join("#%d" % n for n in missing[:CARD_MAX_LISTED])
-        more = ("" if len(missing) <= CARD_MAX_LISTED
-                else " a ďalších %d" % (len(missing) - CARD_MAX_LISTED))
+
+        shown = ", ".join("#%d" % n for n in pingable[:CARD_MAX_LISTED])
+        more = ("" if len(pingable) <= CARD_MAX_LISTED
+                else " a ďalších %d" % (len(pingable) - CARD_MAX_LISTED))
         status = send_fn(
             "\U0001f4ee **%s** — %d hotových ticketov bez hlásenia\n"
             "> Tieto tickety sa dokončili a zavreli, ale na telefón o nich "
             "neprišla žiadna správa: %s%s.\n"
             "> Práca je hotová — chýba len hlásenie o nej."
-            % (name, len(missing), shown, more),
+            % (name, len(pingable), shown, more),
             owner=owner_by_sid.get(sid) or None,
-            dedup_key="card-unreported:%s:%d" % (name, int(now // reping)),
+            dedup_key="card-unreported:%s:%s"
+                      % (name, "-".join(str(n) for n in pingable)),
             dry_run=dry_run)
         logs.append("card-unreported PING %s -> %s" % (name, status))
-        seen[root] = {"pinged_ts": now, "n": len(missing)}
+        for n in pingable:
+            pinged[str(n)] = now
+        seen[root] = {"pinged": pinged}
 
     if not dry_run:
         state["card_unreported"] = {k: v for k, v in seen.items() if k in live}
@@ -8777,8 +8875,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the checkout is `parovanie_produktov` while every marker is keyed
           `parovanie-produktov`. Confirmed before announced (job 24's
           contract): the probe fetches the base ref, the measurement follows
-          it. DETECTION ONLY — one deduped ping per repo per day, never a
-          keystroke (card_reconcile).
+          it. #224: a ticket younger than `CARD_GRACE_S` (20 min, read from
+          its OWN closing commit) is not yet a gap — the original code had
+          no minimum age at all and beat the worker's own delivered cards
+          by 3 seconds on a live clean run. And the ping is deduped per
+          TICKET, forever, never per repo per calendar day — a ticket that
+          can never get a card (the worker died, or the issue closed with
+          no PR) used to re-announce daily for the whole 48h window and
+          restart the clock for every OTHER ticket in the same repo (834
+          consecutive sweeps of the same six camera-box tickets). DETECTION
+          ONLY, never a keystroke (card_reconcile).
       (26) (only when `compact_stall_enabled`) COMPACT-STALL WATCH (#140) —
           the companion to the claim TTL in `compact_claim_active`. Two
           sessions on two boxes sat unable to compact — forestshop@dev1 at
