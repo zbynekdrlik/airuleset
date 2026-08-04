@@ -484,5 +484,108 @@ class TestClassifyReviewComment(unittest.TestCase):
         self.assertTrue(ok, reason)
 
 
+# --------------------------------------------------------------------------- #
+# #206 -- required_refs(): drop already-CLOSED issue refs from the required
+# set (a closed ticket is very unlikely to be "the ticket I'm designing for
+# right now" -- see hooks/block-commit-without-design.sh for the full story).
+# --------------------------------------------------------------------------- #
+
+class TestRequiredRefs(unittest.TestCase):
+
+    def test_closed_ref_is_dropped(self):
+        out = dg.required_refs([1734], "/some/cwd", state_of=lambda n, cwd: "CLOSED")
+        self.assertEqual(out, [])
+
+    def test_open_ref_is_kept(self):
+        out = dg.required_refs([41], "/some/cwd", state_of=lambda n, cwd: "OPEN")
+        self.assertEqual(out, [41])
+
+    def test_unmeasurable_ref_is_kept_fail_toward_required(self):
+        # never guess an issue is safe to skip -- unknown state -> still
+        # required, exactly the pre-#206 unconditional behaviour.
+        out = dg.required_refs([41], "/some/cwd", state_of=lambda n, cwd: None)
+        self.assertEqual(out, [41])
+
+    def test_mixed_refs_only_open_ones_survive(self):
+        closed = {1734, 1766}
+        out = dg.required_refs(
+            [42, 1734, 1766], "/some/cwd",
+            state_of=lambda n, cwd: "CLOSED" if n in closed else "OPEN")
+        self.assertEqual(out, [42])
+
+    def test_empty_refs_is_empty(self):
+        self.assertEqual(dg.required_refs([], "/some/cwd"), [])
+
+    def test_state_of_receives_the_number_and_cwd(self):
+        seen = []
+
+        def spy(n, cwd):
+            seen.append((n, cwd))
+            return "OPEN"
+
+        dg.required_refs([41, 42], "/repo/dir", state_of=spy)
+        self.assertEqual(seen, [(41, "/repo/dir"), (42, "/repo/dir")])
+
+    def test_default_state_of_is_gh_issue_state(self):
+        # no state_of passed -> falls back to the real gh-backed resolver,
+        # never silently no-ops.
+        import inspect
+        src = inspect.getsource(dg.required_refs)
+        self.assertIn("_gh_issue_state", src)
+
+
+class TestGhIssueState(unittest.TestCase):
+    """`_gh_issue_state` never raises and never guesses -- any failure
+    (missing gh, timeout, bad JSON, unexpected value) is None (unmeasurable),
+    never a fabricated OPEN or CLOSED."""
+
+    def _fake_run(self, returncode=0, stdout="OPEN\n"):
+        import unittest.mock as m
+        return m.patch.object(
+            dg.subprocess, "run",
+            return_value=m.Mock(returncode=returncode, stdout=stdout))
+
+    def test_open_state_parses(self):
+        with self._fake_run(stdout="OPEN\n"):
+            self.assertEqual(dg._gh_issue_state(41, "/cwd"), "OPEN")
+
+    def test_closed_state_parses(self):
+        with self._fake_run(stdout="CLOSED\n"):
+            self.assertEqual(dg._gh_issue_state(41, "/cwd"), "CLOSED")
+
+    def test_lowercase_is_normalized(self):
+        with self._fake_run(stdout="closed\n"):
+            self.assertEqual(dg._gh_issue_state(41, "/cwd"), "CLOSED")
+
+    def test_nonzero_exit_is_unmeasurable(self):
+        with self._fake_run(returncode=1, stdout=""):
+            self.assertIsNone(dg._gh_issue_state(41, "/cwd"))
+
+    def test_unexpected_output_is_unmeasurable(self):
+        with self._fake_run(returncode=0, stdout="garbage\n"):
+            self.assertIsNone(dg._gh_issue_state(41, "/cwd"))
+
+    def test_subprocess_exception_is_unmeasurable_never_raises(self):
+        import unittest.mock as m
+        with m.patch.object(dg.subprocess, "run", side_effect=OSError("no gh")):
+            self.assertIsNone(dg._gh_issue_state(41, "/cwd"))
+
+    def test_timeout_is_unmeasurable(self):
+        import subprocess as sp
+        import unittest.mock as m
+        with m.patch.object(dg.subprocess, "run",
+                            side_effect=sp.TimeoutExpired("gh", 8)):
+            self.assertIsNone(dg._gh_issue_state(41, "/cwd"))
+
+    def test_runs_with_cwd_and_a_timeout(self):
+        import unittest.mock as m
+        with m.patch.object(dg.subprocess, "run",
+                            return_value=m.Mock(returncode=0, stdout="OPEN")) as p:
+            dg._gh_issue_state(41, "/some/repo")
+            _, kwargs = p.call_args
+            self.assertEqual(kwargs.get("cwd"), "/some/repo")
+            self.assertIsNotNone(kwargs.get("timeout"))
+
+
 if __name__ == "__main__":
     unittest.main()
