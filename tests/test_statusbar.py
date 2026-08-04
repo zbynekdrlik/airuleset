@@ -842,8 +842,9 @@ class QuestionsSegment(unittest.TestCase):
 
 
 class ContextCostSegment(unittest.TestCase):
-    """'ctx <size> · ~$<cost>/ťah' — the CURRENT turn's context size + its
-    real dollar cost (2026-07-25 cost-fix package). Source: the statusline
+    """'ctx <size> ~$<cost>' (was 'ctx <size> · ~$<cost>/ťah' before the
+    footer's labels were shortened, #223) — the CURRENT turn's context size
+    + its real dollar cost (2026-07-25 cost-fix package). Source: the statusline
     stdin payload's `context_window.current_usage` (the exact token
     breakdown of the LAST billed API call) + `model.id`, priced via the
     SAME per-Mtok table `burn` uses. Colour-escalates on RAW token count:

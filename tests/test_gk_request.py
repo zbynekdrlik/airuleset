@@ -13,7 +13,8 @@ prostredníka medzi vami"). The canonical mechanism, owned by airuleset
   sweep; IDLE supervisor pane gets a typed nudge, BUSY pane gets NOTHING (the
   label alone queues it for the master loop), no live pane → ONE deduped
   Discord ping. Reduced-stream homes are never nudged.
-- VISIBILITY = `gk-req N` statusline badge on full-authority boxes.
+- VISIBILITY = `gkq N` statusline badge on full-authority boxes (was `gk-req
+  N` before the footer's labels were shortened, #223).
 """
 
 import json
@@ -224,12 +225,13 @@ class TestStatuslineBadge(unittest.TestCase):
             return statusbar.tickets_segment(root, home=home, spawn=False)
 
     def test_badge_renders_when_requests_open(self):
+        # label shortened 'gk-req' -> 'gkq' (#223)
         seg = self._segment(gk_req=3)
-        self.assertIn("gk-req 3", seg)
+        self.assertIn("gkq 3", seg)
 
     def test_badge_hidden_at_zero(self):
         seg = self._segment(gk_req=0)
-        self.assertNotIn("gk-req", seg)
+        self.assertNotIn("gkq", seg)
 
     def test_refresh_collects_the_count_for_full_authority(self):
         src = Path(airuleset.__file__).read_text()
