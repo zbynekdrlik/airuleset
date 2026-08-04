@@ -2984,3 +2984,80 @@ hit once, confirmed transient by 5/5 isolated reruns, passed clean on the
 retry that shipped), ruff clean, pushed + installed locally + deployed to
 all 6 remote targets. Issue auto-closed on push via the `Closes #225`
 trailer in 5609a2f. Discord run-card fired.
+
+## 2026-08-04 — batch: #146 (compact DECLINE noise → per-session-once dedup) + #227 (compact-request --self wired into all three /goal templates)
+
+Two independently-filed tickets, bundled onto one push per the batch gate.
+Both direct to `main` (no dev branch / no PR / no CI — `airuleset.py push`'s
+own fail-closed suite is the gate).
+
+**#146**: validated live before touching code — the owner's own already-
+posted VERDICT comment on the ticket narrowed it to ONE remaining
+actionable item (throttle the DECLINE noise; the served-session-boundary
+design question stays explicitly out of scope, split out as #228). Live
+evidence at dispatch time: `~/.claude/compact-decisions.log` at 502908/
+512000 bytes, 1465 of its 2842 lines (51.5%) from ONE 8.5h+ forestshop
+session declining every ~60-70s — a different session than the one the
+ticket originally cited, proving the defect still live a week later. Root
+cause: `_decide_log_throttled` gated the high-volume non-worker DECLINE
+class with a GLOBAL, time-based 60s heartbeat shared across every session
+on the box, not keyed by session at all. Fix: `_decide_log_once_per_session`
+logs the FIRST decline for a (session, reason) pair via a tiny marker file
+under a new `.compact-decisions-seen/` directory, never again for that
+pair, TTL-pruned. Live differential proof (pre-fix HEAD vs the fix, real
+payloads, both directions): the same session declining again 120s later —
+OLD writes a second line forever, NEW writes none; a DIFFERENT session
+declining 0s after another — OLD suppresses its first-ever decline (a real
+bug in the shared window), NEW logs it independently. TDD: 636db66 [red] /
+45edce3 [green]. Closed with evidence; #228 filed for the deferred design
+question.
+
+**#227**: measured all three `/goal STOP CONDITIONS` templates first (full
+3807/4000, branch-merge 3917/4000 = 83 headroom, fork-no-merge 3946/4000 =
+54 headroom — unchanged since #225, confirming the gap was still real).
+The `compact-request --self` instruction needs ~144 chars; neither reduced
+template had room. Reclaimed 168 chars in EACH by cutting text 100%
+duplicated across all three templates — never enforcement-bearing: the
+clause-A "re-prints this /goal line" parenthetical (kept in FULL only) and
+the bounce-lane restatement (compressed; its unabbreviated form already
+lives in the skill body's own Step 3.1). Net −24 chars per reduced
+template after adding the instruction (branch-merge → 3893, fork-no-merge
+→ 3922). TDD: 35cbd3e [red] / 6441b84 [green] — widened
+`TestFullAuthorityTemplateCallsTheSelfCallback` to require all three
+profiles, replacing the honest-gap test with its positive counterpart.
+Auto-closed on push via the `Closes #227` trailer.
+
+**Review-hardening round** (fresh-context Opus review, dispatched before
+push — full findings on both tickets' comment threads): 2 MAJOR + 1 MINOR
+defect found in the #146 fix, all in code that diff introduced. (1) The
+header comment's claim "agent_type never changes mid-session" was
+empirically false on dev1's own corpus (6 of 8 real sessions logged more
+than one distinct type) — the dedup key now folds in `agent_type` too, so
+a session running Explore then general-purpose then ticket-validator gets
+3 lines, not 1 shared one; a repeat of the SAME type is still deduped.
+(2) marker creation could silently fail (ENAMETOOLONG on a huge
+session_id) and the dedup disengaged with zero signal — key now clamped
+to 200 bytes. (3) `[ -e ]` then `touch` raced under real concurrency
+(verified: 12-way race produced up to 4 lines for one pair) — now atomic
+via `set -o noclobber`, verified back down to exactly 1. Also corrected
+the `find -mtime` TTL math (off by one day against its own comment) and a
+stale positional docstring reference. TDD: 03e95a8 [red] / d55fc6d
+[green]. A pre-existing, out-of-scope finding (log-line forgery via an
+unsanitized `session_id` in `_decide_log`, untouched by this diff) filed
+separately as #229. A test-lock gap the review also flagged (the
+clause-A hint's only guard was whole-file-scoped, so it silently passed
+while 2 of 3 templates lost the hint) closed with an explicit per-template
+lock (dcf6897) documenting the FULL-only asymmetry as intentional
+(re-arm is machine-backstopped regardless by watchdog jobs 9/20).
+
+Playbook: three lessons added to `.claude/rules/airuleset-internals.md`
+(adeeb74) — dedup keys must name every field the claim depends on, the
+`find -mtime` off-by-one, and a reusable atomic noclobber marker-write
+pattern.
+
+Full local suite before push: 3695 tests, 1 failure on the first pass —
+the SAME already-tracked #226 flake
+(`OneShotReviewFollowupTest::test_oneshot_ttl_is_configurable_and_short_ttls_decay_fast`,
+a 1-second wall-clock TTL racing subprocess-spawn overhead, unrelated file,
+unrelated to this batch's diff), confirmed transient by an isolated rerun
+(passed alone in 0.45s). `python3 airuleset.py push` result below.
