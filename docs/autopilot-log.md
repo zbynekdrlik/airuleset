@@ -2890,3 +2890,36 @@ all correctly absent, exit 0, no traceback.
 locally + deployed to all 6 remote targets (dev2, gatekeeper, montalu@subdev,
 marek@subdev, david@subdev, simap@subdev). All three issues auto-closed on
 push via their `Closes #N` trailers. Discord run-cards fired for all three.
+
+2026-08-04 solo: #224 watchdog job 25 (card_reconcile) — two independent
+false-positive fixes, both live-measured. Grace period per ticket:
+merged_closes() now returns {issue_num: commit_epoch_ts} (record/field
+separator pair in the git-log format string carries the commit's own
+timestamp), gated on CARD_GRACE_S=1200s read from each ticket's OWN closing
+commit, never the window edge — two tickets in the same repo (one old, one
+fresh) judged independently in the same sweep. Dedup per ticket, forever:
+state["card_unreported"][root]["pinged"] replaces the old per-repo-per-day
+CARD_REPING_S bucket; a ticket earns exactly one nag ever, pruned once it
+ages out of the 48h window. _watchdog_closed_fetch (the gh fallback for
+trailer-less repos like tvdole) carries closedAt through the same path via
+a new _normalize_closed() helper (also accepts the old bare-int-list shape,
+unknown ts = already past grace). TDD: ecb72be[red]->0c9927d[green], 4 new
+TestCardReconcile specimens + all 21 pre-existing pass unmodified. Filed a
+separate unrelated pre-existing flake (wall-clock TTL race in
+test_ci_poll_repeat_block.py, ~50% failure rate, confirmed against this
+commit's own parent) rather than folding it into this diff.
+
+Live-verified on dev1 (real, non-dry-run production sweeps, not just
+--dry-run): #224's own closing commit stayed silent through the ~20-minute
+grace window and pinged exactly once ~22 min after landing; camera-box's 6
+and forestshop-app's 10 already-stuck tickets pinged exactly ONCE at the
+moment the fix went live (12:13:13) and have stayed silent on every sweep
+since despite the unconditional detection log still firing every sweep. A
+direct OLD-vs-NEW differential against the same real repos + real gh data
+confirmed the OLD code re-pings the same camera-box tickets a second time
+one day later while the NEW code stays silent.
+
+`python3 airuleset.py push`: 3607 tests (1 pre-existing unrelated flake
+confirmed transient — passed clean on the retry that shipped), ruff clean,
+pushed + installed locally + deployed to all 6 remote targets. Issue
+auto-closed on push via its `Closes #224` trailer. Discord run-card fired.
