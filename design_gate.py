@@ -54,6 +54,7 @@ exists to avoid) -- deliberately not reinvented here.
 """
 import os
 import re
+import subprocess
 import time
 
 _DESIGN_DIRNAME = "design-posted"
@@ -324,3 +325,50 @@ def issue_refs(text):
         if n not in seen:
             seen.append(n)
     return seen
+
+
+# --------------------------------------------------------------------------- #
+# #206 -- an already-CLOSED issue reference no longer requires a design
+# marker. The same syntactic shapes (`#N`, `(#N)`, comma/slash-separated
+# lists) are used BOTH for "the ticket this commit is for" AND for a
+# historical/context reference (the reported false-block: a commit prose
+# citing "(owner decisions #1734/#1766)", both long-closed tickets) -- no
+# purely positional/syntactic rule can tell the two apart (this repo's own
+# "(#N)" convention for the commit's own ticket is syntactically identical
+# to the false-positive shape). A CLOSED issue, by definition, is
+# overwhelmingly unlikely to be "the ticket I'm designing for right now",
+# so GitHub's own issue state is the discriminator.
+# --------------------------------------------------------------------------- #
+
+def _gh_issue_state(n, cwd, timeout=8):
+    """GitHub's own state ("OPEN"/"CLOSED") for issue #`n`, resolved via
+    `gh` run with `cwd` as the working directory so it auto-detects the
+    repo -- the same pattern `hooks/block-fork-no-merge-issue-close.sh`
+    already uses for its own live `gh` call. Returns None on ANY failure
+    (gh missing, no network, auth issue, timeout, unexpected output) --
+    unmeasurable, never guessed, and NEVER raises."""
+    try:
+        out = subprocess.run(
+            ["gh", "issue", "view", str(n), "--json", "state", "--jq", ".state"],
+            cwd=cwd, capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    state = (out.stdout or "").strip().upper()
+    return state if state in ("OPEN", "CLOSED") else None
+
+
+def required_refs(refs, cwd, state_of=None):
+    """Filter `refs` (issue numbers with no marker yet) down to the ones
+    that STILL require a design-comment marker: drop any that are already
+    CLOSED on GitHub at commit time. Fails toward STILL REQUIRED (never
+    drops a ref whose state can't be determined) -- gh missing, no
+    network, timeout, unexpected output all keep the ref in the required
+    set, which is also exactly this gate's pre-#206 unconditional
+    behaviour, so this is a pure narrowing of when the gate fires, never a
+    widening. `state_of` defaults to `_gh_issue_state`; tests inject a
+    stub so this stays pure/offline."""
+    state_of = state_of or _gh_issue_state
+    return [n for n in refs if state_of(n, cwd) != "CLOSED"]

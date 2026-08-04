@@ -19,6 +19,16 @@ set -euo pipefail
 # Every commit after the FIRST one for an issue passes for free, since the
 # marker persists once written.
 #
+# #206 -- a still-unmarked ref that is already CLOSED on GitHub is dropped
+# from the required set (design_gate.required_refs) -- a historical/context
+# reference in the commit's own prose (e.g. "(owner decisions #1734)" for
+# an old, closed ticket) is overwhelmingly unlikely to be the ticket this
+# commit is actually for, and no purely syntactic rule can tell the two
+# apart (this repo's own "(#N)" convention for "this commit's ticket" is
+# syntactically identical to the false-positive shape). Fails toward STILL
+# REQUIRED whenever the state can't be determined (gh missing, no network,
+# timeout) -- never guesses an issue is safe to skip.
+#
 # ISSUE-REFERENCE SCOPE is deliberately the WHOLE command text, not just a
 # parsed -m/-F body — unlike block-ungated-issue-filing.sh's heavy
 # heredoc/quote-aware body resolution, this only needs to know WHICH issue
@@ -105,6 +115,11 @@ if not repo_key:
     sys.exit(0)          # unmeasurable (no origin) -> never guess, never block
 
 missing = [n for n in refs if not dg.marker_exists(repo_key, n)]
+# #206 -- drop any still-unmarked ref that is already CLOSED on GitHub (a
+# historical/context reference, not the ticket this commit is for). Only
+# ever queries refs with no marker yet, so the common case (this commit's
+# OWN ticket already has one) costs zero extra `gh` calls.
+missing = dg.required_refs(missing, cwd)
 if missing:
     print(repo_key)
     print(" ".join(str(n) for n in missing))

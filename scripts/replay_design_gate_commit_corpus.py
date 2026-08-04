@@ -26,8 +26,14 @@ OFF ever blocks anything, or the two arms disagree on a no-reference commit)
 is a genuine hook bug and is reported, never hidden.
 
 Usage: python3 scripts/replay_design_gate_commit_corpus.py [--limit N]
-Read-only: only ever calls `git log` locally and the hook itself (no gh, no
-network, no real ~/.claude touched -- HOME is scratch-relocated per call).
+Read-only: only ever calls `git log` locally and the hook itself. #206 added
+a `gh issue view` state check inside the hook for still-unmarked refs -- a
+STUBBED `gh` (see _stub_gh_bindir below) is prepended to PATH for every
+run_hook() call so this stays true: no real gh, no network, no real
+~/.claude touched (HOME is scratch-relocated per call as before). The stub
+always answers OPEN, which reproduces this script's pre-#206 invariant
+exactly (the closed-issue exemption is unit-tested separately, with a
+controllable stub, in tests/test_design_gate.py).
 """
 import argparse
 import json
@@ -65,7 +71,22 @@ def real_commit_subjects(limit=None):
     return out[:limit] if limit else out
 
 
-def run_hook(message, agent_type, home):
+def _stub_gh_bindir():
+    """A `gh` that always answers OPEN for `gh issue view <n> --json state
+    --jq .state` -- reproduces the pre-#206 unconditional-required
+    behaviour exactly (no real gh call, no network), so this script's own
+    "no gh, no network" contract holds after #206."""
+    d = Path(tempfile.mkdtemp(prefix="airuleset-replay-gh-"))
+    fake = d / "gh"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = issue ] && [ "$2" = view ]; then echo OPEN; exit 0; fi\n'
+        'exit 1\n')
+    fake.chmod(0o755)
+    return d
+
+
+def run_hook(message, agent_type, home, gh_bindir):
     payload = {"tool_input": {"command": 'git commit -m "%s"' % message.replace('"', '\\"')},
               "session_id": "replay-sess", "cwd": str(ROOT)}
     if agent_type is not None:
@@ -73,6 +94,7 @@ def run_hook(message, agent_type, home):
         payload["agent_id"] = "replay-agent"
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env["PATH"] = str(gh_bindir) + os.pathsep + env.get("PATH", "")
     try:
         r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, timeout=15)
@@ -95,6 +117,7 @@ def main(argv=None):
     home_off = Path(tempfile.mkdtemp(prefix="airuleset-replay-off-"))
     (home_on / ".claude").mkdir(parents=True)
     (home_off / ".claude").mkdir(parents=True)
+    gh_bindir = _stub_gh_bindir()
 
     n_total = 0
     n_has_ref = 0
@@ -108,8 +131,8 @@ def main(argv=None):
         for msg in subjects:
             n_total += 1
             refs = dg.issue_refs(msg)
-            rc_on = run_hook(msg, "autopilot-worker", home_on)
-            rc_off = run_hook(msg, None, home_off)
+            rc_on = run_hook(msg, "autopilot-worker", home_on, gh_bindir)
+            rc_off = run_hook(msg, None, home_off, gh_bindir)
 
             if rc_off != 0:
                 mismatches.append(("OFF-arm-blocked", msg, rc_on, rc_off, refs))
@@ -132,6 +155,7 @@ def main(argv=None):
     finally:
         shutil.rmtree(home_on, ignore_errors=True)
         shutil.rmtree(home_off, ignore_errors=True)
+        shutil.rmtree(gh_bindir, ignore_errors=True)
 
     print("=== CORPUS REPLAY: block-commit-without-design.sh ===")
     print("repo: %s" % ROOT)
