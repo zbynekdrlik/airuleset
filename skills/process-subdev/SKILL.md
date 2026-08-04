@@ -148,7 +148,26 @@ queue is empty).
   delivery guarantee, not your tmux command. The repo's `subdev-handoff-label` workflow
   (template ships with this skill) auto-adds `ready-for-review` on the readiness comment
   AND auto-removes `prio:bounce` on the re-ready comment (a read-role sub-dev cannot
-  touch labels). Then re-run this pipeline from step 3 when the re-handoff lands.
+  touch labels).
+  **Mandatory rule-update step (bounce ⇒ rule-update loop, #222) — every bounce is
+  evidence the sub-dev RULES are deficient, not just that this one PR was wrong.**
+  Before finishing the bounce, answer: **"which sub-dev rule/checklist item would have
+  caught this finding BEFORE hand-off?"**
+    - **The rule exists but was skipped** → name the skipped rule directly IN the
+      bounce comment (so the stream sees the PROCESS failure, not only the code
+      failure — a bounce that only says "field X is wrong" teaches nothing about how
+      to stop it recurring).
+    - **No such rule exists yet** → update the repo's own sub-dev hand-off contract
+      (repo-side: the review dimensions / hand-off checklist in that repo's CLAUDE.md or
+      playbook) in the SAME review cycle, before moving to the next hand-off. If the gap
+      is in an airuleset-owned skill/agent text (this skill, `autopilot-worker`, etc.)
+      file an airuleset ticket for it: `gh issue create -R zbynekdrlik/airuleset`.
+  A bounce with neither a named skipped rule nor a filed/landed rule update is
+  incomplete — the goal is a PR arriving so well-prepared a bounce doesn't happen
+  again for the SAME reason twice, not a loop that just keeps finding more and more
+  problems in tickets that should have shipped cleanly. Track bounce-rate per stream
+  as the metric this loop is meant to drive down.
+  Then re-run this pipeline from step 3 when the re-handoff lands.
 - **Parallel-run rule:** gatekeeper review and the sub-dev's autopilot run CONCURRENTLY
   by design — the review object is the slice pinned at step 2. Never ask the user to
   pause a sub-dev's loop for a review.

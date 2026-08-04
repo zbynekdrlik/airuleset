@@ -100,7 +100,7 @@ class TestBounceRuleUpdateLoop(TestCase):
     def test_missing_rule_updates_the_repo_hand_off_contract(self):
         t = read(SKILL)
         self.assertIn("hand-off contract", t.lower())
-        self.assertIn("same cycle", t.lower())
+        self.assertIn("same review cycle", t.lower())
 
     def test_airuleset_owned_gap_is_filed(self):
         t = read(SKILL)
