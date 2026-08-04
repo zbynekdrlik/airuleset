@@ -582,13 +582,23 @@ class TestCardReconcile(unittest.TestCase):
         self.assertTrue(self.sent, "the probe's answer must be used")
         self.assertIn("#77", self.sent[0]["msg"])
 
-    def test_the_probe_is_not_consulted_when_trailers_already_answered(self):
-        # the expensive path must stay off for a repo that answers locally
+    def test_trailers_that_answer_locally_are_still_verified_exactly_once(self):
+        # #232 DELIBERATELY REVERSES this test's pre-#232 assertion (which
+        # was `calls == []`, i.e. "the expensive path must stay off for a
+        # repo that answers locally"). A trailer match found by
+        # `merged_closes` is a bare commit-message-keyword match, never
+        # proof GitHub actually closed the ticket from it (odoo-erp: 22
+        # local matches, zero real GitHub auto-closes) — so a genuinely
+        # PINGABLE local-trailer candidate must still be confirmed against
+        # GitHub, exactly ONCE per repo per sweep (never twice — see
+        # `test_the_fallback_verified_path_is_not_re_verified_a_second_time`
+        # for the sibling bound on the OTHER path).
         calls = []
         r = self.repo(closes=(3,))
         self.reconcile([r], closed_fetch=lambda root, since: calls.append(root))
-        self.assertEqual(calls, [], "one gh call per repo per sweep is the "
-                                    "cost this job was designed to avoid")
+        self.assertEqual(calls, [str(r)],
+                         "a pingable local-trailer candidate must be "
+                         "verified against GitHub before it can nag")
 
     def test_the_probe_is_not_consulted_for_a_parked_repo(self):
         calls = []
@@ -609,6 +619,82 @@ class TestCardReconcile(unittest.TestCase):
         logs = self.reconcile([r], closed_fetch=boom)
         self.assertEqual(self.sent, [])
         self.assertTrue(any("closed-fetch" in ln for ln in logs), logs)
+
+    # --- #232: a `merged_closes` candidate — the LOCAL, unverified read —
+    # is a commit-message-keyword match, not proof GitHub actually closed
+    # the ticket from it. This is the DOMINANT path (unlike #230's fallback
+    # above, which only ever runs when `merged_closes` found ZERO trailers)
+    # and it is where the odoo-erp false positives actually came from: 22
+    # local `Fixes #N` matches on a non-default branch, none of which ever
+    # triggered a GitHub auto-close. Every `pingable` candidate must be
+    # confirmed against the SAME `_watchdog_closed_fetch` GraphQL check
+    # #230 already taught to require a merged-PR closer, before it ever
+    # reaches `send_fn`.
+
+    def test_a_merged_closes_candidate_confirmed_by_a_merged_pr_still_pings(self):
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: {3: NOW - 3600})
+        self.assertTrue(self.sent, "a genuinely merged-PR-closed ticket "
+                                   "must still nag — no regression")
+        self.assertIn("#3", self.sent[0]["msg"])
+
+    def test_a_merged_closes_candidate_hand_closed_on_github_never_pings(self):
+        # the odoo-erp shape via a different door: local git found a real
+        # `Closes #3` trailer, but GitHub's own CLOSED_EVENT.closer for #3
+        # is None (hand-closed) — `_watchdog_closed_fetch`'s own contract
+        # already excludes such a ticket from its returned dict, so an
+        # empty dict here is exactly what it would hand back.
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: {})
+        self.assertEqual(self.sent, [],
+                         "a hand-closed ticket was never owed a card")
+
+    def test_a_merged_closes_candidate_still_open_on_github_never_pings(self):
+        # the odoo-erp `Fixes #N`-on-`develop` shape: the commit message
+        # trailer matched locally, but the issue is still OPEN on GitHub —
+        # `_watchdog_closed_fetch`'s `states: CLOSED` query would never
+        # even return it. Confirmed dict is non-empty (other tickets DID
+        # verify) but genuinely never contains THIS candidate — proves the
+        # check is a real membership test, not "any confirmed -> allow all".
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: {9: NOW - 100})
+        self.assertEqual(self.sent, [])
+
+    def test_the_verifier_erroring_drops_the_ping_but_does_not_swallow_it(self):
+        def boom(root, since):
+            raise RuntimeError("gh api graphql timed out")
+        r = self.repo(closes=(3,))
+        logs = self.reconcile([r], closed_fetch=boom)
+        self.assertEqual(self.sent, [],
+                         "an unverifiable candidate must not ping")
+        self.assertTrue(any("verify" in ln for ln in logs), logs)
+        # NOT swallowed forever: nothing was added to the per-ticket dedup
+        # (`pinged`) on a failed verification, so a LATER sweep — once
+        # verification succeeds — must still be able to report it.
+        self.reconcile([r], closed_fetch=lambda root, since: {3: NOW - 3600})
+        self.assertTrue(self.sent, "a later successful verification must "
+                                   "still be able to report it")
+
+    def test_the_fallback_verified_path_is_not_re_verified_a_second_time(self):
+        # when `merged_closes` itself found nothing (the tvdole/#230 shape),
+        # `closed_fetch` already ran once as the FALLBACK and its answer IS
+        # already the verified truth — calling it again for the SAME sweep
+        # would double the API cost the ticket explicitly bounds against
+        # ("at most one query per repo per sweep").
+        calls = []
+        def fetch(root, since):
+            calls.append(since)
+            return {77: NOW - 3600}
+        r = self.repo(closes=(), age=3600)
+        (r / "f").write_text("x")
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "feat: no trailer here", ts=NOW - 3600)
+        _git(r, "push", "-q", "origin", "main")
+        _git(r, "fetch", "-q", "origin")
+        self.reconcile([r], closed_fetch=fetch)
+        self.assertEqual(len(calls), 1,
+                         "at most one query per repo per sweep")
+        self.assertTrue(self.sent)
 
     # --- #141 half 2: a DELIVERED digest is a report too ------------------
     # The two mechanisms used disjoint key namespaces: the digest writes one
@@ -1566,6 +1652,110 @@ class TestWatchdogClosedFetchEndToEndThroughCardReconcile(unittest.TestCase):
         self.assertNotIn("#2181", self.sent[0])
         self.assertNotIn("#2300", self.sent[0])
         self.assertNotIn("#1768", self.sent[0])
+
+
+# --------------------------------------------------------------------------- #
+# 5. #232 — the same GitHub verification, reached through the DOMINANT path:
+#    `merged_closes` (the LOCAL, unverified read) is non-empty, so #230's
+#    fallback branch is never entered on its own. This is the real odoo-erp
+#    shape end-to-end: local `Closes #N` trailers exist, and a real (mocked
+#    subprocess) `gh api graphql` call answers with a mix of hand-closed,
+#    still-open and genuinely-merged tickets.
+# --------------------------------------------------------------------------- #
+
+class TestMergedClosesCandidatesEndToEndVerifiedAgainstGitHub(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-mergedver-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sent = []
+        self.state = {}
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append(msg)
+        return "sent"
+
+    def repo(self, name="odoo-erp", closes=(3, 5, 7)):
+        r = self.tmp / name
+        r.mkdir()
+        _git(r, "init", "-q", "-b", "main")
+        (r / "f").write_text("0")
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "init", ts=NOW - 10 * DAY)
+        for n in closes:
+            (r / "f").write_text(str(n))
+            _git(r, "add", "f")
+            _git(r, "commit", "-qm", "feat: thing\n\nCloses #%d" % n,
+                 ts=NOW - 3600)
+        bare = self.tmp / (name + ".git")
+        _git(r, "clone", "-q", "--bare", str(r), str(bare))
+        _git(r, "remote", "add", "origin", str(bare))
+        _git(r, "fetch", "-q", "origin")
+        _git(r, "remote", "set-head", "origin", "main")
+        return r
+
+    def _graphql(self, issues):
+        nodes = [
+            {"number": n, "closedAt": ts,
+             "timelineItems": {"nodes": [{"closer": closer}]}}
+            for n, ts, closer in issues
+        ]
+        return json.dumps(
+            {"data": {"repository": {"issues": {"nodes": nodes}}}})
+
+    def _run_with_gh(self, r, gh_out):
+        import airuleset
+        real_run = subprocess.run
+
+        def fake_run(args, *a, **kw):
+            if args and args[0] == "gh":
+                return gh_out
+            return real_run(args, *a, **kw)
+
+        with m.patch("subprocess.run", side_effect=fake_run):
+            return wd.card_reconcile(
+                NOW, None, self.state, {"s": str(r)},
+                card_probe=lambda root, base: None,
+                marker_ok=lambda key: False,
+                send_fn=self.send,
+                closed_fetch=airuleset._watchdog_closed_fetch)
+
+    def test_only_the_genuinely_merged_ticket_pings_the_rest_stay_silent(self):
+        import time
+
+        def iso(age_s):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - age_s))
+
+        r = self.repo(closes=(3, 5, 7))
+        gh_out = m.Mock(returncode=0, stdout=self._graphql([
+            (3, iso(3600), None),                                          # hand-closed
+            (7, iso(3600), {"__typename": "PullRequest", "merged": True}), # genuinely merged
+            # #5 never appears at all — still OPEN on GitHub
+        ]))
+        self._run_with_gh(r, gh_out)
+        self.assertTrue(self.sent)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("#7", self.sent[0])
+        self.assertNotIn("#3", self.sent[0])
+        self.assertNotIn("#5", self.sent[0])
+
+    def test_gh_failure_drops_the_ping_this_sweep_but_a_later_success_still_reports(self):
+        r = self.repo(closes=(3,))
+        boom = m.Mock(returncode=1, stdout="")
+        self._run_with_gh(r, boom)
+        self.assertEqual(self.sent, [],
+                         "an unverifiable candidate never pings")
+
+        import time
+
+        def iso(age_s):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - age_s))
+
+        gh_out = m.Mock(returncode=0, stdout=self._graphql([
+            (3, iso(3600), {"__typename": "PullRequest", "merged": True})]))
+        self._run_with_gh(r, gh_out)
+        self.assertTrue(self.sent, "not swallowed forever — a later "
+                                   "successful verification must report it")
 
 
 if __name__ == "__main__":
