@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -929,6 +930,131 @@ class FmtTokens(unittest.TestCase):
         self.assertEqual(statusbar._fmt_tokens(1000), "1K")
         self.assertEqual(statusbar._fmt_tokens(570000), "570K")
         self.assertEqual(statusbar._fmt_tokens(1500000), "1.5M")
+
+
+def _write_claude_json(home, data):
+    Path(home).mkdir(parents=True, exist_ok=True)
+    (Path(home) / ".claude.json").write_text(json.dumps(data))
+
+
+class SubscriptionSegment(unittest.TestCase):
+    """'sub <D.M.>(<Nd>)' -- the monthly subscription-renewal anchor of the
+    Claude account logged in on THIS box (#223). Source:
+    ~/.claude.json -> oauthAccount.subscriptionCreatedAt; the renewal is
+    the NEXT occurrence of that day-of-month at/after today, clamped for
+    short months (31 -> the month's last day). Fails silently on any
+    missing/malformed input -- a statusline segment must never raise."""
+
+    def test_renders_days_until_next_anniversary(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-12T16:34:03.439322Z"}})
+            now = datetime(2026, 8, 4, tzinfo=timezone.utc).timestamp()
+            seg = statusbar.subscription_segment(home=home, now=now)
+            self.assertIn("sub 12.8.(8d)", seg)
+
+    def test_renewal_today_renders_zero_days_and_red(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-12T16:34:03Z"}})
+            now = datetime(2026, 8, 12, 10, tzinfo=timezone.utc).timestamp()
+            seg = statusbar.subscription_segment(home=home, now=now)
+            self.assertIn("sub 12.8.(0d)", seg)
+            self.assertIn("38;5;196m", seg)             # red on the last day
+
+    def test_renewal_far_away_renders_green(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-12T00:00:00Z"}})
+            now = datetime(2026, 8, 4, tzinfo=timezone.utc).timestamp()
+            seg = statusbar.subscription_segment(home=home, now=now)
+            self.assertIn("38;5;40m", seg)
+
+    def test_short_month_clamps_the_day(self):
+        # anniversary day-of-month 31; the current month (Feb 2026) only has
+        # 28 days -- clamp to the 28th, never crash / overflow into March.
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-31T00:00:00Z"}})
+            now = datetime(2026, 2, 5, tzinfo=timezone.utc).timestamp()
+            seg = statusbar.subscription_segment(home=home, now=now)
+            self.assertIn("sub 28.2.", seg)
+
+    def test_missing_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_missing_oauth_account_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {})
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_missing_subscription_created_at_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {"emailAddress": "x@y.z"}})
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_unparseable_date_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": "not-a-date"}})
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_garbage_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            Path(home).mkdir(parents=True, exist_ok=True)
+            (Path(home) / ".claude.json").write_text("not json at all")
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_non_dict_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, [1, 2, 3])
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+    def test_never_raises_on_hostile_nested_input(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "subscriptionCreatedAt": {"nested": "garbage"}}})
+            self.assertEqual(statusbar.subscription_segment(home=home), "")
+
+
+class AccountEmailSegment(unittest.TestCase):
+    """The Claude account's login email (~/.claude.json ->
+    oauthAccount.emailAddress, #223) -- WHICH account this box is logged in
+    as. Rendered faint. Fails silently on any missing/malformed input."""
+
+    def test_renders_the_email_faint(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {
+                "emailAddress": "drlik.marek@gmail.com"}})
+            seg = statusbar.account_email_segment(home=home)
+            self.assertIn("drlik.marek@gmail.com", seg)
+            self.assertIn("\033[2m", seg)
+
+    def test_missing_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            self.assertEqual(statusbar.account_email_segment(home=home), "")
+
+    def test_missing_oauth_account_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {})
+            self.assertEqual(statusbar.account_email_segment(home=home), "")
+
+    def test_non_string_email_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, {"oauthAccount": {"emailAddress": 12345}})
+            self.assertEqual(statusbar.account_email_segment(home=home), "")
+
+    def test_garbage_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            Path(home).mkdir(parents=True, exist_ok=True)
+            (Path(home) / ".claude.json").write_text("{not json")
+            self.assertEqual(statusbar.account_email_segment(home=home), "")
+
+    def test_non_dict_claude_json_is_silent(self):
+        with TemporaryDirectory() as home:
+            _write_claude_json(home, "just a string")
+            self.assertEqual(statusbar.account_email_segment(home=home), "")
 
 
 if __name__ == "__main__":
