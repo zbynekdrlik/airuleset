@@ -3118,3 +3118,49 @@ isolated rerun of the tracked #226 wall-clock flake, confirmed transient).
 `python3 airuleset.py push` deployed clean to all 6 targets (dev2,
 gatekeeper, montalu, marek, david, simap). Auto-closed via the `Closes
 #230` trailer.
+
+2026-08-04 #232 (job 25's `merged_closes` trusts a commit-message keyword
+match as proof GitHub closed the ticket -- it isn't; odoo-erp live false
+positives on main) closed. Root cause: `card_reconcile` calls
+`merged_closes` unconditionally as its primary candidate producer, and
+that function is a bare `_CLOSES_RE` match against local commit
+messages -- #230's own GraphQL verification (`_watchdog_closed_fetch`)
+only ever ran as a fallback when `merged_closes` found NOTHING at all, so
+a repo where local trailers DO match (odoo-erp: 22 `Fixes #N` matches on
+`develop`, a non-default branch) never reached it. Fix, per the
+maintainer's binding decision (issuecomment-5183204511, rejecting a
+`base == default branch` gate as a proxy rather than the real fact):
+`merged_closes` stays an unchanged, cheap candidate producer; every
+candidate that survives the per-ticket grace period AND the forever-dedup
+set (i.e. would actually trigger a phone ping) is now confirmed against
+the SAME CLOSED_EVENT->closer query, reusing the `closed_fetch` seam --
+no second GraphQL shape, at most one extra call per repo per sweep,
+zero calls when nothing is pingable.
+
+RED->GREEN, two pairs: 7f8f64d->e9826d9 (the core fix), then a
+self-caught gap (the first GREEN was missing the `pingable` non-emptiness
+guard, costing a wasted call whenever nothing could send) ->
+12a8515->002aa88. A fresh-context adversarial review independently
+reproduced the identical gap via mutation testing before discovering the
+self-fix had already landed -- verdict "safe to deploy", 3 more 🔵
+findings, 2 addressed with new tests (dde5901: dry_run still verifies
+deliberately, per-repo isolation with two repos sharing one closed_fetch
+in one sweep), 1 filed as #234 (the pre-existing #230 fallback itself
+isn't gated on `pingable` either -- out of #232's diff).
+
+Live-verified on both boxes named in the ticket, not just unit-tested:
+pruned the stale `pinged` dedup state (7 tickets on gatekeeper, 22 on
+marek@subdev) that pre-dated the fix and would otherwise have masked a
+future genuine finding for those same ticket numbers -- discovered a real
+TOCTOU race doing this the naive way (a concurrent 60s sweep silently
+restored the pre-prune bytes), fixed by bracketing the prune with
+`systemctl --user stop/start api-watchdog.timer`. Post-fix journal on
+both boxes: `card-reconcile verify-rejected` fires every sweep for the
+exact same ticket sets the ticket named, zero `card-unreported PING`
+lines in the 15 minutes following, dedup state stays `{"pinged": {}}`.
+
+Full local suite before push: 3675 tests. `python3 airuleset.py push`
+deployed clean to all 6 targets. Auto-closed via the `Closes #232`
+trailer. Playbook entry appended (`.claude/rules/airuleset-internals.md`)
+covering the candidate-vs-verify job-design pattern, the commit/working-
+tree discrepancy recovery pattern, and the live-state-prune TOCTOU race.
