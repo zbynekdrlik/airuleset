@@ -3154,6 +3154,85 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "")
 
 
+class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
+    """#146: the DECLINE-not-autopilot-worker class used to be throttled by a
+    GLOBAL, time-based heartbeat (#123) — one line per 60s, box-wide,
+    regardless of WHICH session declined. A served session's agent_type is
+    fixed at launch and never becomes "autopilot-worker" mid-session, so a
+    repeat decline for the SAME (session, reason) is a pre-known fact, not
+    new information — yet the old mechanism kept re-logging it every ~60s
+    for the session's whole lifetime. Live evidence (2026-08-04): one 8.5h+
+    forestshop session alone wrote 1465 of the shared 2842-line decision
+    log (51.5%) and rotated it on its own.
+
+    The fix: log the FIRST decline for a (session, reason) pair, then never
+    again for that SAME pair — bounded per session, not per time window.
+    The discriminating test is the second one below: a purely time-windowed
+    throttle would ALSO produce one line for repeated same-session calls
+    within a test's wall-clock run (that alone proves nothing new), but it
+    would ALSO wrongly suppress a genuinely DIFFERENT session's first-ever
+    decline landing inside the same window — which a per-session dedup
+    must never do.
+    """
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
+
+    def _home(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        return home
+
+    def _decline(self, home, sid, agent_id="agt-x"):
+        payload = {"session_id": sid, "agent_id": agent_id,
+                   "agent_type": "Explore", "cwd": "/nonexistent/i146",
+                   "hook_event_name": "SubagentStop", "stop_hook_active": False}
+        return subprocess.run(
+            ["bash", str(self.HOOK)], input=json.dumps(payload), text=True,
+            capture_output=True, env={**os.environ, "HOME": home},
+            cwd=str(airuleset.REPO_DIR))
+
+    def test_the_same_session_never_re_logs_the_same_cause(self):
+        home = self._home()
+        for _ in range(4):
+            r = self._decline(home, "sess-once")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_a_different_session_still_gets_its_own_first_decline(self):
+        # the discriminator: back-to-back, no delay -- a time-windowed
+        # throttle would suppress the second session's FIRST-EVER decline;
+        # a per-session dedup must not, since it was never logged before
+        # for THAT session.
+        home = self._home()
+        self._decline(home, "sess-a")
+        self._decline(home, "sess-b")
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 2, lines)
+        sids = sorted(_decision_fields(ln).get("sid") for ln in lines)
+        self.assertEqual(sids, ["sess-a", "sess-b"])
+
+    def test_the_marker_directory_holds_one_entry_per_pair_seen(self):
+        home = self._home()
+        self._decline(home, "sess-c")
+        seen_dir = Path(home) / ".claude" / ".compact-decisions-seen"
+        self.assertTrue(seen_dir.is_dir(), "no per-session marker directory")
+        self.assertEqual(len(list(seen_dir.iterdir())), 1)
+
+    def test_a_stale_marker_past_the_ttl_is_pruned(self):
+        # bounds the directory's growth -- a marker older than the TTL must
+        # not survive forever even if that exact session is never seen again
+        home = self._home()
+        self._decline(home, "sess-old")
+        seen_dir = Path(home) / ".claude" / ".compact-decisions-seen"
+        stale = list(seen_dir.iterdir())[0]
+        old = time.time() - (20 * 86400)
+        os.utime(stale, (old, old))
+        self._decline(home, "sess-new")
+        remaining = {p.name for p in seen_dir.iterdir()}
+        self.assertNotIn(stale.name, remaining, remaining)
+
+
 class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
     """The class above can only be trusted if it FAILS on the obvious wrong
     fixes. Both are built by mutating the REAL shipped script, so these tests
