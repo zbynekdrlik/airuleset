@@ -3061,3 +3061,60 @@ the SAME already-tracked #226 flake
 a 1-second wall-clock TTL racing subprocess-spawn overhead, unrelated file,
 unrelated to this batch's diff), confirmed transient by an isolated rerun
 (passed alone in 0.45s). `python3 airuleset.py push` result below.
+
+**#230**: job 25's GitHub fallback (`_watchdog_closed_fetch`) ran `gh issue
+list --state closed` and treated every closed issue as "merged but
+unreported" -- unable to tell a hand close, a close-by-a-bare-commit, and
+a close-by-a-genuinely-merged-PR apart. Live-confirmed against odoo-erp
+before writing any code: 6 of 7 nagged tickets had `closer: null`, the
+7th `closer: {"__typename":"Commit"}` -- none were ever owed a card.
+Fix: `gh api graphql` reads each closed issue's `CLOSED_EVENT.closer` in
+the SAME single call (never N+1), keeping only `closer.__typename ==
+"PullRequest" and closer.merged`. `owner`/`name` resolved via `-F
+owner='{owner}' -F name='{repo}'` (`-F`/`--field`, typed, expands the
+placeholders from cwd's git remote; `-f`/`--raw-field` does not --
+verified empirically both ways before writing the fix). Contract
+preserved: `{number: closed_epoch}`/`None` on failure, 10s timeout,
+`_normalize_closed`'s bare-int tolerance untouched. No state migration
+needed -- `card_reconcile`'s existing per-ticket `pinged` prune (`{k: v
+for ... if int(k) in closed}`) drops the newly-excluded tickets on the
+very next sweep for free. TDD: 0498276 [red] (13 new tests, 8 fail
+against the old implementation) / 172580f [green]. A fresh-context
+adversarial review found a MAJOR test-quality gap (the `-F`/`{owner}`
+placeholder test asserted presence, not pairing -- a mutant swapping `-F`
+and `-f` passed all 12 tests untouched, though the shipped code was
+already correct) and a MINOR terminology error (the comment called `-F`
+"raw-field", backwards from `gh api --help`'s own naming); both fixed in
+0a4679b, the mutant re-verified caught after. A third finding (client-side
+`closedAt` filtering after an `UPDATED_AT`-ordered `first:100` fetch can
+in principle miss a genuinely-merged ticket past 100 closed issues on a
+busy repo, demonstrated against `microsoft/vscode`, not a regression this
+fix introduces) filed as its own follow-up issue, "closed-fetch UPDATED_AT
+ordering can silently miss a merged-but-unreported ticket past 100 closed
+issues" (issue 231).
+
+Post-deploy live verification (marek@subdev, gatekeeper@gk, both updated
+to `0a4679b`) surfaced that the phone nag has NOT actually stopped for
+odoo-erp -- not because this fix is wrong (confirmed correct in isolation:
+returns `{}` for odoo-erp, 52 genuinely-merged tickets with correct
+timestamps for camera-box) but because `merged_closes`, the LOCAL read
+that always runs BEFORE this fallback, has its own false positives on
+this repo for two separate reasons never reached by #230's own scope: (a)
+marek's checkout resolves its base branch to `origin/develop` via a local
+`origin/HEAD` symref, not GitHub's actual default `main`; (b) even on
+`origin/main` (gatekeeper's checkout), a commit message merely mentioning
+"Fix #N" is not proof GitHub actually closed the ticket from that commit
+-- live-demonstrated for #2857, whose closing commit predates its real
+close by ~1h40m yet never triggered GitHub's auto-close (most likely
+odoo-erp's CI pushes via a `GITHUB_TOKEN`, which GitHub deliberately
+excludes from auto-close to prevent circular loops). Both are
+cross-cutting (touch job 24 and job 25 alike) and genuinely need a design
+call (branch-intent per stream; cost tradeoff of cross-checking every
+local match against GraphQL) rather than a guess -- filed as #232 with
+full live evidence rather than expanding #230's own scope.
+
+Full local suite before push: 3665/3708 tests via the push gate (one
+isolated rerun of the tracked #226 wall-clock flake, confirmed transient).
+`python3 airuleset.py push` deployed clean to all 6 targets (dev2,
+gatekeeper, montalu, marek, david, simap). Auto-closed via the `Closes
+#230` trailer.
