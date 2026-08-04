@@ -2923,3 +2923,64 @@ one day later while the NEW code stays silent.
 confirmed transient — passed clean on the retry that shipped), ruff clean,
 pushed + installed locally + deployed to all 6 remote targets. Issue
 auto-closed on push via its `Closes #224` trailer. Discord run-card fired.
+
+## #225 — /compact self-callback + proven-origin trust + bounded no-downgrade (2026-08-04)
+
+Root cause (two compounding races, both measured live on dev1 before
+touching code): the Stop hook's own synchronous /compact attempt
+sometimes falls back to job 14's ~60s poll (a draft, a dialog, an
+unresolved pane); under an armed /goal loop the supervisor's next turn can
+land within seconds, so by the time job 14 re-derives the boundary from
+the session's CURRENT last marker, it has already moved to the next
+ticket's WORKING — refused as "not a boundary" (26 of these since Aug 1,
+the largest single job-14 refusal reason).
+
+Shipped `airuleset.py compact-request --self [--hold S]`: resolves the
+calling session's own pane via $TMUX_PANE (no ambiguity resolution),
+records + synchronously delivers under a new proven-boundary origin
+(self-callback, trusted identically to the existing subagent-stop via a
+shared `_COMPACT_PROVEN_BOUNDARY_ORIGINS` set at all 4 consuming sites),
+holding (bounded, default 60s) if the first attempt can't land. Wired into
+the full-authority /goal template (measured char headroom first: 337
+chars free against the 4000 cap, the added instruction is 144); the two
+reduced-authority templates have too little headroom and are tracked as
+#227.
+
+A fresh-context adversarial review (dispatched before push) found real
+defects in the first cut: a successful --self never cleared the request;
+origin preservation in record_compact_request had NO time bound (could
+resurrect a stale proof indefinitely, defeating the 30-min max-age and
+laundering an old proof onto an unrelated later boundary); the delivery
+call's own origin kwarg was untested (a mutant dropping it survived); and
+_stop_already_rejected (correct for the Stop-hook path) misfires for a
+MID-TURN self-callback call, which runs outside any Stop-hook batch. All
+fixed: clear-on-success, a 120s bounded preservation window
+(COMPACT_ORIGIN_PRESERVE_WINDOW_S), a spy-based origin assertion, and a
+self-callback-only exemption from the rejected-stop gate (subagent-stop's
+existing behavior stays untouched, pinned by its own control test).
+
+Live-verified on dev1 with a genuinely isolated scratch Claude Code
+session (real tmux pane, real CLAUDE_CONFIG_DIR, no real API auth needed
+for the mechanism itself): resolve_self_pane correctly resolved the exact
+pane from $TMUX_PANE; deliver_compact_self typed a real /compact into that
+real pane and it executed (CC replied "Not enough messages to compact.",
+confirming genuine execution, not a simulation); job 14
+(compact_ticket_boundary) delivered into that SAME pane while its
+transcript's CURRENT marker read `⏳ WORKING: dispatching next ticket
+#226` -- the exact #225 regression scenario, proven fixed -- and a blank-
+origin control on the identical marker was correctly still refused
+("skip not-a-boundary"), proving the fix is scoped to proven origins only.
+Re-verified after the review-hardening round: a genuine send now leaves
+`{}` in compact-requests.json (was previously stale).
+
+TDD: 829117d [red] / 5609a2f [green] (the mechanism) then f9ea175 [red] /
+87cf42a [green] (the review-hardening round). #146 evaluated and left
+open -- different root cause (a served/non-worker session never producing
+any boundary signal at all), not closed by this work; commented with the
+verdict.
+
+`python3 airuleset.py push`: 3643 tests (the SAME pre-existing #226 flake
+hit once, confirmed transient by 5/5 isolated reruns, passed clean on the
+retry that shipped), ruff clean, pushed + installed locally + deployed to
+all 6 remote targets. Issue auto-closed on push via the `Closes #225`
+trailer in 5609a2f. Discord run-card fired.
