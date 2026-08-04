@@ -14,12 +14,14 @@ composed from two small machine-local caches:
 stdlib only; every function is fail-safe (an error renders as no segment, never
 a broken statusline).
 """
+import calendar
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import burn
@@ -80,12 +82,13 @@ def _spawn_refresh(cwd, home=None):
 
 
 def tickets_segment(cwd, now=None, home=None, spawn=True):
-    """The GitHub-tickets statusline segment for the session at `cwd`:
+    """The GitHub-tickets statusline segment for the session at `cwd`
+    (label shortened 'Issues' -> 'I', #223):
 
-      - 'Issues D/T' during an ACTIVE autopilot run for this repo (D tickets carded
+      - 'I D/T' during an ACTIVE autopilot run for this repo (D tickets carded
         this run, T = D + the remaining backlog from the last card; green when
         the backlog is empty),
-      - 'Issues N' otherwise (open non-autopilot-skip GitHub issues),
+      - 'I N' otherwise (open non-autopilot-skip GitHub issues),
       - ''  when unknown (not a git/GitHub repo, gh unavailable, no cache yet).
 
     Reads caches only; a stale/missing tickets cache triggers a detached
@@ -103,16 +106,18 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     # Skipped bucket (2026-07-16): tickets labeled autopilot-skip. An EXCLUSION
     # count, not a partition of the visible tickets (unlike gk, whose zero must
     # stay visible) — so it renders only when >= 1 and stays off the line at 0.
+    # Label shortened 'skipped' -> 'skip' (#223).
     skipped = cache.get("skipped")
-    skip_sfx = (" \033[38;5;245m· skipped %d\033[0m" % skipped
+    skip_sfx = (" \033[38;5;245m· skip %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
     # gk-req badge (airuleset #30): open needs-gatekeeper stream→supervisor
     # action requests (full-authority boxes collect the count). Orange —
     # a stream is BLOCKED waiting on this box's supervisor; hidden at 0.
+    # Label shortened 'gk-req' -> 'gkq' (#223).
     gk_req = cache.get("gk_req")
     if isinstance(gk_req, int) and gk_req > 0:
-        skip_sfx += " \033[38;5;208m· gk-req %d\033[0m" % gk_req
+        skip_sfx += " \033[38;5;208m· gkq %d\033[0m" % gk_req
 
     # Active autopilot run for this repo → done/total from the last run-card.
     name = cache.get("name") or ""
@@ -129,34 +134,35 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
                 if isinstance(cache.get("open"), int):
                     remaining = cache["open"]
                 color = 40 if remaining == 0 else 75    # green when backlog empty
-                return "\033[38;5;%dmIssues %d/%d\033[0m%s" % (
+                return "\033[38;5;%dmI %d/%d\033[0m%s" % (
                     color, done, done + remaining, skip_sfx)
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
-        # Sub-dev slice split (scope=mine): "Issues <active> · gk <handed-off>" — the
+        # Sub-dev slice split (scope=mine): "I <active> · gk <handed-off>" — the
         # gk bucket is own tickets labeled ready-for-review, i.e. parked with the
         # gatekeeper. Rendered ALWAYS when the cache carries gk, INCLUDING gk 0: a
         # hidden zero bucket looks exactly like a broken counter (the user panicked
         # when the gatekeeper returned tickets and "gk" vanished — 2026-07-11).
         gk = cache.get("gk")
         if isinstance(gk, int):
-            return ("\033[38;5;75mIssues %d\033[0m \033[38;5;245m· gk %d\033[0m%s"
+            return ("\033[38;5;75mI %d\033[0m \033[38;5;245m· gk %d\033[0m%s"
                     % (open_n, gk, skip_sfx))
         # Full-authority (scope=core): self-describe the population (#164) —
-        # a bare "Issues 28" hid the 45 sub-dev-owned tickets excluded from
+        # a bare "I 28" hid the 45 sub-dev-owned tickets excluded from
         # it, which looks exactly like a broken counter (the same reasoning
         # that already keeps `gk` visible at 0, just for a bigger number).
-        # Rendered whenever the cache actually carries a streamy count;
-        # falls back to the plain form on a stale/older cache.
+        # Rendered whenever the cache actually carries a streamy count
+        # (label shortened 'streamy' -> 'str', #223); falls back to the
+        # plain form on a stale/older cache.
         if cache.get("scope") == "core":
             streamy = cache.get("streamy")
             if isinstance(streamy, int):
-                return ("\033[38;5;75mIssues %d core\033[0m "
-                        "\033[38;5;245m· streamy %d\033[0m%s"
+                return ("\033[38;5;75mI %d core\033[0m "
+                        "\033[38;5;245m· str %d\033[0m%s"
                         % (open_n, streamy, skip_sfx))
-            return "\033[38;5;75mIssues %d core\033[0m%s" % (open_n, skip_sfx)
-        return "\033[38;5;75mIssues %d\033[0m%s" % (open_n, skip_sfx)
+            return "\033[38;5;75mI %d core\033[0m%s" % (open_n, skip_sfx)
+        return "\033[38;5;75mI %d\033[0m%s" % (open_n, skip_sfx)
     return ""
 
 
@@ -207,9 +213,10 @@ def _tail_usage_from_transcript(path, max_bytes=200_000):
 
 
 def context_cost_segment(payload):
-    """'ctx <size> · ~$<cost>/ťah' — the CURRENT context size + its
-    STEADY-STATE per-turn dollar cost (2026-07-25 cost-fix package, #37;
-    pricing fixed same day). Source: the statusline stdin payload's
+    """'ctx <size> ~$<cost>' — the CURRENT context size + its STEADY-STATE
+    per-turn dollar cost (2026-07-25 cost-fix package, #37; pricing fixed
+    same day; the ' · '/'/ťah' separator+suffix dropped, #223). Source:
+    the statusline stdin payload's
     `context_window.current_usage` (the exact token breakdown of the last
     billed API call) + `model.id`; falls back to the transcript tail (see
     _tail_usage_from_transcript) when that's missing. `ctx` is
@@ -257,7 +264,7 @@ def context_cost_segment(payload):
         color = 220
     else:
         color = 196
-    return "\033[38;5;%dmctx %s · ~$%.2f/ťah\033[0m" % (color, _fmt_tokens(ctx), usd)
+    return "\033[38;5;%dmctx %s ~$%.2f\033[0m" % (color, _fmt_tokens(ctx), usd)
 
 
 def questions_segment(cwd, now=None, home=None):
@@ -266,10 +273,11 @@ def questions_segment(cwd, now=None, home=None):
     hluposti"; every map entry carries the asking session's cwd, so the badge
     must attribute questions to their stream):
 
-      - 'otazky N'          — pending ❓ asked from THIS cwd (orange)
-      - 'otazky N · inde M' — plus M pending in OTHER projects (grey)
-      - 'otazky inde M'     — none here, M elsewhere (all grey)
-      - ''                  — none anywhere (badge semantics, like `skipped`)
+      - 'Q N'          — pending ❓ asked from THIS cwd (orange, label
+                          shortened 'otazky' -> 'Q', #223)
+      - 'Q N · inde M' — plus M pending in OTHER projects (grey)
+      - 'Q inde M'     — none here, M elsewhere (all grey)
+      - ''             — none anywhere (badge semantics, like `skipped`)
 
     Source: ~/.claude/discord-questions.json — notify.record_question adds an
     entry per ❓ ping; the watchdog drops it when the user's reply is routed
@@ -300,10 +308,95 @@ def questions_segment(cwd, now=None, home=None):
         else:
             other += 1
     if local and other:
-        return ("\033[38;5;214motazky %d\033[0m \033[38;5;245m· inde %d\033[0m"
+        return ("\033[38;5;214mQ %d\033[0m \033[38;5;245m· inde %d\033[0m"
                 % (local, other))
     if local:
-        return "\033[38;5;214motazky %d\033[0m" % local
+        return "\033[38;5;214mQ %d\033[0m" % local
     if other:
-        return "\033[38;5;245motazky inde %d\033[0m" % other
+        return "\033[38;5;245mQ inde %d\033[0m" % other
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# #223 -- account identity: WHICH Claude account is logged in on this box,
+# and WHEN its monthly subscription renews. Both already local
+# (~/.claude.json), no network call, no new watchdog job (repo FREEZE).
+# --------------------------------------------------------------------------- #
+
+def _claude_json(home=None):
+    path = Path(home or os.path.expanduser("~")) / ".claude.json"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+            return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _clamp_day(year, month, day):
+    last = calendar.monthrange(year, month)[1]
+    return min(day, last)
+
+
+def _next_renewal(created_at, now_ts):
+    """Given an ISO-8601 `subscriptionCreatedAt` timestamp and the current
+    epoch time, return (day, month, days_until) for the NEXT occurrence of
+    that day-of-month at/after today -- the monthly subscription renewal
+    anchor. Clamps the day for short months (31 -> the month's last day).
+    Returns None on any unparseable input; never raises."""
+    try:
+        created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        today = datetime.fromtimestamp(now_ts, tz=timezone.utc).date()
+        day = created.day
+        y, m = today.year, today.month
+        cand = date(y, m, _clamp_day(y, m, day))
+        if cand < today:
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+            cand = date(y, m, _clamp_day(y, m, day))
+        return cand.day, cand.month, (cand - today).days
+    except Exception:
+        return None
+
+
+def subscription_segment(home=None, now=None):
+    """'sub <D.M.>(<Nd>)' -- the monthly renewal anchor of the Claude
+    account logged in on THIS box (~/.claude.json ->
+    oauthAccount.subscriptionCreatedAt, #223). Coloured by proximity, the
+    same green/yellow/red convention the usage-window segments already
+    use (green far, yellow near, red on the last day). Fails SILENTLY on
+    any missing/malformed input -- a statusline segment must never raise."""
+    try:
+        d = _claude_json(home)
+        if not isinstance(d, dict):
+            return ""
+        created = (d.get("oauthAccount") or {}).get("subscriptionCreatedAt")
+        if not created:
+            return ""
+        result = _next_renewal(created, time.time() if now is None else now)
+        if result is None:
+            return ""
+        day, month, days = result
+        color = 196 if days <= 0 else (220 if days <= 3 else 40)
+        return "\033[38;5;%dmsub %d.%d.(%dd)\033[0m" % (color, day, month, days)
+    except Exception:
+        return ""
+
+
+def account_email_segment(home=None):
+    """The Claude account's login email (~/.claude.json ->
+    oauthAccount.emailAddress, #223), rendered FAINT -- the point is
+    knowing WHICH account this box is logged in as, not drawing the eye.
+    Fails SILENTLY on any missing/malformed input."""
+    try:
+        d = _claude_json(home)
+        if not isinstance(d, dict):
+            return ""
+        email = (d.get("oauthAccount") or {}).get("emailAddress")
+        if not email or not isinstance(email, str):
+            return ""
+        return "\033[2m%s\033[0m" % email
+    except Exception:
+        return ""

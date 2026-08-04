@@ -235,18 +235,21 @@ MANAGED_PLUGIN_CACHE_GLOBS = {
     "superpowers@claude-plugins-official":
         "plugins/cache/claude-plugins-official/superpowers/*/skills",
 }
-# Hash-independent entry to caveman's statusline + a context-fill meter. Must
-# NEVER error (a broken statusline would break the prompt render). Caveman's real
-# script lives under a content-hashed cache dir that changes on every `claude
-# plugin update`; `ls -dt ... | head -1` resolves the newest hash at runtime so
-# the path can't rot. A custom statusLine occupies the whole footer row, so the
-# native context-fill indicator is unreliable — Claude Code pipes the session JSON
-# on stdin (context_window.used_percentage etc., CC v2.1.132+) and caveman's script
-# reads only its flag file, so the shim consumes stdin and renders the context
-# meter itself, right next to the badge. Must NOT `exec` caveman (it has to keep
-# running to append the meter). Prints nothing it can't safely render.
+# Hash-independent entry to caveman's statusline + the usage-limit/ticket/
+# account meter line (the standalone context-fill BAR was dropped, #223 --
+# the context size stays visible via the 'ctx <size> ~$<cost>' segment).
+# Must NEVER error (a broken statusline would break the prompt render).
+# Caveman's real script lives under a content-hashed cache dir that changes
+# on every `claude plugin update`; `ls -dt ... | head -1` resolves the
+# newest hash at runtime so the path can't rot. A custom statusLine occupies
+# the whole footer row, so the native context-fill indicator is unreliable —
+# Claude Code pipes the session JSON on stdin (context_window.used_percentage
+# etc., CC v2.1.132+) and caveman's script reads only its flag file, so the
+# shim consumes stdin and renders the meter line itself, right next to the
+# badge. Must NOT `exec` caveman (it has to keep running to append the
+# meter). Prints nothing it can't safely render.
 CAVEMAN_SHIM_CONTENT = r"""#!/usr/bin/env bash
-# airuleset-managed (do NOT edit) — caveman badge + context-fill meter.
+# airuleset-managed (do NOT edit) — caveman badge + usage/ticket/account meter.
 # caveman's real statusline lives under a content-hashed cache dir resolved at
 # runtime (ls -dt ... | head -1) so a `claude plugin update` can never rot it.
 in=$(cat)
@@ -273,25 +276,15 @@ if not isinstance(d, dict):
 segs = []
 def colr(pct, lo, hi):  # green below lo, yellow below hi, red at/above hi
     return 40 if pct < lo else (220 if pct < hi else 196)
-# --- context-window fill (bar only — no % / tokens, per user pref) ---
-cw = d.get("context_window") or {}
-cu = cw.get("current_usage") or {}
-size = cw.get("context_window_size") or 0
-pct = cw.get("used_percentage")
-if pct is None and cu:
-    used = (cu.get("input_tokens") or 0) + (cu.get("cache_read_input_tokens") or 0) + (cu.get("cache_creation_input_tokens") or 0)
-    pct = round(used / size * 100) if size else None
-if pct is not None:
-    pct = max(0, min(100, int(pct)))
-    filled = round(pct / 10.0)
-    bar = "█" * filled + "░" * (10 - filled)
-    c = colr(pct, 50, 80)
-    segs.append("\033[38;5;%dmctx %s\033[0m" % (c, bar))
 # --- usage limits (5h + weekly), high % = near the cap ---
+# (#223 dropped the fill-percentage bar that used to render right here — the
+# context size stays visible via the 'ctx <size> ~$<cost>' segment further
+# down, composed by statusbar.context_cost_segment)
 rl = d.get("rate_limits") or {}
 now = time.time()
 def reset(ts):
     # CC stdin gives an epoch int; the watchdog cache gives an ISO-8601 string.
+    # No leading space (#223) -- callers glue this straight onto '<pct>%'.
     if not ts:
         return ""
     try:
@@ -305,10 +298,10 @@ def reset(ts):
     if s <= 0:
         return ""
     if s >= 86400:
-        return " (%dd)" % round(s / 86400.0)
+        return "(%dd)" % round(s / 86400.0)
     if s >= 3600:
-        return " (%dh)" % round(s / 3600.0)
-    return " (%dm)" % max(1, round(s / 60.0))
+        return "(%dh)" % round(s / 3600.0)
+    return "(%dm)" % max(1, round(s / 60.0))
 for key, label in (("five_hour", "5h"), ("seven_day", "wk")):
     w = rl.get(key) or {}
     p = w.get("used_percentage")
@@ -336,7 +329,10 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
             continue
         p = max(0, min(100, int(p)))
         c = colr(p, 70, 90)
-        segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, model, p, reset(w.get("resets_at"))))
+        # Label shortened to the model's first letter, uppercased (#223):
+        # "Fable 23%" -> "F 23%".
+        label = model[:1].upper()
+        segs.append("\033[38;5;%dm%s %s%%\033[0m\033[2m%s\033[0m" % (c, label, p, reset(w.get("resets_at"))))
 # --- github ticket progress: autopilot done/total, else open issues ---
 # Composed from local caches by statusbar.tickets_segment (a stale cache spawns a
 # DETACHED `airuleset.py tickets-status --refresh`; the render never waits on gh).
@@ -346,16 +342,24 @@ try:
     sys.path.insert(0, "{{REPO_DIR}}")
     import statusbar
     cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or ""
+    # --- monthly subscription renewal: 'sub 12.8.(8d)' (#223) ---
+    sub = statusbar.subscription_segment()
+    if sub:
+        segs.append(sub)
     seg = statusbar.tickets_segment(cwd)
     if seg:
         segs.append(seg)
     q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project · inde)
     if q:
         segs.append(q)
-    # --- session context/cost: 'ctx 570K · ~$0.57/tah' (2026-07-25, #37) ---
+    # --- session context/cost: 'ctx 570K ~$0.57' (2026-07-25, #37; shortened #223) ---
     cc = statusbar.context_cost_segment(d)
     if cc:
         segs.append(cc)
+    # --- which account is logged in on this box, #223 (faint, trails the meter) ---
+    acct = statusbar.account_email_segment()
+    if acct:
+        segs.append(acct)
 except Exception:
     pass
 if not segs:

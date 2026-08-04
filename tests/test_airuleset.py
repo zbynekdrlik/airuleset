@@ -7124,6 +7124,15 @@ class TestStatuslineVocabularyModule(TestCase):
                        "statusline"):
             self.assertIn(phrase, t, phrase)
 
+    def test_module_documents_the_shortened_render_forms(self):
+        # #223 -- every label was abbreviated on the actual footer; the doc
+        # must name the CURRENT rendered forms, not just the spoken/historical
+        # ones the test above already locks.
+        t = self.MODULE.read_text(encoding="utf-8")
+        for phrase in ("`I N`", "`I D/T`", "`· skip K`", "`· gkq N`",
+                       "`Q N`", "sub <D.M.>"):
+            self.assertIn(phrase, t, phrase)
+
     def test_module_names_the_backing_caches(self):
         # The session should read the SAME local caches the segment renders
         # from (never guess): tickets-status + autopilot-progress.

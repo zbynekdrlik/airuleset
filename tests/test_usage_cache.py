@@ -132,9 +132,9 @@ class TestStatuslineRendersEndToEnd(TestCase):
             # The shared windows still render (the ISO crash used to blank them too)...
             self.assertIn("5h 13%", out)
             self.assertIn("wk 15%", out)
-            self.assertIn("ctx", out)
-            # ...and the per-model Fable window now appears.
-            self.assertIn("Fable 25%", out)
+            # ...and the per-model Fable window now appears, label shortened
+            # to its first letter uppercased (#223): "Fable 25%" -> "F 25%".
+            self.assertIn("F 25%", out)
 
     def test_stale_cache_is_ignored(self):
         with tempfile.TemporaryDirectory() as home:

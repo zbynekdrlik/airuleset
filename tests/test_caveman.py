@@ -101,11 +101,15 @@ class TestCavemanShim(TestCase):
         self.assertIn("exit 0", airuleset.CAVEMAN_SHIM_CONTENT)
         self.assertNotIn("set -e", airuleset.CAVEMAN_SHIM_CONTENT)
 
-    def test_shim_renders_context_meter(self):
+    def test_shim_no_longer_renders_a_context_fill_bar(self):
+        # #223 -- the ctx-fill BAR ("ctx ███░░░") was dropped; the context
+        # size stays visible only via the 'ctx <size> ~$<cost>' segment
+        # (statusbar.context_cost_segment), composed further down. Match the
+        # removed CODE SHAPE, never a comment phrase (a comment explaining
+        # the removal legitimately mentions the removed thing by name).
         c = airuleset.CAVEMAN_SHIM_CONTENT
-        # Reads the session JSON from stdin and renders from context_window.
-        self.assertIn("context_window", c)
-        self.assertIn("used_percentage", c)
+        self.assertNotIn('bar = "█"', c)
+        self.assertNotIn("filled = round(pct / 10.0)", c)
 
     def test_shim_renders_usage_limits(self):
         c = airuleset.CAVEMAN_SHIM_CONTENT
@@ -152,9 +156,13 @@ class TestCavemanShimBehavior(TestCase):
             )
             return r
 
-    def test_badge_quiet_and_ctx_is_bar_only(self):
+    def test_badge_quiet_and_no_context_fill_bar(self):
+        # #223 -- the context-fill BAR was dropped entirely; the context
+        # size stays visible only through the 'ctx <size> ~$<cost>'
+        # segment (needs a model id, unlike the removed bar).
         r = self._run(
             {
+                "model": {"id": "claude-opus-5"},
                 "context_window": {
                     "used_percentage": 18,
                     "context_window_size": 1000000,
@@ -164,36 +172,16 @@ class TestCavemanShimBehavior(TestCase):
                         "cache_read_input_tokens": 175516,
                         "cache_creation_input_tokens": 1668,
                     },
-                }
+                },
             }
         )
         self.assertEqual(r.returncode, 0)
         # caveman rendered quietly: lowercased, no loud [CAVEMAN] brackets.
         self.assertIn("caveman:lite", r.stdout)
         self.assertNotIn("[CAVEMAN:LITE]", r.stdout)
-        # ctx is a bar only — no percentage, no token count.
-        self.assertIn("ctx", r.stdout)
-        self.assertTrue("█" in r.stdout or "░" in r.stdout)
-        self.assertNotIn("177k", r.stdout)
-        self.assertNotIn("18%", r.stdout)
-
-    def test_ctx_bar_computed_when_used_percentage_missing(self):
-        # used_percentage null -> compute from current_usage / size -> 50% bar.
-        r = self._run(
-            {
-                "context_window": {
-                    "used_percentage": None,
-                    "context_window_size": 200000,
-                    "current_usage": {
-                        "input_tokens": 0,
-                        "cache_read_input_tokens": 100000,
-                        "cache_creation_input_tokens": 0,
-                    },
-                }
-            }
-        )
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("█████░░░░░", r.stdout)  # 50% -> half-filled bar
+        self.assertNotIn("█", r.stdout)
+        self.assertNotIn("░", r.stdout)
+        self.assertIn("ctx 177K", r.stdout)
 
     def test_no_meter_after_compact_still_shows_badge(self):
         # Right after /compact current_usage is null and there's no percentage:
@@ -211,8 +199,8 @@ class TestCavemanShimBehavior(TestCase):
         self.assertIn("caveman", r.stdout)
         self.assertNotIn("%", r.stdout)
 
-    def test_ctx_bar_renders_even_without_caveman(self):
-        # No caveman plugin on disk -> no tag, but the ctx bar still shows.
+    def test_no_context_fill_bar_even_without_caveman(self):
+        # No caveman plugin on disk -> no tag, and no ctx bar either (#223).
         r = self._run(
             {"context_window": {"used_percentage": 42, "context_window_size": 1000000,
                                 "total_input_tokens": 420000}},
@@ -220,8 +208,8 @@ class TestCavemanShimBehavior(TestCase):
         )
         self.assertEqual(r.returncode, 0)
         self.assertNotIn("caveman", r.stdout.lower())
-        self.assertIn("ctx", r.stdout)
-        self.assertTrue("█" in r.stdout or "░" in r.stdout)
+        self.assertNotIn("█", r.stdout)
+        self.assertNotIn("░", r.stdout)
 
     def test_malformed_payload_never_errors(self):
         r = self._run("not json at all")  # passed through json.dumps -> a string
@@ -230,10 +218,16 @@ class TestCavemanShimBehavior(TestCase):
     def test_usage_limits_render_with_context(self):
         r = self._run(
             {
+                "model": {"id": "claude-opus-5"},
                 "context_window": {
                     "used_percentage": 18,
                     "context_window_size": 1000000,
                     "total_input_tokens": 177186,
+                    "current_usage": {
+                        "input_tokens": 2,
+                        "cache_read_input_tokens": 175516,
+                        "cache_creation_input_tokens": 1668,
+                    },
                 },
                 "rate_limits": {
                     "five_hour": {"used_percentage": 21, "resets_at": 0},
@@ -242,7 +236,7 @@ class TestCavemanShimBehavior(TestCase):
             }
         )
         self.assertEqual(r.returncode, 0)
-        self.assertIn("ctx", r.stdout)
+        self.assertIn("ctx 177K", r.stdout)
         self.assertIn("5h 21%", r.stdout)
         self.assertIn("wk 97%", r.stdout)
 
@@ -260,6 +254,112 @@ class TestCavemanShimBehavior(TestCase):
         self.assertIn("caveman:lite", r.stdout)
         self.assertIn("5h 5%", r.stdout)
         self.assertIn("wk 60%", r.stdout)
+
+
+class TestCavemanShimAccountSegments(TestCase):
+    """End-to-end: the 'sub <D.M.>(<Nd>)' renewal + account-email segments
+    (#223), sourced from ~/.claude.json, rendered through the REAL shim.
+    Every degraded case (no ~/.claude.json, no oauthAccount, unparseable
+    date, stale per-model usage cache) must render the REST of the line and
+    simply omit the affected segment -- never raise, never break the
+    prompt render (the shim's existing contract)."""
+
+    def _render(self, payload, claude_json=None, usage_cache=None):
+        import json as _json
+        import os as _os
+        import subprocess as _subprocess
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as home:
+            if claude_json is not None:
+                Path(home, ".claude.json").write_text(_json.dumps(claude_json))
+            if usage_cache is not None:
+                _os.makedirs(_os.path.join(home, ".claude"), exist_ok=True)
+                Path(home, ".claude", "airuleset-usage-cache.json").write_text(
+                    _json.dumps(usage_cache))
+            shim = _os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
+            env = dict(_os.environ)
+            env["HOME"] = home
+            return _subprocess.run(["bash", shim], input=_json.dumps(payload),
+                                   capture_output=True, text=True, env=env)
+
+    def test_sub_and_email_render_together_in_order(self):
+        # Target line order (#223): ... I ...  Q ...  ctx ...  <email>  caveman
+        r = self._render(
+            {"workspace": {"current_dir": "/tmp/nowhere"}},
+            claude_json={"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-12T16:34:03.439322Z",
+                "emailAddress": "drlik.marek@gmail.com"}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("sub ", r.stdout)
+        self.assertIn("drlik.marek@gmail.com", r.stdout)
+        # the email comes AFTER the sub segment in the rendered line
+        self.assertLess(r.stdout.index("sub "),
+                        r.stdout.index("drlik.marek@gmail.com"))
+
+    def test_missing_claude_json_omits_both_but_renders_the_rest(self):
+        r = self._render({"rate_limits": {
+            "five_hour": {"used_percentage": 13}}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5h 13%", r.stdout)
+        self.assertNotIn("sub ", r.stdout)
+        self.assertNotIn("@", r.stdout)
+
+    def test_missing_oauth_account_omits_both_but_renders_the_rest(self):
+        r = self._render({"rate_limits": {"five_hour": {"used_percentage": 13}}},
+                         claude_json={"someOtherKey": True})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5h 13%", r.stdout)
+        self.assertNotIn("sub ", r.stdout)
+        self.assertNotIn("@", r.stdout)
+
+    def test_unparseable_subscription_created_at_omits_only_sub(self):
+        r = self._render(
+            {"rate_limits": {"five_hour": {"used_percentage": 13}}},
+            claude_json={"oauthAccount": {
+                "subscriptionCreatedAt": "not-a-real-date",
+                "emailAddress": "drlik.marek@gmail.com"}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5h 13%", r.stdout)
+        self.assertNotIn("sub ", r.stdout)
+        self.assertIn("drlik.marek@gmail.com", r.stdout)     # email unaffected
+
+    def test_stale_usage_cache_omits_only_the_per_model_window(self):
+        r = self._render(
+            {"rate_limits": {"five_hour": {"used_percentage": 13}}},
+            claude_json={"oauthAccount": {
+                "subscriptionCreatedAt": "2026-01-12T16:34:03Z",
+                "emailAddress": "drlik.marek@gmail.com"}},
+            usage_cache={"ts": 1, "windows": [   # ancient -- older than 6h
+                {"group": "weekly", "percent": 25, "model": "Fable",
+                 "resets_at": "2099-01-01T00:00:00+00:00", "is_active": True}]})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5h 13%", r.stdout)
+        self.assertNotIn("F 25%", r.stdout)
+        # everything else on the line still renders fine
+        self.assertIn("sub ", r.stdout)
+        self.assertIn("drlik.marek@gmail.com", r.stdout)
+
+    def test_garbage_claude_json_never_breaks_the_render(self):
+        import json as _json
+        import os as _os
+        import subprocess as _subprocess
+        import tempfile as _tempfile
+        with _tempfile.TemporaryDirectory() as home:
+            Path(home, ".claude.json").write_text("{not valid json at all")
+            shim = _os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
+            env = dict(_os.environ)
+            env["HOME"] = home
+            r = _subprocess.run(["bash", shim],
+                                input=_json.dumps({"rate_limits": {
+                                    "five_hour": {"used_percentage": 13}}}),
+                                capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("5h 13%", r.stdout)
+        self.assertNotIn("sub ", r.stdout)
 
 
 if __name__ == "__main__":
@@ -313,7 +413,7 @@ class TestCavemanShimTickets(TestCase):
                 capture_output=True, text=True,
                 env={**_os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("Issues 3/17", r.stdout)
+            self.assertIn("I 3/17", r.stdout)
 
 
 class TestCavemanNewCacheLayout(TestCase):

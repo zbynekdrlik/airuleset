@@ -60,24 +60,24 @@ class TicketsSegment(unittest.TestCase):
 
     def test_open_issue_count_when_no_autopilot(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
-        self.assertIn("Issues 14", self._seg())
+        self.assertIn("I 14", self._seg())
 
     def test_autopilot_progress_wins_when_fresh(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14)
-        self.assertIn("Issues 3/17", self._seg())
+        self.assertIn("I 3/17", self._seg())
 
     def test_stale_progress_falls_back_to_open_count(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14,
                        ts=time.time() - statusbar.AUTOPILOT_RUN_WINDOW_S - 60)
-        self.assertIn("Issues 14", self._seg())
+        self.assertIn("I 14", self._seg())
 
     def test_backlog_empty_renders_green(self):
         _seed_cache(self.home, self.cwd, open_n=0, name="demo")
         _seed_progress(self.home, "demo", done=17, remaining=0)
         seg = self._seg()
-        self.assertIn("Issues 17/17", seg)
+        self.assertIn("I 17/17", seg)
         self.assertIn("38;5;40m", seg)          # green
 
     def test_unknown_repo_renders_nothing(self):
@@ -129,7 +129,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 7)
             self.assertEqual(cache["name"], "demo")
             # and the segment composes from that cache
-            self.assertIn("Issues 7", statusbar.tickets_segment(repo, home=home,
+            self.assertIn("I 7", statusbar.tickets_segment(repo, home=home,
                                                                spawn=False))
 
     def test_refresh_scopes_count_to_own_slice_for_reduced_authority(self):
@@ -165,7 +165,7 @@ class RefreshCLI(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 3)          # own slice, NOT 16
             self.assertEqual(cache.get("scope"), "mine")
-            self.assertIn("Issues 3", statusbar.tickets_segment(repo, home=home,
+            self.assertIn("I 3", statusbar.tickets_segment(repo, home=home,
                                                                 spawn=False))
 
     def test_scoped_render_splits_active_vs_gk_bucket(self):
@@ -176,7 +176,7 @@ class RefreshCLI(unittest.TestCase):
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=1, name="demo", gk=5, scope="mine")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 1", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 5", seg)
 
     def test_scoped_render_zero_active_still_shows_gk(self):
@@ -185,7 +185,7 @@ class RefreshCLI(unittest.TestCase):
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=0, name="demo", gk=5, scope="mine")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 0", seg)
+            self.assertIn("I 0", seg)
             self.assertIn("gk 5", seg)
 
     def test_scoped_render_gk_zero_is_still_shown(self):
@@ -198,7 +198,7 @@ class RefreshCLI(unittest.TestCase):
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=4, name="demo", gk=0, scope="mine")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 4", seg)
+            self.assertIn("I 4", seg)
             self.assertIn("gk 0", seg)
 
     def test_full_authority_render_has_no_gk(self):
@@ -207,7 +207,7 @@ class RefreshCLI(unittest.TestCase):
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=4, name="demo")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 4", seg)
+            self.assertIn("I 4", seg)
             self.assertNotIn("gk", seg)
 
     def test_refresh_partitions_slice_by_ready_for_review_label(self):
@@ -244,7 +244,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 1)      # active on the sub-dev
             self.assertEqual(cache["gk"], 2)        # handed off, waiting on gatekeeper
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("Issues 1", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 2", seg)
 
     def test_refresh_full_authority_excludes_other_streams_labels(self):
@@ -308,8 +308,8 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 28)
             self.assertEqual(cache["streamy"], 45)      # 73 - 28, locks the identity
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("Issues 28 core", seg)
-            self.assertIn("streamy 45", seg)
+            self.assertIn("I 28 core", seg)
+            self.assertIn("str 45", seg)
 
     def test_core_and_total_queries_no_longer_clamp_at_200(self):
         # #181 I5 (round 2): cmd_tickets_status's core/total queries both
@@ -335,8 +335,8 @@ class RefreshCLI(unittest.TestCase):
             (statusbar.cache_dir(home) /
              (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(d))
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 12 core", seg)
-            self.assertIn("streamy 0", seg)
+            self.assertIn("I 12 core", seg)
+            self.assertIn("str 0", seg)
 
     def test_refresh_subdev_slice_includes_own_stream_label(self):
         # Consistency with the ownership convention: a ticket labeled
@@ -474,7 +474,7 @@ class RefreshCLI(unittest.TestCase):
                                 (statusbar.cwd_key(parent) + ".json")).read_text())
             self.assertEqual(cache["open"], 12)
             self.assertEqual(cache["name"], "odoo-slovnormal")
-            self.assertIn("Issues 12", statusbar.tickets_segment(parent, home=home,
+            self.assertIn("I 12", statusbar.tickets_segment(parent, home=home,
                                                                  spawn=False))
 
     def test_refresh_stays_null_when_multiple_subdir_repos_are_ambiguous(self):
@@ -511,16 +511,16 @@ class SkippedBucket(unittest.TestCase):
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=12, name="demo", skipped=3)
             seg = self._seg(home, cwd)
-            self.assertIn("Issues 12", seg)
-            self.assertIn("skipped 3", seg)
+            self.assertIn("I 12", seg)
+            self.assertIn("skip 3", seg)
 
     def test_render_hides_skipped_at_zero_or_missing(self):
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=12, name="demo", skipped=0)
-            self.assertNotIn("skipped", self._seg(home, cwd))
+            self.assertNotIn("skip", self._seg(home, cwd))
             _seed_cache(home, cwd, open_n=12, name="demo")
-            self.assertNotIn("skipped", self._seg(home, cwd))
+            self.assertNotIn("skip", self._seg(home, cwd))
 
     def test_render_combines_with_gk_bucket(self):
         with TemporaryDirectory() as home:
@@ -528,9 +528,9 @@ class SkippedBucket(unittest.TestCase):
             _seed_cache(home, cwd, open_n=1, name="demo", gk=5, scope="mine",
                         skipped=2)
             seg = self._seg(home, cwd)
-            self.assertIn("Issues 1", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 5", seg)
-            self.assertIn("skipped 2", seg)
+            self.assertIn("skip 2", seg)
 
     def test_render_shows_skipped_during_autopilot_run(self):
         # done/total mode must not hide the skip info — skips are exactly the
@@ -540,8 +540,8 @@ class SkippedBucket(unittest.TestCase):
             _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
             _seed_progress(home, "demo", done=1, remaining=3)
             seg = self._seg(home, cwd)
-            self.assertIn("Issues 1/10", seg)   # remaining = LIVE open (9)
-            self.assertIn("skipped 2", seg)
+            self.assertIn("I 1/10", seg)   # remaining = LIVE open (9)
+            self.assertIn("skip 2", seg)
 
     def test_refresh_counts_skipped_for_full_authority(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
@@ -570,8 +570,8 @@ class SkippedBucket(unittest.TestCase):
             self.assertEqual(cache["open"], 7)
             self.assertEqual(cache["skipped"], 2)
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("Issues 7", seg)
-            self.assertIn("skipped 2", seg)
+            self.assertIn("I 7", seg)
+            self.assertIn("skip 2", seg)
 
     def test_refresh_counts_skipped_for_own_slice(self):
         # Reduced authority: skipped = union of the SAME slice quals, but with
@@ -735,7 +735,7 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=0, name="demo")
             _seed_progress(home, "demo", done=1, remaining=1)   # stale card
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 1/1", seg)
+            self.assertIn("I 1/1", seg)
             self.assertIn("38;5;40m", seg)                      # green
 
     def test_new_tickets_mid_run_grow_the_total(self):
@@ -744,7 +744,7 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=5, name="demo")
             _seed_progress(home, "demo", done=2, remaining=1)   # stale low
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 2/7", seg)
+            self.assertIn("I 2/7", seg)
 
     def test_unknown_open_falls_back_to_card_remaining(self):
         with TemporaryDirectory() as home:
@@ -752,7 +752,7 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=None, name="demo")    # gh error
             _seed_progress(home, "demo", done=3, remaining=14)
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("Issues 3/17", seg)
+            self.assertIn("I 3/17", seg)
 
 
 class QuestionsSegment(unittest.TestCase):
@@ -783,7 +783,7 @@ class QuestionsSegment(unittest.TestCase):
                     "2": {"cwd": self.CWD, "ts": now - 3600},
                     "3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
         seg = self._seg(now=now)
-        self.assertIn("otazky 2", seg)
+        self.assertIn("Q 2", seg)
         self.assertIn("inde 1", seg)
         self.assertIn("38;5;214m", seg)               # local count = orange
 
@@ -791,20 +791,20 @@ class QuestionsSegment(unittest.TestCase):
         now = time.time()
         self._seed({"3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
         seg = self._seg(now=now)
-        self.assertIn("otazky inde 1", seg)
+        self.assertIn("Q inde 1", seg)
         self.assertNotIn("38;5;214m", seg)            # nothing local → no orange
 
     def test_trailing_slash_cwd_still_matches(self):
         now = time.time()
         self._seed({"1": {"cwd": self.CWD + "/", "ts": now - 60}})
-        self.assertIn("otazky 1", self._seg(cwd=self.CWD + "/", now=now))
+        self.assertIn("Q 1", self._seg(cwd=self.CWD + "/", now=now))
 
     def test_stale_entries_past_ttl_not_counted(self):
         now = time.time()
         self._seed({"1": {"cwd": self.CWD,
                           "ts": now - statusbar.QUESTIONS_TTL_S - 5},
                     "2": {"cwd": self.CWD, "ts": now - 60}})
-        self.assertIn("otazky 1", self._seg(now=now))
+        self.assertIn("Q 1", self._seg(now=now))
 
     def test_hidden_at_zero_and_when_map_missing(self):
         self.assertEqual(self._seg(), "")
@@ -814,7 +814,7 @@ class QuestionsSegment(unittest.TestCase):
     def test_garbage_entries_are_safe(self):
         now = time.time()
         self._seed({"1": "not-a-dict", "2": {"cwd": self.CWD, "ts": now}})
-        self.assertIn("otazky 1", self._seg(now=now))
+        self.assertIn("Q 1", self._seg(now=now))
 
     def test_ttl_mirrors_notify_prune_ttl(self):
         # the badge must age out exactly when the map itself prunes
@@ -831,13 +831,13 @@ class QuestionsSegment(unittest.TestCase):
         # must count as LOCAL (either-direction containment), never 'inde'
         now = time.time()
         self._seed({"1": {"cwd": self.CWD + "/subrepo", "ts": now - 60}})
-        self.assertIn("otazky 1", self._seg(now=now))
+        self.assertIn("Q 1", self._seg(now=now))
         self.assertNotIn("inde", self._seg(now=now))
         # and the reverse: session in the subdir, question recorded at parent
         self._seed({"1": {"cwd": self.CWD, "ts": now - 60}})
         seg = statusbar.questions_segment(self.CWD + "/subrepo", now=now,
                                           home=self.home)
-        self.assertIn("otazky 1", seg)
+        self.assertIn("Q 1", seg)
         self.assertNotIn("inde", seg)
 
 
