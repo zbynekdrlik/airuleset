@@ -6771,6 +6771,11 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         except Exception as e:
             logs.append("card-reconcile probe-failed %s: %r" % (root, e))
         closed = merged_closes(root, base, now - window, git_run)
+        # `verified_source` tracks whether `closed` ALREADY passed GitHub's
+        # own CLOSED_EVENT->closer check (#230's `_watchdog_closed_fetch`),
+        # as opposed to being a bare local commit-message-keyword match
+        # (`merged_closes`) that has not yet been verified against anything.
+        verified_source = False
         if not closed and closed_fetch is not None:
             # A repo that never writes `Closes #N` trailers is invisible to
             # the local read — its issues close from the PR body, which is a
@@ -6783,6 +6788,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             if _commits_in_window(root, base, now - window, git_run) > 0:
                 try:
                     closed = _normalize_closed(closed_fetch(root, now - window))
+                    verified_source = True
                 except Exception as e:
                     logs.append("card-reconcile closed-fetch-failed %s: %r"
                                 % (root, e))
@@ -6850,6 +6856,35 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                     if not (closed.get(n) is not None
                             and now - closed[n] < grace)
                     and str(n) not in pinged]
+
+        # #232: `merged_closes` is a bare commit-message-keyword match — it
+        # is NOT proof GitHub actually closed the ticket from that commit
+        # (odoo-erp: 22 local `Fixes #N` matches on a non-default branch,
+        # none of which ever triggered a GitHub auto-close). Only a
+        # candidate that already came from the VERIFIED `closed_fetch`
+        # fallback (`verified_source`) skips this — asking again would cost
+        # a second `gh` call for an answer already known. Every OTHER
+        # candidate that survived grace + dedup (i.e. would actually nag
+        # this sweep) is checked against the SAME CLOSED_EVENT->closer
+        # GraphQL query #230 built, and only a confirmed merged-PR closer
+        # is kept. A `closed_fetch` failure (raises, times out, or itself
+        # degrades to `None`) drops every currently-pingable candidate for
+        # THIS SWEEP ONLY — nothing here is added to `pinged`, so a genuine
+        # finding is retried next sweep rather than silently swallowed
+        # forever (the direction the pre-existing fallback-failure branch
+        # above already takes).
+        if not verified_source and closed_fetch is not None:
+            try:
+                confirmed = _normalize_closed(closed_fetch(root, now - window))
+            except Exception as e:
+                logs.append("card-reconcile verify-failed %s: %r" % (root, e))
+                confirmed = {}
+            rejected = [n for n in pingable if n not in confirmed]
+            if rejected:
+                logs.append("card-reconcile verify-rejected %s issues=%s"
+                            % (name, ",".join(str(n)
+                                              for n in rejected[:CARD_MAX_LISTED])))
+            pingable = [n for n in pingable if n in confirmed]
 
         if dry_run or send_fn is None or not pingable:
             # `send_fn is None` must NOT mark anything pinged — nothing was
