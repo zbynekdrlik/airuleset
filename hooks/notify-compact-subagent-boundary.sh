@@ -109,17 +109,30 @@ set -euo pipefail
 # three minutes), so `not-autopilot-worker` runs to thousands a day while the
 # decisions this ticket cares about run to a few dozen. Therefore every
 # `autopilot-worker` decision is logged unconditionally, and the non-worker
-# class is logged ONCE PER (session, reason) — never again for that session,
-# however long it runs (#146, 2026-08-04). This replaces a GLOBAL 60s
-# heartbeat (#123): a served session's `agent_type` never changes mid-
-# session, so re-logging the SAME already-established decline every ~60s is
-# pure noise once the fact is known — live evidence, one 8.5h+ forestshop
-# session alone wrote 1465 of the shared log's 2842 lines (51.5%) and
-# rotated it on its own. A tiny marker file per (session, reason) pair under
+# class is logged ONCE PER (session, agent_type, reason) — never again for
+# that same triple, however long the session runs (#146, 2026-08-04). This
+# replaces a GLOBAL 60s heartbeat (#123): live evidence, one 8.5h+
+# forestshop session alone wrote 1465 of the shared log's 2842 lines (51.5%)
+# and rotated it on its own.
+#
+# `agent_type` IS part of the key, deliberately — a #146 fresh-context
+# review caught an earlier draft claiming "agent_type never changes
+# mid-session" and disproved it on this box's own real corpus (6 of 8
+# sessions logged more than one distinct type; SubagentStop fires per
+# parallel branch as well as per dispatched subagent, per the paragraph
+# above). What genuinely never changes once observed is the (agent_type,
+# reason) FACT for a session: a session that runs Explore, then
+# general-purpose, then ticket-validator gets three lines — one real fact
+# each — but a SECOND Explore branch from that same session is the
+# established, pre-known repeat this fix exists to silence.
+#
+# A tiny marker file per (session, agent_type, reason) triple under
 # `.compact-decisions-seen/` remembers what has already been logged, pruned
-# past a 14-day TTL so the directory cannot grow forever. A `stat`-size
-# check still rotates the decision log itself to `.log.1` at 512 KB
-# (ceiling ≈ 1 MB, two generations, no cron).
+# past a 14-day TTL so the directory cannot grow forever; the key is
+# clamped to 200 bytes so a pathological session_id cannot make marker
+# creation fail (ENAMETOOLONG) and silently re-enable the flood this fix
+# removes. A `stat`-size check still rotates the decision log itself to
+# `.log.1` at 512 KB (ceiling ≈ 1 MB, two generations, no cron).
 #
 # Logging is diagnostics: every write is `|| true`-guarded so a read-only
 # $HOME can never turn it into a blocked subagent stop. The ACCEPT CONDITION
@@ -156,26 +169,36 @@ _decide_log() {
     } 2>/dev/null || true
 }
 
-# The high-volume class: log the FIRST decline for a (session, reason) pair,
-# then suppress every later one for that SAME pair — the cause cannot change
-# mid-session (agent_type is fixed at launch), so a repeat is pure noise
-# (#146). O(1) — one `[ -e ]` check, no read-modify-write, so concurrent
-# stops cannot corrupt anything (the worst case is two markers written for
-# the same pair in the same instant, which is harmless).
+# The high-volume class: log the FIRST decline for a (session, agent_type,
+# reason) triple, then suppress every later one for that SAME triple — a
+# repeat of the exact same branch shape is pure noise (#146). The marker
+# write is ATOMIC (`set -o noclobber`, #146 review finding 4 — the earlier
+# `[ -e ] && … ; touch` shape raced: verified concurrent, more than one
+# winner) so concurrent stops for the identical triple still produce
+# exactly one line, never zero and never more than one.
 _decide_log_once_per_session() {
     local outcome="$1"
     local extra="${2:-}"
     local key seen_file
-    key=$(printf '%s|%s' "${SID:-}" "$extra" | tr -c 'A-Za-z0-9=_|-' '_')
+    key=$(printf '%s|%s|%s' "${SID:-}" "${AGENT_TYPE:-}" "$extra" \
+        | tr -c 'A-Za-z0-9=_|-' '_')
+    # clamp well under NAME_MAX (255 bytes) so a pathological session_id
+    # can never make marker creation fail and silently re-enable the flood
+    # (#146 review finding 2 — this used to fail ENAMETOOLONG, unnoticed).
+    key=${key:0:200}
     seen_file="$DECISION_SEEN_DIR/$key"
     [ -e "$seen_file" ] && return 0
     mkdir -p "$DECISION_SEEN_DIR" 2>/dev/null || true
     # bound the directory's growth -- a marker no session will ever revisit
-    # must not survive forever.
+    # must not survive forever. `-mtime +N` matches files whose age exceeds
+    # N+1 FULL days (a find quirk), so N-1 here is what actually enforces a
+    # TRUE $DECISION_SEEN_TTL_DAYS-day bound.
     find "$DECISION_SEEN_DIR" -maxdepth 1 -type f \
-        -mtime "+$DECISION_SEEN_TTL_DAYS" -delete 2>/dev/null || true
+        -mtime "+$((DECISION_SEEN_TTL_DAYS - 1))" -delete 2>/dev/null || true
+    # atomic create-if-absent: noclobber's `>` fails (silently, `2>/dev/null`)
+    # if the file already exists, so at most one concurrent racer ever wins.
+    ( set -o noclobber; : > "$seen_file" ) 2>/dev/null || return 0
     _decide_log "$outcome" "$extra"
-    touch "$seen_file" 2>/dev/null || true
 }
 
 _field() {
