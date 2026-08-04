@@ -1324,5 +1324,222 @@ class TestWorkerEvidenceBlockDeclaresTheCard(unittest.TestCase):
         self.assertIn("subagent-stop-check-run-card", t)
 
 
+# --------------------------------------------------------------------------- #
+# 4. #230 — the GitHub fallback must ask WHO closed the ticket, not just
+#    WHETHER it is closed.
+#
+# `_watchdog_closed_fetch` (airuleset.py) used to run
+# `gh issue list --state closed --json number,closedAt`, which cannot tell a
+# hand close, a close-by-a-bare-commit, and a close-by-a-merged-PR apart —
+# every closed issue in the window looked like "merged but unreported".
+# Measured live on odoo-erp before writing the fix: six of the seven
+# tickets named in the ticket were hand-closed (`closer: null`), one closed
+# from a commit (`closer: {"__typename": "Commit"}`) — none of the seven
+# ever had anything merged, so none was ever owed a card.
+#
+# The fix reads each closed issue's `CLOSED_EVENT.closer` via GraphQL and
+# keeps only `closer.__typename == "PullRequest" and closer.merged`. These
+# tests mock `subprocess.run` with the exact response shape `gh api
+# graphql` returns for that query (verified live against odoo-erp and
+# camera-box), so no test here talks to the network.
+# --------------------------------------------------------------------------- #
+
+class TestWatchdogClosedFetchOnlyCountsMergedPRs(unittest.TestCase):
+
+    def _graphql_stdout(self, issues, errors=None):
+        """`issues` = [(number, closedAt_iso, closer_dict_or_None), ...] —
+        the exact shape `gh api graphql`'s CLOSED_EVENT -> closer query
+        returns."""
+        nodes = [
+            {
+                "number": number,
+                "closedAt": closed_at,
+                "timelineItems": {"nodes": [{"closer": closer}]},
+            }
+            for number, closed_at, closer in issues
+        ]
+        body = {"data": {"repository": {"issues": {"nodes": nodes}}}}
+        if errors is not None:
+            body["errors"] = errors
+        return json.dumps(body)
+
+    def _fetch(self, issues, since_ts=0, returncode=0, errors=None,
+              side_effect=None):
+        import airuleset
+        if side_effect is not None:
+            with m.patch("subprocess.run", side_effect=side_effect) as run:
+                result = airuleset._watchdog_closed_fetch("/tmp/whatever",
+                                                           since_ts)
+            return result, run
+        out = m.Mock(returncode=returncode,
+                     stdout=self._graphql_stdout(issues, errors=errors))
+        with m.patch("subprocess.run", return_value=out) as run:
+            result = airuleset._watchdog_closed_fetch("/tmp/whatever",
+                                                       since_ts)
+        return result, run
+
+    # --- the three shapes named in #230 -----------------------------------
+
+    def test_a_hand_closed_issue_contributes_nothing(self):
+        # #2181's own shape from the ticket: closer is NONE at all.
+        result, _ = self._fetch([(2181, "2026-08-04T11:18:52Z", None)])
+        self.assertEqual(result, {})
+
+    def test_an_unmerged_pr_contributes_nothing(self):
+        result, _ = self._fetch([(500, "2026-08-04T11:18:52Z",
+                                  {"__typename": "PullRequest",
+                                   "merged": False})])
+        self.assertEqual(result, {})
+
+    def test_a_merged_pr_still_contributes_with_its_own_timestamp(self):
+        result, _ = self._fetch([(940, "2026-08-04T15:18:18Z",
+                                  {"__typename": "PullRequest",
+                                   "merged": True})])
+        self.assertEqual(list(result.keys()), [940])
+        import burn
+        expected = burn._parse_ts("2026-08-04T15:18:18Z").timestamp()
+        self.assertAlmostEqual(result[940], expected, delta=1,
+                               msg="the grace period (#224) reads this "
+                                   "timestamp per ticket")
+
+    # --- a close-by-bare-commit is not a merged PR either -------------------
+
+    def test_a_commit_closer_contributes_nothing(self):
+        # #1768's own shape from the ticket: closed by a plain commit, not
+        # a pull request at all.
+        result, _ = self._fetch([(1768, "2026-08-04T16:10:45Z",
+                                  {"__typename": "Commit"})])
+        self.assertEqual(result, {})
+
+    def test_a_mix_keeps_only_the_genuinely_merged_ticket(self):
+        result, _ = self._fetch([
+            (2181, "2026-08-04T11:18:52Z", None),
+            (1768, "2026-08-04T16:10:45Z", {"__typename": "Commit"}),
+            (940, "2026-08-04T15:18:18Z",
+             {"__typename": "PullRequest", "merged": True}),
+        ])
+        self.assertEqual(list(result.keys()), [940])
+
+    # --- contract preserved -------------------------------------------------
+
+    def test_the_since_window_still_filters(self):
+        result, _ = self._fetch(
+            [(940, "2020-01-01T00:00:00Z",
+              {"__typename": "PullRequest", "merged": True})],
+            since_ts=1785000000.0)
+        self.assertEqual(result, {})
+
+    def test_owner_and_name_are_resolved_via_raw_field_placeholders(self):
+        # Confirmed empirically before writing this fix: `-F`/raw-field
+        # expands `{owner}`/`{repo}` from the cwd's git remote; `-f`/
+        # string-field does NOT.
+        _, run = self._fetch([])
+        args = run.call_args[0][0]
+        self.assertIn("-F", args)
+        joined = " ".join(args)
+        self.assertIn("owner={owner}", joined)
+        self.assertIn("name={repo}", joined)
+        self.assertNotIn("gh issue list", joined)
+
+    def test_it_runs_in_the_repo_root_with_a_10s_timeout(self):
+        import airuleset
+        out = m.Mock(returncode=0, stdout=self._graphql_stdout([]))
+        with m.patch("subprocess.run", return_value=out) as run:
+            airuleset._watchdog_closed_fetch("/repo/root", 0)
+        _, kw = run.call_args
+        self.assertEqual(kw.get("cwd"), "/repo/root")
+        self.assertEqual(kw.get("timeout"), 10)
+
+    def test_non_zero_exit_degrades_to_none(self):
+        result, _ = self._fetch([], returncode=1)
+        self.assertIsNone(result)
+
+    def test_a_graphql_errors_field_degrades_to_none(self):
+        result, _ = self._fetch(
+            [(940, "2026-08-04T15:18:18Z",
+              {"__typename": "PullRequest", "merged": True})],
+            errors=[{"message": "boom"}])
+        self.assertIsNone(result)
+
+    def test_a_raised_exception_degrades_to_none(self):
+        result, _ = self._fetch([], side_effect=RuntimeError("no gh"))
+        self.assertIsNone(result)
+
+    def test_malformed_json_degrades_to_none(self):
+        import airuleset
+        out = m.Mock(returncode=0, stdout="not json")
+        with m.patch("subprocess.run", return_value=out):
+            result = airuleset._watchdog_closed_fetch("/tmp/x", 0)
+        self.assertIsNone(result)
+
+
+class TestWatchdogClosedFetchEndToEndThroughCardReconcile(unittest.TestCase):
+    """The same real (mocked-subprocess) `_watchdog_closed_fetch` wired as
+    job 25's `closed_fetch=` callback, proving the fix end-to-end the way
+    the ticket's own incident happened: a repo with no local `Closes #N`
+    trailers, whose closed tickets are a mix of hand-closed and genuinely
+    merged."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-closedfetch-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sent = []
+        self.state = {}
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append(msg)
+        return "sent"
+
+    def repo(self, name="odoo-erp"):
+        r = self.tmp / name
+        r.mkdir()
+        _git(r, "init", "-q", "-b", "main")
+        (r / "f").write_text("1")
+        _git(r, "add", "f")
+        # no Closes trailer at all — the exact tvdole/odoo-erp signature
+        _git(r, "commit", "-qm", "feat: no trailer here", ts=NOW - 3600)
+        bare = self.tmp / (name + ".git")
+        _git(r, "clone", "-q", "--bare", str(r), str(bare))
+        _git(r, "remote", "add", "origin", str(bare))
+        _git(r, "fetch", "-q", "origin")
+        _git(r, "remote", "set-head", "origin", "main")
+        return r
+
+    def test_hand_closed_tickets_never_ping_but_a_merged_one_does(self):
+        import airuleset
+
+        def graphql_stdout(issues):
+            nodes = [
+                {"number": n, "closedAt": ts,
+                 "timelineItems": {"nodes": [{"closer": closer}]}}
+                for n, ts, closer in issues
+            ]
+            return json.dumps(
+                {"data": {"repository": {"issues": {"nodes": nodes}}}})
+
+        out = m.Mock(returncode=0, stdout=graphql_stdout([
+            (2181, "2026-08-04T11:18:52Z", None),
+            (2300, "2026-08-04T10:54:49Z", None),
+            (1768, "2026-08-04T16:10:45Z", {"__typename": "Commit"}),
+            (940, "2026-08-04T15:18:18Z",
+             {"__typename": "PullRequest", "merged": True}),
+        ]))
+        r = self.repo()
+        with m.patch("subprocess.run", return_value=out):
+            wd.card_reconcile(
+                NOW, None, self.state, {"s": str(r)},
+                card_probe=lambda root, base: None,
+                marker_ok=lambda key: False,
+                send_fn=self.send,
+                closed_fetch=airuleset._watchdog_closed_fetch)
+        self.assertTrue(self.sent, "the genuinely merged ticket is owed a "
+                                   "card")
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("#940", self.sent[0])
+        self.assertNotIn("#2181", self.sent[0])
+        self.assertNotIn("#2300", self.sent[0])
+        self.assertNotIn("#1768", self.sent[0])
+
+
 if __name__ == "__main__":
     unittest.main()
