@@ -3321,5 +3321,364 @@ class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
                 self.assertIn("/compact", tmux.typed_texts())
 
 
+# --------------------------------------------------------------------------- #
+# #225 (2026-08-04) — the SELF-CALLBACK entry point.
+#
+# The Stop hook's own synchronous attempt (#65) sometimes has to fall back to
+# job 14's ~60s poll (a genuine draft, a dialog, an unresolved pane); under an
+# armed `/goal` loop the supervisor's NEXT turn can land within seconds, so by
+# the time job 14 re-derives the boundary from the session's CURRENT last
+# marker, it has already moved to the next ticket's `⏳`. The fix: a session
+# can EXPLICITLY assert its own boundary (`compact-request --self`) instead
+# of leaving it to be re-derived later — trusted identically to the existing
+# `subagent-stop` origin at every gate.
+# --------------------------------------------------------------------------- #
+
+class TestResolveSelfPane(unittest.TestCase):
+    CWD = "/home/newlevel/devel/selfcb"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_no_pane_env_returns_all_blank(self):
+        tmux = DeliverCompactNowFakeTmux([], CB_IDLE_CAP)
+        self.assertEqual(wd.resolve_self_pane(run=tmux, pane_env=""),
+                         ("", "", ""))
+
+    def test_resolves_cwd_and_sid_for_the_exact_pane(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-self-1", 1000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%7", "claude", self.CWD, "999")], CB_IDLE_CAP)
+        self.assertEqual(
+            wd.resolve_self_pane(run=tmux, projects_dir=proj, pane_env="%7"),
+            ("%7", self.CWD, "sid-self-1"))
+
+    def test_unrecognized_pane_id_returns_pane_id_but_blank_cwd_and_sid(self):
+        tmux = DeliverCompactNowFakeTmux(
+            [("%7", "claude", self.CWD, "999")], CB_IDLE_CAP)
+        self.assertEqual(wd.resolve_self_pane(run=tmux, pane_env="%999"),
+                         ("%999", "", ""))
+
+    def test_resolved_pane_with_no_transcript_yet_returns_blank_sid(self):
+        proj = self._dir()
+        tmux = DeliverCompactNowFakeTmux(
+            [("%7", "claude", self.CWD, "999")], CB_IDLE_CAP)
+        self.assertEqual(
+            wd.resolve_self_pane(run=tmux, projects_dir=proj, pane_env="%7"),
+            ("%7", self.CWD, ""))
+
+    def test_defaults_to_the_real_tmux_pane_env_var(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-env", 1000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%3", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        with m.patch.dict(os.environ, {"TMUX_PANE": "%3"}):
+            self.assertEqual(
+                wd.resolve_self_pane(run=tmux, projects_dir=proj),
+                ("%3", self.CWD, "sid-env"))
+
+
+class TestDeliverCompactSelf(unittest.TestCase):
+    CWD = "/home/newlevel/devel/selfcb2"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _reqpath(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_unresolvable_pane_returns_blank_and_records_nothing(self):
+        reqp = self._reqpath()
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp):
+            word, sid = wd.deliver_compact_self(pane_env="")
+        self.assertEqual((word, sid), ("", ""))
+        self.assertFalse(reqp.exists())
+
+    def test_immediate_delivery_returns_the_word_without_ever_holding(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-imm", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        reqp = self._reqpath()
+        sleeps = []
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp):
+            word, sid = wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5",
+                sleep_fn=lambda s: sleeps.append(s))
+        self.assertEqual(word, "sent")
+        self.assertEqual(sid, "sid-imm")
+        self.assertEqual(sleeps, [])
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_records_under_the_self_callback_origin(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-origin", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        reqp = self._reqpath()
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp), \
+             m.patch.object(wd, "record_compact_request",
+                            wraps=wd.record_compact_request) as rec:
+            wd.deliver_compact_self(run=tmux, projects_dir=proj, pane_env="%5")
+        rec.assert_called_once()
+        self.assertEqual(rec.call_args.kwargs.get("origin"), "self-callback")
+
+    def test_hold_retries_then_gives_up_and_leaves_request_recorded(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-hold", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP, in_mode=True)
+        reqp = self._reqpath()
+        clock = [0.0]
+
+        def now_fn():
+            return clock[0]
+
+        sleeps = []
+
+        def sleep_fn(s):
+            sleeps.append(s)
+            clock[0] += s
+
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp):
+            word, sid = wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5",
+                hold_s=17, retry_interval=5,
+                now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(word, "recorded")
+        self.assertEqual(sid, "sid-hold")
+        self.assertTrue(sleeps)
+        self.assertEqual(tmux.typed_texts(), [])
+        d = json.loads(reqp.read_text())
+        self.assertIn("sid-hold", d)
+        self.assertEqual(d["sid-hold"]["origin"], "self-callback")
+
+    def test_a_transient_failure_that_clears_within_the_hold_still_succeeds(self):
+        # copy-mode clears after the first poll -- the hold gives it a
+        # second chance instead of giving up on the very first attempt.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-retry", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP, in_mode=True)
+        reqp = self._reqpath()
+        clock = [0.0]
+        calls = []
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            tmux.in_mode = False   # the transient condition clears
+            clock[0] += s
+
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp):
+            word, sid = wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5",
+                hold_s=30, retry_interval=5,
+                now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(word, "sent")
+        self.assertEqual(sid, "sid-retry")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_exception_during_delivery_is_swallowed_and_still_holds(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-exc", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        reqp = self._reqpath()
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp), \
+             m.patch.object(wd, "deliver_compact_now",
+                            side_effect=RuntimeError("boom")):
+            word, sid = wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5",
+                hold_s=0, now_fn=lambda: 0.0, sleep_fn=lambda s: None)
+        self.assertEqual(word, "recorded")
+        self.assertEqual(sid, "sid-exc")
+
+
+class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
+    """The NEW origin gets IDENTICAL proven-boundary treatment to the
+    existing `subagent-stop` origin, at every one of the 4 sites that used to
+    compare against a single literal."""
+
+    SID = "sess-225"
+    CWD = "/home/x/proj225"
+    PANE = "%22"
+    WORKING = "⏳ WORKING: worker robí #43 + #47"
+    SELF = "self-callback"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_job14_delivers_on_a_working_turn_for_self_callback_origin(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.SELF)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+
+    def test_job14_delivers_into_a_busy_pane_for_self_callback_origin(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.SELF)
+        tmux = CompactFakeTmux(CB_BUSY_CAP)
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+
+    def test_sync_path_delivers_on_a_working_turn_for_self_callback_origin(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         origin=self.SELF)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(handled)
+
+    def test_substantiality_gates_are_exempt_for_self_callback_origin(self):
+        proj = self._proj()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 1000)   # tiny ctx
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(
+            self.SID, self.CWD, run=tmux, projects_dir=proj,
+            min_context=200_000, origin=self.SELF,
+            git_run=lambda argv, timeout=10: "0")   # would report 0 commits
+        self.assertEqual(word, "sent")
+
+
+class TestOriginPreservedAgainstBlankOverwrite(unittest.TestCase):
+    """#225 — a BLANK-origin `--record` call (the automatic Stop-hook's own
+    default shape) must never DOWNGRADE an already-recorded PROVEN origin for
+    the same still-pending session — that would silently erase the trust the
+    delivery gates above depend on."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_blank_origin_does_not_downgrade_self_callback(self):
+        p = self._p()
+        wd.record_compact_request("s1", "/x", now=1, path=p,
+                                  origin="self-callback")
+        wd.record_compact_request("s1", "/y", now=2, path=p)   # blank
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["s1"]["origin"], "self-callback")
+        self.assertEqual(d["s1"]["cwd"], "/y")
+        self.assertEqual(d["s1"]["ts"], 2)
+
+    def test_blank_origin_does_not_downgrade_subagent_stop(self):
+        p = self._p()
+        wd.record_compact_request("s2", "/x", now=1, path=p,
+                                  origin="subagent-stop")
+        wd.record_compact_request("s2", "/y", now=2, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["s2"]["origin"], "subagent-stop")
+
+    def test_an_explicit_non_blank_origin_still_overrides(self):
+        p = self._p()
+        wd.record_compact_request("s3", "/x", now=1, path=p,
+                                  origin="self-callback")
+        wd.record_compact_request("s3", "/y", now=2, path=p,
+                                  origin="subagent-stop")
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["s3"]["origin"], "subagent-stop")
+
+    def test_two_blank_origin_calls_never_invent_one(self):
+        p = self._p()
+        wd.record_compact_request("s4", "/x", now=1, path=p)
+        wd.record_compact_request("s4", "/y", now=2, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertNotIn("origin", d["s4"])
+
+
+class TestCompactRequestSelfCli(unittest.TestCase):
+    """`airuleset.py compact-request --self` wiring."""
+
+    class SelfArgs:
+        pass
+
+    def _args(self, **kw):
+        a = self.SelfArgs()
+        a.self = True
+        a.hold = kw.get("hold")
+        for k, v in kw.items():
+            setattr(a, k, v)
+        return a
+
+    def test_self_flag_calls_deliver_compact_self_and_prints_the_word(self):
+        a = self._args()
+        with m.patch("watchdog.deliver_compact_self",
+                     return_value=("sent", "sid-x")) as dcs:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                airuleset.cmd_compact_request(a)
+        dcs.assert_called_once_with(hold_s=None)
+        self.assertEqual(out.getvalue(), "sent")
+
+    def test_self_flag_passes_through_hold(self):
+        a = self._args(hold=12.5)
+        with m.patch("watchdog.deliver_compact_self",
+                     return_value=("recorded", "sid-y")) as dcs:
+            airuleset.cmd_compact_request(a)
+        dcs.assert_called_once_with(hold_s=12.5)
+
+    def test_self_flag_unresolvable_pane_exits_nonzero(self):
+        a = self._args()
+        with m.patch("watchdog.deliver_compact_self", return_value=("", "")):
+            with self.assertRaises(SystemExit) as cm:
+                airuleset.cmd_compact_request(a)
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_self_flag_takes_precedence_over_record(self):
+        a = self._args()
+        a.record = True
+        a.session = "should-not-be-used"
+        a.cwd = "/x"
+        with m.patch("watchdog.deliver_compact_self",
+                     return_value=("sent", "sid-z")) as dcs, \
+             m.patch("watchdog.record_compact_request") as rec:
+            airuleset.cmd_compact_request(a)
+        dcs.assert_called_once()
+        rec.assert_not_called()
+
+
+class TestCompactRequestSelfArgparseWiring(unittest.TestCase):
+    def test_self_and_hold_flags_are_registered(self):
+        r = subprocess.run(
+            [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+             "compact-request", "--help"],
+            capture_output=True, text=True)
+        self.assertIn("--self", r.stdout)
+        self.assertIn("--hold", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
