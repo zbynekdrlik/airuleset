@@ -80,6 +80,47 @@ class TestBounceLaneAlignment(TestCase):
         self.assertIn("Cross-stream protocol", read(SKILL))
 
 
+class TestBounceRuleUpdateLoop(TestCase):
+    """#222 -- every bounce is evidence the sub-dev RULES are deficient, so
+    the bounce path must feed back into those rules instead of only
+    re-queuing the same class of finding. User directive 2026-08-04, live
+    evidence: odoo-erp #2183/#2181/#2301 bounced simultaneously; an earlier
+    kiosk hand-off took 4 review rounds."""
+
+    def test_mandatory_question_is_asked_on_every_bounce(self):
+        t = read(SKILL)
+        self.assertIn("which sub-dev rule", t.lower())
+        self.assertIn("before hand-off", t.lower())
+
+    def test_skipped_rule_is_named_in_the_bounce_comment(self):
+        t = read(SKILL)
+        self.assertIn("name", t.lower())
+        self.assertIn("skipped rule", t.lower())
+
+    def test_missing_rule_updates_the_repo_hand_off_contract(self):
+        t = read(SKILL)
+        self.assertIn("hand-off contract", t.lower())
+        self.assertIn("same cycle", t.lower())
+
+    def test_airuleset_owned_gap_is_filed(self):
+        t = read(SKILL)
+        self.assertIn("gh issue create -R zbynekdrlik/airuleset", t)
+
+    def test_bounce_rate_metric_is_named(self):
+        t = read(SKILL)
+        self.assertIn("bounce-rate", t.lower())
+
+    def test_step_lands_inside_the_findings_bounce_bullet(self):
+        # not a stray paragraph elsewhere -- it must sit right where the
+        # bounce actually happens (step 5's FINDINGS branch), so a
+        # gatekeeper reading that one bullet sees the whole obligation.
+        t = read(SKILL)
+        i = t.index("FINDINGS")
+        j = t.index("Parallel-run rule")   # the next bullet after step 5
+        window = t[i:j]
+        self.assertIn("which sub-dev rule", window.lower())
+
+
 class TestIndependentReviewFrame(TestCase):
     def test_core_review_rules_ported(self):
         t = read(SKILL)
