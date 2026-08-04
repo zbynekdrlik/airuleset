@@ -515,3 +515,27 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
             # after (calling --self only makes sense before moving on)
             self.assertLess(line.index("compact-request --self"),
                             line.index("do NOT dispatch %s" % marker))
+
+
+class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):
+    """#227 review finding 10: the ONE lock that should have guarded the
+    clause-A "re-prints this /goal line" parenthetical
+    (`test_goal_line_rearm_after_answer`, tests/test_airuleset.py:2114)
+    checks the WHOLE skill file, not per template — so it stayed green
+    while the trim pass silently dropped the hint from two of three
+    templates. That trim was a deliberate, budget-driven call (verified:
+    it fits back into branch-merge at 3893+93=3986 but NOT fork-no-merge
+    at 3922+93=4015, over the 4000-char cap) and re-arming is
+    machine-backstopped regardless (watchdog jobs 9/20 re-print/re-arm the
+    template independent of this prose) — so this locks the asymmetry as
+    an intentional, tested design decision instead of an accidental gap."""
+
+    REARM_HINT = ("Claude resolves that ticket and re-prints this /goal "
+                  "line if issues remain")
+
+    def test_full_authority_carries_the_rearm_hint(self):
+        self.assertIn(self.REARM_HINT, goal_lines()[FULL])
+
+    def test_the_two_reduced_authority_templates_deliberately_do_not(self):
+        for idx in (BRANCH_MERGE, FORK_NO_MERGE):
+            self.assertNotIn(self.REARM_HINT, goal_lines()[idx])
