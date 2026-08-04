@@ -3157,22 +3157,29 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
 class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
     """#146: the DECLINE-not-autopilot-worker class used to be throttled by a
     GLOBAL, time-based heartbeat (#123) — one line per 60s, box-wide,
-    regardless of WHICH session declined. A served session's agent_type is
-    fixed at launch and never becomes "autopilot-worker" mid-session, so a
-    repeat decline for the SAME (session, reason) is a pre-known fact, not
-    new information — yet the old mechanism kept re-logging it every ~60s
-    for the session's whole lifetime. Live evidence (2026-08-04): one 8.5h+
-    forestshop session alone wrote 1465 of the shared 2842-line decision
-    log (51.5%) and rotated it on its own.
+    regardless of WHICH session declined. Live evidence (2026-08-04): one
+    8.5h+ forestshop session alone wrote 1465 of the shared 2842-line
+    decision log (51.5%) and rotated it on its own.
 
-    The fix: log the FIRST decline for a (session, reason) pair, then never
-    again for that SAME pair — bounded per session, not per time window.
-    The discriminating test is the second one below: a purely time-windowed
-    throttle would ALSO produce one line for repeated same-session calls
-    within a test's wall-clock run (that alone proves nothing new), but it
-    would ALSO wrongly suppress a genuinely DIFFERENT session's first-ever
-    decline landing inside the same window — which a per-session dedup
-    must never do.
+    The fix: log the FIRST decline for a (session, agent_type, reason)
+    triple, then never again for that SAME triple — bounded per session,
+    not per time window. `agent_type` is IN the key (a #146 fresh-context
+    review caught a first draft's claim that "agent_type never changes
+    mid-session" as empirically false on this box's own corpus: SubagentStop
+    fires once per parallel tool-call branch AND per dispatched subagent, so
+    ONE session routinely produces several DIFFERENT non-worker agent_type
+    values over its life — Explore, general-purpose, ticket-validator, fork
+    — and each is worth its own first line of evidence, not a shared one).
+    What genuinely never changes is the (agent_type, reason) FACT itself
+    once observed for a session: a repeat of the exact same branch shape is
+    what is pure noise, never the session's non-worker status as a whole.
+
+    The discriminating test is `test_a_different_session_still_gets_its_own_
+    first_decline`: a purely time-windowed throttle would ALSO produce one
+    line for repeated same-session calls within a test's wall-clock run
+    (that alone proves nothing new), but it would ALSO wrongly suppress a
+    genuinely DIFFERENT session's first-ever decline landing inside the
+    same window — which a per-session dedup must never do.
     """
 
     HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
@@ -3182,9 +3189,9 @@ class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
         return home
 
-    def _decline(self, home, sid, agent_id="agt-x"):
+    def _decline(self, home, sid, agent_id="agt-x", agent_type="Explore"):
         payload = {"session_id": sid, "agent_id": agent_id,
-                   "agent_type": "Explore", "cwd": "/nonexistent/i146",
+                   "agent_type": agent_type, "cwd": "/nonexistent/i146",
                    "hook_event_name": "SubagentStop", "stop_hook_active": False}
         return subprocess.run(
             ["bash", str(self.HOOK)], input=json.dumps(payload), text=True,
@@ -3212,6 +3219,21 @@ class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
         sids = sorted(_decision_fields(ln).get("sid") for ln in lines)
         self.assertEqual(sids, ["sess-a", "sess-b"])
 
+    def test_a_different_agent_type_from_the_same_session_still_logs(self):
+        # #146 review finding 1: one session running Explore then
+        # general-purpose then ticket-validator must produce ONE line per
+        # type it actually ran, not a single line for the session overall --
+        # the diversity is real evidence, not noise.
+        home = self._home()
+        for at in ("Explore", "general-purpose", "ticket-validator"):
+            self._decline(home, "sess-multi", agent_type=at)
+        # a repeat of a TYPE ALREADY SEEN is still deduped
+        self._decline(home, "sess-multi", agent_type="Explore")
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 3, lines)
+        types = sorted(_decision_fields(ln).get("type") for ln in lines)
+        self.assertEqual(types, ["Explore", "general-purpose", "ticket-validator"])
+
     def test_the_marker_directory_holds_one_entry_per_pair_seen(self):
         home = self._home()
         self._decline(home, "sess-c")
@@ -3232,11 +3254,69 @@ class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
         remaining = {p.name for p in seen_dir.iterdir()}
         self.assertNotIn(stale.name, remaining, remaining)
 
+    def test_a_marker_within_the_ttl_is_not_a_disguised_short_window(self):
+        # #146 review gap B: the earlier tests cannot tell "once EVER" from
+        # "once per N-day window" -- back-date the marker WELL inside the
+        # 14-day TTL and confirm the SAME session still does not re-log.
+        home = self._home()
+        self._decline(home, "sess-within-ttl")
+        seen_dir = Path(home) / ".claude" / ".compact-decisions-seen"
+        marker = list(seen_dir.iterdir())[0]
+        thirteen_days_ago = time.time() - (13 * 86400)
+        os.utime(marker, (thirteen_days_ago, thirteen_days_ago))
+        self._decline(home, "sess-within-ttl")
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_a_pathological_session_id_still_dedupes(self):
+        # #146 review finding 2: a session_id long enough to blow NAME_MAX
+        # (touch fails ENAMETOOLONG) used to make marker creation fail
+        # SILENTLY every time -- reverting to the exact per-call flood this
+        # fix exists to remove, with zero signal. The key must be clamped
+        # to a length the filesystem can always accept.
+        home = self._home()
+        huge_sid = "s" * 5000
+        for _ in range(3):
+            r = self._decline(home, huge_sid)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 1, lines)
+
+    def test_concurrent_first_declines_for_the_same_pair_produce_one_line(self):
+        # #146 review finding 4: [ -e ] then touch is not atomic. Launch
+        # several REAL concurrent hook invocations (subprocess.Popen, not
+        # .run, so they genuinely race) for the identical (session,
+        # agent_type, reason) triple and require exactly one winner. Every
+        # process's stdin is fed and closed BEFORE any is waited on, so
+        # they all actually race in the OS rather than running serially.
+        home = self._home()
+        payload = json.dumps({
+            "session_id": "sess-race", "agent_id": "agt-race",
+            "agent_type": "Explore", "cwd": "/nonexistent/i146-race",
+            "hook_event_name": "SubagentStop", "stop_hook_active": False})
+        procs = [
+            subprocess.Popen(
+                ["bash", str(self.HOOK)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "HOME": home}, cwd=str(airuleset.REPO_DIR),
+                text=True)
+            for _ in range(12)]
+        for p in procs:
+            p.stdin.write(payload)
+            p.stdin.close()
+        for p in procs:
+            p.wait(timeout=15)
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 1, lines)
+
 
 class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
-    """The class above can only be trusted if it FAILS on the obvious wrong
-    fixes. Both are built by mutating the REAL shipped script, so these tests
-    also fail if the script stops being the thing under test.
+    """`TestCompactBoundaryDecisionLog` can only be trusted if it FAILS on
+    the obvious wrong fixes (named explicitly, not as "the class above" --
+    a #146 review caught that positional reference going stale the moment
+    another class was inserted between the two). Both mutants are built by
+    mutating the REAL shipped script, so these tests also fail if the
+    script stops being the thing under test.
 
     The mutants live in a scratch `hooks/` dir so the script's own
     `dirname/..` resolution finds no airuleset.py — the `--record` call then
