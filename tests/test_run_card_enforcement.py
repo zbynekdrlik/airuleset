@@ -1429,16 +1429,26 @@ class TestWatchdogClosedFetchOnlyCountsMergedPRs(unittest.TestCase):
             since_ts=1785000000.0)
         self.assertEqual(result, {})
 
-    def test_owner_and_name_are_resolved_via_raw_field_placeholders(self):
-        # Confirmed empirically before writing this fix: `-F`/raw-field
-        # expands `{owner}`/`{repo}` from the cwd's git remote; `-f`/
-        # string-field does NOT.
+    def test_owner_and_name_are_resolved_via_field_placeholders(self):
+        # Confirmed empirically before writing this fix: gh's `-F`/`--field`
+        # (typed) values expand `{owner}`/`{repo}` from the cwd's git
+        # remote; `-f`/`--raw-field` (string) values do NOT. Asserts the
+        # PAIRING, not just presence — a mutant that swaps the two flags
+        # (query gets `-F`, owner/name get `-f`) passed the earlier,
+        # presence-only version of this test (a real adversarial-review
+        # finding) even though it makes `gh` fail with "Could not resolve
+        # to a Repository with the name '{owner}/{repo}'" every time.
         _, run = self._fetch([])
         args = run.call_args[0][0]
-        self.assertIn("-F", args)
+        for placeholder in ("owner={owner}", "name={repo}"):
+            self.assertIn(placeholder, args)
+            i = args.index(placeholder)
+            self.assertGreater(i, 0, placeholder)
+            self.assertEqual(args[i - 1], "-F",
+                             "%s must be paired with -F/--field (typed), "
+                             "the flag whose value gh actually expands — "
+                             "not -f/--raw-field" % placeholder)
         joined = " ".join(args)
-        self.assertIn("owner={owner}", joined)
-        self.assertIn("name={repo}", joined)
         self.assertNotIn("gh issue list", joined)
 
     def test_it_runs_in_the_repo_root_with_a_10s_timeout(self):

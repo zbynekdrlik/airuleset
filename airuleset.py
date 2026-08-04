@@ -3154,11 +3154,11 @@ def _watchdog_closed_fetch(root, since_ts):
     #230: only counts an issue whose CLOSED_EVENT `closer` is a merged pull
     request — a hand close or a close-by-commit is not a report anyone was
     ever owed. `owner`/`name` are resolved via `-F owner='{owner}' -F
-    name='{repo}'`: gh's raw-field (`-F`) values expand the `{owner}`/
-    `{repo}` placeholders from `cwd`'s git remote, `-f`/string-field values
-    do NOT (verified empirically before writing this) — so this stays one
-    `gh` call, exactly like before, with no separate `gh repo view` needed
-    to learn the owner/name first.
+    name='{repo}'`: gh's `-F`/`--field` (typed) values expand the
+    `{owner}`/`{repo}` placeholders from `cwd`'s git remote, `-f`/
+    `--raw-field` (string) values do NOT (verified empirically before
+    writing this) — so this stays one `gh` call, exactly like before, with
+    no separate `gh repo view` needed to learn the owner/name first.
     """
     import burn
     import subprocess
