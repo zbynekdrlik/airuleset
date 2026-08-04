@@ -6873,7 +6873,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # finding is retried next sweep rather than silently swallowed
         # forever (the direction the pre-existing fallback-failure branch
         # above already takes).
-        if not verified_source and closed_fetch is not None:
+        if pingable and not verified_source and closed_fetch is not None:
             try:
                 confirmed = _normalize_closed(closed_fetch(root, now - window))
             except Exception as e:
