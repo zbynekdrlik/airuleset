@@ -3472,7 +3472,6 @@ class TestDeliverCompactSelf(unittest.TestCase):
             [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP, in_mode=True)
         reqp = self._reqpath()
         clock = [0.0]
-        calls = []
 
         def now_fn():
             return clock[0]

@@ -60,6 +60,17 @@ set -euo pipefail
 # SubagentStop hook that emitted anything could interfere with the worker's
 # own stop decision (subagent-stop-check-bg-work.sh owns that).
 #
+# #225 (2026-08-04): `origin="subagent-stop"` (below) is no longer the ONLY
+# proven-boundary origin — `compact-request --self` (a session explicitly
+# asking to compact its OWN pane, right now) carries its own new
+# `"self-callback"` origin, trusted identically at every gate. The two never
+# collide: this hook always passes `subagent-stop` itself, unchanged, and
+# `record_compact_request` now refuses to let either PROVEN origin be
+# silently downgraded by a LATER blank-origin call for the same session
+# (the plain Stop-hook channel's own default shape) — so a request THIS
+# hook records keeps its proof even if that other channel also fires
+# moments later for the same session.
+#
 # ---------------------------------------------------------------------------
 # THE DECISION LOG (#123, 2026-07-28) — why a silent guard had to grow one.
 #

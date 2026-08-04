@@ -4222,11 +4222,24 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
 
     `origin` (#121, optional): WHAT proved this is a ticket boundary.
     `"subagent-stop"` means an autopilot-worker concluded with zero other
-    live tasks in the session's own task registry — evidence the DELIVERY
-    gate (`_compact_not_at_boundary`) consults so a supervisor's `⏳` last
-    line, which refers to the NEXT batch, stops vetoing the boundary of the
-    ticket that just landed. Absent/blank = the Stop-hook origin, gated
-    exactly as before."""
+    live tasks in the session's own task registry; `"self-callback"` (#225)
+    means the session itself asserted the boundary via `compact-request
+    --self`. Both are evidence the DELIVERY gate (`_compact_not_at_boundary`)
+    consults so a supervisor's `⏳` last line, which refers to the NEXT
+    batch, stops vetoing the boundary of the ticket that just landed.
+    Absent/blank = the Stop-hook origin, gated exactly as before.
+
+    #225 — a BLANK origin never DOWNGRADES an already-recorded PROVEN one
+    for the SAME still-pending session. The automatic Stop-hook's own
+    `--record` call (blank origin, its unchanged default shape) fires again
+    moments after e.g. a self-callback's bounded hold gives up without
+    delivering — without this, that later call would silently overwrite the
+    self-callback's trusted entry with an untrusted one, erasing exactly the
+    proof job 14's later retry depends on. A call that supplies its OWN
+    non-blank origin is never affected by this — it always wins outright, as
+    before. `ts`/`cwd`/`msg_hash` still take the NEWER call's values either
+    way (only the LATEST boundary matters, per the doc above); only the
+    origin can be preserved instead of overwritten."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -4235,8 +4248,15 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     entry = {"cwd": str(cwd or ""), "ts": int(now)}
     if msg_hash:
         entry["msg_hash"] = str(msg_hash)
-    if origin:
-        entry["origin"] = str(origin)
+    resolved_origin = str(origin or "").strip()
+    if not resolved_origin:
+        prior = d.get(session)
+        prior_origin = (str(prior.get("origin") or "").strip()
+                        if isinstance(prior, dict) else "")
+        if prior_origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS:
+            resolved_origin = prior_origin
+    if resolved_origin:
+        entry["origin"] = resolved_origin
     d[session] = entry
     return _save_compact_requests(d, path)
 
@@ -5027,6 +5047,17 @@ _COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
 # state (the #102 camera-box incident compacted a `❓ NEEDS YOU` turn before
 # the user could answer), and no worker's completion makes it durable.
 _COMPACT_PROVEN_BOUNDARY_ORIGIN = "subagent-stop"
+
+# #225 — a SECOND origin that proves its own boundary the same way: the
+# SESSION ITSELF calling the new `compact-request --self` entry point,
+# asserting "I am at a safe boundary right now" directly rather than having
+# it re-derived later from transcript marker text (see `resolve_self_pane`/
+# `deliver_compact_self` below). Both origins get IDENTICAL trust — a single
+# frozenset so every consumer checks membership instead of `==` against one
+# literal, which is the only change needed at each of the 4 call sites below.
+_COMPACT_SELF_CALLBACK_ORIGIN = "self-callback"
+_COMPACT_PROVEN_BOUNDARY_ORIGINS = frozenset(
+    (_COMPACT_PROVEN_BOUNDARY_ORIGIN, _COMPACT_SELF_CALLBACK_ORIGIN))
 _COMPACT_NON_BOUNDARY_MARKERS_PROVEN = ("❓",)
 
 # The `user` entry Claude Code writes when a Stop hook REFUSES a turn's final
@@ -5063,7 +5094,7 @@ def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     if tpath is None:
         return False
     markers = (_COMPACT_NON_BOUNDARY_MARKERS_PROVEN
-               if origin == _COMPACT_PROVEN_BOUNDARY_ORIGIN
+               if origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS
                else _COMPACT_NON_BOUNDARY_MARKERS)
     return transcript_last_marker(tpath) in markers
 
@@ -5106,7 +5137,7 @@ def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
 
     Unmeasurable never blocks — the same fail-direction every other compact
     gate uses."""
-    if origin != _COMPACT_PROVEN_BOUNDARY_ORIGIN:
+    if origin not in _COMPACT_PROVEN_BOUNDARY_ORIGINS:
         return False
     pdir = projects_dir or PROJECTS_DIR
     tpath = _transcript_for_session(pdir, sid, cwd)
@@ -5381,7 +5412,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # turn is not blocked by `❓`. Every OTHER origin keeps the
         # unconditional busy-skip unchanged (see the #122 issue comment).
         proven_boundary = (str(entry.get("origin") or "")
-                           == _COMPACT_PROVEN_BOUNDARY_ORIGIN)
+                           in _COMPACT_PROVEN_BOUNDARY_ORIGINS)
         if kind == "busy" and not proven_boundary:
             logs.append("skip busy (compact-request) %s" % loc)
             continue
@@ -5690,7 +5721,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # no-work too, not just small-context" reasoning. Every OTHER origin
     # (the plain Stop-hook channel, and job 14's own separate copy of these
     # same two gates) is completely untouched by this.
-    proven_boundary = origin == "subagent-stop"
+    proven_boundary = origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS
     if not proven_boundary:
         # #99 — did REAL work (>=1 commit) actually happen since the last
         # genuine boundary for this repo? A positively-confirmed zero drops
@@ -5724,6 +5755,130 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
     _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
     return "sent"
+
+
+# --------------------------------------------------------------------------- #
+# #225 (2026-08-04) — the SELF-CALLBACK entry point.
+#
+# The user's own directive (asked repeatedly before this ticket): at Work
+# Complete the session must not immediately walk on to the next ticket — it
+# should fire an explicit external command that asks the watchdog to deliver
+# `/compact` into its OWN pane right now, holding (bounded) until it lands,
+# rather than parking a request for a LATER sweep to re-derive a boundary
+# that may have already moved on by the time that sweep runs.
+#
+# `airuleset.py compact-request --self` (wired below) is that command. It
+# needs no `--session`/`--cwd` from the caller at all — unlike every other
+# sender, which has to resolve an AMBIGUOUS "which pane hosts this sid"
+# question (`_find_pane_for_session`, above), the session calling THIS
+# command already IS the one true pane: `$TMUX_PANE` (tmux's own per-pane
+# identity env var, set for every process running inside a tmux pane) names
+# it directly, with zero matching/guessing involved.
+# --------------------------------------------------------------------------- #
+
+def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
+    """Resolve the EXACT pane/cwd/sid of the CALLING session for the
+    self-callback entry point — never ambiguity-resolved by transcript
+    matching the way `_find_pane_for_session` has to be, because the caller
+    already knows precisely which pane it is.
+
+    `pane_env` (optional, for tests) overrides `$TMUX_PANE`. Returns
+    `(pane_id, cwd, sid)`; any element that could not be resolved is `""`:
+    `pane_id==""` means `$TMUX_PANE` was absent (not running inside a tmux
+    pane at all — this command is only ever meant to be invoked from one);
+    `cwd==""` means the pane id is set but `list_claude_panes` does not
+    recognize it as a `claude`/hosted-sudo pane (should not happen for a
+    genuine self-call, but never guess); `sid==""` means the pane resolved
+    but has no active transcript yet. The caller treats a blank `sid` as
+    total failure — there is nothing safe to record or deliver without one."""
+    run = run or _default_run
+    pane_id = (pane_env if pane_env is not None
+              else os.environ.get("TMUX_PANE", "")).strip()
+    if not pane_id:
+        return "", "", ""
+    cwd = ""
+    for pid, pcwd in list_claude_panes(run):
+        if pid == pane_id:
+            cwd = pcwd
+            break
+    if not cwd:
+        return pane_id, "", ""
+    pdir = projects_dir or PROJECTS_DIR
+    tinfo = find_active_transcript(pdir, cwd)
+    if not tinfo:
+        return pane_id, cwd, ""
+    tpath, _mtime = tinfo
+    return pane_id, cwd, tpath.stem
+
+
+COMPACT_SELF_HOLD_DEFAULT_S = 60
+COMPACT_SELF_RETRY_INTERVAL_S = 5
+
+
+def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
+                         hold_s=None, retry_interval=None,
+                         now_fn=None, sleep_fn=None,
+                         min_context=None, git_run=None):
+    """The self-callback: resolve the calling session's own pane, record a
+    request under the `self-callback` proven-boundary origin, and hold
+    (bounded) while retrying synchronous delivery until it lands or the
+    window expires.
+
+    Returns `(word, sid)`. `sid==""` means the pane/session could not be
+    resolved at all (nothing was recorded — see `resolve_self_pane`).
+    Otherwise `word` is `deliver_compact_now`'s own disposition word once
+    one is returned truthy (`"sent"`/`"claim-queued"`/`"queued-compact"` —
+    `"dropped-no-work"`/`"dropped-small-context"` cannot occur here, since
+    the proven-boundary origin exempts both #99/#48 gates entirely), or the
+    literal `"recorded"` if the whole hold window elapses with nothing
+    landing — the request stays on file, WITH the trusted origin, for job
+    14's own later sweep to pick up (extended by #225 to trust this origin
+    exactly like `subagent-stop`).
+
+    Reachable expiry, no wedging (the hard constraint this ticket names
+    explicitly): this writes nothing new outside the TWO stores that are
+    already bounded — `compact-requests.json` via `COMPACT_REQUEST_MAX_AGE_S`
+    (30 min, `record_compact_request` above, unchanged) and
+    `compact_claims.json` via its own existing CONSUMED/FAILED/EXPIRED
+    resolution (#72/#78/#83/#140, `compact_claim_set`/`compact_claim_active`,
+    unchanged). This function's OWN loop is bounded by `hold_s` regardless —
+    it can hang the calling process for at most that long, never indefinitely,
+    and holds no lock/claim of its own that could outlive it.
+
+    `hold_s` defaults to `AIRULESET_COMPACT_SELF_HOLD_S` or
+    `COMPACT_SELF_HOLD_DEFAULT_S` (60s) — the ticket's own "~60s" figure.
+    `now_fn`/`sleep_fn` are injectable so tests never sleep for real."""
+    now_fn = now_fn or time.time
+    sleep_fn = sleep_fn or time.sleep
+    if hold_s is None:
+        try:
+            hold_s = float(os.environ.get("AIRULESET_COMPACT_SELF_HOLD_S",
+                                          COMPACT_SELF_HOLD_DEFAULT_S))
+        except ValueError:
+            hold_s = COMPACT_SELF_HOLD_DEFAULT_S
+    if retry_interval is None:
+        retry_interval = COMPACT_SELF_RETRY_INTERVAL_S
+    _pane_id, cwd, sid = resolve_self_pane(run=run, projects_dir=projects_dir,
+                                           pane_env=pane_env)
+    if not sid:
+        return "", ""
+    record_compact_request(sid, cwd, now=now_fn(),
+                           origin=_COMPACT_SELF_CALLBACK_ORIGIN)
+    deadline = now_fn() + max(0.0, hold_s)
+    while True:
+        try:
+            word = deliver_compact_now(sid, cwd, run=run,
+                                       projects_dir=projects_dir,
+                                       min_context=min_context, git_run=git_run,
+                                       origin=_COMPACT_SELF_CALLBACK_ORIGIN)
+        except Exception:
+            word = ""
+        if word:
+            return word, sid
+        now = now_fn()
+        if now >= deadline:
+            return "recorded", sid
+        sleep_fn(min(retry_interval, deadline - now))
 
 
 # --------------------------------------------------------------------------- #

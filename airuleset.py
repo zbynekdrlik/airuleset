@@ -3453,7 +3453,26 @@ def cmd_compact_request(args):
     "sent"/"claim-queued"/"queued-compact"/"dropped-no-work"/
     "dropped-small-context" -- never the single generic "delivered" this
     command used to print for all five dispositions regardless of what
-    actually happened downstream."""
+    actually happened downstream.
+
+    #225 -- `--self` is a SEPARATE mode, checked first: the SESSION itself
+    calling this to ask "deliver /compact into MY OWN pane, right now, and
+    hold (bounded) until it lands" -- no --session/--cwd/--origin needed at
+    all, resolved from the calling pane via `$TMUX_PANE`. See
+    `watchdog.deliver_compact_self`'s own docstring for the full mechanism
+    (the primary fix for the ticket's "boundary window closes before the
+    sweep looks" race)."""
+    if getattr(args, "self", False):
+        from watchdog import deliver_compact_self
+        word, sid = deliver_compact_self(hold_s=getattr(args, "hold", None))
+        if not sid:
+            print("compact-request --self: could not resolve this session's "
+                  "own pane/transcript (not running inside a recognized "
+                  "tmux Claude Code pane, or $TMUX_PANE unset) -- nothing "
+                  "recorded", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.write(word)
+        return
     from watchdog import (record_compact_request, deliver_compact_now,
                           clear_compact_request, compact_already_delivered,
                           mark_compact_delivered)
@@ -5841,6 +5860,22 @@ def main():
                              "not evidence of anything and never holds the "
                              "delivery (a `❓` still does). Empty = the Stop-hook "
                              "origin, whose gate is unchanged.")
+    p_creq.add_argument("--self", action="store_true",
+                        help="#225 -- explicit self-callback: resolve THIS "
+                             "session's own pane via $TMUX_PANE and attempt "
+                             "synchronous /compact delivery under a proven "
+                             "boundary origin, holding (bounded, default "
+                             "60s) if the first attempt can't land yet. "
+                             "Ignores --record/--session/--cwd/--origin -- "
+                             "everything is resolved from the calling pane "
+                             "itself. Call this as your OWN last tool call "
+                             "right after finishing a ticket, before "
+                             "dispatching anything else.")
+    p_creq.add_argument("--hold", type=float, default=None,
+                        help="--self only: seconds to keep retrying before "
+                             "giving up and leaving the request for job "
+                             "14's later sweep (default "
+                             "AIRULESET_COMPACT_SELF_HOLD_S or 60)")
 
     p_tickets = sub.add_parser(
         "tickets-status",

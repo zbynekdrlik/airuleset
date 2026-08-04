@@ -49,6 +49,18 @@ set -euo pipefail
 # another. Still silent + non-blocking on stdout — only the log FILE gains
 # a line; nothing here can interfere with the Stop decision pipeline (the
 # other stop-check-*.sh gates).
+#
+# #225 (2026-08-04): this channel is now the FALLBACK, not the only path. The
+# PRIMARY path is a session calling `compact-request --self` itself, right
+# after a ticket's own ✅ report, under a proven-boundary origin
+# (`self-callback`) it asserts directly rather than leaving job 14 to
+# re-derive a boundary that may have already moved on by the time it polls
+# (the ticket's own "boundary window closes before the sweep looks" root
+# cause). This hook's own `--record` call below is unchanged (still blank
+# origin, still gated exactly as before #225) — `record_compact_request`
+# itself was hardened so a blank-origin call like this one can never
+# silently downgrade an already-recorded PROVEN origin (self-callback's, or
+# the SubagentStop channel's) for the same still-pending session.
 
 INPUT=$(cat)
 
