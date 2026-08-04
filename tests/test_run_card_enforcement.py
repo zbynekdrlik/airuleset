@@ -710,6 +710,62 @@ class TestCardReconcile(unittest.TestCase):
                          "at most one query per repo per sweep")
         self.assertTrue(self.sent)
 
+    def test_dry_run_still_verifies_but_sends_and_records_nothing(self):
+        # Adversarial-review finding on #232: the verify call runs BEFORE
+        # the `dry_run`/`send_fn is None`/`not pingable` short-circuit,
+        # exactly mirroring the pre-existing #230 fallback (also
+        # unconditioned on dry_run) — deliberate, not an oversight: a
+        # `--dry-run --verbose` diagnostic run (the maintainer's own
+        # evidence-gathering command in this ticket) must show the SAME
+        # verified answer a live sweep would compute, or the diagnostic
+        # output would be misleadingly full of unverified false positives
+        # even after this fix is deployed. Locking it here so the
+        # behavior is provably intentional, not merely untested.
+        calls = []
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: calls.append(root),
+                       dry_run=True)
+        self.assertEqual(calls, [str(r)],
+                         "dry-run must still verify, to preview the real "
+                         "answer")
+        self.assertEqual(self.sent, [], "dry-run never sends")
+        self.assertEqual(self.state.get("card_unreported"), None,
+                         "dry-run never records anything either")
+
+    def test_two_repos_in_one_sweep_each_cost_at_most_one_verify_call(self):
+        # Adversarial-review coverage gap on #232: the "at most one query
+        # per repo per sweep" claim was only exercised with a single repo.
+        # Two repos in the SAME sweep, sharing ONE closed_fetch callable —
+        # one taking the #230 FALLBACK path (merged_closes finds nothing
+        # locally), the other taking the NEW verify path (merged_closes
+        # finds a real trailer) — must cost exactly one call each, and
+        # `verified_source` (a per-iteration local) must never leak
+        # between them.
+        calls = []
+
+        def fetch(root, since):
+            calls.append(root)
+            if root.endswith("fallback-repo"):
+                return {77: NOW - 3600}
+            return {3: NOW - 3600}
+
+        rf = self.repo(name="fallback-repo", closes=(), age=3600)
+        (rf / "f").write_text("x")
+        _git(rf, "add", "f")
+        _git(rf, "commit", "-qm", "feat: no trailer here", ts=NOW - 3600)
+        _git(rf, "push", "-q", "origin", "main")
+        _git(rf, "fetch", "-q", "origin")
+
+        rv = self.repo(name="verify-repo", closes=(3,))
+
+        self.reconcile([rf, rv], closed_fetch=fetch)
+        self.assertEqual(sorted(calls), sorted([str(rf), str(rv)]),
+                         "each repo verified exactly once — no double "
+                         "query, no skipped query")
+        self.assertEqual(len(self.sent), 2)
+        self.assertTrue(any("#77" in s["msg"] for s in self.sent))
+        self.assertTrue(any("#3" in s["msg"] for s in self.sent))
+
     # --- #141 half 2: a DELIVERED digest is a report too ------------------
     # The two mechanisms used disjoint key namespaces: the digest writes one
     # marker for `backfill:<repo>:<since>` while job 25 asks about
