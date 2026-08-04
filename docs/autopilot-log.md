@@ -2811,3 +2811,82 @@ missing from `SUBAGENT_REACHABLE_EVENTS`) and needed its own keyword-set narrowi
 closed via STEP 0's `gh issue close --comment` path (never coded) could still need 3 unmeetable
 markers -- fixed by excluding issues named on `obsolete_closed:`/`obsolete_handed_off:` lines.
 Full suite green again after each fix; final count 3607 passed, ruff clean, `validate` clean.
+
+
+## 2026-08-04 — batch: #206 (closed-issue design-gate exemption) + #222 (bounce ⇒ rule-update loop) + #223 (statusline: drop ctx bar, add sub/account segments, shorten labels)
+
+Three independently-filed tickets, bundled onto one push per the batch gate (no
+cross-dependency between them). All three landed direct to `main` (this repo has
+no dev branch / no PR / no CI — `airuleset.py push`'s own fail-closed test suite
+is the gate).
+
+**#206**: `block-commit-without-design.sh` used to require a design marker for
+EVERY `#N` mentioned anywhere in a commit message, with no way to tell "the
+ticket this commit is for" from a historical/closed reference in prose (the
+reported case: `"(owner decisions #1734/#1766)"`, both long-closed — syntactically
+identical to this repo's own `(#N)` "this commit's ticket" convention, so no
+positional/syntactic rule could discriminate them). Fix: `design_gate.
+required_refs()` + `_gh_issue_state()` drop a still-unmarked ref from the
+required set once `gh issue view` confirms it's CLOSED, querying only refs with
+no existing marker (the common case costs zero extra calls), failing toward
+STILL REQUIRED whenever state can't be determined. `scripts/
+replay_design_gate_commit_corpus.py` now stubs `gh` (always OPEN) so its own
+"no gh, no network" contract holds after the change. TDD: c8031fa [red] / 6ae3ccb
+[green] — 15 design_gate unit tests + 5 hook-behaviour tests, 89 total passing
+across both files.
+
+**#222**: `skills/process-subdev/SKILL.md`'s bounce path (step 5, FINDINGS
+branch) posted findings + `prio:bounce` and stopped, with no mechanism asking
+WHY the finding reached review at all — live evidence cited: odoo-erp
+#2183/#2181/#2301 bounced simultaneously, an earlier kiosk hand-off took 4
+rounds. Added a mandatory step: before finishing a bounce, answer "which
+sub-dev rule/checklist item would have caught this finding BEFORE hand-off?" —
+name the skipped rule in the bounce comment, or update the repo's hand-off
+contract in the same cycle (file an airuleset ticket if the gap is airuleset-
+owned). Bounce-rate per stream named as the metric this loop drives down. TDD:
+53b21ab [red] / 2ac4410 [green] — 6 new content-lock tests, 21 total passing.
+
+**#223**: exact target footer format implemented as specified (verbatim in the
+ticket, not redesigned): dropped the context-fill BAR from `CAVEMAN_SHIM_CONTENT`
+entirely (the KB figure stays visible via the existing cost segment); shortened
+every label (`Issues`->`I`, `otazky`->`Q`, `streamy`->`str`, `skipped`->`skip`,
+`gk-req`->`gkq`, per-model window to its first letter uppercased, `ctx <size> ·
+~$<cost>/ťah`->`ctx <size> ~$<cost>`, reset suffix lost its leading space); added
+`statusbar.subscription_segment()` (monthly renewal anchor from `~/.claude.json`
+-> `oauthAccount.subscriptionCreatedAt`, day-of-month anniversary clamped for
+short months, coloured by proximity) and `statusbar.account_email_segment()`
+(the logged-in account's email, faint). Both new readers fail silently on any
+missing/malformed input, verified end-to-end against the real bash shim
+(`tests/test_caveman.py::TestCavemanShimAccountSegments`) for every degraded
+case the ticket named: missing `~/.claude.json`, missing `oauthAccount`,
+unparseable `subscriptionCreatedAt`, stale (>6h) per-model usage cache — each
+omits only the affected segment, never breaks the line. TDD: 60eb1f9 [red] /
+fe2178a [green] + bd751c3 [green] (a same-batch fixup: the first push attempt
+correctly self-aborted on one assertion in `tests/test_gk_request.py` that
+still expected the OLD `gk-req N` text — missed because it lives in a file the
+earlier statusbar/caveman-scoped test runs never touched; a repo-wide sweep
+after the fix found zero remaining stale-label assertions). Every pre-existing
+test asserting an old label string across `tests/test_statusbar.py`, `tests/
+test_caveman.py`, `tests/test_usage_cache.py`, `tests/test_gk_request.py` was
+migrated to the new render text (never weakened). `modules/core/
+statusline-vocabulary.md` + its two locked tests updated to document the
+current rendered forms alongside the historical spoken ones.
+
+Live-verified on dev1: rendered the REAL installed shim
+(`~/.claude/airuleset-caveman-statusline.sh`) against a constructed realistic
+stdin payload, real HOME/caches --
+`5h 13%(95071d)  wk 61%(95071d)  F 25%(3d)  sub 12.8.(8d)  I 49 core · str 0 ·
+skip 1  Q inde 1  ctx 570K ~$0.28  drlik.marek@gmail.com  caveman:lite` -- the
+`sub 12.8.(8d)` and `drlik.marek@gmail.com` match the box's real
+`~/.claude.json` values exactly. A pre-#223 build of the same bash wrapper,
+same payload, same live caches confirmed the bash-level delta precisely (ctx
+bar present -> absent, `Fable 25% (3d)` -> `F 25%(3d)`, no leading space on the
+reset suffix, `sub`/email segments absent -> present). A fresh `HOME` with no
+`~/.claude.json` at all rendered `5h 13%(95071d)  wk 61%(95071d)  ctx 570K
+~$0.28` -- the rest of the line intact, `sub`/email/tickets/questions/caveman
+all correctly absent, exit 0, no traceback.
+
+`python3 airuleset.py push`: 3603 tests, ruff clean, pushed + installed
+locally + deployed to all 6 remote targets (dev2, gatekeeper, montalu@subdev,
+marek@subdev, david@subdev, simap@subdev). All three issues auto-closed on
+push via their `Closes #N` trailers. Discord run-cards fired for all three.
