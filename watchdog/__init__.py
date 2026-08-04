@@ -4203,6 +4203,14 @@ def _save_compact_requests(d, path=None):
         return False
 
 
+# #225 (adversarial-review hardening) — how long a PROVEN origin survives a
+# later BLANK-origin `--record` call for the same session before it is
+# treated as stale rather than preserved. See `record_compact_request`'s
+# own docstring for why this has to be bounded at all (an unbounded
+# preservation defeats `COMPACT_REQUEST_MAX_AGE_S`).
+COMPACT_ORIGIN_PRESERVE_WINDOW_S = 120
+
+
 def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
                            origin=None):
     """Record that `session` (transcript stem = CC session id) just reported
@@ -4230,16 +4238,27 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     Absent/blank = the Stop-hook origin, gated exactly as before.
 
     #225 — a BLANK origin never DOWNGRADES an already-recorded PROVEN one
-    for the SAME still-pending session. The automatic Stop-hook's own
-    `--record` call (blank origin, its unchanged default shape) fires again
-    moments after e.g. a self-callback's bounded hold gives up without
-    delivering — without this, that later call would silently overwrite the
-    self-callback's trusted entry with an untrusted one, erasing exactly the
-    proof job 14's later retry depends on. A call that supplies its OWN
-    non-blank origin is never affected by this — it always wins outright, as
+    for the SAME still-pending session, PROVIDED that proven entry is still
+    FRESH (within `COMPACT_ORIGIN_PRESERVE_WINDOW_S` of its own `ts`). The
+    automatic Stop-hook's own `--record` call (blank origin, its unchanged
+    default shape) fires again moments after e.g. a self-callback's bounded
+    hold gives up without delivering — without preservation, that later
+    call would silently overwrite the self-callback's trusted entry with an
+    untrusted one, erasing exactly the proof job 14's later retry depends
+    on. The freshness bound exists because #225's adversarial review found
+    the UNBOUNDED form of this fix defeats `COMPACT_REQUEST_MAX_AGE_S`
+    outright — a session producing repeated blank-origin `✅` boundaries
+    could resurrect the SAME old proof indefinitely, laundering it onto a
+    ticket boundary it says nothing about, well past the point any of it is
+    still true. `COMPACT_ORIGIN_PRESERVE_WINDOW_S` (120s) comfortably covers
+    the one real gap it exists for (a self-callback's own default 60s hold,
+    plus the time until the next Stop-hook fire) without resurrecting
+    anything materially stale. A call that supplies its OWN non-blank
+    origin is never affected by any of this — it always wins outright, as
     before. `ts`/`cwd`/`msg_hash` still take the NEWER call's values either
     way (only the LATEST boundary matters, per the doc above); only the
-    origin can be preserved instead of overwritten."""
+    origin can be preserved instead of overwritten, and only within the
+    window."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -4251,10 +4270,16 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     resolved_origin = str(origin or "").strip()
     if not resolved_origin:
         prior = d.get(session)
-        prior_origin = (str(prior.get("origin") or "").strip()
-                        if isinstance(prior, dict) else "")
-        if prior_origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS:
-            resolved_origin = prior_origin
+        if isinstance(prior, dict):
+            prior_origin = str(prior.get("origin") or "").strip()
+            try:
+                prior_age = float(now) - float(prior.get("ts"))
+            except (TypeError, ValueError):
+                prior_age = None
+            if (prior_origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS
+                    and prior_age is not None
+                    and 0 <= prior_age <= COMPACT_ORIGIN_PRESERVE_WINDOW_S):
+                resolved_origin = prior_origin
     if resolved_origin:
         entry["origin"] = resolved_origin
     d[session] = entry
@@ -5688,7 +5713,20 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # keystrokes CC will only drain at some LATER accepted Stop (#84), in a
     # state that would never have justified them. Fall back to job 14's polled
     # retry, which re-checks the session's then-current state.
-    if _stop_already_rejected(cwd, sid, projects_dir=projects_dir):
+    #
+    # #225-review -- this gate's whole premise ("an EARLIER hook in THIS
+    # Stop-hook batch already rejected THIS turn") does not hold for the
+    # `self-callback` origin: `deliver_compact_self` calls this MID-TURN, as
+    # the session's own Bash tool call, not from inside any Stop-hook batch
+    # at all. Under an active /goal loop the PREVIOUS turn almost always DOES
+    # have a `Stop hook feedback:` entry after it (that is what keeps the
+    # loop going), so this check would misread that as "this boundary was
+    # already refused" and refuse every retry for the WHOLE hold window --
+    # confirmed by tracing the scan against a real transcript shape. Exempt
+    # ONLY `self-callback`, not the whole proven set: `subagent-stop` keeps
+    # its existing (untouched, out of this ticket's scope) behavior.
+    if (origin != _COMPACT_SELF_CALLBACK_ORIGIN
+            and _stop_already_rejected(cwd, sid, projects_dir=projects_dir)):
         _log_compact_sync("SKIP stop-rejected sid=%s cwd=%s" % (sid, cwd))
         return ""
     kind, draft = _classify_boundary(captured)
@@ -5817,7 +5855,7 @@ COMPACT_SELF_RETRY_INTERVAL_S = 5
 
 def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
                          hold_s=None, retry_interval=None,
-                         now_fn=None, sleep_fn=None,
+                         now_fn=None, sleep_fn=None, clock_fn=None,
                          min_context=None, git_run=None):
     """The self-callback: resolve the calling session's own pane, record a
     request under the `self-callback` proven-boundary origin, and hold
@@ -5829,11 +5867,16 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
     Otherwise `word` is `deliver_compact_now`'s own disposition word once
     one is returned truthy (`"sent"`/`"claim-queued"`/`"queued-compact"` —
     `"dropped-no-work"`/`"dropped-small-context"` cannot occur here, since
-    the proven-boundary origin exempts both #99/#48 gates entirely), or the
-    literal `"recorded"` if the whole hold window elapses with nothing
-    landing — the request stays on file, WITH the trusted origin, for job
-    14's own later sweep to pick up (extended by #225 to trust this origin
-    exactly like `subagent-stop`).
+    the proven-boundary origin exempts both #99/#48 gates entirely) — on a
+    truthy word the request is also CLEARED (`clear_compact_request`), the
+    same contract `cmd_compact_request`'s own `--record` branch already
+    gives every other caller; leaving it recorded after a genuine send was
+    a #225-review-found bug (job 14 would then see a STALE self-callback
+    entry it had no reason to ever act on again). Or the literal
+    `"recorded"` if the whole hold window elapses with nothing landing —
+    the request stays on file, WITH the trusted origin, for job 14's own
+    later sweep to pick up (extended by #225 to trust this origin exactly
+    like `subagent-stop`).
 
     Reachable expiry, no wedging (the hard constraint this ticket names
     explicitly): this writes nothing new outside the TWO stores that are
@@ -5847,8 +5890,14 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
 
     `hold_s` defaults to `AIRULESET_COMPACT_SELF_HOLD_S` or
     `COMPACT_SELF_HOLD_DEFAULT_S` (60s) — the ticket's own "~60s" figure.
-    `now_fn`/`sleep_fn` are injectable so tests never sleep for real."""
+    `now_fn` (wall-clock, for the ONE `record_compact_request` call's stored
+    `ts`) and `clock_fn` (a MONOTONIC clock, for the loop's own deadline
+    arithmetic — #225-review finding: a wall-clock hold is sensitive to a
+    backward NTP step, which would silently extend it) are injectable
+    separately so tests never sleep for real and never depend on which
+    clock a mock happens to advance."""
     now_fn = now_fn or time.time
+    clock_fn = clock_fn or time.monotonic
     sleep_fn = sleep_fn or time.sleep
     if hold_s is None:
         try:
@@ -5864,7 +5913,7 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
         return "", ""
     record_compact_request(sid, cwd, now=now_fn(),
                            origin=_COMPACT_SELF_CALLBACK_ORIGIN)
-    deadline = now_fn() + max(0.0, hold_s)
+    deadline = clock_fn() + max(0.0, hold_s)
     while True:
         try:
             word = deliver_compact_now(sid, cwd, run=run,
@@ -5874,8 +5923,9 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
         except Exception:
             word = ""
         if word:
+            clear_compact_request(sid)
             return word, sid
-        now = now_fn()
+        now = clock_fn()
         if now >= deadline:
             return "recorded", sid
         sleep_fn(min(retry_interval, deadline - now))
