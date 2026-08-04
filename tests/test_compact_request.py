@@ -2438,6 +2438,37 @@ class TestDeliverCompactNowRefusesRejectedBoundary(unittest.TestCase):
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(handled)
 
+    def test_self_callback_origin_is_exempt_from_the_rejected_stop_gate(self):
+        # #225-review MINOR finding: this gate's whole premise ("an earlier
+        # hook in THIS Stop-hook batch already rejected THIS turn") does not
+        # hold for a MID-TURN self-callback call -- there is no Stop-hook
+        # batch running at all. Under an active /goal loop the PREVIOUS turn
+        # almost always carries a rejected-stop entry (that's what keeps the
+        # loop going), which would otherwise refuse every retry for the
+        # WHOLE hold window. Exempt self-callback specifically.
+        proj = self._proj()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         origin="self-callback")
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(handled)
+
+    def test_subagent_stop_origin_keeps_the_existing_rejected_stop_behavior(self):
+        # the exemption above is scoped to self-callback ONLY -- subagent-
+        # stop's existing (pre-#225, untouched) behavior must not change.
+        proj = self._proj()
+        _write_rejected_boundary_transcript(proj, self.CWD, self.SID)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         origin="subagent-stop")
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
+
 
 class TestCompactDeliveryTimeBoundaryGate(unittest.TestCase):
     """#109 — the DELIVERY-time half #102 never built. #102 re-checked only for
@@ -3454,10 +3485,13 @@ class TestDeliverCompactSelf(unittest.TestCase):
             word, sid = wd.deliver_compact_self(
                 run=tmux, projects_dir=proj, pane_env="%5",
                 hold_s=17, retry_interval=5,
-                now_fn=now_fn, sleep_fn=sleep_fn)
+                now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
         self.assertEqual(word, "recorded")
         self.assertEqual(sid, "sid-hold")
-        self.assertTrue(sleeps)
+        # #225-review -- the exact sequence, not just "some sleeping
+        # happened": pins the `min(retry_interval, deadline - now)` clamp
+        # (a mutant dropping the clamp would sleep [5,5,5,5] instead).
+        self.assertEqual(sleeps, [5, 5, 5, 2])
         self.assertEqual(tmux.typed_texts(), [])
         d = json.loads(reqp.read_text())
         self.assertIn("sid-hold", d)
@@ -3484,7 +3518,7 @@ class TestDeliverCompactSelf(unittest.TestCase):
             word, sid = wd.deliver_compact_self(
                 run=tmux, projects_dir=proj, pane_env="%5",
                 hold_s=30, retry_interval=5,
-                now_fn=now_fn, sleep_fn=sleep_fn)
+                now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
         self.assertEqual(word, "sent")
         self.assertEqual(sid, "sid-retry")
         self.assertIn("/compact", tmux.typed_texts())
@@ -3500,9 +3534,41 @@ class TestDeliverCompactSelf(unittest.TestCase):
                             side_effect=RuntimeError("boom")):
             word, sid = wd.deliver_compact_self(
                 run=tmux, projects_dir=proj, pane_env="%5",
-                hold_s=0, now_fn=lambda: 0.0, sleep_fn=lambda s: None)
+                hold_s=0, now_fn=lambda: 0.0, sleep_fn=lambda s: None,
+                clock_fn=lambda: 0.0)
         self.assertEqual(word, "recorded")
         self.assertEqual(sid, "sid-exc")
+
+    def test_successful_send_clears_the_recorded_request(self):
+        # #225-review CRITICAL/MAJOR finding: a truthy delivery word left
+        # the request file untouched, unlike --record's own contract.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-clear", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        reqp = self._reqpath()
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp):
+            word, sid = wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5")
+        self.assertEqual(word, "sent")
+        d = json.loads(reqp.read_text()) if reqp.exists() else {}
+        self.assertNotIn(sid, d)
+
+    def test_delivery_call_itself_carries_the_self_callback_origin(self):
+        # #225-review MAJOR finding: only record_compact_request's origin
+        # was asserted -- a mutant dropping `origin=` on the delivery call
+        # (the thing that actually grants proven-boundary trust) survived.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-deliver-origin", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        reqp = self._reqpath()
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp), \
+             m.patch.object(wd, "deliver_compact_now",
+                            wraps=wd.deliver_compact_now) as dcn:
+            wd.deliver_compact_self(run=tmux, projects_dir=proj, pane_env="%5")
+        dcn.assert_called_once()
+        self.assertEqual(dcn.call_args.kwargs.get("origin"), "self-callback")
 
 
 class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
@@ -3616,6 +3682,87 @@ class TestOriginPreservedAgainstBlankOverwrite(unittest.TestCase):
         wd.record_compact_request("s4", "/y", now=2, path=p)
         d = wd.load_compact_requests(p)
         self.assertNotIn("origin", d["s4"])
+
+    # ----------------------------------------------------------------- #
+    # #225-review MAJOR finding: the FIRST cut of this preservation had NO
+    # time bound at all -- a session producing repeated blank-origin `✅`
+    # boundaries could resurrect the SAME proof indefinitely, defeating
+    # COMPACT_REQUEST_MAX_AGE_S outright, and could launder an old proof
+    # onto a much later, unrelated boundary (even a different cwd). These
+    # pin the bounded fix: preserve only within
+    # COMPACT_ORIGIN_PRESERVE_WINDOW_S of the PROVEN entry's own `ts`.
+    # ----------------------------------------------------------------- #
+
+    def test_blank_origin_preserves_within_the_freshness_window(self):
+        p = self._p()
+        wd.record_compact_request("s5", "/x", now=100, path=p,
+                                  origin="self-callback")
+        wd.record_compact_request(
+            "s5", "/y", now=100 + wd.COMPACT_ORIGIN_PRESERVE_WINDOW_S,
+            path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["s5"]["origin"], "self-callback")
+
+    def test_blank_origin_does_not_preserve_past_the_freshness_window(self):
+        p = self._p()
+        wd.record_compact_request("s6", "/x", now=100, path=p,
+                                  origin="self-callback")
+        wd.record_compact_request(
+            "s6", "/y", now=100 + wd.COMPACT_ORIGIN_PRESERVE_WINDOW_S + 1,
+            path=p)
+        d = wd.load_compact_requests(p)
+        self.assertNotIn("origin", d["s6"])
+
+    def test_repeated_blank_origin_calls_do_not_resurrect_a_stale_proof(self):
+        # the exact defeats-the-expiry shape the review found: many
+        # blank-origin calls, each individually inside the window relative
+        # to the PREVIOUS blank call, must not chain into an indefinite
+        # resurrection measured from the ORIGINAL proven ts.
+        p = self._p()
+        wd.record_compact_request("s7", "/x", now=0, path=p,
+                                  origin="self-callback")
+        t = 0
+        step = wd.COMPACT_ORIGIN_PRESERVE_WINDOW_S - 1
+        for _ in range(5):
+            t += step
+            wd.record_compact_request("s7", "/x", now=t, path=p)
+        d = wd.load_compact_requests(p)
+        # each hop was individually within the window of the PRIOR entry's
+        # own ts (which keeps advancing, since ts always takes the newer
+        # call's value) -- so this is legitimate continuous freshness, not
+        # resurrection of a single stale proof. Confirm it explicitly with
+        # a hop that jumps straight from the ORIGINAL ts past the window:
+        p2 = self._p()
+        wd.record_compact_request("s8", "/x", now=0, path=p2,
+                                  origin="self-callback")
+        wd.record_compact_request(
+            "s8", "/x", now=wd.COMPACT_ORIGIN_PRESERVE_WINDOW_S + 1,
+            path=p2)
+        d2 = wd.load_compact_requests(p2)
+        self.assertNotIn("origin", d2["s8"])
+        self.assertIn("origin", d["s7"])   # the continuous-hop case above
+
+    def test_blank_origin_preservation_survives_a_changed_cwd(self):
+        # #225-review sequencing gap: proven -> blank across a CHANGED cwd
+        # was untested. Within the window this is still the SAME session's
+        # still-pending boundary (cwd can legitimately shift between calls,
+        # documented behavior already) -- preserved.
+        p = self._p()
+        wd.record_compact_request("s9", "/x", now=1, path=p,
+                                  origin="self-callback")
+        wd.record_compact_request("s9", "/completely/different", now=2, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["s9"]["origin"], "self-callback")
+        self.assertEqual(d["s9"]["cwd"], "/completely/different")
+
+    def test_missing_prior_ts_is_never_treated_as_fresh(self):
+        # a malformed/legacy entry with a proven origin but no readable ts
+        # must not be trusted -- unmeasurable age is never "fresh".
+        p = self._p()
+        p.write_text(json.dumps({"s10": {"cwd": "/x", "origin": "self-callback"}}))
+        wd.record_compact_request("s10", "/y", now=1000, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertNotIn("origin", d["s10"])
 
 
 class TestCompactRequestSelfCli(unittest.TestCase):

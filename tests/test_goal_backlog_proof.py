@@ -484,3 +484,32 @@ class TestTheMeasurementIsStatedOnceInLabelledUnits(TestCase):
             self.assertNotIn(
                 stale, t,
                 "the skill still carries the unlabelled phrasing %r" % stale)
+
+
+class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
+    """#225 — the full-authority template's own STOP-CONDITIONS text is what
+    survives compaction and governs every turn of an armed /goal loop, so
+    that is where a session actually learns to hold the boundary open
+    itself instead of just relying on the passive Stop-hook/job-14 chain.
+    Scoped to FULL authority only for now (#227 tracks wiring the two
+    reduced-authority templates too — they are within 55-85 chars of the
+    4000-char cap and need a dedicated pass to find room first)."""
+
+    def test_full_template_calls_compact_request_self(self):
+        t = goal_lines()[FULL]
+        self.assertIn("compact-request --self", t)
+
+    def test_full_template_says_to_hold_before_dispatching(self):
+        t = goal_lines()[FULL]
+        self.assertIn("do NOT dispatch the next issue in the same turn", t)
+        # the new instruction must come BEFORE the existing hold, not after
+        # (calling --self only makes sense before moving on)
+        self.assertLess(t.index("compact-request --self"),
+                        t.index("do NOT dispatch the next issue"))
+
+    def test_reduced_authority_templates_are_not_yet_wired(self):
+        # honest coverage marker for #227 -- this test is EXPECTED to start
+        # failing (in a good way) the moment #227 lands; until then it pins
+        # that the gap is real and known, not silently forgotten.
+        for idx in (BRANCH_MERGE, FORK_NO_MERGE):
+            self.assertNotIn("compact-request --self", goal_lines()[idx])
