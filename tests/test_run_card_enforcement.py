@@ -600,6 +600,20 @@ class TestCardReconcile(unittest.TestCase):
                          "a pingable local-trailer candidate must be "
                          "verified against GitHub before it can nag")
 
+    def test_a_fresh_candidate_still_inside_grace_costs_zero_verify_calls(self):
+        # #232's own explicit bound: "zero API calls when there are no
+        # fresh candidates". `closed` (from `merged_closes`) is non-empty
+        # here, but `pingable` is EMPTY — the one ticket is still inside
+        # its own grace window — so the verifier must never be reached at
+        # all, not just never SEND.
+        calls = []
+        r = self.repo(closes=(3,), age=30)              # merged 30s ago
+        self.reconcile_at(NOW, [r],
+                          closed_fetch=lambda root, since: calls.append(root))
+        self.assertEqual(calls, [],
+                         "nothing pingable this sweep — verifying it "
+                         "would cost an API call for no possible ping")
+
     def test_the_probe_is_not_consulted_for_a_parked_repo(self):
         calls = []
         r = self.repo(closes=(), age=10 * DAY)
