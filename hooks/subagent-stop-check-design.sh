@@ -63,7 +63,10 @@ cwd, msg = sys.argv[2], sys.argv[3]
 ev = notify.parse_worker_evidence(msg)
 if not ev["merged"] or not ev["closed"]:
     sys.exit(0)
-repo = notify.repo_name_for(cwd)
+# #220 -- prefer the evidence block's own `pr: #<N> <url>` line (the real
+# repo the PR landed against) over the payload's static cwd, which can be a
+# DIFFERENT repo than the one this worker actually worked in.
+repo = notify.resolve_repo_key(cwd, msg=msg)
 if not repo:
     sys.exit(0)
 

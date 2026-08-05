@@ -657,6 +657,48 @@ def resolve_work_cwd(cmd, cwd, run=None):
     return cwd
 
 
+# --------------------------------------------------------------------------- #
+# #220 -- the SubagentStop-side counterpart of #187 above: neither
+# subagent-stop-check-design.sh nor subagent-stop-check-run-card.sh has a
+# command to scan a `cd` prefix out of (SubagentStop only ever sees `cwd`
+# and the worker's own final message, never the commands it ran along the
+# way). The worker evidence-block template already REQUIRES a
+# `pr: #<N> <url>` line for every issue it merged -- by the time SubagentStop
+# fires, that URL is the ground truth for which repo the work actually
+# landed in, unlike the payload's static, dispatch-time cwd.
+# --------------------------------------------------------------------------- #
+
+_PR_LINE_RE = re.compile(r"^\s*pr\s*:(.*)$", re.I | re.M)
+_GH_REPO_URL_RE = re.compile(
+    r"github\.com[:/]([^/\s'\"]+)/([^/\s'\"]+?)(?:\.git)?(?:[/#?]|\s|$)")
+
+
+def repo_from_pr_line(text):
+    """The repo named by an evidence block's own `pr: #<N> <url>` line's
+    GitHub URL -- "" when there is no such line, or no GitHub URL in it.
+    Never guesses beyond what the URL itself says."""
+    if not isinstance(text, str) or not text:
+        return ""
+    for m in _PR_LINE_RE.finditer(text):
+        gm = _GH_REPO_URL_RE.search(m.group(1))
+        if gm:
+            return gm.group(2)
+    return ""
+
+
+def resolve_repo_key(cwd, msg=None, run=None):
+    """The repo key a SubagentStop hook should use -- preferring the
+    evidence block's own `pr:` line (#220) over the payload's static `cwd`
+    when `msg` carries one. Falls back to `repo_name_for(cwd)` unchanged
+    for a worker with no `pr:` line (a genuinely unmerged report, or one
+    whose session cwd already matches the work repo)."""
+    if msg:
+        r = repo_from_pr_line(msg)
+        if r:
+            return r
+    return repo_name_for(cwd, run=run)
+
+
 def newest_delivered_card(repo_name):
     """mtime of the newest DELIVERED per-ticket card marker for `repo_name`,
     or None. The marker key is `<repo-name>#<issue>` (`_notify_run_card`), so

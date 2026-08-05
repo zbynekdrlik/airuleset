@@ -225,8 +225,10 @@ class TestRepoResolvedFromPrLine(_GateBase):
         # line says the real repo is dantesync.
         self.mark_all(61, repo="airuleset")
         r = self.run_gate(self.PR_MSG)
+        # this gate's own message never names the repo (unlike run-card's) --
+        # the correctness proof IS that it stays blocked despite markers
+        # existing under the wrong (cwd-derived) key.
         self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
-        self.assertIn("dantesync", r.stdout + r.stderr)
 
     def test_no_pr_line_still_resolves_from_cwd_unchanged(self):
         self.mark_all(41)
