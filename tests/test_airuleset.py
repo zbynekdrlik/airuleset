@@ -3459,10 +3459,18 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertIn("set-option -g default-size 176x50", text)
         # the surrounding non-managed lines are unchanged, and only ONE
         # blank-line-separated block sits between them (no duplication).
+        # Written out LITERALLY (not built from render_tmux_history_block()
+        # itself) so this also locks the exact line ORDER and content, not
+        # just placement -- a self-referential expected string would pass
+        # even if the three set-option lines were emitted out of order.
         expected = (
             "set -g mouse on\n\n"
-            + airuleset.render_tmux_history_block()
-            + "\n\nset -g status-bg colour234\n"
+            f"{airuleset.TMUX_MARK_START}\n"
+            "set-option -g history-limit 50000\n"
+            "set-option -g window-size manual\n"
+            "set-option -g default-size 176x50\n"
+            f"{airuleset.TMUX_MARK_END}"
+            "\n\nset -g status-bg colour234\n"
         )
         self.assertEqual(text, expected)
 
@@ -3477,18 +3485,26 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(p.stat().st_mtime_ns, before_mtime)
 
     def test_live_applies_via_injected_run_regardless_of_server_state(self):
-        # Keystroke-free, safe: all THREE `tmux set-option -g ...` calls
-        # (#236 extends #235's single history-limit call to two more) are
-        # attempted unconditionally (harmless no-op if no server is
-        # running) -- never a send-keys, never a resize-window, never
-        # touches a pane.
+        # Keystroke-free, safe: ONLY the history-limit set-option is live-
+        # applied against a running server -- exactly #235's original,
+        # already-shipped, already-proven-safe scope. window-size and
+        # default-size are DELIBERATELY never live-applied via a real tmux
+        # subprocess call (see TestTmuxWindowSizeConfOnly below): a
+        # post-implementation adversarial review, independently reproduced
+        # on this box's own live tmux 3.7b binary via a real attached pty
+        # client, PROVED that flipping `window-size` to `manual` against a
+        # RUNNING server immediately snaps every window back to its
+        # stored/created size regardless of the attached client's current
+        # size -- a live, disruptive resize event with NO resize-window
+        # call and NO #{...} format-expansion query involved at all. The
+        # managed ~/.tmux.conf block still carries all three options; they
+        # take effect for the NEXT server/session/window, the same safe
+        # path already established for resize-window itself.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
-        self.assertEqual(calls[1], ["tmux", "set-option", "-g", "window-size", "manual"])
-        self.assertEqual(calls[2], ["tmux", "set-option", "-g", "default-size", "176x50"])
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -3573,6 +3589,40 @@ class TestTmuxHistoryLimit(TestCase):
         p = self._tmp()
         changed = airuleset.apply_tmux_history_limit(p)
         self.assertTrue(changed)
+
+
+class TestTmuxWindowSizeConfOnly(TestCase):
+    """#236 (adversarial-review finding, independently reproduced on this
+    box's real tmux binary via a real attached pty client): live-applying
+    `window-size manual` against a RUNNING server immediately snaps every
+    window back to its stored/created size, regardless of the attached
+    client's current terminal size -- a live, disruptive resize event, with
+    NO resize-window call and NO #{...} format-expansion query involved.
+    window-size and default-size are therefore CONF-ONLY: they are written
+    to the managed ~/.tmux.conf block (so the NEXT server/session/window
+    picks them up) but NEVER issued as a live `tmux set-option` subprocess
+    call against a running server, in any code path -- only history-limit
+    is live-applied (exactly #235's original, already-proven-safe scope)."""
+
+    def test_window_size_and_default_size_never_reach_a_live_run_call(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        joined = " ".join(str(c) for c in calls)
+        self.assertNotIn("window-size", joined)
+        self.assertNotIn("default-size", joined)
+        # but the conf file itself still carries both -- conf-only, not
+        # dropped from the feature.
+        text = p.read_text()
+        self.assertIn("set-option -g window-size manual", text)
+        self.assertIn("set-option -g default-size 176x50", text)
+
+    def test_only_one_live_tmux_call_is_ever_issued(self):
+        p = Path(tempfile.mkdtemp()) / ".tmux.conf"
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertEqual(len(calls), 1)
 
 
 class TestTmuxWindowSizeNoResize(TestCase):
