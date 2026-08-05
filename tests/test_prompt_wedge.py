@@ -152,6 +152,133 @@ class TestMachineNudgeAutoSubmit(unittest.TestCase):
         self.assertIn("auto-submits", skill)
 
 
+class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
+    """#255 Fix 2 -- the real fix. Live incident (david@subdev, 2026-08-05):
+    a machine-authored nudge typed cleanly but Claude Code swallowed every
+    subsequent Enter as literal text (a bracketed-paste-pending state) --
+    job 10's own machine-submit retry (bare Escape+Enter, repeated every ~2
+    sweeps) tried 3 times over ~5 minutes and NEVER recovered it. Only a
+    manual `tmux send-keys -H 1b 5b 32 30 31 7e` (the ANSI bracketed-paste
+    END marker, ESC[201~) followed by Enter unstuck it.
+
+    So: once the SAME draft has survived >= PWEDGE_SUBMIT_UNSTICK_AFTER
+    consecutive machine-submit attempts with zero progress (an ordinary
+    swallowed-submit race, #36's class, is ruled out by then), the NEXT
+    attempt sends the proven unstick sequence BEFORE Enter."""
+
+    def _run_recorder(self):
+        calls = []
+
+        def run(argv, timeout=8):
+            calls.append(argv)
+            if "pane_in_mode" in " ".join(argv):
+                return "0"
+            return ""
+        run.calls = calls
+        return run
+
+    def _drive_n_attempts(self, n, run=None):
+        """Drive prompt_wedge_check through N machine-submit attempts against
+        a draft that NEVER clears (mirroring the live incident -- the pane
+        genuinely never submitted, so the box content is byte-identical
+        forever). Each attempt costs 2 sweeps (one to record the fresh hash,
+        one to fire). Returns (run, logs_per_attempt)."""
+        st, s = {}, FakeSend()
+        run = run or self._run_recorder()
+        now = time.time()
+        attempt_logs = []
+        t = now
+        for _ in range(n):
+            wd.prompt_wedge_check(t, st, "%1", MACHINE_PANE, now, "zbynek",
+                                  "odoo", s, run=run)          # record fresh
+            t += 70
+            logs = wd.prompt_wedge_check(t, st, "%1", MACHINE_PANE, now,
+                                         "zbynek", "odoo", s, run=run)
+            attempt_logs.append(logs)
+            t += 70
+        return run, attempt_logs
+
+    @staticmethod
+    def _unstick_calls(run):
+        return [a for a in run.calls if a[:4] == ["tmux", "send-keys", "-t", "%1"]
+                and "-H" in a]
+
+    def test_first_two_attempts_never_send_the_unstick(self):
+        run, attempt_logs = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER)
+        self.assertEqual(len(self._unstick_calls(run)), 0, run.calls)
+        for logs in attempt_logs:
+            self.assertTrue(any("machine-nudge submit" in ln for ln in logs), logs)
+
+    def test_nth_consecutive_attempt_sends_paste_end_before_enter(self):
+        run, attempt_logs = self._drive_n_attempts(
+            wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
+        unstick = self._unstick_calls(run)
+        self.assertEqual(len(unstick), 1, run.calls)
+        self.assertEqual(unstick[0][4:], ["1b", "5b", "32", "30", "31", "7e"])
+        tails = [a[-1] for a in run.calls]
+        unstick_i = run.calls.index(unstick[0])
+        enter_i = len(tails) - 1 - tails[::-1].index("Enter")
+        self.assertLess(unstick_i, enter_i, run.calls)
+        self.assertTrue(
+            any("paste-end" in ln for ln in attempt_logs[-1]), attempt_logs[-1])
+
+    def test_attempts_counter_resets_once_the_draft_actually_clears(self):
+        run, _ = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER)
+        st = {}
+        # replay the same sequence of state mutations by hand: after N
+        # attempts, clearing the box must drop the attempts counter so a
+        # LATER, unrelated stuck draft starts counting from zero again --
+        # never inherits a stale escalation from a previous episode.
+        now = time.time()
+        run2 = self._run_recorder()
+        st2 = {}
+        t = now
+        for _ in range(wd.PWEDGE_SUBMIT_UNSTICK_AFTER):
+            wd.prompt_wedge_check(t, st2, "%1", MACHINE_PANE, now, "zbynek",
+                                  "odoo", FakeSend(), run=run2)
+            t += 70
+            wd.prompt_wedge_check(t, st2, "%1", MACHINE_PANE, now, "zbynek",
+                                  "odoo", FakeSend(), run=run2)
+            t += 70
+        self.assertIn("pwedge-submit-attempts:%1", st2)
+        # box goes bare -- the draft cleared (submitted successfully)
+        empty_pane = MACHINE_PANE.replace(
+            "Priorita: prio:bounce #1896 - posledny blocker release", "")
+        wd.prompt_wedge_check(t, st2, "%1", empty_pane, now, "zbynek",
+                              "odoo", FakeSend(), run=run2)
+        self.assertNotIn("pwedge-submit-attempts:%1", st2, st2)
+
+
+class DeliveryAtomicWrtSweepBudget(unittest.TestCase):
+    """#255 CORRECTION -- the ticket's own prime suspect (the #172
+    sweep_budget_s wall-clock self-bound breaking a delivery BETWEEN its
+    type and submit steps) does not hold: verified by code trace + the live
+    incident's own evidence (the sweep finished cleanly, no timeout kill).
+    `send_continue` and `deliver_with_stash` are each a single synchronous
+    function -- nothing can interrupt them gracefully between a type call
+    and a submit call, because there is no yield point in between at all.
+    This locks that invariant forward: a FUTURE change threading a budget
+    check into either of these in a way that could split type from submit
+    would break this test immediately. (bounce_backstop is DELIBERATELY not
+    in this list -- #255 Fix 1 gives it its OWN time_fn/sweep_deadline,
+    checked strictly BETWEEN targets, never inside one target's delivery;
+    see TestBounceBackstopSweepBudget in test_bounce_backstop.py.)"""
+
+    def _source(self, fn):
+        import inspect
+        return inspect.getsource(fn)
+
+    def test_send_continue_never_references_sweep_budget(self):
+        src = self._source(wd.send_continue)
+        for tok in ("time_fn", "sweep_deadline", "sweep_budget_s"):
+            self.assertNotIn(tok, src, src)
+
+    def test_deliver_with_stash_never_references_sweep_budget(self):
+        src = self._source(wd.deliver_with_stash)
+        for tok in ("time_fn", "sweep_deadline", "sweep_budget_s"):
+            self.assertNotIn(tok, src, src)
+
+
 class TestPwedgeStateCleanupOnDeadPane(unittest.TestCase):
     """(#199) job 10's `pwedge:`/`pwedge-ping:` state is keyed by tmux PANE
     ID, not a transcript session id — a DIFFERENT identity space from the

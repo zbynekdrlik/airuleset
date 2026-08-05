@@ -203,6 +203,93 @@ class TestBounceBackstop(unittest.TestCase):
         self.assertNotIn("demo", (state.get("bounce") or {}).get("seen", {}))
 
 
+class TestBounceBackstopSweepBudget(unittest.TestCase):
+    """#255 Fix 1: bounce_backstop's own per-target loop previously had NO
+    wall-clock self-bound at all -- unlike the per-transcript pane loop,
+    which #172 already protects via time_fn/sweep_deadline. This closes
+    that gap so job 8 can never be the thing that runs long enough (many
+    cross-stream repos, each a real `gh` fetch) to be the reason a hard
+    systemd kill lands mid-delivery for some LATER target. The check sits
+    strictly BETWEEN targets -- checked BEFORE a target's delivery starts,
+    never nested inside one target's own send_continue (a single atomic
+    type+submit pair) -- so a target already being delivered always
+    finishes; only a NOT-YET-STARTED target is deferred to the next sweep."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.pings = []
+
+    def _send(self, body, **kw):
+        self.pings.append((body, kw))
+        return "sent"
+
+    def _two_target_setup(self):
+        root1 = str(Path(self.home) / "devel" / "demo1")
+        root2 = str(Path(self.home) / "devel" / "demo2")
+        Path(root1).mkdir(parents=True)
+        Path(root2).mkdir(parents=True)
+        seed_repo_cache(self.home, root1, "demo1")
+        seed_repo_cache(self.home, root2, "demo2")
+        tmux = FakeTmux([("%1", root1), ("%2", root2)], IDLE)
+        return tmux
+
+    def test_stops_before_starting_a_new_target_once_budget_exhausted(self):
+        tmux = self._two_target_setup()
+        clock = [0.0]
+
+        def time_fn():
+            return clock[0]
+
+        def fetch(root):
+            clock[0] += 10          # each fetch "costs" real wall-clock time
+            return [1705]
+
+        logs = wd.bounce_backstop(
+            time.time(), tmux, {}, self._send, home=self.home,
+            gh_fetch=fetch, cross_stream_repos={"demo1", "demo2"},
+            time_fn=time_fn, sweep_deadline=5)
+        typed = tmux.typed()
+        self.assertEqual(len(typed), 1, typed)   # only the FIRST target delivered
+        self.assertTrue(any("bounce-budget-exceeded" in ln for ln in logs), logs)
+
+    def test_deferred_target_is_not_dedup_marked_so_it_retries_next_sweep(self):
+        tmux = self._two_target_setup()
+        clock = [0.0]
+
+        def time_fn():
+            return clock[0]
+
+        def fetch(root):
+            clock[0] += 10
+            return [1705]
+
+        state = {}
+        wd.bounce_backstop(
+            time.time(), tmux, state, self._send, home=self.home,
+            gh_fetch=fetch, cross_stream_repos={"demo1", "demo2"},
+            time_fn=time_fn, sweep_deadline=5)
+        # demo1 (processed) is marked seen; demo2 (deferred by budget) is not
+        # -- a skipped target must be retried, never silently dropped.
+        seen = (state.get("bounce") or {}).get("seen") or {}
+        self.assertIn("demo1", seen, seen)
+        self.assertNotIn("demo2", seen, seen)
+
+    def test_no_deadline_given_means_unbounded_as_before(self):
+        # Backward compatible: every existing caller (and every OTHER
+        # existing test in this file) omits time_fn/sweep_deadline entirely
+        # -- that must behave exactly as it always has, no budget check at
+        # all.
+        tmux = self._two_target_setup()
+        logs = wd.bounce_backstop(
+            time.time(), tmux, {}, self._send, home=self.home,
+            gh_fetch=lambda root: [1705],
+            cross_stream_repos={"demo1", "demo2"})
+        self.assertEqual(len(tmux.typed()), 2, tmux.typed())
+        self.assertFalse(any("bounce-budget-exceeded" in ln for ln in logs), logs)
+
+
 class TestBounceQuals(unittest.TestCase):
     """Scoping is derived from the PANE's home dir, not the watchdog user:
     montalu's claude runs inside NEWLEVEL's tmux (a `sudo su - montalu`
