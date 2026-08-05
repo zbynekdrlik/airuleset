@@ -1000,6 +1000,102 @@ class SessionLimitDetector(unittest.TestCase):
         self.assertTrue(wd.pane_session_limited(self.WEEKLY_LIMIT_BANNER))
         self.assertTrue(wd.pane_session_limited(self.BARE_LIMIT_BANNER))
 
+
+class ResetTimeParseRegressions(unittest.TestCase):
+    """(#183) Six correctness findings in the widened reset-time parse the
+    #172 livelock ticket shipped (`_RESET_TIME_RX`, `parse_reset_epoch`,
+    `_human_clock`) — three ready-made reproductions from the ticket plus
+    the acceptance criteria's own required regressions."""
+
+    def _epoch(self, y, mo, d, h, mi=0, tz_name="Europe/Prague"):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(y, mo, d, h, mi, tzinfo=ZoneInfo(tz_name)).timestamp()
+
+    def _hhmm(self, epoch, tz_name="Europe/Prague"):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(epoch, ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M")
+
+    # --- finding 1: an unrecognised month word must return None, never fall
+    # through to the bare-clock branch (which would silently reuse TODAY's
+    # date with this banner's clock — an epoch DAYS too early).
+    def test_unrecognized_month_word_returns_none(self):
+        now = self._epoch(2026, 7, 26, 10)
+        epoch = wd.parse_reset_epoch(
+            "resets Thu 31, 9pm (Europe/Prague)", now)
+        self.assertIsNone(
+            epoch, "an unrecognised month word must return None, got %r"
+            % (self._hhmm(epoch) if epoch else epoch))
+
+    # --- finding 2: a 4-digit year must not be absorbed into the hour group
+    # (one hour early is the reproduced case) — and the three shapes that
+    # were ALREADY fail-safe before the #172 widening must stay that way.
+    def test_four_digit_year_no_longer_corrupts_the_hour(self):
+        now = self._epoch(2026, 7, 26, 10)
+        epoch = wd.parse_reset_epoch("resets Jul 31, 2026 9pm", now)
+        self.assertIsNone(
+            epoch, "a 4-digit year must not be absorbed into the hour "
+            "group, got %r" % (self._hhmm(epoch) if epoch else epoch))
+
+    def test_previously_fail_safe_malformed_shapes_still_return_none(self):
+        now = self._epoch(2026, 7, 26, 10)
+        for banner in ("resets 31 Jul",                 # reversed order
+                       "resets Jul 31, 26 9pm",          # 2-digit year
+                       "resets Feb 30, 9pm"):            # invalid calendar day
+            epoch = wd.parse_reset_epoch(banner, now)
+            self.assertIsNone(epoch, "banner %r must stay fail-safe (None), "
+                              "got %r" % (banner, epoch))
+
+    # --- finding 3: the parse must be bottom-scoped exactly like the
+    # detector (`pane_session_limited`) — a STALE echo higher on screen must
+    # never beat a FRESHER banner lower down.
+    def test_stale_dated_echo_above_a_fresh_banner_prefers_the_fresh_one(self):
+        cap = ("resets Jul 29, 9pm (Europe/Prague)\n"
+               "● pokracujem v praci\n"
+               "● pokracujem v praci\n"
+               "resets Aug 6, 9pm (Europe/Prague)\n❯ \n")
+        now = self._epoch(2026, 8, 3, 10)
+        epoch = wd.parse_reset_epoch(cap, now)
+        self.assertIsNotNone(epoch)
+        self.assertEqual(self._hhmm(epoch), "2026-08-06 21:00",
+                         "expected the FRESH (bottom) banner to win, got "
+                         "the stale one instead")
+
+    # --- findings 4/5: a dated target slightly stale (including a small
+    # negative delta -- "the reset already happened") is returned AS-IS,
+    # never rolled a whole year forward for a merely-hours-old banner; only
+    # staleness beyond a realistic weekly-cap cycle means "next year". 20h
+    # stale is deliberately PAST the bare-clock branch's OWN 6h window (the
+    # exact width the round-2 fix mistakenly reused for the dated branch
+    # too) but comfortably inside a weekly cap's real cycle -- a specimen
+    # that actually discriminates the fix from the pre-#183 6h behaviour,
+    # not one both old and new code happen to agree on.
+    def test_dated_target_recently_past_returns_as_is_no_year_jump(self):
+        now = self._epoch(2026, 8, 1, 17)      # 20h after the 21:00 target
+        epoch = wd.parse_reset_epoch("resets Jul 31, 9pm", now)
+        self.assertIsNotNone(epoch)
+        self.assertLessEqual(epoch, now)
+        self.assertEqual(self._hhmm(epoch), "2026-07-31 21:00")
+
+    def test_dated_target_stale_beyond_the_weekly_grace_rolls_forward(self):
+        now = self._epoch(2026, 8, 20, 10)      # ~3 weeks after the target
+        epoch = wd.parse_reset_epoch("resets Jul 31, 9pm", now)
+        self.assertIsNotNone(epoch)
+        self.assertEqual(self._hhmm(epoch), "2027-07-31 21:00")
+
+    # --- finding 6: a reset several days out must not read as "tonight".
+    def test_human_clock_renders_the_date_when_not_today(self):
+        now = self._epoch(2026, 8, 3, 10)
+        future = self._epoch(2026, 8, 6, 21)
+        self.assertEqual(wd._human_clock(future, now=now), "06.08 21:00")
+
+    def test_human_clock_stays_bare_hhmm_for_todays_reset(self):
+        now = self._epoch(2026, 8, 3, 10)
+        today = self._epoch(2026, 8, 3, 21)
+        self.assertEqual(wd._human_clock(today, now=now), "21:00")
+
+
 class SessionLimitWiring(unittest.TestCase):
     """run_once job 6: ping once on the banner, NO `continue` before the reset,
     exactly ONE `continue` after it."""
