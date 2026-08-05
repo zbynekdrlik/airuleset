@@ -3572,3 +3572,69 @@ Live proof of #250's grace-anchor fix (previous batch) observed
 post-deploy: dev1's watchdog journal logged
 `OK (compact-request, grace-elapsed) zbynek-4:2.0` at 21:00:32 UTC —
 the first field grace-elapsed compact delivery.
+
+## Batch: #187, #220, #218, #217 (bundled, one work stretch, local commits only)
+
+**#187 — `block-commit-without-design.sh` resolved the repo from the
+PreToolUse payload's static cwd, false-blocking a cross-repo autopilot
+worker's commit against the wrong repo's marker namespace.** RED
+`8fd872e` / GREEN `fdf8b17`: `notify.resolve_work_cwd(cmd, cwd)` trusts an
+inline `cd <path> &&` ahead of the `git commit` invocation, when that path
+resolves to a real git repo. A dispatched-before-finalizing adversarial
+review then found this first draft had a CRITICAL gap (a `cd` literal
+sitting inside a heredoc commit-message BODY could be misread as a real
+statement boundary — combined with `design_gate.required_refs` also using
+the resolved directory for the #206 closed-issue exemption, this could
+silently disable the gate) and, separately, that my own follow-up
+quote-stripping hardening (RED `bf32994` / GREEN `cc17a64`) had regressed
+a legitimate quoted `cd "/path with spaces"`. Both fixed in one redesign:
+the cd-prefix scan is now anchored to the command's own literal START
+(position 0), closing the injection surface structurally while letting a
+quoted argument parse correctly again — RED `736658a` / GREEN `b372dc6`,
+plus a strengthened (previously-tautological) guard test and new
+end-to-end coverage of `required_refs(missing, work_cwd)`.
+
+**#220 — `subagent-stop-check-design.sh` and
+`subagent-stop-check-run-card.sh` had the same cwd-only resolution bug on
+their SubagentStop side**, where no command text exists to scan a `cd`
+prefix from. RED `81d4d22` / GREEN `6db6933`:
+`notify.repo_from_pr_line()`/`resolve_repo_key()` prefer the evidence
+block's own mandatory `pr: #<N> <url>` line (the real repo the PR landed
+against) over the payload cwd. Adversarial review found the punctuation
+terminator on the URL regex absorbed trailing `)`/`,`/`.`/backtick into
+the resolved repo name on a repo-root URL, false-blocking a compliant
+worker whose card was genuinely delivered — RED `5035f22` / GREEN
+`4d485b2`, plus direct unit coverage for two already-correct-but-untested
+mutation gaps (a URL not on a `pr:` line is ignored; the first of multiple
+`pr:` lines wins).
+
+**#218 — `pre-push-lint.sh` false-blocked a clean push on a nested-repo
+layout** (git root at the repo top, `pyproject.toml` one level down):
+`git diff --name-only`'s root-relative paths were piped straight into
+`ruff check`, which resolves them against the hook's own process cwd (the
+subdirectory, not the root) — "file not found" read as a lint failure.
+Fix resolves `$GIT_ROOT` once and makes every changed-file path absolute
+before handing it to ruff; the `pyproject.toml`/`setup.py` detection at
+the hook's own cwd is left untouched (needed for a genuinely nested
+layout). RED `2a8790a` / GREEN `0b2a363`.
+
+**#217 — docs-only: `gh-cli-recipes.md` now warns that GitHub's
+issue-linking parser has no negation awareness**, so writing "does NOT
+close #N" still auto-closes #N on merge (the literal substring is all
+GitHub's parser reads). Added the trigger-word list and safe phrasing
+("leaves #N open") plus a content-lock test. `17439e2`.
+
+Adversarial review (dispatched before finalizing, `general-purpose`/opus)
+also filed follow-up #257 (needs-user-decision) for the lower-priority
+findings deliberately NOT bundled into this security fix: remaining
+`resolve_work_cwd` coverage gaps (multi-line/subshell cd, `git -C`, each
+a genuine coverage-vs-attack-surface tradeoff), the `pr:` line's lack of
+cross-validation against the evidence block's own declared issues, and
+minor regex/UX polish (owner placeholder in the run-card example command,
+case-sensitivity, host anchor).
+
+FREEZE-compliant: zero new non-test files across the whole batch
+(`git diff --name-status --diff-filter=A 04cdd6c..4d485b2` — only 3 new
+test files). Full local suite: 3929 tests OK, ruff clean. This session
+NEVER pushes (hard constraint) — 13 commits sit locally on `main`
+(`04cdd6c..4d485b2`), awaiting the supervisor's push + CI + deploy cycle.
