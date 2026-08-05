@@ -6143,13 +6143,27 @@ def cmd_autopilot_lock(args):
                     is_empty = not any(lock_path.iterdir())
                 except OSError:
                     is_empty = False
+                removed = False
                 if is_empty:
-                    lock_path.rmdir()
-                else:
+                    try:
+                        lock_path.rmdir()
+                        removed = True
+                    except OSError:
+                        # A symlink to an empty directory reports is_dir()
+                        # True and iterdir() succeeds, yet rmdir() itself
+                        # raises NotADirectoryError (verified empirically) —
+                        # a TOCTOU race (something repopulated the directory
+                        # between the check above and here) raises
+                        # "Directory not empty" the same way. Either way,
+                        # fall through to the same clean refusal below —
+                        # never an unhandled crash.
+                        removed = False
+                if not removed:
                     print(f"ERROR: lock path {lock_path} exists as a "
-                          f"NON-EMPTY directory (not a recognized stale "
-                          f"artifact) — refusing to acquire. Inspect and "
-                          f"remove it manually if safe: rm -rf {lock_path}",
+                          f"directory that could not be safely removed "
+                          f"(non-empty, a symlink, or a filesystem race) — "
+                          f"refusing to acquire. Inspect and remove it "
+                          f"manually if safe: rm -rf {lock_path}",
                           file=sys.stderr)
                     sys.exit(1)
             elif lock_path.exists():
