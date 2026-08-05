@@ -162,7 +162,14 @@ MAINTAINER_USERS = {"newlevel"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
 # (montalu meeting recordings get analyzed IN that stream's session — the
 # 2026-07-14 incident where the scoping prune took /meeting-analysis off montalu).
-SKILLS_EXTRA_BY_USER = {"montalu": {"meeting-analysis"}}
+# montalu2/3/4 (airuleset#251): three MORE full parallel montalu streams,
+# same working style — same re-grant.
+SKILLS_EXTRA_BY_USER = {
+    "montalu": {"meeting-analysis"},
+    "montalu2": {"meeting-analysis"},
+    "montalu3": {"meeting-analysis"},
+    "montalu4": {"meeting-analysis"},
+}
 
 
 def skill_names_for_user(user=None):
@@ -3353,9 +3360,49 @@ REMOTE_HOSTS = [
         # untouched as the rollback backup per the #1895 contract. Unlike
         # marek/david, montalu authorizes the DEFAULT newlevel key (no
         # gatekeeper_access identity — live-verified at the swap).
+        #
+        # #258 (2026-08-05): this exact key (dev1's own default
+        # ~/.ssh/id_ed25519, comment "david grena mac" for unrelated
+        # historical reasons — NOT david@subdev's key) got stripped from
+        # montalu's authorized_keys by a gatekeeper access review that
+        # mistook the misleading comment for the real cross-company
+        # david@subdev identity. Restored via root@subdev under a
+        # corrected comment. If push to montalu@subdev ever silently
+        # starts failing with "Permission denied" again, check
+        # authorized_keys FIRST before assuming a code regression.
         "name": "montalu@subdev",
         "host": "100.118.174.27",
         "user": "montalu",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        # montalu2/montalu3/montalu4 — three MORE full parallel montalu
+        # streams (airuleset#251, odoo-erp#2961: "zhodné s dnešným
+        # montalu" — same subdev box, same default-key shape, same
+        # branch-merge authority). Accounts created by GATEKEEPER (Phase 1
+        # of #2961 — SSH access/Hetzner ownership stays with gatekeeper per
+        # the user's 2026-08-05 ownership split; airuleset only wires the
+        # ALREADY-EXISTING accounts into its own push/authority registries).
+        # Live-verified 2026-08-05: all three accounts' default-key push
+        # access had to be restored via root@subdev (see the montalu
+        # entry's own comment above — same #258 access-cleanup mistake hit
+        # montalu2/3/4 too, since they were provisioned from the same
+        # authorized_keys template the cleanup rewrote).
+        "name": "montalu2@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu2",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        "name": "montalu3@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu3",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        "name": "montalu4@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu4",
         "repo_path": "~/devel/airuleset",
     },
     {
@@ -4098,6 +4145,11 @@ AUTHORITY_BY_USER = {
     # existing lowest profile and already expresses exactly that ("never
     # opens/merges a PR, hand-off via comment only") — no new profile needed.
     "simap": "fork-no-merge",
+    # montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE
+    # full parallel montalu streams — same authority as montalu itself.
+    "montalu2": "branch-merge",
+    "montalu3": "branch-merge",
+    "montalu4": "branch-merge",
 }
 
 

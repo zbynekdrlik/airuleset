@@ -3012,7 +3012,13 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
 
 BOUNCE_INTERVAL = 30 * 60            # min seconds between bounce sweeps
 BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this often
-_REDUCED_STREAM_USERS = ("david", "marek", "montalu")
+# montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE full
+# parallel montalu streams working on odoo-erp (a _CROSS_STREAM_REPOS
+# member) — need their own bounce-quals scoping like montalu itself, or a
+# pane in one of their homes falls through to the full-authority
+# exclude-all-reduced-streams branch instead of its own stream:<user> label.
+_REDUCED_STREAM_USERS = ("david", "marek", "montalu",
+                         "montalu2", "montalu3", "montalu4")
 
 BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
                 "gatekeeper-returned work is waiting. Per the autopilot "
