@@ -6952,6 +6952,53 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             continue                      # unmeasurable — never a finding
         live.add(root)
 
+        # The repo NAME comes from `origin`, never the directory basename:
+        # the checkout is `parovanie_produktov` while every marker is keyed
+        # `parovanie-produktov`, so a directory-derived key matches nothing
+        # and would report every ticket as unreported. Resolved HERE, ahead
+        # of `closed` — the #182 reopen-clear step below needs it and must
+        # run independent of whether anything closed in THIS sweep's window
+        # (adversarial-review finding: it used to sit AFTER `if not closed:
+        # continue`, so a repo where nothing closed this sweep — the ticket's
+        # OWN original close having aged out of the window, with no sibling
+        # ticket closing to keep `closed` non-empty — never reached it at
+        # all, and the exact bug #182 exists to fix kept reproducing).
+        try:
+            from notify import repo_name_for
+            name = repo_name_for(root)
+        except ImportError:
+            name = ""
+
+        # #182: a REOPENED ticket's existing run-card marker refers to a
+        # PRIOR close and must not keep deduping the card the NEXT close
+        # earns. `reopen_fetch` (wired = on, like `closed_fetch`) answers
+        # "of the issue numbers that already have a marker for this repo,
+        # which are OPEN again right now" — a marker for one of those is
+        # cleared so the next close claims fresh. Gated separately from the
+        # rest of this job (never on `card_probe`/`closed` at all) so a
+        # caller that never wires it — every pre-#182 test — sees NO
+        # behavior change at all. An existing marker predates THIS sweep's
+        # window entirely, which is exactly why this cannot depend on
+        # `closed` being non-empty.
+        if name and reopen_fetch is not None:
+            try:
+                from notify import card_marker_numbers, forget_marker
+            except ImportError:
+                card_marker_numbers = forget_marker = None
+            if card_marker_numbers is not None:
+                candidates = card_marker_numbers(name)
+                if candidates:
+                    try:
+                        reopened = reopen_fetch(root, candidates)
+                    except Exception as e:
+                        logs.append("card-reconcile reopen-fetch-failed %s: %r"
+                                    % (root, e))
+                        reopened = None
+                    for n in sorted(reopened or ()):
+                        forget_marker("%s#%d" % (name, n))
+                        logs.append("card-reconcile reopen-cleared %s#%d"
+                                    % (name, n))
+
         # CONFIRM, then announce (job 24's contract, reused verbatim): the
         # probe fetches the base ref, and the measurement happens after it.
         try:
@@ -6985,46 +7032,8 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             seen.pop(root, None)
             continue
 
-        # The repo NAME comes from `origin`, never the directory basename:
-        # the checkout is `parovanie_produktov` while every marker is keyed
-        # `parovanie-produktov`, so a directory-derived key matches nothing
-        # and would report every ticket as unreported.
-        try:
-            from notify import repo_name_for
-            name = repo_name_for(root)
-        except ImportError:
-            name = ""
         if not name:
             continue
-
-        # #182: a REOPENED ticket's existing run-card marker refers to a
-        # PRIOR close and must not keep deduping the card the NEXT close
-        # earns. `reopen_fetch` (wired = on, like `closed_fetch`) answers
-        # "of the issue numbers that already have a marker for this repo,
-        # which are OPEN again right now" — a marker for one of those is
-        # cleared so the next close claims fresh. Gated separately from the
-        # rest of this job (never on `card_probe` alone) so a caller that
-        # never wires it — every pre-#182 test — sees NO behavior change at
-        # all. Independent of `missing`/`closed` on purpose: an existing
-        # marker predates THIS sweep's window entirely.
-        if reopen_fetch is not None:
-            try:
-                from notify import card_marker_numbers, forget_marker
-            except ImportError:
-                card_marker_numbers = forget_marker = None
-            if card_marker_numbers is not None:
-                candidates = card_marker_numbers(name)
-                if candidates:
-                    try:
-                        reopened = reopen_fetch(root, candidates)
-                    except Exception as e:
-                        logs.append("card-reconcile reopen-fetch-failed %s: %r"
-                                    % (root, e))
-                        reopened = None
-                    for n in sorted(reopened or ()):
-                        forget_marker("%s#%d" % (name, n))
-                        logs.append("card-reconcile reopen-cleared %s#%d"
-                                    % (name, n))
 
         # Two ways a ticket can already have been reported: its OWN card, or
         # a catch-up DIGEST that accounted for it (#141). The digest writes
