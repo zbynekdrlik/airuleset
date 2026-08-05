@@ -747,6 +747,83 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
     return False
 
 
+TMUX_CONF = Path.home() / ".tmux.conf"
+TMUX_HISTORY_LIMIT = 50000
+TMUX_MARK_START = "# >>> airuleset tmux >>>"
+TMUX_MARK_END = "# <<< airuleset tmux <<<"
+# #235: tmux's own built-in default (2000-line scrollback) plus the current
+# Claude Code renderer re-rendering the viewport in place and stacking
+# duplicate/partial frames into pane history on re-render events made real
+# scrollback holey within minutes under agentic load (measured live: active
+# panes saturated at ~1937-1942/2000). Fix: raise history-limit fleet-wide.
+# Same idempotent-marker-block shape as apply_ultracode_launcher (#77) above
+# -- create the file if missing, rewrite ONLY the block's content if the
+# markers already exist, never touch anything outside them.
+
+
+def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT):
+    return (
+        f"{TMUX_MARK_START}\n"
+        f"set-option -g history-limit {limit}\n"
+        f"{TMUX_MARK_END}"
+    )
+
+
+def _default_tmux_run(argv):
+    import subprocess
+    return subprocess.run(argv, capture_output=True, text=True, timeout=8)
+
+
+def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
+                              run=None) -> bool:
+    """Ensure `~/.tmux.conf` carries the managed history-limit block (#235).
+
+    Idempotent marker block: create the file if absent, rewrite ONLY the
+    block's CONTENT in place if the markers already exist (never touches
+    anything outside them, byte-for-byte), no-op on a second run with
+    nothing changed. Returns True iff the conf file's bytes changed.
+
+    Also live-applies the option on any RUNNING tmux server for this user
+    (`tmux set-option -g history-limit N`) so an already-running session's
+    NEW panes/windows pick it up immediately, without waiting for the next
+    server start -- EXISTING panes keep their creation-time limit
+    (documented behavior, not chased: tmux has no way to grow an existing
+    pane's history buffer in place). This is a server OPTION set, never a
+    keystroke into any pane -- `run` defaults to a real (but exception-safe)
+    `tmux` invocation and is injectable so tests never touch a real tmux
+    server. A missing server / failed call is silently ignored (logged, not
+    raised) -- it never affects the conf-file write result, mirroring the
+    ticket's own "ignore failure when no server" acceptance."""
+    import re
+    path = tmux_conf_path or TMUX_CONF
+    block = render_tmux_history_block(limit)
+
+    existing = path.read_text() if path.exists() else ""
+    if TMUX_MARK_START in existing and TMUX_MARK_END in existing:
+        pattern = re.compile(
+            re.escape(TMUX_MARK_START) + r".*?" + re.escape(TMUX_MARK_END), re.S)
+        new = pattern.sub(lambda _m: block, existing)
+    else:
+        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+        new = f"{existing}{sep}\n{block}\n"
+    changed = new != existing
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new)
+
+    try:
+        (run or _default_tmux_run)(
+            ["tmux", "set-option", "-g", "history-limit", str(limit)])
+    except Exception as e:
+        # No server running / tmux missing from PATH / timeout, etc. --
+        # expected and harmless (a new server reads the conf file we just
+        # wrote anyway); logged for visibility, never re-raised, and never
+        # affects the conf-file write result above.
+        print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
+
+    return changed
+
+
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
@@ -1240,6 +1317,22 @@ def cmd_install(args):
             print(f"  No change: {BASHRC} (claude launcher wrappers)")
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
+
+    # --- 3c. tmux history-limit: every managed user's ~/.tmux.conf (#235) ---
+    # tmux's own 2000-line default plus the current CC renderer's re-render
+    # frame-stacking made real scrollback holey within minutes under
+    # agentic load -- raise history-limit fleet-wide via the same
+    # idempotent-marker-block shape as the launcher's ~/.bashrc block above.
+    # Also live-applies to any RUNNING tmux server so it takes effect for
+    # NEW panes/windows immediately, without a server restart.
+    try:
+        tmux_changed = apply_tmux_history_limit()
+        if tmux_changed:
+            print(f"  Updated:   {TMUX_CONF} (history-limit {TMUX_HISTORY_LIMIT})")
+        else:
+            print(f"  No change: {TMUX_CONF} (history-limit {TMUX_HISTORY_LIMIT})")
+    except Exception as e:
+        print(f"  tmux history-limit error: {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
