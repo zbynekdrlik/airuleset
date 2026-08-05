@@ -613,6 +613,50 @@ def repo_name_for(cwd, run=None):
     return url.replace(":", "/").split("/")[-1]
 
 
+# --------------------------------------------------------------------------- #
+# #187 -- repo resolution when a command's own text moves the shell to a
+# DIFFERENT directory than the PreToolUse payload's static `cwd`.
+#
+# THE PROBLEM. `repo_name_for(cwd)` trusts the payload's `.cwd` field, fixed
+# at dispatch time. A worker explicitly dispatched to operate on a sibling
+# checkout (the documented "REPO PATH is different from session cwd" shape
+# in agents/autopilot-worker.md) runs every Bash call as `cd <path> &&
+# <command>` -- the payload's cwd never reflects that `cd`, so a hook that
+# keys off it alone gates against the WRONG repo's marker namespace.
+#
+# THE FIX. Scan the command text for the LAST `cd <path>` occurring before
+# the actual `git commit` invocation (same statement-boundary shape
+# `block-commit-without-design.sh`'s own bash grep already uses) and trust
+# it ONLY when it resolves to a real git repo with an `origin` remote --
+# never a bare guess. Falls back to `cwd` unchanged otherwise, so a command
+# with no `cd` prefix (the overwhelming majority) sees zero behavior change.
+# --------------------------------------------------------------------------- #
+
+_STMT_BOUNDARY = r"(?:^|[;&|]|&&)"
+_GIT_COMMIT_CMD_RE = re.compile(
+    _STMT_BOUNDARY + r"\s*(?:sudo\s+|env\s+)?git\s+commit\b")
+_CD_PREFIX_RE = re.compile(_STMT_BOUNDARY + r"\s*cd\s+([^\s;&|]+)")
+
+
+def resolve_work_cwd(cmd, cwd, run=None):
+    """The directory whose repo `cmd` actually operates on -- an inline
+    `cd <path> &&` immediately ahead of a `git commit` invocation overrides
+    `cwd` (#187) when, and only when, that path is a real, resolvable git
+    repo. Never guesses: no `cd` prefix, no `git commit` in `cmd`, or a
+    `cd` target that isn't a git repo all fall through to `cwd` unchanged."""
+    if isinstance(cmd, str) and cmd:
+        m_commit = _GIT_COMMIT_CMD_RE.search(cmd)
+        if m_commit:
+            path = ""
+            for m in _CD_PREFIX_RE.finditer(cmd, 0, m_commit.start()):
+                path = m.group(1)
+            if path:
+                path = os.path.expanduser(path.strip("'\""))
+                if path and path != cwd and repo_name_for(path, run=run):
+                    return path
+    return cwd
+
+
 def newest_delivered_card(repo_name):
     """mtime of the newest DELIVERED per-ticket card marker for `repo_name`,
     or None. The marker key is `<repo-name>#<issue>` (`_notify_run_card`), so

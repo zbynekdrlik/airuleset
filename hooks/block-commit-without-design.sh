@@ -19,6 +19,14 @@ set -euo pipefail
 # Every commit after the FIRST one for an issue passes for free, since the
 # marker persists once written.
 #
+# #187 -- the repo a commit is gated against is resolved via
+# notify.resolve_work_cwd(cmd, cwd), which trusts an inline `cd <path> &&`
+# immediately ahead of the `git commit` invocation over the PreToolUse
+# payload's own static cwd, whenever that path is a real git repo. This is
+# what a worker dispatched into a sibling checkout (session cwd = repo A,
+# `cd /path/to/repo-B && git commit ...`) needs — without it every such
+# commit is gated against repo A's marker namespace instead of repo B's.
+#
 # #206 -- a still-unmarked ref that is already CLOSED on GitHub is dropped
 # from the required set (design_gate.required_refs) -- a historical/context
 # reference in the commit's own prose (e.g. "(owner decisions #1734)" for
@@ -110,7 +118,14 @@ refs = dg.issue_refs(cmd)
 if not refs:
     sys.exit(0)
 
-repo_key = notify.repo_name_for(cwd)
+# #187 -- an inline `cd /other/repo && git commit ...` moves the shell to a
+# DIFFERENT repo than the payload's static cwd; resolve_work_cwd() trusts
+# that only when the target genuinely is a git repo, else falls back to cwd
+# unchanged. Use the SAME resolved directory for the repo-key lookup AND
+# the #206 gh issue-state check below, so both agree on which repo this
+# commit is actually landing in.
+work_cwd = notify.resolve_work_cwd(cmd, cwd)
+repo_key = notify.repo_name_for(work_cwd)
 if not repo_key:
     sys.exit(0)          # unmeasurable (no origin) -> never guess, never block
 
@@ -119,7 +134,7 @@ missing = [n for n in refs if not dg.marker_exists(repo_key, n)]
 # historical/context reference, not the ticket this commit is for). Only
 # ever queries refs with no marker yet, so the common case (this commit's
 # OWN ticket already has one) costs zero extra `gh` calls.
-missing = dg.required_refs(missing, cwd)
+missing = dg.required_refs(missing, work_cwd)
 if missing:
     print(repo_key)
     print(" ".join(str(n) for n in missing))
