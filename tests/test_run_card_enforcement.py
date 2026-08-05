@@ -965,6 +965,29 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         self.reconcile(r, reopen_fetch=spy)
         self.assertEqual(seen, [{3}])
 
+    def test_reopen_clear_runs_even_when_nothing_closed_in_this_sweeps_window(self):
+        # CRITICAL adversarial-review finding: the reopen-clear step used to
+        # sit AFTER `if not closed: continue` — a repo whose ONLY close (the
+        # one the stale marker is for) has aged out of the 48h window, with
+        # no OTHER ticket closing in this sweep, never even reached name
+        # resolution — reopen_fetch was never called and the stale marker
+        # was never cleared, reproducing the exact #182 bug this job exists
+        # to fix.
+        r = self.repo(closes=(3,), age=10 * DAY)   # aged out of the window
+        self._fire_card("proj#3")
+        seen = []
+
+        def spy(root, nums):
+            seen.append(set(nums))
+            return {3} if 3 in nums else set()
+
+        self.reconcile(r, reopen_fetch=spy)
+        self.assertEqual(seen, [{3}],
+                         "reopen_fetch must be consulted even when nothing "
+                         "closed in this sweep's own window")
+        self.assertFalse(notify.marker_delivered("proj#3"),
+                         "the stale marker must still be cleared")
+
 
 # --------------------------------------------------------------------------- #
 # 3. the SUPPRESSION becomes conditional on DELIVERY
