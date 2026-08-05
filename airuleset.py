@@ -929,6 +929,205 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     return changed
 
 
+# ---------------------------------------------------------------------------
+# tmux boot-time cutover (#242) -- points /usr/local/bin/tmux at the newest
+# managed tmux build (tmux-3.7b) at the box's own NEXT boot, so the client
+# and server binary always match. #240/#241: repointing the symlink while a
+# tmux SERVER is live breaks every attach ("server exited unexpectedly"),
+# and at boot no server exists yet -- the only moment a flip is provably
+# safe for a box whose server is already live today (dev2/gatekeeper/
+# subdev). This is what actually unlocks #236's fixed-geometry goal:
+# `window-size manual` crashes tmux 3.4's server outright at startup
+# (#241), starts cleanly on 3.7b.
+#
+# System-level (root-owned /etc/systemd/system + /usr/local/bin), unlike
+# every OTHER airuleset-managed unit (file-drop/api-watchdog are --user).
+# ---------------------------------------------------------------------------
+
+TMUX_CUTOVER_UNIT_NAME = "airuleset-tmux-cutover.service"
+TMUX_CUTOVER_SCRIPT_DEST = "/usr/local/bin/airuleset-tmux-cutover.sh"
+TMUX_CUTOVER_SERVICE_DEST = "/etc/systemd/system/" + TMUX_CUTOVER_UNIT_NAME
+TMUX_CUTOVER_SERVICE_TEMPLATE = REPO_DIR / "settings" / "tmux-cutover.service.template"
+# tmux-3.7b is the only extra build any managed box carries today (#242); a
+# future newer build is a distinct ticket with its own compatibility check
+# (like #241 for 3.4), not something a silent "highest version wins" glob
+# should decide -- deliberately hardcoded, not generalized.
+TMUX_CUTOVER_NEWEST = "/usr/local/bin/tmux-3.7b"
+
+# Env-var overrides (unset in production -- the defaults above always apply
+# there) exist ONLY so this script's LOGIC can be exercised by a real `sh`
+# subprocess against a throwaway sandbox in tests, instead of only ever
+# being proven by string-matching its source.
+TMUX_CUTOVER_SCRIPT_CONTENT = """#!/bin/sh
+# airuleset-managed (do NOT edit) -- boot-time tmux symlink cutover (#242).
+# Idempotently points /usr/local/bin/tmux at the newest managed tmux build
+# present on this box. Runs once at boot, before any tmux server can exist
+# -- see airuleset-tmux-cutover.service's own ordering (Before=sysinit.target
+# ssh.service ssh.socket, DefaultDependencies=no) -- so it can never run
+# while a server using the OLD binary is already live.
+set -eu
+
+NEWEST="${AIRULESET_TMUX_CUTOVER_NEWEST:-/usr/local/bin/tmux-3.7b}"
+TARGET="${AIRULESET_TMUX_CUTOVER_TARGET:-/usr/local/bin/tmux}"
+
+# No 3.7b build on this box (yet), or it isn't runnable (a truncated /
+# interrupted copy, wrong permissions) -- leave the packaged binary alone.
+# -x (not -e): a present-but-non-executable NEWEST must never become the
+# boot-time target (review finding, #242).
+if [ ! -x "$NEWEST" ]; then
+    exit 0
+fi
+
+CURRENT=""
+if [ -L "$TARGET" ]; then
+    CURRENT=$(readlink "$TARGET")
+fi
+
+# Already correct -- no-op. This is what makes a re-run at any later boot,
+# or a box that is already on 3.7b, safe: the symlink is only ever touched
+# when it is actually stale.
+if [ "$CURRENT" != "$NEWEST" ]; then
+    ln -sfn "$NEWEST" "$TARGET"
+fi
+"""
+
+# subdev's four stream accounts (montalu/marek/david/simap) have no sudo at
+# all and share ONE box + ONE symlink -- root there is reachable ONLY from
+# the gatekeeper VPS (never dev1), via this identity. Its mere PRESENCE is
+# the discriminator for "am I the gatekeeper box" (mirrors #68's own
+# identity-based trust in block-subdev-ssh-misuse.sh) -- never a
+# hostname/whoami guess.
+SUBDEV_ADMIN_IDENTITY = Path.home() / ".ssh" / "subdev_admin"
+
+
+def _sudo_write_root_file(run, content, dest, mode):
+    """Write `content` to root-owned `dest` LOCALLY via `sudo -n tee` +
+    `sudo -n chmod` -- never an interactive password. Returns (ok, err)."""
+    w = run(["sudo", "-n", "tee", dest], input=content,
+            capture_output=True, text=True, timeout=15)
+    if w.returncode != 0:
+        return False, f"write {dest} failed: {(w.stderr or '').strip()}"
+    c = run(["sudo", "-n", "chmod", mode, dest],
+            capture_output=True, text=True, timeout=15)
+    if c.returncode != 0:
+        return False, f"chmod {dest} failed: {(c.stderr or '').strip()}"
+    return True, None
+
+
+def setup_tmux_cutover_provisioning(run=None):
+    """Install the boot-time tmux symlink cutover unit on THIS box (#242).
+
+    Non-interactive (`sudo -n`) throughout, matching check_runtime_deps's own
+    "install what you can, skip loudly what you can't" shape: the four subdev
+    stream accounts (montalu/marek/david/simap) have no sudo AT ALL -- probed
+    up front and skipped with an expected, non-alarming reason, because the
+    ONE shared box+symlink they sit behind is provisioned instead by
+    `setup_tmux_cutover_subdev_via_gatekeeper` (the gatekeeper account's own
+    `install` run performs that root hop).
+
+    Rewrites the script + unit UNCONDITIONALLY on every call (same shape as
+    apply_ultracode_launcher's own claude-launcher script -- cheap, and the
+    content is a pure function of fixed constants, so a same-content rewrite
+    is a true no-op on disk) and (re)enables the unit -- but NEVER starts it.
+    Starting it now would flip the symlink under a POSSIBLY-LIVE tmux server;
+    the actual flip only ever happens at the box's own NEXT boot, when no
+    server can exist yet (see the shipped unit's own ordering). Running the
+    unit/script directly at ANY time (including a manual `systemctl start`
+    used to prove idempotency) is still provably safe on a box already on
+    3.7b: the script's own compare-then-skip is what makes that true, not
+    merely "we never invoke it".
+
+    Returns (ok: bool, reason: str|None) -- reason is set only when this
+    account genuinely cannot do it (the expected subdev-stream case) or a
+    real command failed."""
+    import subprocess
+    run = run or subprocess.run
+
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True, timeout=10)
+        has_sudo = probe.returncode == 0
+    except Exception:
+        has_sudo = False
+    if not has_sudo:
+        return False, "no NOPASSWD sudo on this account (expected on the subdev stream accounts)"
+
+    if not TMUX_CUTOVER_SERVICE_TEMPLATE.exists():
+        return False, f"missing unit template: {TMUX_CUTOVER_SERVICE_TEMPLATE}"
+    unit_content = TMUX_CUTOVER_SERVICE_TEMPLATE.read_text()
+
+    for content, dest, mode in (
+        (TMUX_CUTOVER_SCRIPT_CONTENT, TMUX_CUTOVER_SCRIPT_DEST, "755"),
+        (unit_content, TMUX_CUTOVER_SERVICE_DEST, "644"),
+    ):
+        ok, err = _sudo_write_root_file(run, content, dest, mode)
+        if not ok:
+            return False, err
+
+    dr = run(["sudo", "-n", "systemctl", "daemon-reload"],
+            capture_output=True, text=True, timeout=20)
+    if dr.returncode != 0:
+        return False, f"daemon-reload failed: {(dr.stderr or '').strip()}"
+    en = run(["sudo", "-n", "systemctl", "enable", TMUX_CUTOVER_UNIT_NAME],
+            capture_output=True, text=True, timeout=20)
+    if en.returncode != 0:
+        return False, f"enable failed: {(en.stderr or '').strip()}"
+
+    return True, None
+
+
+def setup_tmux_cutover_subdev_via_gatekeeper(run=None, identity_path: Path = None):
+    """From the gatekeeper account ONLY, root-hop into the shared subdev VPS
+    (`ssh -i ~/.ssh/subdev_admin root@subdev`) and install the SAME cutover
+    unit there -- ONE root-level install covers all FOUR subdev stream
+    accounts (montalu/marek/david/simap), which share one box and one
+    /usr/local/bin/tmux symlink and individually have no sudo (see
+    setup_tmux_cutover_provisioning's own no-op there). Root@subdev is
+    reachable ONLY from gatekeeper, never from dev1 (machine-identities.md)
+    -- which is why this is a distinct function rather than one more
+    REMOTE_HOSTS deploy entry: root there is not one of the managed
+    per-account checkouts `install` normally runs against.
+
+    A true no-op on every box that isn't gatekeeper (dev1/dev2/the subdev
+    accounts themselves never carry the identity file). Never starts the
+    remote unit, for the identical live-server-safety reason as the local
+    path above -- the remote's own next reboot is what actually flips it.
+
+    Returns (ok: bool, reason: str|None)."""
+    import subprocess
+    run = run or subprocess.run
+    identity = identity_path or SUBDEV_ADMIN_IDENTITY
+
+    if not identity.exists():
+        return False, "not the gatekeeper box (no subdev_admin identity) -- skipped"
+
+    if not TMUX_CUTOVER_SERVICE_TEMPLATE.exists():
+        return False, f"missing unit template: {TMUX_CUTOVER_SERVICE_TEMPLATE}"
+    unit_content = TMUX_CUTOVER_SERVICE_TEMPLATE.read_text()
+
+    ssh_prefix = ["ssh", "-i", str(identity),
+                  "-o", "StrictHostKeyChecking=no", "root@subdev"]
+
+    for content, dest, mode in (
+        (TMUX_CUTOVER_SCRIPT_CONTENT, TMUX_CUTOVER_SCRIPT_DEST, "755"),
+        (unit_content, TMUX_CUTOVER_SERVICE_DEST, "644"),
+    ):
+        w = run(ssh_prefix + [f"tee {dest} >/dev/null && chmod {mode} {dest}"],
+                input=content, capture_output=True, text=True, timeout=25)
+        if w.returncode != 0:
+            return False, f"write {dest} on subdev failed: {(w.stderr or '').strip()}"
+
+    dr = run(ssh_prefix + ["systemctl daemon-reload"],
+            capture_output=True, text=True, timeout=25)
+    if dr.returncode != 0:
+        return False, f"daemon-reload on subdev failed: {(dr.stderr or '').strip()}"
+    en = run(ssh_prefix + [f"systemctl enable {TMUX_CUTOVER_UNIT_NAME}"],
+            capture_output=True, text=True, timeout=25)
+    if en.returncode != 0:
+        return False, f"enable on subdev failed: {(en.stderr or '').strip()}"
+
+    return True, None
+
+
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
@@ -1048,6 +1247,30 @@ def _validate_filedrop():
     return errors
 
 
+def _validate_tmux_cutover():
+    """Validate the tmux boot-time cutover unit (#242): the systemd unit
+    template exists and points ExecStart at the managed script + is ordered
+    to run before login/ssh; the inline script CONTENT constant (same shape
+    as the claude launcher's own CLAUDE_LAUNCH_SCRIPT_CONTENT) carries the
+    expected paths and never references the packaged /usr/bin/tmux."""
+    errors = []
+    if not TMUX_CUTOVER_SERVICE_TEMPLATE.exists():
+        errors.append(f"Missing tmux-cutover unit template: {TMUX_CUTOVER_SERVICE_TEMPLATE}")
+    else:
+        t = TMUX_CUTOVER_SERVICE_TEMPLATE.read_text()
+        if TMUX_CUTOVER_SCRIPT_DEST not in t:
+            errors.append("tmux-cutover unit template ExecStart missing the managed script path")
+        if "WantedBy=sysinit.target" not in t:
+            errors.append("tmux-cutover unit template missing WantedBy=sysinit.target")
+        if "DefaultDependencies=no" not in t:
+            errors.append("tmux-cutover unit template missing DefaultDependencies=no")
+    if "/usr/bin/tmux" in TMUX_CUTOVER_SCRIPT_CONTENT:
+        errors.append("tmux-cutover script must never reference the packaged /usr/bin/tmux")
+    if TMUX_CUTOVER_NEWEST not in TMUX_CUTOVER_SCRIPT_CONTENT:
+        errors.append("tmux-cutover script missing the managed NEWEST path")
+    return errors
+
+
 def _validate_watchdog():
     """Validate the api-watchdog: the package imports cleanly and the systemd
     service + timer templates exist with the repo-path placeholder + ExecStart."""
@@ -1146,6 +1369,8 @@ def cmd_validate(args):
     errors.extend(_validate_filedrop())
     # Validate the api-watchdog: watchdog/ imports + service/timer templates ok.
     errors.extend(_validate_watchdog())
+    # Validate the tmux boot-time cutover unit: template + script content ok.
+    errors.extend(_validate_tmux_cutover())
 
     if errors:
         print("VALIDATION FAILED:")
@@ -1449,6 +1674,32 @@ def cmd_install(args):
             print(f"  No change: {TMUX_CONF} ({tmux_desc})")
     except Exception as e:
         print(f"  tmux managed-block error: {e}", file=sys.stderr)
+
+    # --- 3d. tmux boot-time cutover unit: points /usr/local/bin/tmux at the
+    # newest managed build (tmux-3.7b) at THIS box's own next boot (#242).
+    # Non-interactive (sudo -n); skipped with a loud-but-expected reason on
+    # the four subdev stream accounts, which have no sudo at all.
+    try:
+        ok, reason = setup_tmux_cutover_provisioning()
+        if reason:
+            print(f"  tmux cutover unit: skipped ({reason})")
+        elif ok:
+            print(f"  tmux cutover unit: installed + enabled ({TMUX_CUTOVER_UNIT_NAME})")
+    except Exception as e:
+        print(f"  tmux cutover unit error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3e. tmux boot-time cutover unit, subdev VIA the gatekeeper root hop
+    # (#242) -- a true no-op except when this install run is genuinely on the
+    # gatekeeper box (identity file present); covers all FOUR subdev stream
+    # accounts with the ONE root-level install their shared box needs.
+    try:
+        ok, reason = setup_tmux_cutover_subdev_via_gatekeeper()
+        if reason:
+            print(f"  tmux cutover unit (subdev via gatekeeper): skipped ({reason})")
+        elif ok:
+            print("  tmux cutover unit (subdev via gatekeeper): installed + enabled")
+    except Exception as e:
+        print(f"  tmux cutover unit (subdev) error (non-fatal): {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import time
 import sys
@@ -3670,6 +3671,381 @@ class TestTmuxWindowSizeNoResize(TestCase):
     def test_list_windows_is_never_constructed_or_invoked_anywhere(self):
         src = Path(airuleset.__file__).read_text()
         self.assertNotIn("list-windows", src)
+
+
+class _FakeCP:
+    """A subprocess.CompletedProcess stand-in -- just returncode/stdout/stderr."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestTmuxCutoverScriptContent(TestCase):
+    """#242: the inline boot-time cutover script (TMUX_CUTOVER_SCRIPT_CONTENT,
+    same "rendered unconditionally, no separate template file" shape as
+    apply_ultracode_launcher's own CLAUDE_LAUNCH_SCRIPT_CONTENT) must compare
+    the current /usr/local/bin/tmux symlink target against tmux-3.7b and only
+    re-link when it differs -- a true no-op once correct -- and must NEVER
+    reference the packaged /usr/bin/tmux anywhere."""
+
+    def test_starts_with_posix_shebang_and_fails_loudly(self):
+        self.assertTrue(airuleset.TMUX_CUTOVER_SCRIPT_CONTENT.startswith("#!/bin/sh"))
+        self.assertIn("set -eu", airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+
+    def test_never_references_the_packaged_binary(self):
+        self.assertNotIn("/usr/bin/tmux", airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+
+    def test_carries_the_managed_newest_and_target_paths(self):
+        self.assertIn(airuleset.TMUX_CUTOVER_NEWEST, airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+        self.assertIn("/usr/local/bin/tmux", airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+
+    def test_compares_before_relinking_no_unconditional_ln(self):
+        # A structural guard: `ln -sfn` must be gated behind the
+        # CURRENT-vs-NEWEST comparison, never issued unconditionally.
+        self.assertIn('if [ "$CURRENT" != "$NEWEST" ]', airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+        self.assertIn("ln -sfn", airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+
+    def test_exits_early_when_newest_build_is_missing_or_not_executable(self):
+        # -x, not -e: a present-but-non-executable NEWEST (a truncated /
+        # interrupted copy, wrong perms) must never become the boot-time
+        # target either (adversarial-review finding, #242).
+        self.assertIn('if [ ! -x "$NEWEST" ]', airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+        self.assertNotIn('if [ ! -e "$NEWEST" ]', airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+
+
+class TestTmuxCutoverScriptRealBehavior(TestCase):
+    """Genuine `sh` execution of the shipped script content against a
+    throwaway sandbox, via the AIRULESET_TMUX_CUTOVER_NEWEST/TARGET env-var
+    overrides the script reads (unset in production -- the hardcoded
+    defaults always apply there). Proves the LOGIC, not just the text."""
+
+    def _tmp(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _fake_tmux(self, path, executable=True):
+        path.write_text("fake binary")
+        path.chmod(0o755 if executable else 0o644)
+        return path
+
+    def _run_script(self, env_extra):
+        d = self._tmp()
+        script = Path(d) / "cutover.sh"
+        script.write_text(airuleset.TMUX_CUTOVER_SCRIPT_CONTENT)
+        script.chmod(0o755)
+        env = {**os.environ, **env_extra}
+        r = subprocess.run(["sh", str(script)], capture_output=True, text=True, env=env)
+        return d, r
+
+    def test_newest_missing_leaves_target_untouched(self):
+        d = self._tmp()
+        newest = Path(d) / "no-such-tmux-3.7b"          # deliberately never created
+        target = Path(d) / "tmux"
+        packaged = Path(d) / "tmux-packaged"
+        packaged.write_text("old packaged binary")
+        target.symlink_to(packaged)                      # simulates dev2/gk/subdev today
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # untouched -- still pointing at the packaged binary, never at
+        # something that doesn't exist.
+        self.assertEqual(os.readlink(target), str(packaged))
+
+    def test_present_but_non_executable_newest_leaves_target_untouched(self):
+        # A truncated/interrupted copy of tmux-3.7b, or one that landed with
+        # the wrong permissions, must never become the boot-time target
+        # (adversarial-review finding, #242).
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b", executable=False)
+        target = Path(d) / "tmux"
+        packaged = Path(d) / "tmux-packaged"
+        packaged.write_text("old packaged binary")
+        target.symlink_to(packaged)
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.readlink(target), str(packaged))
+
+    def test_target_created_pointing_at_newest_when_missing_entirely(self):
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b")
+        target = Path(d) / "tmux"
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(os.readlink(target), str(newest))
+
+    def test_wrong_target_gets_relinked_to_newest(self):
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b")
+        packaged = Path(d) / "tmux-packaged"
+        packaged.write_text("old packaged binary")
+        target = Path(d) / "tmux"
+        target.symlink_to(packaged)
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.readlink(target), str(newest))
+
+    def test_regular_file_at_target_gets_replaced_by_the_symlink(self):
+        # TARGET as a plain regular file (not missing, not a symlink) is
+        # the shape a freshly-`apt-get install`ed packaged tmux could
+        # actually take -- ln -sfn must still cut it over cleanly.
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b")
+        target = Path(d) / "tmux"
+        target.write_text("packaged tmux binary, not a symlink")
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(os.readlink(target), str(newest))
+
+    def test_already_correct_target_is_a_true_noop(self):
+        # Read-only sandbox dir: the CORRECT script never writes when
+        # already correct, so it exits 0 regardless. Any mutant that drops
+        # the comparison and always `ln -sfn`s would hit a real write
+        # failure against the read-only dir and fail this test -- a plain
+        # writable sandbox cannot tell "skipped" from "re-wrote the same
+        # value" (adversarial-review finding, #242).
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b")
+        target = Path(d) / "tmux"
+        target.symlink_to(newest)
+        os.chmod(d, 0o555)
+        self.addCleanup(os.chmod, d, 0o755)
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.readlink(target), str(newest))
+
+    def test_never_touches_a_path_outside_target(self):
+        d = self._tmp()
+        newest = self._fake_tmux(Path(d) / "tmux-3.7b")
+        target = Path(d) / "tmux"
+        sentinel = Path(d) / "unrelated-file"
+        sentinel.write_text("do not touch")
+        before = sentinel.read_text()
+        _, r = self._run_script({
+            "AIRULESET_TMUX_CUTOVER_NEWEST": str(newest),
+            "AIRULESET_TMUX_CUTOVER_TARGET": str(target),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sentinel.read_text(), before)
+
+
+class TestTmuxCutoverUnitTemplate(TestCase):
+    """The systemd unit template (settings/tmux-cutover.service.template)
+    must be a boot-time oneshot ordered before any login/ssh session can
+    exist, and must never be configured to auto-start."""
+
+    def setUp(self):
+        self.text = airuleset.TMUX_CUTOVER_SERVICE_TEMPLATE.read_text()
+
+    def test_is_a_oneshot_that_remains_after_exit(self):
+        self.assertIn("Type=oneshot", self.text)
+        self.assertIn("RemainAfterExit=yes", self.text)
+
+    def test_execstart_points_at_the_managed_script(self):
+        self.assertIn(f"ExecStart={airuleset.TMUX_CUTOVER_SCRIPT_DEST}", self.text)
+
+    def test_ordered_before_sysinit_and_ssh(self):
+        self.assertIn("DefaultDependencies=no", self.text)
+        self.assertIn("Before=sysinit.target ssh.service ssh.socket", self.text)
+
+    def test_enabled_via_sysinit_target_never_multi_user(self):
+        self.assertIn("WantedBy=sysinit.target", self.text)
+
+
+def _assert_never_starts(testcase, calls):
+    """The load-bearing safety invariant across every code path of both
+    provisioning functions: starting the unit (by ANY of `systemctl start`,
+    `enable --now`, or `restart`) could flip the symlink under a
+    possibly-live tmux server, so none of these three may EVER appear as an
+    argv element in any call. Checking `"start" in argv` alone (list
+    membership) misses `--now` and a bare `restart` element -- caught by
+    adversarial review, #242."""
+    for c in calls:
+        testcase.assertNotIn("start", c)
+        testcase.assertNotIn("--now", c)
+        testcase.assertNotIn("restart", c)
+
+
+class TestSetupTmuxCutoverProvisioning(TestCase):
+    """setup_tmux_cutover_provisioning: local, non-interactive (sudo -n)
+    install+enable -- NEVER a `systemctl start`, on any code path, success
+    or failure, because starting it could flip a symlink under a
+    possibly-live tmux server."""
+
+    def test_no_sudo_skips_with_expected_reason_and_writes_nothing(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return _FakeCP(returncode=1, stderr="sudo: a password is required")
+
+        ok, reason = airuleset.setup_tmux_cutover_provisioning(run=run)
+        self.assertFalse(ok)
+        self.assertIn("no NOPASSWD sudo", reason)
+        # only the probe was attempted -- no write, no systemctl call
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ["sudo", "-n", "true"])
+
+    def test_happy_path_installs_enables_and_never_starts(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_provisioning(run=run)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        joined = [" ".join(c) for c in calls]
+        self.assertTrue(any("tee /usr/local/bin/airuleset-tmux-cutover.sh" in j for j in joined))
+        self.assertTrue(any("tee /etc/systemd/system/airuleset-tmux-cutover.service" in j
+                             for j in joined))
+        self.assertTrue(any("daemon-reload" in j for j in joined))
+        self.assertTrue(any("enable" in j and "airuleset-tmux-cutover.service" in j
+                             for j in joined))
+        # the load-bearing safety invariant: never a `systemctl start`
+        # (nor `enable --now`, nor `restart`).
+        _assert_never_starts(self, calls)
+
+    def test_write_failure_stops_before_systemctl_and_never_starts(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[:3] == ["sudo", "-n", "true"]:
+                return _FakeCP(returncode=0)
+            if "tee" in argv:
+                return _FakeCP(returncode=1, stderr="Permission denied")
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_provisioning(run=run)
+        self.assertFalse(ok)
+        self.assertIn("write", reason)
+        self.assertFalse(any("daemon-reload" in " ".join(c) for c in calls))
+        _assert_never_starts(self, calls)
+
+    def test_daemon_reload_failure_never_reaches_enable_or_start(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "daemon-reload" in argv:
+                return _FakeCP(returncode=1, stderr="reload failed")
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_provisioning(run=run)
+        self.assertFalse(ok)
+        self.assertIn("daemon-reload", reason)
+        self.assertFalse(any("enable" in c for c in calls))
+        _assert_never_starts(self, calls)
+
+    def test_enable_failure_reported_and_never_starts(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "enable" in argv:
+                return _FakeCP(returncode=1, stderr="enable failed")
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_provisioning(run=run)
+        self.assertFalse(ok)
+        self.assertIn("enable", reason)
+        _assert_never_starts(self, calls)
+
+
+class TestSetupTmuxCutoverSubdevViaGatekeeper(TestCase):
+    """setup_tmux_cutover_subdev_via_gatekeeper: a true no-op on every box
+    without the subdev_admin identity, and on gatekeeper itself performs the
+    identical install over the root@subdev hop -- again, never starting the
+    unit."""
+
+    def test_missing_identity_is_a_true_noop_no_calls_at_all(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return _FakeCP(returncode=0)
+
+        missing = Path(tempfile.mkdtemp()) / "no-such-identity"
+        ok, reason = airuleset.setup_tmux_cutover_subdev_via_gatekeeper(
+            run=run, identity_path=missing)
+        self.assertFalse(ok)
+        self.assertIn("not the gatekeeper box", reason)
+        self.assertEqual(calls, [])
+
+    def test_present_identity_installs_over_the_sanctioned_ssh_shape(self):
+        d = tempfile.mkdtemp()
+        identity = Path(d) / "subdev_admin"
+        identity.write_text("fake key")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_subdev_via_gatekeeper(
+            run=run, identity_path=identity)
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        expected_prefix = ["ssh", "-i", str(identity),
+                            "-o", "StrictHostKeyChecking=no", "root@subdev"]
+        for c in calls:
+            self.assertEqual(c[:len(expected_prefix)], expected_prefix)
+        joined = [" ".join(c) for c in calls]
+        self.assertTrue(any("airuleset-tmux-cutover.sh" in j for j in joined))
+        self.assertTrue(any("airuleset-tmux-cutover.service" in j for j in joined))
+        self.assertTrue(any("daemon-reload" in j for j in joined))
+        self.assertTrue(any("enable airuleset-tmux-cutover.service" in j for j in joined))
+        _assert_never_starts(self, calls)
+
+    def test_remote_write_failure_stops_before_systemctl(self):
+        d = tempfile.mkdtemp()
+        identity = Path(d) / "subdev_admin"
+        identity.write_text("fake key")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            joined = " ".join(argv)
+            if "tee" in joined:
+                return _FakeCP(returncode=1, stderr="remote write failed")
+            return _FakeCP(returncode=0)
+
+        ok, reason = airuleset.setup_tmux_cutover_subdev_via_gatekeeper(
+            run=run, identity_path=identity)
+        self.assertFalse(ok)
+        self.assertIn("subdev failed", reason)
+        self.assertFalse(any("daemon-reload" in " ".join(c) for c in calls))
+
+
+class TestTmuxCutoverValidation(TestCase):
+    """_validate_tmux_cutover() must pass clean against this repo's own
+    shipped template + script (the real files `cmd_validate` checks)."""
+
+    def test_real_repo_files_validate_clean(self):
+        self.assertEqual(airuleset._validate_tmux_cutover(), [])
 
 
 class TestClaudeLauncherContinueOrNew(TestCase):

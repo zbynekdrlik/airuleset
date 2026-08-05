@@ -1,0 +1,38 @@
+# airuleset tmux boot-time cutover (#242) — SYSTEM-level unit (managed by
+# airuleset), unlike every other airuleset-managed unit (file-drop /
+# api-watchdog, which are --user). Installed by `airuleset.py install` via
+# setup_tmux_cutover_provisioning() / setup_tmux_cutover_subdev_via_gatekeeper()
+# — non-interactively (`sudo -n`), or the gatekeeper root-hop to subdev.
+# Edit this template, not the installed copy in /etc/systemd/system/, then
+# re-run `airuleset.py install` (or `push`).
+#
+# Points /usr/local/bin/tmux at the newest managed tmux build (tmux-3.7b)
+# at THIS box's own next boot. DefaultDependencies=no + Before=sysinit.target
+# is the earliest possible boot hook — it always runs before any login
+# (hence before any tmux client/server) can exist, so the flip can never
+# race a live server (#240/#241: repointing the symlink under a running
+# server breaks every attach). The unit is only ever ENABLED by install,
+# NEVER started — the actual flip happens only at the box's own next
+# reboot.
+
+[Unit]
+Description=airuleset: point /usr/local/bin/tmux at the newest managed tmux build (boot-time, idempotent)
+DefaultDependencies=no
+Before=sysinit.target ssh.service ssh.socket
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+Type=oneshot
+# Type=oneshot defaults TimeoutStartSec to infinity; this unit is ordered
+# Before=sysinit.target ssh.service, so an unbounded hang here would block
+# boot -- and therefore ssh -- fleet-wide. A failed/timed-out unit does NOT
+# block boot on its own (Wants-pulled, not Requires-pulled), so a hard
+# bound converts the only unbounded failure mode into the benign one
+# (review finding, #242).
+TimeoutStartSec=30
+ExecStart=/usr/local/bin/airuleset-tmux-cutover.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
