@@ -1382,6 +1382,153 @@ class RunOncePreservesStateOnError(unittest.TestCase):
                         "got: %r" % logs)
 
 
+def _pane_list_fake_run(pane_cwd_pairs, cap="● Predošlá práca hotová.\n❯ \n"):
+    """(#172) A minimal tmux-shim fake covering only what the sweep-budget
+    tests need: a fixed multi-pane `list-panes` response (in the given
+    order, so `by_transcript`'s insertion order -- and therefore which
+    session the budget check reaches first -- is deterministic), an idle
+    `capture-pane` for every pane, and harmless answers for the small
+    handful of `display-message`/`send-keys` calls every session touches."""
+    def fake_run(argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "".join("%s\tclaude\t%s\n" % (pid, cwd) for pid, cwd in pane_cwd_pairs)
+        if "capture-pane" in j:
+            return cap
+        if "display-message" in argv[0:2] or "display-message" in j:
+            if "pane_in_mode" in j:
+                return "0"
+            if "session_group" in j or argv[-1] == "#S":
+                return "zbynek"
+            return ""
+        if "send-keys" in j:
+            return ""
+        return ""
+    return fake_run
+
+
+class RunOnceSweepWallClockBudget(unittest.TestCase):
+    """(#172) Live evidence on dev1: the sweep is still occasionally
+    SIGTERM-killed by systemd's TimeoutStartSec=120 (~4/24h, self-recovering
+    next tick, never the original 7h+ livelock) with NOT ONE log line
+    printed before the kill -- meaning a slow tick can still overrun well
+    before jobs 27/28's own already-bounded per-repo work (their cadence
+    markers were progressing normally the whole time this was observed). The
+    per-transcript pane loop must self-bound against wall clock and exit
+    gracefully -- printing what it decided so far and reaching this sweep's
+    own trailing save_state() -- instead of relying on systemd's external
+    kill, which loses whatever the tick hadn't reached AND prints nothing."""
+
+    CWD_A = "/home/newlevel/devel/proj-a"
+    CWD_B = "/home/newlevel/devel/proj-b"
+    PANE_A = "%1"
+    PANE_B = "%2"
+
+    def test_budget_exceeded_stops_processing_remaining_sessions(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+
+        enc_a = wd.encode_project_dir(self.CWD_A)
+        (proj / enc_a).mkdir(parents=True)
+        tpath_a = proj / enc_a / "aaaaaaaa.jsonl"
+        _write_jsonl(tpath_a, [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT), _system()])
+
+        enc_b = wd.encode_project_dir(self.CWD_B)
+        (proj / enc_b).mkdir(parents=True)
+        tpath_b = proj / enc_b / "bbbbbbbb.jsonl"
+        _write_jsonl(tpath_b, [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT), _system()])
+
+        now = time.time()
+        idle_seconds = 600
+        os.utime(tpath_a, (now - idle_seconds, now - idle_seconds))
+        os.utime(tpath_b, (now - idle_seconds, now - idle_seconds))
+
+        state_path = Path(tmp.name) / "state.json"
+        fake_run = _pane_list_fake_run([(self.PANE_A, self.CWD_A), (self.PANE_B, self.CWD_B)])
+
+        # 1st call: sweep_deadline = 0.0 + 10 = 10.0. 2nd call: the loop's
+        # idx=0 check for session A (0.0 < 10.0 -> processed). 3rd call: the
+        # loop's idx=1 check for session B (50.0 >= 10.0 -> break, never
+        # processed this tick).
+        calls = iter([0.0, 0.0, 50.0])
+        time_fn = lambda: next(calls, 999.0)
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"),
+                           time_fn=time_fn, sweep_budget_s=10)
+
+        self.assertTrue(
+            any(ln.startswith("sweep-budget-exceeded") for ln in logs),
+            "expected a sweep-budget-exceeded log line once the wall-clock "
+            "budget is spent, got: %r" % logs)
+        self.assertTrue(
+            any(ln.startswith("textcall-nudge#1") for ln in logs),
+            "expected session A (processed BEFORE the budget tripped) to "
+            "still be handled, got: %r" % logs)
+        b_sid = tpath_b.stem
+        self.assertFalse(
+            any(b_sid in ln for ln in logs),
+            "session B must show NO per-job processing this tick (the "
+            "budget must have tripped before it was ever reached), got: %r"
+            % logs)
+
+    def test_skipped_session_keeps_its_existing_episode_state(self):
+        """The identical #175 F1 hazard, reached through a different door:
+        a session skipped by the wall-clock budget (rather than a
+        busy-pane/copy-mode gate) must not have its job-1 api-error episode
+        state silently wiped by the cleanup pass at the end of run_once."""
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+
+        enc_a = wd.encode_project_dir(self.CWD_A)
+        (proj / enc_a).mkdir(parents=True)
+        tpath_a = proj / enc_a / "aaaaaaaa.jsonl"
+        _write_jsonl(tpath_a, [_assistant("hello, all good here")])
+
+        sid_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        enc_b = wd.encode_project_dir(self.CWD_B)
+        (proj / enc_b).mkdir(parents=True)
+        tpath_b = proj / enc_b / (sid_b + ".jsonl")
+        _write_jsonl(tpath_b, [_assistant_apierror()])
+
+        now = time.time()
+        idle_seconds = 600
+        os.utime(tpath_a, (now - idle_seconds, now - idle_seconds))
+        os.utime(tpath_b, (now - idle_seconds, now - idle_seconds))
+
+        err_hash = wd._hash("API Error: 529 Overloaded")
+        state_path = Path(tmp.name) / "state.json"
+        seeded = {sid_b: {"hash": err_hash, "first_seen": int(now - idle_seconds),
+                          "nudges": [int(now - 400)], "escalated": False}}
+        wd.save_state(state_path, seeded)
+
+        fake_run = _pane_list_fake_run([(self.PANE_A, self.CWD_A), (self.PANE_B, self.CWD_B)])
+        calls = iter([0.0, 0.0, 50.0])
+        time_fn = lambda: next(calls, 999.0)
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                           send_fn=lambda *a, **k: None,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"),
+                           time_fn=time_fn, sweep_budget_s=10)
+
+        self.assertTrue(any(ln.startswith("sweep-budget-exceeded") for ln in logs),
+                        "expected the budget to trip, got: %r" % logs)
+        saved = json.loads(state_path.read_text())
+        self.assertIn(
+            sid_b, saved,
+            "session B's job-1 episode state must survive being skipped by "
+            "the wall-clock budget -- saved keys: %r" % list(saved.keys()))
+        self.assertEqual(
+            len(saved[sid_b].get("nudges", [])), 1,
+            "nudge history must be UNCHANGED for a session the budget "
+            "skipped this tick, got: %r" % saved.get(sid_b))
+
+
 class RunOnceSubagentVisibility(unittest.TestCase):
     """(issue #6) run_once must apply job 1's api-error detector AND job 4a's
     text-toolcall-stall detector to the newest subagents/*.jsonl too, not just the
