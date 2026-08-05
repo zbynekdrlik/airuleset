@@ -3452,14 +3452,75 @@ class TestTmuxHistoryLimit(TestCase):
         changed = airuleset.apply_tmux_history_limit(p, run=_boom)
         self.assertTrue(changed)  # the file write still succeeded
 
+    def test_live_apply_nonzero_return_without_raising_is_logged(self):
+        # ADVERSARIAL-REVIEW FINDING (#235, MAJOR): `subprocess.run` does
+        # NOT raise on a nonzero exit code with no `check=True` -- a real
+        # `tmux set-option` against a dead/nonexistent socket exits 1
+        # WITHOUT raising, so a bare try/except around the call alone
+        # silently swallows it with ZERO log output (contradicting the
+        # docstring's "logged for visibility" claim: it was really only
+        # "logged if the call happened to raise"). A CompletedProcess-
+        # shaped fake result (never an exception) must still be surfaced.
+        import io
+        from contextlib import redirect_stderr
+
+        class _FakeFailedResult:
+            returncode = 1
+            stderr = "no server running on default socket"
+
+        p = self._tmp()
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            changed = airuleset.apply_tmux_history_limit(
+                p, run=lambda argv: _FakeFailedResult())
+        self.assertTrue(changed)  # conf write still succeeds regardless
+        self.assertIn("no server running", buf.getvalue())
+
+    def test_malformed_reversed_markers_self_heal_without_data_loss(self):
+        # ADVERSARIAL-REVIEW FINDING (#235, MAJOR): an externally-corrupted
+        # conf with END appearing BEFORE START must never be treated as a
+        # valid pair to replace in place -- a naive whole-file `START.*?END`
+        # regex would (on a SECOND run, once a fresh clean block has been
+        # appended after the stray markers) span from the stray START all
+        # the way to the fresh block's END, silently deleting every real
+        # tmux directive sitting in between. Correct behavior: never touch
+        # or merge with an unpaired marker; append a fresh clean block
+        # instead, and stay a stable no-op afterwards -- zero data loss,
+        # across any number of repeated runs.
+        malformed = (
+            "set -g mouse on\n\n"
+            f"{airuleset.TMUX_MARK_END}\n"
+            "set-option -g history-limit 2000\n"
+            f"{airuleset.TMUX_MARK_START}\n\n"
+            "set -g status-bg colour234\n"
+        )
+        p = self._tmp(malformed)
+        changed1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed1)
+        after_first = p.read_text()
+        self.assertIn("set -g mouse on", after_first)              # untouched
+        self.assertIn("set -g status-bg colour234", after_first)   # untouched
+        self.assertIn("history-limit 50000", after_first)          # fresh block landed
+
+        # SECOND run: must be a clean no-op, and crucially must NOT eat the
+        # content sitting between the stray markers and the fresh block.
+        changed2 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertFalse(changed2)
+        after_second = p.read_text()
+        self.assertEqual(after_first, after_second)
+        self.assertIn("set -g status-bg colour234", after_second)
+
     def test_custom_history_limit_value(self):
         p = self._tmp()
         airuleset.apply_tmux_history_limit(p, limit=99999, run=lambda argv: None)
         self.assertIn("history-limit 99999", p.read_text())
 
     def test_default_run_invokes_real_tmux_binary_when_not_injected(self):
-        # No injected `run` -- the default path must shell out to the real
-        # `tmux` binary (never crash just because no server is running).
+        # Smoke test only: no injected `run` -- the default path must shell
+        # out to the real `tmux` binary and must never crash the whole
+        # conf-file write regardless of live server state (a nonzero/failed
+        # `tmux set-option` is asserted separately, with an injected fake,
+        # by test_live_apply_nonzero_return_without_raising_is_logged).
         p = self._tmp()
         changed = airuleset.apply_tmux_history_limit(p)
         self.assertTrue(changed)
