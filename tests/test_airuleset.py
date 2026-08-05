@@ -3369,14 +3369,20 @@ class TestUltracodeLauncher(TestCase):
 
 class TestTmuxHistoryLimit(TestCase):
     """apply_tmux_history_limit ensures ~/.tmux.conf carries the managed
-    history-limit block (#235): tmux's built-in default (2000 lines) plus
-    the current CC renderer's frame-stacking on re-render events made real
-    scrollback holey within minutes under agentic load (measured live:
-    active panes saturated at ~1940/2000). Same idempotent-marker-block
+    tmux block: history-limit 50000 (#235: tmux's built-in default of 2000
+    lines plus the current CC renderer's frame-stacking on re-render events
+    made real scrollback holey within minutes under agentic load -- measured
+    live: active panes saturated at ~1940/2000), PLUS window-size manual +
+    default-size 176x50 (#236: per-attach resizes from different-sized
+    terminals trigger the identical frame-stacking mechanism -- fixing the
+    resize source rather than just the buffer). Same idempotent-marker-block
     shape as apply_ultracode_launcher (#77) -- create if missing, rewrite
     CONTENT in place if present, never touch anything outside the markers
     -- plus a live-apply on any running tmux server via an injectable `run`
-    (never a real tmux call, never a keystroke, in these tests)."""
+    (never a real tmux call, never a keystroke, in these tests). #236's own
+    incident history settled that `resize-window` is NEVER invoked, in any
+    code path -- see TestTmuxWindowSizeNoResize below for the structural
+    lock."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -3394,7 +3400,13 @@ class TestTmuxHistoryLimit(TestCase):
         text = p.read_text()
         self.assertIn(airuleset.TMUX_MARK_START, text)
         self.assertIn(airuleset.TMUX_MARK_END, text)
+        # #236: the block renders all THREE managed options.
         self.assertIn("set-option -g history-limit 50000", text)
+        self.assertIn("set-option -g window-size manual", text)
+        self.assertIn("set-option -g default-size 176x50", text)
+        # never the resize-window/list-windows shape this ticket's incident
+        # history explicitly rejected -- see TestTmuxWindowSizeNoResize.
+        self.assertNotIn("resize-window", text)
 
     def test_appends_to_existing_conf_preserving_content_byte_for_byte(self):
         original = "set -g mouse on\nset -g status-bg colour234\n"
@@ -3423,6 +3435,37 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertNotIn("history-limit 2000", text)
         self.assertIn("history-limit 50000", text)
 
+    def test_upgrades_235_two_line_block_to_three_lines_preserving_surroundings(self):
+        # A conf already carrying #235's SHIPPED two-line block (history-
+        # limit only, no window-size/default-size yet) must have the block
+        # CONTENT rewritten in place to the new three-line form -- the
+        # surroundings stay byte-identical, exactly like the stale-value
+        # rewrite case above.
+        pre_236_block = (
+            f"{airuleset.TMUX_MARK_START}\n"
+            "set-option -g history-limit 50000\n"
+            f"{airuleset.TMUX_MARK_END}"
+        )
+        original = f"set -g mouse on\n\n{pre_236_block}\n\nset -g status-bg colour234\n"
+        p = self._tmp(original)
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn("set -g mouse on", text)
+        self.assertIn("set -g status-bg colour234", text)
+        self.assertEqual(text.count(airuleset.TMUX_MARK_START), 1)
+        self.assertIn("set-option -g history-limit 50000", text)
+        self.assertIn("set-option -g window-size manual", text)
+        self.assertIn("set-option -g default-size 176x50", text)
+        # the surrounding non-managed lines are unchanged, and only ONE
+        # blank-line-separated block sits between them (no duplication).
+        expected = (
+            "set -g mouse on\n\n"
+            + airuleset.render_tmux_history_block()
+            + "\n\nset -g status-bg colour234\n"
+        )
+        self.assertEqual(text, expected)
+
     def test_idempotent_second_run_is_a_no_op(self):
         p = self._tmp("# my tmux conf\n")
         self.assertTrue(airuleset.apply_tmux_history_limit(p, run=lambda argv: None))
@@ -3434,14 +3477,18 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(p.stat().st_mtime_ns, before_mtime)
 
     def test_live_applies_via_injected_run_regardless_of_server_state(self):
-        # Keystroke-free, safe: a `tmux set-option -g history-limit N` is
-        # attempted unconditionally (harmless no-op if no server is running)
-        # -- never a send-keys, never touches a pane.
+        # Keystroke-free, safe: all THREE `tmux set-option -g ...` calls
+        # (#236 extends #235's single history-limit call to two more) are
+        # attempted unconditionally (harmless no-op if no server is
+        # running) -- never a send-keys, never a resize-window, never
+        # touches a pane.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
+        self.assertEqual(calls[1], ["tmux", "set-option", "-g", "window-size", "manual"])
+        self.assertEqual(calls[2], ["tmux", "set-option", "-g", "default-size", "176x50"])
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -3520,10 +3567,34 @@ class TestTmuxHistoryLimit(TestCase):
         # out to the real `tmux` binary and must never crash the whole
         # conf-file write regardless of live server state (a nonzero/failed
         # `tmux set-option` is asserted separately, with an injected fake,
-        # by test_live_apply_nonzero_return_without_raising_is_logged).
+        # by test_live_apply_nonzero_return_without_raising_is_logged). All
+        # THREE managed options (#236 extends #235's history-limit-only
+        # smoke test) go through the real `_default_tmux_run` path.
         p = self._tmp()
         changed = airuleset.apply_tmux_history_limit(p)
         self.assertTrue(changed)
+
+
+class TestTmuxWindowSizeNoResize(TestCase):
+    """#236's own incident history (two live-tmux destructions on dev1,
+    the second a kernel segfault in tmux 3.4's format-expansion code)
+    settled that `resize-window` is NEVER part of this feature -- not
+    gated behind an attached-client check, not a "one-time final
+    junction", not anywhere. Setting the window-size/default-size
+    SERVER OPTIONS does not disturb any attached client's current window
+    size; only `resize-window` does that, and it buys nothing new windows
+    don't already get from `default-size` on their own. This is a
+    structural, whole-file lock so it can never silently regress via a
+    future edit anywhere in the module, not just inside the one function
+    #236 touches."""
+
+    def test_resize_window_is_never_constructed_or_invoked_anywhere(self):
+        src = Path(airuleset.__file__).read_text()
+        self.assertNotIn("resize-window", src)
+
+    def test_list_windows_is_never_constructed_or_invoked_anywhere(self):
+        src = Path(airuleset.__file__).read_text()
+        self.assertNotIn("list-windows", src)
 
 
 class TestClaudeLauncherContinueOrNew(TestCase):
