@@ -3664,3 +3664,59 @@ user (Hetzner access is gatekeeper's domain, out of this repo's scope
 to execute). Adversarial review (fresh-context `general-purpose`): 0 🔴
 0 🟡, including a real mutation-tested teeth check on the widened
 ssh-guard allow-list. RED `73709cc` / GREEN `a560d5b` / docs `b4acd8b`.
+
+**#253 — tmux scrollback still holey after #235-#242: proven upstream Claude
+Code renderer defect, opt-in mitigation shipped.** Reproduced live on dev1
+(3.7b, history-limit 50000, both confirmed correctly deployed): a sliding-
+window diff over a real `tmux capture-pane -S` dump found a genuine 25-line
+chunk of a prior completion report duplicated verbatim 40 lines apart —
+direct proof the residual cause is Claude Code's own TUI re-emitting a fresh
+copy of the transcript into tmux's native scrollback on SIGWINCH/relayout,
+exactly as #235 diagnosed. Confirmed via `gh api search/issues` this is an
+OPEN, actively-tracked upstream regression (`anthropics/claude-code#84247`,
+`#46834`, bisected to v2.1.101, still present in 2.1.222 despite an
+intervening "fixed in 2.1.116" changelog entry) — not fixable via any
+tmux.conf option. Shipped the one community-verified mitigation
+(`CLAUDE_CODE_NO_FLICKER=1`, alternate-screen TUI) as a new OPT-IN launcher
+mode (`claude-fullscreen`, same shape as `claude-ultracode`/`claude-new`),
+never the default — it trades away native tmux copy-mode/OS scrollback
+search, a real UX choice left to the user. Adversarial review (fresh-context
+`general-purpose`/opus): 3 🟡 + 2 🔵, all fixed (test hermeticity against an
+ambient `CLAUDE_CODE_NO_FLICKER` env var; documented the `settings.json`
+`tui` pin vs env-var ordering; documented the tmux-CC/Windows-SSH guard
+interaction). RED `e8ce382` / GREEN `28caa0e` / review-fixup `ac11259`.
+
+**#255 — watchdog delivery cut mid-paste: CORRECTED root cause, real fix
+shipped.** Traced every named delivery path in code and found the ticket's
+own prime suspect (#172's `sweep_budget_s` self-bound breaking a delivery
+between type and submit) does not hold — the incident's own journal shows
+the sweep finished cleanly with no kill, and none of `send_continue`,
+`deliver_with_stash`, `bounce_backstop`, `goal_autoarm` had (or needed) a
+nested budget check between a type and a submit step. Empirically verified
+(isolated throwaway tmux session) that `tmux send-keys -l` never auto-wraps
+a payload in ANSI bracketed-paste framing at all (`man tmux`: only
+`paste-buffer -p` does) — so Claude Code's paste-pending state has some
+other internal trigger, and once in it, every existing retry path (plain
+Enter, even Escape+Enter) never recovers it; only the literal bracketed-
+paste-END sequence does (proven by the incident's own manual recovery).
+Shipped two real fixes: (1) `bounce_backstop`/`goal_autoarm` each gained
+their own `time_fn`/`sweep_deadline` self-bound (neither loop had one at
+all, unlike the per-transcript loop's existing #172 protection), checked
+strictly BETWEEN targets/panes; (2) `prompt_wedge_check`'s machine-submit
+backstop now escalates to the proven paste-end unstick sequence after
+`PWEDGE_SUBMIT_UNSTICK_AFTER` consecutive ineffective attempts on the SAME
+draft, tracked by a new per-pane `(hash, count)` state key decoupled from
+the existing episode-tracking key's own reset cycle (a real coupling bug
+caught by the RED test, not by review — see the playbook entry). RED
+`3102d84`+`a2e2d00` / GREEN `ac7a7e4`. Full local suite: 3947 passed.
+
+**#261 — montalu2/montalu3/montalu4: Discord notify DISABLED, live-fixed
+and closed.** Pure provisioning, no code: copied `~/.claude/channels/discord/
+.env` byte-for-byte from the already-configured `montalu@subdev` via a
+direct ssh-to-ssh pipe (content never printed/logged), verified identical
+via `sha256sum` on all four accounts, correct mode/ownership by
+construction. Live-verified real end-to-end delivery per account
+(`airuleset.py notify --body "..."` → `sent`, confirmed by a fresh entry in
+each account's own `notify-delivery.log`) and confirmed all four resolve to
+the IDENTICAL Discord channel/thread id, matching montalu's own routing.
+Closed with evidence, no PR.
