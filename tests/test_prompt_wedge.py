@@ -222,6 +222,35 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
         self.assertTrue(
             any("paste-end" in ln for ln in attempt_logs[-1]), attempt_logs[-1])
 
+    def test_escalation_attempt_never_sends_a_leading_escape(self):
+        # CRITICAL (adversarial review of #255): the proven manual recovery
+        # was the paste-end sequence + Enter with NO leading Escape. Sending
+        # the ordinary pre-Escape (issue #36) immediately before -H 1b 5b...
+        # puts TWO ESC bytes back to back on the wire (Escape, then the
+        # unstick sequence's own leading 0x1b) -- the exact rapid-double-
+        # escape shape that PERMANENTLY DELETES a draft (issue #35's hard
+        # rule), and may not even be recognized as ESC[201~ at all (could
+        # parse as an Alt-modified CSI instead). By escalation time, TWO
+        # prior attempts already sent their own leading Escape and still
+        # failed, so the #36 agent-strip-selector explanation is already
+        # ruled out -- the escalation attempt must NOT send "Escape" at all.
+        run, _ = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
+        unstick = self._unstick_calls(run)
+        self.assertEqual(len(unstick), 1, run.calls)
+        unstick_i = run.calls.index(unstick[0])
+        # the call immediately before the unstick send must NOT be "Escape"
+        self.assertGreater(unstick_i, 0, run.calls)
+        prev = run.calls[unstick_i - 1]
+        self.assertNotEqual(prev[-1], "Escape", run.calls)
+        # and no bare "Escape" call was sent anywhere in the ESCALATION
+        # attempt's own portion of the call log (after the prior attempts'
+        # own Escape+Enter pairs) -- isolate the tail starting right after
+        # the 2nd attempt's own Enter.
+        enters = [i for i, a in enumerate(run.calls) if a[-1] == "Enter"]
+        tail = run.calls[enters[-2] + 1:]  # everything since the 2nd Enter
+        self.assertNotIn(["tmux", "send-keys", "-t", "%1", "Escape"], tail,
+                         run.calls)
+
     def test_attempts_counter_resets_once_the_draft_actually_clears(self):
         # after N machine-submit attempts, clearing the box must drop the
         # attempts counter so a LATER, unrelated stuck draft starts counting
