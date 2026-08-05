@@ -3367,6 +3367,104 @@ class TestUltracodeLauncher(TestCase):
         self.assertNotIn("--model", plain_branch)
 
 
+class TestTmuxHistoryLimit(TestCase):
+    """apply_tmux_history_limit ensures ~/.tmux.conf carries the managed
+    history-limit block (#235): tmux's built-in default (2000 lines) plus
+    the current CC renderer's frame-stacking on re-render events made real
+    scrollback holey within minutes under agentic load (measured live:
+    active panes saturated at ~1940/2000). Same idempotent-marker-block
+    shape as apply_ultracode_launcher (#77) -- create if missing, rewrite
+    CONTENT in place if present, never touch anything outside the markers
+    -- plus a live-apply on any running tmux server via an injectable `run`
+    (never a real tmux call, never a keystroke, in these tests)."""
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_creates_file_when_absent_with_the_managed_block(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed)
+        self.assertTrue(p.exists())
+        text = p.read_text()
+        self.assertIn(airuleset.TMUX_MARK_START, text)
+        self.assertIn(airuleset.TMUX_MARK_END, text)
+        self.assertIn("set-option -g history-limit 50000", text)
+
+    def test_appends_to_existing_conf_preserving_content_byte_for_byte(self):
+        original = "set -g mouse on\nset -g status-bg colour234\n"
+        p = self._tmp(original)
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn(original, text)  # untouched, byte-for-byte
+        self.assertIn(airuleset.TMUX_MARK_START, text)
+        self.assertIn("set-option -g history-limit 50000", text)
+
+    def test_rewrites_stale_block_content_in_place_preserving_surroundings(self):
+        stale_block = (
+            f"{airuleset.TMUX_MARK_START}\n"
+            "set-option -g history-limit 2000\n"
+            f"{airuleset.TMUX_MARK_END}"
+        )
+        original = f"set -g mouse on\n\n{stale_block}\n\nset -g status-bg colour234\n"
+        p = self._tmp(original)
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn("set -g mouse on", text)
+        self.assertIn("set -g status-bg colour234", text)
+        self.assertEqual(text.count(airuleset.TMUX_MARK_START), 1)
+        self.assertNotIn("history-limit 2000", text)
+        self.assertIn("history-limit 50000", text)
+
+    def test_idempotent_second_run_is_a_no_op(self):
+        p = self._tmp("# my tmux conf\n")
+        self.assertTrue(airuleset.apply_tmux_history_limit(p, run=lambda argv: None))
+        before_text = p.read_text()
+        before_mtime = p.stat().st_mtime_ns
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertFalse(changed)
+        self.assertEqual(p.read_text(), before_text)
+        self.assertEqual(p.stat().st_mtime_ns, before_mtime)
+
+    def test_live_applies_via_injected_run_regardless_of_server_state(self):
+        # Keystroke-free, safe: a `tmux set-option -g history-limit N` is
+        # attempted unconditionally (harmless no-op if no server is running)
+        # -- never a send-keys, never touches a pane.
+        p = self._tmp()
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
+
+    def test_live_apply_failure_is_silently_ignored(self):
+        # "ignore failure when no server" -- a raising run() must not
+        # propagate, and must not affect the conf-file write result.
+        def _boom(argv):
+            raise OSError("no server running on default socket")
+        p = self._tmp()
+        changed = airuleset.apply_tmux_history_limit(p, run=_boom)
+        self.assertTrue(changed)  # the file write still succeeded
+
+    def test_custom_history_limit_value(self):
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, limit=99999, run=lambda argv: None)
+        self.assertIn("history-limit 99999", p.read_text())
+
+    def test_default_run_invokes_real_tmux_binary_when_not_injected(self):
+        # No injected `run` -- the default path must shell out to the real
+        # `tmux` binary (never crash just because no server is running).
+        p = self._tmp()
+        changed = airuleset.apply_tmux_history_limit(p)
+        self.assertTrue(changed)
+
+
 class TestClaudeLauncherContinueOrNew(TestCase):
     """The managed `claude` launcher must CONTINUE (-c) only when the cwd has a
     prior conversation, and start a FRESH session otherwise — unconditional -c
