@@ -336,6 +336,32 @@ class TestLogPolicy(_StoreCase):
             self.assertNotIn(VAL[:n], text)
         self.assertNotIn(str(len(VAL)), text.replace("144", ""))
 
+    def test_log_survives_a_forced_wall_clock_digit_collision(self):
+        # #179: the log lines are timestamped with the REAL wall clock, and
+        # str(len(VAL)) == "25" can coincidentally appear inside the
+        # timestamp itself (any second/minute/offset digit run containing
+        # "25"), making the plain assertNotIn check above spuriously fail —
+        # nothing leaked, it's just a clock coincidence. Reproduced here
+        # DETERMINISTICALLY (never by waiting for it to happen): search
+        # forward from "now" for a real local second whose HH:MM:SS
+        # rendering genuinely contains "25", then freeze the clock there.
+        ts = time.time()
+        for _ in range(120):
+            if "25" in time.strftime("%H:%M:%S", time.localtime(ts)):
+                break
+            ts += 1.0
+        else:
+            self.skipTest("could not find a real local time containing "
+                          "'25' within 120s of now")
+        with m.patch("time.time", return_value=ts):
+            st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+            st.store_value("DB_PASS", VAL.encode(), keep_s=60)
+            st.forget("DB_PASS")
+        text = st.log_path().read_text(encoding="utf-8")
+        # sanity: the collision really was forced, not accidental
+        self.assertIn("25", time.strftime("%H:%M:%S", time.localtime(ts)))
+        self.assertNotIn(str(len(VAL)), text.replace("144", ""))
+
     def test_log_file_is_0600(self):
         st.log_event("request", "DB_PASS")
         self.assertEqual(stat.S_IMODE(st.log_path().stat().st_mode), 0o600)
