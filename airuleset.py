@@ -769,6 +769,43 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT):
     )
 
 
+def _clean_tmux_block_spans(existing):
+    """[(start, end)] for every CLEAN (non-crossing) START...END marker
+    pair in `existing`, left to right. "Clean" means no OTHER marker
+    literal (START or END) falls strictly between a pair's own START and
+    its END -- this deliberately refuses to treat an externally-corrupted
+    or reordered marker set (e.g. END appearing before START) as a
+    replaceable block.
+
+    Why this matters (#235 adversarial-review finding): a naive whole-file
+    `START.*?END` regex would, on a LATER run once a fresh clean block has
+    been appended after a stray/orphaned marker, span from the stray
+    marker all the way to the fresh block's END -- silently deleting every
+    real tmux directive sitting in between. This left-to-right, position-
+    tracking scan can never produce that outcome, at any point across any
+    number of runs: an unpaired or crossed marker is simply skipped over
+    and left as inert literal text, never merged with anything else."""
+    spans = []
+    pos = 0
+    s_len = len(TMUX_MARK_START)
+    while True:
+        s = existing.find(TMUX_MARK_START, pos)
+        if s == -1:
+            break
+        e = existing.find(TMUX_MARK_END, s + s_len)
+        if e == -1:
+            pos = s + s_len  # no END anywhere after this START -- skip it
+            continue
+        inner = existing[s + s_len:e]
+        if TMUX_MARK_START in inner or TMUX_MARK_END in inner:
+            pos = s + s_len  # another marker crosses this pair -- not clean
+            continue
+        e_full = e + len(TMUX_MARK_END)
+        spans.append((s, e_full))
+        pos = e_full
+    return spans
+
+
 def _default_tmux_run(argv):
     import subprocess
     return subprocess.run(argv, capture_output=True, text=True, timeout=8)
@@ -779,9 +816,10 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     """Ensure `~/.tmux.conf` carries the managed history-limit block (#235).
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
-    block's CONTENT in place if the markers already exist (never touches
-    anything outside them, byte-for-byte), no-op on a second run with
-    nothing changed. Returns True iff the conf file's bytes changed.
+    block's CONTENT in place if a clean pair of markers already exists
+    (never touches anything outside them, byte-for-byte -- see
+    `_clean_tmux_block_spans`), no-op on a second run with nothing
+    changed. Returns True iff the conf file's bytes changed.
 
     Also live-applies the option on any RUNNING tmux server for this user
     (`tmux set-option -g history-limit N`) so an already-running session's
@@ -789,20 +827,26 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     server start -- EXISTING panes keep their creation-time limit
     (documented behavior, not chased: tmux has no way to grow an existing
     pane's history buffer in place). This is a server OPTION set, never a
-    keystroke into any pane -- `run` defaults to a real (but exception-safe)
-    `tmux` invocation and is injectable so tests never touch a real tmux
-    server. A missing server / failed call is silently ignored (logged, not
-    raised) -- it never affects the conf-file write result, mirroring the
-    ticket's own "ignore failure when no server" acceptance."""
-    import re
+    keystroke into any pane -- `run` defaults to a real `tmux` invocation
+    and is injectable so tests never touch a real tmux server. A missing
+    server / a nonzero exit (which `subprocess.run` does NOT raise on
+    without `check=True` -- a real `tmux set-option` against a dead socket
+    exits 1 silently) / any other failure is logged and ignored, never
+    raised, never affecting the conf-file write result above -- mirroring
+    the ticket's own "ignore failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
     block = render_tmux_history_block(limit)
 
     existing = path.read_text() if path.exists() else ""
-    if TMUX_MARK_START in existing and TMUX_MARK_END in existing:
-        pattern = re.compile(
-            re.escape(TMUX_MARK_START) + r".*?" + re.escape(TMUX_MARK_END), re.S)
-        new = pattern.sub(lambda _m: block, existing)
+    spans = _clean_tmux_block_spans(existing)
+    if spans:
+        out, cursor = [], 0
+        for s, e in spans:
+            out.append(existing[cursor:s])
+            out.append(block)
+            cursor = e
+        out.append(existing[cursor:])
+        new = "".join(out)
     else:
         sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
         new = f"{existing}{sep}\n{block}\n"
@@ -812,8 +856,13 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         path.write_text(new)
 
     try:
-        (run or _default_tmux_run)(
+        result = (run or _default_tmux_run)(
             ["tmux", "set-option", "-g", "history-limit", str(limit)])
+        rc = getattr(result, "returncode", 0)
+        if rc:
+            stderr = (getattr(result, "stderr", "") or "").strip()
+            print(f"  tmux live-apply skipped (rc={rc}): "
+                  f"{stderr or 'no server running?'}", file=sys.stderr)
     except Exception as e:
         # No server running / tmux missing from PATH / timeout, etc. --
         # expected and harmless (a new server reads the conf file we just
