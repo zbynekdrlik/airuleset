@@ -203,6 +203,37 @@ class TestObsoleteClosedIssuesAreExcluded(_GateBase):
         self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
 
 
+class TestRepoResolvedFromPrLine(_GateBase):
+    """#220 -- a worker dispatched with session cwd = repo A (self.repo,
+    origin airuleset), working repo B (dantesync), must be checked against
+    repo B's markers -- the evidence block's own `pr: #<N> <url>` line names
+    the real repo the PR landed against, and is the ground truth over the
+    payload's static cwd."""
+
+    PR_MSG = ("issues: #61 x\nmerge_sha: " + SHA40 + "\n"
+              "pr: #63 https://github.com/zbynekdrlik/dantesync/pull/63\n"
+              "issue_state: #61=closed")
+
+    def test_markers_under_the_pr_line_repo_let_the_worker_stop(self):
+        self.mark_all(61, repo="dantesync")
+        r = self.run_gate(self.PR_MSG)
+        self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
+
+    def test_markers_only_under_the_stale_session_cwd_repo_still_blocks(self):
+        # OLD cwd-only resolution would have accepted this (repo "airuleset"
+        # matches self.repo's remote) -- the fix must not, since the PR
+        # line says the real repo is dantesync.
+        self.mark_all(61, repo="airuleset")
+        r = self.run_gate(self.PR_MSG)
+        self.assertTrue(self.blocked(r), (r.stdout, r.stderr))
+        self.assertIn("dantesync", r.stdout + r.stderr)
+
+    def test_no_pr_line_still_resolves_from_cwd_unchanged(self):
+        self.mark_all(41)
+        r = self.run_gate(MERGED)
+        self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
+
+
 class TestGateStaysOutOfTheWay(_GateBase):
 
     def test_a_non_worker_subagent_is_ignored(self):
