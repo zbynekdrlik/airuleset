@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -63,6 +64,21 @@ class _HomeIsolated(unittest.TestCase):
         if not self.log.exists():
             return []
         return [ln for ln in self.log.read_text().splitlines() if ln.strip()]
+
+
+def _path_with_fake_curl(http_code="200"):
+    """A bin dir with a fake `curl` (prepended to the real PATH so `jq` and
+    everything else stay resolvable) that always answers with a canned
+    `<body>\\n<code>` — the exact shape both the confirm and the
+    fire-and-forget branches parse via `curl -w '\\n%{http_code}'`. Used to
+    prove #184's success logging without ever touching the real network."""
+    d = Path(tempfile.mkdtemp(prefix="airuleset-fakecurl-"))
+    fake = d / "curl"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%%s\\n%%s' '{\"id\":\"999\"}' '%s'\n" % http_code)
+    fake.chmod(0o755)
+    return str(d) + os.pathsep + os.environ.get("PATH", "")
 
 
 def _path_without(tool):
@@ -153,6 +169,44 @@ class TestShellSendLogsEveryNonDelivery(_HomeIsolated):
         self.assertRegex(line, r"^\d{4}-\d{2}-\d{2}T")
         self.assertIn("kind=", line)
 
+    def test_a_confirmed_successful_delivery_is_ALSO_logged(self):
+        # #184: the CONFIRM (❓) path only ever logged a NON-delivery — a
+        # card that genuinely reached Discord left zero trace, so a healthy
+        # box and a broken logger both showed an empty file.
+        self._write_env(token=True, channel=True)
+        d = _path_with_fake_curl("200")
+        self.addCleanup(shutil.rmtree, d.split(os.pathsep)[0], True)
+        env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "❓",
+               "ND_TEXT": "otazka", "ND_CWD": str(ROOT), "ND_CONFIRM": "1",
+               "PATH": d}
+        env.pop("DISCORD_NOTIFY_DRYRUN", None)
+        r = subprocess.run(["bash", str(SEND_HOOK)], input="",
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(any("sent" in ln for ln in self.log_lines()),
+                        self.log_lines())
+
+    def test_a_backgrounded_successful_delivery_is_ALSO_logged(self):
+        # The idle ✅ path (no ND_CONFIRM) posts via a fire-and-forget
+        # backgrounded curl — before this it NEVER checked its own result,
+        # success or failure. It now captures the HTTP code and logs the
+        # outcome from WITHIN the same background subshell, so the parent
+        # script stays exactly as non-blocking as before; the log line lands
+        # slightly after this process returns, so poll for it (bounded).
+        self._write_env(token=True, channel=True)
+        d = _path_with_fake_curl("200")
+        self.addCleanup(shutil.rmtree, d.split(os.pathsep)[0], True)
+        r = self._run(path=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        deadline = time.time() + 5
+        lines = []
+        while time.time() < deadline:
+            lines = self.log_lines()
+            if any("sent" in ln for ln in lines):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any("sent" in ln for ln in lines), lines)
+
 
 # --------------------------------------------------------------------------- #
 # 2. the marker records DELIVERY, not merely the claim
@@ -203,6 +257,27 @@ class TestDedupMarkerRecordsDeliveryOutcome(_HomeIsolated):
         notify.send("body", env={}, owner="", dedup_key="repo#10")
         self.assertTrue(any("no-config" in ln for ln in self.log_lines()),
                         self.log_lines())
+
+    def test_a_successful_send_is_ALSO_logged(self):
+        # #184: before this, log_delivery was called ONLY on a non-delivery
+        # — so a card that genuinely reached Discord left zero trace, and
+        # "zero lines, ever" was indistinguishable from "the logger is
+        # broken". Every delivery ATTEMPT, success included, now writes one
+        # line, so the file's own absence becomes a diagnosable state.
+        self._post(True)
+        env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}
+        st = notify.send("body", env=env, owner="", dedup_key="repo#184a")
+        self.assertEqual(st, "sent")
+        self.assertTrue(any("sent" in ln and "repo#184a" in ln
+                            for ln in self.log_lines()), self.log_lines())
+
+    def test_a_dedup_skip_is_ALSO_logged(self):
+        self._post(True)
+        env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}
+        notify.send("body", env=env, owner="", dedup_key="repo#184b")
+        notify.send("body", env=env, owner="", dedup_key="repo#184b")
+        self.assertTrue(any("dedup" in ln and "repo#184b" in ln
+                            for ln in self.log_lines()), self.log_lines())
 
     def test_a_log_line_is_always_exactly_one_line(self):
         # Found live, not hypothesised: a test fake returned the whole
