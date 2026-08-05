@@ -32,6 +32,12 @@ class TestAuthorityResolution(TestCase):
         # fork-no-merge is the existing lowest profile, already correct.
         self.assertEqual(airuleset.AUTHORITY_BY_USER["simap"], "fork-no-merge")
 
+    def test_montalu_family_streams_map_to_branch_merge(self):
+        # airuleset#251: montalu2/3/4 are full parallel montalu streams
+        # ("zhodné s dnešným montalu") — same authority as montalu itself.
+        for u in ("montalu2", "montalu3", "montalu4"):
+            self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "branch-merge", u)
+
     def test_resolve_uses_the_map_for_simap(self):
         with m.patch.object(airuleset, "_current_user", return_value="simap"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
@@ -267,7 +273,8 @@ class TestPerBoxSkillScoping(TestCase):
         self.assertIn("playbook-review", names)
 
     def test_subdev_also_loses_deploy_ssh(self):
-        for user in ("david", "marek", "montalu"):
+        for user in ("david", "marek", "montalu", "montalu2", "montalu3",
+                     "montalu4"):
             names = airuleset.skill_names_for_user(user)
             self.assertNotIn("deploy-ssh", names, user)
             self.assertNotIn("mdreview", names, user)
@@ -297,6 +304,11 @@ class TestPerBoxSkillScoping(TestCase):
         # scoped-away skill on exactly the boxes where it IS relevant.
         self.assertIn("meeting-analysis",
                       airuleset.skill_names_for_user("montalu"))
+        # airuleset#251: montalu2/3/4 are full parallel montalu streams —
+        # same working style, same meeting-recordings-in-session rationale.
+        for user in ("montalu2", "montalu3", "montalu4"):
+            self.assertIn("meeting-analysis",
+                          airuleset.skill_names_for_user(user), user)
         for user in ("david", "marek", "gatekeeper"):
             self.assertNotIn("meeting-analysis",
                              airuleset.skill_names_for_user(user), user)

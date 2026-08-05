@@ -6454,7 +6454,9 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu@subdev",
-                         "marek@subdev", "david@subdev", "simap@subdev"):
+                         "marek@subdev", "david@subdev", "simap@subdev",
+                         "montalu2@subdev", "montalu3@subdev",
+                         "montalu4@subdev"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
@@ -6477,6 +6479,22 @@ class TestRemoteHosts(TestCase):
                          "montalu authorizes the DEFAULT newlevel key, not "
                          "gatekeeper_access (unlike marek/david) — "
                          "live-verified at the swap")
+
+    def test_montalu_family_subdev_target_shape(self):
+        # airuleset#251: montalu2/3/4 are three MORE full parallel montalu
+        # streams ("zhodné s dnešným montalu") — accounts created by
+        # gatekeeper (odoo-erp#2961 Phase 1), same subdev box, SAME
+        # default-key shape as montalu (never gatekeeper_access).
+        for user in ("montalu2", "montalu3", "montalu4"):
+            name = "%s@subdev" % user
+            entries = [r for r in airuleset.REMOTE_HOSTS if r["name"] == name]
+            self.assertEqual(len(entries), 1, "%s target missing" % name)
+            e = entries[0]
+            self.assertEqual(e["host"], "100.118.174.27")
+            self.assertEqual(e["user"], user)
+            self.assertNotIn("identity", e,
+                             "%s authorizes the DEFAULT newlevel key, "
+                             "same as montalu" % user)
 
     def test_simap_subdev_target_shape(self):
         # simap (airuleset#143, 2026-07-28): 4th sub-dev stream, built by
@@ -7344,6 +7362,13 @@ class TestBlockSubdevSshMisuseHook(TestCase):
     def test_allows_montalu_default_key(self):
         r = self._run('ssh montalu@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_montalu_family_default_key(self):
+        # airuleset#251: montalu2/3/4 share montalu's own no-identity-
+        # required shape (three more full parallel montalu streams).
+        for user in ("montalu2", "montalu3", "montalu4"):
+            r = self._run('ssh %s@subdev "ls"' % user)
+            self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
 
     def test_allows_montalu_via_sshpass(self):
         r = self._run(

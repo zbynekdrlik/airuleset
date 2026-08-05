@@ -217,6 +217,14 @@ class TestBounceQuals(unittest.TestCase):
         self.assertEqual(wd._bounce_quals("/home/david/devel/x"),
                          ["label:stream:david"])
 
+    def test_montalu_family_home_scopes_by_own_label(self):
+        # airuleset#251: montalu2/3/4 work on odoo-erp (a _CROSS_STREAM_REPOS
+        # member) — each pane must scope to ITS OWN stream:<user> label, not
+        # fall through to the full-authority exclude-all branch.
+        for u in ("montalu2", "montalu3", "montalu4"):
+            self.assertEqual(wd._bounce_quals("/home/%s/devel/odoo-erp" % u),
+                             ["label:stream:%s" % u], u)
+
     def test_full_authority_home_excludes_subdev_streams(self):
         # Live dry-run finding (2026-07-19): an unscoped full-box query picked
         # up DAVID's stream bounces from newlevel's dev1 checkout and would
@@ -224,7 +232,8 @@ class TestBounceQuals(unittest.TestCase):
         # Full authority = the core slice (same exclusions as tickets-status).
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        for u in ("david", "marek", "montalu"):
+        for u in ("david", "marek", "montalu", "montalu2", "montalu3",
+                  "montalu4"):
             self.assertIn("-label:stream:%s" % u, quals[0])
 
 
