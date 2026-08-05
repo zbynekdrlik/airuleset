@@ -435,9 +435,18 @@ if [ -n "$BYPASS_MARK" ]; then
     # cleared" — misleading whoever reads the log. Capture jq's OWN exit
     # status on its own line so the log can say which one actually
     # happened.
+    # (adversarial review, batch-3 #172/#183/#180/#174): this pipe used to
+    # be part of the SAME `|| echo ""` fallback as the jq slice below it —
+    # splitting them apart for the #180 fix removed that safety net from
+    # THIS half. Under `set -euo pipefail`, a read failure here (e.g. a
+    # TOCTOU race where $BYPASS_FILE vanishes between the earlier `[ -e ]`
+    # check and this read — confirmed reproducible: `tr ... < <missing
+    # file>` aborts the WHOLE hook via set -e, with no block message and no
+    # controlled exit code, before ever reaching the jq-failure handling
+    # this fix exists to add) must fall back to empty, not crash the hook.
     BYPASS_CLEAN=$(tr '\n\r\t' '   ' < "$BYPASS_FILE" 2>/dev/null \
         | tr -d '\000-\010\013\014\016-\037\177' \
-        | sed 's/  */ /g; s/^ //; s/ $//')
+        | sed 's/  */ /g; s/^ //; s/ $//') || BYPASS_CLEAN=""
     BYPASS_JQ_RC=0
     BYPASS_REASON=$(printf '%s' "$BYPASS_CLEAN" | jq -Rrs '.[0:200]' 2>/dev/null) \
         || BYPASS_JQ_RC=$?

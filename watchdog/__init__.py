@@ -9740,6 +9740,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                                  SWEEP_WALL_CLOCK_BUDGET_S))
         except ValueError:
             sweep_budget_s = SWEEP_WALL_CLOCK_BUDGET_S
+    # (adversarial review, batch-3 #172/#183/#180/#174) a `<= 0` value (an
+    # operator's `AIRULESET_SWEEP_BUDGET_S=0`, or a negative one -- both
+    # parse as valid ints, so the `except ValueError` above never catches
+    # them) would set `sweep_deadline` to now-or-earlier, so the very FIRST
+    # loop-top check trips and EVERY session is skipped on EVERY sweep
+    # forever -- silently disabling jobs 1/2/4/4a/5/6/7/9/10 fleet-wide, the
+    # opposite of this fix's whole purpose. Unconditional (not just the
+    # env-resolved branch above), matching `_repo_sweep_batch`'s own
+    # `max_repos <= 0` clamp (REPO_SWEEP_BATCH_MAX's own finding-2 comment)
+    # — a caller-supplied value gets the same safety net as an env one.
+    if sweep_budget_s <= 0:
+        sweep_budget_s = SWEEP_WALL_CLOCK_BUDGET_S
     sweep_deadline = time_fn() + sweep_budget_s
     from notify import compose_api_error_alert
     if send_fn is None:
@@ -9871,7 +9883,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 ra = s.get("resets_at")
                 if not s.get("pinged"):
                     s["pinged"] = True
-                    when = _human_clock(ra) if ra else "čoskoro"
+                    # (adversarial review, batch-3 #172/#183/#180/#174):
+                    # `now=now` -- run_once's OWN notion of "now" -- not the
+                    # implicit default (real time.time()). Production calls
+                    # run_once with now=None (so both are the same instant
+                    # anyway, called microseconds apart), but ANY caller
+                    # that injects a fixed/historical `now` (this whole test
+                    # suite routinely does) would otherwise have
+                    # _human_clock's "is this reset TODAY" check silently
+                    # compare against the REAL wall clock instead of the
+                    # run's own timeline -- wall-clock dependence with no
+                    # functional purpose here.
+                    when = _human_clock(ra, now=now) if ra else "čoskoro"
                     logs.append("session-limit %s — ping (reset %s)" % (project, when))
                     send_fn("⏳ **%s** — dosiahnutý 5-hodinový limit\n> Reset o %s. Po "
                             "resete pošlem `continue` automaticky — nič nemusíš robiť."
