@@ -749,6 +749,8 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
 
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
+TMUX_WINDOW_SIZE = "manual"
+TMUX_DEFAULT_SIZE = "176x50"
 TMUX_MARK_START = "# >>> airuleset tmux >>>"
 TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # #235: tmux's own built-in default (2000-line scrollback) plus the current
@@ -759,12 +761,32 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # Same idempotent-marker-block shape as apply_ultracode_launcher (#77) above
 # -- create the file if missing, rewrite ONLY the block's content if the
 # markers already exist, never touch anything outside them.
+#
+# #236: the identical frame-stacking mechanism also fires on every ATTACH
+# from a different-sized terminal -- tmux's default `window-size latest`
+# auto-resizes the whole window to fit the new client, and Claude Code
+# re-renders the visible screen in place on that resize. Fix: pin
+# `window-size manual` (stop the auto-resize) and `default-size 176x50`
+# (the fixed size new windows get -- the user's own client, 176x51, is the
+# confirmed smallest on the fleet, so 176x50 crops nobody and larger
+# clients just get an unused margin). This ticket's own incident history
+# (two live-tmux destructions on dev1, the second a kernel segfault in
+# tmux 3.4's format-expansion code) settled that a per-window resize call
+# is NEVER part of this feature: setting the two OPTIONS above does not
+# disturb any attached client's current window size, and resizing a window
+# in place buys nothing new windows don't already get from `default-size`
+# on their own -- see TestTmuxWindowSizeNoResize for the structural,
+# whole-file lock (the exact tmux subcommand name is deliberately not
+# spelled out here so this comment can't ever collide with that lock).
 
 
-def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT):
+def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT, window_size=TMUX_WINDOW_SIZE,
+                               default_size=TMUX_DEFAULT_SIZE):
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
+        f"set-option -g window-size {window_size}\n"
+        f"set-option -g default-size {default_size}\n"
         f"{TMUX_MARK_END}"
     )
 
@@ -812,8 +834,11 @@ def _default_tmux_run(argv):
 
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
+                              window_size: str = TMUX_WINDOW_SIZE,
+                              default_size: str = TMUX_DEFAULT_SIZE,
                               run=None) -> bool:
-    """Ensure `~/.tmux.conf` carries the managed history-limit block (#235).
+    """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
+    (#235) plus window-size manual + default-size (#236).
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
     block's CONTENT in place if a clean pair of markers already exists
@@ -821,21 +846,31 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     `_clean_tmux_block_spans`), no-op on a second run with nothing
     changed. Returns True iff the conf file's bytes changed.
 
-    Also live-applies the option on any RUNNING tmux server for this user
-    (`tmux set-option -g history-limit N`) so an already-running session's
-    NEW panes/windows pick it up immediately, without waiting for the next
-    server start -- EXISTING panes keep their creation-time limit
-    (documented behavior, not chased: tmux has no way to grow an existing
-    pane's history buffer in place). This is a server OPTION set, never a
-    keystroke into any pane -- `run` defaults to a real `tmux` invocation
-    and is injectable so tests never touch a real tmux server. A missing
-    server / a nonzero exit (which `subprocess.run` does NOT raise on
-    without `check=True` -- a real `tmux set-option` against a dead socket
-    exits 1 silently) / any other failure is logged and ignored, never
-    raised, never affecting the conf-file write result above -- mirroring
-    the ticket's own "ignore failure when no server" acceptance."""
+    Also live-applies all three options on any RUNNING tmux server for
+    this user (`tmux set-option -g <key> <value>`, one call per option) so
+    an already-running session picks them up immediately, without waiting
+    for the next server start -- EXISTING panes/windows keep their
+    creation-time history buffer and current size (documented behavior,
+    not chased: tmux has no way to grow an existing pane's history buffer
+    or resize an existing window's live geometry in place without an
+    explicit per-window resize call). This is a server OPTION set, never a
+    keystroke into any pane, and NEVER a per-window resize call or any
+    `#{...}` format-expansion query against the live server
+    (`list-clients`, enumerating windows, `display -p`, ...) -- #236's own
+    incident history (two live-tmux
+    destructions on dev1, the second a kernel segfault in tmux 3.4's
+    format-expansion code) settled that permanently; see
+    TestTmuxWindowSizeNoResize for the structural lock. `run` defaults to
+    a real `tmux` invocation and is injectable so tests never touch a real
+    tmux server. Each of the three calls is attempted independently -- a
+    missing server / a nonzero exit (which `subprocess.run` does NOT raise
+    on without `check=True` -- a real `tmux set-option` against a dead
+    socket exits 1 silently) / any other failure on ONE call is logged and
+    ignored without aborting the remaining calls, never raised, never
+    affecting the conf-file write result above -- mirroring the ticket's
+    own "ignore failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
-    block = render_tmux_history_block(limit)
+    block = render_tmux_history_block(limit, window_size, default_size)
 
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(existing)
@@ -855,20 +890,30 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
 
-    try:
-        result = (run or _default_tmux_run)(
-            ["tmux", "set-option", "-g", "history-limit", str(limit)])
-        rc = getattr(result, "returncode", 0)
-        if rc:
-            stderr = (getattr(result, "stderr", "") or "").strip()
-            print(f"  tmux live-apply skipped (rc={rc}): "
-                  f"{stderr or 'no server running?'}", file=sys.stderr)
-    except Exception as e:
-        # No server running / tmux missing from PATH / timeout, etc. --
-        # expected and harmless (a new server reads the conf file we just
-        # wrote anyway); logged for visibility, never re-raised, and never
-        # affects the conf-file write result above.
-        print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
+    run_fn = run or _default_tmux_run
+    tmux_options = (
+        (["tmux", "set-option", "-g", "history-limit", str(limit)],
+         f"history-limit {limit}"),
+        (["tmux", "set-option", "-g", "window-size", window_size],
+         f"window-size {window_size}"),
+        (["tmux", "set-option", "-g", "default-size", default_size],
+         f"default-size {default_size}"),
+    )
+    for argv, label in tmux_options:
+        try:
+            result = run_fn(argv)
+            rc = getattr(result, "returncode", 0)
+            if rc:
+                stderr = (getattr(result, "stderr", "") or "").strip()
+                print(f"  tmux live-apply skipped (rc={rc}) [{label}]: "
+                      f"{stderr or 'no server running?'}", file=sys.stderr)
+        except Exception as e:
+            # No server running / tmux missing from PATH / timeout, etc. --
+            # expected and harmless (a new server reads the conf file we
+            # just wrote anyway); logged for visibility, never re-raised,
+            # and never affects the conf-file write result above. Never
+            # aborts the remaining options in `tmux_options`.
+            print(f"  tmux live-apply skipped (non-fatal) [{label}]: {e}", file=sys.stderr)
 
     return changed
 
@@ -1367,19 +1412,25 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
 
-    # --- 3c. tmux history-limit: every managed user's ~/.tmux.conf (#235) ---
+    # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
     # frame-stacking made real scrollback holey within minutes under
     # agentic load -- raise history-limit fleet-wide via the same
     # idempotent-marker-block shape as the launcher's ~/.bashrc block above.
-    # Also live-applies to any RUNNING tmux server so it takes effect for
-    # NEW panes/windows immediately, without a server restart.
+    # #236 extends the SAME block with window-size manual + default-size
+    # 176x50 -- the identical frame-stacking mechanism also fires on every
+    # per-attach resize from a different-sized terminal, not just scrollback
+    # rotation. Also live-applies all three options to any RUNNING tmux
+    # server so they take effect immediately, without a server restart --
+    # never a per-window resize call, never touches a pane.
     try:
         tmux_changed = apply_tmux_history_limit()
+        tmux_desc = (f"history-limit {TMUX_HISTORY_LIMIT}, window-size "
+                     f"{TMUX_WINDOW_SIZE}, default-size {TMUX_DEFAULT_SIZE}")
         if tmux_changed:
-            print(f"  Updated:   {TMUX_CONF} (history-limit {TMUX_HISTORY_LIMIT})")
+            print(f"  Updated:   {TMUX_CONF} ({tmux_desc})")
         else:
-            print(f"  No change: {TMUX_CONF} (history-limit {TMUX_HISTORY_LIMIT})")
+            print(f"  No change: {TMUX_CONF} ({tmux_desc})")
     except Exception as e:
         print(f"  tmux history-limit error: {e}", file=sys.stderr)
 
