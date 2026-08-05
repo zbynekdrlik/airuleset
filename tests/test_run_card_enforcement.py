@@ -838,6 +838,135 @@ class TestCardReconcile_NoOverlapWithJob24(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2b. #182 — a REOPENED ticket's stale marker must not dedup its NEXT card
+# --------------------------------------------------------------------------- #
+
+class TestCardReconcileReopenClear(unittest.TestCase):
+    """#182: the run-card dedup key is `<repo>#<issue>` alone, claimed the
+    instant the FIRST close's card delivers — `notify._dedup_claim` uses
+    O_CREAT|O_EXCL, so it refuses EVERY later claim for that key forever. A
+    reopened ticket's second, independently-earned card therefore silently
+    dedups against the first close's marker and never reaches Discord.
+
+    Job 25 (`card_reconcile`), which already reconciles per-repo card state
+    every sweep, gains an ADDITIVE `reopen_fetch` step: for every issue
+    number that already has a run-card marker for a repo, ask (once per
+    repo per sweep) which of those are OPEN again; a reopened one's stale
+    marker is cleared via `notify.forget_marker`, so the next close's
+    `_notify_run_card` claims fresh. Every existing consumer of the plain
+    `<repo>#<issue>` key (`marker_delivered`, the SubagentStop gate, this
+    same job's own `missing` check) is untouched — the key format itself
+    never changes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-cardrec-reopen-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self._patcher = m.patch.object(notify, "_claude_dir",
+                                       lambda: str(self.home / ".claude"))
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+        self.state = {}
+        self.sent = []
+        self._post_patcher = m.patch.object(notify, "_post_discord", return_value=True)
+        self._post_patcher.start()
+        self.addCleanup(self._post_patcher.stop)
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append({"msg": msg, "dedup": dedup_key})
+        return "sent"
+
+    def repo(self, name="proj", closes=(3,), age=3600, base="main"):
+        r = self.tmp / name
+        r.mkdir()
+        _git(r, "init", "-q", "-b", base)
+        (r / "f").write_text("1")
+        _git(r, "add", "f")
+        _git(r, "commit", "-qm", "init", ts=NOW - 10 * DAY)
+        for n in closes:
+            (r / "f").write_text(str(n))
+            _git(r, "add", "f")
+            _git(r, "commit", "-qm", "feat: thing\n\nCloses #%d" % n, ts=NOW - age)
+        bare = self.tmp / (name + ".git")
+        _git(r, "clone", "-q", "--bare", str(r), str(bare))
+        _git(r, "remote", "add", "origin", str(bare))
+        _git(r, "fetch", "-q", "origin")
+        _git(r, "remote", "set-head", "origin", base)
+        return r
+
+    def _fire_card(self, key):
+        """Deliver a REAL marker via the real notify.send() — the same
+        primitive `_notify_run_card` actually uses."""
+        env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_NOTIFICATION_CHANNEL_ID": "c"}
+        status = notify.send("card body", env=env, owner="", dedup_key=key)
+        self.assertEqual(status, "sent", "test setup must genuinely deliver")
+
+    def reconcile(self, r, **kw):
+        kw.setdefault("card_probe", lambda root, base: None)
+        kw.setdefault("marker_ok", notify.marker_delivered)
+        kw.setdefault("send_fn", self.send)
+        return wd.card_reconcile(NOW, None, self.state, {"s": str(r)}, **kw)
+
+    def test_same_round_the_marker_survives_untouched(self):
+        r = self.repo(closes=(3,))
+        self._fire_card("proj#3")
+        # the ticket is STILL closed this whole round — reopen_fetch has
+        # nothing to report as open.
+        self.reconcile(r, reopen_fetch=lambda root, nums: set())
+        self.assertTrue(notify.marker_delivered("proj#3"),
+                        "same round: the marker must survive untouched")
+        self.assertEqual(self.sent, [],
+                         "already has a delivered card — no nag")
+
+    def test_reopened_ticket_marker_is_cleared_so_the_next_close_cards_again(self):
+        r = self.repo(closes=(3,))
+        self._fire_card("proj#3")
+        self.assertTrue(notify.marker_delivered("proj#3"))
+        # the watchdog observes #3 is OPEN again (reopened after its card)
+        self.reconcile(
+            r, reopen_fetch=lambda root, nums: {3} if 3 in nums else set())
+        self.assertFalse(notify.marker_delivered("proj#3"),
+                         "a reopened ticket's stale marker must be cleared")
+        # the SAME real primitive _notify_run_card uses can now claim fresh
+        self._fire_card("proj#3")
+        self.assertTrue(notify.marker_delivered("proj#3"),
+                        "the second close's card must actually deliver")
+
+    def test_reopen_fetch_unwired_changes_nothing(self):
+        r = self.repo(closes=(3,))
+        self._fire_card("proj#3")
+        self.reconcile(r)                 # no reopen_fetch kwarg at all
+        self.assertTrue(notify.marker_delivered("proj#3"),
+                        "unwired reopen_fetch must be a complete no-op, "
+                        "like every other 'wired = on' fetch in this job")
+
+    def test_a_failing_reopen_fetch_never_clears_a_marker_it_could_not_confirm(self):
+        r = self.repo(closes=(3,))
+        self._fire_card("proj#3")
+
+        def boom(root, nums):
+            raise RuntimeError("no gh")
+
+        logs = self.reconcile(r, reopen_fetch=boom)
+        self.assertTrue(notify.marker_delivered("proj#3"),
+                        "an unmeasurable check must never clear a marker")
+        self.assertTrue(any("reopen-fetch-failed" in ln for ln in logs), logs)
+
+    def test_reopen_fetch_only_asked_about_numbers_with_an_existing_marker(self):
+        r = self.repo(closes=(3,))
+        self._fire_card("proj#3")
+        seen = []
+
+        def spy(root, nums):
+            seen.append(set(nums))
+            return set()
+
+        self.reconcile(r, reopen_fetch=spy)
+        self.assertEqual(seen, [{3}])
+
+
+# --------------------------------------------------------------------------- #
 # 3. the SUPPRESSION becomes conditional on DELIVERY
 # --------------------------------------------------------------------------- #
 

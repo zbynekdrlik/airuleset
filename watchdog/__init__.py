@@ -6892,7 +6892,7 @@ def _commits_in_window(root, base, since_ts, git_run=None):
 def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                    git_run=None, card_probe=None, marker_ok=None,
                    owner_by_sid=None, window=None, grace=None,
-                   closed_fetch=None):
+                   closed_fetch=None, reopen_fetch=None):
     """Job 25 — see the section comment.
 
     Gated on `card_probe` (the "wired = on" convention of jobs 8/11/16/24):
