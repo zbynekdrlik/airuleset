@@ -282,6 +282,22 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
         r = self.run_hook(cmd, cwd=self.repo)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_a_cd_mention_inside_a_quoted_argument_is_never_trusted(self):
+        # adversarial-review finding: `;cd /path` embedded inside a QUOTED
+        # argument (e.g. an echo string) must never be read as a real
+        # statement boundary -- an attacker-influenced ticket/commit body
+        # could otherwise spoof the resolved repo and let the gate check
+        # an unrelated repo's marker namespace instead of the real one.
+        other = self._other_repo()
+        self.mark(61, repo="dantesync")   # a marker exists there, but must
+                                          # NOT be reachable via a quoted
+                                          # mention of its path
+        cmd = ('echo "note: see readme;cd %s" && '
+               'git commit -m "fix: thing (#61) [green]"') % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("airuleset", r.stderr)
+
 
 class TestBypass(_Base):
 
