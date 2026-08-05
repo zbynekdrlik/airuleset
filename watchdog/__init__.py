@@ -9243,6 +9243,22 @@ def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
 # One poll cycle
 # --------------------------------------------------------------------------- #
 
+# #172: a wall-clock SELF-BOUND on the per-transcript pane loop below (jobs 1,
+# 2, 4, 4a, 5, 6, 7, 9, 10 all run inside it). Live evidence on dev1
+# (2026-08-05): the sweep is still occasionally SIGTERM-killed by systemd's
+# TimeoutStartSec=120 (~4 times/24h, self-recovering next tick, never the
+# original 7h+ livelock) with NOT ONE log line printed before the kill —
+# meaning the hang sits well before jobs 27/28's OWN already-bounded per-repo
+# work (their cadence markers were progressing normally the whole time). A
+# leftover from a slow tmux round-trip or a large pane count can still push
+# this loop past budget under load. Rather than let systemd SIGTERM the
+# process mid-loop (losing whatever this tick hadn't reached AND printing
+# nothing), the loop checks its own wall clock and exits gracefully once
+# `SWEEP_WALL_CLOCK_BUDGET_S` is spent — the remaining lightweight jobs still
+# run afterward and this sweep's own `save_state()` still fires. A degraded
+# sweep (fewer sessions handled this tick) beats a killed one.
+SWEEP_WALL_CLOCK_BUDGET_S = 90    # env AIRULESET_SWEEP_BUDGET_S
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -9261,7 +9277,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None, compact_stall_enabled=False,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
-             vault_purge=None, log_fn=None, reopen_fetch=None):
+             vault_purge=None, log_fn=None, reopen_fetch=None,
+             time_fn=None, sweep_budget_s=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -9634,9 +9651,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     so a sweep killed mid-way (systemd TimeoutStartSec) still leaves every
     earlier job's decision in the journal, instead of the whole sweep's
     output vanishing with it (the exact #172 "job 1 logged nothing for 14h"
-    symptom)."""
+    symptom).
+
+    `time_fn`/`sweep_budget_s` (#172, cross-cutting — not a numbered job):
+    the per-transcript pane loop self-bounds against `time_fn()` (default
+    `time.monotonic`) so an unusually slow sweep exits gracefully once
+    `sweep_budget_s` (default `SWEEP_WALL_CLOCK_BUDGET_S`, env
+    `AIRULESET_SWEEP_BUDGET_S`) is spent, rather than being SIGTERM-killed by
+    systemd mid-loop. Every session not reached this tick keeps its existing
+    episode state (added to `stalled`) exactly like a session skipped by a
+    busy-pane/copy-mode gate — never wiped by the cleanup pass below."""
     now = time.time() if now is None else now
     run = run or _default_run
+    time_fn = time_fn or time.monotonic
+    if sweep_budget_s is None:
+        try:
+            sweep_budget_s = int(os.environ.get("AIRULESET_SWEEP_BUDGET_S",
+                                                 SWEEP_WALL_CLOCK_BUDGET_S))
+        except ValueError:
+            sweep_budget_s = SWEEP_WALL_CLOCK_BUDGET_S
+    sweep_deadline = time_fn() + sweep_budget_s
     from notify import compose_api_error_alert
     if send_fn is None:
         from notify import send as send_fn
@@ -9681,7 +9715,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         tpath, tmtime = tinfo
         by_transcript.setdefault(str(tpath), []).append((pid, cwd, tmtime, tpath))
 
-    for tkey, owners in by_transcript.items():
+    for idx, (tkey, owners) in enumerate(by_transcript.items()):
+        if time_fn() >= sweep_deadline:
+            # #172: every session not reached THIS sweep must not lose its
+            # existing episode state — the identical #175 F1 hazard, applied
+            # to a session skipped by BUDGET rather than by a busy-pane/
+            # copy-mode gate. Preserve each remaining transcript's own
+            # bare-UUID key so the cleanup pass below does not wipe it.
+            for rtkey in list(by_transcript.keys())[idx:]:
+                stalled.add(Path(rtkey).stem)
+            logs.append("sweep-budget-exceeded (pane-loop) — %d/%d sessions "
+                        "handled this tick, rest retried next"
+                        % (idx, len(by_transcript)))
+            break
         try:
             if len(owners) > 1:
                 logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
