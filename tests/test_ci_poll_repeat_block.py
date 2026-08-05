@@ -733,12 +733,16 @@ class OneShotReviewFollowupTest(unittest.TestCase):
         # setup calls (each a genuine bash+hook subprocess) plus the
         # verification call can, under real machine load, cumulatively
         # exceed 1 real second, making the LAST touch see an already-stale
-        # oneshot file and decay early. Reproduced DETERMINISTICALLY here
-        # (never by waiting for load) via a forced ~1.2s delay — comfortably
+        # oneshot file and decay early. Fixed by giving the accumulate phase
+        # a TTL with genuine headroom (30s) over realistic subprocess
+        # overhead — proven with a forced ~1.2s delay below (comfortably
         # more than the ORIGINAL literal 1s TTL this test used to race, and
-        # comfortably less than the 1 configured below, proving the fix has
-        # real headroom over realistic subprocess overhead.
-        env = {"AIRULESET_CIPOLL_ONESHOT_TTL_S": "1"}
+        # comfortably less than the 30s TTL now configured), rather than by
+        # hoping the box stays idle. The "short TTL DOES decay" claim stays
+        # fully deterministic — via os.utime backdating, never real elapsed
+        # wall-clock time — using the CONFIGURED (30s) boundary, not the
+        # 1800s default.
+        env = {"AIRULESET_CIPOLL_ONESHOT_TTL_S": "30"}
         for _ in range(3):
             self.run_hook(self.oneshot(RUN_A), extra_env=env)
         time.sleep(1.2)
@@ -747,9 +751,7 @@ class OneShotReviewFollowupTest(unittest.TestCase):
 
         oneshot_file = Path(self.state) / (
             "airuleset-cipoll-oneshot-sess-118-run-%s" % RUN_A)
-        # The "short TTL DOES decay" claim stays fully deterministic — via
-        # os.utime backdating, never real elapsed wall-clock time.
-        old = os.path.getmtime(oneshot_file) - 2
+        old = os.path.getmtime(oneshot_file) - 31   # past the configured 30s TTL
         os.utime(oneshot_file, (old, old))
 
         out = self.run_hook(self.oneshot(RUN_A), extra_env=env)
