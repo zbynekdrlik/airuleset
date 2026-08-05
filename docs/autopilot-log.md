@@ -3270,3 +3270,136 @@ the read-only subdev check. Posted a follow-up comment on #236: once the
 whole fleet has rebooted onto 3.7b, `window-size manual` becomes
 shippable again (crashes 3.4 at server start, starts cleanly on 3.7b) --
 not implemented here, per #242's own explicit scope. No PR (direct push).
+
+## #243 -- goal_autoarm blind on ultracode panes: labelled border + #223 statusline reorder
+
+RED `4b2ce0b` (an ultracode pane's box is unfindable, so job 9 never
+arms) -> GREEN `4d8c098` (find the input box on an ultracode pane
+again). Root cause: two independent faults closed BOTH of
+`_input_box_rows_raw`'s detection paths at once, and only their
+coincidence was visible. The structural strategy's strict separator
+test rejected CC's own LABELLED top border (the session's effort mode,
+e.g. `──── ultracode ─`, written into the box's own top edge) -- only
+one separator remained, so `len(seps) >= 2` never held. The chrome-peel
+fallback's `_is_bottom_chrome` recognised the managed statusline by
+`startswith("ctx ")`, which stopped matching the moment the #223
+segment reorder moved the ctx meter out of the lead position. Together
+an idle pane at a bare prompt classified `busy`, so every keystroke
+gate silently skipped it -- the regression ran fleet-wide, undetected,
+for a day, because either fault alone would still have left the OTHER
+detection path working. Fix: accept a labelled `_is_border_rule` top
+border while the bottom edge stays strict (it is the anchor, always
+pure on a real pane, and taking the nearest border above it cannot
+pick a wrong row); match the statusline's segment VOCABULARY anywhere
+in the row instead of anchoring on whichever segment leads. Both
+guards mutation-checked (dropping the glyph guard / loosening the
+bottom edge each kill their own test).
+
+A fresh-context adversarial review of that fix found THREE follow-up
+defects an anywhere-in-capture structural scan still had: a transcript
+that QUOTES an input-box fixture (e.g. this very ticket's own
+discussion of the bug) could fool the scan into finding a box inside
+the quoted text instead of the real one; a wrapped draft's own pasted
+table row (`│ a │ b │ c │`) could be mistaken for the box's top
+border; and the chrome-vocabulary match could fire on a single
+co-occurring token instead of requiring a real combination. RED
+`37ec8ab` (quoted boxes, table rows and prose tokens fool the box
+scan) -> GREEN `5664f5a` (anchor the box scan against quoted panes and
+single-token prose) closed all three: a candidate border pair is now
+rejected when a non-chrome row below its bottom edge starts with the
+prompt glyph or carries "esc to interrupt" (the real prompt/turn is
+elsewhere); the box HEAD is found by walking up past non-glyph content
+rows, never past a strict separator; the statusline match now requires
+>= 2 co-occurring segment shapes. One residual quoted-box shape the
+review flagged but did not fix was filed separately as #245 rather
+than expanding this ticket's scope. Both rounds: full suite green
+(3772 tests) with mutation-checked guards.
+
+Closed via the `Closes #243` trailer on 4d8c098 -- pushed directly to
+main (no PR/CI in this repo), auto-closed on push. `airuleset.py push`
+deployed the follow-up round to all managed boxes; live-verified on
+presenter -- the pane armed its `/goal` within the very next watchdog
+sweep after deploy, confirming the fix reaches a real ultracode
+session, not just the test fixtures. No PR (direct push).
+
+## #246 -- per-ticket compaction starved by the record-time zero-siblings gate on overlapping-worker boxes, moved to delivery time
+
+RED `3fc328e` (16 genuine failures -- 6 behavioural against the hook's
+old outright-decline shape, 2 behavioural against the delivery paths'
+missing defer gate driven through their real production entry points
+[`compact_ticket_boundary`, `deliver_compact_now`], 8 the brand-new
+`_session_has_live_bg_tasks` helper's own not-yet-existing tests) ->
+GREEN `beed55a` (record at every proven boundary, defer delivery while
+background tasks live).
+
+Root cause: `notify-compact-subagent-boundary.sh` placed its
+live-tasks safety check (a real property -- compacting while a sibling
+worker is mid-flight would drop that worker's own task linkage) at
+RECORD time instead of delivery time. On a box running continuously
+OVERLAPPING autopilot-workers the zero-siblings instant it demanded
+almost never arrived, so a completed ticket's compaction boundary was
+never even RECORDED -- "not safe to compact right now" silently became
+"never compacts", invisible to the compact-stall backstop (job 26)
+because a declined record leaves no artifact at all for it to watch.
+Live evidence (montalu@subdev, fleet audit 2026-08-05): repeated
+`DECLINE reason=live-tasks n=1/2/3` through a whole day, 3h45m of
+total silence in compact-sync.log while tickets kept completing, zero
+"compact" lines in the watchdog journal in 72h.
+
+Fix: the hook now records the proven boundary UNCONDITIONALLY,
+carrying the live-tasks fact forward on the SAME record line
+(`deferred=live-tasks n=N`) rather than discarding it -- the #123
+observability this file already built is relocated, not lost. The
+safety property itself moved to the two DELIVERY points: a new
+`_session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None,
+now=None, captured=None)` helper (watchdog/__init__.py), checked
+immediately before the keystroke send in both `deliver_compact_now`
+(the synchronous path) and job 14's `compact_ticket_boundary` (the
+polled retry), using two independent signals: the pane's own ambient
+"Waiting for N background agents" row (`_BG_AGENTS_WAIT_RX`, already
+job 9/20's own bg-agent detection), or a sibling worker's own subagent
+transcript written within the last 120s (`subagent_active`, already
+job 4's own signal). Either signal true defers the send and leaves the
+request queued for the next sweep; neither readable never blocks --
+deferral is an optimization of an already-real safety property, never
+a new way to block delivery on "we don't know". The existing 30-minute
+request-expiry ceiling still bounds a continuously-deferred request,
+and the NEXT worker's own boundary re-records it if the old one has
+already lapsed -- converting permanent starvation into a bounded wait.
+
+`captured` (a keyword param not in the ticket's own literal signature,
+added during implementation) reuses the pane capture BOTH call sites
+already have in scope instead of issuing a second live `capture-pane`
+call -- required because job 14's own test harness sequences its OWN
+scripted `capture-pane` replies for `deliver_with_stash`'s internal
+re-captures, and an extra real capture ahead of that sequence silently
+consumed its first entry and desynced every reply after it (caught by
+two genuine pre-existing test regressions before the helper's
+signature was adjusted -- `test_draft_with_free_stash_slot_gets_stash_
+delivered` and `test_stash_success_marks_delivered_for_its_own_hash`).
+
+Existing-test audit: three hook tests pinning `DECLINE
+reason=live-tasks` rewritten to pin the new RECORD-with-deferral
+contract (the request now lands in compact-requests.json); three
+decision-log tests rewritten the same way, plus a new positive control
+asserting NO `deferred=` field on a zero-siblings boundary; two
+mutation-teeth tests in `TestDecisionLogAssertionsHaveTeeth` updated --
+one now asserts against the new RECORD shape, the other's target
+string no longer existing in the shipped script, so it was rewritten
+to mutate the NEW deferral-carrying line back to the old
+decline-and-exit block, proving the new assertions catch exactly that
+regression. Both of the ticket's own required mutation checks verified
+KILLED on a throwaway copy outside the working tree: gutting
+`_session_has_live_bg_tasks` to `return False` fails both
+delivery-path defer tests; reverting the hook's live-tasks line to the
+old decline-and-exit block fails all six hook record/decision-log
+tests.
+
+Design comment posted before the first code commit
+(issuecomment-5192072358). Full local suite: 3791 tests, OK. Ruff
+clean on both changed Python files, `bash -n` + `shellcheck` clean on
+the hook. Playbook entries appended (`.claude/rules/airuleset-
+internals.md`, plus this file's own #243/#246 backfill for two prior
+tickets' documentation debt). Pushed directly to main (no PR/CI in
+this repo) -- Closes #246 on the GREEN commit auto-closed the issue.
+No PR (direct push).
