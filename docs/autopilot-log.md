@@ -3232,3 +3232,41 @@ and that the real tmux 3.4 binary starts cleanly against it via a
 throwaway socket. Posted a follow-up comment on #236 stating the
 accepted trade-off (default-size alone no longer live-pins an existing
 window's size across attach/detach cycles). No PR (direct push).
+
+#242 — Boot-time cutover to tmux 3.7b, fleet-wide, zero manual steps.
+Commit cd784f7 (feat, [Closes #242]). Added a root-owned, idempotent
+systemd oneshot (airuleset-tmux-cutover.service, DefaultDependencies=no,
+Before=sysinit.target ssh.service ssh.socket, WantedBy=sysinit.target --
+the earliest boot hook, always before any login/tmux client/server can
+exist) that points /usr/local/bin/tmux at tmux-3.7b when present and
+executable, never touching the packaged /usr/bin/tmux. cmd_install()
+installs+ENABLES it non-interactively (sudo -n) but NEVER starts it --
+the flip only happens at each box's own next reboot, so it can never race
+a live server (#240/#241). The four subdev stream accounts have no sudo
+and share one box+symlink; a second function performs the same install
+over the gatekeeper -> root@subdev ssh hop, fired from the gatekeeper
+account's own install run -- one root-level install covers all four.
+Fresh-context adversarial review (fable, gate OPEN) before push found no
+critical (🔴) finding; three 🟡 fixed in the same commit: TimeoutStartSec=30 added
+(Type=oneshot defaults to infinity, and the unit blocks ssh.service --
+an unbounded hang would block boot fleet-wide); the newest-build check
+switched from -e to -x (a truncated/non-executable tmux-3.7b must never
+become the target); the "never systemctl start" test assertions widened
+to also catch `enable --now` and a bare `restart` (list-membership on
+"start" alone missed both), plus a read-only-sandbox variant of the
+no-op test so an "always ln -sfn unconditionally" mutant fails it.
+25 targeted tests (incl. real `sh` execution of the shipped script
+against throwaway sandboxes) + full 3716-test suite green, ruff clean.
+Pushed directly to main (no PR/CI in this repo) -- Closes #242 on the
+commit auto-closed the issue. Deployed to all 7 checkouts via
+`airuleset.py push`. Post-deploy verified read-only on every box: dev1
+(unit installed+enabled, ran it live via `systemctl start` -- true
+no-op, already on 3.7b, symlink unchanged), dev2 + gatekeeper + subdev
+(via the gatekeeper root hop) -- unit installed+enabled on all, symlink
+STILL on the packaged 3.4 on all three (never flipped by hand, no server
+touched -- each flips at its own next reboot). Gatekeeper's own install
+run performed the subdev root-hop live, confirmed in the push log and by
+the read-only subdev check. Posted a follow-up comment on #236: once the
+whole fleet has rebooted onto 3.7b, `window-size manual` becomes
+shippable again (crashes 3.4 at server start, starts cleanly on 3.7b) --
+not implemented here, per #242's own explicit scope. No PR (direct push).
