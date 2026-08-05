@@ -640,6 +640,41 @@ def newest_delivered_card(repo_name):
     return newest
 
 
+def card_marker_numbers(name):
+    """Every issue NUMBER that has a run-card marker for repo `name` — the
+    same `<name>#<digits>` prefix `newest_delivered_card` scans, returning
+    the set of numbers rather than a single mtime (#182). A marker's
+    DELIVERED status is not checked here: a caller deciding whether to clear
+    a STALE marker (one from a ticket that has since REOPENED) needs to know
+    it exists at all, delivered or merely claimed — a claimed-but-failed
+    marker for a reopened ticket is exactly as stale as a delivered one."""
+    if not name:
+        return set()
+    prefix = re.sub(r"[^A-Za-z0-9._#-]", "_", str(name)) + "#"
+    d = _dedup_dir()
+    out = set()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    for fname in names:
+        if not fname.startswith(prefix):
+            continue
+        tail = fname[len(prefix):]
+        if tail.isdigit():
+            out.add(int(tail))
+    return out
+
+
+def forget_marker(key):
+    """Drop a marker so its issue's NEXT card claims fresh (#182: a
+    REOPENED ticket's second fix must not stay deduped against its FIRST
+    close's card forever). Thin, PUBLIC wrapper over `_dedup_release` — the
+    exact same best-effort delete `send()` already uses when a claim
+    provably never sent."""
+    _dedup_release(key)
+
+
 def _dedup_release(key):
     """Drop a claim so a FAILED send can be retried (a network error must not
     permanently suppress the user's requested card)."""

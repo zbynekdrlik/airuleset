@@ -3655,6 +3655,34 @@ def _watchdog_closed_fetch(root, since_ts):
         return None
 
 
+def _watchdog_reopened_fetch(root, numbers):
+    """Job 25's `reopen_fetch` (#182): given candidate issue NUMBERS that
+    already have a run-card marker for this repo, return the SUBSET that are
+    OPEN again right now — i.e. reopened since their marker's card fired.
+    One `gh issue list --state open` call per repo per sweep, bounded by
+    `numbers` (never per-issue), same cost shape as `_watchdog_closed_fetch`.
+    `root` is a local checkout path — `gh` resolves owner/repo from its
+    `origin` remote via `cwd=root`, no `-R` needed. Any failure degrades to
+    an EMPTY set: never guess a ticket reopened."""
+    import subprocess
+    if not numbers:
+        return set()
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "open",
+             "--json", "number", "-L", "1000"],
+            cwd=root, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return set()
+        rows = json.loads(r.stdout or "[]")
+    except Exception:
+        return set()
+    if not isinstance(rows, list):
+        return set()
+    open_now = {row.get("number") for row in rows if isinstance(row, dict)}
+    return {n for n in numbers if n in open_now}
+
+
 def _watchdog_delivery_probe(root, base):
     """Job 24's confirming fetch + best-effort blocker lookup (#138).
 
@@ -3869,6 +3897,11 @@ def cmd_watchdog(args):
                     # the checkout that proves it.
                     card_probe=_watchdog_card_probe,
                     closed_fetch=_watchdog_closed_fetch,
+                    # #182: same job (25), an ADDITIVE step — a reopened
+                    # ticket's stale run-card marker is cleared so its next
+                    # close's card claims fresh. Changes zero consumers of
+                    # the existing <repo>#<issue> key format.
+                    reopen_fetch=_watchdog_reopened_fetch,
                     burn_snapshot_path=burn.snapshots_path(),
                     compact_requests_path=compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,

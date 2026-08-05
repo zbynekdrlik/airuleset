@@ -6996,6 +6996,36 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             name = ""
         if not name:
             continue
+
+        # #182: a REOPENED ticket's existing run-card marker refers to a
+        # PRIOR close and must not keep deduping the card the NEXT close
+        # earns. `reopen_fetch` (wired = on, like `closed_fetch`) answers
+        # "of the issue numbers that already have a marker for this repo,
+        # which are OPEN again right now" — a marker for one of those is
+        # cleared so the next close claims fresh. Gated separately from the
+        # rest of this job (never on `card_probe` alone) so a caller that
+        # never wires it — every pre-#182 test — sees NO behavior change at
+        # all. Independent of `missing`/`closed` on purpose: an existing
+        # marker predates THIS sweep's window entirely.
+        if reopen_fetch is not None:
+            try:
+                from notify import card_marker_numbers, forget_marker
+            except ImportError:
+                card_marker_numbers = forget_marker = None
+            if card_marker_numbers is not None:
+                candidates = card_marker_numbers(name)
+                if candidates:
+                    try:
+                        reopened = reopen_fetch(root, candidates)
+                    except Exception as e:
+                        logs.append("card-reconcile reopen-fetch-failed %s: %r"
+                                    % (root, e))
+                        reopened = None
+                    for n in sorted(reopened or ()):
+                        forget_marker("%s#%d" % (name, n))
+                        logs.append("card-reconcile reopen-cleared %s#%d"
+                                    % (name, n))
+
         # Two ways a ticket can already have been reported: its OWN card, or
         # a catch-up DIGEST that accounted for it (#141). The digest writes
         # its own namespace, and only on a delivered POST — so a digest that
@@ -9036,7 +9066,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              goal_templates_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None, compact_stall_enabled=False,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
-             vault_purge=None, log_fn=None):
+             vault_purge=None, log_fn=None, reopen_fetch=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -10445,6 +10475,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                    send_fn=send_fn, dry_run=dry_run,
                                    card_probe=card_probe,
                                    closed_fetch=closed_fetch,
+                                   reopen_fetch=reopen_fetch,
                                    owner_by_sid=owner_by_sid)
         except Exception as e:
             logs.append("card-reconcile error: %r" % (e,))
