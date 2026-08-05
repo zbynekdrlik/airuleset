@@ -783,6 +783,53 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
     return False
 
 
+NOTIFY_OWNER_MARK_START = "# >>> airuleset: notify owner >>>"
+NOTIFY_OWNER_MARK_END = "# <<< airuleset: notify owner <<<"
+
+
+def render_notify_owner_block(owner):
+    return (
+        f"{NOTIFY_OWNER_MARK_START}\n"
+        f"export AIRULESET_NOTIFY_OWNER={owner}\n"
+        f"{NOTIFY_OWNER_MARK_END}"
+    )
+
+
+def apply_notify_owner(bashrc_path: Path = None, user: str = None) -> bool:
+    """Managed `AIRULESET_NOTIFY_OWNER` bashrc block (airuleset#151/#259).
+
+    Same idempotent-marker-block shape as `apply_ultracode_launcher` above:
+    replaces the marked block in place if present, else appends it. A user
+    NOT in `STREAM_NOTIFY_OWNER` (newlevel, gatekeeper, marek -- anyone whose
+    tmux session name already resolves to the right owner on its own) is a
+    no-op -- no block is written or touched, so nothing here can ever
+    override a plain personal account's natural resolution.
+
+    Returns True iff the ~/.bashrc file changed."""
+    import re
+    bpath = bashrc_path or BASHRC
+    who = user if user is not None else _whoami()
+    owner = STREAM_NOTIFY_OWNER.get(who)
+    if owner is None:
+        return False
+
+    block = render_notify_owner_block(owner)
+    existing = bpath.read_text() if bpath.exists() else ""
+    if NOTIFY_OWNER_MARK_START in existing and NOTIFY_OWNER_MARK_END in existing:
+        pattern = re.compile(
+            re.escape(NOTIFY_OWNER_MARK_START) + r".*?" + re.escape(NOTIFY_OWNER_MARK_END),
+            re.S)
+        new = pattern.sub(lambda _m: block, existing)
+    else:
+        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+        new = f"{existing}{sep}\n{block}\n"
+    if new != existing:
+        bpath.parent.mkdir(parents=True, exist_ok=True)
+        bpath.write_text(new)
+        return True
+    return False
+
+
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
@@ -1690,6 +1737,18 @@ def cmd_install(args):
             print(f"  No change: {BASHRC} (claude launcher wrappers)")
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
+
+    # --- 3b2. AIRULESET_NOTIFY_OWNER bashrc block (airuleset#151/#259) ---
+    # The stream users in STREAM_NOTIFY_OWNER (montalu/montalu2-4/simap ->
+    # zbynek's own thread; david -> its own thread) get this managed instead
+    # of hand-added -- see the map's own comment for why. A no-op for every
+    # user not in that map (newlevel, gatekeeper, marek).
+    try:
+        owner_changed = apply_notify_owner()
+        if owner_changed:
+            print(f"  Updated:   {BASHRC} (AIRULESET_NOTIFY_OWNER)")
+    except Exception as e:
+        print(f"  notify-owner block error: {e}", file=sys.stderr)
 
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
@@ -4186,6 +4245,31 @@ AUTHORITY_BY_USER = {
     "montalu2": "branch-merge",
     "montalu3": "branch-merge",
     "montalu4": "branch-merge",
+}
+
+
+# Which Discord OWNER key (notify.resolve_owner()'s AIRULESET_NOTIFY_OWNER
+# override) a stream's linux user routes its pings under (airuleset#151/#259,
+# 2026-08-06). `notify.resolve_owner()` falls back to the tmux SESSION NAME
+# when this override is absent -- fine for a distinct real person (marek: the
+# session name IS "marek", which already has its own DISCORD_NOTIFICATION_
+# CHANNEL_MAREK/DISCORD_MENTION_MAREK keys, so marek is deliberately NOT in
+# this map) but wrong for an automated persona whose session name has no
+# Discord identity of its own (montalu/simap route to zbynek's own thread;
+# david gets its own claude-david thread). Until this map, the override was
+# ONLY ever hand-added per account at onboarding time -- airuleset.py's own
+# comment above (AUTHORITY_BY_USER) already names this "the AIRULESET_NOTIFY_
+# OWNER loss pattern": unmanaged, easy to silently miss (simap's own
+# onboarding did), and easy to lose on a home-dir migration. `apply_notify_
+# owner()` below provisions it the same self-healing way `apply_ultracode_
+# launcher` provisions the claude launcher.
+STREAM_NOTIFY_OWNER = {
+    "david": "david",
+    "montalu": "zbynek",
+    "montalu2": "zbynek",
+    "montalu3": "zbynek",
+    "montalu4": "zbynek",
+    "simap": "zbynek",
 }
 
 
