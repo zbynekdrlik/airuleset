@@ -630,12 +630,28 @@ def repo_name_for(cwd, run=None):
 # it ONLY when it resolves to a real git repo with an `origin` remote --
 # never a bare guess. Falls back to `cwd` unchanged otherwise, so a command
 # with no `cd` prefix (the overwhelming majority) sees zero behavior change.
+#
+# Adversarial-review finding: the scan MUST strip quoted spans first (same
+# shape `hooks/block-foreign-airuleset-write.sh` already uses) -- otherwise
+# a `;cd /path` literal sitting INSIDE a quoted argument (an echo string, a
+# commit message body) is misread as a real statement boundary, letting a
+# crafted command spoof which repo's marker namespace this hook trusts.
 # --------------------------------------------------------------------------- #
 
 _STMT_BOUNDARY = r"(?:^|[;&|]|&&)"
 _GIT_COMMIT_CMD_RE = re.compile(
     _STMT_BOUNDARY + r"\s*(?:sudo\s+|env\s+)?git\s+commit\b")
 _CD_PREFIX_RE = re.compile(_STMT_BOUNDARY + r"\s*cd\s+([^\s;&|]+)")
+_SQ_SPAN_RE = re.compile(r"'[^']*'")
+_DQ_SPAN_RE = re.compile(r'"[^"]*"')
+
+
+def _strip_quoted_spans(text):
+    """Blank out single- and double-quoted spans (replaced with a single
+    space each, never deleted outright, so token boundaries either side
+    stay separated). Never a full shell parse -- just enough to stop a
+    quoted MENTION of shell syntax from being read as the real thing."""
+    return _DQ_SPAN_RE.sub(" ", _SQ_SPAN_RE.sub(" ", text))
 
 
 def resolve_work_cwd(cmd, cwd, run=None):
@@ -643,12 +659,15 @@ def resolve_work_cwd(cmd, cwd, run=None):
     `cd <path> &&` immediately ahead of a `git commit` invocation overrides
     `cwd` (#187) when, and only when, that path is a real, resolvable git
     repo. Never guesses: no `cd` prefix, no `git commit` in `cmd`, or a
-    `cd` target that isn't a git repo all fall through to `cwd` unchanged."""
+    `cd` target that isn't a git repo all fall through to `cwd` unchanged.
+    Scans quote-stripped text (see module comment) so a `cd` merely
+    MENTIONED inside a quoted argument can never be trusted."""
     if isinstance(cmd, str) and cmd:
-        m_commit = _GIT_COMMIT_CMD_RE.search(cmd)
+        scan = _strip_quoted_spans(cmd)
+        m_commit = _GIT_COMMIT_CMD_RE.search(scan)
         if m_commit:
             path = ""
-            for m in _CD_PREFIX_RE.finditer(cmd, 0, m_commit.start()):
+            for m in _CD_PREFIX_RE.finditer(scan, 0, m_commit.start()):
                 path = m.group(1)
             if path:
                 path = os.path.expanduser(path.strip("'\""))
