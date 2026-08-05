@@ -235,6 +235,54 @@ class TestStaysOutOfTheWayOtherwise(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestRepoResolvedFromInlineCdPrefix(_Base):
+    """#187/#220 -- a worker dispatched with session cwd = repo A, running
+    `cd /path/to/repo-B && git commit ...`, must be gated against repo B
+    (the repo the commit is actually landing in), not repo A (the payload's
+    static cwd)."""
+
+    def _other_repo(self, remote="https://github.com/zbynekdrlik/dantesync.git"):
+        other = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-other-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "remote", "add", "origin", remote)
+        return other
+
+    def test_marker_under_the_cd_target_repo_passes(self):
+        other = self._other_repo()
+        self.mark(61, repo="dantesync")
+        cmd = 'cd %s && git commit -m "fix: thing (#61) [green]"' % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_marker_only_under_the_stale_session_cwd_repo_still_blocks(self):
+        # the marker exists under "airuleset" (self.repo's remote) -- the
+        # OLD cwd-only resolution would have accepted this; the fix must
+        # not, since the commit is actually landing in dantesync.
+        other = self._other_repo()
+        self.mark(61, repo="airuleset")
+        cmd = 'cd %s && git commit -m "fix: thing (#61) [green]"' % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("dantesync", r.stderr)
+
+    def test_no_cd_prefix_still_resolves_from_payload_cwd_unchanged(self):
+        # no `cd` anywhere in the command -- must behave exactly as before.
+        self.mark(41)
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cd_to_a_non_repo_path_falls_back_to_payload_cwd(self):
+        # a `cd` to something that is NOT a git repo must never be trusted --
+        # falls back to the payload cwd, same as having no `cd` at all.
+        not_a_repo = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-notrepo-"))
+        self.addCleanup(shutil.rmtree, not_a_repo, True)
+        self.mark(41)
+        cmd = 'cd %s && git commit -m "fix: thing (#41) [green]"' % not_a_repo
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class TestBypass(_Base):
 
     def test_bare_bypass_without_reason_is_rejected(self):
