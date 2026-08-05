@@ -4273,6 +4273,20 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         path = path or str(proj / "compact-requests.json")
         wd.record_compact_request(self.SID, "/home/x/livebg", now=record_ts,
                                   path=path)
+        if boundary_now != record_ts:
+            # #250-review (MAJOR fix) -- the grace anchor (`deferred_since`)
+            # is stamped the FIRST sweep that observes a pending request
+            # deferred on live tasks, never derived from `record_ts`
+            # directly. Prime it with an earlier sweep AT `record_ts` --
+            # no scripted cap_seq needed, since a freshly-stamped anchor is
+            # always in-grace and the sweep never proceeds past its own
+            # "skip live-tasks" continue -- so the REAL sweep below
+            # measures grace from the correct anchor, exactly like the
+            # real ~60s-cadence job does across two ticks.
+            priming_tmux = CompactFakeTmux(captured)
+            wd.compact_ticket_boundary(
+                record_ts, priming_tmux, {}, {self.SID: (self.PANE, captured)},
+                path=path, projects_dir=proj)
         tmux = CompactFakeTmux(captured, cap_seq=cap_seq)
         panes_by_sid = {self.SID: (self.PANE, captured)}
         logs = wd.compact_ticket_boundary(boundary_now, tmux, {}, panes_by_sid,
@@ -4364,7 +4378,7 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         # First record + first sweep -- stamps deferred_since = t0, in-grace.
         wd.record_compact_request(self.SID, "/home/x/livebg", now=t0, path=path)
         tmux1 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
-        logs1 = wd.compact_ticket_boundary(
+        wd.compact_ticket_boundary(
             t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
             path=path, projects_dir=proj)
         self.assertEqual(tmux1.sent, [])

@@ -4334,18 +4334,37 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     before. `ts`/`cwd`/`msg_hash` still take the NEWER call's values either
     way (only the LATEST boundary matters, per the doc above); only the
     origin can be preserved instead of overwritten, and only within the
-    window."""
+    window.
+
+    #250-review (MAJOR) — `deferred_since` (set by job 14 the FIRST sweep it
+    observes THIS session deferred on live tasks, `_session_has_live_bg_tasks`)
+    is preserved across a re-record for the SAME still-pending session
+    UNCONDITIONALLY, unlike `origin` above. `ts` is deliberately overwritten
+    on every call (only the LATEST boundary matters), which means a session
+    completing tickets FASTER than the live-tasks grace window (#250's own
+    target population — a supervisor dispatching workers back to back) would
+    otherwise reset its own grace anchor on every single re-record and never
+    actually reach it, no matter how long it has genuinely gone un-compacted.
+    No freshness window is needed here (unlike origin's, which exists to stop
+    an OLD, unrelated proof from laundering onto a much LATER boundary it
+    says nothing about): `deferred_since` answers a different question — "how
+    long has THIS pending request specifically been stuck" — and it is
+    already bounded by the entry's own lifetime: the moment the request is
+    delivered, dropped, or expires, the whole entry (and this field with it)
+    is removed, so there is nothing further to bound."""
     session = str(session or "").strip()
     if not session:
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
+    prior = d.get(session)
     entry = {"cwd": str(cwd or ""), "ts": int(now)}
     if msg_hash:
         entry["msg_hash"] = str(msg_hash)
+    if isinstance(prior, dict) and prior.get("deferred_since") is not None:
+        entry["deferred_since"] = prior["deferred_since"]
     resolved_origin = str(origin or "").strip()
     if not resolved_origin:
-        prior = d.get(session)
         if isinstance(prior, dict):
             prior_origin = str(prior.get("origin") or "").strip()
             try:
@@ -5051,34 +5070,69 @@ COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 # request would LAPSE (dropped, unfired) before its own grace window ever
 # has a chance to elapse, so the "deliver anyway" branch below would never
 # be reached for a session that never has a quiet moment. Locked by
-# `TestCompactDeferGraceRelationship`.
+# `TestCompactDeferGraceRelationship`, and by `_compact_defer_grace`'s own
+# clamp on a misconfigured env override (#250-review MINOR).
+#
+# #250-review (MAJOR): "sitting through a live-tasks defer for longer than
+# this window" is measured from the FIRST sweep that observed THIS pending
+# request deferred (`deferred_since`, `record_compact_request`), never from
+# the request's `ts` -- `ts` refreshes on every re-record, so a session
+# completing tickets faster than this window would otherwise reset its own
+# anchor forever and never actually reach it.
 COMPACT_DEFER_GRACE_S = 300      # 5 min; env AIRULESET_COMPACT_DEFER_GRACE_S
 
 
 def _compact_defer_grace(grace=None):
+    """An explicit `grace=` (test/caller override) is returned verbatim,
+    unclamped — every production call site leaves it `None`.
+
+    #250-review (MINOR) — the CONSTANT/ENV-derived value is clamped to
+    `[1, COMPACT_REQUEST_MAX_AGE_S)`: a misconfigured
+    `AIRULESET_COMPACT_DEFER_GRACE_S` could otherwise silently disable the
+    live-tasks safety defer outright (0 or negative -> every request reads
+    as instantly "past grace") or recreate the lapse-before-grace
+    starvation `COMPACT_DEFER_GRACE_S`'s own comment forbids (a value at or
+    above the request TTL)."""
     if grace is not None:
         return grace
     try:
-        return int(os.environ.get("AIRULESET_COMPACT_DEFER_GRACE_S",
-                                  COMPACT_DEFER_GRACE_S))
+        raw = int(os.environ.get("AIRULESET_COMPACT_DEFER_GRACE_S",
+                                 COMPACT_DEFER_GRACE_S))
     except ValueError:
-        return COMPACT_DEFER_GRACE_S
+        raw = COMPACT_DEFER_GRACE_S
+    if raw < 1:
+        return 1
+    if raw >= COMPACT_REQUEST_MAX_AGE_S:
+        return COMPACT_REQUEST_MAX_AGE_S - 1
+    return raw
 
 
 def _compact_live_tasks_in_grace(request_ts, now, grace=None):
     """#250 -- True while the live-tasks defer (`_session_has_live_bg_tasks`)
-    should still apply: the request's OWN age (its `ts` field -- the
-    authoritative anchor every other age-based gate in this file already
-    uses) is under the grace window (`_compact_defer_grace`). Once a
-    request has been deferred on live tasks for longer than this, the
-    defer stops -- the caller delivers `/compact` anyway.
+    should still apply: `now - request_ts` is under the grace window
+    (`_compact_defer_grace`). Once deferred on live tasks for longer than
+    this, the defer stops -- the caller delivers `/compact` anyway.
 
-    A missing/unreadable `ts` is treated as IN-GRACE (True), never as
-    "infinite age": guessing "past grace" from an unmeasurable value would
-    start typing into a session with live siblings the FIRST time age
-    can't be read, which is exactly the safety property this defer exists
-    to protect. `COMPACT_REQUEST_MAX_AGE_S`'s own expiry is what eventually
-    drops an entry whose age can never be resolved -- not this check."""
+    `request_ts` is whichever anchor the CALLER passes -- job 14 passes its
+    request's own `deferred_since` (the first sweep it observed THIS
+    session deferred, preserved by `record_compact_request` across a
+    re-record; see #250-review above for why the raw `ts` field cannot be
+    used here), `deliver_compact_now`'s callers pass the `ts` their own
+    `record_compact_request` call just wrote (see that function's own
+    docstring for why its attempt is always in-grace in practice).
+
+    A missing/unreadable `request_ts` is treated as IN-GRACE (True), never
+    as "infinite age": guessing "past grace" from an unmeasurable value
+    would start typing into a session with live siblings the FIRST time
+    age can't be read, which is exactly the safety property this defer
+    exists to protect. In real production `request_ts` is always a plain
+    `int`/`float` timestamp a prior call already wrote, so an unmeasurable
+    value here means corrupted/hand-edited state, not a normal condition --
+    #250-review found `COMPACT_REQUEST_MAX_AGE_S`'s own expiry check does
+    NOT reliably drop such an entry either (it treats an unparseable `ts`
+    as age 0, i.e. never-expiring), so an entry in that state simply stays
+    deferred until the underlying data is fixed or the session genuinely
+    goes quiet -- never guessed either way."""
     try:
         age = float(now) - float(request_ts)
     except (TypeError, ValueError):
@@ -5724,19 +5778,33 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # point, never at the top of the loop.
         #
         # #250 — bounded by TIME: the defer applies only while this
-        # request is still within COMPACT_DEFER_GRACE_S of its own `ts`
-        # (`_compact_live_tasks_in_grace`) — see that constant's own
-        # comment for why a session that NEVER goes quiet (a supervisor
-        # dispatching workers back to back) must not be deferred forever.
-        # Still in grace -> left in place, retried next sweep, exactly
-        # like every other "not safe RIGHT NOW" skip in this loop. Past
-        # grace -> `grace_elapsed` marks every OK/READY line below so a
-        # field audit of journalctl can tell a genuinely-clear delivery
-        # apart from one that fired anyway.
+        # request is still within COMPACT_DEFER_GRACE_S of the FIRST sweep
+        # that observed it deferred (`deferred_since`, stamped below the
+        # first time this branch fires for a given pending request, and
+        # PRESERVED across a re-record by `record_compact_request` — see
+        # its own #250-review docstring). Still in grace -> left in place,
+        # retried next sweep, exactly like every other "not safe RIGHT NOW"
+        # skip in this loop. Past grace -> `grace_elapsed` marks every
+        # OK/READY line below so a field audit of journalctl can tell a
+        # genuinely-clear delivery apart from one that fired anyway.
+        #
+        # #250-review (MAJOR) — this must NOT anchor on the entry's own
+        # `ts` field: `ts` is overwritten on EVERY re-record (only the
+        # latest boundary matters, by design), so a session completing
+        # tickets faster than the grace window — the exact population this
+        # fix exists to un-starve — would otherwise reset its own grace
+        # anchor every time and never actually reach it, no matter how long
+        # it has genuinely gone un-compacted.
         grace_elapsed = False
         if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
                                       now=now, captured=captured):
-            if _compact_live_tasks_in_grace(entry.get("ts"), now):
+            deferred_since = entry.get("deferred_since")
+            if deferred_since is None:
+                deferred_since = now
+                entry["deferred_since"] = deferred_since
+                reqs[sid] = entry
+                changed = True
+            if _compact_live_tasks_in_grace(deferred_since, now):
                 logs.append("skip live-tasks (compact-request) %s" % loc)
                 continue
             grace_elapsed = True
