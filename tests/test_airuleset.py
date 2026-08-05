@@ -4075,17 +4075,23 @@ class TestClaudeLauncherContinueOrNew(TestCase):
     died with "No conversation found to continue" in every new directory
     (david@gk, 2026-07-09), forcing users to know about claude-new."""
 
-    def _run_launcher(self, home, cwd, fn="claude"):
+    def _run_launcher(self, home, cwd, fn="claude", stub_body=None):
         bashrc = Path(home) / ".bashrc"
         script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
         airuleset.apply_ultracode_launcher(bashrc, script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir(exist_ok=True)
         stub = stub_dir / "claude"
-        stub.write_text('#!/bin/bash\necho "ARGS:$*"\n')
+        stub.write_text(stub_body or '#!/bin/bash\necho "ARGS:$*"\n')
         stub.chmod(0o755)
+        # Hermetic regardless of the AMBIENT environment this test process
+        # itself runs under (#253 review finding): CLAUDE_CODE_NO_FLICKER
+        # popped so a test asserting "the default mode never sets it" can
+        # never spuriously pass/fail on account of an already-exported value
+        # this subprocess would otherwise inherit.
         env = {**os.environ, "HOME": str(home),
                "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+        env.pop("CLAUDE_CODE_NO_FLICKER", None)
         r = subprocess.run(
             ["bash", "-c", f"source {bashrc}; cd '{cwd}'; {fn}"],
             capture_output=True, text=True, env=env)
@@ -4184,21 +4190,10 @@ class TestClaudeLauncherContinueOrNew(TestCase):
     def _run_launcher_with_env_probe(self, home, cwd, fn):
         # Like _run_launcher, but the stub also echoes CLAUDE_CODE_NO_FLICKER
         # so a test can assert what the launch script actually EXPORTED.
-        bashrc = Path(home) / ".bashrc"
-        script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
-        airuleset.apply_ultracode_launcher(bashrc, script)
-        stub_dir = Path(home) / "bin"
-        stub_dir.mkdir(exist_ok=True)
-        stub = stub_dir / "claude"
-        stub.write_text(
-            '#!/bin/bash\necho "ARGS:$* NOFLICKER:${CLAUDE_CODE_NO_FLICKER:-}"\n')
-        stub.chmod(0o755)
-        env = {**os.environ, "HOME": str(home),
-               "PATH": f"{stub_dir}:{os.environ['PATH']}"}
-        r = subprocess.run(
-            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; {fn}"],
-            capture_output=True, text=True, env=env)
-        return r.stdout
+        return self._run_launcher(
+            home, cwd, fn=fn,
+            stub_body='#!/bin/bash\n'
+                      'echo "ARGS:$* NOFLICKER:${CLAUDE_CODE_NO_FLICKER:-}"\n')
 
     def test_claude_fullscreen_sets_no_flicker_and_preserves_continue_or_new(self):
         # #253: proven upstream renderer defect (anthropics/claude-code#84247 /

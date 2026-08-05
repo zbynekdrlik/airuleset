@@ -661,7 +661,13 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 #       has nothing to corrupt. It is NEVER the default -- it trades away native
 #       tmux copy-mode (Ctrl+B [) and OS-level scrollback search, a real UX choice
 #       only the user should make, same discipline as ultracode's own opt-in-only
-#       rule two paragraphs up.
+#       rule two paragraphs up. Wins over the managed `settings.json` "tui":
+#       "default" pin (see render_managed_settings()) -- confirmed against the
+#       installed CC binary that the env var is read before that settings key.
+#       Also overrides upstream's own tmux-control-mode / Windows-over-SSH
+#       auto-disable guards for fullscreen mode, since those check the SAME
+#       env var this mode forces on -- an intentional consequence of opting
+#       in explicitly, not something this mode tries to work around.
 CLAUDE_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) — the claude launcher (#77). Read FRESH from
 # disk on EVERY invocation (unlike a ~/.bashrc function, which is parsed once
@@ -1215,6 +1221,13 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
+    # `tui: "default"` is pinned here, but the opt-in `claude-fullscreen`
+    # launcher mode (#253, CLAUDE_LAUNCH_SCRIPT_CONTENT) overrides it PER
+    # LAUNCH via CLAUDE_CODE_NO_FLICKER=1 -- confirmed against the installed
+    # CC binary that the env var is checked BEFORE this settings key, so the
+    # override wins. If this pin is ever changed to `"tui": "fullscreen"`
+    # (upstream's own settings-level equivalent of the env var), re-check
+    # that ordering still holds before removing #253's env-var mechanism.
     result["tui"] = "default"
     result["model"] = MANAGED_MODEL
     result["promptSuggestionEnabled"] = False
