@@ -444,10 +444,21 @@ class TestTotalBindFailureIsFatal(TestCase):
         # status, gets it FAST (so a readiness poll can give up on the child's
         # death instead of burning its budget — #113's `_wait_until_serving`),
         # and finds the diagnosis on stderr.
+        #
+        # #148: this method uses its OWN larger TTL, not the class's shared
+        # `self.TTL` (6s, still used by the sibling expiry test below). At
+        # ttl=6 the old bound (ttl/3.0 = 2.0s) had no headroom for full-suite
+        # CPU contention — live-reproduced taking 3.34s under load, a false
+        # flake, not the #113/#114 regression (whose signature is ~6.06s, the
+        # timer holding the process for the FULL ttl). ttl=20 / bound=ttl/2.0
+        # (10s) keeps the same "exits well under half the ttl" shape with
+        # ~8.6s of headroom over the worst load-driven time observed, while
+        # staying far below where the regression would land (~20s).
+        ttl = 20
         dest = Path(tempfile.mkdtemp())
         t0 = time.monotonic()
-        proc, _ = _spawn(self, "tok114dead", dest, ips=self.DEAD_IP, ttl=self.TTL)
-        err, _ = self._run_to_exit(proc, self.TTL + 20)
+        proc, _ = _spawn(self, "tok114dead", dest, ips=self.DEAD_IP, ttl=ttl)
+        err, _ = self._run_to_exit(proc, ttl + 20)
         took = time.monotonic() - t0
 
         self.assertIn("no address", err)            # diagnosis reached stderr
@@ -457,10 +468,10 @@ class TestTotalBindFailureIsFatal(TestCase):
             "SystemExit was overtaken by the TTL timer's os._exit(0) (#114); "
             "stderr was:\n%s" % err)
         self.assertLess(
-            took, self.TTL / 3.0,
+            took, ttl / 2.0,
             "the failure took %.2fs of a %ds TTL — the non-daemon timer thread "
             "is holding the interpreter open through its own exit (#114)"
-            % (took, self.TTL))
+            % (took, ttl))
 
     def test_the_fast_fail_bound_has_headroom_over_realistic_subprocess_overhead(self):
         # #148: the ABOVE test's own bound is only meaningful if it has real
@@ -477,7 +488,7 @@ class TestTotalBindFailureIsFatal(TestCase):
         # actually observed, comfortably below the widened bound, and far
         # below where the #113/#114 regression itself would land (~ttl).
         dest = Path(tempfile.mkdtemp())
-        ttl = self.TTL
+        ttl = 20
         forced_delay_s = 3.5          # > the 3.34s worst case observed live
         slow = ("import os, sys, time; time.sleep(%r); "
                 "os.execv(sys.executable, [sys.executable, %r] + sys.argv[1:])"
@@ -491,7 +502,7 @@ class TestTotalBindFailureIsFatal(TestCase):
         self.assertIn("no address", err)
         self.assertNotEqual(0, proc.returncode)
         self.assertLess(
-            took, ttl / 3.0,
+            took, ttl / 2.0,
             "a %.1fs forced startup delay (realistic full-suite load, not "
             "the #113/#114 regression) still tripped the bound — took %.2fs "
             "of a %ds ttl; the bound has no real headroom left (#148)"
