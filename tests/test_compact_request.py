@@ -3797,6 +3797,39 @@ class TestDeliverCompactSelf(unittest.TestCase):
         dcn.assert_called_once()
         self.assertEqual(dcn.call_args.kwargs.get("origin"), "self-callback")
 
+    def test_request_ts_and_now_are_threaded_into_every_retry(self):
+        # #250-review MINOR -- request_ts/now were wired but never locked; a
+        # mutant dropping both kwargs would have survived the whole suite.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-ts", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP, in_mode=True)
+        reqp = self._reqpath()
+        clock = [1_000_000.0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+
+        with m.patch.object(wd, "compact_requests_path", return_value=reqp), \
+             m.patch.object(wd, "deliver_compact_now",
+                            wraps=wd.deliver_compact_now) as dcn:
+            wd.deliver_compact_self(
+                run=tmux, projects_dir=proj, pane_env="%5",
+                hold_s=17, retry_interval=5,
+                now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
+        self.assertGreaterEqual(dcn.call_count, 2)
+        first_ts = dcn.call_args_list[0].kwargs.get("request_ts")
+        self.assertEqual(first_ts, 1_000_000.0)
+        # request_ts is captured ONCE and never re-derived per retry ...
+        for call in dcn.call_args_list:
+            self.assertEqual(call.kwargs.get("request_ts"), first_ts)
+        # ... while `now` DOES advance across retries, unlike request_ts.
+        nows = [call.kwargs.get("now") for call in dcn.call_args_list]
+        self.assertEqual(len(set(nows)), len(nows))
+
 
 class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
     """The NEW origin gets IDENTICAL proven-boundary treatment to the
@@ -3990,6 +4023,53 @@ class TestOriginPreservedAgainstBlankOverwrite(unittest.TestCase):
         wd.record_compact_request("s10", "/y", now=1000, path=p)
         d = wd.load_compact_requests(p)
         self.assertNotIn("origin", d["s10"])
+
+
+class TestDeferredSincePreservedAcrossReRecord(unittest.TestCase):
+    """#250-review MAJOR -- `deferred_since` (job 14's grace anchor) must
+    survive a re-record for the SAME still-pending session, UNCONDITIONALLY
+    -- unlike `origin`, which is only preserved within a short freshness
+    window. `ts` still takes the newer call's value either way (only the
+    LATEST boundary matters for delivery TARGETING)."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_deferred_since_survives_a_re_record(self):
+        p = self._p()
+        wd.record_compact_request("d1", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        d["d1"]["deferred_since"] = 50.0   # simulate job 14's own stamp
+        p.write_text(json.dumps(d))
+        wd.record_compact_request("d1", "/y", now=500, path=p)   # re-record
+        d2 = wd.load_compact_requests(p)
+        self.assertEqual(d2["d1"]["deferred_since"], 50.0)
+        self.assertEqual(d2["d1"]["ts"], 500)      # ts DOES take the new value
+        self.assertEqual(d2["d1"]["cwd"], "/y")    # cwd DOES take the new value
+
+    def test_no_prior_deferred_since_means_none_is_invented(self):
+        p = self._p()
+        wd.record_compact_request("d2", "/x", now=100, path=p)   # no stamp yet
+        wd.record_compact_request("d2", "/y", now=200, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertNotIn("deferred_since", d["d2"])
+
+    def test_a_fresh_session_never_carries_a_stale_deferred_since(self):
+        # once an entry is fully DELIVERED it is removed from the file
+        # (clear_compact_request / the pop-on-success paths), so a BRAND
+        # NEW request for the SAME sid, recorded afresh later, starts with
+        # no deferred_since at all -- never resurrecting an old streak.
+        p = self._p()
+        wd.record_compact_request("d3", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        d["d3"]["deferred_since"] = 50.0
+        p.write_text(json.dumps(d))
+        wd.clear_compact_request("d3", path=p)   # delivered/dropped/expired
+        wd.record_compact_request("d3", "/z", now=9000, path=p)   # a later, unrelated boundary
+        d2 = wd.load_compact_requests(p)
+        self.assertNotIn("deferred_since", d2["d3"])
 
 
 class TestCompactRequestSelfCli(unittest.TestCase):
@@ -4263,6 +4343,54 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
                             for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
+    # ------------------------------------------------------------------- #
+    # #250-review (MAJOR) — the grace anchor must NOT be `entry["ts"]`,
+    # which resets on every re-record: a session completing tickets faster
+    # than the grace window (#250's own target population) would otherwise
+    # never actually reach it. `deferred_since` is stamped the FIRST sweep
+    # a pending request is observed deferred and preserved across re-records.
+    # ------------------------------------------------------------------- #
+
+    def test_deferred_since_is_stamped_on_first_defer_and_persisted(self):
+        tmux, logs, path = self._go(CB_IDLE_WAITING_CAP)
+        self.assertEqual(tmux.sent, [])
+        d = wd.load_compact_requests(path)
+        self.assertIn("deferred_since", d[self.SID])
+
+    def test_repeated_re_records_do_not_reset_the_grace_anchor(self):
+        proj = self._dir()
+        path = str(proj / "compact-requests.json")
+        t0 = 1_000_000.0
+        # First record + first sweep -- stamps deferred_since = t0, in-grace.
+        wd.record_compact_request(self.SID, "/home/x/livebg", now=t0, path=path)
+        tmux1 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        logs1 = wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux1.sent, [])
+
+        # A SECOND record for the SAME session arrives well inside the
+        # grace window (a fast follow-on ticket boundary) -- refreshes
+        # `ts`, but must NOT reset `deferred_since`.
+        t1 = t0 + wd.COMPACT_DEFER_GRACE_S - 10
+        wd.record_compact_request(self.SID, "/home/x/livebg", now=t1, path=path)
+        d_mid = wd.load_compact_requests(path)
+        self.assertEqual(d_mid[self.SID]["ts"], int(t1))
+        self.assertEqual(d_mid[self.SID]["deferred_since"], t0)
+
+        # A sweep run PAST the ORIGINAL deferred_since + grace (but well
+        # within grace of the SECOND record's own `ts`) must still deliver
+        # -- an anchor keyed on `ts` would have read "fresh" here and
+        # deferred forever.
+        t2 = t0 + wd.COMPACT_DEFER_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t2, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux2.typed_texts(), logs2)
+        self.assertTrue(any("grace-elapsed" in ln for ln in logs2), logs2)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
     def test_past_grace_draft_branch_also_marks_grace_elapsed(self):
         # the stash-delivery branch (a draft-holding pane) gets the same
         # marker on its own OK line. Live-tasks is checked ONCE, before the
@@ -4328,6 +4456,43 @@ class TestCompactLiveTasksInGrace(unittest.TestCase):
         with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "9999"}):
             self.assertFalse(
                 wd._compact_live_tasks_in_grace(1000, 1050, grace=10))
+
+    # ------------------------------------------------------------------- #
+    # #250-review (MINOR) — a misconfigured env override must never disable
+    # the live-tasks safety defer outright (0/negative) or recreate the
+    # lapse-before-grace starvation (>= the request TTL).
+    # ------------------------------------------------------------------- #
+
+    def test_env_override_negative_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "-100"}):
+            self.assertEqual(wd._compact_defer_grace(), 1)
+
+    def test_env_override_zero_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "0"}):
+            self.assertEqual(wd._compact_defer_grace(), 1)
+
+    def test_env_override_at_or_above_ttl_is_clamped_below_it(self):
+        huge = str(wd.COMPACT_REQUEST_MAX_AGE_S + 1000)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": huge}):
+            self.assertLess(wd._compact_defer_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_env_override_exactly_at_ttl_is_clamped_below_it(self):
+        at_ttl = str(wd.COMPACT_REQUEST_MAX_AGE_S)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": at_ttl}):
+            self.assertLess(wd._compact_defer_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_a_sane_env_override_is_returned_unclamped(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "600"}):
+            self.assertEqual(wd._compact_defer_grace(), 600)
+
+    def test_explicit_grace_param_is_never_clamped(self):
+        # every production call leaves grace=None; an explicit override
+        # (test/caller-only) is returned verbatim, even outside the sane
+        # range -- the clamp protects only the env/const-derived default.
+        self.assertEqual(wd._compact_defer_grace(grace=-5), -5)
+        self.assertEqual(
+            wd._compact_defer_grace(grace=wd.COMPACT_REQUEST_MAX_AGE_S + 5),
+            wd.COMPACT_REQUEST_MAX_AGE_S + 5)
 
 
 class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
