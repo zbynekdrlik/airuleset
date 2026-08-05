@@ -50,6 +50,14 @@ SERVER = ROOT / "filedrop" / "vault_server.py"
 VAL = "hunter2-fixture-value-144"
 TOK = "toktoktoktoktok144"
 
+# #179: every log line this module writes is prefixed with a real ISO-8601
+# wall-clock timestamp (`_iso()` in filedrop/vault.py), whose digits can
+# coincidentally contain the digit run under test (str(len(VAL)) == "25")
+# purely by chance of WHEN the test happened to run. Stripped out before any
+# "this digit run must not leak" check, so the assertion is about a real
+# leaked length, never a wall-clock coincidence.
+_ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}")
+
 
 def _free_port():
     sk = socket.socket()
@@ -334,7 +342,12 @@ class TestLogPolicy(_StoreCase):
         self.assertNotIn(VAL, text)
         for n in range(4, len(VAL) + 1):          # not even a prefix of it
             self.assertNotIn(VAL[:n], text)
-        self.assertNotIn(str(len(VAL)), text.replace("144", ""))
+        # #179: strip every real ISO-8601 timestamp before checking for the
+        # leaked-length digit run — the timestamp's own digits can
+        # coincidentally spell "25" (len(VAL)) purely by chance of when the
+        # test ran, which is not a leak.
+        stripped = _ISO_TS_RE.sub("", text)
+        self.assertNotIn(str(len(VAL)), stripped.replace("144", ""))
 
     def test_log_survives_a_forced_wall_clock_digit_collision(self):
         # #179: the log lines are timestamped with the REAL wall clock, and
@@ -360,7 +373,8 @@ class TestLogPolicy(_StoreCase):
         text = st.log_path().read_text(encoding="utf-8")
         # sanity: the collision really was forced, not accidental
         self.assertIn("25", time.strftime("%H:%M:%S", time.localtime(ts)))
-        self.assertNotIn(str(len(VAL)), text.replace("144", ""))
+        stripped = _ISO_TS_RE.sub("", text)
+        self.assertNotIn(str(len(VAL)), stripped.replace("144", ""))
 
     def test_log_file_is_0600(self):
         st.log_event("request", "DB_PASS")
