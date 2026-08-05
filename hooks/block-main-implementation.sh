@@ -350,19 +350,34 @@ if [ -n "$BYPASS_MARK" ]; then
     # C0 bytes in an append-only log are unreadable — the delete set spares
     # every byte >= 0x80, so a Slovak reason survives intact), length bounded
     # by a UTF-8-safe codepoint slice (never `cut -c`, which counts bytes).
-    BYPASS_REASON=$(tr '\n\r\t' '   ' < "$BYPASS_FILE" 2>/dev/null \
+    #
+    # #180: the jq slice used to be the LAST stage of one long pipe collapsed
+    # by `|| echo ""` — indistinguishable from a genuinely empty/short
+    # reason. Both readings already fail CLOSED here (an unrecognised
+    # reason REFUSES the bypass, so implementation stays blocked either
+    # way), but a real jq hiccup was silently reported as "no reason,
+    # cleared" — misleading whoever reads the log. Capture jq's OWN exit
+    # status on its own line so the log can say which one actually
+    # happened.
+    BYPASS_CLEAN=$(tr '\n\r\t' '   ' < "$BYPASS_FILE" 2>/dev/null \
         | tr -d '\000-\010\013\014\016-\037\177' \
-        | sed 's/  */ /g; s/^ //; s/ $//' \
-        | jq -Rrs '.[0:200]' 2>/dev/null || echo "")
+        | sed 's/  */ /g; s/^ //; s/ $//')
+    BYPASS_JQ_RC=0
+    BYPASS_REASON=$(printf '%s' "$BYPASS_CLEAN" | jq -Rrs '.[0:200]' 2>/dev/null) \
+        || BYPASS_JQ_RC=$?
     BYPASS_REASON=$(printf '%s' "$BYPASS_REASON" | sed 's/^ *//; s/ *$//')
     rm -f "$BYPASS_FILE" 2>/dev/null || true
-    if [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
+    if [ "$BYPASS_JQ_RC" -ne 0 ]; then
+        echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
+            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+    elif [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
         echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed) reason=$BYPASS_REASON" \
             >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
         exit 0
+    else
+        echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
+            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
     fi
-    echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
-        >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
 fi
 
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
@@ -500,18 +515,42 @@ if [ "$AWAY_S" -gt 0 ] && [ -f "$ACTIVE_MARK" ]; then
 fi
 
 # ---- condition 2: armed /goal main (#54) ----
-GOAL_MARK=$(jq -r '
+# #180: the whole block/allow decision used to hinge on ONE jq call — a
+# transient jq hiccup (fault-injected via a stub-on-PATH: 0 of 8 attempts
+# reproduced it live, but a stub jq confirms the mechanism) made the
+# combined `jq | grep | tail` pipe fail with `pipefail` set, collapsing
+# through `|| echo ""` into GOAL_MARK="" -> GOAL_ARMED=0 -> the guard
+# reads "not armed" and ALLOWS — the exact silent stop-guarding this
+# ticket is about. The fix separates jq's OWN exit status (GOAL_JQ_RC)
+# from the ROUTINE "no goal marker in this transcript" case (jq succeeds,
+# grep legitimately finds nothing — `pipefail` reports THAT as non-zero
+# too, so `$?` on the combined pipe can never distinguish them) by
+# capturing jq's output on its own line first, only THEN piping it
+# through grep/tail (which is allowed to find nothing).
+GOAL_JQ_RC=0
+GOAL_JQ_OUT=$(jq -r '
     if .type == "user" and (.message.content | type) == "string" then .message.content
     elif .type == "system" and (.content | type) == "string" then .content
     else empty end
-' "$TRANSCRIPT" 2>/dev/null \
-    | grep -oE '<local-command-stdout>Goal (set|cleared):' | tail -1 || echo "")
+' "$TRANSCRIPT" 2>/dev/null) || GOAL_JQ_RC=$?
+GOAL_MARK=$(printf '%s\n' "$GOAL_JQ_OUT" \
+    | grep -oE '<local-command-stdout>Goal (set|cleared):' | tail -1 || true)
 GOAL_ARMED=0
-case "$GOAL_MARK" in
-    *"Goal set:") GOAL_ARMED=1 ;;
-esac
+GOAL_UNKNOWN=0
+if [ "$GOAL_JQ_RC" -ne 0 ]; then
+    # Could not decide -> fail CLOSED (block, and say why), never silently
+    # allow. This is a NAMED distinct state (GOAL_UNKNOWN), not folded into
+    # GOAL_ARMED, so the block message never claims a goal is armed when
+    # the truth is "the transcript could not be read".
+    GOAL_UNKNOWN=1
+else
+    case "$GOAL_MARK" in
+        *"Goal set:") GOAL_ARMED=1 ;;
+    esac
+fi
 
-if [ "$IS_FABLE" != "1" ] && [ "$GOAL_ARMED" != "1" ] && [ "$AWAY" != "1" ]; then
+if [ "$IS_FABLE" != "1" ] && [ "$GOAL_ARMED" != "1" ] \
+   && [ "$AWAY" != "1" ] && [ "$GOAL_UNKNOWN" != "1" ]; then
     exit 0                               # no condition holds — allow
 fi
 
@@ -523,6 +562,10 @@ REASON=""
 if [ "$GOAL_ARMED" = "1" ]; then
     RULE_TAG="${RULE_TAG:+$RULE_TAG+}GOAL_ARMED"
     REASON="${REASON:+$REASON and }has an ARMED /goal"
+fi
+if [ "$GOAL_UNKNOWN" = "1" ]; then
+    RULE_TAG="${RULE_TAG:+$RULE_TAG+}GOAL_UNKNOWN"
+    REASON="${REASON:+$REASON and }could not determine whether a /goal is armed (transcript read failed — failing closed)"
 fi
 if [ "$AWAY" = "1" ]; then
     RULE_TAG="${RULE_TAG:+$RULE_TAG+}USER_AWAY"
