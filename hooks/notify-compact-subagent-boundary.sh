@@ -24,22 +24,54 @@ set -euo pipefail
 # ticket, and at that instant its result is already durable in git / GitHub /
 # the issue — which is the entire justification for compacting at a boundary.
 #
-# THE ONE ALLOWED DEFERRAL is that the session still has one of its OWN
-# workers running (the next ticket is genuinely already in flight). That is a
-# FACT read out of the payload, never a marker, prose, or an estimate:
-# `background_tasks` is this session's own task registry (the harness filters
-# it to status ∈ {running, pending}), and it carries a SELF entry at
-# `id == agent_id` that must be excluded (#28/#29 — live-captured payload
-# shapes). Zero entries other than self ⇒ nothing of this session's is live
-# ⇒ compact. Any other entry — sibling worker OR a stray shell task, any
-# status — defers; the next worker's SubagentStop is the next chance.
+# A SIBLING WORKER STILL RUNNING is a real fact worth carrying forward — the
+# session still has one of its OWN workers running (the next ticket is
+# genuinely already in flight), read straight out of the payload, never a
+# marker, prose, or an estimate: `background_tasks` is this session's own
+# task registry (the harness filters it to status ∈ {running, pending}), and
+# it carries a SELF entry at `id == agent_id` that must be excluded (#28/#29
+# — live-captured payload shapes). Zero entries other than self ⇒ nothing of
+# this session's is live; any other entry — sibling worker OR a stray shell
+# task, any status — means the next ticket is genuinely mid-flight.
+#
+# #246 (2026-08-05, live evidence: montalu@subdev) — THIS FACT USED TO BE AN
+# OUTRIGHT DECLINE HERE: a legitimate SAFETY property (compacting while a
+# sibling worker is mid-flight would drop that worker's own task linkage),
+# placed at the WRONG TIME. On a box running CONTINUOUSLY OVERLAPPING
+# autopilot-workers the zero-siblings moment that decline demanded almost
+# never arrives — measured: `DECLINE reason=live-tasks n=1/2/3` for a whole
+# day, last real `compact_boundary` 10:12Z, then 3h45m of total silence in
+# `compact-sync.log` while tickets kept completing, and the watchdog journal
+# showed ZERO "compact" lines in 72h because a DECLINED record leaves no
+# artifact at all — the compact-stall backstop (job 26) had nothing queued
+# to watch. "Not safe to compact RIGHT NOW" had silently become "never
+# compacts" — the exact failure mode this file's own #123 section (below)
+# exists to make visible, just one gate too early to be caught by it.
+#
+# THE FIX: record the proven boundary UNCONDITIONALLY — this hook's whole job
+# is proving the boundary exists, not deciding whether it is safe to act on
+# it RIGHT NOW. The live-tasks safety check MOVES to the two DELIVERY points
+# (`deliver_compact_now` / job 14's `compact_ticket_boundary`,
+# `_session_has_live_bg_tasks` in watchdog/__init__.py) — every other "is it
+# safe to type into this pane right now" gate already lives at delivery time
+# for exactly this reason (`_compact_blocked_by_question`,
+# `_compact_not_at_boundary`, `_compact_session_unresumed`), and this is the
+# same shape. The DEFERRAL FACT itself (how many other tasks were live at
+# record time) is carried forward into the decision log as
+# `deferred=live-tasks n=N` so the observability this whole file's #123
+# section built is not lost — it is now visible on a RECORD line instead of
+# a DECLINE line.
 #
 # NEVER COMPACT ON A GUESS. No `background_tasks` field at all (an older
-# Claude Code) ⇒ zero live workers cannot be PROVEN ⇒ exit 0, record nothing.
+# Claude Code) ⇒ zero live workers cannot be PROVEN ⇒ exit 0, record nothing
+# — this ONE case is unchanged: it is not a live-tasks DEFERRAL (a fact), it
+# is an UNPROVABLE boundary (no fact at all), so it still declines outright.
 # This is deliberately the same fail-direction subagent-stop-check-bg-work.sh
 # uses, which is why the two SubagentStop hooks cannot disagree: that gate
 # BLOCKS a stop exactly when live OWNED tasks exist, and every such task is a
-# non-self entry here, so whenever it blocks, this hook has already deferred.
+# non-self entry here, so whenever it blocks, this hook may still have
+# RECORDED (with `deferred=live-tasks`) — the two gates now differ on
+# TIMING, not on the underlying fact, which is the whole point of #246.
 #
 # This does NOT reinstate #109 (a `/compact` fired INTO live work): there the
 # only evidence available was the status marker, which cannot tell "`⏳`
@@ -245,14 +277,15 @@ fi
 # Every entry that is not the self entry counts as live, whatever its status
 # or type — the harness has already filtered the array to in-flight work. An
 # entry with no usable id cannot be proven to BE the self entry, so it counts
-# too (defer, never compact on a guess).
+# too. #246 — this NO LONGER declines: it carries the fact forward
+# (`DEFERRED`) into a RECORD line below. The live-tasks SAFETY property
+# still applies, just at the two DELIVERY points
+# (`_session_has_live_bg_tasks`, watchdog/__init__.py), not here.
 OTHERS=$(printf '%s' "$INPUT" | jq -r --arg a "$AGENT_ID" \
     '[.background_tasks[]? | select(((.id // "") | tostring) != $a)] | length' \
     2>/dev/null || echo "1")
-[ "$OTHERS" = "0" ] || {
-    _decide_log DECLINE "reason=live-tasks n=$OTHERS"
-    exit 0
-}
+DEFERRED=""
+[ "$OTHERS" = "0" ] || DEFERRED="deferred=live-tasks n=$OTHERS "
 
 # #71 dedup key = this worker, so a repeat SubagentStop for the SAME worker is
 # a no-op. Never let a failing sha256sum kill this `set -e` script (the repo's
@@ -268,6 +301,6 @@ case "$RESULT" in
     recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip) ;;
     *) RESULT="error" ;;
 esac
-_decide_log RECORD "result=$RESULT"
+_decide_log RECORD "${DEFERRED}result=$RESULT"
 
 exit 0

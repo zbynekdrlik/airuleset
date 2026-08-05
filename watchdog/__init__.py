@@ -5247,6 +5247,83 @@ def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
     return bool(transcript_last_error(tpath))
 
 
+# #246 (2026-08-05, live evidence: montalu@subdev) — the live-tasks SAFETY
+# check `notify-compact-subagent-boundary.sh` used to apply at RECORD time
+# (declining outright whenever a sibling worker was still live) now applies
+# HERE, at the two DELIVERY points, exactly like every other "is it safe to
+# type into this pane right now" gate above
+# (`_compact_blocked_by_question`/`_compact_not_at_boundary`/
+# `_compact_session_unresumed`). The safety property itself is unchanged —
+# compacting while a SIBLING worker is mid-flight would drop that worker's
+# own task linkage — only WHERE it is enforced moved: on a box running
+# continuously OVERLAPPING autopilot-workers the zero-siblings moment the
+# old record-time gate demanded almost never arrived, so the boundary was
+# never even recorded and the compact-stall backstop (job 26) had nothing
+# queued to watch. See the hook's own header for the full incident.
+#
+# Two INDEPENDENT signals, either one sufficient:
+#   (a) the pane's OWN capture still shows CC's ambient "Waiting for N
+#       background agents to finish" row (`_BG_AGENTS_WAIT_RX` — already the
+#       job 9/20 bg-agent detection). It renders above the input box for as
+#       long as the MAIN session has live background tasks, so it is a
+#       direct, real-time read of the exact fact the old record-time gate
+#       tried to observe from the SubagentStop payload.
+#   (b) a SIBLING WORKER's own subagent transcript
+#       (`<projects_dir>/<encode_project_dir(cwd)>/<sid>/subagents/*.jsonl`)
+#       was written within the last `_LIVE_BG_TASK_WINDOW_S` seconds —
+#       reuses `subagent_active` (already job 4's "is a dispatched worker
+#       alive" signal), so a worker that is actively writing but whose pane
+#       happens not to be showing the ambient row (a rare render-timing gap)
+#       still counts. A JUST-FINISHED worker keeps this True for up to a
+#       couple of sweeps after it stops — harmless over-deferral, deliberate:
+#       the request simply retries next sweep.
+#
+# Fail direction, same as every other compact gate in this file: when
+# NEITHER signal is readable (no pane id, the capture fails, no subagents
+# dir at all) this returns False — deferral is an OPTIMIZATION of an
+# already-real safety property, never itself a new way to block delivery on
+# "we don't know".
+_LIVE_BG_TASK_WINDOW_S = 120
+
+
+def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
+                               captured=None):
+    """True when EITHER signal above says this session still has background
+    work in flight (see the section comment). `now` defaults to
+    `time.time()` — tests pass a fixed value.
+
+    `captured` (optional): the pane's ALREADY-KNOWN capture, when the caller
+    has one in scope — both call sites do, by the time they reach this
+    check. Reusing it (rather than issuing a fresh `capture_pane` call)
+    matches this file's existing `cap = captured if captured is not None
+    else capture_pane(...)` idiom, avoids a redundant tmux round-trip, and
+    — the reason it MATTERS, not just an optimisation — job 14's own draft
+    delivery path hands its FakeTmux a SEQUENCE of scripted `capture-pane`
+    replies for `deliver_with_stash`'s own internal re-captures; an extra
+    real capture-pane call inserted ahead of that sequence would silently
+    consume its first entry and desync every reply after it. `captured=None`
+    (the default) falls back to a fresh capture — used when nothing is
+    already in scope (e.g. a direct/standalone call)."""
+    if pid:
+        cap = captured
+        if cap is None:
+            try:
+                cap = capture_pane(pid, run, lines=40)
+            except Exception:
+                cap = None
+        if cap and _BG_AGENTS_WAIT_RX.search(cap):
+            return True
+    pdir = projects_dir or PROJECTS_DIR
+    try:
+        tpath = _transcript_for_session(pdir, sid, cwd)
+    except Exception:
+        tpath = None
+    if tpath is None:
+        return False
+    now_ts = now if now is not None else time.time()
+    return bool(subagent_active(str(tpath), now_ts, _LIVE_BG_TASK_WINDOW_S))
+
+
 def _stop_already_rejected(cwd, sid, projects_dir=None):
     """#109 — the ENQUEUE-time gate, and the ONE moment the reported incident
     is still preventable.
@@ -5391,7 +5468,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     `_log_compact_sync` — the same observable channel
     `deliver_compact_now` already uses for every send/drop decision —
     instead of only the pre-#122 journalctl `"skip expired"` line, buried
-    among thousands of no-pane polls that nobody actually watches."""
+    among thousands of no-pane polls that nobody actually watches.
+
+    #246 — the live-tasks SAFETY check the SubagentStop hook used to apply
+    at RECORD time (declining the request outright) now applies HERE too,
+    right before EITHER keystroke-sending branch below (the stash-around-
+    a-draft path and the plain send), via `_session_has_live_bg_tasks`.
+    The request is left in place (never consumed) on a defer — the next
+    sweep retries once the sibling work clears, or the entry expires via
+    `COMPACT_REQUEST_MAX_AGE_S` above."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -5563,6 +5648,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 if mhash:
                     mark_compact_delivered(sid, mhash, path=delivered_path)
             continue
+        # #246 — the live-tasks SAFETY check, moved here from the
+        # SubagentStop hook's old RECORD-time decline (see
+        # `_session_has_live_bg_tasks`'s own section comment). Checked
+        # immediately before EITHER keystroke-sending path below (the
+        # stash-around-a-draft path and the direct send), after every one
+        # of this job's own state-resolution gates above (#78/#71 dedup,
+        # in-mode/dialog/❓/⏳/unresumed/busy/#99/#48/#84) — per this repo's
+        # own #78 lesson, a new cross-cutting gate belongs at the send
+        # point, never at the top of the loop. Never a reason to consume
+        # the request: it stays queued for the next sweep, exactly like
+        # every other "not safe RIGHT NOW" skip in this loop.
+        if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
+                                      now=now, captured=captured):
+            logs.append("skip live-tasks (compact-request) %s" % loc)
+            continue
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
             # stash it around the /compact delivery instead of skipping
@@ -5716,14 +5816,16 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
-    block (#102 — `_compact_blocked_by_question`), or — the one case this
-    function deliberately stays conservative on — the pane holds a genuine
-    unsent DRAFT (job 14's `_compact_stash_attempt`, #67, handles that on
-    retry; a synchronous multi-round-trip stash dance at Stop-hook time is
-    unnecessary risk for what should be a rare case). A pane merely BUSY
-    (mid-turn) is NOT a reason to fall back — that is exactly the case
-    this function exists to handle, per the section comment's queuing
-    behavior.
+    block (#102 — `_compact_blocked_by_question`), the session STILL has
+    live background work of its own (#246 —
+    `_session_has_live_bg_tasks`, checked LAST, right before the send), or
+    — the one case this function deliberately stays conservative on — the
+    pane holds a genuine unsent DRAFT (job 14's `_compact_stash_attempt`,
+    #67, handles that on retry; a synchronous multi-round-trip stash dance
+    at Stop-hook time is unnecessary risk for what should be a rare case).
+    A pane merely BUSY (mid-turn) is NOT a reason to fall back — that is
+    exactly the case this function exists to handle, per the section
+    comment's queuing behavior.
 
     #78 — checks the SHARED `/compact` claim FIRST, before anything else
     (no pane resolution, no tmux round-trip needed): if another sender
@@ -5864,6 +5966,16 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         if tpath is not None and transcript_current_context(tpath) < min_context:
             _log_compact_sync("DROP small-context sid=%s cwd=%s" % (sid, cwd))
             return "dropped-small-context"   # #48 gate: nothing worth compacting
+    # #246 — the live-tasks SAFETY check, moved here from the SubagentStop
+    # hook's old RECORD-time decline (see `_session_has_live_bg_tasks`'s own
+    # section comment). Checked LAST, immediately before the actual
+    # keystroke send, after every other state-resolution step above — never
+    # a reason to consume/drop the request, just to leave it in place for
+    # job 14's polled retry once the sibling work clears.
+    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
+                                  captured=captured):
+        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
+        return ""
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
