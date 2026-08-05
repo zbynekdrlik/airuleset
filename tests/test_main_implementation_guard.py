@@ -1530,6 +1530,161 @@ class BypassCarriesAReason128(unittest.TestCase):
         self.assertRegex(out.stderr, r"echo\s+[\"'<]")
 
 
+def _stub_jq_dir(testcase, fail_argpat):
+    """(#180) A `jq` shim placed EARLIER on PATH than the real binary: it
+    fails (exit 2, no output) whenever its OWN argv contains `fail_argpat`,
+    and delegates everything else to the real `/usr/bin/jq` unchanged --
+    fault-injecting exactly ONE named extraction inside the hook without
+    disturbing any other jq call it makes. `fail_argpat` must be a
+    substring that appears in ONLY the targeted call's argv (verified per
+    call site against the shipped hook, not guessed)."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    import shutil
+    real_jq = shutil.which("jq") or "/usr/bin/jq"
+    stub = Path(d.name) / "jq"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in\n"
+        "    *'%s'*) exit 2 ;;\n"
+        "esac\n"
+        "exec %s \"$@\"\n" % (fail_argpat, real_jq))
+    stub.chmod(0o755)
+    return d.name
+
+
+class GoalArmedJqFails180(unittest.TestCase):
+    """(#180) The whole armed-/goal block/allow decision used to hinge on
+    ONE jq call (`jq -r '<filter>' "$TRANSCRIPT" | grep ... | tail -1`).
+    Fault-injecting that call (a stub jq on PATH -- direct reproduction was
+    0/8 attempts, confirming the mechanism needs the injection) proved the
+    pipe's failure collapsed through `|| echo ""` into GOAL_ARMED=0, which
+    reads as "not armed" and ALLOWS -- exactly backwards for a guard whose
+    whole point is stopping unattended main-session implementation."""
+
+    def test_jq_failure_reading_the_goal_marker_blocks_not_allows(self):
+        sid = "t-mg-jqfail-goal-" + uuid.uuid4().hex[:8]
+        with TemporaryDirectory() as d:
+            tp = str(Path(d) / "sess.jsonl")
+            # a PLAIN, non-Fable, no-goal-marker transcript -- with a
+            # WORKING jq this would be genuinely GOAL_ARMED=0 and ALLOWED.
+            Path(tp).write_text(transcript("claude-opus-4-8"))
+            # the goal-armed jq call is the ONLY one in the whole hook that
+            # takes $TRANSCRIPT as a positional argument (every other jq
+            # call reads its input piped via stdin) -- verified against
+            # the shipped hook, so this fails ONLY that one extraction.
+            stubdir = _stub_jq_dir(self, tp)
+            payload = {"session_id": sid, "hook_event_name": "PreToolUse",
+                       "tool_name": "Write",
+                       "tool_input": {"file_path": "/x/a.py", "content": BIG},
+                       "transcript_path": tp}
+            env = dict(os.environ)
+            env["PATH"] = stubdir + ":" + env["PATH"]
+            out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                                 env=env, capture_output=True, text=True)
+        self.assertEqual(
+            out.returncode, 2,
+            "a jq failure reading the goal-armed marker must fail CLOSED "
+            "(block), never silently allow: " + out.stdout + out.stderr)
+        self.assertIn(
+            "could not determine whether a /goal is armed", out.stderr,
+            "the operator-facing message must say it could not decide, "
+            "not silently claim a goal IS armed: " + out.stderr)
+        # the machine-readable rule tag (the block log's own `rule=` field)
+        # must be the DISTINCT GOAL_UNKNOWN, never GOAL_ARMED -- an audit
+        # reading the log must never be told a goal was armed when the
+        # truth is "the transcript could not be read".
+        block_log = Path("/tmp/airuleset-main-exec-block.log")
+        self.assertTrue(block_log.exists(), "the block must be logged")
+        lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
+        self.assertTrue(lines, "expected a block log line for this session")
+        self.assertIn("rule=GOAL_UNKNOWN", lines[-1],
+                      "expected the distinct GOAL_UNKNOWN rule tag, got: %r"
+                      % lines[-1])
+        self.assertNotIn("rule=GOAL_ARMED", lines[-1],
+                         "must never claim GOAL_ARMED when jq genuinely "
+                         "failed, got: %r" % lines[-1])
+
+    def test_a_working_jq_with_no_goal_marker_still_allows(self):
+        # control: the SAME plain transcript, real jq -- must still ALLOW.
+        # Proves the fix didn't flip to a blanket fail-closed that blocks
+        # every ordinary main-session call regardless of jq's health.
+        sid = "t-mg-jqok-goal-" + uuid.uuid4().hex[:8]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Write", content=BIG, model="claude-opus-4-8",
+                          sid=sid)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_jq_failure_message_names_the_extraction_that_failed(self):
+        sid = "t-mg-jqfail-msg-" + uuid.uuid4().hex[:8]
+        with TemporaryDirectory() as d:
+            tp = str(Path(d) / "sess.jsonl")
+            Path(tp).write_text(transcript("claude-opus-4-8"))
+            stubdir = _stub_jq_dir(self, tp)
+            payload = {"session_id": sid, "hook_event_name": "PreToolUse",
+                       "tool_name": "Write",
+                       "tool_input": {"file_path": "/x/a.py", "content": BIG},
+                       "transcript_path": tp}
+            env = dict(os.environ)
+            env["PATH"] = stubdir + ":" + env["PATH"]
+            out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                                 env=env, capture_output=True, text=True)
+        self.assertIn("could not determine", out.stdout + out.stderr,
+                      "the operator-facing message must say WHY it "
+                      "blocked, not just that it did: " + out.stderr)
+
+
+class BypassReasonJqFails180(unittest.TestCase):
+    """(#180) The bypass-reason extraction's own jq call sits at the end of
+    one pipe collapsed by `|| echo ""` -- a genuine jq hiccup and a
+    genuinely-too-short reason both used to produce the SAME "no reason,
+    cleared" log line, misleading whoever reads the bypass audit log. A
+    jq failure here already fails CLOSED overall (the bypass is refused,
+    implementation stays blocked) -- the fix is making the LOG say which
+    one actually happened."""
+
+    def _marker(self, sid):
+        return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
+
+    def _bypass_lines(self, sid):
+        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        if not log.exists():
+            return []
+        return [ln for ln in log.read_text().splitlines() if sid in ln]
+
+    def test_jq_failure_extracting_a_real_reason_still_refuses_the_bypass(self):
+        sid = "t-mg-jqfail-bypass-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        # a perfectly good, long reason -- with a WORKING jq this bypass
+        # would be HONORED (exit 0).
+        m.write_text("authoring the policy text itself — the content IS the judgment")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        # the bypass-reason jq call is the only one in the hook using the
+        # exact filter '.[0:200]' (every other slice uses '.[0:120]') --
+        # verified against the shipped hook.
+        stubdir = _stub_jq_dir(self, ".[0:200]")
+        env = dict(os.environ)
+        env["PATH"] = stubdir + ":" + env["PATH"]
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+                          transcript_text=goal_armed_transcript(),
+                          extra_env={"PATH": env["PATH"]})
+        self.assertEqual(
+            out.returncode, 2,
+            "a jq failure must never accidentally HONOR a bypass it "
+            "couldn't actually read: " + out.stdout + out.stderr)
+        lines = self._bypass_lines(sid)
+        self.assertTrue(lines, "the refusal must be logged")
+        self.assertIn(
+            "FAILED", lines[-1],
+            "the log must distinguish a jq FAILURE from a genuinely "
+            "too-short/absent reason, got: %r" % lines[-1])
+        self.assertNotIn(
+            "no reason", lines[-1],
+            "a real reason existed -- the log must not claim there was "
+            "none, got: %r" % lines[-1])
+
+
 class CombinedAssertionFlags128(unittest.TestCase):
     """#128, found while replaying the 2026-07-28 corpus: #80 exempts
     `grep -c` / `grep -q` as ASSERTIONS ("returns one number / nothing"),
