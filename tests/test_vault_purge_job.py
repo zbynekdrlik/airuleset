@@ -171,10 +171,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         import sys as _sys
         src_path = Path(wd.__file__)
         src = src_path.read_text()
-        old = "             vault_purge=None, log_fn=None):"
+        # (#182 re-pin: `reopen_fetch=None` was added after `log_fn=None` in
+        # run_once's own signature — the anchor moved, not the guard.)
+        old = "             vault_purge=None, log_fn=None, reopen_fetch=None):"
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         mutated = src.replace(
-            old, "             vault_purge=lambda: [], log_fn=None):", 1)
+            old, "             vault_purge=lambda: [], log_fn=None, "
+                 "reopen_fetch=None):", 1)
         self.assertNotEqual(mutated, src, "the mutation did not apply")
 
         name = "watchdog_live_default_mutant"
