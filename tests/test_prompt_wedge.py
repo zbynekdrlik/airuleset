@@ -177,13 +177,14 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
         run.calls = calls
         return run
 
-    def _drive_n_attempts(self, n, run=None):
+    def _drive_n_attempts(self, n, run=None, send=None, state=None):
         """Drive prompt_wedge_check through N machine-submit attempts against
         a draft that NEVER clears (mirroring the live incident -- the pane
         genuinely never submitted, so the box content is byte-identical
         forever). Each attempt costs 2 sweeps (one to record the fresh hash,
-        one to fire). Returns (run, logs_per_attempt)."""
-        st, s = {}, FakeSend()
+        one to fire). Returns (run, logs_per_attempt, send)."""
+        st = state if state is not None else {}
+        s = send if send is not None else FakeSend()
         run = run or self._run_recorder()
         now = time.time()
         attempt_logs = []
@@ -196,7 +197,7 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
                                          "zbynek", "odoo", s, run=run)
             attempt_logs.append(logs)
             t += 70
-        return run, attempt_logs
+        return run, attempt_logs, s
 
     @staticmethod
     def _unstick_calls(run):
@@ -204,13 +205,13 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
                 and "-H" in a]
 
     def test_first_two_attempts_never_send_the_unstick(self):
-        run, attempt_logs = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER)
+        run, attempt_logs, _ = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER)
         self.assertEqual(len(self._unstick_calls(run)), 0, run.calls)
         for logs in attempt_logs:
             self.assertTrue(any("machine-nudge submit" in ln for ln in logs), logs)
 
     def test_nth_consecutive_attempt_sends_paste_end_before_enter(self):
-        run, attempt_logs = self._drive_n_attempts(
+        run, attempt_logs, _ = self._drive_n_attempts(
             wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
         unstick = self._unstick_calls(run)
         self.assertEqual(len(unstick), 1, run.calls)
@@ -234,7 +235,7 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
         # prior attempts already sent their own leading Escape and still
         # failed, so the #36 agent-strip-selector explanation is already
         # ruled out -- the escalation attempt must NOT send "Escape" at all.
-        run, _ = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
+        run, _, _s = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
         unstick = self._unstick_calls(run)
         self.assertEqual(len(unstick), 1, run.calls)
         unstick_i = run.calls.index(unstick[0])
@@ -274,6 +275,60 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
         wd.prompt_wedge_check(t, st, "%1", empty_pane, now, "zbynek",
                               "odoo", FakeSend(), run=run)
         self.assertNotIn("pwedge-submit-attempts:%1", st, st)
+
+
+class TestMachineSubmitGiveUpPing(unittest.TestCase):
+    """MINOR finding (adversarial review of #255): the escalation loop
+    previously retried the paste-end unstick every ~2 sweeps FOREVER with
+    no observability if it never actually recovers the pane -- a genuinely
+    unrecoverable stuck pane would silently retry forever with nobody ever
+    told. Once escalation itself has been tried PWEDGE_SUBMIT_GIVEUP_AFTER
+    times with zero progress, send ONE deduped give-up ping (mirroring the
+    existing apierr-stashabort:/job-1 bounded give-up shape) -- the retry
+    itself keeps happening (still the best available automatic recovery),
+    but a human is now told this pane needs a look."""
+
+    def test_giveup_ping_fires_once_after_repeated_failed_unsticks(self):
+        st = {}
+        send = FakeSend()
+        harness = TestMachineSubmitPasteEndUnstick()
+        run, _, send = harness._drive_n_attempts(
+            wd.PWEDGE_SUBMIT_GIVEUP_AFTER + 1, send=send, state=st)
+        self.assertEqual(len(send.calls), 1, send.calls)
+        body = send.calls[0][0]
+        self.assertIn("%1", body)
+        self.assertIn("dedup_key", send.calls[0][1])
+
+    def test_no_giveup_ping_still_below_the_threshold(self):
+        st = {}
+        send = FakeSend()
+        harness = TestMachineSubmitPasteEndUnstick()
+        harness._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1,
+                                  send=send, state=st)
+        self.assertFalse(send.calls, send.calls)
+
+    def test_giveup_ping_never_repeats_for_the_same_stuck_episode(self):
+        st = {}
+        send = FakeSend()
+        harness = TestMachineSubmitPasteEndUnstick()
+        run, _, send = harness._drive_n_attempts(
+            wd.PWEDGE_SUBMIT_GIVEUP_AFTER + 3, send=send, state=st,
+            run=harness._run_recorder())
+        self.assertEqual(len(send.calls), 1, send.calls)
+
+    def test_giveup_state_resets_once_the_draft_actually_clears(self):
+        st = {}
+        send = FakeSend()
+        harness = TestMachineSubmitPasteEndUnstick()
+        run, _, send = harness._drive_n_attempts(
+            wd.PWEDGE_SUBMIT_GIVEUP_AFTER + 1, send=send, state=st)
+        self.assertTrue(any(k.startswith("pwedge-submit-giveup:") for k in st), st)
+        empty_pane = MACHINE_PANE.replace(
+            "Priorita: prio:bounce #1896 - posledny blocker release", "")
+        now = time.time()
+        wd.prompt_wedge_check(now, st, "%1", empty_pane, now, "zbynek",
+                              "odoo", FakeSend(), run=run)
+        self.assertFalse(any(k.startswith("pwedge-submit-giveup:") for k in st), st)
 
 
 class DeliveryAtomicWrtSweepBudget(unittest.TestCase):
