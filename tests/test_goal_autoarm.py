@@ -173,6 +173,57 @@ class TestGoalAutoarm(unittest.TestCase):
         self.assertTrue(t2.typed())
 
 
+class TestGoalAutoarmSweepBudget(unittest.TestCase):
+    """#255 Fix 1: goal_autoarm's own per-pane loop previously had no
+    wall-clock self-bound either -- the SAME gap class as bounce_backstop
+    (job 8), closed the same way: an optional time_fn/sweep_deadline pair,
+    checked strictly BETWEEN panes so a pane already being processed always
+    finishes; only a NOT-YET-STARTED pane is deferred to the next sweep."""
+
+    class MultiPaneTmux:
+        def __init__(self, n, captured, clock):
+            self.n = n
+            self.captured = captured
+            self.clock = clock
+            self.sent = []
+
+        def __call__(self, argv, timeout=8):
+            j = " ".join(argv)
+            self.sent.append(argv)
+            if "list-panes" in j:
+                return "\n".join(
+                    "%%%d\tclaude\t/home/x/devel/demo%d" % (i, i)
+                    for i in range(self.n))
+            if "capture-pane" in j:
+                self.clock[0] += 10   # each capture "costs" wall-clock time
+                return self.captured
+            if "display" in j:
+                return "0"
+            return ""
+
+        def typed(self):
+            return [a[-1] for a in self.sent if "-l" in a]
+
+    def test_stops_before_a_new_pane_once_budget_exhausted(self):
+        clock = [0.0]
+        tmux = self.MultiPaneTmux(2, ARM_PANE, clock)
+
+        def time_fn():
+            return clock[0]
+
+        logs = wd.goal_autoarm(time.time(), tmux, {},
+                               time_fn=time_fn, sweep_deadline=5)
+        self.assertEqual(len(tmux.typed()), 1, tmux.sent)
+        self.assertTrue(any("goalarm-budget-exceeded" in ln for ln in logs), logs)
+
+    def test_no_deadline_given_means_unbounded_as_before(self):
+        clock = [0.0]
+        tmux = self.MultiPaneTmux(2, ARM_PANE, clock)
+        logs = wd.goal_autoarm(time.time(), tmux, {})
+        self.assertEqual(len(tmux.typed()), 2, tmux.sent)
+        self.assertFalse(any("goalarm-budget-exceeded" in ln for ln in logs), logs)
+
+
 class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
     """#170 — job 9 decided purely from what is VISIBLE in the pane.
 
