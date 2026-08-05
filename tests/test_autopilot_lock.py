@@ -129,6 +129,55 @@ class TestAcquireRelease(TestCase):
                          + r2.stdout + r2.stderr)
 
 
+class TestDirectoryShapedLockPath(TestCase):
+    """(#248) `acquire` used to crash with an unhandled IsADirectoryError
+    when the lock path already exists as a DIRECTORY — a stale artifact of
+    an older mkdir-style lock implementation, or any manual mkdir. Hit live
+    on dev2 (presenter repo, 2026-08-05): the path was an EMPTY directory,
+    `rmdir` + retry fixed it manually — the command should self-heal instead:
+    an EMPTY directory is a stale artifact (removed, acquire proceeds); a
+    NON-EMPTY one is an error with a clear message, never a traceback."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+
+    def _lock_path(self):
+        sys.path.insert(0, str(REPO))
+        import airuleset
+        return airuleset._autopilot_lock_path(self.repo)
+
+    def test_empty_directory_at_lock_path_self_heals(self):
+        lp = self._lock_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.mkdir()                      # the exact stale artifact from the ticket
+        r = run(["acquire", "--repo", self.repo, "--pid", "999999999"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ACQUIRED", r.stdout)
+        self.assertFalse(lp.is_dir(), "the stale directory must be gone")
+        self.assertTrue(lp.is_file(), "a real lock file must exist now")
+
+    def test_non_empty_directory_at_lock_path_refuses_cleanly(self):
+        lp = self._lock_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.mkdir()
+        (lp / "unexpected-file").write_text("do not touch")
+        r = run(["acquire", "--repo", self.repo, "--pid", "999999999"])
+        self.assertNotEqual(r.returncode, 0,
+                            "a non-empty directory must never be silently removed")
+        self.assertNotIn("Traceback", r.stdout + r.stderr,
+                         "must refuse cleanly, never crash: " + r.stdout + r.stderr)
+        self.assertTrue(lp.is_dir(), "the non-empty directory must be left alone")
+        self.assertTrue((lp / "unexpected-file").exists())
+
+    def test_status_on_a_directory_shaped_lock_path_never_crashes(self):
+        lp = self._lock_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.mkdir()
+        r = run(["status", "--repo", self.repo])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+
+
 class TestWiring(TestCase):
     def test_registered_in_subcommands_table(self):
         sys.path.insert(0, str(REPO))
