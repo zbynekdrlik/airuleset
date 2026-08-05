@@ -10221,6 +10221,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # place, so a pane id not among THIS sweep's live_pane_ids is
             # dropped outright; a still-live pane's entry is left completely
             # untouched, however stale it looks.
+            #
+            # (adversarial-review finding on #199): `live_pane_ids` being
+            # EMPTY is NOT proof every pane died — `list_claude_panes`
+            # degrades to `[]` on ANY tmux read failure (`_default_run`'s
+            # own bare `except Exception: return ""`), so an empty set here
+            # is exactly as likely to mean "this sweep could not see tmux at
+            # all" as "nothing is running". Conflating the two would wipe
+            # every pwedge entry fleet-wide on one transient hiccup — skip
+            # pruning entirely rather than guess.
+            if not live_pane_ids:
+                continue
             prefix = "pwedge-ping:" if k.startswith("pwedge-ping:") else "pwedge:"
             if k[len(prefix):] not in live_pane_ids:
                 del state[k]
