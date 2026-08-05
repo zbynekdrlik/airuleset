@@ -84,7 +84,13 @@ MIN_LEN = 120
 
 _CAUSE_RE = re.compile(
     r"root\s*cause|underlying\s*cause|caused\s+by|because\s+the\b|"
-    r"pr[ií][cč]in|d[ôo]vod|sp[ôo]soben",
+    r"pr[ií][cč]in|d[ôo]vod|sp[ôo]soben|"
+    # #219: common Slovak root-cause phrasings that don't use
+    # "príčina"/"dôvod"/"spôsobené" -- "zdroj" alone is deliberately
+    # QUALIFIED (problému/chyby) so it never matches "zdrojový kód" (source
+    # CODE), an unrelated and extremely common technical phrase.
+    r"kore[ňn]|zdroj\s+(?:probl[ée]mu|chyby)|zisten|zistil|"
+    r"čo\s+sa\s+stalo|ch[ýy]bal|\bnebolo\b",
     re.IGNORECASE,
 )
 _APPROACH_RE = re.compile(
