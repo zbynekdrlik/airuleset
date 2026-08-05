@@ -3708,7 +3708,24 @@ backstop now escalates to the proven paste-end unstick sequence after
 draft, tracked by a new per-pane `(hash, count)` state key decoupled from
 the existing episode-tracking key's own reset cycle (a real coupling bug
 caught by the RED test, not by review — see the playbook entry). RED
-`3102d84`+`a2e2d00` / GREEN `ac7a7e4`. Full local suite: 3947 passed.
+`3102d84`+`a2e2d00` / GREEN `ac7a7e4`.
+
+Adversarial review (fresh-context `general-purpose`/opus): 1 🔴 CRITICAL +
+1 🟡 MAJOR + 2 🔵 MINOR, all fixed. CRITICAL: the escalation attempt sent
+the ordinary pre-Escape (#36) immediately before the unstick sequence's
+own leading ESC byte, putting two ESC bytes back-to-back on the wire —
+verified live on a throwaway tmux socket — the exact rapid-double-escape
+shape that PERMANENTLY DELETES a draft (this repo's #35 rule), and
+possibly not even parsed as the intended ESC[201~ at all. Fixed to send
+EXACTLY the proven sequence (paste-end + Enter, no Escape). MAJOR:
+`bounce_backstop`/`goal_autoarm` reused the bare pane-loop `sweep_deadline`
+instead of getting their OWN fair share of the 90/120 margin, silently
+zeroing their whole ~30s window whenever the pane loop alone used its
+full budget (measured live: 26/3837 sweeps over 3 days) — fixed via a new
+`TAIL_BUDGET_S` extension. MINOR: added a bounded give-up ping so an
+unrecoverable stuck pane is no longer retried silently forever. RED
+`7fb75a8`+`7018e85`+`eafb2c6` / GREEN `ccac144`. Full local suite: 3953
+passed.
 
 **#261 — montalu2/montalu3/montalu4: Discord notify DISABLED, live-fixed
 and closed.** Pure provisioning, no code: copied `~/.claude/channels/discord/
