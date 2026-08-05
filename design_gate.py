@@ -89,7 +89,15 @@ _CAUSE_RE = re.compile(
     # "príčina"/"dôvod"/"spôsobené" -- "zdroj" alone is deliberately
     # QUALIFIED (problému/chyby) so it never matches "zdrojový kód" (source
     # CODE), an unrelated and extremely common technical phrase.
-    r"kore[ňn]|zdroj\s+(?:probl[ée]mu|chyby)|zisten|zistil|"
+    #
+    # Adversarial-review findings (post-#219 fix): a bare "koreň" collided
+    # with "koreňový adresár"/"koreňová zložka" (root DIRECTORY/folder --
+    # the adjective form always continues "koreň" + "ov" + gender suffix,
+    # excluded via the negative lookahead), and a bare "zisten" was a pure
+    # accidental SUBSTRING of "konzistentná"/"nekonzistentný" (consistent/
+    # inconsistent, kon-ZISTEN-tná) with no word boundary in front of it --
+    # nothing to do with "zistenie" (finding), excluded via \b.
+    r"kore[ňn](?!ov)|zdroj\s+(?:probl[ée]mu|chyby)|\bzisten|\bzistil|"
     r"čo\s+sa\s+stalo|ch[ýy]bal|\bnebolo\b",
     re.IGNORECASE,
 )
