@@ -3204,3 +3204,31 @@ marker-block scan pattern and a subagent wait-protocol gotcha (Monitor
 registers as a SECOND in-flight task instead of satisfying the
 foreground-wait requirement -- a real `for`/`sleep`-loop-with-deadline
 Bash call is what actually works).
+
+## #241 -- window-size manual crashes tmux 3.4 at server start
+
+RED `0430e29` (test-only: TestTmuxHistoryLimit block-content assertions
+updated to expect two lines, a new downgrade test, and a dedicated
+TestTmuxWindowSizeRemoved.test_window_size_option_is_never_emitted_in_the_rendered_block
+-- confirmed genuinely RED against the unfixed render_tmux_history_block
+via `git stash` isolation) -> GREEN `9e8e2fe` (window-size manual removed
+from render_tmux_history_block at the source; TMUX_WINDOW_SIZE constant
+dropped at all three use sites; default-size 176x50 + history-limit
+50000 unaffected; docstrings/comments and the .claude/rules/airuleset-
+internals.md #236 entry corrected to stop claiming the option ships).
+Root cause: window-size manual, shipped fleet-wide by #236, crashes real
+tmux 3.4's server outright at startup (`server exited unexpectedly`) --
+confirmed live against the real 3.4 binary every managed box runs, the
+only version Ubuntu 24.04 noble ships (a DIFFERENT failure than #236's
+own live-apply-resize finding, which only affects a RUNNING server).
+Fresh-context adversarial review before push: no CRITICAL/MAJOR findings
+-- confirmed no leftover window_size references, argument order intact,
+docstrings accurate, and proved the new regression test has real teeth
+by mutation (reintroducing the crashing line makes 3 tests fail).
+Pushed directly to main (no PR/CI in this repo) -- Closes #241 on the
+GREEN commit auto-closed the issue. Post-deploy: verified read-only on
+dev1 and dev2 that the deployed ~/.tmux.conf carries no window-size line
+and that the real tmux 3.4 binary starts cleanly against it via a
+throwaway socket. Posted a follow-up comment on #236 stating the
+accepted trade-off (default-size alone no longer live-pins an existing
+window's size across attach/detach cycles). No PR (direct push).
