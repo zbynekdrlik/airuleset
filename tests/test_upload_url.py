@@ -462,6 +462,41 @@ class TestTotalBindFailureIsFatal(TestCase):
             "is holding the interpreter open through its own exit (#114)"
             % (took, self.TTL))
 
+    def test_the_fast_fail_bound_has_headroom_over_realistic_subprocess_overhead(self):
+        # #148: the ABOVE test's own bound is only meaningful if it has real
+        # headroom over what full-suite CPU contention actually does to
+        # subprocess spawn/exit timing. Live-reproduced (3 consecutive full
+        # `pytest tests/` runs on this repo, unchanged tree): the SAME fast-
+        # fail path took 3.34s on a loaded box, comfortably tripping the OLD
+        # `ttl/3.0` bound (2.0s at ttl=6) with no code regression at all.
+        #
+        # Reproduced DETERMINISTICALLY here (never by waiting for real load,
+        # same technique as `test_readiness_wait_survives_a_slow_server_start`
+        # above and #226's oneshot-TTL fix): a launcher wrapper injects a
+        # fixed startup delay comfortably above the worst load-driven time
+        # actually observed, comfortably below the widened bound, and far
+        # below where the #113/#114 regression itself would land (~ttl).
+        dest = Path(tempfile.mkdtemp())
+        ttl = self.TTL
+        forced_delay_s = 3.5          # > the 3.34s worst case observed live
+        slow = ("import os, sys, time; time.sleep(%r); "
+                "os.execv(sys.executable, [sys.executable, %r] + sys.argv[1:])"
+                % (forced_delay_s, str(SERVER)))
+        t0 = time.monotonic()
+        proc, _ = _spawn(self, "tok148slow", dest, ips=self.DEAD_IP, ttl=ttl,
+                          launcher=[sys.executable, "-c", slow])
+        err, _ = self._run_to_exit(proc, ttl + 20)
+        took = time.monotonic() - t0
+
+        self.assertIn("no address", err)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertLess(
+            took, ttl / 3.0,
+            "a %.1fs forced startup delay (realistic full-suite load, not "
+            "the #113/#114 regression) still tripped the bound — took %.2fs "
+            "of a %ds ttl; the bound has no real headroom left (#148)"
+            % (forced_delay_s, took, ttl))
+
     def test_a_bound_server_still_serves_and_still_expires_at_its_ttl(self):
         # The other direction: the fix must not buy a fast failure by breaking
         # the self-shutdown that keeps detached endpoints from orphaning. This
