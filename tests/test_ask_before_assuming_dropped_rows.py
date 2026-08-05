@@ -23,15 +23,18 @@ from unittest import TestCase, main
 from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset  # noqa: E402
+from _hook_state_cleanup import sweep_session_files  # noqa: E402
 
 HOOKS = airuleset.REPO_DIR / "hooks"
 
 
 def _run_pre_ask(text):
     """PreToolUse(AskUserQuestion) hook — exit 2 means the tool call itself
-    is blocked before the question ever reaches the user."""
+    is blocked before the question ever reaches the user. No session id in
+    this payload at all, so no per-session counter file to sweep."""
     payload = json.dumps({"tool_input": {"question": text}})
     p = subprocess.run(
         ["bash", str(HOOKS / "pre-ask-auto-answer.sh")],
@@ -42,13 +45,19 @@ def _run_pre_ask(text):
 
 def _run_stop_prose(text):
     """Stop hook — {"decision":"block"} on stdout means the same question
-    written as prose (not the AskUserQuestion tool) is also hard-blocked."""
+    written as prose (not the AskUserQuestion tool) is also hard-blocked.
+
+    #202: the hook only clears its own retry-counter file on a CLEAN stop,
+    never on a block — and almost every call here IS a block, by design (the
+    whole point of this file). Swept immediately: the sid is unique per call
+    and nothing later needs the counter once the verdict is read."""
     sid = f"test-dropped-row-{uuid.uuid4().hex[:10]}"
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
     p = subprocess.run(
         ["bash", str(HOOKS / "stop-check-prose-violations.sh")],
         input=payload, capture_output=True, text=True,
     )
+    sweep_session_files(sid)
     return '"decision"' in p.stdout and '"block"' in p.stdout
 
 
@@ -56,13 +65,17 @@ def _run_stop_untracked_work(text):
     """Stop hook — {"decision":"block"} means "asking permission to file
     issues" is hard-blocked. Fresh session id per call: the hook caps at
     3 blocks/session, so a shared session id across calls would silently
-    stop blocking after the 3rd and look like a coverage regression."""
+    stop blocking after the 3rd and look like a coverage regression.
+
+    #202: same leftover-counter shape as `_run_stop_prose` above — swept
+    immediately for the same reason."""
     sid = f"test-dropped-row-ndw-{uuid.uuid4().hex[:10]}"
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
     p = subprocess.run(
         ["bash", str(HOOKS / "stop-check-untracked-work.sh")],
         input=payload, capture_output=True, text=True,
     )
+    sweep_session_files(sid)
     return '"decision"' in p.stdout and '"block"' in p.stdout
 
 
