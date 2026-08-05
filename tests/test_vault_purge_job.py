@@ -173,11 +173,17 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         src = src_path.read_text()
         # (#182 re-pin: `reopen_fetch=None` was added after `log_fn=None` in
         # run_once's own signature — the anchor moved, not the guard.)
-        old = "             vault_purge=None, log_fn=None, reopen_fetch=None):"
+        # (batch-3 #172 re-pin: `time_fn=None, sweep_budget_s=None` were
+        # added on a NEW trailing line after `reopen_fetch=None,` — the
+        # closing `):` moved off this line entirely. Anchor spans both
+        # lines now; the mutation itself still targets only `vault_purge`.)
+        old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
+               "             time_fn=None, sweep_budget_s=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         mutated = src.replace(
             old, "             vault_purge=lambda: [], log_fn=None, "
-                 "reopen_fetch=None):", 1)
+                 "reopen_fetch=None,\n"
+                 "             time_fn=None, sweep_budget_s=None):", 1)
         self.assertNotEqual(mutated, src, "the mutation did not apply")
 
         name = "watchdog_live_default_mutant"

@@ -1684,6 +1684,38 @@ class BypassReasonJqFails180(unittest.TestCase):
             "a real reason existed -- the log must not claim there was "
             "none, got: %r" % lines[-1])
 
+    def test_unreadable_marker_file_never_crashes_the_hook(self):
+        # (adversarial review of this batch's own #180 diff) Splitting the
+        # bypass-reason pipe (tr | tr -d | sed) out of its old shared
+        # `|| echo ""` fallback removed the safety net from THIS half --
+        # under `set -euo pipefail`, a read failure here (a TOCTOU-style
+        # race, or -- reproduced deterministically here -- a permission
+        # failure) used to crash the WHOLE hook via set -e: no block
+        # message, no controlled exit code, before ever reaching the
+        # jq-failure handling #180 added. The hook must always resolve to
+        # a real decision (0 or 2), never die uncaught.
+        sid = "t-mg-180-unreadable-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("a perfectly good reason that becomes unreadable")
+        m.chmod(0o000)
+
+        def _cleanup():
+            # the hook's own `rm -f $BYPASS_FILE` may already have removed
+            # it (rm needs write on the PARENT dir, not the file's own
+            # mode) -- either way is fine, just don't crash cleanup itself.
+            if m.exists():
+                m.chmod(0o644)
+            m.unlink(missing_ok=True)
+        self.addCleanup(_cleanup)
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+                          transcript_text=goal_armed_transcript())
+        self.assertIn(
+            out.returncode, (0, 2),
+            "the hook must resolve to a real decision, never crash "
+            "uncaught: rc=%d stdout=%r stderr=%r"
+            % (out.returncode, out.stdout, out.stderr))
+
 
 class CombinedAssertionFlags128(unittest.TestCase):
     """#128, found while replaying the 2026-07-28 corpus: #80 exempts

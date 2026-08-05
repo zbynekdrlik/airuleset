@@ -1294,6 +1294,31 @@ class SessionLimitWiring(unittest.TestCase):
         self.assertIn("Enter", flat)
         self.assertNotIn("-l", flat, "must never type text over the user's draft: %r" % keys)
 
+    def test_dated_reset_ping_uses_run_onces_own_now_not_real_wall_clock(self):
+        """(adversarial review of this batch's own #183 diff) job 6's ping
+        text renders the reset time via `_human_clock`, which formats
+        differently depending on whether the reset falls on "today" --
+        that comparison must use run_once's OWN `now` parameter, never the
+        REAL wall clock silently read behind the scenes. A weekly-cap
+        banner ("resets Jul 31, 9pm", no day-of-week qualifier -- job 6's
+        dated branch) with `now` fixed to that SAME calendar date must
+        render the bare 'HH:MM' form (today's reset), regardless of what
+        the real world's current date happens to be when this test runs."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Prague")
+        now = datetime(2026, 7, 31, 10, 0, tzinfo=tz).timestamp()
+        capture = ("❯ continue\n"
+                  "  ⎿  You've hit your weekly limit · resets Jul 31, 9pm "
+                  "(Europe/Prague)\n\n❯ ")
+        logs, sent, keys, _ = self._harness(now, capture=capture)
+        self.assertTrue(sent, "expected a session-limit ping: %r" % logs)
+        self.assertTrue(
+            any("Reset o 21:00." in b for b in sent),
+            "the SAME calendar date must render the bare HH:MM form, not "
+            "DD.MM HH:MM (which would mean it compared against the REAL "
+            "wall clock instead of run_once's own `now`): %r" % sent)
+
 
 class RunOnceLoopIsolation(unittest.TestCase):
     """(issue #3) One pane raising inside the per-transcript loop body — a
@@ -1503,6 +1528,18 @@ def _pane_list_fake_run(pane_cwd_pairs, cap="● Predošlá práca hotová.\n❯
     return fake_run
 
 
+def _fixed_calls_time_fn(values, default=999.0):
+    """(#172) A `time_fn` stub returning each of `values` in order, then
+    `default` forever after -- lets a test script the EXACT sequence of
+    wall-clock reads run_once's sweep-budget check makes (one for the
+    deadline, one per loop-top check) without depending on real timing."""
+    calls = iter(values)
+
+    def time_fn():
+        return next(calls, default)
+    return time_fn
+
+
 class RunOnceSweepWallClockBudget(unittest.TestCase):
     """(#172) Live evidence on dev1: the sweep is still occasionally
     SIGTERM-killed by systemd's TimeoutStartSec=120 (~4/24h, self-recovering
@@ -1547,8 +1584,7 @@ class RunOnceSweepWallClockBudget(unittest.TestCase):
         # idx=0 check for session A (0.0 < 10.0 -> processed). 3rd call: the
         # loop's idx=1 check for session B (50.0 >= 10.0 -> break, never
         # processed this tick).
-        calls = iter([0.0, 0.0, 50.0])
-        time_fn = lambda: next(calls, 999.0)
+        time_fn = _fixed_calls_time_fn([0.0, 0.0, 50.0])
 
         logs = wd.run_once(now=now, dry_run=False, run=fake_run,
                            send_fn=lambda *a, **k: None,
@@ -1603,8 +1639,7 @@ class RunOnceSweepWallClockBudget(unittest.TestCase):
         wd.save_state(state_path, seeded)
 
         fake_run = _pane_list_fake_run([(self.PANE_A, self.CWD_A), (self.PANE_B, self.CWD_B)])
-        calls = iter([0.0, 0.0, 50.0])
-        time_fn = lambda: next(calls, 999.0)
+        time_fn = _fixed_calls_time_fn([0.0, 0.0, 50.0])
 
         logs = wd.run_once(now=now, dry_run=False, run=fake_run,
                            send_fn=lambda *a, **k: None,
@@ -1623,6 +1658,48 @@ class RunOnceSweepWallClockBudget(unittest.TestCase):
             len(saved[sid_b].get("nudges", [])), 1,
             "nudge history must be UNCHANGED for a session the budget "
             "skipped this tick, got: %r" % saved.get(sid_b))
+
+    def test_a_nonpositive_env_budget_does_not_disable_the_sweep(self):
+        """(adversarial review of this batch's own #172 diff) A `<= 0`
+        AIRULESET_SWEEP_BUDGET_S (0, or a negative value -- both parse as
+        valid ints, so the ValueError fallback never catches them) would
+        set the deadline to now-or-earlier, tripping the very FIRST
+        loop-top check and skipping EVERY session on EVERY sweep forever --
+        silently disabling jobs 1/2/4/4a/5/6/7/9/10 fleet-wide, exactly the
+        opposite of what this fix exists to do. Must clamp to the default
+        instead, exactly like `_repo_sweep_batch`'s own `max_repos <= 0`."""
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc_a = wd.encode_project_dir(self.CWD_A)
+        (proj / enc_a).mkdir(parents=True)
+        tpath_a = proj / enc_a / "aaaaaaaa.jsonl"
+        _write_jsonl(tpath_a, [_assistant("Earlier."), _assistant(CAMERA_BOX_TEXT), _system()])
+        now = time.time()
+        os.utime(tpath_a, (now - 600, now - 600))
+        fake_run = _pane_list_fake_run([(self.PANE_A, self.CWD_A)])
+
+        for bad in (0, -5):
+            with self.subTest(sweep_budget_s=bad):
+                # a FRESH state file per value -- reusing one across
+                # iterations means the first (correctly clamped) run seeds
+                # textcall: state, and the second run's "nudge" then
+                # legitimately reads as "wait" (retry-interval not yet
+                # elapsed), which is a TEST bug, not a production one.
+                state_path = Path(tmp.name) / ("state-%s.json" % bad)
+                logs = wd.run_once(now=now, dry_run=False, run=fake_run,
+                                   send_fn=lambda *a, **k: None,
+                                   projects_dir=proj, state_path=state_path,
+                                   pending_prefix=str(Path(tmp.name) / "pending-"),
+                                   sweep_budget_s=bad)
+                self.assertFalse(
+                    any(ln.startswith("sweep-budget-exceeded") for ln in logs),
+                    "a non-positive sweep_budget_s must clamp to the "
+                    "default, not disable the sweep entirely: %r" % logs)
+                self.assertTrue(
+                    any(ln.startswith("textcall-nudge#1") for ln in logs),
+                    "session A must still be processed with the clamped "
+                    "default budget, got: %r" % logs)
 
 
 class RunOnceSubagentVisibility(unittest.TestCase):
