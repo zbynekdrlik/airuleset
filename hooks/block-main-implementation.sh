@@ -258,6 +258,82 @@ esac
 if [ "$TOOL_NAME" = "Bash" ]; then
     BASH_CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
     [ -n "$BASH_CMD" ] || exit 0
+
+    # #174: manual pane revival must deliver only 'continue' -- never text
+    # captured from the SAME pane. UNCONDITIONAL (not gated by Fable/goal-
+    # armed/away, no bypass marker): a live incident (2026-07-29, see
+    # .claude/rules/airuleset-internals.md) showed the main session read a
+    # STALLED pane's stale input-box draft off its screen and typed it back
+    # as if it were a real pending prompt -- `continue` was never sent at
+    # all. This is a CORRECTNESS/SAFETY concern (what gets typed into
+    # another session), not a cost-control one, so it applies regardless of
+    # this session's own Fable/goal/away state, and there is no legitimate
+    # reason to bypass it (the sanctioned way to deliver an answer to
+    # another session is notify/deliver_discord_replies, never an ad-hoc
+    # manual send-keys of something just read). This catches the narrow,
+    # MECHANICALLY-SAFE slice of the mistake: a command that CAPTURES a
+    # pane's content (`tmux capture-pane`/`display-message`, via a shell
+    # variable or an inline command substitution) and then feeds that SAME
+    # value into a `tmux send-keys` payload, in ONE command line -- zero
+    # false positives on a deliberately hand-composed literal, since that
+    # never involves a capture call at all. It cannot see the CROSS-turn
+    # shape (read the pane in one tool call, compose the send-keys command
+    # from memory in a LATER one) -- there is no mechanical fix for that;
+    # the rule file is what covers it.
+    SENDKEYS_VERDICT=$(python3 - "$BASH_CMD" 2>/dev/null <<'PYEOF'
+import re
+import shlex
+import sys
+
+cmd = sys.argv[1]
+
+
+def top_segments(text):
+    # good enough to find every assignment/command in a compound line --
+    # the same boundary set this hook already treats as command edges
+    # elsewhere (classify_bash's own segment split).
+    return re.split(r'&&|\|\||;|\n', text)
+
+
+CAPTURE_RE = re.compile(
+    r'\$\(\s*tmux\s+(?:capture-pane|display-message)\b[^)]*\)')
+
+captured_vars = set()      # names of vars assigned FROM a pane-capture call
+inline_hit = False         # a capture call sits directly inside a send-keys segment
+
+for seg in top_segments(cmd):
+    seg = seg.strip()
+    m = re.match(r'^(\w+)=(.*)$', seg)
+    if m and CAPTURE_RE.search(m.group(2)):
+        captured_vars.add(m.group(1))
+    if CAPTURE_RE.search(seg) and re.search(r'\bsend-keys\b', seg):
+        inline_hit = True
+
+if inline_hit:
+    print("UNSAFE:inline-capture-into-send-keys")
+    sys.exit(0)
+
+for seg in top_segments(cmd):
+    try:
+        tk = shlex.split(seg)
+    except ValueError:
+        continue
+    if "tmux" not in tk or "send-keys" not in tk:
+        continue
+    for var in captured_vars:
+        if ("$" + var) in seg or ("${" + var + "}") in seg:
+            print("UNSAFE:%s" % var)
+            sys.exit(0)
+print("SAFE")
+PYEOF
+) || SENDKEYS_VERDICT=""
+    case "$SENDKEYS_VERDICT" in
+        UNSAFE:*)
+            echo "BLOCKED: this MAIN session's command captures a pane's content (tmux capture-pane/display-message) and feeds it straight back into \`tmux send-keys\` -- the exact \"read the screen, type it back as a real prompt\" mistake #174 is about. Manual pane revival may ONLY ever deliver the literal 'continue' -- a genuinely deliberate, hand-composed literal is fine (this only blocks a value that came FROM a pane capture in this SAME command). See .claude/rules/airuleset-internals.md." >&2
+            exit 2
+            ;;
+    esac
+
     # #80: ARMING the escape hatch is never blocked and never counted —
     # otherwise the per-dispatch cap below could sit in front of the only
     # documented way out of it, which would be exactly the dead end the
