@@ -224,3 +224,41 @@ class TestPwedgeStateCleanupOnDeadPane(unittest.TestCase):
         self.assertIn("pwedge:%s" % self.LIVE_PANE, saved,
                       "a live pane's episode state must survive cleanup: "
                       "%r" % saved)
+
+    def test_a_transient_tmux_failure_must_never_wipe_every_pwedge_entry(self):
+        # (adversarial-review finding on #199) `list_claude_panes` degrades
+        # to `[]` on ANY tmux read failure (`_default_run`'s bare `except
+        # Exception: return ""`) — a genuinely empty `live_pane_ids` set is
+        # therefore NOT evidence every pane died, it is evidence THIS SWEEP
+        # could not see any pane at all. Conflating the two would wipe every
+        # pwedge episode fleet-wide on one transient hiccup (a tmux restart,
+        # an ssh blip) — unmeasurable must never be read as "prune it all".
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        now = time.time()
+
+        state_path = Path(tmp.name) / "state.json"
+        state_path.write_text(json.dumps({
+            "pwedge:%s" % self.DEAD_PANE: {"hash": "deadbeef", "n": 2,
+                                            "pinged": False},
+            "pwedge-ping:%s" % self.LIVE_PANE: now - 100,
+        }))
+
+        def fake_run(argv, timeout=8):
+            # every call fails, exactly like _default_run's own real
+            # degrade-to-"" behavior on a tmux read error/timeout.
+            return ""
+
+        wd.run_once(now=now, dry_run=False, run=fake_run,
+                    send_fn=lambda *a, **k: None,
+                    projects_dir=proj, state_path=state_path,
+                    pending_prefix=str(Path(tmp.name) / "pending-"))
+
+        saved = json.loads(state_path.read_text())
+        self.assertIn("pwedge:%s" % self.DEAD_PANE, saved,
+                      "an unmeasurable sweep must never be read as "
+                      "'every pane died': %r" % saved)
+        self.assertIn("pwedge-ping:%s" % self.LIVE_PANE, saved,
+                      "an unmeasurable sweep must never wipe ping-cooldown "
+                      "state either: %r" % saved)
