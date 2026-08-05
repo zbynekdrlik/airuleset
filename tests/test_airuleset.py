@@ -3303,6 +3303,7 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn("claude-new()", text)
         self.assertIn("claude-ultracode()", text)
         self.assertIn("claude-plain()", text)
+        self.assertIn("claude-fullscreen()", text)
 
     def test_bashrc_block_has_no_flag_literals_only_script_calls(self):
         # THE ACCEPTANCE CRITERION (#77): the .bashrc block must contain NO
@@ -3315,11 +3316,13 @@ class TestUltracodeLauncher(TestCase):
         block = p.read_text().split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
         for literal in ("--settings", "--model", "--dangerously-skip-permissions",
-                        "ultracode\":true", airuleset.MANAGED_MODEL):
+                        "ultracode\":true", airuleset.MANAGED_MODEL,
+                        "CLAUDE_CODE_NO_FLICKER"):
             self.assertNotIn(literal, block, block)
         self.assertIn(airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name, block)
         for fn, mode in (("claude", "default"), ("claude-new", "new"),
-                         ("claude-ultracode", "ultracode"), ("claude-plain", "plain")):
+                         ("claude-ultracode", "ultracode"), ("claude-plain", "plain"),
+                         ("claude-fullscreen", "fullscreen")):
             line = next(ln for ln in block.splitlines() if ln.startswith(f"{fn}() {{"))
             self.assertIn(f'"$HOME/.claude/{airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name}" {mode} "$@"',
                           line)
@@ -3354,6 +3357,23 @@ class TestUltracodeLauncher(TestCase):
         rest = content[:start] + content[end + len(";;"):]
         self.assertNotIn('"ultracode":true', rest)
 
+    def test_no_flicker_env_var_only_in_fullscreen_branch(self):
+        # #253: CLAUDE_CODE_NO_FLICKER=1 is the OPT-IN mitigation for the
+        # proven upstream renderer defect (anthropics/claude-code#84247 /
+        # #46834) that stacks duplicate/interleaved frames into tmux's
+        # native scrollback. It must appear ONLY inside the script's own
+        # `fullscreen)` branch -- never silently applied to default/new/
+        # ultracode/plain, since it trades away native tmux copy-mode / OS
+        # scrollback search and that tradeoff is the user's call, not a
+        # forced default.
+        content = airuleset.render_claude_launch_script()
+        start = content.index("fullscreen)")
+        end = content.index(";;", start)
+        fullscreen_branch = content[start:end]
+        self.assertIn("CLAUDE_CODE_NO_FLICKER=1", fullscreen_branch)
+        rest = content[:start] + content[end + len(";;"):]
+        self.assertNotIn("CLAUDE_CODE_NO_FLICKER", rest)
+
     def test_model_flag_present_in_every_mode_except_plain(self):
         # THE BUG (live on gatekeeper): a RESUMED session (-c) silently kept
         # its OLD model -- the launcher never passed --model, so `-c`
@@ -3362,8 +3382,9 @@ class TestUltracodeLauncher(TestCase):
         # deliberate vanilla `plain` escape hatch.
         content = airuleset.render_claude_launch_script()
         expected = "--model '%s'" % airuleset.MANAGED_MODEL
-        # new(x1) + ultracode(if/else x2) + default(if/else x2) = 5
-        self.assertEqual(content.count(expected), 5, content)
+        # new(x1) + ultracode(if/else x2) + default(if/else x2)
+        # + fullscreen(if/else x2) = 7
+        self.assertEqual(content.count(expected), 7, content)
         plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
         self.assertNotIn("--model", plain_branch)
 
@@ -4159,6 +4180,64 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         cwd.mkdir()
         out = self._run_launcher(home, cwd, fn="claude-plain")
         self.assertEqual(out.strip(), "ARGS:")
+
+    def _run_launcher_with_env_probe(self, home, cwd, fn):
+        # Like _run_launcher, but the stub also echoes CLAUDE_CODE_NO_FLICKER
+        # so a test can assert what the launch script actually EXPORTED.
+        bashrc = Path(home) / ".bashrc"
+        script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
+        airuleset.apply_ultracode_launcher(bashrc, script)
+        stub_dir = Path(home) / "bin"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "claude"
+        stub.write_text(
+            '#!/bin/bash\necho "ARGS:$* NOFLICKER:${CLAUDE_CODE_NO_FLICKER:-}"\n')
+        stub.chmod(0o755)
+        env = {**os.environ, "HOME": str(home),
+               "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+        r = subprocess.run(
+            ["bash", "-c", f"source {bashrc}; cd '{cwd}'; {fn}"],
+            capture_output=True, text=True, env=env)
+        return r.stdout
+
+    def test_claude_fullscreen_sets_no_flicker_and_preserves_continue_or_new(self):
+        # #253: proven upstream renderer defect (anthropics/claude-code#84247 /
+        # #46834) stacks duplicate/interleaved frames into tmux's native
+        # scrollback on every SIGWINCH/relayout. CLAUDE_CODE_NO_FLICKER=1
+        # switches Claude Code to the alternate-screen TUI, which never
+        # writes into the terminal's native scrollback at all -- sidestepping
+        # the defect class entirely (confirmed by upstream reporters on
+        # #46834). This is otherwise identical to the `default` mode
+        # (continue-or-new, skip-perms, managed model) -- only the env var
+        # differs.
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out = self._run_launcher_with_env_probe(home, cwd, fn="claude-fullscreen")
+        self.assertIn("NOFLICKER:1", out)
+        self.assertIn(" -c", out)
+        self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
+        self.assertIn("--dangerously-skip-permissions", out)
+        self.assertNotIn("ultracode", out)
+
+    def test_claude_fullscreen_fresh_dir_starts_new_without_dash_c(self):
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher_with_env_probe(home, cwd, fn="claude-fullscreen")
+        self.assertIn("NOFLICKER:1", out)
+        self.assertNotIn(" -c", out)
+
+    def test_default_mode_never_sets_no_flicker(self):
+        # The opt-in escape hatch must never leak into the default launch --
+        # forcing fullscreen mode on every session is a UX tradeoff the user
+        # did not ask for.
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher_with_env_probe(home, cwd, fn="claude")
+        self.assertNotIn("NOFLICKER:1", out, out)
 
     def test_frozen_shell_gets_new_launcher_behavior_without_resourcing(self):
         # THE BUG (#77): a bashrc FUNCTION is parsed once at shell startup and
