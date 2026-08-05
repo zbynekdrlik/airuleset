@@ -3403,3 +3403,65 @@ internals.md`, plus this file's own #243/#246 backfill for two prior
 tickets' documentation debt). Pushed directly to main (no PR/CI in
 this repo) -- Closes #246 on the GREEN commit auto-closed the issue.
 No PR (direct push).
+
+
+## Batch: #248, #199, #184, #182 (bundled, one work stretch)
+
+**#248 — autopilot-lock acquire crashed (IsADirectoryError) on a stale
+directory-shaped lock path.** `cmd_autopilot_lock`'s acquire path now checks
+`lock_path.is_dir()` before the exists()/read()/steal flow: an empty
+directory is `rmdir()`'d and acquisition proceeds; a non-empty one refuses
+with a clear stderr message, exit 1, never a traceback. RED
+`23e8a22` / GREEN `d4843d1`. Adversarial-review MINOR finding: `rmdir()`
+itself was unguarded and crashes on a symlink to an empty directory
+(`NotADirectoryError`, verified empirically) — fixed with its own
+try/except falling through to the same clean refusal. RED `edcad9b` /
+GREEN `681ff17`.
+
+**#199 — watchdog job 10's `pwedge:`/`pwedge-ping:` state (keyed by tmux
+PANE id, a different identity space from every session-keyed prefix in
+`run_once`'s cleanup OR-chain) was never pruned for a dead pane.** Added a
+`live_pane_ids` set populated from every pane `list_claude_panes` sees this
+sweep, and a cleanup branch dropping a pwedge entry whose pane id isn't in
+it. RED `7f21e9a` / GREEN `8c0f90d`. Adversarial-review MAJOR finding: an
+empty `live_pane_ids` (from `list_claude_panes` degrading to `[]` on ANY
+tmux read failure) was wrongly read as "every pane died", wiping all pwedge
+state on one transient hiccup — fixed by skipping the prune entirely when
+`live_pane_ids` is empty. RED `0bb6a74` / GREEN `6210076`.
+
+**#184 — `notify-delivery.log` only ever logged non-deliveries, so a
+healthy box and a broken logger produced the identical empty file.**
+`notify.send()` now logs `dedup`/`no-config`/`sent`/`error` unconditionally;
+`hooks/notify-discord-send.sh` logs `sent` in the CONFIRM 2xx branch and
+inside the fire-and-forget backgrounded curl (which now captures its own
+HTTP code from within the same background subshell — still non-blocking).
+RED `0edb943` / GREEN `c7bdb5e`. No adversarial-review findings.
+
+**#182 — the run-card dedup key `<repo>#<issue>` was claimed forever on
+the first close, so a reopened ticket's second card silently deduped.**
+Job 25 (`card_reconcile`) gained an additive `reopen_fetch` step: for every
+issue number with an existing marker, ask which are open again and clear
+those markers via a new `notify.forget_marker`/`card_marker_numbers` pair —
+zero consumers of the plain key changed. `_watchdog_reopened_fetch` wires
+one bounded `gh issue list --state open` call. RED `96ef8fd` / GREEN
+`add762c`. Adversarial-review CRITICAL finding: the reopen-clear step sat
+after `if not closed: continue`, so a repo with nothing closing in THIS
+sweep's window never reached it at all — reproducing the exact bug. Fixed
+by moving name-resolution + reopen-clear ahead of that early-continue, so
+it runs independent of `closed`. RED `504bd81` / GREEN `5cfc0e2`.
+
+Design + validated + reviewed comments posted per issue before/after code
+per the extended design-gate (#213/#214). Fresh-context adversarial review
+dispatched once over the whole batch's diff before the intended push;
+1 CRITICAL + 1 MAJOR + 1 MINOR finding, all fixed with their own RED/GREEN
+pairs (commits above), 0 residual findings after re-review. One incidental
+test re-pin (`test_vault_purge_job.py`, `303fbc3`) — an unrelated mutation
+test's literal anchor moved when `run_once` grew the new `reopen_fetch`
+trailing parameter; re-pinned, not weakened.
+
+Full local suite: 3807 tests, 1 documented unrelated wall-clock flake
+(`test_ci_poll_repeat_block.py::OneShotReviewFollowupTest::
+test_oneshot_ttl_is_configurable_and_short_ttls_decay_fast`, a 1s TTL
+racing subprocess-spawn overhead — confirmed flaky standalone, unrelated to
+any of the four tickets, pre-dates this batch by several days). Ruff clean
+repo-wide. No PR (direct push — supervisor pushes).
