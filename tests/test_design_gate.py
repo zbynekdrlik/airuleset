@@ -208,6 +208,56 @@ class TestCauseRegexSlovakSynonyms(unittest.TestCase):
             "endpoint. Everything works as expected and is ready for "
             "review."))
 
+    # ---- adversarial-review findings (post-#219 fix): the bare "koreň" and
+    # "zisten" alternations collided with everyday, unrelated Slovak words,
+    # exactly the class of false positive the "zdroj" qualifier was already
+    # written to avoid, just not applied to these two.
+    def test_korenovy_adresar_root_directory_is_not_mistaken_for_root_cause(self):
+        # "koreňový adresár" / "koreňová zložka" = "root directory" / "root
+        # folder" -- an everyday IT term, not a cause claim. The adjective
+        # form always continues "koreň" + "ov" + gender suffix.
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "presunul som konfiguračný súbor do koreňového adresára "
+            "repozitára"))
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "súbor je teraz v koreňovej zložke"))
+
+    def test_konzistentne_consistent_is_not_mistaken_for_zistenie(self):
+        # "konzistentná"/"nekonzistentný" (consistent/inconsistent) contains
+        # "zisten" as a pure accidental SUBSTRING (kon-ZISTEN-tná) with no
+        # word boundary in front of it -- nothing to do with "zistenie"
+        # (finding).
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "aby sa chyby hlásili konzistentne naprieč všetkými cestami"))
+        self.assertIsNone(dg._CAUSE_RE.search("stav bol nekonzistentný"))
+
+    def test_a_comment_using_only_root_directory_language_fails_the_classifier(self):
+        # End-to-end: no real root-cause explanation anywhere, only a
+        # filesystem move justified by mentioning "root directory" -- must
+        # still fail on "root cause", not be waved through.
+        body = (
+            "Prístup: presuniem config súbor do koreňového adresára "
+            "repozitára, namiesto ponechania v podadresári config/, čo "
+            "zjednodušuje cesty vo všetkých skriptoch. Zamietnutá "
+            "alternatíva: ponechať ho v podadresári a upraviť každý "
+            "skript zvlášť -- to je zbytočná duplicitná práca."
+        )
+        ok, reason = dg.classify_design_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("root cause", reason)
+
+    def test_a_comment_using_only_consistency_language_fails_the_classifier(self):
+        body = (
+            "Prístup: pridávam validáciu vstupu na začiatku endpointu "
+            "namiesto kontroly až pred zápisom do DB, aby sa chyby "
+            "hlásili konzistentne naprieč všetkými cestami. Zamietnutá "
+            "alternatíva: kontrola tesne pred zápisom -- to necháva "
+            "nekonzistentné chybové hlásenia medzi jednotlivými cestami."
+        )
+        ok, reason = dg.classify_design_comment(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("root cause", reason)
+
     # ---- end-to-end: the real incident shape now passes the classifier ---
     GOOD_SLOVAK_KOREN = (
         "Koreň/kontext: worker chýbal v dispatch reťazci, lebo telo skillu "
