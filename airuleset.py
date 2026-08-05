@@ -224,7 +224,26 @@ CAVEMAN_CACHE_GLOBS = (
 # commands like /brainstorming simply missing and gated audits reference
 # nonexistent skills (david@gk, 2026-07-09). All from the built-in
 # claude-plugins-official marketplace — no extraKnownMarketplaces entry needed.
-MANAGED_PLUGINS = ("superpowers@claude-plugins-official",)
+#
+# Playwright (#158, 2026-08-06): the ruleset MANDATES a real browser for
+# verification (autonomous-verification.md's "ask the user to install
+# plugin:playwright" branch, e2e-real-user-testing.md, post-deploy-
+# verification / version-on-dashboard skills) but the plugin was only ever
+# installed BY HAND, per account — david@subdev had none at all, and no
+# future account ever would either. THE CONTEXT-COST DECISION (a CONNECTED
+# Playwright MCP injects its whole tool schema every turn — skills/mdreview/
+# SKILL.md already flags it as expensive): baseline-installed AND ENABLED
+# everywhere, not project-scoped. Reasoning: (a) it was ALREADY the fleet's
+# de facto norm — dev1/dev2/gatekeeper/marek/montalu all had it enabled by
+# hand already, only david (and any future account) was missing it, (b) the
+# rules require it as MANDATORY verification tooling on every project, not a
+# subset, (c) `superpowers` already set the "baseline plugin, always
+# enabled, accepted context cost" precedent this repo already lives with,
+# (d) true per-project scoping would need NEW machinery (project-level
+# plugin overrides) out of this ticket's scope and against the standing
+# FREEZE on inventing new supervision mechanisms.
+MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
+                    "playwright@claude-plugins-official")
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
 # /doctor findings): rust-analyzer-lsp + claude-md-management had 0 lifetime
 # uses on dev2 and `/doctor` disabled them directly in settings.json
@@ -241,6 +260,11 @@ MANAGED_DISABLED_PLUGINS = (
 MANAGED_PLUGIN_CACHE_GLOBS = {
     "superpowers@claude-plugins-official":
         "plugins/cache/claude-plugins-official/superpowers/*/skills",
+    # Playwright's cache dir uses a literal "unknown" version segment rather
+    # than a content hash (confirmed live, dev1) — match the plugin manifest
+    # file instead, present under any version-segment name.
+    "playwright@claude-plugins-official":
+        "plugins/cache/claude-plugins-official/playwright/*/.claude-plugin/plugin.json",
 }
 # Hash-independent entry to caveman's statusline + the usage-limit/ticket/
 # account meter line (the standalone context-fill BAR was dropped, #223 --
@@ -1558,7 +1582,20 @@ def cmd_diff(args):
 # it on every target in one shot.
 # Push runs install on EVERY target, so every deploy verifies + heals the
 # whole fleet's toolset.
-RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop")
+#
+# node/npx (#158): the managed Playwright plugin's MCP server needs a real
+# node/npx runtime, never tracked here before.
+RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop",
+                 "node", "npx")
+
+# The apt PACKAGE name differs from the BINARY name for node/npx (#158):
+# Debian/Ubuntu's real "node" package is an unrelated amateur packet-radio
+# program (installing it would never provide the `node` binary at all), and
+# `npx` has no package of its own — both ship bundled inside "nodejs" (this
+# fleet's own NodeSource package, confirmed live to explicitly `Replaces:
+# npm`, i.e. npm+npx included). Every other tracked dep's binary name IS its
+# apt package name, so this override only needs the two exceptions.
+RUNTIME_DEP_PACKAGE = {"node": "nodejs", "npx": "nodejs"}
 
 
 def check_runtime_deps(deps=RUNTIME_DEPS):
@@ -1572,8 +1609,9 @@ def check_runtime_deps(deps=RUNTIME_DEPS):
     for d in deps:
         if shutil.which(d):
             continue
+        pkg = RUNTIME_DEP_PACKAGE.get(d, d)
         try:
-            r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y", d],
+            r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y", pkg],
                                capture_output=True, text=True, timeout=300)
             ok = r.returncode == 0 and shutil.which(d)
         except Exception:
@@ -1586,7 +1624,7 @@ def check_runtime_deps(deps=RUNTIME_DEPS):
             print("  ⚠ MISSING RUNTIME DEP: '%s' is not installed on this box "
                   "and auto-install failed (no sudo?) — hooks/notify/watchdog "
                   "will degrade SILENTLY. Install it as root: apt-get install "
-                  "%s." % (d, d))
+                  "%s." % (d, pkg))
     return still
 
 
