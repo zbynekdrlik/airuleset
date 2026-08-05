@@ -9436,7 +9436,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # a missed auto-resume (the user still gets pinged on the stall via the flag).
     by_transcript = {}
     hosted_panes = []                   # sudo-hosted stream panes (foreign HOME)
+    live_pane_ids = set()               # every claude pane id THIS sweep sees — job 10
+                                         # cleanup (#199) prunes a pwedge:/pwedge-ping:
+                                         # entry for a pane id NOT in this set. Populated
+                                         # from EVERY pane list_claude_panes discovers
+                                         # (not just the subset job 10 actually processes
+                                         # this sweep) — a pane ambiguously mapped to a
+                                         # shared transcript, or a sudo-hosted one, is
+                                         # still genuinely LIVE even though job 10 skips
+                                         # it this particular sweep.
     for pid, cwd in list_claude_panes(run):
+        live_pane_ids.add(pid)
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
             fu = _foreign_user(cwd)
@@ -10172,7 +10182,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     for k in list(state.keys()):
         if k == "usage":
             continue                       # account-wide usage state, not a session
-        if (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
+        if k.startswith("pwedge:") or k.startswith("pwedge-ping:"):
+            # Job 10's episode + ping-cooldown state (#199) is keyed by PANE
+            # ID (tmux target), never a transcript session id — a DIFFERENT
+            # identity space from every other prefix below (all keyed by
+            # session id, aged via `last_seen` or membership in `stalled`).
+            # pwedge state carries no timestamp field to age by in the first
+            # place, so a pane id not among THIS sweep's live_pane_ids is
+            # dropped outright; a still-live pane's entry is left completely
+            # untouched, however stale it looks.
+            prefix = "pwedge-ping:" if k.startswith("pwedge-ping:") else "pwedge:"
+            if k[len(prefix):] not in live_pane_ids:
+                del state[k]
+        elif (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
                 or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")
                 or k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
