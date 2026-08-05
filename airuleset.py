@@ -647,7 +647,21 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # Modes: `default` (claude — continue-or-new, skip-perms, model, NO ultracode),
 # `new` (claude-new — always FRESH, skip-perms, model, NO ultracode — force a
 # clean start), `ultracode` (claude-ultracode — deliberate opt-in: continue-or-new
-# + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags).
+# + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags),
+# `fullscreen` (claude-fullscreen — deliberate opt-in: continue-or-new + skip-perms
+# + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
+#   CLAUDE_CODE_NO_FLICKER=1 : the OPT-IN mitigation for a proven upstream Claude
+#       Code renderer defect (#253 — anthropics/claude-code#84247 / #46834, both
+#       open: a SIGWINCH/relayout re-emits a fresh copy of the transcript into the
+#       terminal's PRIMARY scrollback, corrupting it with duplicate/interleaved
+#       frames; reproduced live on dev1 -- a real 25-line completion-report chunk
+#       found duplicated verbatim in tmux pane history). Switching to the
+#       alternate-screen TUI means Claude Code owns the whole viewport and never
+#       writes into the terminal's native scrollback at all, so the defect class
+#       has nothing to corrupt. It is NEVER the default -- it trades away native
+#       tmux copy-mode (Ctrl+B [) and OS-level scrollback search, a real UX choice
+#       only the user should make, same discipline as ultracode's own opt-in-only
+#       rule two paragraphs up.
 CLAUDE_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) — the claude launcher (#77). Read FRESH from
 # disk on EVERY invocation (unlike a ~/.bashrc function, which is parsed once
@@ -686,6 +700,14 @@ case "$mode" in
         --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
+  fullscreen)
+    export CLAUDE_CODE_NO_FLICKER=1
+    if _has_conversation; then
+      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+    else
+      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+    fi
+    ;;
   *)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
@@ -712,6 +734,7 @@ ULTRACODE_BASHRC_BLOCK = (
     f'claude-new() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" new "$@"; }}\n'
     f'claude-ultracode() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" ultracode "$@"; }}\n'
     f'claude-plain() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" plain "$@"; }}\n'
+    f'claude-fullscreen() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" fullscreen "$@"; }}\n'
     f"{ULTRACODE_MARK_END}"
 )
 
