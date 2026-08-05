@@ -749,7 +749,6 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
 
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
-TMUX_WINDOW_SIZE = "manual"
 TMUX_DEFAULT_SIZE = "176x50"
 TMUX_MARK_START = "# >>> airuleset tmux >>>"
 TMUX_MARK_END = "# <<< airuleset tmux <<<"
@@ -765,27 +764,43 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # #236: the identical frame-stacking mechanism also fires on every ATTACH
 # from a different-sized terminal -- tmux's default `window-size latest`
 # auto-resizes the whole window to fit the new client, and Claude Code
-# re-renders the visible screen in place on that resize. Fix: pin
-# `window-size manual` (stop the auto-resize) and `default-size 176x50`
-# (the fixed size new windows get -- the user's own client, 176x51, is the
-# confirmed smallest on the fleet, so 176x50 crops nobody and larger
-# clients just get an unused margin). This ticket's own incident history
-# (two live-tmux destructions on dev1, the second a kernel segfault in
-# tmux 3.4's format-expansion code) settled that a per-window resize call
-# is NEVER part of this feature: setting the two OPTIONS above does not
-# disturb any attached client's current window size, and resizing a window
-# in place buys nothing new windows don't already get from `default-size`
-# on their own -- see TestTmuxWindowSizeNoResize for the structural,
-# whole-file lock (the exact tmux subcommand name is deliberately not
-# spelled out here so this comment can't ever collide with that lock).
+# re-renders the visible screen in place on that resize. #236 originally
+# tried to pin `window-size manual` (stop the auto-resize) alongside
+# `default-size 176x50` (the fixed size new windows get -- the user's own
+# client, 176x51, is the confirmed smallest on the fleet, so 176x50 crops
+# nobody and larger clients just get an unused margin).
+#
+# #241: `window-size manual` was REMOVED again -- it CRASHES tmux 3.4's
+# server outright at startup (`server exited unexpectedly`), confirmed
+# live against the real 3.4 binary every managed box runs, the only
+# version Ubuntu 24.04 noble ships. A box whose conf carried the line
+# could not start tmux at all. This is a DIFFERENT failure than #236's own
+# live-apply finding (flipping window-size against a RUNNING server snaps
+# every window back to its stored size -- a disruptive resize, not a
+# crash): there is no safe way to ship the option at all, conf-only or
+# otherwise, so it is gone from the managed block entirely. Cost: without
+# `manual`, tmux keeps auto-tracking the smallest attached client's size,
+# so the fixed geometry #236 wanted is only PARTLY delivered by
+# `default-size` alone (new windows still start at 176x50; an existing
+# window's LIVE size is no longer pinned against later attach/detach
+# cycles) -- see #236's own comment thread for that trade-off.
+# `default-size` stays: it starts cleanly on 3.4. This ticket's own
+# incident history (two live-tmux destructions on dev1, the second a
+# kernel segfault in tmux 3.4's format-expansion code) settled that a
+# per-window resize call is NEVER part of this feature: setting the
+# surviving default-size OPTION does not disturb any attached client's
+# current window size, and resizing a window in place buys nothing new
+# windows don't already get from `default-size` on their own -- see
+# TestTmuxWindowSizeNoResize for the structural, whole-file lock (the
+# exact tmux subcommand name is deliberately not spelled out here so this
+# comment can't ever collide with that lock).
 
 
-def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT, window_size=TMUX_WINDOW_SIZE,
+def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE):
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
-        f"set-option -g window-size {window_size}\n"
         f"set-option -g default-size {default_size}\n"
         f"{TMUX_MARK_END}"
     )
@@ -834,11 +849,14 @@ def _default_tmux_run(argv):
 
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
-                              window_size: str = TMUX_WINDOW_SIZE,
                               default_size: str = TMUX_DEFAULT_SIZE,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
-    (#235) plus window-size manual + default-size (#236).
+    (#235) plus default-size (#236). `window-size manual` was REMOVED
+    again by #241 -- it crashes tmux 3.4's server outright at startup, so
+    it is never emitted here at all, conf-only or otherwise (see the
+    module-level comment above `render_tmux_history_block` for the full
+    incident history and the `default-size`-alone trade-off this leaves).
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
     block's CONTENT in place if a clean pair of markers already exists
@@ -855,23 +873,13 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     pane's history buffer in place). This is a server OPTION set, never a
     keystroke into any pane.
 
-    window-size and default-size are DELIBERATELY CONF-ONLY -- never
-    live-applied via a real tmux subprocess call, in any code path. A
-    post-implementation adversarial review, independently reproduced on a
-    real attached pty client against this box's own live tmux binary,
-    PROVED that flipping `window-size` to `manual` against a RUNNING
-    server immediately snaps every window back to its stored/created
-    size, regardless of the attached client's current terminal size -- a
-    live, disruptive resize event, with NO per-window resize call and NO
-    `#{...}` format-expansion query against the live server involved at
-    all. That is exactly the disruption this ticket exists to eliminate,
-    reached through a THIRD, independently discovered pathway (neither of
-    the two prior incidents). Both options still land in the conf file
-    above, so they take effect for the NEXT server/session/window --
-    existing attached sessions simply keep tmux's factory defaults
-    (`latest`/`80x24`) until that server is next restarted, mirroring the
+    default-size is DELIBERATELY CONF-ONLY -- never live-applied via a
+    real tmux subprocess call, in any code path. It lands in the conf
+    file above, so it takes effect for the NEXT server/session/window --
+    existing attached sessions simply keep tmux's factory default
+    (`80x24`) until that server is next restarted, mirroring the
     identical, already-accepted trade-off this ticket made for a
-    per-window resize call itself. See TestTmuxWindowSizeConfOnly for the
+    per-window resize call itself. See TestTmuxWindowSizeRemoved for the
     lock, and TestTmuxWindowSizeNoResize for the separate, unrelated
     per-window-resize / format-expansion-query lock.
 
@@ -883,7 +891,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     conf-file write result above -- mirroring the ticket's own "ignore
     failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
-    block = render_tmux_history_block(limit, window_size, default_size)
+    block = render_tmux_history_block(limit, default_size)
 
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(existing)
@@ -1415,23 +1423,26 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
 
-    # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236) ---
+    # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
     # frame-stacking made real scrollback holey within minutes under
     # agentic load -- raise history-limit fleet-wide via the same
     # idempotent-marker-block shape as the launcher's ~/.bashrc block above.
-    # #236 extends the SAME block with window-size manual + default-size
-    # 176x50 -- the identical frame-stacking mechanism also fires on every
-    # per-attach resize from a different-sized terminal, not just scrollback
-    # rotation. history-limit alone is live-applied to any RUNNING tmux
-    # server (#235's original, proven-safe scope); window-size/default-size
-    # are conf-only (a live set of window-size was PROVED to itself force a
-    # disruptive resize on an attached client -- see apply_tmux_history_
-    # limit's own docstring) and take effect for the next server/session.
+    # #236 extended the SAME block with default-size 176x50 -- the
+    # identical frame-stacking mechanism also fires on every per-attach
+    # resize from a different-sized terminal, not just scrollback rotation.
+    # #236 originally also shipped `window-size manual`; #241 removed it
+    # again -- it crashes tmux 3.4's server outright at startup (every
+    # managed box's version) -- so only history-limit + default-size ship
+    # now. history-limit alone is live-applied to any RUNNING tmux server
+    # (#235's original, proven-safe scope); default-size is conf-only and
+    # takes effect for the next server/session (see apply_tmux_history_
+    # limit's own docstring, and the module-level comment above
+    # render_tmux_history_block, for the full history).
     try:
         tmux_changed = apply_tmux_history_limit()
-        tmux_desc = (f"history-limit {TMUX_HISTORY_LIMIT}, window-size "
-                     f"{TMUX_WINDOW_SIZE}, default-size {TMUX_DEFAULT_SIZE}")
+        tmux_desc = (f"history-limit {TMUX_HISTORY_LIMIT}, "
+                     f"default-size {TMUX_DEFAULT_SIZE}")
         if tmux_changed:
             print(f"  Updated:   {TMUX_CONF} ({tmux_desc})")
         else:
