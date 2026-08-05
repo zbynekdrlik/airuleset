@@ -169,6 +169,23 @@ class TestDirectoryShapedLockPath(TestCase):
         self.assertTrue(lp.is_dir(), "the non-empty directory must be left alone")
         self.assertTrue((lp / "unexpected-file").exists())
 
+    def test_a_symlink_to_an_empty_directory_refuses_cleanly_never_crashes(self):
+        # (adversarial-review finding on #248 — MINOR) `rmdir()` on a
+        # SYMLINK whose target is an empty directory raises
+        # NotADirectoryError even though `is_dir()`/`iterdir()` both report
+        # it as a normal, empty directory — verified empirically. The
+        # original fix only wrapped `iterdir()` in try/except, leaving
+        # `rmdir()` itself able to crash the exact same way the ticket was
+        # filed about, just via a rarer filesystem shape.
+        lp = self._lock_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        real_dir = lp.parent / (lp.name + "-real-target")
+        real_dir.mkdir()
+        lp.symlink_to(real_dir, target_is_directory=True)
+        r = run(["acquire", "--repo", self.repo, "--pid", "999999999"])
+        self.assertNotIn("Traceback", r.stdout + r.stderr,
+                         "must refuse cleanly, never crash: " + r.stdout + r.stderr)
+
     def test_status_on_a_directory_shaped_lock_path_never_crashes(self):
         lp = self._lock_path()
         lp.parent.mkdir(parents=True, exist_ok=True)
