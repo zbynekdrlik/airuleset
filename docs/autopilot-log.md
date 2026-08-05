@@ -3512,3 +3512,63 @@ own RED/GREEN pairs (commits above).
 
 Pushed `7e42250..88f3414` direct to main (no PR/CI in this repo).
 Deployed to all 6 targets via `airuleset.py push`.
+
+
+## Batch: #172, #183, #180, #174 (bundled, one work stretch)
+
+**#172 — watchdog livelock: sweeps kept getting killed at systemd's
+`TimeoutStartSec` instead of finishing.** The real residual was NOT jobs
+27/28 (already fixed by #175/#176/#199) — it was the per-transcript pane
+loop itself running unbounded wall-clock with no self-bound, so a slow
+sweep hit the systemd SIGTERM mid-loop instead of stopping cleanly.
+Fix: a sweep-wide wall-clock self-bound (`sweep_budget_s`, env
+`AIRULESET_SWEEP_BUDGET_S`) on the per-transcript loop, so it stops
+itself before systemd ever has to. RED `ceed8ae` / GREEN `4e2e595`.
+
+**#183 — watchdog job 6's auto-resume reset-time parse returned wrong
+epochs on reproduced real shapes.** Three independent bugs in the same
+parser: no guard against a truncated year, last-regex-match preferred
+over first (letting a stale echoed timestamp hijack the result), and a
+non-sticky bad-parse path that silently rolled forward to the wrong
+coarse epoch. Fix rejects truncated years and unrecognised months,
+prefers the first match over the last, and refuses the coarse rollover
+on a bad parse instead of guessing. RED `8844235` / GREEN `a24bab6`.
+
+**#180 — `block-main-implementation.sh` failed OPEN when its `jq`
+extraction hiccupped**, silently letting a Fable-main implementation
+edit through on the exact malformed-input case the guard exists to
+catch. Fix: the guard now fails CLOSED on a `jq` extraction failure,
+distinguishably logged from a routine empty result, so a parse error
+blocks instead of waving through. RED `f6b6f85` / GREEN `fb1f314`.
+
+**#174 — manual pane revival submitted the captured pane's own screen
+text back to it as a prompt**, re-injecting whatever was already on
+screen instead of a real instruction. Fix: the revival payload is now
+constrained to the literal string `continue`, never the captured
+buffer. RED `8705ff1` / GREEN `c2098c9`. The remaining cross-turn
+detection gap (revival firing on stale mid-turn output rather than a
+genuinely stuck pane) is out of this fix's scope and a NEW hook is
+forbidden under the FREEZE — filed as #252 (new hook forbidden under
+FREEZE).
+
+Fresh-context adversarial review over the whole batch's diff found 3
+real regressions in the batch's own four fixes, all fixed with their
+own RED/GREEN pair (RED `63cfa89` / GREEN `9f02665`): (1) the sweep
+budget had no `<= 0` clamp — a non-positive `AIRULESET_SWEEP_BUDGET_S`
+would have disabled the whole per-transcript loop instead of bounding
+it; (2) the production call site of `_human_clock` (which accepts
+`now=` for testability) wasn't threading `now=` through, so it silently
+read real wall-clock instead of `run_once`'s own timeline; (3) #180's
+`jq` pipe was refactored from `cmd | while read` into a split form that
+dropped the pipeline's `set -e` coverage for the producer, so a
+marker-file read failure crashed the hook uncaught instead of failing
+closed — reproduced via `chmod 000` on the marker file.
+
+FREEZE-compliant: zero new files across the whole batch
+(`git diff --name-status --diff-filter=A 88f3414..9f02665` empty).
+Full local suite: 3849 tests OK. Pushed `88f3414..9f02665` (12 commits)
+direct to main, deployed to all 6 targets via `airuleset.py push`.
+Live proof of #250's grace-anchor fix (previous batch) observed
+post-deploy: dev1's watchdog journal logged
+`OK (compact-request, grace-elapsed) zbynek-4:2.0` at 21:00:32 UTC —
+the first field grace-elapsed compact delivery.
