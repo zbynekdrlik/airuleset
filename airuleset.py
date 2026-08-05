@@ -4008,7 +4008,12 @@ def cmd_compact_request(args):
     all, resolved from the calling pane via `$TMUX_PANE`. See
     `watchdog.deliver_compact_self`'s own docstring for the full mechanism
     (the primary fix for the ticket's "boundary window closes before the
-    sweep looks" race)."""
+    sweep looks" race).
+
+    #250 -- the `req_now` captured right before `record_compact_request` is
+    threaded into `deliver_compact_now` as `request_ts=` (and `now=`), so
+    its live-tasks defer (#246) is bounded by the SAME grace window job 14
+    applies -- see `watchdog.COMPACT_DEFER_GRACE_S`'s own comment."""
     if getattr(args, "self", False):
         from watchdog import deliver_compact_self
         word, sid = deliver_compact_self(hold_s=getattr(args, "hold", None))
@@ -4024,18 +4029,28 @@ def cmd_compact_request(args):
                           clear_compact_request, compact_already_delivered,
                           mark_compact_delivered)
     if getattr(args, "record", False):
+        import time
         msg_hash = (getattr(args, "msg_hash", "") or "").strip()
         origin = (getattr(args, "origin", "") or "").strip()
         if compact_already_delivered(args.session, msg_hash):
             sys.stdout.write("dup")
             return
-        ok = record_compact_request(args.session, args.cwd, msg_hash=msg_hash,
-                                    origin=origin)
+        # #250 -- capture the SAME `ts` used for the record call and thread
+        # it into `deliver_compact_now` as `request_ts=`, so its own
+        # grace-bound live-tasks check (`_compact_live_tasks_in_grace`)
+        # measures age from the request this exact call just recorded --
+        # see that function's own docstring for why this is always
+        # in-grace in practice (called synchronously, moments after the
+        # record above).
+        req_now = time.time()
+        ok = record_compact_request(args.session, args.cwd, now=req_now,
+                                    msg_hash=msg_hash, origin=origin)
         if not ok:
             sys.stdout.write("skip")
             return
         try:
-            delivered = deliver_compact_now(args.session, args.cwd, origin=origin)
+            delivered = deliver_compact_now(args.session, args.cwd, origin=origin,
+                                            request_ts=req_now, now=req_now)
         except Exception:
             delivered = ""
         if delivered:

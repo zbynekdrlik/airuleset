@@ -5034,6 +5034,57 @@ COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
 # gates above are what decide whether a fresh request is safe.
 COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
+# #250 (2026-08-05, live evidence: dev1 supervisor + gk) — the live-tasks
+# defer (`_session_has_live_bg_tasks`, below) starves a SUPERVISOR-shaped
+# session outright: a session that continuously dispatches background
+# workers never has a quiet moment, so every recorded request cycles
+# "skip live-tasks" on every sweep, forever, until COMPACT_REQUEST_MAX_AGE_S
+# silently drops it -- zero real compactions, ever, for that session. This
+# bounds the defer by TIME instead of leaving it unconditional: once a
+# request has been sitting through a live-tasks defer for longer than this
+# window, `/compact` is delivered anyway (see `_compact_live_tasks_in_grace`
+# below) -- a short type-ahead-queue send, exactly the pre-#246 delivery
+# shape, reliable even into a busy pane.
+#
+# MUST stay comfortably UNDER COMPACT_REQUEST_MAX_AGE_S above -- a grace >=
+# the TTL recreates the exact starvation this fix exists to kill: the
+# request would LAPSE (dropped, unfired) before its own grace window ever
+# has a chance to elapse, so the "deliver anyway" branch below would never
+# be reached for a session that never has a quiet moment. Locked by
+# `TestCompactDeferGraceRelationship`.
+COMPACT_DEFER_GRACE_S = 300      # 5 min; env AIRULESET_COMPACT_DEFER_GRACE_S
+
+
+def _compact_defer_grace(grace=None):
+    if grace is not None:
+        return grace
+    try:
+        return int(os.environ.get("AIRULESET_COMPACT_DEFER_GRACE_S",
+                                  COMPACT_DEFER_GRACE_S))
+    except ValueError:
+        return COMPACT_DEFER_GRACE_S
+
+
+def _compact_live_tasks_in_grace(request_ts, now, grace=None):
+    """#250 -- True while the live-tasks defer (`_session_has_live_bg_tasks`)
+    should still apply: the request's OWN age (its `ts` field -- the
+    authoritative anchor every other age-based gate in this file already
+    uses) is under the grace window (`_compact_defer_grace`). Once a
+    request has been deferred on live tasks for longer than this, the
+    defer stops -- the caller delivers `/compact` anyway.
+
+    A missing/unreadable `ts` is treated as IN-GRACE (True), never as
+    "infinite age": guessing "past grace" from an unmeasurable value would
+    start typing into a session with live siblings the FIRST time age
+    can't be read, which is exactly the safety property this defer exists
+    to protect. `COMPACT_REQUEST_MAX_AGE_S`'s own expiry is what eventually
+    drops an entry whose age can never be resolved -- not this check."""
+    try:
+        age = float(now) - float(request_ts)
+    except (TypeError, ValueError):
+        return True   # unmeasurable age -- stay in-grace, never guess "past"
+    return age < _compact_defer_grace(grace)
+
 # #67 (2026-07-26 live incident, david@subdev): a forgotten USER DRAFT sitting
 # in the input box made job 14/15 log "skip draft" and retry FOREVER — the
 # same draft (one unfinished sentence) skipped 13 sweeps straight overnight
@@ -5283,6 +5334,12 @@ def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
 # dir at all) this returns False — deferral is an OPTIMIZATION of an
 # already-real safety property, never itself a new way to block delivery on
 # "we don't know".
+#
+# This function answers only "does live sibling work exist RIGHT NOW" — it
+# says nothing about how LONG a request may be deferred on that basis. #250
+# bounds that separately (`COMPACT_DEFER_GRACE_S` /
+# `_compact_live_tasks_in_grace`, above): a session that never has a quiet
+# moment must not be deferred forever.
 _LIVE_BG_TASK_WINDOW_S = 120
 
 
@@ -5476,7 +5533,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     a-draft path and the plain send), via `_session_has_live_bg_tasks`.
     The request is left in place (never consumed) on a defer — the next
     sweep retries once the sibling work clears, or the entry expires via
-    `COMPACT_REQUEST_MAX_AGE_S` above."""
+    `COMPACT_REQUEST_MAX_AGE_S` above.
+
+    #250 — that defer is bounded by TIME, not unconditional: once the
+    request has been sitting through a live-tasks defer for longer than
+    `COMPACT_DEFER_GRACE_S` (`_compact_live_tasks_in_grace`), `/compact` is
+    delivered anyway. A session shaped like a supervisor that continuously
+    dispatches background workers never has a quiet moment, so an
+    unconditional defer starves it completely — see that constant's own
+    comment for the live evidence and the bounded-relationship invariant."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -5656,19 +5721,33 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # of this job's own state-resolution gates above (#78/#71 dedup,
         # in-mode/dialog/❓/⏳/unresumed/busy/#99/#48/#84) — per this repo's
         # own #78 lesson, a new cross-cutting gate belongs at the send
-        # point, never at the top of the loop. Never a reason to consume
-        # the request: it stays queued for the next sweep, exactly like
-        # every other "not safe RIGHT NOW" skip in this loop.
+        # point, never at the top of the loop.
+        #
+        # #250 — bounded by TIME: the defer applies only while this
+        # request is still within COMPACT_DEFER_GRACE_S of its own `ts`
+        # (`_compact_live_tasks_in_grace`) — see that constant's own
+        # comment for why a session that NEVER goes quiet (a supervisor
+        # dispatching workers back to back) must not be deferred forever.
+        # Still in grace -> left in place, retried next sweep, exactly
+        # like every other "not safe RIGHT NOW" skip in this loop. Past
+        # grace -> `grace_elapsed` marks every OK/READY line below so a
+        # field audit of journalctl can tell a genuinely-clear delivery
+        # apart from one that fired anyway.
+        grace_elapsed = False
         if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
                                       now=now, captured=captured):
-            logs.append("skip live-tasks (compact-request) %s" % loc)
-            continue
+            if _compact_live_tasks_in_grace(entry.get("ts"), now):
+                logs.append("skip live-tasks (compact-request) %s" % loc)
+                continue
+            grace_elapsed = True
+        grace_tag = ", grace-elapsed" if grace_elapsed else ""
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
             # stash it around the /compact delivery instead of skipping
             # forever.
             if dry_run:
-                logs.append("READY (compact-request, draft) %s" % loc)
+                logs.append("READY (compact-request, draft%s) %s"
+                            % (grace_tag, loc))
                 continue
             project = project_label(cwd)
             owner = pane_owner(pid, run)
@@ -5683,7 +5762,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     mark_compact_delivered(sid, mhash, path=delivered_path)
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
-                logs.append("OK (compact-request, stash) %s" % loc)
+                logs.append("OK (compact-request, stash%s) %s"
+                            % (grace_tag, loc))
             else:
                 logs.append("skip draft (stash occupied) %s: %r"
                             % (loc, draft[:40]))
@@ -5698,7 +5778,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             continue
         busy_tag = ", busy" if kind == "busy" else ""
         if dry_run:
-            logs.append("READY (compact-request%s) %s" % (busy_tag, loc))
+            logs.append("READY (compact-request%s%s) %s"
+                        % (busy_tag, grace_tag, loc))
             continue
         send_continue(pid, COMPACT_TEXT, run)
         reqs.pop(sid, None)
@@ -5709,7 +5790,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
-        logs.append("OK (compact-request%s) %s" % (busy_tag, loc))
+        logs.append("OK (compact-request%s%s) %s" % (busy_tag, grace_tag, loc))
     if changed:
         _save_compact_requests(reqs, path)
     return logs
@@ -5796,9 +5877,26 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
 
 
 def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
-                        git_run=None, origin=None):
+                        git_run=None, origin=None, request_ts=None, now=None):
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
+
+    `request_ts`/`now` (#250, both optional): the SAME grace-bound check job
+    14 applies (`_compact_live_tasks_in_grace`) — `request_ts` is the `ts`
+    the caller's OWN `record_compact_request` call just wrote for this exact
+    `sid` (both callers thread it through: `cmd_compact_request`'s
+    `--record` branch, `deliver_compact_self`'s retry loop). Left at the
+    default `None` (every pre-#250 caller/test), a missing `request_ts` is
+    treated as unmeasurable and therefore ALWAYS in-grace — i.e. UNCHANGED
+    behavior: this function still always defers on live tasks, exactly as
+    before. That default is also the CORRECT behavior for how this function
+    is actually invoked in production: it runs SYNCHRONOUSLY, moments after
+    the request was recorded with `ts=now`, so its own attempt is always
+    in-grace when tasks are live (the "wait for a genuinely quiet moment
+    first" preference) — the post-grace delivery belongs to job 14's own
+    polled retry, which is why only ITS decision log carries the explicit
+    `grace-elapsed` marker; see `COMPACT_DEFER_GRACE_S`'s own comment for
+    the full reasoning and the live evidence that motivated it.
 
     Returns a non-empty STRING word when this session is FULLY HANDLED
     (either `/compact` was actually typed, or an existing claim / the #99 /
@@ -5972,14 +6070,23 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # keystroke send, after every other state-resolution step above — never
     # a reason to consume/drop the request, just to leave it in place for
     # job 14's polled retry once the sibling work clears.
+    #
+    # #250 — bounded by TIME, the identical check job 14 applies
+    # (`_compact_live_tasks_in_grace`), using `request_ts` (see this
+    # function's own docstring for why it is always in-grace in practice).
+    grace_elapsed = False
     if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
                                   captured=captured):
-        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
-        return ""
+        now_ts = now if now is not None else time.time()
+        if _compact_live_tasks_in_grace(request_ts, now_ts):
+            _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
+            return ""
+        grace_elapsed = True
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
-    _log_compact_sync("SEND sid=%s cwd=%s" % (sid, cwd))
+    _log_compact_sync("SEND%s sid=%s cwd=%s"
+                      % (" grace-elapsed" if grace_elapsed else "", sid, cwd))
     return "sent"
 
 
@@ -6083,7 +6190,16 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
     arithmetic — #225-review finding: a wall-clock hold is sensitive to a
     backward NTP step, which would silently extend it) are injectable
     separately so tests never sleep for real and never depend on which
-    clock a mock happens to advance."""
+    clock a mock happens to advance.
+
+    #250 — the ONE `record_compact_request` call's `ts` is captured once
+    (`record_ts`) and threaded into EVERY retry as `deliver_compact_now`'s
+    own `request_ts=`, with a FRESH `now_fn()` read each time — the same
+    grace-bound check job 14 applies. Under the default 60s hold and 5-min
+    grace this never actually crosses the boundary (see
+    `COMPACT_DEFER_GRACE_S`'s own comment), which is deliberate: the
+    post-grace delivery belongs to job 14's own polled retry, not this
+    bounded hold."""
     now_fn = now_fn or time.time
     clock_fn = clock_fn or time.monotonic
     sleep_fn = sleep_fn or time.sleep
@@ -6099,7 +6215,8 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
                                            pane_env=pane_env)
     if not sid:
         return "", ""
-    record_compact_request(sid, cwd, now=now_fn(),
+    record_ts = now_fn()
+    record_compact_request(sid, cwd, now=record_ts,
                            origin=_COMPACT_SELF_CALLBACK_ORIGIN)
     deadline = clock_fn() + max(0.0, hold_s)
     while True:
@@ -6107,7 +6224,8 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
             word = deliver_compact_now(sid, cwd, run=run,
                                        projects_dir=projects_dir,
                                        min_context=min_context, git_run=git_run,
-                                       origin=_COMPACT_SELF_CALLBACK_ORIGIN)
+                                       origin=_COMPACT_SELF_CALLBACK_ORIGIN,
+                                       request_ts=record_ts, now=now_fn())
         except Exception:
             word = ""
         if word:
