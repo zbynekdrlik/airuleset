@@ -130,7 +130,9 @@ class ManagedStatuslineIsChromeInAnySegmentOrder(unittest.TestCase):
 
     def test_a_draft_quoting_the_statusline_is_never_chrome(self):
         # fail-safe direction: a row carrying the prompt glyph is the box, so
-        # it must never be peeled away as chrome however it reads.
+        # it must never be peeled away as chrome however it reads — even when
+        # it quotes TWO real segment shapes.
+        self.assertFalse(wd._is_bottom_chrome("❯ wk 65%(3d) a ctx 292K poznamka"))
         self.assertFalse(wd._is_bottom_chrome("❯ wk 65% of the budget is gone"))
         self.assertFalse(wd._is_bottom_chrome("❯ ctx 292K looks high"))
 
@@ -143,6 +145,101 @@ class ManagedStatuslineIsChromeInAnySegmentOrder(unittest.TestCase):
     def test_ordinary_prose_is_not_chrome(self):
         self.assertFalse(wd._is_bottom_chrome("the ctx budget is the problem"))
         self.assertFalse(wd._is_bottom_chrome("wk is short for week"))
+
+    def test_prose_quoting_one_token_with_a_value_is_not_chrome(self):
+        # A single segment shape is not a statusline — a real one always
+        # carries several (review finding 3: eating such a row swallowed a
+        # wrapped draft's continuation line and returned the wrong tail).
+        self.assertFalse(wd._is_bottom_chrome("the wk 65% weekly figure is fine"))
+        self.assertFalse(wd._is_bottom_chrome("sub 24.8. je datum obnovy"))
+        self.assertFalse(wd._is_bottom_chrome("5h 20% ostava do resetu"))
+        self.assertFalse(wd._is_bottom_chrome("ctx 292K je uz vela"))
+
+
+# Review finding 1: a transcript QUOTING an input-box fixture (this repo's own
+# sessions paste exactly this while working on pane-classifier tickets), with
+# the pane's REAL state below it — a borderless box holding an unsent draft.
+# The quoted pair must not be trusted as the box; the real draft must be found.
+QUOTED_BOX_ABOVE_BORDERLESS_DRAFT = (
+    "● fixture z #243:\n"
+    "──────────────────────────────────────────────────── ultracode ─\n"
+    "❯\xa0\n"
+    "────────────────────────────────────────────────────────────────\n"
+    "● hotovo:\n"
+    "❯\xa0moj rozpisany neodoslany prompt\n"
+    "  5h 7%(4h)  wk 65%(3d)  F 67%(2d)  sub 24.8.(19d)  "
+    "I 4 core · str 0 · skip 2  ctx 292K ~$0.29  vychod@varos.sk  caveman:lite\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+)
+
+# Review finding 2: a real bordered wrapped draft whose middle row is a pasted
+# table — `│ a │ b │ c │` passes `_is_border_rule`, and a naive nearest-border
+# scan takes it as the box's top edge, degrading a readable draft to "busy".
+WRAPPED_DRAFT_WITH_TABLE_ROW = (
+    "────────────────────────────────────────────────────────────────\n"
+    "❯\xa0oprav tuto tabulku:\n"
+    "│ a │ b │ c │\n"
+    "a potom pushni\n"
+    "────────────────────────────────────────────────────────────────\n"
+    "  5h 7%(4h)  wk 65%(3d)  ctx 292K ~$0.29  caveman:lite\n"
+)
+
+# Review finding 3: a borderless wrapped draft whose continuation row quotes a
+# single statusline token. The row must NOT be eaten as chrome; the safe
+# resolution for this unreadable shape is "busy" (skip), never a wrong tail.
+BORDERLESS_DRAFT_QUOTING_STATUSLINE = (
+    "❯\xa0poznamka:\n"
+    "wk 65% z tyzdna je prec\n"
+    "  5h 7%(4h)  wk 65%(3d)  F 67%(2d)  ctx 292K ~$0.29  caveman:lite\n"
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+)
+
+
+class ReviewFindingsQuotedBoxesAndProse(unittest.TestCase):
+    """Adversarial-review regressions on the #243 fix — each must FAIL against
+    the pre-fix build (the RED proof) and pass after."""
+
+    def test_a_quoted_box_never_hides_a_real_draft_below_it(self):
+        cap = QUOTED_BOX_ABOVE_BORDERLESS_DRAFT
+        self.assertFalse(wd._has_free_prompt(cap, bare_only=True))
+        self.assertEqual(wd._classify_boundary(cap),
+                         ("input", "moj rozpisany neodoslany prompt"))
+        self.assertEqual(wd._input_line_text(cap),
+                         "moj rozpisany neodoslany prompt")
+
+    def test_a_table_row_inside_a_wrapped_draft_is_not_a_border(self):
+        cap = WRAPPED_DRAFT_WITH_TABLE_ROW
+        box = wd._find_input_box(cap)
+        self.assertIsNotNone(box)
+        head, tail, wrapped = box
+        self.assertTrue(head.startswith("❯"))
+        self.assertEqual(tail, "a potom pushni")
+        self.assertTrue(wrapped)
+        self.assertEqual(wd._classify_boundary(cap), ("input", "a potom pushni"))
+
+    def test_a_draft_continuation_quoting_a_token_is_not_eaten(self):
+        cap = BORDERLESS_DRAFT_QUOTING_STATUSLINE
+        # The continuation row survives the peel, so the box is unreadable
+        # here — the safe answer is busy/skip, NEVER ("input", "poznamka:")
+        # with the wrong tail and wrapped=False.
+        kind, text = wd._classify_boundary(cap)
+        self.assertNotEqual((kind, text), ("input", "poznamka:"))
+        self.assertFalse(wd._has_free_prompt(cap, bare_only=True))
+
+    def test_a_live_turn_quoting_a_box_stays_busy(self):
+        # "esc to interrupt" below the quoted pair marks a running turn —
+        # the quoted box must not be trusted (review finding 4's live-turn
+        # shape).
+        cap = (
+            "● fixture z #243:\n"
+            "──────────────────────────────────────────────────── ultracode ─\n"
+            "❯\xa0\n"
+            "────────────────────────────────────────────────────────────────\n"
+            "✻ Churning… (esc to interrupt)\n"
+            "  5h 7%(4h)  wk 65%(3d)  ctx 292K ~$0.29  caveman:lite\n"
+        )
+        self.assertFalse(wd._has_free_prompt(cap, bare_only=True))
+        self.assertNotEqual(wd._classify_boundary(cap), ("input", ""))
 
 
 if __name__ == "__main__":
