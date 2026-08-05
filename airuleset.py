@@ -6095,7 +6095,31 @@ def cmd_autopilot_lock(args):
         mfd = os.open(mutex_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(mfd, fcntl.LOCK_EX)
-            if lock_path.exists():
+            if lock_path.is_dir():
+                # A stale directory-shaped artifact (an older mkdir-style
+                # lock implementation, or a manual mkdir) — `write_text`
+                # below cannot write through a directory, so this must be
+                # resolved BEFORE the exists()/read()/steal flow, never
+                # discovered as an unhandled IsADirectoryError crash (#248,
+                # hit live on dev2). An EMPTY directory is self-healed
+                # (removed, acquisition proceeds exactly as if the path
+                # never existed); a NON-EMPTY one is refused with a clear
+                # message — deleting unknown directory contents is not this
+                # command's call to make.
+                try:
+                    is_empty = not any(lock_path.iterdir())
+                except OSError:
+                    is_empty = False
+                if is_empty:
+                    lock_path.rmdir()
+                else:
+                    print(f"ERROR: lock path {lock_path} exists as a "
+                          f"NON-EMPTY directory (not a recognized stale "
+                          f"artifact) — refusing to acquire. Inspect and "
+                          f"remove it manually if safe: rm -rf {lock_path}",
+                          file=sys.stderr)
+                    sys.exit(1)
+            elif lock_path.exists():
                 holder = _autopilot_lock_read(lock_path)
                 if _pid_alive(holder.get("pid")):
                     print(f"BLOCKED: {payload['repo']} already has an active "
