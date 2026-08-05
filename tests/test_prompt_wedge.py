@@ -214,7 +214,7 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
             wd.PWEDGE_SUBMIT_UNSTICK_AFTER + 1)
         unstick = self._unstick_calls(run)
         self.assertEqual(len(unstick), 1, run.calls)
-        self.assertEqual(unstick[0][4:], ["1b", "5b", "32", "30", "31", "7e"])
+        self.assertEqual(unstick[0][5:], ["1b", "5b", "32", "30", "31", "7e"])
         tails = [a[-1] for a in run.calls]
         unstick_i = run.calls.index(unstick[0])
         enter_i = len(tails) - 1 - tails[::-1].index("Enter")
@@ -223,30 +223,28 @@ class TestMachineSubmitPasteEndUnstick(unittest.TestCase):
             any("paste-end" in ln for ln in attempt_logs[-1]), attempt_logs[-1])
 
     def test_attempts_counter_resets_once_the_draft_actually_clears(self):
-        run, _ = self._drive_n_attempts(wd.PWEDGE_SUBMIT_UNSTICK_AFTER)
-        st = {}
-        # replay the same sequence of state mutations by hand: after N
-        # attempts, clearing the box must drop the attempts counter so a
-        # LATER, unrelated stuck draft starts counting from zero again --
-        # never inherits a stale escalation from a previous episode.
+        # after N machine-submit attempts, clearing the box must drop the
+        # attempts counter so a LATER, unrelated stuck draft starts counting
+        # from zero again -- never inherits a stale escalation from a
+        # previous episode.
         now = time.time()
-        run2 = self._run_recorder()
-        st2 = {}
+        run = self._run_recorder()
+        st = {}
         t = now
         for _ in range(wd.PWEDGE_SUBMIT_UNSTICK_AFTER):
-            wd.prompt_wedge_check(t, st2, "%1", MACHINE_PANE, now, "zbynek",
-                                  "odoo", FakeSend(), run=run2)
+            wd.prompt_wedge_check(t, st, "%1", MACHINE_PANE, now, "zbynek",
+                                  "odoo", FakeSend(), run=run)
             t += 70
-            wd.prompt_wedge_check(t, st2, "%1", MACHINE_PANE, now, "zbynek",
-                                  "odoo", FakeSend(), run=run2)
+            wd.prompt_wedge_check(t, st, "%1", MACHINE_PANE, now, "zbynek",
+                                  "odoo", FakeSend(), run=run)
             t += 70
-        self.assertIn("pwedge-submit-attempts:%1", st2)
+        self.assertIn("pwedge-submit-attempts:%1", st)
         # box goes bare -- the draft cleared (submitted successfully)
         empty_pane = MACHINE_PANE.replace(
             "Priorita: prio:bounce #1896 - posledny blocker release", "")
-        wd.prompt_wedge_check(t, st2, "%1", empty_pane, now, "zbynek",
-                              "odoo", FakeSend(), run=run2)
-        self.assertNotIn("pwedge-submit-attempts:%1", st2, st2)
+        wd.prompt_wedge_check(t, st, "%1", empty_pane, now, "zbynek",
+                              "odoo", FakeSend(), run=run)
+        self.assertNotIn("pwedge-submit-attempts:%1", st, st)
 
 
 class DeliveryAtomicWrtSweepBudget(unittest.TestCase):

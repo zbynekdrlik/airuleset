@@ -3243,12 +3243,25 @@ _FOREIGN_TMUX_USERS = ()
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=BOUNCE_INTERVAL,
                     renudge=BOUNCE_RENUDGE_SECONDS, persist=None,
-                    projects_dir=None, user=None, cross_stream_repos=None):
+                    projects_dir=None, user=None, cross_stream_repos=None,
+                    time_fn=None, sweep_deadline=None):
     """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
     caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
     the process — the live incident: TimeoutStartSec killed the run after the
     nudge but before run_once's save, so dedup had no memory and the same
-    nudge repeated every sweep. Returns log lines. Best-effort (never raises)."""
+    nudge repeated every sweep. Returns log lines. Best-effort (never raises).
+
+    #255 Fix 1: `time_fn`/`sweep_deadline` (both optional, default None ->
+    unbounded, exactly today's behavior) give this job's own per-TARGET loop
+    the SAME wall-clock self-bound `run_once`'s per-transcript pane loop
+    already has via #172 -- this loop previously had none at all, unlike
+    that one. The check sits strictly BETWEEN targets, checked BEFORE a
+    target's delivery starts, never nested inside one target's own
+    `send_continue`/`_try_stash_nudge` call (each a single atomic type+
+    submit pair) -- a target already being delivered always finishes; only
+    a NOT-YET-STARTED target is deferred to the next sweep. A deferred
+    target's dedup memory (`seen`) is never written, so it is retried next
+    sweep rather than silently dropped."""
     if user is None:
         import getpass
         try:
@@ -3267,6 +3280,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     fetch = gh_fetch or (lambda root: _fetch_bounce_tickets(root, home))
     persist = persist or (lambda: None)
     projects_dir = projects_dir or PROJECTS_DIR
+    time_fn = time_fn or time.monotonic
     persist()                                  # cadence stamp survives a kill
     logs = []
 
@@ -3296,7 +3310,16 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
         if not _covered_by_pane(root):
             targets.setdefault(root, (name, None))
 
-    for root, (name, pid) in sorted(targets.items()):
+    for idx, (root, (name, pid)) in enumerate(sorted(targets.items())):
+        if sweep_deadline is not None and time_fn() >= sweep_deadline:
+            # #255 Fix 1: never START a new target's delivery once the
+            # shared sweep budget is exhausted. Nothing has been fetched or
+            # typed for THIS (or any later) target yet, so deferring here
+            # loses nothing -- it is retried on the next sweep exactly like
+            # an untouched target always would be.
+            logs.append("bounce-budget-exceeded — %d/%d targets handled "
+                        "this tick, rest retried next" % (idx, len(targets)))
+            break
         if not _bounce_quals(root):
             continue                           # gatekeeper: never bounce-nudged
         if not _repo_in_cross_stream_flow(root, cross_stream_repos):
@@ -3558,6 +3581,11 @@ _ARM_QUESTION_RX = re.compile(
 
 PWEDGE_MIN_IDLE_S = 30 * 60      # transcript must be this stale before a wedge ping
 PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
+# #255: consecutive machine-submit attempts (each its own PWEDGE_SWEEPS-sweep
+# cycle) tolerated on an ordinary swallowed-submit race before escalating to
+# the bracketed-paste-END unstick sequence -- the live incident took 3
+# attempts over ~5 minutes with plain Enter alone, all ineffective.
+PWEDGE_SUBMIT_UNSTICK_AFTER = 2
 # Per-pane ping cooldown (issue #35) — a re-WRAPPED draft changes its hash,
 # which used to read as a brand-new episode and re-ping the same pane
 # ("často mi chodí" spam). The cooldown is keyed on the PANE, independent of
@@ -3627,8 +3655,12 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
         return []
     head, tail, wrapped = box
     txt = tail if wrapped else head[1:].strip()
+    attempts_key = "pwedge-submit-attempts:" + pid
     if not txt:
         state.pop(key, None)          # provably BARE — there really is no draft
+        state.pop(attempts_key, None)  # #255: the draft cleared -- forget any
+                                       # escalation count so a LATER, unrelated
+                                       # stuck draft starts counting from zero
         return []
     # A machine nudge's PREFIX lives on the box's HEAD row. A wrapped draft's
     # boundary row is its TAIL and can never carry it, so testing `txt` alone
@@ -3649,6 +3681,11 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     st = state.get(key)
     st = dict(st) if isinstance(st, dict) else {}
     if st.get("hash") != h:
+        # NOTE: this fires both for a genuinely NEW draft AND for the SAME
+        # still-stuck draft starting its next PWEDGE_SWEEPS-cycle right
+        # after a machine-submit attempt popped `key` (#255) -- `attempts_key`
+        # is deliberately NOT touched here; it carries its OWN hash below and
+        # is the thing that tells those two cases apart.
         state[key] = {"hash": h, "n": 1, "pinged": False}
         return []
     st["n"] = int(st.get("n") or 1) + 1
@@ -3656,15 +3693,43 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     if st["n"] < PWEDGE_SWEEPS or st.get("pinged"):
         return []
     if machine:
+        unstick_note = ""
         if not dry_run and run and not pane_in_mode(pid, run):
             # Escape first (issue #36) — a swallowed submit while the
             # agent-strip selector holds focus makes a bare Enter navigate
             # instead of submit; never a SECOND Escape (issue #35: deletes a
             # draft permanently).
             run(["tmux", "send-keys", "-t", pid, "Escape"])
+            # #255: attempts_key tracks its OWN (hash, count) pair,
+            # independent of `key`'s own pop/reset cycle above -- it must
+            # keep incrementing across repeated PWEDGE_SWEEPS-cycles of the
+            # SAME stuck draft (same hash) and only reset to 1 when the
+            # CONTENT genuinely changes (a different draft entirely).
+            arec = state.get(attempts_key)
+            arec = dict(arec) if isinstance(arec, dict) else {}
+            attempts = (int(arec.get("n") or 0) + 1) if arec.get("hash") == h else 1
+            state[attempts_key] = {"hash": h, "n": attempts}
+            if attempts > PWEDGE_SUBMIT_UNSTICK_AFTER:
+                # #255: this SAME draft has already survived
+                # PWEDGE_SUBMIT_UNSTICK_AFTER consecutive machine-submit
+                # attempts with zero progress -- an ordinary swallowed-
+                # submit race (issue #36's class, already handled by the
+                # Escape above) is ruled out by now. Live incident
+                # (david@subdev, 2026-08-05): Claude Code was left waiting
+                # for the ANSI bracketed-paste END marker (ESC[201~) that
+                # nothing in this codebase ever sends -- `send-keys -l`
+                # never emits real bracket framing (confirmed empirically:
+                # tmux only wraps `paste-buffer -p`, never `send-keys -l`,
+                # per `man tmux`) -- so every further Enter was swallowed as
+                # literal text. A human's manual `send-keys -H 1b 5b 32 30
+                # 31 7e` + Enter recovered it instantly; send the identical
+                # sequence here, before Enter.
+                run(["tmux", "send-keys", "-t", pid, "-H",
+                     "1b", "5b", "32", "30", "31", "7e"])
+                unstick_note = " (paste-end unstick)"
             run(["tmux", "send-keys", "-t", pid, "Enter"])
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
-        return ["machine-nudge submit %s (%s)" % (pid, project)]
+        return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
     if not waiting:
         # tracked but nothing urgent — the session isn't blocked on the
         # user, and a stash-around delivery (#35) can still reach it. A
@@ -3853,13 +3918,27 @@ def _goal_was_cleared_by_user(tpath):
             and not mark.get("arm_after"))
 
 
-def goal_autoarm(now, run, state, dry_run=False, projects_dir=None):
+def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
+                 time_fn=None, sweep_deadline=None):
     """Job 9 — see the section comment. Mutates state['goalarm']; returns log
-    lines. Best-effort (never raises)."""
+    lines. Best-effort (never raises).
+
+    #255 Fix 1: same gap class as bounce_backstop (job 8) — this loop had no
+    wall-clock self-bound of its own either. `time_fn`/`sweep_deadline`
+    (both optional, default None -> unbounded, today's behavior) are
+    checked strictly BETWEEN panes, before a pane's own delivery starts —
+    never nested inside one pane's own capture/classify/deliver sequence.
+    A deferred pane writes no dedup state, so it is retried next sweep."""
     ga = state.get("goalarm") or {}
     logs = []
     projects_dir = projects_dir or PROJECTS_DIR
-    for pid, cwd in list_claude_panes(run):
+    time_fn = time_fn or time.monotonic
+    panes = list_claude_panes(run)
+    for idx, (pid, cwd) in enumerate(panes):
+        if sweep_deadline is not None and time_fn() >= sweep_deadline:
+            logs.append("goalarm-budget-exceeded — %d/%d panes handled "
+                        "this tick, rest retried next" % (idx, len(panes)))
+            break
         if (now - ga.get(pid, 0)) < GOAL_ARM_WINDOW_S:
             continue
         # VISIBLE VIEWPORT ONLY (no -S): after a claude restart the tmux
@@ -10552,15 +10631,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     for k in list(state.keys()):
         if k == "usage":
             continue                       # account-wide usage state, not a session
-        if k.startswith("pwedge:") or k.startswith("pwedge-ping:"):
-            # Job 10's episode + ping-cooldown state (#199) is keyed by PANE
-            # ID (tmux target), never a transcript session id — a DIFFERENT
-            # identity space from every other prefix below (all keyed by
-            # session id, aged via `last_seen` or membership in `stalled`).
-            # pwedge state carries no timestamp field to age by in the first
-            # place, so a pane id not among THIS sweep's live_pane_ids is
-            # dropped outright; a still-live pane's entry is left completely
-            # untouched, however stale it looks.
+        if (k.startswith("pwedge:") or k.startswith("pwedge-ping:")
+                or k.startswith("pwedge-submit-attempts:")):
+            # Job 10's episode + ping-cooldown + (#255) submit-escalation
+            # state is keyed by PANE ID (tmux target), never a transcript
+            # session id — a DIFFERENT identity space from every other
+            # prefix below (all keyed by session id, aged via `last_seen` or
+            # membership in `stalled`). pwedge state carries no timestamp
+            # field to age by in the first place, so a pane id not among
+            # THIS sweep's live_pane_ids is dropped outright; a still-live
+            # pane's entry is left completely untouched, however stale it
+            # looks.
             #
             # (adversarial-review finding on #199): `live_pane_ids` being
             # EMPTY is NOT proof every pane died — `list_claude_panes`
@@ -10572,7 +10653,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # pruning entirely rather than guess.
             if not live_pane_ids:
                 continue
-            prefix = "pwedge-ping:" if k.startswith("pwedge-ping:") else "pwedge:"
+            if k.startswith("pwedge-ping:"):
+                prefix = "pwedge-ping:"
+            elif k.startswith("pwedge-submit-attempts:"):
+                prefix = "pwedge-submit-attempts:"
+            else:
+                prefix = "pwedge:"
             if k[len(prefix):] not in live_pane_ids:
                 del state[k]
         elif (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
@@ -10651,7 +10737,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += bounce_backstop(
                 now, run, state, send_fn, dry_run=dry_run,
                 gh_fetch=bounce_fetch, projects_dir=projects_dir,
-                persist=lambda: save_state(state_path, state))
+                persist=lambda: save_state(state_path, state),
+                time_fn=time_fn, sweep_deadline=sweep_deadline)
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
 
@@ -10670,7 +10757,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Job 9 — /goal auto-arm (the printed template pastes itself; pure tmux,
     # no network). Best-effort.
     try:
-        logs += goal_autoarm(now, run, state, dry_run=dry_run)
+        logs += goal_autoarm(now, run, state, dry_run=dry_run,
+                             time_fn=time_fn, sweep_deadline=sweep_deadline)
     except Exception as e:
         logs.append("goal-autoarm error: %r" % (e,))
 
