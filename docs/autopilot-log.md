@@ -3465,3 +3465,50 @@ test_oneshot_ttl_is_configurable_and_short_ttls_decay_fast`, a 1s TTL
 racing subprocess-spawn overhead — confirmed flaky standalone, unrelated to
 any of the four tickets, pre-dates this batch by several days). Ruff clean
 repo-wide. No PR (direct push — supervisor pushes).
+
+
+## Batch: #179, #226, #202, #219, #250 (bundled, one work stretch)
+
+**#179 — `TestLogPolicy::test_vault_channel` flaked on a wall-clock digit
+collision inside the length-leak assertion.** A coincidental digit match
+between an ISO timestamp and the string under test could trip the check
+on an unlucky second. Fix: strip ISO timestamps before comparing
+lengths, so timestamp digits can no longer collide with the leak check.
+RED `308ceca` / GREEN `e6c2c6e`. Proven 30/30 consecutive runs.
+
+**#226 — `OneShotReviewFollowupTest::test_ci_poll_repeat_block` flaked
+on a TTL-vs-subprocess-overhead race** — a short TTL could decay before
+the subprocess spawn it was timing even finished. Fix: real headroom
+margin added in the accumulate phase instead of a bare TTL comparison.
+RED `29a49dd` / GREEN `90b7985`. Proven 15/15 under deliberate CPU
+saturation.
+
+**#202 — hook-driving tests leaked ~1000 Stop-gate counter files/day
+into `/tmp`, never cleaned up between runs.** Fix: shared cleanup helper
+`tests/_hook_state_cleanup.py`, wired into every hook-driving test's
+teardown. RED `511a46c` / GREEN `a55743f`.
+
+**#219 — `design_gate`'s `_CAUSE_RE` missed Slovak root-cause
+phrasings entirely.** Widened with a negative lookahead + explicit word
+boundaries. Adversarial review found two additional false-positive
+classes before it landed — koreň/koreňový-adresár and
+zisten/konzistentná both matching as if they were the intended
+root-cause phrase. RED `f608f82` + `5fd60aa` / GREEN `f331e13` +
+`05e93ab`.
+
+**#250 — supervisor-shaped sessions starved under the #246
+delivery-time live-tasks defer.** A request cycled "skip live-tasks"
+repeatedly until it hit the 30-minute TTL and died — reproduced live on
+both the dev1 supervisor and gatekeeper. Fix: `COMPACT_DEFER_GRACE_S`
+(300s, env `AIRULESET_COMPACT_DEFER_GRACE_S`, clamped to `[1, TTL)`)
+bounds the defer at both delivery points, anchored on `deferred_since` —
+stamped once at the first observed defer and preserved unconditionally
+across re-records, never on the request's own `ts` (which every
+re-record overwrites). RED `a054b6f` + `4578078` / GREEN `1d39c30` +
+`88f3414`. Fresh-context adversarial review: 1 MAJOR (grace anchored on
+the overwritten `ts` — a session re-recording faster than the grace
+window never reached delivery at all) + 3 MINOR, all fixed with their
+own RED/GREEN pairs (commits above).
+
+Pushed `7e42250..88f3414` direct to main (no PR/CI in this repo).
+Deployed to all 6 targets via `airuleset.py push`.
