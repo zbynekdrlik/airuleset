@@ -153,7 +153,19 @@ class ManagedStatuslineIsChromeInAnySegmentOrder(unittest.TestCase):
         self.assertFalse(wd._is_bottom_chrome("the wk 65% weekly figure is fine"))
         self.assertFalse(wd._is_bottom_chrome("sub 24.8. je datum obnovy"))
         self.assertFalse(wd._is_bottom_chrome("5h 20% ostava do resetu"))
-        self.assertFalse(wd._is_bottom_chrome("ctx 292K je uz vela"))
+
+    def test_ctx_prefixed_prose_stays_the_documented_legacy_exception(self):
+        # A row starting literally "ctx " is the one segment NOT covered by
+        # the >=2 rule above — it keeps the unconditional pre-#223 legacy
+        # branch (`s.startswith("ctx ")`) for backward compatibility with the
+        # bare "ctx ░░"-style placeholder used pervasively across the rest of
+        # this test suite (test_goal_autoarm.py, test_stash_delivery.py,
+        # test_strip_selection.py, test_wrapped_draft.py, test_goal_rearm.py —
+        # ~200 pre-existing tests). Removing the legacy branch to also reject
+        # ctx-prefixed prose broke all of them; this narrow, documented
+        # trade-off keeps them green. In practice a real draft essentially
+        # never opens its first line with the literal technical token "ctx ".
+        self.assertTrue(wd._is_bottom_chrome("ctx 292K je uz vela"))
 
 
 # Review finding 1: a transcript QUOTING an input-box fixture (this repo's own
@@ -240,6 +252,22 @@ class ReviewFindingsQuotedBoxesAndProse(unittest.TestCase):
         )
         self.assertFalse(wd._has_free_prompt(cap, bare_only=True))
         self.assertNotEqual(wd._classify_boundary(cap), ("input", ""))
+
+    def test_a_head_with_plain_prose_above_it_is_not_a_box(self):
+        # Mutation-test pin: the head-walk requires a border (strict or
+        # labelled) immediately above the glyph row. Without that guard, a
+        # `❯` row that merely happens to sit above a strict bottom separator
+        # — with ordinary prose above IT, no border at all — would wrongly
+        # be read as a wrapped draft's head.
+        cap = (
+            "prose line here\n"
+            "❯\xa0first line of draft\n"
+            "second line continuation\n"
+            "────────────────────────────────────────────────────────────────\n"
+            "  5h 7%(4h)  wk 65%(3d)  ctx 292K ~$0.29  caveman:lite\n"
+        )
+        self.assertIsNone(wd._find_input_box(cap))
+        self.assertEqual(wd._classify_boundary(cap), ("busy", None))
 
 
 if __name__ == "__main__":

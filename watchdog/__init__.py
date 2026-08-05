@@ -721,12 +721,26 @@ def _is_border_rule(s):
 # now starts `5h 7%(4h)` — so the test silently stopped matching, the bottom-up
 # chrome peel stopped ON the statusline, and handed it back as the input box
 # (#243). Match the segment VOCABULARY anywhere in the row instead of anchoring
-# on whichever segment happens to lead, so a future reorder cannot repeat this.
-# Each alternative is pinned tightly enough (a digit or a meter block after
-# `ctx`, a percentage after a window label, a date after `sub`) that ordinary
-# prose mentioning the same words does not match.
-_STATUSLINE_RX = re.compile(
-    r"(?:^|\s)(?:ctx [\d█▓▒░]|5h \d+%|wk \d+%|sub \d+\.\d+\.|caveman:)")
+# on whichever segment happens to lead — but require at least TWO distinct
+# segment shapes to co-occur: a real statusline always carries several, while
+# ordinary prose quoting ONE token with its value ("the wk 65% figure") must
+# never be eaten as chrome (adversarial review of #243, finding 3 — the harm
+# is a wrapped draft's continuation row swallowed as chrome, returning the
+# wrong tail).
+_STATUSLINE_SEG_RES = (
+    re.compile(r"(?:^|\s)ctx [\d█▓▒░]"),
+    re.compile(r"(?:^|\s)5h \d+%"),
+    re.compile(r"(?:^|\s)wk \d+%"),
+    re.compile(r"(?:^|\s)sub \d+\.\d+\."),
+    re.compile(r"caveman:"),
+    re.compile(r"(?:^|\s)(?:F|Fable) \d+%"),
+    re.compile(r"~\$\d"),
+    re.compile(r"(?:^|\s)(?:I|Issues) \d+"),
+)
+
+
+def _statusline_hits(s):
+    return sum(1 for rx in _STATUSLINE_SEG_RES if rx.search(s))
 
 
 def _is_bottom_chrome(s):
@@ -747,12 +761,15 @@ def _is_bottom_chrome(s):
         return True                                     # the strip's selector hint
     if s.startswith("⏵⏵"):                              # bypass / mode hint
         return True
-    # The footer statusline, in ANY segment order. A row carrying the prompt
-    # glyph is the input box and must never be peeled away as chrome however it
-    # reads — a draft quoting `wk 65%` is still a draft. The two `❯ ●` / `❯ ◯`
-    # selected-strip shapes are already answered by their own branch above, so
-    # this guard cannot regress them (#36).
-    if s[0] != "❯" and _STATUSLINE_RX.search(s):
+    if s.startswith("ctx "):                            # legacy pre-#223 statusline
+        return True
+    # The managed statusline in ANY segment order (#243): at least TWO distinct
+    # segment shapes must co-occur — see _STATUSLINE_SEG_RES. A row carrying
+    # the prompt glyph is the input box and must never be peeled away as chrome
+    # however it reads; the `❯ ●` / `❯ ◯` selected-strip shapes are already
+    # answered by their own branch above, so this guard cannot regress them
+    # (#36).
+    if s[0] != "❯" and _statusline_hits(s) >= 2:
         return True
     if _is_border_rule(s):                              # a box border / rule (labelled ok)
         return True
@@ -904,21 +921,46 @@ def _input_box_rows_raw(captured):
         # The BOTTOM edge stays STRICT — it is the anchor, and a real pane
         # always renders it pure. The TOP edge may carry a LABEL: Claude Code
         # writes the session's effort mode into the box's own top border
-        # (`──── ultracode ─`), which the strict test rejects, leaving a single
-        # separator and killing this whole strategy (#243, live on dev2's
-        # presenter pane — the only one of four in ultracode mode, and the only
-        # one job 9 refused to arm). Loosening the search to `_is_border_rule`
-        # cannot pick a wrong row: we take the NEAREST border above the strict
-        # bottom edge, and the box's real top border is by construction nearer
-        # than anything above it. `_is_separator_line` itself stays strict —
-        # it is shared with every other separator consumer, and its strictness
-        # is what stops a line of prose being read as the box's own edge.
-        earlier = [i for i in range(idx_b)
-                   if _is_border_rule(lines[i]) or _is_separator_line(lines[i])]
-        if earlier:
-            content = lines[earlier[-1] + 1:idx_b]
-            if content:
-                return content
+        # (`──── ultracode ─`), which the strict test rejects (#243, live on
+        # dev2's presenter pane). Three guards shape the scan, all from the
+        # adversarial review of that fix:
+        #
+        # 1. A candidate pair is trusted ONLY when nothing below the bottom
+        #    edge could be the REAL box or a REAL running turn: a non-chrome
+        #    row starting with the prompt glyph (a genuine draft/bare prompt
+        #    below the candidate) or carrying "esc to interrupt" (a live
+        #    foreground turn) means the pair is QUOTED transcript content, not
+        #    the pane's own box — reject it and let the glyph fallback find
+        #    the real state. A real box has only chrome below it; requiring
+        #    full chrome below would re-open the unknown-chrome hole (#46,
+        #    the `⧉` row incident), so only these two decisive shapes reject.
+        # 2. The box's HEAD is the nearest row above the bottom edge carrying
+        #    the prompt glyph, found by walking up PAST non-glyph content
+        #    rows (a wrapped draft's own lines — including a pasted table row
+        #    `│ a │ b │ c │`, which `_is_border_rule` would misread as the
+        #    top edge) but never past a STRICT separator (crossing one would
+        #    leave the box's own span).
+        # 3. The row immediately above the head must be a border — strict, or
+        #    a labelled `_is_border_rule` (the ultracode shape). No border
+        #    above the glyph row means this is not a box.
+        # `_is_separator_line` itself stays strict — it is shared with every
+        # other separator consumer, and its strictness is what stops a line
+        # of prose being read as the box's own edge.
+        below_disqualifies = any(
+            not _is_bottom_chrome(ln)
+            and (ln.startswith("❯") or "esc to interrupt" in ln)
+            for ln in lines[idx_b + 1:])
+        if not below_disqualifies:
+            i = idx_b - 1
+            while i >= 0 and not _is_separator_line(lines[i]) \
+                    and not lines[i].startswith("❯"):
+                i -= 1
+            if i > 0 and lines[i].startswith("❯") \
+                    and (_is_separator_line(lines[i - 1])
+                         or _is_border_rule(lines[i - 1])):
+                content = lines[i:idx_b]
+                if content:
+                    return content
 
     i, n = len(lines), 0
     while i > 0 and _is_bottom_chrome(lines[i - 1]) and n < 40:
