@@ -20,6 +20,7 @@ import sys
 import uuid
 from pathlib import Path
 from unittest import TestCase, main
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -220,6 +221,64 @@ class TestKeptRowsRemainUncoveredByHooks(TestCase):
                 self.assertFalse(
                     _run_stop_untracked_work(phrase),
                     f"stop-untracked-work blocked: {phrase!r}")
+
+
+class TestNoLeftoverCounterFiles(TestCase):
+    """#202: this file's blocking probes each mint a fresh session id and
+    drive a REAL hook that writes a retry-counter file for a session that
+    just blocked — by far the largest generator of the ~2418 leaked
+    `/tmp/airuleset-*-block-*` files measured on this box in one real day
+    (2026-07-30), since every one of the ~20 "must block" assertions above
+    leaves its own counter behind (both hooks only clear it on a CLEAN
+    stop). A fixed uuid makes the exact counter path predictable so its
+    presence/absence can be asserted directly."""
+
+    def test_stop_prose_probe_leaves_no_counter_file_behind(self):
+        fixed = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        with m.patch("uuid.uuid4", return_value=fixed):
+            self.assertTrue(
+                _run_stop_prose("Should I merge despite the failing check?"))
+        counter = Path(
+            "/tmp/airuleset-stop-block-test-dropped-row-%s" % fixed.hex[:10])
+        self.addCleanup(lambda: counter.unlink(missing_ok=True))
+        self.assertFalse(
+            counter.exists(),
+            "#202: the blocking probe left a retry-counter file in /tmp: %s"
+            % counter)
+
+    def test_untracked_work_probe_leaves_no_counter_file_behind(self):
+        fixed = uuid.UUID("87654321-4321-8765-4321-876543218765")
+        with m.patch("uuid.uuid4", return_value=fixed):
+            self.assertTrue(
+                _run_stop_untracked_work(
+                    "Give the word and I'll create the issues"))
+        counter = Path(
+            "/tmp/airuleset-untracked-work-block-test-dropped-row-ndw-%s"
+            % fixed.hex[:10])
+        self.addCleanup(lambda: counter.unlink(missing_ok=True))
+        self.assertFalse(
+            counter.exists(),
+            "#202: the blocking probe left a retry-counter file in /tmp: %s"
+            % counter)
+
+    def test_probes_still_mint_a_fresh_session_id_per_call(self):
+        # The other half of #202's acceptance criteria: cleanup must not
+        # come at the cost of the fresh-id-per-probe property (a shared
+        # session id would silently stop blocking after the hook's retry
+        # cap, per the existing docstring on _run_stop_untracked_work).
+        sids_seen = []
+        orig_uuid4 = uuid.uuid4
+
+        def _recording_uuid4():
+            val = orig_uuid4()
+            sids_seen.append(val)
+            return val
+
+        with m.patch("uuid.uuid4", side_effect=_recording_uuid4):
+            _run_stop_prose("Should I merge despite the failing check?")
+            _run_stop_prose("Should I merge despite the failing check?")
+        self.assertEqual(len(sids_seen), 2)
+        self.assertNotEqual(sids_seen[0], sids_seen[1])
 
 
 if __name__ == "__main__":
