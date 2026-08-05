@@ -3638,3 +3638,29 @@ FREEZE-compliant: zero new non-test files across the whole batch
 test files). Full local suite: 3929 tests OK, ruff clean. This session
 NEVER pushes (hard constraint) — 13 commits sit locally on `main`
 (`04cdd6c..4d485b2`), awaiting the supervisor's push + CI + deploy cycle.
+
+**#251 + #258 — montalu2/3/4 onboarded as push targets + montalu-family
+SSH access restored.** #258's root cause: a gatekeeper access review on a
+DIFFERENT repo's ticket (odoo-erp#2961) mistook dev1's own default push
+key for a foreign identity, purely because of its misleading comment
+field ("david grena mac" — byte-identical to `~/.ssh/id_ed25519.pub`, not
+actually david@subdev's key), and stripped it from montalu/montalu2/
+montalu3's `authorized_keys`. Restored via the sanctioned `root@subdev`
+hop under a corrected comment; live-verified (`ssh montalu@subdev true`
+rc=0, a real `git log` read succeeds). #251: wired the three already-
+provisioned montalu2/3/4 accounts (gatekeeper Phase 1, odoo-erp#2961)
+into every generic per-user registry montalu itself already uses —
+`REMOTE_HOSTS` (no identity, same default-key shape), `AUTHORITY_BY_USER`
+(branch-merge), `SKILLS_EXTRA_BY_USER` (meeting-analysis parity),
+`watchdog._REDUCED_STREAM_USERS` (own-label bounce scoping on odoo-erp),
+and the subdev ssh-guard's allow-list — authority/skill-scoping/footer/
+goal-proof needed zero further code since they're already generic over
+`AUTHORITY_BY_USER`'s own keys. Also cloned `~/devel/airuleset` onto all
+three accounts (a prerequisite for the next `push`'s `git pull`) and
+assessed subdev VPS capacity live (root@subdev): the box is already
+running load average ~15 against 4 CPU cores with only 4 of the
+eventual 7 Claude sessions active — a resize question was raised to the
+user (Hetzner access is gatekeeper's domain, out of this repo's scope
+to execute). Adversarial review (fresh-context `general-purpose`): 0 🔴
+0 🟡, including a real mutation-tested teeth check on the widened
+ssh-guard allow-list. RED `73709cc` / GREEN `a560d5b` / docs `b4acd8b`.
