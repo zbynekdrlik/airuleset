@@ -272,15 +272,20 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
         r = self.run_hook(COMMIT_41)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_cd_to_a_non_repo_path_falls_back_to_payload_cwd(self):
+    def test_cd_to_a_non_repo_path_falls_back_to_payload_cwd_and_still_gates(self):
         # a `cd` to something that is NOT a git repo must never be trusted --
-        # falls back to the payload cwd, same as having no `cd` at all.
+        # falls back to the payload cwd, same as having no `cd` at all. NO
+        # marker is placed anywhere: this must still BLOCK (proves the
+        # fallback preserves the gate's normal function) -- a prior version
+        # of this test placed a marker under the payload repo first, which
+        # made a mutant that drops the is-a-repo guard entirely pass for the
+        # SAME observable reason as the correct code (tautological; caught
+        # by adversarial review).
         not_a_repo = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-notrepo-"))
         self.addCleanup(shutil.rmtree, not_a_repo, True)
-        self.mark(41)
         cmd = 'cd %s && git commit -m "fix: thing (#41) [green]"' % not_a_repo
         r = self.run_hook(cmd, cwd=self.repo)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_a_cd_mention_inside_a_quoted_argument_is_never_trusted(self):
         # adversarial-review finding: `;cd /path` embedded inside a QUOTED
@@ -294,6 +299,59 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
                                           # mention of its path
         cmd = ('echo "note: see readme;cd %s" && '
                'git commit -m "fix: thing (#61) [green]"') % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("airuleset", r.stderr)
+
+    def test_a_cd_mention_inside_a_heredoc_commit_message_body_is_never_trusted(self):
+        # CRITICAL adversarial-review finding: a `cd /path && ...` literal
+        # sitting inside a HEREDOC BODY (not a quoted span -- the earlier
+        # quote-stripping hardening cannot see it) must never be read as a
+        # real statement boundary. Reachable via ordinary commit-message
+        # prose (e.g. quoting a runbook recipe the ticket described), and
+        # because `dg.required_refs(missing, work_cwd)` ALSO uses the
+        # resolved directory for the #206 gh-issue-state check, this could
+        # silently DISABLE the design gate entirely if the spoofed repo
+        # happens to have the same issue number already closed.
+        other = self._other_repo()
+        self.mark(61, repo="dantesync")   # a marker exists there, but must
+                                          # NOT be reachable via a cd merely
+                                          # quoted inside a heredoc body
+        cmd = ("cat > /tmp/airuleset-test-msg.md <<'EOF'\n"
+               "fix: thing (#61) [green]\n"
+               "\n"
+               "Reported by the user; their runbook says:\n"
+               "  ./build.sh && cd %s && ./deploy.sh\n"
+               "EOF\n"
+               "git add -A && git commit -F /tmp/airuleset-test-msg.md"
+               ) % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("airuleset", r.stderr)
+
+    def test_a_quoted_cd_path_with_spaces_still_resolves(self):
+        # adversarial-review finding: the quote-stripping hardening (since
+        # replaced by the string-start anchor) regressed the LEGITIMATE
+        # case -- a `cd "/path with spaces"` must still resolve correctly,
+        # since quoting a path is the recommended way to handle one.
+        other = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-with space-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "remote", "add", "origin",
+             "https://github.com/zbynekdrlik/dantesync.git")
+        self.mark(61, repo="dantesync")
+        cmd = 'cd "%s" && git commit -m "fix: thing (#61) [green]"' % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_cd_after_git_commit_in_the_command_is_ignored(self):
+        # a `cd` appearing AFTER the git commit invocation must never be
+        # trusted -- it cannot be what the shell actually did before the
+        # commit ran.
+        other = self._other_repo()
+        self.mark(61, repo="dantesync")   # exists there, must not be reached
+        cmd = ('git commit -m "fix: thing (#61) [green]" && cd %s'
+              ) % other
         r = self.run_hook(cmd, cwd=self.repo)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("airuleset", r.stderr)
