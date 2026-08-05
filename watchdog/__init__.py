@@ -713,6 +713,22 @@ def _is_border_rule(s):
     return bars >= 4 and bars >= len(s.replace(" ", "")) - 12
 
 
+# airuleset's OWN managed statusline (composed by `statusbar.py` through the
+# caveman shim), rendered directly below the input box. Every segment is
+# individually optional and their ORDER has changed once already: the ctx meter
+# used to lead the row (`ctx ██░░░  5h 20% …`), which is the only reason a
+# `startswith("ctx ")` test ever worked. #223 dropped the fill bar and the row
+# now starts `5h 7%(4h)` — so the test silently stopped matching, the bottom-up
+# chrome peel stopped ON the statusline, and handed it back as the input box
+# (#243). Match the segment VOCABULARY anywhere in the row instead of anchoring
+# on whichever segment happens to lead, so a future reorder cannot repeat this.
+# Each alternative is pinned tightly enough (a digit or a meter block after
+# `ctx`, a percentage after a window label, a date after `sub`) that ordinary
+# prose mentioning the same words does not match.
+_STATUSLINE_RX = re.compile(
+    r"(?:^|\s)(?:ctx [\d█▓▒░]|5h \d+%|wk \d+%|sub \d+\.\d+\.|caveman:)")
+
+
 def _is_bottom_chrome(s):
     """A trailing 'chrome' line rendered BELOW the input box: the agent strip (`● main`
     + one `◯ <agent>` row PER concurrent subagent — including a SELECTED row, which
@@ -731,7 +747,12 @@ def _is_bottom_chrome(s):
         return True                                     # the strip's selector hint
     if s.startswith("⏵⏵"):                              # bypass / mode hint
         return True
-    if s.startswith("ctx "):                            # footer statusline
+    # The footer statusline, in ANY segment order. A row carrying the prompt
+    # glyph is the input box and must never be peeled away as chrome however it
+    # reads — a draft quoting `wk 65%` is still a draft. The two `❯ ●` / `❯ ◯`
+    # selected-strip shapes are already answered by their own branch above, so
+    # this guard cannot regress them (#36).
+    if s[0] != "❯" and _STATUSLINE_RX.search(s):
         return True
     if _is_border_rule(s):                              # a box border / rule (labelled ok)
         return True
@@ -878,9 +899,22 @@ def _input_box_rows_raw(captured):
         return []
 
     seps = [i for i, ln in enumerate(lines) if _is_separator_line(ln)]
-    if len(seps) >= 2:
+    if seps:
         idx_b = seps[-1]
-        earlier = [i for i in seps if i < idx_b]
+        # The BOTTOM edge stays STRICT — it is the anchor, and a real pane
+        # always renders it pure. The TOP edge may carry a LABEL: Claude Code
+        # writes the session's effort mode into the box's own top border
+        # (`──── ultracode ─`), which the strict test rejects, leaving a single
+        # separator and killing this whole strategy (#243, live on dev2's
+        # presenter pane — the only one of four in ultracode mode, and the only
+        # one job 9 refused to arm). Loosening the search to `_is_border_rule`
+        # cannot pick a wrong row: we take the NEAREST border above the strict
+        # bottom edge, and the box's real top border is by construction nearer
+        # than anything above it. `_is_separator_line` itself stays strict —
+        # it is shared with every other separator consumer, and its strictness
+        # is what stops a line of prose being read as the box's own edge.
+        earlier = [i for i in range(idx_b)
+                   if _is_border_rule(lines[i]) or _is_separator_line(lines[i])]
         if earlier:
             content = lines[earlier[-1] + 1:idx_b]
             if content:
