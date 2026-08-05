@@ -1929,6 +1929,90 @@ class GrepDereferenceRecursive178Review(unittest.TestCase):
             self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class ManualRevival174(unittest.TestCase):
+    """(#174) Live incident (2026-07-29): reviving a stalled `simap` pane by
+    hand, the MAIN session read a stale input-box draft off the pane's
+    screen and typed it back as if it were a real pending prompt --
+    `continue` was never sent at all. It was a frozen render of a session
+    that had died 6.5h earlier, not a pending draft.
+
+    UNCONDITIONAL — not gated by Fable/goal-armed/away, and NO bypass
+    marker honors it (this is a correctness/safety concern, not a
+    cost-control one; there is no legitimate reason to type a pane's own
+    captured content back into it). Covers the mechanically-safe slice: a
+    command that CAPTURES a pane (`tmux capture-pane`/`display-message`,
+    via a variable or an inline command substitution) and feeds that SAME
+    value into a `tmux send-keys` payload, in one command line."""
+
+    def _plain(self, command):
+        # a completely ordinary transcript -- non-Fable, no goal armed, no
+        # bypass marker -- proving the check fires regardless of those.
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=transcript("claude-opus-4-8"))
+
+    def test_variable_captured_then_sent_is_blocked(self):
+        out = self._plain(
+            'TEXT=$(tmux capture-pane -t %5 -p); tmux send-keys -t %5 -l "$TEXT"')
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#174", out.stderr)
+
+    def test_braced_variable_form_is_also_blocked(self):
+        out = self._plain(
+            'TEXT=$(tmux capture-pane -t %5 -p); tmux send-keys -t %5 -l "${TEXT}"')
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_display_message_captured_then_sent_is_blocked(self):
+        out = self._plain(
+            'D=$(tmux display-message -t %5 -p "#{pane_id}"); '
+            'tmux send-keys -t %5 -l "$D"')
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_inline_capture_directly_in_send_keys_is_blocked(self):
+        out = self._plain(
+            'tmux send-keys -t %5 -l "$(tmux capture-pane -t %5 -p)"')
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_deliberate_literal_continue_is_allowed(self):
+        out = self._plain('tmux send-keys -t %5 -l "continue"')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_control_key_name_is_allowed(self):
+        out = self._plain('tmux send-keys -t %5 Enter')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_an_unrelated_variable_is_allowed(self):
+        # MSG is hand-composed, never derived from a pane capture -- must
+        # not be treated as suspicious just for being a variable.
+        out = self._plain(
+            'MSG="deliberate reply"; tmux send-keys -t %5 -l "$MSG"')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_capture_pane_alone_with_no_send_is_allowed(self):
+        # reading a pane to DECIDE what to do next (the normal diagnostic
+        # step) must never itself be blocked -- only capture-THEN-send.
+        out = self._plain('tmux capture-pane -t %5 -p')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_unrelated_bash_command_is_unaffected(self):
+        out = self._plain('gh issue view 42')
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_bypass_marker_can_rescue_it(self):
+        # this is a correctness/safety concern -- unlike the cost-control
+        # conditions, there is no escape hatch.
+        sid = "t-mg-174-nobypass-" + uuid.uuid4().hex[:8]
+        m = Path("/tmp/airuleset-main-exec-ok-%s" % sid)
+        m.write_text("a perfectly good reason for something else entirely")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        helper = MainImplementationGuard()
+        out = helper._run(
+            tool="Bash",
+            command='TEXT=$(tmux capture-pane -t %5 -p); tmux send-keys -t %5 -l "$TEXT"',
+            sid=sid, transcript_text=transcript("claude-opus-4-8"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class TestWiringAndSkill(unittest.TestCase):
     def test_hook_exists_and_wired_for_edit_and_write(self):
         self.assertTrue(HOOK.exists())
