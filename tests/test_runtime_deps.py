@@ -104,6 +104,50 @@ class RuntimeDepsCheck(unittest.TestCase):
         # a box missing it degraded with no signal at all.
         self.assertIn("btop", airuleset.RUNTIME_DEPS)
 
+    def test_node_and_npx_are_tracked_dependencies(self):
+        # #158: the managed Playwright MCP server needs a real node/npx
+        # runtime — RUNTIME_DEPS never checked for either.
+        self.assertIn("node", airuleset.RUNTIME_DEPS)
+        self.assertIn("npx", airuleset.RUNTIME_DEPS)
+
+    def test_node_install_uses_the_nodejs_apt_package(self):
+        # Debian/Ubuntu's real "node" apt package is an UNRELATED amateur
+        # packet-radio program — installing it would never provide the
+        # `node` binary. The real package (NodeSource's "nodejs", already
+        # used fleet-wide) has to be named explicitly.
+        seen_argv = []
+
+        def run(argv, **kw):
+            seen_argv.append(argv)
+            return m.Mock(returncode=0)
+
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "node" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", side_effect=run):
+            airuleset.check_runtime_deps()
+        node_calls = [a for a in seen_argv if "nodejs" in a or "node" in a]
+        self.assertTrue(node_calls, seen_argv)
+        for argv in node_calls:
+            self.assertIn("nodejs", argv, argv)
+            self.assertNotIn("node", [tok for tok in argv if tok != "nodejs"])
+
+    def test_npx_install_also_uses_the_nodejs_apt_package(self):
+        # npx has no apt package of its own — it ships bundled inside nodejs.
+        seen_argv = []
+
+        def run(argv, **kw):
+            seen_argv.append(argv)
+            return m.Mock(returncode=0)
+
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "npx" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", side_effect=run):
+            airuleset.check_runtime_deps()
+        npx_calls = [a for a in seen_argv if "nodejs" in a]
+        self.assertTrue(npx_calls, seen_argv)
+        for argv in npx_calls:
+            self.assertNotIn("npx", argv, argv)
+
 
 class SudoLessToolRequestPath(unittest.TestCase):
     """#98: a sub-dev box (david/marek/montalu) has NO sudo, so

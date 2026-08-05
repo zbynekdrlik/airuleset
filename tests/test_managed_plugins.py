@@ -31,6 +31,14 @@ class TestReconcileManagedPlugins(TestCase):
         self.assertIn("superpowers@claude-plugins-official",
                       airuleset.MANAGED_PLUGINS)
 
+    def test_playwright_is_in_the_baseline(self):
+        # #158: Playwright is MANDATED by the rules (autonomous-verification,
+        # e2e-real-user-testing, post-deploy-verification, version-on-
+        # dashboard) as the browser-driving verification tool, but was only
+        # ever installed by hand — david@subdev had none at all.
+        self.assertIn("playwright@claude-plugins-official",
+                      airuleset.MANAGED_PLUGINS)
+
     def test_preserves_unrelated_keys_and_plugins(self):
         settings = {"model": "sonnet",
                     "enabledPlugins": {"caveman@caveman": True,
@@ -114,6 +122,25 @@ class TestManagedPluginBuilt(TestCase):
     def test_every_baseline_plugin_has_a_cache_glob(self):
         for key in airuleset.MANAGED_PLUGINS:
             self.assertIn(key, airuleset.MANAGED_PLUGIN_CACHE_GLOBS)
+
+    def test_detects_installed_playwright_cache(self):
+        # Playwright's real cache shape (confirmed live, dev1) differs from
+        # superpowers': a literal "unknown" version segment instead of a
+        # content hash, so the glob has to match on the plugin manifest file.
+        d = self._claude_dir_with(
+            "plugins/cache/claude-plugins-official/playwright/unknown/"
+            ".claude-plugin")
+        (d / "plugins/cache/claude-plugins-official/playwright/unknown/"
+           ".claude-plugin/plugin.json").write_text("{}")
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertTrue(airuleset._managed_plugin_built(
+                "playwright@claude-plugins-official"))
+
+    def test_absent_playwright_cache_means_not_built(self):
+        d = self._claude_dir_with(None)
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertFalse(airuleset._managed_plugin_built(
+                "playwright@claude-plugins-official"))
 
 
 class TestClaudeCliEnv(TestCase):
