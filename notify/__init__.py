@@ -702,8 +702,16 @@ def resolve_work_cwd(cmd, cwd, run=None):
 # --------------------------------------------------------------------------- #
 
 _PR_LINE_RE = re.compile(r"^\s*pr\s*:(.*)$", re.I | re.M)
+# Adversarial-review finding (WARNING 4): a repo-ROOT URL (no /pull/N path
+# segment following it -- e.g. parenthesised, comma-separated, or ending a
+# sentence) had its terminator absorb the trailing punctuation into the
+# captured repo name (`dantesync)`, `dantesync,`, `dantesync.`), which
+# false-blocked a compliant worker whose card was genuinely delivered
+# under the clean key. The terminator set now also stops on common prose
+# punctuation around a bare URL, not just a path separator/whitespace/EOL.
 _GH_REPO_URL_RE = re.compile(
-    r"github\.com[:/]([^/\s'\"]+)/([^/\s'\"]+?)(?:\.git)?(?:[/#?]|\s|$)")
+    r"github\.com[:/]([^/\s'\"]+)/([^/\s'\"]+?)(?:\.git)?"
+    r"(?:[/#?).,\]},;:!`]|\s|$)")
 
 
 def repo_from_pr_line(text):
