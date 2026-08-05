@@ -28,4 +28,6 @@ gh pr view  "$num" --json mergeable,mergeStateStatus,statusCheckRollup
 
 **Labels:** `-l/--label name` (repeatable or comma-list): `gh issue create ... -l bug -l "help wanted"`. Add to an existing issue: `gh issue edit <N> --add-label x --remove-label y`.
 
+**GitHub's issue-linking auto-close has NO negation awareness — writing "does NOT close #N" still closes #N on merge.** GitHub scans a merged PR's title/body for the literal substring `close`/`closes`/`closed`/`fix`/`fixes`/`fixed`/`resolve`/`resolves`/`resolved` immediately followed by `#N` (case-insensitive) and auto-closes #N — with zero understanding of any negation in front of it. So the natural, extra-explicit phrasing for "this PR does NOT close a ticket" (`"This PR does **NOT** close #435"`) contains the exact trigger substring (`close #435`) and closes it anyway — the opposite of the intended effect. **Never write those trigger words immediately before `#N` when the PR genuinely should NOT close it.** Use safe phrasing instead: `"leaves #N open"`, `"#N remains open"` — even `"resolve"` is a trigger word, so avoid it too when explaining a PR does not resolve something.
+
 The intent: use the known recipe (or `--help` once) instead of guessing a flag and looping on the same failure. Applies to all rewordings — and to any CLI where an invented flag failed once.
