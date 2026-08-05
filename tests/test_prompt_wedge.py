@@ -11,10 +11,13 @@ draft must never be submitted by a machine); job 7's own-text Enter-retry
 covers the watchdog's own deliveries.
 """
 
+import json
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -147,3 +150,77 @@ class TestMachineNudgeAutoSubmit(unittest.TestCase):
                  "autopilot" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Priorita: prio:bounce", skill)
         self.assertIn("auto-submits", skill)
+
+
+class TestPwedgeStateCleanupOnDeadPane(unittest.TestCase):
+    """(#199) job 10's `pwedge:`/`pwedge-ping:` state is keyed by tmux PANE
+    ID, not a transcript session id — a DIFFERENT identity space from the
+    session-keyed prefixes `run_once`'s generic cleanup OR-chain already
+    prunes. Neither prefix was ever named there (nor by `_SESSION_KEY_RX`),
+    so a pane that dies while tracked keeps its entry forever. Fix: the
+    cleanup pass drops a pwedge:/pwedge-ping: entry whose pane id is not
+    among the panes THIS sweep actually sees; a live pane's entry (however
+    stale-looking, since pwedge state carries no timestamp to age it by) is
+    left completely untouched."""
+
+    LIVE_CWD = "/home/newlevel/devel/camera-box"
+    LIVE_PANE = "%2"
+    DEAD_PANE = "%1"
+
+    def test_dead_pane_pruned_live_pane_kept(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        now = time.time()
+
+        enc = wd.encode_project_dir(self.LIVE_CWD)
+        tpath = proj / enc / "90bc51f3.jsonl"
+        tpath.parent.mkdir(parents=True)
+        tpath.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "hello"}]},
+        }) + "\n")
+        stale = now - wd.PWEDGE_MIN_IDLE_S - 120     # >= 30 min idle
+        os.utime(tpath, (stale, stale))
+
+        state_path = Path(tmp.name) / "state.json"
+        state_path.write_text(json.dumps({
+            "pwedge:%s" % self.DEAD_PANE: {"hash": "deadbeef", "n": 2,
+                                            "pinged": False},
+            "pwedge-ping:%s" % self.DEAD_PANE: now - 100,
+            "pwedge:%s" % self.LIVE_PANE: {"hash": "livehash", "n": 1,
+                                            "pinged": False},
+        }))
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                # only the LIVE pane exists this sweep — %1 has closed
+                return "%s\tclaude\t%s\n" % (self.LIVE_PANE, self.LIVE_CWD)
+            if "capture-pane" in j:
+                return DRAFT_PANE
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if argv[-1] == "#S":
+                    return "zbynek"
+                return ""             # #{session_group} -> empty, falls to #S
+            if "send-keys" in j:
+                return ""
+            return ""
+
+        wd.run_once(now=now, dry_run=False, run=fake_run,
+                    send_fn=lambda *a, **k: None,
+                    projects_dir=proj, state_path=state_path,
+                    pending_prefix=str(Path(tmp.name) / "pending-"))
+
+        saved = json.loads(state_path.read_text())
+        self.assertNotIn("pwedge:%s" % self.DEAD_PANE, saved,
+                         "a dead pane's episode state must be pruned: %r" % saved)
+        self.assertNotIn("pwedge-ping:%s" % self.DEAD_PANE, saved,
+                         "a dead pane's ping-cooldown state must be pruned: "
+                         "%r" % saved)
+        self.assertIn("pwedge:%s" % self.LIVE_PANE, saved,
+                      "a live pane's episode state must survive cleanup: "
+                      "%r" % saved)
