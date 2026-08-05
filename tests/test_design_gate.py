@@ -128,6 +128,118 @@ class TestClassifyDesignComment(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #219 -- _CAUSE_RE missed common Slovak root-cause phrasings
+# --------------------------------------------------------------------------- #
+
+class TestCauseRegexSlovakSynonyms(unittest.TestCase):
+    """#219: two real design comments (on #132 and #137) were rejected by
+    `hooks/block-commit-without-design.sh` despite genuinely explaining root
+    cause, because they used "koreň"/"zistenie"/"chýbal" instead of
+    "príčina"/"dôvod"/"caused by"/"because the"."""
+
+    # ---- positive: each new synonym is recognized -------------------------
+    def test_koren_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Koreň/kontext: worker chýbal v dispatch reťazci, lebo telo "
+            "skillu sa nikdy nenačíta pre dispatchnutého subagenta."))
+
+    def test_zdroj_problemu_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Zdroj problému je v tom, že marker sa zapisuje pred overením."))
+
+    def test_zdroj_chyby_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Zdroj chyby: retry súbor sa nikdy neodstráni."))
+
+    def test_zistenie_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Zistenie: retry súbor nikdy nezaniká, lebo TTL sa nikdy "
+            "nekontroluje."))
+
+    def test_zistil_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Pri debugovaní som zistil, že hook nikdy nezapíše marker."))
+
+    def test_co_sa_stalo_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Čo sa stalo: hook zbadal starý counter a znova ho použil."))
+
+    def test_chybal_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Skill telo chýbalo v kontexte dispatchnutého workera, takže "
+            "krok sa nikdy nespustil."))
+
+    def test_nebolo_is_recognized(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Overenie nebolo nikdy zavolané pred zápisom markera."))
+
+    def test_spo_soben_family_still_matches(self):
+        # the already-covered "sp[ôo]soben" family (used to phrase "to je
+        # spôsobené") must keep matching -- this addition must not narrow it.
+        self.assertTrue(dg._CAUSE_RE.search(
+            "To je spôsobené tým, že session id sa nikdy neuložil."))
+
+    def test_english_families_still_match(self):
+        self.assertTrue(dg._CAUSE_RE.search(
+            "Root cause: the retry loop never reset its backoff counter."))
+
+    # ---- negative controls: ordinary Slovak prose must NOT match --------
+    def test_zdrojovy_kod_is_not_mistaken_for_zdroj_problemu(self):
+        # bare "zdroj" would false-positive on "source CODE" -- unrelated to
+        # a cause claim. The qualifier (problému/chyby) exists for exactly
+        # this reason.
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "Pozrel som sa na zdrojový kód a všetko vyzerá v poriadku."))
+
+    def test_ordinary_status_prose_does_not_match(self):
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "Aktualizoval som dokumentáciu a pridal testy pre nový "
+            "endpoint. Všetko funguje podľa očakávania a je pripravené na "
+            "review."))
+
+    def test_ordinary_plan_prose_does_not_match(self):
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "Ďalší krok je nasadiť zmenu na oba stroje a potvrdiť, že "
+            "dashboard zobrazuje novú verziu."))
+
+    def test_ordinary_english_status_prose_does_not_match(self):
+        self.assertIsNone(dg._CAUSE_RE.search(
+            "Updated the documentation and added tests for the new "
+            "endpoint. Everything works as expected and is ready for "
+            "review."))
+
+    # ---- end-to-end: the real incident shape now passes the classifier ---
+    GOOD_SLOVAK_KOREN = (
+        "Koreň/kontext: worker chýbal v dispatch reťazci, lebo telo skillu "
+        "sa nikdy nenačíta pre dispatchnutého subagenta -- preto krok "
+        "fyzicky nemohol prebehnúť. Prístup: presunúť krok do "
+        "vždy-načítaného modulu, aby ho subagent skutočne videl. Zamietnutá "
+        "alternatíva: ponechať ho v skille a len pridať odkaz naň -- to by "
+        "problém nevyriešilo, lebo telo skillu subagentovi stále nedorazí."
+    )
+
+    GOOD_SLOVAK_PRECO = (
+        "Prečo toto? Autopilot-worker beží ako samostatný subagent a novo "
+        "pridaný krok chýbal presne v jeho vlastnom system prompte -- preto "
+        "ho nikdy nevidel, aj keď existoval v skille. Prístup: presunúť "
+        "krok do agents/autopilot-worker.md, ktoré je subagentov skutočný "
+        "system prompt. Zamietnutá alternatíva: len upozorniť naň v "
+        "dokumentácii -- to už raz nefungovalo, lebo dokumentácia nie je "
+        "súčasťou dispatchnutého kontextu."
+    )
+
+    def test_koren_kontext_heading_now_passes_the_full_classifier(self):
+        ok, reason = dg.classify_design_comment(self.GOOD_SLOVAK_KOREN)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
+    def test_preco_toto_shape_now_passes_the_full_classifier(self):
+        ok, reason = dg.classify_design_comment(self.GOOD_SLOVAK_PRECO)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
+
+# --------------------------------------------------------------------------- #
 # issue reference extraction
 # --------------------------------------------------------------------------- #
 
