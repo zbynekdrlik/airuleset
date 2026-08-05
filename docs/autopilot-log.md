@@ -3164,3 +3164,43 @@ deployed clean to all 6 targets. Auto-closed via the `Closes #232`
 trailer. Playbook entry appended (`.claude/rules/airuleset-internals.md`)
 covering the candidate-vs-verify job-design pattern, the commit/working-
 tree discrepancy recovery pattern, and the live-state-prune TOCTOU race.
+
+2026-08-05 solo: #235 tmux scrollback holey — raised history-limit
+2000->50000 fleet-wide. `apply_tmux_history_limit()` mirrors
+`apply_ultracode_launcher` (#77)'s idempotent-marker-block shape in
+`~/.tmux.conf`, wired into `cmd_install` (so both `install` and `push`
+apply it -- push already runs install over ssh on every REMOTE_HOSTS
+entry, so no separate remote-deploy code was needed) plus a keystroke-free
+live-apply (`tmux set-option -g history-limit N`) on any running server.
+RED->GREEN: 6261f9c->cf41ed5 (8 tests: create/append/rewrite-in-place/
+idempotent/injectable-live-apply/exception-safety/custom-limit/real-tmux
+smoke).
+
+A fresh-context adversarial review dispatched before push found 2 real
+MAJOR defects: (1) a naive whole-file `START.*?END` regex, given an
+externally-corrupted conf with markers in the wrong order, wasn't just a
+silent no-op -- a SECOND run risked spanning from the stray marker to a
+freshly-appended block's END and silently deleting real content in
+between; (2) `subprocess.run` without `check=True` doesn't raise on a
+nonzero exit, so a real dead-socket `tmux set-option` failure was 100%
+silently swallowed, contradicting the docstring's own "logged for
+visibility" claim. Second RED->GREEN: 3a6d623->6926148 --
+`_clean_tmux_block_spans` (a positional, non-regex, crossing-safe scan)
+replaces the regex entirely, and the live-apply path now inspects
+`returncode`/`stderr` instead of relying only on a raised exception. 3
+MINOR/cosmetic findings (duplicate blocks, a truncated block, a leading
+blank line) mirror pre-existing behavior in the sibling
+`apply_ultracode_launcher` and were filed as #237 rather than expanding
+#235's scope.
+
+Full local suite before push: 3685 tests, OK. `python3 airuleset.py push`
+deployed clean to all 6 targets (dev1 local + dev2 + gatekeeper +
+montalu/marek/david/simap@subdev) -- live-verified on every one of them:
+`~/.tmux.conf` carries the managed block and `tmux show -g history-limit`
+reports 50000 on the running server. Auto-closed via the `Closes #235`
+trailer on cf41ed5. Playbook entry appended
+(`.claude/rules/airuleset-internals.md`) covering the crossing-safe
+marker-block scan pattern and a subagent wait-protocol gotcha (Monitor
+registers as a SECOND in-flight task instead of satisfying the
+foreground-wait requirement -- a real `for`/`sleep`-loop-with-deadline
+Bash call is what actually works).
