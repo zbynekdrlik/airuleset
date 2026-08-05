@@ -2671,9 +2671,13 @@ def _write_request(path, sid, cwd, origin=None, now=None):
 
 class TestCompactSubagentBoundaryHook(unittest.TestCase):
     """`hooks/notify-compact-subagent-boundary.sh` — records a compact request
-    the moment an `autopilot-worker` concludes with no other live task in the
-    session's own registry. `background_tasks` is that registry; a non-self
-    entry (`id != agent_id`) is the ONE fact allowed to defer the compact."""
+    the moment an `autopilot-worker` concludes. `background_tasks` is this
+    session's own live-task registry; a non-self entry (`id != agent_id`,
+    #246) no longer prevents the record — it is a live-tasks DEFERRAL fact
+    carried forward for the two DELIVERY-time gates
+    (`_session_has_live_bg_tasks`, watchdog/__init__.py) to act on instead.
+    Only an UNPROVABLE registry (absent/null/malformed/no ids) still
+    prevents recording outright — see the module below."""
 
     HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-subagent-boundary.sh"
 
@@ -2726,21 +2730,28 @@ class TestCompactSubagentBoundaryHook(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(reqfile.exists(), r.stderr)
 
-    def test_another_live_worker_of_this_session_defers(self):
-        # the ONE allowed deferral: the next ticket is genuinely in flight
+    def test_another_live_worker_of_this_session_still_records(self):
+        # #246: a sibling worker still running is no longer an outright
+        # DECLINE here — the boundary is recorded like any other, with its
+        # own PROVEN origin, and the live-tasks SAFETY property is enforced
+        # at DELIVERY time instead (`_session_has_live_bg_tasks`, watchdog/
+        # __init__.py) so the compact-stall backstop (job 26) always has an
+        # artifact to watch.
         r, reqfile = self._run(sid="sup-c", tasks="sibling")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(reqfile.exists())
+        self.assertTrue(reqfile.exists())
+        d = json.loads(reqfile.read_text())
+        self.assertEqual(d["sup-c"].get("origin"), _PROVEN)
 
-    def test_a_pending_task_counts_as_live(self):
+    def test_a_pending_task_also_still_records(self):
         r, reqfile = self._run(sid="sup-d", tasks="pending-sibling")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(reqfile.exists())
+        self.assertTrue(reqfile.exists())
 
-    def test_a_live_shell_task_of_this_session_also_defers(self):
+    def test_a_live_shell_task_of_this_session_also_still_records(self):
         r, reqfile = self._run(sid="sup-e", tasks="shell")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(reqfile.exists())
+        self.assertTrue(reqfile.exists())
 
     def test_no_background_tasks_field_can_never_prove_zero(self):
         # cannot PROVE nothing is live -> never compact (same fail-direction
@@ -3057,18 +3068,33 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
         _, home = self._run(sid="sup-empty", tasks="empty")
         self._expect_one(home, "RECORD", sid="sup-empty")
 
-    # -- DECLINE, one named predicate each ---------------------------------- #
+    # -- RECORD, a live-tasks deferral fact carried forward (#246) ---------- #
 
-    def test_a_live_sibling_declines_naming_the_live_task_predicate(self):
+    def test_a_live_sibling_still_records_naming_the_deferral_fact(self):
+        # #246: a sibling worker still running used to be an outright
+        # DECLINE here; it now RECORDS the proven boundary like any other
+        # and carries the deferral FACT forward as `deferred=live-tasks
+        # n=N` on the SAME record line — the live-tasks SAFETY check moved
+        # to the two delivery-time gates (`_session_has_live_bg_tasks`).
         r, home = self._run(sid="sup-sib", agent_id="agt-sib", tasks="sibling")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse((Path(home) / ".claude" / "compact-requests.json").exists())
-        self._expect_one(home, "DECLINE", reason="live-tasks", n="1",
+        self.assertTrue((Path(home) / ".claude" / "compact-requests.json").exists())
+        self._expect_one(home, "RECORD", deferred="live-tasks", n="1",
                          agent="agt-sib", sid="sup-sib")
 
     def test_the_live_task_count_is_the_non_self_count(self):
         _, home = self._run(sid="sup-two", tasks="two-siblings")
-        self._expect_one(home, "DECLINE", reason="live-tasks", n="2")
+        self._expect_one(home, "RECORD", deferred="live-tasks", n="2")
+
+    def test_zero_live_tasks_carries_no_deferred_field_at_all(self):
+        # the positive control for the two tests above: a proven boundary
+        # with NO sibling work carries no `deferred=` field on its RECORD
+        # line — the field is a FACT about deferral, not a constant tag.
+        _, home = self._run(sid="sup-zero", tasks="self")
+        f = self._expect_one(home, "RECORD", sid="sup-zero")
+        self.assertNotIn("deferred", f, f)
+
+    # -- DECLINE, one named predicate each — an UNPROVABLE registry only ---- #
 
     def test_a_null_registry_declines_naming_the_observed_type(self):
         _, home = self._run(sid="sup-null", tasks="null")
@@ -3120,8 +3146,14 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
         home = self._home()
         self._run(home=home, sid="sup-nw", agent_type="Explore")
         self._run(home=home, sid="sup-w", agent_id="agt-w", tasks="sibling")
-        outs = [_decision_fields(ln)["reason"] for ln in _decision_lines(home)]
-        self.assertEqual(outs, ["not-autopilot-worker", "live-tasks"], outs)
+        lines = _decision_lines(home)
+        self.assertEqual(len(lines), 2, lines)
+        outs = [_decision_fields(ln)["_outcome"] for ln in lines]
+        self.assertEqual(outs, ["DECLINE", "RECORD"], outs)
+        # #246 — the worker's own RECORD line still carries its deferral
+        # fact, unaffected by the throttled non-worker DECLINE ahead of it.
+        self.assertEqual(_decision_fields(lines[1]).get("deferred"),
+                         "live-tasks", lines[1])
 
     # -- bounded, and never able to break a subagent stop -------------------- #
 
@@ -3341,10 +3373,11 @@ class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
         probe.addCleanup = self.addCleanup
         return probe._run(hook=hook, **kw), probe
 
-    def test_a_hook_that_logs_unconditionally_fails_the_decline_assertions(self):
+    def test_a_hook_that_logs_unconditionally_fails_the_record_assertions(self):
         # "make something appear in the log" — the exact wrong fix #123 warns
         # about. It writes a RECORD line for every payload, before any
-        # predicate is evaluated.
+        # predicate is evaluated — so it can never carry the REAL deferral
+        # fact (#246) the correct hook's own RECORD line carries.
         inject = ('mkdir -p "$HOME/.claude" 2>/dev/null || true\n'
                   'printf "%s RECORD result=recorded type=x agent=x sid=x cwd=x\\n" '
                   '"$(date -Iseconds)" >> "$HOME/.claude/compact-decisions.log" '
@@ -3355,18 +3388,27 @@ class TestDecisionLogAssertionsHaveTeeth(unittest.TestCase):
                                        tasks="sibling")
         self.assertTrue(_decision_lines(home), "mutant must have logged")
         with self.assertRaises(AssertionError):
-            probe._expect_one(home, "DECLINE", reason="live-tasks", n="1",
+            probe._expect_one(home, "RECORD", deferred="live-tasks", n="1",
                               agent="agt-t1", sid="sup-t1")
 
-    def test_a_widened_accept_condition_fails_the_decline_assertions(self):
-        # "widen until something appears" — the other wrong fix. The live-task
-        # gate is neutralised, so a deferral is reported as a boundary.
+    def test_a_hook_that_still_declines_on_live_tasks_fails_the_record_assertions(self):
+        # #246's own regression shape: the live-tasks branch reverted to
+        # DECLINE-and-exit (the pre-#246 behavior) instead of carrying the
+        # deferral fact forward on a RECORD line. Mutating the REAL shipped
+        # deferral-carrying statement back to the old decline-and-exit block
+        # proves the new RECORD-with-deferred assertions have teeth against
+        # exactly the regression this hook's whole fix exists to prevent.
         mut = self._mutant(lambda s: s.replace(
-            '[ "$OTHERS" = "0" ] ||', 'true ||', 1))
+            '[ "$OTHERS" = "0" ] || DEFERRED="deferred=live-tasks n=$OTHERS "\n',
+            '[ "$OTHERS" = "0" ] || { _decide_log DECLINE '
+            '"reason=live-tasks n=$OTHERS"; exit 0; }\n', 1))
         (_, home), probe = self._probe(mut, sid="sup-t2", agent_id="agt-t2",
                                        tasks="sibling")
+        self.assertFalse(
+            (Path(home) / ".claude" / "compact-requests.json").exists(),
+            "mutant must have reverted to the pre-#246 decline")
         with self.assertRaises(AssertionError):
-            probe._expect_one(home, "DECLINE", reason="live-tasks", n="1")
+            probe._expect_one(home, "RECORD", deferred="live-tasks", n="1")
 
     def test_a_hook_that_logs_nothing_fails_the_accept_assertion(self):
         # the pre-#123 state itself: silent on every path.
@@ -3983,6 +4025,193 @@ class TestCompactRequestSelfArgparseWiring(unittest.TestCase):
             capture_output=True, text=True)
         self.assertIn("--self", r.stdout)
         self.assertIn("--hold", r.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# #246 (2026-08-05) — the live-tasks SAFETY check MOVES from RECORD time (the
+# SubagentStop hook's old outright DECLINE) to DELIVERY time
+# (`_session_has_live_bg_tasks`, checked right before either keystroke-send
+# point in `deliver_compact_now` and job 14's `compact_ticket_boundary`).
+# --------------------------------------------------------------------------- #
+
+def _sub_agent_transcript(projects_dir, cwd, sid, age_s, now,
+                          filename="agent-x.jsonl"):
+    """Write <projects_dir>/<encoded-cwd>/<sid>/subagents/<filename> with an
+    mtime `age_s` seconds before `now` — the exact shape `subagent_active`
+    (job 4's own "is a dispatched worker alive" signal) reads, reused here
+    for signal (b) of `_session_has_live_bg_tasks`. ALSO writes the PARENT
+    transcript `<projects_dir>/<encoded-cwd>/<sid>.jsonl` (a bare stub) —
+    `_transcript_for_session` (the resolver signal (b) uses to find the
+    subagents/ dir in the first place) requires that file to exist, exactly
+    like a real session's own transcript always does."""
+    d = Path(projects_dir) / wd.encode_project_dir(cwd) / sid / "subagents"
+    d.mkdir(parents=True, exist_ok=True)
+    parent = d.parent.parent / (sid + ".jsonl")
+    if not parent.exists():
+        parent.write_text('{"type":"assistant"}\n')
+    p = d / filename
+    p.write_text('{"type":"assistant"}\n')
+    os.utime(p, (now - age_s, now - age_s))
+    return p
+
+
+class TestSessionHasLiveBgTasks(unittest.TestCase):
+    """`_session_has_live_bg_tasks` — the two independent DELIVERY-time
+    signals #246 moved the SubagentStop hook's old RECORD-time live-tasks
+    DECLINE into. Either signal true -> True; neither readable -> False
+    (deferral is an OPTIMIZATION of an already-real safety property, never
+    itself a new way to block on "we don't know")."""
+
+    def _projects(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_true_when_the_pane_capture_shows_the_waiting_row(self):
+        pdir = self._projects()   # no subagents dir at all -> signal (b) is False
+        cap = "● Hotovo.\n✻ Waiting for 1 background agent to finish\n❯ \n"
+        self.assertTrue(wd._session_has_live_bg_tasks(
+            "%1", "sid-a", "/proj/a", None, projects_dir=str(pdir),
+            captured=cap))
+
+    def test_true_on_a_fresh_subagent_transcript_mtime(self):
+        pdir = self._projects()
+        now = 1_000_000.0
+        _sub_agent_transcript(pdir, "/proj/b", "sid-b", 10, now)
+        # `captured` carries NO waiting row -> signal (a) is False; the fresh
+        # mtime (signal b) must be sufficient on its own.
+        self.assertTrue(wd._session_has_live_bg_tasks(
+            "%1", "sid-b", "/proj/b", None, projects_dir=str(pdir),
+            now=now, captured="● Hotovo.\n❯ \n"))
+
+    def test_false_on_stale_mtime_and_a_clean_capture(self):
+        pdir = self._projects()
+        now = 1_000_000.0
+        _sub_agent_transcript(pdir, "/proj/c", "sid-c",
+                              wd._LIVE_BG_TASK_WINDOW_S + 1, now)
+        self.assertFalse(wd._session_has_live_bg_tasks(
+            "%1", "sid-c", "/proj/c", None, projects_dir=str(pdir),
+            now=now, captured="● Hotovo.\n❯ \n"))
+
+    def test_false_when_nothing_is_readable(self):
+        pdir = self._projects()   # empty -- no subagents dir, no pane
+        self.assertFalse(wd._session_has_live_bg_tasks(
+            "", "sid-d", "/proj/d", None, projects_dir=str(pdir),
+            captured=None))
+
+    def test_a_capture_pane_failure_falls_through_to_signal_b(self):
+        # exception-safe: a `run` that raises must not propagate out, and
+        # must not be mistaken for a positive signal (a) — it falls through
+        # to signal (b), which here is genuinely live.
+        pdir = self._projects()
+        now = 1_000_000.0
+        _sub_agent_transcript(pdir, "/proj/e", "sid-e", 5, now)
+
+        def boom(argv, timeout=8):
+            raise OSError("tmux gone")
+
+        self.assertTrue(wd._session_has_live_bg_tasks(
+            "%1", "sid-e", "/proj/e", boom, projects_dir=str(pdir), now=now))
+
+    def test_a_capture_pane_failure_with_no_subagent_activity_is_false(self):
+        pdir = self._projects()
+
+        def boom(argv, timeout=8):
+            raise OSError("tmux gone")
+
+        self.assertFalse(wd._session_has_live_bg_tasks(
+            "%1", "sid-f", "/proj/f", boom, projects_dir=str(pdir)))
+
+    def test_no_pane_id_skips_signal_a_and_still_checks_signal_b(self):
+        pdir = self._projects()
+        now = 1_000_000.0
+        _sub_agent_transcript(pdir, "/proj/g", "sid-g", 5, now)
+        self.assertTrue(wd._session_has_live_bg_tasks(
+            "", "sid-g", "/proj/g", None, projects_dir=str(pdir), now=now))
+
+
+CB_IDLE_WAITING_CAP = ("● Predošlá práca hotová.\n"
+                       "✻ Waiting for 1 background agent to finish\n"
+                       "❯ \n  ctx ███░  caveman:lite\n")
+
+
+class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
+    """Job 14 (`compact_ticket_boundary`) — the live-tasks defer check,
+    right before EITHER keystroke-sending branch, using the SAME
+    `CompactFakeTmux` harness `TestCompactTicketBoundary` uses."""
+
+    PANE = "%9"
+    SID = "sess-livebg-14"
+
+    def setUp(self):
+        _isolate_compact_claims(self)   # #78 — never touch the real claims file
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, captured):
+        proj = self._dir()
+        path = str(proj / "compact-requests.json")
+        wd.record_compact_request(self.SID, "/home/x/livebg", path=path)
+        tmux = CompactFakeTmux(captured)
+        panes_by_sid = {self.SID: (self.PANE, captured)}
+        logs = wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        return tmux, logs, path
+
+    def test_live_tasks_true_defers_request_kept_no_keystrokes(self):
+        tmux, logs, path = self._go(CB_IDLE_WAITING_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip live-tasks (compact-request)" in ln
+                            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_live_tasks_false_delivers_exactly_as_today(self):
+        # positive control -- the SAME fixture, minus the waiting row
+        tmux, logs, path = self._go(CB_IDLE_CAP)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+
+class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
+    """`deliver_compact_now` (the synchronous #65 path) — the same
+    live-tasks defer check, right before its own single keystroke-sending
+    point, using the SAME `DeliverCompactNowFakeTmux` harness
+    `TestDeliverCompactNow` uses."""
+
+    SID = "sess-livebg-dcn"
+    CWD = "/home/newlevel/devel/livebg-dcn"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, captured):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], captured)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj)
+        return ok, tmux
+
+    def test_live_tasks_true_falls_back_to_recorded(self):
+        ok, tmux = self._go(CB_IDLE_WAITING_CAP)
+        self.assertFalse(ok)          # "" -- falls through to job 14's retry
+        self.assertEqual(tmux.sent, [])
+
+    def test_live_tasks_false_still_delivers(self):
+        # positive control -- the SAME fixture, minus the waiting row
+        ok, tmux = self._go(CB_IDLE_CAP)
+        self.assertTrue(ok)
+        self.assertIn("/compact", tmux.typed_texts())
 
 
 if __name__ == "__main__":
