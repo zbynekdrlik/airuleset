@@ -1224,7 +1224,13 @@ _SESSION_LIMIT_RX = re.compile(
 # -- capture an optional MONTH + DAY ahead of the clock, then the clock.
 _RESET_TIME_RX = re.compile(
     r"reset(?:s|ting)?\s+(?:at\s+)?(?:([A-Za-z]{3,9})\s+(\d{1,2}),?\s+)?"
-    r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", re.I)
+    # #183 finding 2: the hour group is `(?!\d)`-guarded so it can never be
+    # a TRUNCATED PREFIX of a longer digit run — without it, a 4-digit year
+    # ("resets Jul 31, 2026 9pm") silently absorbed its first two digits as
+    # the hour (epoch one hour early) instead of the whole match failing
+    # (the previously fail-safe None a 2-digit year / reversed-order form
+    # still correctly returns).
+    r"(\d{1,2})(?!\d)(?::(\d{2}))?\s*([ap]m)?", re.I)
 _RESET_MONTH_NUM = {name: i + 1 for i, name in enumerate((
     "jan", "feb", "mar", "apr", "may", "jun",
     "jul", "aug", "sep", "oct", "nov", "dec"))}
@@ -1239,6 +1245,15 @@ _RESET_TZ_RX = re.compile(r"\(([A-Za-z]+(?:/[A-Za-z_]+)?)\)")
 # see the `elif ra and now >= ra:` branch in run_once for the full story.
 SESSLIMIT_RETRY_S = 5 * 60
 SESSLIMIT_MAX_TRIES = 4
+# #183: how stale a DATED reset target (this year's occurrence) may be
+# before it must mean NEXT year's occurrence instead. The bare-clock
+# branch's OWN 6h window is sized for a 5-HOUR session-limit banner, which
+# can only ever be a few hours stale — far too tight for the WEEKLY-cap
+# banner `parse_reset_epoch` ALSO parses (the same function, the dated
+# branch), whose date can legitimately be up to ~7 days out. Comfortably
+# wider than one full weekly cycle so a genuinely-this-week date is never
+# mistaken for "must be next year".
+DATED_RESET_STALE_GRACE_S = 8 * 86400
 
 
 def pane_session_limited(captured):
@@ -1264,14 +1279,26 @@ def pane_session_limited(captured):
 
 def parse_reset_epoch(captured, now):
     """Parse 'resets <clock>' (optionally 'resets <Month> <day>, <clock>')
-    from the banner into an epoch >= now, or None. The clock is read in the
-    tz the banner names: "UTC"/"GMT" literally, an "Area/City" name via
-    ZoneInfo, any other bare parenthesized word (e.g. a stray "(debug)"
-    elsewhere in the pane) falls back to the Europe/Bratislava default
-    (same offset as Prague) — and rolled to tomorrow if already past. The
-    tz is searched ONLY in the ~80 chars starting at the TIME match, never
-    the whole capture: a global search would hijack on ANY parenthesized
-    word anywhere in the pane, however far from the clock (gk incident
+    from the banner. The BARE-CLOCK form (a 5-hour session-limit reset)
+    always returns an epoch >= now (rolled to tomorrow if already past by
+    more than 6h). The DATED form (also used for a WEEKLY-cap banner, whose
+    date can legitimately be up to ~7 days out) returns the parsed target
+    AS-IS whenever it is within `DATED_RESET_STALE_GRACE_S` of now — INCLUDING
+    slightly in the past, which means "the reset already happened" and is
+    correct, not an error: job 6 treats any `resets_at <= now` as "resume
+    immediately". Only once THIS YEAR's occurrence is stale by more than
+    that grace does it roll to next year's occurrence. Either way, returns
+    None whenever the banner cannot be read with confidence — see the
+    per-branch notes below — so job 6 pings but leaves the episode
+    refinable rather than locking in a wrong epoch.
+
+    The clock is read in the tz the banner names: "UTC"/"GMT" literally, an
+    "Area/City" name via ZoneInfo, any other bare parenthesized word (e.g. a
+    stray "(debug)" elsewhere in the pane) falls back to the
+    Europe/Bratislava default (same offset as Prague). The tz is searched
+    ONLY in the ~80 chars starting at the TIME match, never the whole
+    capture: a global search would hijack on ANY parenthesized word
+    anywhere in the pane, however far from the clock (gk incident
     2026-07-24). Fail-safe: any parse/tz error returns None (job 6 then
     pings but cannot auto-resume — the user handles it).
 
@@ -1280,11 +1307,29 @@ def parse_reset_epoch(captured, now):
     used for the target — NOT "today". Assuming today for a multi-day-out
     weekly reset would compute an epoch DAYS too early, and job 6 would
     retry-resume long before the real reset (immediately re-hitting the
-    limit — the one thing `continue`-before-reset must never do)."""
+    limit — the one thing `continue`-before-reset must never do).
+
+    #183 finding 3: the search is BOTTOM-SCOPED to the same last-10-lines
+    region `pane_session_limited` itself uses, never the whole capture — a
+    STALE reset-time echo higher on screen (a dead background worker's old
+    output, or last episode's own banner) must never beat a fresher banner
+    lower down; before this the parse searched globally while the detector
+    that gates it was already deliberately bottom-scoped (the exact
+    stale-echo shape `pane_session_limited`'s own docstring documents)."""
     try:
-        m = _RESET_TIME_RX.search(captured or "")
-        if not m:
+        region = _above_input_box(captured)
+        lines = [ln for ln in region.splitlines() if ln.strip()]
+        if not lines:
+            lines = [ln for ln in (captured or "").splitlines() if ln.strip()]
+        scoped = "\n".join(lines[-10:])
+        # The LAST match, not the first: `.search()` would still pick a
+        # STALE echo sitting higher in the scoped window over a FRESHER
+        # banner below it (#183 finding 3's exact reproduction — bottom
+        # scoping alone narrows the window, it doesn't reorder within it).
+        matches = list(_RESET_TIME_RX.finditer(scoped))
+        if not matches:
             return None
+        m = matches[-1]
         month_name, day_s, hh_s, mm_s, ap_s = m.groups()
         hh = int(hh_s)
         mm = int(mm_s or 0)
@@ -1299,7 +1344,7 @@ def parse_reset_epoch(captured, now):
         tz = None
         try:
             from zoneinfo import ZoneInfo
-            seg = (captured or "")[m.start():m.start() + 80]
+            seg = scoped[m.start():m.start() + 80]
             tzm = _RESET_TZ_RX.search(seg)
             if tzm:
                 name = tzm.group(1)
@@ -1315,17 +1360,31 @@ def parse_reset_epoch(captured, now):
             tz = None
         base = datetime.fromtimestamp(now, tz)
         month = _RESET_MONTH_NUM.get((month_name or "")[:3].lower())
+        if month_name and not month:
+            # #183 finding 1: the date group MATCHED (a month-shaped word +
+            # a day both present) but the word is not a recognised month
+            # (e.g. a weekday, "Thu 31" — the regex only requires 3-9
+            # letters, it never validates the word itself). Falling through
+            # to the bare-clock branch below would silently reuse TODAY's
+            # date with this banner's clock, computing an epoch DAYS too
+            # early — the exact "resumes before the real reset, immediately
+            # re-hits the limit" outcome this whole function exists to
+            # prevent. An unrecognised month must return None, not guess.
+            return None
         if month and day_s:
             # An explicit calendar date -- use IT, not "today" (see the
-            # docstring above). A date more than 6h in the "past" against
-            # THIS year must mean next year's occurrence (a reset banner is
-            # never referring to a date that already passed by that much).
+            # docstring above).
             try:
                 target = base.replace(month=month, day=int(day_s), hour=hh,
                                       minute=mm, second=0, microsecond=0)
             except ValueError:
                 return None       # e.g. day out of range for the month
-            if target.timestamp() <= now - 6 * 3600:
+            # #183 findings 4/5: NOT the bare-clock branch's 6h window (see
+            # DATED_RESET_STALE_GRACE_S's own comment) -- a dated target
+            # slightly in the past (including a small negative delta) is
+            # simply returned as-is; only real staleness beyond one weekly
+            # cycle means "must be next year".
+            if target.timestamp() <= now - DATED_RESET_STALE_GRACE_S:
                 target = target.replace(year=target.year + 1)
             return target.timestamp()
         target = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
@@ -1341,8 +1400,15 @@ def parse_reset_epoch(captured, now):
         return None
 
 
-def _human_clock(epoch):
-    """Epoch → 'HH:MM' in Europe/Bratislava, for the ping text."""
+def _human_clock(epoch, now=None):
+    """Epoch → 'HH:MM' in Europe/Bratislava, for the ping text — but only
+    when the reset falls on TODAY's local date (relative to `now`, default
+    the real wall clock). #183 finding 6: `parse_reset_epoch` started
+    successfully parsing a multi-day-out WEEKLY-cap banner without this
+    consumer ever being updated to match — a cap five days out read as
+    "Reset o 21:00", telling the user it resumes TONIGHT when it actually
+    resumes on a later date. A reset on a different day renders
+    'DD.MM HH:MM' instead."""
     try:
         from datetime import datetime
         try:
@@ -1350,7 +1416,11 @@ def _human_clock(epoch):
             tz = ZoneInfo("Europe/Bratislava")
         except Exception:
             tz = None
-        return datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+        dt = datetime.fromtimestamp(epoch, tz)
+        today = datetime.fromtimestamp(time.time() if now is None else now, tz)
+        if dt.date() == today.date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%d.%m %H:%M")
     except Exception:
         return "?"
 
