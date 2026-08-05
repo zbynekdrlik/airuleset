@@ -920,6 +920,11 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     # primary provably never sent (no token / no channel), so a transient failure
     # can NOT re-send (a timeout can fire AFTER Discord accepted the message).
     if dedup_key and not _dedup_claim(dedup_key):
+        # #184: logged too, not just non-deliveries — an ABSENT log file must
+        # mean "the logger is broken", never "nothing has ever been sent or
+        # skipped here", and a dedup skip is exactly the kind of attempt that
+        # used to leave zero trace on an otherwise perfectly healthy box.
+        log_delivery("dedup", kind="python", key=dedup_key, reason="already-claimed")
         return "dedup"
 
     token = env.get("DISCORD_BOT_TOKEN", "")
@@ -937,9 +942,11 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         (mention_prefix(env, primary_owner) + (body or ""))[:_MAX_CONTENT]) else "error"
     for t, ch in targets[1:]:
         _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
-    # Record the OUTCOME on the claim (#135) and log anything that is not a
-    # delivery — silence is what made #134 invisible for five days.
+    # Record the OUTCOME on the claim (#135) and log EVERY attempt, not only
+    # a non-delivery (#184) — a "sent" line is what turns the log's own
+    # absence into a diagnosable state ("the logger is broken") instead of
+    # being indistinguishable from "nothing has ever failed to deliver".
     _dedup_mark_status(dedup_key, status)
-    if status != "sent":
-        log_delivery(status, kind="python", key=dedup_key, reason="post-failed")
+    log_delivery(status, kind="python", key=dedup_key,
+                 reason="" if status == "sent" else "post-failed")
     return status

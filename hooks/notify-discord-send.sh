@@ -206,6 +206,10 @@ emit_one() {
         body="${resp%$'\n'*}"
         case "$code" in
             2??)
+                # A genuine delivery — logged here too (#184: previously
+                # ONLY a non-delivery ever wrote a line, so a healthy box
+                # and a broken logger both showed an empty file).
+                _delivery_log "sent" ""
                 # Record message-id → session so a Discord REPLY to this ❓ ping
                 # routes the answer back into the asking session (watchdog job 7).
                 # Only the ❓ Stop-hook path sets ND_SESSION_ID; a bad parse is a
@@ -232,12 +236,23 @@ emit_one() {
         return 0
     fi
 
-    (curl -s --max-time 5 -X POST \
-        "https://discord.com/api/v10/channels/${CH}/messages" \
-        -H "Authorization: Bot ${BOT_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n --arg content "$CONTENT" '{content: $content, flags: 4}')" \
-        >/dev/null 2>&1) &
+    # Fire-and-forget (the idle ✅ path): still backgrounded so the caller
+    # never blocks, but the outcome is now captured and logged FROM WITHIN
+    # the same background subshell (#184) — before this, neither a success
+    # nor a failure on this path ever left a trace anywhere.
+    (
+        bg_resp=$(curl -s --max-time 5 -w '\n%{http_code}' -X POST \
+            "https://discord.com/api/v10/channels/${CH}/messages" \
+            -H "Authorization: Bot ${BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg content "$CONTENT" '{content: $content, flags: 4}')" \
+            2>/dev/null) || bg_resp=""
+        bg_code="${bg_resp##*$'\n'}"
+        case "$bg_code" in
+            2??) _delivery_log "sent" "" ;;
+            *)   _delivery_log "not-delivered" "http-${bg_code:-none}" ;;
+        esac
+    ) &
 }
 
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
