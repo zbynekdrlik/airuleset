@@ -3586,6 +3586,13 @@ PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
 # the bracketed-paste-END unstick sequence -- the live incident took 3
 # attempts over ~5 minutes with plain Enter alone, all ineffective.
 PWEDGE_SUBMIT_UNSTICK_AFTER = 2
+# #255 adversarial-review MINOR finding: without this, an unrecoverable
+# stuck pane would retry the paste-end unstick every ~2 sweeps FOREVER with
+# nobody ever told. Once escalation ITSELF has failed this many further
+# times (still on the SAME draft), send ONE deduped give-up ping — the
+# automatic retry keeps happening (still the best available recovery), but
+# a human is now told this pane needs a look.
+PWEDGE_SUBMIT_GIVEUP_AFTER = PWEDGE_SUBMIT_UNSTICK_AFTER + 3
 # Per-pane ping cooldown (issue #35) — a re-WRAPPED draft changes its hash,
 # which used to read as a brand-new episode and re-ping the same pane
 # ("často mi chodí" spam). The cooldown is keyed on the PANE, independent of
@@ -3656,11 +3663,13 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     head, tail, wrapped = box
     txt = tail if wrapped else head[1:].strip()
     attempts_key = "pwedge-submit-attempts:" + pid
+    giveup_key = "pwedge-submit-giveup:" + pid
     if not txt:
         state.pop(key, None)          # provably BARE — there really is no draft
         state.pop(attempts_key, None)  # #255: the draft cleared -- forget any
                                        # escalation count so a LATER, unrelated
                                        # stuck draft starts counting from zero
+        state.pop(giveup_key, None)    # ...and the give-up-ping dedup with it
         return []
     # A machine nudge's PREFIX lives on the box's HEAD row. A wrapped draft's
     # boundary row is its TAIL and can never carry it, so testing `txt` alone
@@ -3695,11 +3704,6 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     if machine:
         unstick_note = ""
         if not dry_run and run and not pane_in_mode(pid, run):
-            # Escape first (issue #36) — a swallowed submit while the
-            # agent-strip selector holds focus makes a bare Enter navigate
-            # instead of submit; never a SECOND Escape (issue #35: deletes a
-            # draft permanently).
-            run(["tmux", "send-keys", "-t", pid, "Escape"])
             # #255: attempts_key tracks its OWN (hash, count) pair,
             # independent of `key`'s own pop/reset cycle above -- it must
             # keep incrementing across repeated PWEDGE_SWEEPS-cycles of the
@@ -3712,21 +3716,57 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             if attempts > PWEDGE_SUBMIT_UNSTICK_AFTER:
                 # #255: this SAME draft has already survived
                 # PWEDGE_SUBMIT_UNSTICK_AFTER consecutive machine-submit
-                # attempts with zero progress -- an ordinary swallowed-
-                # submit race (issue #36's class, already handled by the
-                # Escape above) is ruled out by now. Live incident
-                # (david@subdev, 2026-08-05): Claude Code was left waiting
-                # for the ANSI bracketed-paste END marker (ESC[201~) that
-                # nothing in this codebase ever sends -- `send-keys -l`
+                # attempts (each of which already sent its OWN leading
+                # Escape below and still failed) -- an ordinary swallowed-
+                # submit race (issue #36's class) is ruled out by now. Live
+                # incident (david@subdev, 2026-08-05): Claude Code was left
+                # waiting for the ANSI bracketed-paste END marker (ESC[201~)
+                # that nothing in this codebase ever sends -- `send-keys -l`
                 # never emits real bracket framing (confirmed empirically:
                 # tmux only wraps `paste-buffer -p`, never `send-keys -l`,
                 # per `man tmux`) -- so every further Enter was swallowed as
                 # literal text. A human's manual `send-keys -H 1b 5b 32 30
-                # 31 7e` + Enter recovered it instantly; send the identical
-                # sequence here, before Enter.
+                # 31 7e` + Enter (NO leading Escape) recovered it instantly.
+                #
+                # CRITICAL (adversarial review): do NOT also send the
+                # ordinary pre-Escape on THIS attempt -- it would put two
+                # ESC bytes back to back on the wire (Escape, then this
+                # sequence's own leading 0x1b), which is the exact rapid-
+                # double-escape shape that PERMANENTLY DELETES a draft
+                # (issue #35's hard rule) and might not even be recognized
+                # as ESC[201~ at all (could parse as an Alt-modified CSI
+                # instead). Send EXACTLY the sequence that was proven to
+                # work, nothing more.
                 run(["tmux", "send-keys", "-t", pid, "-H",
                      "1b", "5b", "32", "30", "31", "7e"])
                 unstick_note = " (paste-end unstick)"
+                if attempts > PWEDGE_SUBMIT_GIVEUP_AFTER and not state.get(giveup_key):
+                    # #255 (adversarial review MINOR finding): the paste-end
+                    # unstick itself has now failed to actually clear this
+                    # SAME draft PWEDGE_SUBMIT_GIVEUP_AFTER times over --
+                    # keep retrying (it is still the best automatic
+                    # recovery available), but tell a human ONCE rather
+                    # than retrying silently forever.
+                    state[giveup_key] = True
+                    where = _pane_location(pid, run) if run else ""
+                    loc = " (%s)" % where if where else ""
+                    send_fn(
+                        "⚠️ **%s**%s — automatické odoslanie "
+                        "(vrátane paste-end unstick) opakovane "
+                        "zlyháva na tom istom texte v okne "
+                        "(pid %s); over to ručne — stlač tam "
+                        "Enter alebo priamo v termináli skontroluj "
+                        "stav." % (project, loc, pid),
+                        owner=owner or None,
+                        dedup_key="pwedge-submit-giveup:%s:%s" % (pid, h),
+                        dry_run=dry_run)
+                    unstick_note += " + give-up ping"
+            else:
+                # Escape first (issue #36) — a swallowed submit while the
+                # agent-strip selector holds focus makes a bare Enter
+                # navigate instead of submit; never a SECOND Escape (issue
+                # #35: deletes a draft permanently).
+                run(["tmux", "send-keys", "-t", pid, "Escape"])
             run(["tmux", "send-keys", "-t", pid, "Enter"])
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
@@ -9413,6 +9453,19 @@ def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
 # run afterward and this sweep's own `save_state()` still fires. A degraded
 # sweep (fewer sessions handled this tick) beats a killed one.
 SWEEP_WALL_CLOCK_BUDGET_S = 90    # env AIRULESET_SWEEP_BUDGET_S
+# #255 (adversarial review, MAJOR finding): jobs 8/9's OWN per-item budget
+# checks (added the same ticket) must NOT reuse the bare `sweep_deadline`
+# above verbatim -- that deadline is scoped to the PANE LOOP, which runs
+# BEFORE jobs 8/9 and can legitimately consume the entire 90s on its own
+# (measured live: 26 of 3837 sweeps over 3 days). Reusing it meant jobs 8/9
+# got ZERO of the ~30s margin the 90/120 split was always meant to leave
+# them (the docstring above already says "the remaining lightweight jobs
+# still run afterward") -- they would silently defer EVERY target/pane at
+# idx=0 whenever the pane loop alone used its full budget, exactly when a
+# real backlog is most likely to exist. `TAIL_BUDGET_S` extends their
+# deadline into that same margin, still comfortably under the 120s hard
+# kill (90 + 20 = 110s, 10s of slack left for jobs 1-7/11 in between).
+TAIL_BUDGET_S = 20                # extra seconds for jobs 8/9 past sweep_deadline
 
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
@@ -10632,16 +10685,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         if k == "usage":
             continue                       # account-wide usage state, not a session
         if (k.startswith("pwedge:") or k.startswith("pwedge-ping:")
-                or k.startswith("pwedge-submit-attempts:")):
-            # Job 10's episode + ping-cooldown + (#255) submit-escalation
-            # state is keyed by PANE ID (tmux target), never a transcript
-            # session id — a DIFFERENT identity space from every other
-            # prefix below (all keyed by session id, aged via `last_seen` or
-            # membership in `stalled`). pwedge state carries no timestamp
-            # field to age by in the first place, so a pane id not among
-            # THIS sweep's live_pane_ids is dropped outright; a still-live
-            # pane's entry is left completely untouched, however stale it
-            # looks.
+                or k.startswith("pwedge-submit-attempts:")
+                or k.startswith("pwedge-submit-giveup:")):
+            # Job 10's episode + ping-cooldown + (#255) submit-escalation +
+            # give-up-ping state is keyed by PANE ID (tmux target), never a
+            # transcript session id — a DIFFERENT identity space from every
+            # other prefix below (all keyed by session id, aged via
+            # `last_seen` or membership in `stalled`). pwedge state carries
+            # no timestamp field to age by in the first place, so a pane id
+            # not among THIS sweep's live_pane_ids is dropped outright; a
+            # still-live pane's entry is left completely untouched, however
+            # stale it looks.
             #
             # (adversarial-review finding on #199): `live_pane_ids` being
             # EMPTY is NOT proof every pane died — `list_claude_panes`
@@ -10657,6 +10711,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 prefix = "pwedge-ping:"
             elif k.startswith("pwedge-submit-attempts:"):
                 prefix = "pwedge-submit-attempts:"
+            elif k.startswith("pwedge-submit-giveup:"):
+                prefix = "pwedge-submit-giveup:"
             else:
                 prefix = "pwedge:"
             if k[len(prefix):] not in live_pane_ids:
@@ -10728,6 +10784,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     except Exception as e:
         logs.append("question-prune error: %r" % (e,))
 
+    # #255 (adversarial review, MAJOR finding): jobs 8/9 must NOT reuse the
+    # bare `sweep_deadline` above -- that deadline is scoped to the
+    # per-transcript PANE LOOP, which runs entirely BEFORE this point and
+    # can legitimately consume its whole budget on its own. Reusing it
+    # verbatim meant jobs 8/9 got ZERO of the ~30s margin the 90/120 split
+    # was always meant to leave them, silently deferring every target/pane
+    # at idx=0 whenever the pane loop alone used its full budget -- exactly
+    # when a real backlog is most likely to exist. `tail_deadline` extends
+    # into that same margin, still comfortably under the 120s hard kill.
+    tail_deadline = sweep_deadline + TAIL_BUDGET_S
+
     # Job 8 — bounce backstop (gatekeeper-returned prio:bounce tickets must
     # never rot after a loop ends). Only when a fetch is wired (cmd_watchdog
     # passes the real one; unit tests of other jobs stay network-free).
@@ -10738,7 +10805,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 now, run, state, send_fn, dry_run=dry_run,
                 gh_fetch=bounce_fetch, projects_dir=projects_dir,
                 persist=lambda: save_state(state_path, state),
-                time_fn=time_fn, sweep_deadline=sweep_deadline)
+                time_fn=time_fn, sweep_deadline=tail_deadline)
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
 
@@ -10758,7 +10825,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # no network). Best-effort.
     try:
         logs += goal_autoarm(now, run, state, dry_run=dry_run,
-                             time_fn=time_fn, sweep_deadline=sweep_deadline)
+                             time_fn=time_fn, sweep_deadline=tail_deadline)
     except Exception as e:
         logs.append("goal-autoarm error: %r" % (e,))
 
