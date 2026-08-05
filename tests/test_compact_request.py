@@ -1904,10 +1904,36 @@ class TestCompactRequestCli(unittest.TestCase):
         # #121 — the request's own boundary PROOF is threaded to the sender on
         # every call; a blank origin (this Stop-hook-shaped caller) keeps
         # #109's gate exactly as it was.
-        dcn.assert_called_once_with("sid-cli", "/x", origin="")
+        dcn.assert_called_once()
+        call_args, call_kwargs = dcn.call_args
+        self.assertEqual(call_args, ("sid-cli", "/x"))
+        self.assertEqual(call_kwargs.get("origin"), "")
+        # #250 — `request_ts`/`now` both carry the SAME wall-clock value this
+        # call's own `record_compact_request` just wrote as `ts` — the
+        # live-tasks grace check downstream measures age from THIS request,
+        # not a freshly-recomputed timestamp.
+        self.assertIn("request_ts", call_kwargs)
+        self.assertEqual(call_kwargs.get("request_ts"), call_kwargs.get("now"))
         reqfile = fake_home / ".claude" / "compact-requests.json"
         d2 = json.loads(reqfile.read_text())
         self.assertNotIn("sid-cli", d2)
+
+    def test_record_and_delivery_share_the_exact_same_ts(self):
+        # #250 — the request FILE's own `ts` (what record_compact_request
+        # wrote) and the `request_ts` handed to deliver_compact_now must be
+        # the IDENTICAL value, not two separate `time.time()` reads a few
+        # instructions apart.
+        fake_home = self._home()
+        fixed_ts = 1_700_000_000.0
+        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+             m.patch("time.time", return_value=fixed_ts), \
+             m.patch("watchdog.deliver_compact_now", return_value=False) as dcn:
+            airuleset.cmd_compact_request(Args())
+        self.assertEqual(dcn.call_args.kwargs.get("request_ts"), fixed_ts)
+        self.assertEqual(dcn.call_args.kwargs.get("now"), fixed_ts)
+        reqfile = fake_home / ".claude" / "compact-requests.json"
+        d2 = json.loads(reqfile.read_text())
+        self.assertEqual(d2["sid-cli"]["ts"], int(fixed_ts))
 
     def test_immediate_delivery_failure_leaves_the_request_recorded(self):
         fake_home = self._home()
@@ -4161,7 +4187,23 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
                                           path=path, projects_dir=proj)
         return tmux, logs, path
 
+    def _go_with_ts(self, captured, record_ts, boundary_now, path=None,
+                   cap_seq=()):
+        proj = self._dir()
+        path = path or str(proj / "compact-requests.json")
+        wd.record_compact_request(self.SID, "/home/x/livebg", now=record_ts,
+                                  path=path)
+        tmux = CompactFakeTmux(captured, cap_seq=cap_seq)
+        panes_by_sid = {self.SID: (self.PANE, captured)}
+        logs = wd.compact_ticket_boundary(boundary_now, tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        return tmux, logs, path
+
     def test_live_tasks_true_defers_request_kept_no_keystrokes(self):
+        # #250 -- record and boundary happen moments apart (both via
+        # time.time()), so this pins the IN-GRACE branch specifically: a
+        # fresh request under a live-tasks defer is still skipped/kept,
+        # exactly like the pre-#250 (unconditional) shape.
         tmux, logs, path = self._go(CB_IDLE_WAITING_CAP)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip live-tasks (compact-request)" in ln
@@ -4174,6 +4216,118 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
         self.assertEqual(wd.load_compact_requests(path), {})
+
+    # ------------------------------------------------------------------- #
+    # #250 (2026-08-05) — bounding the live-tasks defer by TIME: a session
+    # that NEVER goes quiet (a supervisor dispatching workers back to back)
+    # must not be deferred forever.
+    # ------------------------------------------------------------------- #
+
+    def test_live_tasks_true_within_grace_skips_and_keeps_the_request(self):
+        recent_ts = 1_000_000.0
+        boundary_now = recent_ts + wd.COMPACT_DEFER_GRACE_S - 1
+        tmux, logs, path = self._go_with_ts(CB_IDLE_WAITING_CAP, recent_ts,
+                                            boundary_now)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip live-tasks (compact-request)" in ln
+                            for ln in logs), logs)
+        self.assertFalse(any("grace-elapsed" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_live_tasks_true_past_grace_delivers_and_marks_grace_elapsed(self):
+        old_ts = 1_000_000.0
+        boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
+        tmux, logs, path = self._go_with_ts(CB_IDLE_WAITING_CAP, old_ts,
+                                            boundary_now)
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertTrue(any("grace-elapsed" in ln for ln in logs), logs)
+        # the pre-#250 skip line must NOT also appear for the same request
+        self.assertFalse(any("skip live-tasks (compact-request)" in ln
+                             for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_malformed_ts_stays_in_grace_and_is_kept(self):
+        # a legacy/corrupted entry with no readable `ts` at all -- unmeasurable
+        # age must never be guessed as "past grace" (that would start typing
+        # into a session with live siblings the FIRST time age can't be read).
+        proj = self._dir()
+        path = str(proj / "compact-requests.json")
+        Path(path).write_text(json.dumps(
+            {self.SID: {"cwd": "/home/x/livebg"}}))   # no "ts" key at all
+        tmux = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)}
+        logs = wd.compact_ticket_boundary(10_000_000.0, tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip live-tasks (compact-request)" in ln
+                            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_past_grace_draft_branch_also_marks_grace_elapsed(self):
+        # the stash-delivery branch (a draft-holding pane) gets the same
+        # marker on its own OK line. Live-tasks is checked ONCE, before the
+        # draft branch -- the scripted cap_seq below (the standard
+        # bare -> typed -> submitted stash sequence, #67) is unrelated to
+        # the waiting row and needs none of it.
+        old_ts = 1_000_000.0
+        boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
+        draft_cap = ("● Predošlá práca hotová.\n"
+                    "✻ Waiting for 1 background agent to finish\n"
+                    "❯ nedokončená veta\n")
+        tmux, logs, path = self._go_with_ts(
+            draft_cap, old_ts, boundary_now,
+            cap_seq=[CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP,
+                    CB_STASH_SUBMITTED_CAP])
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertTrue(
+            any(ln.startswith("OK (compact-request, stash") and
+               "grace-elapsed" in ln for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+
+class TestCompactDeferGraceRelationship(unittest.TestCase):
+    """#250 -- the grace window MUST stay well under the request TTL: a
+    grace >= the TTL recreates the exact starvation this fix exists to
+    kill (a request would LAPSE, dropped unfired, before its own grace
+    window ever has a chance to elapse)."""
+
+    def test_grace_stays_comfortably_under_the_request_ttl(self):
+        self.assertLess(wd.COMPACT_DEFER_GRACE_S, wd.COMPACT_REQUEST_MAX_AGE_S)
+
+
+class TestCompactLiveTasksInGrace(unittest.TestCase):
+    """#250 -- `_compact_live_tasks_in_grace`, the shared time-bound check
+    both delivery points consult before honoring a live-tasks defer."""
+
+    def test_within_grace_is_true(self):
+        self.assertTrue(wd._compact_live_tasks_in_grace(
+            1000, 1000 + wd.COMPACT_DEFER_GRACE_S - 1))
+
+    def test_exactly_at_grace_is_no_longer_in_grace(self):
+        # strict "<" -- the boundary instant itself already counts as past
+        self.assertFalse(wd._compact_live_tasks_in_grace(
+            1000, 1000 + wd.COMPACT_DEFER_GRACE_S))
+
+    def test_past_grace_is_false(self):
+        self.assertFalse(wd._compact_live_tasks_in_grace(
+            1000, 1000 + wd.COMPACT_DEFER_GRACE_S + 1))
+
+    def test_missing_ts_stays_in_grace(self):
+        self.assertTrue(wd._compact_live_tasks_in_grace(None, 10_000_000))
+
+    def test_non_numeric_ts_stays_in_grace(self):
+        self.assertTrue(
+            wd._compact_live_tasks_in_grace("not-a-number", 10_000_000))
+
+    def test_env_override_is_honored(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "10"}):
+            self.assertFalse(wd._compact_live_tasks_in_grace(1000, 1015))
+            self.assertTrue(wd._compact_live_tasks_in_grace(1000, 1005))
+
+    def test_explicit_grace_param_overrides_env_and_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_DEFER_GRACE_S": "9999"}):
+            self.assertFalse(
+                wd._compact_live_tasks_in_grace(1000, 1050, grace=10))
 
 
 class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
@@ -4202,7 +4356,19 @@ class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
                                     projects_dir=proj)
         return ok, tmux
 
+    def _go_with_ts(self, captured, request_ts=None, now=None):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], captured)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj,
+                                    request_ts=request_ts, now=now)
+        return ok, tmux
+
     def test_live_tasks_true_falls_back_to_recorded(self):
+        # #250 -- no request_ts passed (every pre-#250 caller/test): treated
+        # as unmeasurable -> ALWAYS in-grace -> UNCHANGED behavior.
         ok, tmux = self._go(CB_IDLE_WAITING_CAP)
         self.assertFalse(ok)          # "" -- falls through to job 14's retry
         self.assertEqual(tmux.sent, [])
@@ -4212,6 +4378,42 @@ class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
         ok, tmux = self._go(CB_IDLE_CAP)
         self.assertTrue(ok)
         self.assertIn("/compact", tmux.typed_texts())
+
+    # ------------------------------------------------------------------- #
+    # #250 (2026-08-05) — the same time-bound check, exercised directly via
+    # the new `request_ts=`/`now=` params.
+    # ------------------------------------------------------------------- #
+
+    def test_live_tasks_true_within_grace_still_falls_back(self):
+        recent_ts = 1_000_000.0
+        now = recent_ts + wd.COMPACT_DEFER_GRACE_S - 1
+        ok, tmux = self._go_with_ts(CB_IDLE_WAITING_CAP, request_ts=recent_ts,
+                                    now=now)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP live-tasks", log_text)
+        self.assertNotIn("grace-elapsed", log_text)
+
+    def test_live_tasks_true_past_grace_delivers_with_marker(self):
+        old_ts = 1_000_000.0
+        now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
+        ok, tmux = self._go_with_ts(CB_IDLE_WAITING_CAP, request_ts=old_ts,
+                                    now=now)
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SEND grace-elapsed", log_text)
+
+    def test_no_request_ts_defaults_to_in_grace_even_with_a_far_future_now(self):
+        # #250 -- documents the deliberate default: this function runs
+        # SYNCHRONOUSLY, moments after the request was recorded with
+        # ts=now, so its own attempt is ALWAYS in-grace when tasks are
+        # live -- a huge `now` with no `request_ts` must still defer.
+        ok, tmux = self._go_with_ts(CB_IDLE_WAITING_CAP, request_ts=None,
+                                    now=99_999_999.0)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
 
 
 if __name__ == "__main__":
