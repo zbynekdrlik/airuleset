@@ -1702,6 +1702,60 @@ class RunOnceSweepWallClockBudget(unittest.TestCase):
                     "default budget, got: %r" % logs)
 
 
+class RunOnceTailBudgetForJobs89(unittest.TestCase):
+    """#255 (adversarial review, MAJOR finding): jobs 8/9 must NOT receive
+    the bare `sweep_deadline` used by the per-transcript pane loop -- that
+    deadline is scoped to the pane loop alone (which runs BEFORE jobs 8/9)
+    and can legitimately already be exhausted by the time jobs 8/9 run,
+    silently zeroing their entire ~30s margin (the docstring above the
+    90/120 split already says "the remaining lightweight jobs still run
+    afterward") exactly when a real backlog is most likely to exist
+    (measured live: 26 of 3837 sweeps over 3 days exceeded the pane loop's
+    own 90s budget). They get `sweep_deadline + TAIL_BUDGET_S` instead,
+    still comfortably under the 120s systemd hard kill."""
+
+    def test_bounce_backstop_and_goal_autoarm_get_the_extended_tail_deadline(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        proj.mkdir(parents=True)
+        state_path = Path(tmp.name) / "state.json"
+
+        captured = {}
+
+        def bounce_probe(*a, **kw):
+            captured["bounce_deadline"] = kw.get("sweep_deadline")
+            return []
+
+        def goal_probe(*a, **kw):
+            captured["goal_deadline"] = kw.get("sweep_deadline")
+            return []
+
+        budget = 10
+        with unittest.mock.patch.object(wd, "bounce_backstop",
+                                        side_effect=bounce_probe), \
+             unittest.mock.patch.object(wd, "goal_autoarm",
+                                        side_effect=goal_probe):
+            wd.run_once(now=time.time(), dry_run=False,
+                       run=lambda *a, **k: "",
+                       send_fn=lambda *a, **k: None, projects_dir=proj,
+                       state_path=state_path,
+                       pending_prefix=str(Path(tmp.name) / "pending-"),
+                       time_fn=lambda: 0.0, sweep_budget_s=budget,
+                       bounce_fetch=lambda root: [])
+
+        expected = 0.0 + budget + wd.TAIL_BUDGET_S
+        self.assertEqual(captured.get("bounce_deadline"), expected,
+                         "bounce_backstop must get the EXTENDED tail "
+                         "deadline, not the bare pane-loop sweep_deadline")
+        self.assertEqual(captured.get("goal_deadline"), expected,
+                         "goal_autoarm must get the EXTENDED tail "
+                         "deadline, not the bare pane-loop sweep_deadline")
+        self.assertLess(expected, 120,
+                        "the tail deadline must stay comfortably under "
+                        "the 120s systemd hard kill")
+
+
 class RunOnceSubagentVisibility(unittest.TestCase):
     """(issue #6) run_once must apply job 1's api-error detector AND job 4a's
     text-toolcall-stall detector to the newest subagents/*.jsonl too, not just the
