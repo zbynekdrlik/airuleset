@@ -60,30 +60,61 @@ class _Base(TestCase):
         broken_gh = self.no_gh_dir / "gh"
         broken_gh.write_text("#!/usr/bin/env bash\nexit 1\n")
         broken_gh.chmod(0o755)
-        self._closed = set()
+        self._closed = {}   # repo-name -> {issue-number-str, ...}
         self._write_fake_gh()
 
     def _write_fake_gh(self):
+        # Repo-aware (M8, adversarial review): `gh issue view` is invoked
+        # with `cwd=<work_cwd>` by `_gh_issue_state`, so THIS script's own
+        # process cwd at run time IS that resolved directory -- resolve
+        # "which repo am I being asked about" the same way `repo_name_for`
+        # does (git remote get-url origin, last path segment), so a test
+        # can prove the #206 exemption is queried against the RESOLVED
+        # work repo, not the raw payload cwd. Default (no repo given to
+        # closed_issues()) is "airuleset", matching every pre-existing test
+        # in this file, which never leaves self.repo.
+        # A PYTHON script (not bash) -- avoids sed/awk's own $-inside-
+        # double-quotes traps entirely. `git remote get-url origin`, run
+        # with THIS process's own cwd (which IS the resolved `work_cwd`
+        # `_gh_issue_state` invokes `gh` with), resolved the same
+        # last-path-segment way `notify.repo_name_for()` does.
         fake_gh = self.bindir / "gh"
-        closed = " ".join(sorted(self._closed))
+        closed_by_repo = {r: sorted(n) for r, n in self._closed.items()}
         fake_gh.write_text(
-            "#!/usr/bin/env bash\n"
-            'if [ "$1" = issue ] && [ "$2" = view ]; then\n'
-            '  n="$3"\n'
-            '  for c in %s; do [ "$c" = "$n" ] && echo CLOSED && exit 0; done\n'
-            '  echo OPEN\n'
-            '  exit 0\n'
-            'fi\n'
-            'exit 1\n' % (closed if closed else '""'))
+            "#!/usr/bin/env python3\n"
+            "import subprocess, sys\n"
+            "CLOSED = %r\n"
+            "if len(sys.argv) >= 4 and sys.argv[1:3] == ['issue', 'view']:\n"
+            "    n = sys.argv[3]\n"
+            "    out = subprocess.run(['git', 'remote', 'get-url', 'origin'],\n"
+            "                         capture_output=True, text=True)\n"
+            "    url = out.stdout.strip().rstrip('/')\n"
+            "    if url.endswith('.git'):\n"
+            "        url = url[:-4]\n"
+            "    repo = url.replace(':', '/').split('/')[-1]\n"
+            "    if n in CLOSED.get(repo, []):\n"
+            "        print('CLOSED')\n"
+            "    else:\n"
+            "        print('OPEN')\n"
+            "    sys.exit(0)\n"
+            "sys.exit(1)\n" % closed_by_repo)
         fake_gh.chmod(0o755)
 
-    def closed_issues(self, *nums):
-        self._closed |= {str(n) for n in nums}
+    def closed_issues(self, *nums, repo="airuleset"):
+        self._closed.setdefault(repo, set())
+        self._closed[repo] |= {str(n) for n in nums}
         self._write_fake_gh()
 
     def mark(self, issue, repo="airuleset"):
         os.environ["HOME"] = str(self.home)
         dg.write_marker(repo, issue, "https://x/issues/%s#issuecomment-1" % issue)
+
+    def _other_repo(self, remote="https://github.com/zbynekdrlik/dantesync.git"):
+        other = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-other-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "remote", "add", "origin", remote)
+        return other
 
     def run_hook(self, command, agent_type="autopilot-worker", agent_id="aW1",
                 cwd=None, sid="commitgate-sess", gh_on_path=True):
@@ -191,6 +222,32 @@ class TestClosedIssueReferencesAreExempt(_Base):
         r = self.run_hook(COMMIT_41)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_the_exemption_is_checked_against_the_resolved_work_repo(self):
+        # M8 (adversarial review): dg.required_refs(missing, work_cwd) must
+        # query the #206 CLOSED-exemption against the RESOLVED repo (from
+        # an inline cd), never the raw payload cwd -- #61 is CLOSED in
+        # dantesync but still OPEN in airuleset (self.repo/payload cwd); a
+        # commit landing in dantesync via `cd` must see the exemption
+        # apply, proving the resolved directory (not payload cwd) is what
+        # the gh query actually runs against.
+        other = self._other_repo()
+        self.closed_issues(61, repo="dantesync")
+        cmd = 'cd %s && git commit -m "fix: thing (#61) [green]"' % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_exemption_does_not_leak_from_the_payload_repo(self):
+        # the mirror check: #61 CLOSED in airuleset (payload cwd) must NOT
+        # exempt a commit that's actually landing in dantesync (via cd),
+        # where #61 is still OPEN -- proves the query uses work_cwd, not a
+        # stale/cached payload-cwd answer.
+        other = self._other_repo()
+        self.closed_issues(61, repo="airuleset")
+        cmd = 'cd %s && git commit -m "fix: thing (#61) [green]"' % other
+        r = self.run_hook(cmd, cwd=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("61", r.stderr)
+
 
 class TestScopedToAutopilotWorkerOnly(_Base):
 
@@ -239,14 +296,7 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
     """#187/#220 -- a worker dispatched with session cwd = repo A, running
     `cd /path/to/repo-B && git commit ...`, must be gated against repo B
     (the repo the commit is actually landing in), not repo A (the payload's
-    static cwd)."""
-
-    def _other_repo(self, remote="https://github.com/zbynekdrlik/dantesync.git"):
-        other = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-other-"))
-        self.addCleanup(shutil.rmtree, other, True)
-        _git(other, "init", "-q", "-b", "main")
-        _git(other, "remote", "add", "origin", remote)
-        return other
+    static cwd). `_other_repo()` is inherited from `_Base`."""
 
     def test_marker_under_the_cd_target_repo_passes(self):
         other = self._other_repo()

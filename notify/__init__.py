@@ -624,55 +624,69 @@ def repo_name_for(cwd, run=None):
 # <command>` -- the payload's cwd never reflects that `cd`, so a hook that
 # keys off it alone gates against the WRONG repo's marker namespace.
 #
-# THE FIX. Scan the command text for the LAST `cd <path>` occurring before
-# the actual `git commit` invocation (same statement-boundary shape
-# `block-commit-without-design.sh`'s own bash grep already uses) and trust
-# it ONLY when it resolves to a real git repo with an `origin` remote --
-# never a bare guess. Falls back to `cwd` unchanged otherwise, so a command
-# with no `cd` prefix (the overwhelming majority) sees zero behavior change.
+# THE FIX. Trust a `cd <path> &&`/`cd <path>;` ONLY when it is the very
+# FIRST STATEMENT of the whole command (anchored at string position 0), and
+# only when that path resolves to a real git repo with an `origin` remote
+# -- never a bare guess. Falls back to `cwd` unchanged otherwise, so a
+# command with no such prefix (the overwhelming majority) sees zero
+# behavior change.
 #
-# Adversarial-review finding: the scan MUST strip quoted spans first (same
-# shape `hooks/block-foreign-airuleset-write.sh` already uses) -- otherwise
-# a `;cd /path` literal sitting INSIDE a quoted argument (an echo string, a
-# commit message body) is misread as a real statement boundary, letting a
-# crafted command spoof which repo's marker namespace this hook trusts.
+# ADVERSARIAL-REVIEW HISTORY (both against the SAME earlier draft, which
+# scanned for a `cd` preceded by ANY `;`/`&`/`|` ANYWHERE in the text, with
+# quoted spans stripped first):
+#   CRITICAL -- a `cd /path && ...` literal sitting inside a HEREDOC BODY
+#   (not a quoted span -- quote-stripping cannot see it) was misread as a
+#   real statement boundary. Reachable via ordinary commit-message prose
+#   (e.g. quoting a runbook recipe), and because `design_gate.required_refs`
+#   ALSO uses the resolved directory for the #206 gh-issue-state exemption,
+#   this could silently DISABLE the design gate if the spoofed repo happens
+#   to have the same issue number already closed.
+#   WARNING -- the quote-stripping itself regressed the LEGITIMATE case: a
+#   `cd "/path with spaces"` no longer resolved at all, since the quoted
+#   path was blanked along with the injection vector it defended against.
+#
+# THE ANCHOR FIX. Requiring `cd` to be the command's own FIRST token makes
+# both findings structurally impossible at once: nothing (a heredoc body, a
+# quoted argument, an earlier statement) can ever appear before position 0,
+# so no scan-anywhere heuristic is needed, and no quote-stripping is needed
+# either -- a quoted `cd` ARGUMENT is now parsed directly instead of being
+# destroyed. This also tracks real bash semantics exactly: if the command
+# genuinely begins with `cd X &&`, bash really does execute that cd first.
+#
+# KNOWN, ACCEPTED GAPS (documented, not fixed here -- same coverage limit
+# `resolve_work_cwd` already had before this ticket, never a NEW one):
+# `cd X<newline>git commit` (multi-line), `(cd X && git commit)` (subshell),
+# and `git -C X commit` (no `cd` at all) are not detected -- each falls
+# back to `cwd` unchanged, the safe default. Extending coverage to those
+# shapes needs a deliberately more permissive parse, which trades directly
+# against the attack surface this fix just closed -- a decision for a
+# follow-up, not bundled into a security fix.
 # --------------------------------------------------------------------------- #
 
 _STMT_BOUNDARY = r"(?:^|[;&|]|&&)"
 _GIT_COMMIT_CMD_RE = re.compile(
     _STMT_BOUNDARY + r"\s*(?:sudo\s+|env\s+)?git\s+commit\b")
-_CD_PREFIX_RE = re.compile(_STMT_BOUNDARY + r"\s*cd\s+([^\s;&|]+)")
-_SQ_SPAN_RE = re.compile(r"'[^']*'")
-_DQ_SPAN_RE = re.compile(r'"[^"]*"')
-
-
-def _strip_quoted_spans(text):
-    """Blank out single- and double-quoted spans (replaced with a single
-    space each, never deleted outright, so token boundaries either side
-    stay separated). Never a full shell parse -- just enough to stop a
-    quoted MENTION of shell syntax from being read as the real thing."""
-    return _DQ_SPAN_RE.sub(" ", _SQ_SPAN_RE.sub(" ", text))
+_CD_PREFIX_RE = re.compile(
+    r"""^\s*cd\s+(?:"([^"]*)"|'([^']*)'|(\S+))\s*(?:&&|;)""")
 
 
 def resolve_work_cwd(cmd, cwd, run=None):
-    """The directory whose repo `cmd` actually operates on -- an inline
-    `cd <path> &&` immediately ahead of a `git commit` invocation overrides
+    """The directory whose repo `cmd` actually operates on -- a `cd <path>
+    &&`/`cd <path>;` that is the very FIRST statement of `cmd` overrides
     `cwd` (#187) when, and only when, that path is a real, resolvable git
-    repo. Never guesses: no `cd` prefix, no `git commit` in `cmd`, or a
-    `cd` target that isn't a git repo all fall through to `cwd` unchanged.
-    Scans quote-stripped text (see module comment) so a `cd` merely
-    MENTIONED inside a quoted argument can never be trusted."""
-    if isinstance(cmd, str) and cmd:
-        scan = _strip_quoted_spans(cmd)
-        m_commit = _GIT_COMMIT_CMD_RE.search(scan)
-        if m_commit:
-            path = ""
-            for m in _CD_PREFIX_RE.finditer(scan, 0, m_commit.start()):
-                path = m.group(1)
-            if path:
-                path = os.path.expanduser(path.strip("'\""))
-                if path and path != cwd and repo_name_for(path, run=run):
-                    return path
+    repo AND `cmd` contains a `git commit` invocation somewhere. Never
+    guesses: no leading `cd`, no `git commit` anywhere in `cmd`, or a `cd`
+    target that isn't a git repo all fall through to `cwd` unchanged.
+    Anchoring to the command's own start (not "a cd preceded by any
+    boundary character anywhere") is deliberate -- see the module comment
+    for the adversarial-review history that shape closes."""
+    if isinstance(cmd, str) and cmd and _GIT_COMMIT_CMD_RE.search(cmd):
+        m = _CD_PREFIX_RE.match(cmd)
+        if m:
+            path = m.group(1) or m.group(2) or m.group(3) or ""
+            path = os.path.expanduser(path)
+            if path and path != cwd and repo_name_for(path, run=run):
+                return path
     return cwd
 
 
