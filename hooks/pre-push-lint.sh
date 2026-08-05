@@ -31,6 +31,17 @@ fi
 # Detect project type and run appropriate linters
 FAILED=0
 
+# #218 -- `git diff --name-only` always returns paths ROOT-relative,
+# regardless of this hook's own process cwd. On a nested-repo layout (git
+# root at the repo top, the actual project one level down -- pyproject.toml
+# lives in a subdirectory, not at the root) this hook's cwd is that
+# subdirectory, so a root-relative path piped straight into a linter is
+# resolved against the WRONG base and silently doesn't exist. Resolve the
+# git root once here and make every changed-file path ABSOLUTE before
+# handing it to a linter -- correct regardless of which directory the hook
+# itself is running from.
+GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
 # Rust project (Cargo.toml exists)
 if [ -f "Cargo.toml" ]; then
     echo "Pre-push lint: checking Rust formatting..."
@@ -61,7 +72,11 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
         CHANGED=$(git diff --name-only --diff-filter=d "$RANGE" 2>/dev/null | grep -E '\.py$' || true)
         if [ -n "$CHANGED" ]; then
             echo "Pre-push lint: ruff on $(echo "$CHANGED" | wc -l) changed Python file(s)..."
-            if ! echo "$CHANGED" | xargs -r ruff check 2>&1; then
+            # #218 -- $CHANGED paths are ROOT-relative; resolve to absolute
+            # paths via $GIT_ROOT so ruff finds them regardless of this
+            # hook's own invocation cwd (nested-repo layout).
+            ABS_CHANGED=$(printf '%s\n' "$CHANGED" | sed "s|^|${GIT_ROOT}/|")
+            if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check 2>&1; then
                 echo ""
                 echo "BLOCKED: ruff found issues in files you're pushing. Fix them before pushing."
                 FAILED=1
