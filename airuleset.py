@@ -1437,7 +1437,7 @@ def cmd_install(args):
         else:
             print(f"  No change: {TMUX_CONF} ({tmux_desc})")
     except Exception as e:
-        print(f"  tmux history-limit error: {e}", file=sys.stderr)
+        print(f"  tmux managed-block error: {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
