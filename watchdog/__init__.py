@@ -144,6 +144,7 @@ no network.
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -5302,7 +5303,20 @@ def _log_compact_sync(line, path=None):
     break delivery (returns False instead, same fail-safe shape as every
     other `_save_*` helper in this module). Bounded: trims to the last
     `COMPACT_SYNC_LOG_LINES_MAX` lines on every write so this can never
-    grow unbounded on a long-lived box."""
+    grow unbounded on a long-lived box.
+
+    #238-review-style finding 🔵F6 (this ticket's own review, proven live)
+    -- a bounded-retry caller (`deliver_compact_record`/
+    `deliver_compact_self`) can call `deliver_compact_now` several times
+    in a row for the SAME sid/cwd, each attempt hitting the SAME
+    early-return decision (e.g. a genuine `blocked-question` state that
+    does not change between attempts a couple hundred ms apart) --
+    measured live on gatekeeper: 5 IDENTICAL lines inside one 3-second
+    hold. When the new line's own CONTENT (excluding its timestamp) is
+    byte-identical to the log's current last line, this refreshes that
+    line's timestamp in place instead of appending a duplicate -- so the
+    bounded log's forensic window is spent on distinct DECISIONS, not
+    repeated retries of the same one."""
     path = path or compact_sync_log_path()
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
@@ -5311,7 +5325,10 @@ def _log_compact_sync(line, path=None):
         existing = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError:
         existing = []
-    existing.append("%s %s" % (ts, line))
+    if existing and existing[-1].partition(" ")[2] == line:
+        existing[-1] = "%s %s" % (ts, line)
+    else:
+        existing.append("%s %s" % (ts, line))
     existing = existing[-COMPACT_SYNC_LOG_LINES_MAX:]
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -5554,7 +5571,15 @@ def _compact_messages_since_boundary(path, tail_bytes=4_000_000):
     shape) -- never loads a huge transcript whole. `boundary_ts is None`
     must never be read as "thin" by any caller -- there is nothing to
     measure a delta against, the same unmeasurable-never-blocks direction
-    every other gate in this file uses."""
+    every other gate in this file uses.
+
+    #238-review-style finding 🔵F5 (this ticket's own review) -- a
+    boundary WAS found (`delta` genuinely reflects real activity since it)
+    but its own `timestamp` field failed to parse (malformed/missing) is a
+    THIRD case, distinct from "no boundary at all" -- `boundary_ts` reads
+    `0.0` for it (found, epoch unknown), never `None`, so `delta` stays
+    trustworthy for the caller instead of the whole read being discarded
+    as unmeasurable."""
     from datetime import datetime
     try:
         with open(path, "rb") as f:
@@ -5597,6 +5622,18 @@ def _compact_messages_since_boundary(path, tail_bytes=4_000_000):
             continue
         if isinstance(e, dict) and e.get("type") == "assistant":
             delta += 1
+    # #238-review-style finding 🔵F5 (this ticket's own review, proven) --
+    # `boundary_ts` can ALSO be None when a boundary WAS found
+    # (`boundary_idx is not None`) but its own `timestamp` field failed to
+    # parse (a malformed/corrupted line, or a missing field) -- the caller
+    # keys "unmeasurable, never treat as thin" on `boundary_ts is None`
+    # alone, which then wrongly disables the whole gate for a case where
+    # `delta` is perfectly measurable. `0.0` distinguishes "found, epoch
+    # unknown" from "not found at all" (`None`) without changing this
+    # function's 2-tuple return contract every existing caller/test relies
+    # on.
+    if boundary_ts is None:
+        boundary_ts = 0.0
     return delta, boundary_ts
 
 
@@ -6765,7 +6802,26 @@ def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
 
 
 COMPACT_SELF_HOLD_DEFAULT_S = 60
-COMPACT_SELF_RETRY_INTERVAL_S = 5
+# #238-review-style finding 🟡F3 (this ticket's own review, proven live) --
+# removing the self-callback exemption from the too-young gate (#238's own
+# fix) means EVERY real self-callback call now blocks on age at least once
+# (request_ts and the first now_fn() read are always microseconds apart),
+# and the OLD value here (5) overshot COMPACT_MIN_REQUEST_AGE_S's default
+# (2.0) by 3s on every single call -- traced with injected clocks: attempt
+# 1 always fails too-young at t=0, attempt 2 (after ONE sleep of this
+# interval) succeeds. Lowered to comfortably clear the default age gate
+# with a small margin (never exactly 2.0 -- real `sleep()` should never
+# undershoot, but there is no reason to shave it that fine) without
+# meaningfully changing this function's OTHER retry scenarios (copy-mode
+# clearing, a transient failure) -- those still get up to
+# COMPACT_SELF_HOLD_DEFAULT_S / this interval attempts, just more of them.
+COMPACT_SELF_RETRY_INTERVAL_S = 2.5
+
+# #238-review-style finding 🔵F8 (this ticket's own review) -- safety
+# ceilings for `_compact_retry_until`, well past every legitimate caller's
+# own hold (self-callback's 60s is the longest today).
+COMPACT_RETRY_HOLD_CEILING_S = 600
+COMPACT_RETRY_MIN_INTERVAL_S = 0.1
 
 
 def _compact_retry_until(attempt_fn, hold_s, retry_interval, clock_fn=None,
@@ -6783,10 +6839,35 @@ def _compact_retry_until(attempt_fn, hold_s, retry_interval, clock_fn=None,
     `deliver_compact_record` (#238 adversarial review 🔴1 -- a SHORT hold
     for the plain --record path, whose caller passes `request_ts == now`
     on every real invocation, making `_compact_request_too_young` an
-    unconditional off-switch for that path without a genuine retry)."""
+    unconditional off-switch for that path without a genuine retry).
+
+    #238-review-style finding 🔵F8 (this ticket's own review) -- both
+    callers run SYNCHRONOUSLY inside a Stop/SubagentStop hook, which the
+    harness itself time-limits, so a misconfigured/malformed `hold_s`
+    (`inf`, `nan`, or an absurdly large env override) must never turn this
+    into an effectively unbounded loop -- clamped to
+    `COMPACT_RETRY_HOLD_CEILING_S` (well past every legitimate caller's
+    own hold, self-callback's 60s included). A non-finite/negative
+    `retry_interval` is clamped to a small positive floor for the same
+    reason (`time.sleep` on a genuine negative raises; `nan` compares
+    False everywhere and would otherwise silently defeat the clamp
+    below)."""
     clock_fn = clock_fn or time.monotonic
     sleep_fn = sleep_fn or time.sleep
-    deadline = clock_fn() + max(0.0, hold_s)
+    try:
+        hold_s = float(hold_s)
+        if not math.isfinite(hold_s):
+            hold_s = COMPACT_RETRY_HOLD_CEILING_S
+    except (TypeError, ValueError):
+        hold_s = 0.0
+    hold_s = min(max(0.0, hold_s), COMPACT_RETRY_HOLD_CEILING_S)
+    try:
+        retry_interval = float(retry_interval)
+        if not math.isfinite(retry_interval) or retry_interval <= 0:
+            retry_interval = COMPACT_RETRY_MIN_INTERVAL_S
+    except (TypeError, ValueError):
+        retry_interval = COMPACT_RETRY_MIN_INTERVAL_S
+    deadline = clock_fn() + hold_s
     while True:
         try:
             word = attempt_fn()
@@ -6836,7 +6917,22 @@ def deliver_compact_record(sid, cwd, origin=None, request_ts=None, run=None,
     the (short) hold elapses with nothing landing -- the caller's existing
     contract (`""` means "leave the request recorded for job 14's polled
     retry") is unchanged, this function just gives that first attempt a
-    real few seconds instead of exactly none."""
+    real few seconds instead of exactly none.
+
+    #238-review-style finding 🟡F4 (this ticket's own review, proven live)
+    -- `hold_s` and the min-request-age gate (`COMPACT_MIN_REQUEST_AGE_S`,
+    itself env-overridable via `AIRULESET_COMPACT_MIN_REQUEST_AGE_S`) are
+    otherwise UNCOUPLED: raising the min-age env var past `hold_s -
+    retry_interval` silently restores the exact 🔴1 off-switch this
+    function exists to fix (the age gate can never clear inside the hold).
+    Floors `hold_s` to comfortably outlast the CURRENTLY RESOLVED min-age
+    -- only ever WIDENS an accidentally-too-short POSITIVE hold, never
+    shortens a deliberately configured longer one, and never touches an
+    explicit `hold_s <= 0` (that spelling already has its own, DIFFERENT
+    meaning -- "exactly one attempt, no retry at all" -- which callers/
+    tests use deliberately, e.g. to keep a real end-to-end hook test fast
+    when only the RECORDING side is under test, not this function's own
+    retry timing)."""
     now_fn = now_fn or time.time
     if hold_s is None:
         try:
@@ -6846,6 +6942,10 @@ def deliver_compact_record(sid, cwd, origin=None, request_ts=None, run=None,
             hold_s = COMPACT_RECORD_HOLD_DEFAULT_S
     if retry_interval is None:
         retry_interval = COMPACT_RECORD_RETRY_INTERVAL_S
+    if hold_s > 0:
+        floor = _compact_min_request_age() + retry_interval
+        if hold_s < floor:
+            hold_s = floor
     return _compact_retry_until(
         lambda: deliver_compact_now(sid, cwd, run=run, projects_dir=projects_dir,
                                     min_context=min_context, git_run=git_run,

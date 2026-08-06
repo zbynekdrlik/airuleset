@@ -1887,7 +1887,7 @@ class TestCompactRequestCli(unittest.TestCase):
 
     def test_record_writes_the_request_file(self):
         fake_home = self._home()
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=False):
             airuleset.cmd_compact_request(Args())
         reqfile = fake_home / ".claude" / "compact-requests.json"
@@ -1906,7 +1906,7 @@ class TestCompactRequestCli(unittest.TestCase):
         # threaded from the SAME clock, just no longer the same single read.
         fake_home = self._home()
         fixed_ts = 1_700_000_500.0
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("time.time", return_value=fixed_ts), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(Args())
@@ -1934,7 +1934,7 @@ class TestCompactRequestCli(unittest.TestCase):
         # instructions apart.
         fake_home = self._home()
         fixed_ts = 1_700_000_000.0
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("time.time", return_value=fixed_ts), \
              m.patch("watchdog.deliver_compact_now", return_value=False) as dcn:
             airuleset.cmd_compact_request(Args())
@@ -1946,7 +1946,7 @@ class TestCompactRequestCli(unittest.TestCase):
 
     def test_immediate_delivery_failure_leaves_the_request_recorded(self):
         fake_home = self._home()
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=False):
             airuleset.cmd_compact_request(Args())
         reqfile = fake_home / ".claude" / "compact-requests.json"
@@ -1955,7 +1955,7 @@ class TestCompactRequestCli(unittest.TestCase):
 
     def test_immediate_delivery_exception_is_swallowed_and_request_stays_recorded(self):
         fake_home = self._home()
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now",
                      side_effect=RuntimeError("boom")):
             airuleset.cmd_compact_request(Args())   # must not raise
@@ -1977,7 +1977,7 @@ class TestCompactRequestCli(unittest.TestCase):
         fake_home = self._home()
         a = Args()
         a.msg_hash = "dup-hash"
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(a)   # 1st: delivers + marks
             airuleset.cmd_compact_request(a)   # 2nd: SAME hash -> no-op
@@ -1992,7 +1992,7 @@ class TestCompactRequestCli(unittest.TestCase):
         a1.msg_hash = "hash-1"
         a2 = Args()
         a2.msg_hash = "hash-2"
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(a1)
             airuleset.cmd_compact_request(a2)
@@ -2002,10 +2002,10 @@ class TestCompactRequestCli(unittest.TestCase):
         fake_home = self._home()
         a = Args()
         a.msg_hash = "fail-hash"
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=False):
             airuleset.cmd_compact_request(a)   # fails -> must NOT be marked
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(a)   # same hash -> still tries
         dcn.assert_called_once()
@@ -2014,7 +2014,7 @@ class TestCompactRequestCli(unittest.TestCase):
         # Args() with no msg_hash attribute at all (the pre-#71 shape) must
         # behave exactly as before -- every call attempts delivery.
         fake_home = self._home()
-        with m.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+        with m.patch.dict(os.environ, {"HOME": str(fake_home), "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}), \
              m.patch("watchdog.deliver_compact_now", return_value=True) as dcn:
             airuleset.cmd_compact_request(Args())
             airuleset.cmd_compact_request(Args())
@@ -2253,7 +2253,7 @@ class TestCompactRequestHook(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
                               "cwd": cwd})
-        env = {**os.environ, "HOME": home}
+        env = {**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}
         r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
                            capture_output=True, env=env,
                            cwd=str(airuleset.REPO_DIR))
@@ -2649,6 +2649,46 @@ class TestCompactRequestExpiry(unittest.TestCase):
         self.assertFalse(Path(sync_log).exists())
 
 
+class TestLogCompactSyncDedup(unittest.TestCase):
+    """#238-review-style finding 🔵F6 (this ticket's own review, proven
+    live) -- a bounded-retry caller re-invoking `deliver_compact_now`
+    several times for the SAME sid/cwd can hit the SAME early-return
+    decision on every attempt; `_log_compact_sync` must collapse a run of
+    IDENTICAL consecutive lines into one (timestamp refreshed), never
+    duplicate them into the bounded log."""
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def test_consecutive_identical_lines_collapse_to_one(self):
+        for _ in range(5):
+            wd._log_compact_sync("SKIP blocked-question sid=abc cwd=/x")
+        text = wd.compact_sync_log_path().read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("SKIP blocked-question sid=abc cwd=/x", lines[0])
+
+    def test_a_genuinely_different_line_is_appended_not_collapsed(self):
+        wd._log_compact_sync("SKIP blocked-question sid=abc cwd=/x")
+        wd._log_compact_sync("SKIP blocked-question sid=abc cwd=/x")
+        wd._log_compact_sync("SEND sid=abc cwd=/x")
+        text = wd.compact_sync_log_path().read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("SKIP blocked-question", lines[0])
+        self.assertIn("SEND", lines[1])
+
+    def test_the_refreshed_line_carries_the_latest_timestamp(self):
+        wd._log_compact_sync("SKIP blocked-question sid=abc cwd=/x")
+        first_text = wd.compact_sync_log_path().read_text(encoding="utf-8")
+        wd._log_compact_sync("SKIP blocked-question sid=abc cwd=/x")
+        second_text = wd.compact_sync_log_path().read_text(encoding="utf-8")
+        self.assertEqual(len(second_text.splitlines()), 1)
+        self.assertNotEqual(first_text, second_text,
+                            "the timestamp must refresh even though the "
+                            "line count stays the same")
+
+
 class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
     """#109 — the enqueue-time gate can only SEE a rejection that an earlier
     hook has already produced, so `notify-compact-request.sh` must stay ordered
@@ -2742,7 +2782,7 @@ class TestCompactSubagentBoundaryHook(unittest.TestCase):
         elif tasks == "malformed":
             payload["background_tasks"] = "notalist"
         # "absent" — no background_tasks key at all
-        env = {**os.environ, "HOME": home}
+        env = {**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}
         r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
                            text=True, capture_output=True, env=env,
                            cwd=str(airuleset.REPO_DIR))
@@ -2961,7 +3001,7 @@ class TestSupervisorStopVetoIsNoLongerTheOnlyChannel(unittest.TestCase):
                               "last_assistant_message":
                                   "## ✅ Work Complete\n⏳ WORKING: ďalší ticket"})
         subprocess.run(["bash", str(hook)], input=payload, text=True,
-                       capture_output=True, env={**os.environ, "HOME": home},
+                       capture_output=True, env={**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"},
                        cwd=str(airuleset.REPO_DIR))
         self.assertFalse((Path(home) / ".claude" / "compact-requests.json").exists())
 
@@ -3054,7 +3094,7 @@ class TestCompactBoundaryDecisionLog(unittest.TestCase):
         r = subprocess.run(["bash", str(hook or self.HOOK)],
                            input=json.dumps(self._payload(**kw)),
                            text=True, capture_output=True,
-                           env={**os.environ, "HOME": home},
+                           env={**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"},
                            cwd=str(airuleset.REPO_DIR))
         return r, home
 
@@ -3262,7 +3302,7 @@ class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
                    "hook_event_name": "SubagentStop", "stop_hook_active": False}
         return subprocess.run(
             ["bash", str(self.HOOK)], input=json.dumps(payload), text=True,
-            capture_output=True, env={**os.environ, "HOME": home},
+            capture_output=True, env={**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"},
             cwd=str(airuleset.REPO_DIR))
 
     def test_the_same_session_never_re_logs_the_same_cause(self):
@@ -3365,7 +3405,7 @@ class TestNonWorkerDeclineIsLoggedOncePerSession(unittest.TestCase):
             subprocess.Popen(
                 ["bash", str(self.HOOK)], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env={**os.environ, "HOME": home}, cwd=str(airuleset.REPO_DIR),
+                env={**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}, cwd=str(airuleset.REPO_DIR),
                 text=True)
             for _ in range(12)]
         for p in procs:
@@ -3646,6 +3686,323 @@ class TestResolveSelfPane(unittest.TestCase):
             self.assertEqual(
                 wd.resolve_self_pane(run=tmux, projects_dir=proj),
                 ("%3", self.CWD, "sid-env"))
+
+
+class TestCompactRetryUntilHelper(unittest.TestCase):
+    """#238-review-style finding 🟡F1 (this ticket's own review, proven) --
+    `_compact_retry_until`, the shared bounded-retry helper BOTH
+    `deliver_compact_record` and `deliver_compact_self` are built on, had
+    ZERO dedicated test coverage: a mutant reverting `deliver_compact_record`
+    to a single bare `deliver_compact_now` call (a full revert of the
+    🔴1 fix) passed the entire pre-existing suite untouched. These tests
+    exercise the helper directly, in isolation, with no real sleeping."""
+
+    def test_returns_the_first_truthy_word_without_ever_sleeping(self):
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            return "sent"
+        word = wd._compact_retry_until(
+            attempt, hold_s=10, retry_interval=1,
+            clock_fn=lambda: 0.0,
+            sleep_fn=lambda s: self.fail("must not sleep"))
+        self.assertEqual(word, "sent")
+        self.assertEqual(len(calls), 1)
+
+    def test_retries_until_a_later_attempt_succeeds(self):
+        clock = [0.0]
+        results = iter(["", "", "sent"])
+
+        def attempt():
+            return next(results)
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd._compact_retry_until(
+            attempt, hold_s=10, retry_interval=1,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "sent")
+
+    def test_gives_up_and_returns_blank_once_the_hold_elapses(self):
+        clock = [0.0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd._compact_retry_until(
+            lambda: "", hold_s=3, retry_interval=1,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "")
+
+    def test_an_exception_is_treated_as_a_falsy_attempt_and_retried(self):
+        clock = [0.0]
+        attempts = [0]
+
+        def attempt():
+            attempts[0] += 1
+            if attempts[0] < 2:
+                raise RuntimeError("boom")
+            return "sent"
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd._compact_retry_until(
+            attempt, hold_s=10, retry_interval=1,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "sent")
+        self.assertEqual(attempts[0], 2)
+
+    def test_each_sleep_is_clamped_to_the_remaining_deadline(self):
+        # a mutant dropping the `min(retry_interval, deadline - now)` clamp
+        # would sleep the FULL retry_interval on the last iteration too,
+        # overshooting the hold instead of landing exactly on it.
+        clock = [0.0]
+        sleeps = []
+
+        def sleep_fn(s):
+            sleeps.append(s)
+            clock[0] += s
+        wd._compact_retry_until(
+            lambda: "", hold_s=7, retry_interval=5,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(sleeps, [5, 2])
+
+    def test_zero_hold_makes_exactly_one_attempt_and_never_sleeps(self):
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            return ""
+        word = wd._compact_retry_until(
+            attempt, hold_s=0, retry_interval=1,
+            clock_fn=lambda: 0.0,
+            sleep_fn=lambda s: self.fail("must not sleep on a zero hold"))
+        self.assertEqual(word, "")
+        self.assertEqual(len(calls), 1)
+
+    def test_negative_hold_behaves_like_zero(self):
+        calls = []
+
+        def attempt():
+            calls.append(1)
+            return ""
+        word = wd._compact_retry_until(
+            attempt, hold_s=-5, retry_interval=1,
+            clock_fn=lambda: 0.0,
+            sleep_fn=lambda s: self.fail("must not sleep on a negative hold"))
+        self.assertEqual(word, "")
+        self.assertEqual(len(calls), 1)
+
+    def test_infinite_hold_is_clamped_to_a_finite_ceiling(self):
+        # #238-review-style finding 🔵F8 (this ticket's own review, proven)
+        # -- a misconfigured `hold_s=inf` must not turn this into an
+        # effectively unbounded loop inside a Stop/SubagentStop hook the
+        # harness itself time-limits.
+        clock = [0.0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd._compact_retry_until(
+            lambda: "", hold_s=float("inf"), retry_interval=100,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "")
+        self.assertLessEqual(clock[0], wd.COMPACT_RETRY_HOLD_CEILING_S)
+
+    def test_nan_hold_is_treated_as_the_ceiling_not_as_zero(self):
+        # nan comparisons are False everywhere -- `max(0.0, nan)` and
+        # `nan < x` are both unreliable, so this must be caught explicitly
+        # rather than accidentally collapsing to a zero-attempt hold.
+        clock = [0.0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd._compact_retry_until(
+            lambda: "", hold_s=float("nan"), retry_interval=100,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "")
+        self.assertGreater(clock[0], 0.0)
+
+    def test_a_negative_retry_interval_never_reaches_sleep_fn_negative(self):
+        # a genuine negative interval passed straight to time.sleep()
+        # raises ValueError -- must be clamped to a small positive floor
+        # instead.
+        clock = [0.0]
+        sleeps = []
+
+        def sleep_fn(s):
+            self.assertGreater(s, 0.0)
+            sleeps.append(s)
+            clock[0] += s
+        word = wd._compact_retry_until(
+            lambda: "", hold_s=1, retry_interval=-3,
+            clock_fn=lambda: clock[0], sleep_fn=sleep_fn)
+        self.assertEqual(word, "")
+        self.assertTrue(sleeps)
+
+
+class TestDeliverCompactRecord(unittest.TestCase):
+    """#238-review-style finding 🟡F1 (this ticket's own review) --
+    `deliver_compact_record` (the `--record` path's own bounded retry over
+    `deliver_compact_now`) had no dedicated test at all; only the CLI
+    wiring around it (`TestCompactRequestCli`, `deliver_compact_now`
+    entirely mocked) was covered. These drive the REAL `deliver_compact_now`
+    through the SAME fake-tmux fixture the sibling `deliver_compact_self`
+    tests use, with a synced fake clock, so the age gate genuinely has to
+    clear via real (simulated) elapsed time -- no real sleeping."""
+
+    CWD = "/home/newlevel/devel/record-retry"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_a_same_turn_request_defers_then_sends_once_genuinely_aged(self):
+        # #238-review 🔴1's own reported production shape: request_ts and
+        # the FIRST now_fn() read are always microseconds apart -- the
+        # first attempt must defer, and a LATER attempt (after real
+        # simulated elapsed time) must clear the gate and actually send.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-record", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        clock = [1_000_000.0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd.deliver_compact_record(
+            "sid-record", self.CWD, request_ts=clock[0], run=tmux,
+            projects_dir=proj, hold_s=10, retry_interval=1,
+            now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_request_ts_stays_fixed_while_now_advances_across_attempts(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-fixed", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        clock = [2_000_000.0]
+        record_ts = clock[0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        with m.patch.object(wd, "deliver_compact_now",
+                           wraps=wd.deliver_compact_now) as dcn:
+            wd.deliver_compact_record(
+                "sid-fixed", self.CWD, request_ts=record_ts, run=tmux,
+                projects_dir=proj, hold_s=10, retry_interval=1,
+                now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
+        self.assertGreaterEqual(dcn.call_count, 2)
+        for call in dcn.call_args_list:
+            self.assertEqual(call.kwargs.get("request_ts"), record_ts)
+        nows = [call.kwargs.get("now") for call in dcn.call_args_list]
+        self.assertEqual(len(set(nows)), len(nows),
+                         "each retry must read a FRESH now: %r" % nows)
+
+    def test_the_real_default_hold_and_interval_clear_the_default_age_gate(self):
+        # the shipped defaults (COMPACT_RECORD_HOLD_DEFAULT_S /
+        # COMPACT_RECORD_RETRY_INTERVAL_S) must genuinely be enough to
+        # clear COMPACT_MIN_REQUEST_AGE_S's own default -- proven against
+        # the REAL constants, not a test-chosen hold/interval.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-defaults", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        clock = [3_000_000.0]
+        record_ts = clock[0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        word = wd.deliver_compact_record(
+            "sid-defaults", self.CWD, request_ts=record_ts, run=tmux,
+            projects_dir=proj, now_fn=now_fn, sleep_fn=sleep_fn,
+            clock_fn=now_fn)
+        self.assertEqual(word, "sent")
+
+    def test_a_too_short_explicit_hold_is_floored_past_the_min_age_gate(self):
+        # #238-review-style finding 🟡F4 (this ticket's own review, proven)
+        # -- an accidentally-too-short POSITIVE hold_s (shorter than the
+        # currently-resolved min-age gate) must be widened, never left as
+        # a silent off-switch.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-floor", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        clock = [4_000_000.0]
+        record_ts = clock[0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+        # hold_s=1 alone (with the real 0.5s default retry_interval) would
+        # give up at t=1.0, still short of the 2.0s default min-age -- the
+        # floor must widen it so the gate genuinely gets a chance to clear.
+        word = wd.deliver_compact_record(
+            "sid-floor", self.CWD, request_ts=record_ts, run=tmux,
+            projects_dir=proj, hold_s=1.0, now_fn=now_fn, sleep_fn=sleep_fn,
+            clock_fn=now_fn)
+        self.assertEqual(word, "sent")
+
+    def test_an_explicit_zero_hold_is_never_floored_exactly_one_attempt(self):
+        # hold_s<=0 means "exactly one attempt, no retry at all" -- a
+        # DIFFERENT, deliberate meaning tests/callers rely on (e.g. to keep
+        # a real end-to-end hook test fast) -- the F4 floor must never
+        # touch it.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-zero", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP)
+        with m.patch.object(wd, "deliver_compact_now",
+                           wraps=wd.deliver_compact_now) as dcn:
+            word = wd.deliver_compact_record(
+                "sid-zero", self.CWD, request_ts=time.time(), run=tmux,
+                projects_dir=proj, hold_s=0,
+                sleep_fn=lambda s: self.fail("must not sleep on hold_s=0"))
+        self.assertEqual(word, "")
+        dcn.assert_called_once()
+
+    def test_hold_exceeds_deliberately_configured_longer_one_is_untouched(self):
+        # the floor only ever WIDENS a too-short hold -- a deliberately
+        # LONGER hold must be left exactly as configured.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, "sid-long", 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%5", "claude", self.CWD, "1")], CB_IDLE_CAP, in_mode=True)
+        clock = [5_000_000.0]
+
+        def now_fn():
+            return clock[0]
+
+        sleeps = []
+
+        def sleep_fn(s):
+            sleeps.append(s)
+            clock[0] += s
+        word = wd.deliver_compact_record(
+            "sid-long", self.CWD, request_ts=clock[0], run=tmux,
+            projects_dir=proj, hold_s=17, retry_interval=5,
+            now_fn=now_fn, sleep_fn=sleep_fn, clock_fn=now_fn)
+        self.assertEqual(word, "")
+        # the pinned exact sequence for hold_s=17/retry_interval=5 (the
+        # SAME shape `deliver_compact_self`'s own hold/give-up test pins)
+        # -- proves the configured 17s was honored, not silently floored
+        # down to ~2.5s.
+        self.assertEqual(sleeps, [5, 5, 5, 2])
 
 
 class TestDeliverCompactSelf(unittest.TestCase):
@@ -4911,6 +5268,39 @@ class TestCompactMessagesSinceBoundary(unittest.TestCase):
         delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
         self.assertIsNone(boundary_ts)
 
+    def test_a_boundary_with_an_unparseable_timestamp_still_measures_delta(self):
+        # #238-review-style finding 🔵F5 (this ticket's own review, proven)
+        # -- a boundary that WAS found but whose `timestamp` field is
+        # malformed/missing must NOT be conflated with "no boundary found
+        # at all": `delta` is still genuinely measurable and must not be
+        # silently discarded as unmeasurable.
+        proj = self._dir()
+        d = Path(proj) / wd.encode_project_dir("/x")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sid-badts.jsonl"
+        lines = [
+            json.dumps({"type": "system", "subtype": "compact_boundary",
+                       "timestamp": "not-a-real-timestamp"}),
+            json.dumps({"type": "assistant", "message": {"id": "a1"}}),
+        ]
+        p.write_text("\n".join(lines) + "\n")
+        delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
+        self.assertEqual(delta, 1)
+        self.assertIsNotNone(boundary_ts)
+
+    def test_a_boundary_with_a_missing_timestamp_field_still_measures_delta(self):
+        proj = self._dir()
+        d = Path(proj) / wd.encode_project_dir("/x")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sid-notimestamp.jsonl"
+        lines = [
+            json.dumps({"type": "system", "subtype": "compact_boundary"}),
+        ]
+        p.write_text("\n".join(lines) + "\n")
+        delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
+        self.assertEqual(delta, 0)
+        self.assertIsNotNone(boundary_ts)
+
     def test_missing_file_is_unmeasurable_not_thin(self):
         delta, boundary_ts = wd._compact_messages_since_boundary(
             "/no/such/file.jsonl")
@@ -4923,6 +5313,19 @@ class TestCompactMessagesSinceBoundary(unittest.TestCase):
         self.assertTrue(wd._compact_thin_context("/x", "sid-thin",
                                                  projects_dir=proj))
 
+    def test_thin_context_false_exactly_at_the_threshold(self):
+        # #238-review-style finding 🔵F7 (this ticket's own review) -- a
+        # mutant widening `delta < threshold` to `delta <= threshold`
+        # survived the whole pre-existing suite, since no fixture ever
+        # used `delta == COMPACT_THIN_CONTEXT_MIN_MESSAGES` exactly (only
+        # 0 and 26/28). The threshold is exclusive: exactly enough real
+        # activity must NOT read as thin.
+        proj = self._dir()
+        _write_boundary_transcript(proj, "/x", "sid-exact",
+                                   wd.COMPACT_THIN_CONTEXT_MIN_MESSAGES)
+        self.assertFalse(wd._compact_thin_context("/x", "sid-exact",
+                                                   projects_dir=proj))
+
     def test_thin_context_false_on_real_activity(self):
         proj = self._dir()
         _write_boundary_transcript(proj, "/x", "sid-real", 26)
@@ -4934,6 +5337,22 @@ class TestCompactMessagesSinceBoundary(unittest.TestCase):
         _write_ctx_transcript(proj, "/x", "sid-first", 300_000)
         self.assertFalse(wd._compact_thin_context("/x", "sid-first",
                                                    projects_dir=proj))
+
+    def test_thin_context_true_on_zero_activity_with_an_unparseable_ts(self):
+        # #238-review-style finding 🔵F5 (this ticket's own review, proven)
+        # -- a boundary WAS found but its timestamp is malformed must
+        # still correctly read as THIN when the real delta is zero --
+        # never silently fail open just because the timestamp parse
+        # failed.
+        proj = self._dir()
+        d = Path(proj) / wd.encode_project_dir("/x")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sid-thin-badts.jsonl"
+        p.write_text(json.dumps({"type": "system",
+                                 "subtype": "compact_boundary",
+                                 "timestamp": "garbage"}) + "\n")
+        self.assertTrue(wd._compact_thin_context("/x", "sid-thin-badts",
+                                                  projects_dir=proj))
 
     def test_thin_context_false_when_no_transcript_resolves(self):
         proj = self._dir()
