@@ -4046,7 +4046,9 @@ class TestTmuxScrollbackKeybinds(TestCase):
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        keybind_calls = calls[1:]  # calls[0] is the history-limit set-option
+        # calls[0] is history-limit, calls[1] is #254's destroy-unattached
+        # -- both plain set-option calls, neither part of the keybind list.
+        keybind_calls = calls[2:]
         self.assertEqual(len(keybind_calls), len(airuleset.TMUX_SCROLLBACK_KEYBINDS))
         for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
             self.assertEqual(call, ["tmux"] + argv)
