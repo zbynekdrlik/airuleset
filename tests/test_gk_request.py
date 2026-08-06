@@ -287,6 +287,78 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertTrue(any(t.startswith("GATEKEEPER-ACTION:")
                             for t in titles), titles)
 
+    def test_create_label_silently_dropped_degrades_to_prefix(self):
+        # #221 LIVE bug: GitHub's issue-create endpoint silently DROPS a
+        # `labels` field the actor lacks push access for -- unlike the
+        # dedicated add-label endpoint, it does NOT 403 the whole request
+        # (documented GitHub REST behavior: "Only users with push access
+        # can set labels for new issues... labels are silently dropped
+        # otherwise"). A read-only-fork actor's `gh issue create --label
+        # needs-gatekeeper` therefore returned rc=0 with the issue created
+        # and NO label on it at all, and cmd_gk_request reported "filed"
+        # as if the escalation were visible. Simulate the real split: the
+        # label must be applied in its OWN edit call (not baked into
+        # create), and that dedicated call correctly fails (403) for a
+        # read-only actor -- prove the command then degrades to the
+        # GATEKEEPER-ACTION title prefix instead of silently declaring
+        # success with neither signal present.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0,
+                              stdout="https://github.com/zbynekdrlik/"
+                                     "odoo-erp/issues/2779\n",
+                              stderr="")
+            if "--add-label" in argv and "needs-gatekeeper" in argv:
+                return m.Mock(returncode=1, stdout="",
+                              stderr="HTTP 403: Resource not accessible")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="DNS chyba blokuje hand-off",
+                           body="detail"))
+        self.assertIn(rc, (0, None))
+        # the initial create must NEVER bake the label into the same call
+        # -- that is precisely the field GitHub silently drops
+        create_call = [c for c in calls
+                       if "create" in c and "issue" in c][0]
+        self.assertNotIn("needs-gatekeeper", create_call, create_call)
+        # a real, separate add-label attempt must have been made and
+        # denied (the dedicated label endpoint correctly 403s)
+        self.assertTrue(any("--add-label" in c and "needs-gatekeeper" in c
+                            for c in calls), calls)
+        # denial must degrade to the GATEKEEPER-ACTION title prefix so the
+        # escalation stays discoverable by job 11's `in:title` query
+        edits = [c for c in calls if "edit" in c and "--title" in c]
+        self.assertTrue(edits, calls)
+        self.assertIn("GATEKEEPER-ACTION:", json.dumps(edits))
+
+    def test_create_neither_label_nor_prefix_fails_loudly(self):
+        # both the label add AND the retitle are denied -- must NEVER
+        # report success while the escalation is invisible to the
+        # supervisor (script-failure-policy: fail loudly, never guess).
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0,
+                              stdout="https://github.com/o/r/issues/2780\n",
+                              stderr="")
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "edit" in argv and "--title" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Nejaky problem", body="detail"))
+        self.assertEqual(rc, 1)
+
     def test_issue_mode_labels_and_comments(self):
         calls = []
 
