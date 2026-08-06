@@ -466,11 +466,36 @@ class Issue127LocalSideGapTest(_Runner):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
         self.assertIn("#119", out.stderr)
 
-    def test_a_different_pr_number_is_the_same_shape_digit_blind(self):
-        """`gh pr view 436` -> `gh pr view 704`: same wait, still collides."""
+    def test_a_different_pr_number_gets_its_own_free_first_loop(self):
+        """#281: `gh pr view 436` -> `gh pr view 704` is a DIFFERENT wait for a
+        DIFFERENT PR, not a repeat of the first. The digit-blind shape hash is
+        deliberate for TUNING knobs (retuned sleep/iters, see
+        test_the_key_is_digit_blind_so_retuning_the_loop_still_collides) but
+        the PR number embedded in `gh pr view <N>` is the identifying TARGET,
+        not a tuning knob -- blinding it wrongly reads a genuinely different
+        wait as a repeat of the first (reported live, #208's #281 spin-off:
+        the workaround was to never chain two different PR/issue-number poll
+        calls in one Bash call)."""
+        self.assertEqual(self.run_hook(self.PR_VIEW_LOOP % 436).returncode, 0)
+        out = self.run_hook(self.PR_VIEW_LOOP % 704)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_the_same_pr_number_repeated_still_collides(self):
+        """The fix must not become 'everything is free' -- watching the SAME
+        PR twice is still a genuine repeat and must still block."""
         self.run_hook(self.PR_VIEW_LOOP % 436)
+        self.assertEqual(self.run_hook(self.PR_VIEW_LOOP % 436).returncode, 2)
+        self.run_hook(self.PR_VIEW_LOOP % 704)
         out = self.run_hook(self.PR_VIEW_LOOP % 704)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_a_different_issue_number_also_gets_its_own_free_first_loop(self):
+        """`gh issue view <N>` shares the same target-bearing shape as
+        `gh pr view <N>` and must be extracted the same way."""
+        loop = self.PR_VIEW_LOOP.replace("gh pr view", "gh issue view")
+        self.assertEqual(self.run_hook(loop % 436).returncode, 0)
+        out = self.run_hook(loop % 704)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 class FailOpenTest(_Runner):
