@@ -15,6 +15,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -3928,6 +3929,70 @@ def _notify_backfill_digest(args, send):
         sys.exit(1)
 
 
+# #272 — a card whose 🎯 Cieľ is only the bare ticket number, or whose
+# ✅ Dosiahnuté is empty/generic filler, is undecodable from a phone and must
+# never reach Discord silently (the codex-bridge #457-#460 report: worker
+# calls that reached `--goal "#457"` / an omitted `--achieved`). A GOAL that
+# merely looks omitted (bare, blank, or a bare "#N"/"N" ticket reference) is
+# auto-enriched from the already-fetched issue title when the title itself
+# is usable; an ACHIEVED that is empty or normalizes to a known-generic
+# filler phrase has nothing to enrich it FROM (it is worker-authored
+# content, not something `gh` can supply) and is always a hard refusal.
+_RUN_CARD_BARE_REF_RE = re.compile(r"^#?\d+$")
+
+_RUN_CARD_GENERIC_ACHIEVED = frozenset({
+    "pr zmergnutý, deploy beží",
+    "pr zmergnutý",
+    "zmergnuté",
+    "zmergnutý",
+    "deploy beží",
+    "hotovo",
+    "hotové",
+    "done",
+    "merged",
+    "dokončené",
+    "dokoncene",
+})
+
+
+def _run_card_goal_is_bare(goal_raw):
+    """True when `goal_raw` carries no plain-language meaning: absent,
+    blank/whitespace-only, or a bare ticket reference like "457"/"#457"."""
+    if goal_raw is None:
+        return True
+    s = str(goal_raw).strip()
+    return (not s) or bool(_RUN_CARD_BARE_REF_RE.match(s))
+
+
+def _run_card_achieved_is_bad(achieved_raw):
+    """True when `achieved_raw` is empty/whitespace, or normalizes to one of
+    the known generic filler phrases (incl. the hardcoded default this fix
+    removes below)."""
+    if achieved_raw is None:
+        return True
+    s = str(achieved_raw).strip()
+    if not s:
+        return True
+    norm = " ".join(s.casefold().split())
+    return norm in _RUN_CARD_GENERIC_ACHIEVED
+
+
+def _run_card_refuse(repo, issue, dry_run, reason):
+    """A #272 content-validation refusal: never send a contentless card, but
+    never crash the worker's turn either — exit non-zero with the reason on
+    stderr, the SAME shape a genuine delivery failure already uses (#135),
+    so a Bash caller sees it. Logged durably UNLESS --dry-run (dry-run's
+    contract is preview-only, no state written — the same split the
+    pre-existing view_ok diagnostic in `_notify_run_card` already uses)."""
+    key = "%s#%s" % (repo, issue)
+    if not dry_run:
+        from notify import log_delivery
+        log_delivery("refused", kind="run-card", key=key, reason=reason)
+    print("notify --run-card: REFUSED (%s) — %s" % (key, reason),
+          file=sys.stderr)
+    sys.exit(1)
+
+
 def _notify_run_card(args, compose_autopilot_card, send):
     """Send the per-ticket completion card, gathering the issue title (the Cieľ)
     and the remaining backlog count from gh. The autopilot worker fires this
@@ -4027,16 +4092,45 @@ def _notify_run_card(args, compose_autopilot_card, send):
                 remaining = None
             scope_label = "core"
 
-        achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
-        # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable); the
-        # technical gh issue title is only the fallback when --goal is omitted.
-        goal = getattr(args, "goal", None) or title
+        raw_goal = getattr(args, "goal", None)
+        raw_achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
+        dry_run = getattr(args, "dry_run", False)
+        # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable).
+        # #272: a GOAL that merely LOOKS omitted (bare/blank/whitespace/a bare
+        # "#N" ticket reference) is auto-enriched from the fetched issue title
+        # — extending the pre-existing "goal genuinely omitted" fallback — but
+        # only when that title itself carries real content; otherwise refuse.
+        if _run_card_goal_is_bare(raw_goal):
+            if not _run_card_goal_is_bare(title):
+                goal = title
+                print("notify --run-card: --goal %r is contentless — "
+                      "auto-enriched from the issue title." % raw_goal,
+                      file=sys.stderr)
+            else:
+                _run_card_refuse(
+                    repo, issue, dry_run,
+                    "goal %r is contentless and no usable issue title was "
+                    "available to enrich it — pass a real --goal (plain "
+                    "Slovak, what the ticket wants)" % raw_goal)
+        else:
+            goal = raw_goal
+        # ✅ Dosiahnuté has nothing to enrich it FROM (it is worker-authored
+        # content describing what actually landed and was verified) — empty
+        # or generic filler is always a hard refusal, never a silently-sent
+        # generic default (#272).
+        if _run_card_achieved_is_bad(raw_achieved):
+            _run_card_refuse(
+                repo, issue, dry_run,
+                "achieved %r is missing or generic — pass a real --achieved "
+                "describing what actually landed and was verified"
+                % raw_achieved)
+        achieved = raw_achieved
         # --pr is the full PR URL → a clickable "kód (PR)" link (the number was
         # dropped, the link kept). --url = "where to see it live" link(s).
         body = compose_autopilot_card(
             repo=repo,
             tickets=[{"n": issue, "title": title, "goal": goal,
-                      "achieved": achieved or "PR zmergnutý, deploy beží"}],
+                      "achieved": achieved}],
             pr=getattr(args, "pr", None), version=getattr(args, "version", None),
             merge_sha=getattr(args, "merge_sha", None),
             review_ok=(getattr(args, "review", "ok") != "fail"),
