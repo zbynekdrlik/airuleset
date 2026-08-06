@@ -445,6 +445,17 @@ try:
     sys.path.insert(0, "{{REPO_DIR}}")
     import statusbar
     cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or ""
+    # --- which model this session runs: 'opus'/'sonnet'/'fable'/'haiku',
+    # highlighted when it differs from this box's MANAGED_MODEL default
+    # (#133 -- passive replacement for the #37 model-cost signal).
+    # {{MANAGED_MODEL}} is baked in at RENDER time (adversarial-review
+    # MINOR-1: a lazy `import airuleset` on every prompt render measured
+    # ~12ms steady-state / ~88ms right after a `push` invalidates the
+    # .pyc -- the SAME shape render_caveman_shim() already uses for
+    # {{REPO_DIR}}, and the launch script for {{MANAGED_MODEL}} itself). ---
+    mdl = statusbar.model_segment(d, managed_model="{{MANAGED_MODEL}}")
+    if mdl:
+        segs.append(mdl)
     # --- monthly subscription renewal: 'sub 12.8.(8d)' (#223) ---
     sub = statusbar.subscription_segment()
     if sub:
@@ -484,8 +495,12 @@ CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 def render_caveman_shim():
     """The shim content with per-machine placeholders substituted ({{REPO_DIR}} →
     this checkout, so the embedded python can import statusbar for the 🎫 ticket
-    segment). The install write site MUST use this, never the raw constant."""
-    return CAVEMAN_SHIM_CONTENT.replace("{{REPO_DIR}}", str(REPO_DIR))
+    segment; {{MANAGED_MODEL}} -> this box's managed model default, so the
+    model-identity segment (#133) never pays a per-render `import airuleset`).
+    The install write site MUST use this, never the raw constant."""
+    return (CAVEMAN_SHIM_CONTENT
+            .replace("{{REPO_DIR}}", str(REPO_DIR))
+            .replace("{{MANAGED_MODEL}}", MANAGED_MODEL))
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]

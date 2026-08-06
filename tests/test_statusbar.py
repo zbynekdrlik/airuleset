@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -923,6 +924,133 @@ class ContextCostSegment(unittest.TestCase):
 
     def test_shim_renders_the_context_cost_segment(self):
         self.assertIn("context_cost_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+
+class ModelSegment(unittest.TestCase):
+    """The session-model identity segment (#133): a short alias of the
+    CURRENT session's model (fable/opus/sonnet/haiku), source
+    `payload["model"]["id"]` (fallback `display_name`) -- the same field
+    `context_cost_segment` already reads, never guessed from config.
+    Highlighted (yellow) when it differs from this box's MANAGED_MODEL
+    default; green when it matches or the comparison is unresolvable
+    (never a false alarm). Compares via `burn.tier()`, never a raw string
+    equality -- MANAGED_MODEL's `[1m]` launch-flag suffix never appears in
+    what a session reports back for its own model id."""
+
+    def test_matches_managed_model_renders_green(self):
+        seg = statusbar.model_segment({"model": {"id": "claude-opus-5"}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertIn("\033[38;5;40m", seg)
+        self.assertIn("opus", seg)
+
+    def test_mismatch_renders_yellow_highlight(self):
+        seg = statusbar.model_segment({"model": {"id": "claude-sonnet-5"}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertIn("\033[38;5;220m", seg)
+        self.assertIn("sonnet", seg)
+
+    def test_suffix_agnostic_managed_comparison(self):
+        # The exact regression the removed watchdog job 23 hit (#132):
+        # MANAGED_MODEL carries a launch-flag suffix that never appears in
+        # what the session itself reports -- a bare string compare would be
+        # permanently mismatched. Comparing via tier() must not repeat that.
+        seg = statusbar.model_segment({"model": {"id": "claude-opus-5"}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertIn("\033[38;5;40m", seg)
+
+    def test_empty_on_missing_model_field(self):
+        self.assertEqual(statusbar.model_segment({}), "")
+        self.assertEqual(statusbar.model_segment(None), "")
+        self.assertEqual(statusbar.model_segment("garbage"), "")
+
+    def test_empty_on_non_dict_model_field(self):
+        self.assertEqual(statusbar.model_segment({"model": "opus"}), "")
+
+    def test_empty_on_unknown_model_tier(self):
+        seg = statusbar.model_segment(
+            {"model": {"id": "some-other-vendor-model"}},
+            managed_model="claude-opus-5[1m]")
+        self.assertEqual(seg, "")
+
+    def test_falls_back_to_display_name_when_id_missing(self):
+        seg = statusbar.model_segment(
+            {"model": {"display_name": "Fable"}}, managed_model="claude-opus-5[1m]")
+        self.assertIn("fable", seg)
+
+    def test_unresolvable_managed_model_never_false_alarms(self):
+        # An explicit empty override (mirrors a failed lazy `import airuleset`)
+        # must render as a plain match, never a manufactured mismatch.
+        seg = statusbar.model_segment({"model": {"id": "claude-sonnet-5"}},
+                                       managed_model="")
+        self.assertIn("\033[38;5;40m", seg)
+        self.assertIn("sonnet", seg)
+
+    def test_label_is_the_bare_tier_word_no_prefix(self):
+        # #223 fits-on-one-line discipline: no redundant "m " label -- the
+        # tier word alone is already the shortest possible spelling.
+        seg = statusbar.model_segment({"model": {"id": "claude-opus-5"}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertEqual(seg, "\033[38;5;40mopus\033[0m")
+
+    def test_default_managed_model_resolves_via_real_airuleset_constant(self):
+        # No managed_model override -- resolves airuleset.MANAGED_MODEL via
+        # a lazy import (no module-level `import statusbar` in airuleset.py,
+        # so this is not a real circular import).
+        seg = statusbar.model_segment({"model": {"id": airuleset.MANAGED_MODEL}})
+        self.assertIn("\033[38;5;40m", seg)
+
+    def test_shim_renders_the_model_segment(self):
+        self.assertIn("model_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_non_string_model_id_does_not_crash(self):
+        # Adversarial review MAJOR-1: a truthy non-string `id` (int/float/
+        # list/dict/bool) reached burn.tier()'s `.lower()` uncaught -- a
+        # crash here, being first in the shim's shared try block, silently
+        # deleted 5 unrelated working segments (sub/tickets/questions/ctx/
+        # account-email). model_id must be coerced to str before tiering.
+        for hostile_id in (123, 4.5, [1, 2], {"nested": "opus"}, True):
+            seg = statusbar.model_segment({"model": {"id": hostile_id}},
+                                           managed_model="claude-opus-5[1m]")
+            self.assertIsInstance(seg, str)
+
+    def test_non_string_display_name_does_not_crash(self):
+        seg = statusbar.model_segment({"model": {"display_name": 9}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertIsInstance(seg, str)
+
+    def test_unrecognized_managed_model_never_false_alarms(self):
+        # Adversarial review MAJOR-2: burn.tier() returns "other" for an
+        # unrecognized MANAGED_MODEL (a future alias, or any string with no
+        # tier word). The session's own "other" tier already renders "" --
+        # but the MANAGED side let "other" stand in as a real tier and
+        # compared it, permanently mismatching (a manufactured false alarm)
+        # even though the comparison is genuinely unresolvable. Not firing
+        # today (MANAGED_MODEL="claude-opus-5[1m]" tiers to "opus"), but a
+        # regression waiting for the next MANAGED_MODEL value.
+        for unrecognized in ("default", "gpt-5", "claude-5-titan"):
+            seg = statusbar.model_segment(
+                {"model": {"id": "claude-opus-5"}}, managed_model=unrecognized)
+            self.assertIn("\033[38;5;40m", seg,
+                           "managed_model=%r must never manufacture a "
+                           "mismatch" % unrecognized)
+
+    def test_managed_model_lazy_import_failure_falls_back_to_no_alarm(self):
+        # Adversarial review MINOR-3: _managed_model()'s try/except had zero
+        # coverage -- the import always succeeds in the test environment.
+        # Force the failure and confirm the fail-safe path still holds.
+        import builtins
+        real_import = builtins.__import__
+
+        def _hostile_import(name, *a, **kw):
+            if name == "airuleset":
+                raise ImportError("simulated: airuleset unimportable")
+            return real_import(name, *a, **kw)
+
+        with unittest.mock.patch("builtins.__import__", side_effect=_hostile_import):
+            self.assertIsNone(statusbar._managed_model())
+            seg = statusbar.model_segment({"model": {"id": "claude-sonnet-5"}})
+        self.assertIn("\033[38;5;40m", seg)
+        self.assertIn("sonnet", seg)
 
 
 class FmtTokens(unittest.TestCase):

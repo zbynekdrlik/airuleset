@@ -267,6 +267,74 @@ def context_cost_segment(payload):
     return "\033[38;5;%dmctx %s ~$%.2f\033[0m" % (color, _fmt_tokens(ctx), usd)
 
 
+def _managed_model():
+    """Lazy `import airuleset` to read MANAGED_MODEL -- airuleset.py has no
+    module-level `import statusbar` anywhere (only inside function bodies),
+    so this is a deferred import, not a real circular one. Fails silently to
+    None (renders as "no mismatch signal", i.e. treated as a match) rather
+    than raise -- a statusline segment must never crash the render."""
+    try:
+        import airuleset
+        return airuleset.MANAGED_MODEL
+    except Exception:
+        return None
+
+
+def model_segment(payload, managed_model=None):
+    """'<tier>' -- a short alias of the CURRENT session's model (#133: the
+    passive replacement for the #37 model-cost signal, after #132 removed
+    the restart-based watchdog jobs that used to nudge a stale session).
+
+    Source: the statusline stdin payload's `model.id` (fallback
+    `display_name`) -- the SAME field `context_cost_segment` already reads
+    for pricing, never guessed from config/settings. Mapped to a tier
+    (fable/opus/sonnet/haiku) via the existing `burn.tier()`; an
+    empty/unrecognized model ("other") renders "" -- graceful n/a, mirroring
+    `context_cost_segment`'s own unknown-tier behavior.
+
+    Highlighted yellow when the session's tier differs from this box's
+    MANAGED_MODEL default (a passive, no-ping reminder that a long-lived
+    session is coasting on a different tier -- the original #37 intent);
+    green when it matches, and ALSO green when the comparison itself is
+    unresolvable (managed_model not given and the lazy `import airuleset`
+    fails, or an explicit empty override) -- never manufacture a false
+    alarm from an unresolvable comparison.
+
+    Deliberately compares TIER, never the raw model string: MANAGED_MODEL
+    carries a `[1m]` launch-flag suffix that never appears in what a
+    session reports back for its own model id (the exact bug the removed
+    watchdog job 23 hit, #132) -- `burn.tier()` is already suffix-agnostic
+    (substring match), so comparing tiers sidesteps that regression by
+    construction.
+
+    Two failure surfaces closed by adversarial review (#133): (1) a truthy
+    NON-STRING `id`/`display_name` (int/float/list/dict/bool -- all valid
+    JSON scalars a hostile/malformed payload can carry) used to reach
+    `burn.tier()`'s `.lower()` uncaught; coerced to `str()` first, since
+    every JSON scalar stringifies safely. (2) an UNRECOGNIZED managed_model
+    (burn.tier() -> "other", e.g. a future MANAGED_MODEL value with no tier
+    word) used to stand in as a real tier and compare as a genuine
+    mismatch -- "other" is now treated the same as an unresolvable
+    comparison (never a manufactured false alarm), matching how the
+    session's OWN "other" tier already renders "" above."""
+    if not isinstance(payload, dict):
+        return ""
+    model = payload.get("model")
+    if not isinstance(model, dict):
+        return ""
+    model_id = str(model.get("id") or model.get("display_name") or "")
+    tier = burn.tier(model_id)
+    if tier == "other":
+        return ""
+    if managed_model is None:
+        managed_model = _managed_model()
+    managed_tier = burn.tier(managed_model) if managed_model else None
+    if managed_tier == "other":
+        managed_tier = None
+    color = 40 if (managed_tier is None or tier == managed_tier) else 220
+    return "\033[38;5;%dm%s\033[0m" % (color, tier)
+
+
 def questions_segment(cwd, now=None, home=None):
     """Unanswered-❓ badge, SCOPED to the session's project (user complaint
     2026-07-22: the airuleset footer showed the machine-global 14 — "custe
