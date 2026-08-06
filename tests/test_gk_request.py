@@ -370,6 +370,31 @@ class TestCmdGkRequest(unittest.TestCase):
                 self._args(title="Nejaky problem", body="detail"))
         self.assertEqual(rc, 1)
 
+    def test_create_unparseable_issue_number_fails_loudly(self):
+        # #221 adversarial review, MAJOR: a `gh issue create` success whose
+        # stdout does NOT end in a parseable issue number must not be
+        # allowed to short-circuit past both the label-add AND the
+        # retitle attempt straight to a false "gk-request filed" — that
+        # silently reproduces the exact invisible-escalation class this
+        # ticket exists to kill, just triggered by anomalous `gh` stdout
+        # instead of a denied label.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0, stdout="done\n", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Neparsovatelne cislo", body="detail"))
+        self.assertEqual(rc, 1)
+        # never attempted a label/retitle against a garbage "issue number"
+        self.assertFalse(any("--add-label" in c for c in calls), calls)
+        self.assertFalse(
+            any("edit" in c and "--title" in c for c in calls), calls)
+
     def test_issue_mode_labels_and_comments(self):
         calls = []
 
