@@ -137,6 +137,36 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
         self.assertIsNotNone(ts)
         self.assertAlmostEqual(ts, now - 1234, delta=1)
 
+    def test_a_future_timestamped_real_turn_is_clamped_to_the_file_mtime(self):
+        # Adversarial-review hardening: the "job 10 can only fire MORE
+        # readily than before, never later" claim only holds if every
+        # entry's own `timestamp` field is trustworthy. A single
+        # clock-skewed/corrupt FUTURE timestamp must not make the new idle
+        # clock read as FRESHER than the raw file mtime ever did -- clamp
+        # to mtime removes the failure mode by construction.
+        now = time.time()
+        d = self.projects / wd.encode_project_dir(CWD)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (SID + ".jsonl")
+        future_turn = {
+            "type": "assistant",
+            "timestamp": _iso(now + 3600),      # clock-skewed / corrupt
+            "message": {"content": [
+                {"type": "text", "text": "❓ NEEDS YOU: schválim to?"}]},
+        }
+        p.write_text(json.dumps(future_turn) + "\n")
+        # the file's OWN mtime is genuinely stale -- the raw-mtime code
+        # path would already have detected this as idle.
+        stale = now - wd.PWEDGE_MIN_IDLE_S - 300
+        os.utime(p, (stale, stale))
+        tmux = _Tmux("%1\tclaude\t" + CWD + "\n", WEDGE_PANE)
+        self._run(now, tmux)
+        self._run(now + 70, tmux)
+        self.assertEqual(
+            len(self.pings), 1,
+            "a future/corrupt real-turn timestamp must not make job 10 "
+            "wait LONGER than the raw file mtime ever did")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,15 +80,22 @@ class FakeTmux:
 
     A frozen capture makes every Ctrl+S look like a no-op, which made a pane
     holding a draft LOOK like it refused the arm — when in production the
-    draft is parked and the goal is delivered around it (issue 35)."""
+    draft is parked and the goal is delivered around it (issue 35).
 
-    def __init__(self, captured, model_stash=False):
+    `capture_seq` (optional): a SCRIPTED sequence of successive capture-pane
+    replies, consumed one per call in order, falling back to `captured` once
+    exhausted (mirrors `test_goal_rearm.py`'s own `FakeTmux.cap_seq`) — for
+    proving a race between the loop's TOP-of-iteration capture and a LATER
+    re-capture immediately before a send (#266 adversarial-review finding)."""
+
+    def __init__(self, captured, model_stash=False, capture_seq=()):
         self.captured = captured
         self.sent = []
         self.model_stash = model_stash
         self.stash = None
         self.submitted = []
         self._box = self._box_of(captured)
+        self._capture_seq = list(capture_seq)
 
     @staticmethod
     def _box_of(cap):
@@ -124,6 +131,8 @@ class FakeTmux:
         if "list-panes" in j:
             return "%1\tclaude\t/home/x/devel/demo"
         if "capture-pane" in j:
+            if self._capture_seq:
+                return self._capture_seq.pop(0)
             return self._render() if self.model_stash else self.captured
         if "display" in j:
             return "0"
@@ -780,6 +789,28 @@ class TestPlainBranchUsesVerifiedDelivery(unittest.TestCase):
         self.assertFalse(tmux.typed())
         self.assertTrue(any("READY" in ln for ln in logs), logs)
 
+    def test_a_pane_that_stops_being_bare_between_capture_and_send_is_never_typed_into(self):
+        # Adversarial-review finding (post-#266): the pane was bare at the
+        # TOP of its loop iteration (that capture is what let arming reach
+        # this far at all -- transcript reads / a foreign-transcript sudo
+        # call can genuinely take a moment), but a FRESH re-capture right
+        # before the send shows a draft has since appeared. Must refuse
+        # WITHOUT ever calling the verified primitive, and must NOT consume
+        # the 10-minute dedup window -- a zero-keystroke refusal.
+        now_typed_pane = ARM_PANE.replace("❯ \n", "❯ time-critical draft\n")
+        tmux = FakeTmux(ARM_PANE, capture_seq=[ARM_PANE, now_typed_pane])
+        state = {}
+        with m.patch.object(wd, "_send_goal_verified") as fake:
+            logs = wd.goal_autoarm(time.time(), tmux, state)
+        fake.assert_not_called()
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any(ln.startswith("goal-autoarm SKIP-TRANSIENT")
+                            for ln in logs), logs)
+        self.assertEqual(
+            state.get("goalarm", {}), {},
+            "a pre-send (zero-keystroke) refusal must not consume the "
+            "per-pane dedup window")
+
 
 class TestGoalsOnScreenGateNoLongerPermanentlyVetoes(unittest.TestCase):
     """#266 Defect 2: the viewport `/goal ...` regex used to be a HARD
@@ -841,6 +872,22 @@ class TestGoalsOnScreenGateNoLongerPermanentlyVetoes(unittest.TestCase):
                                    projects_dir=Path(empty_pd))
         self.assertFalse(tmux.typed())
         self.assertTrue(any("no-goal-on-screen" in ln for ln in logs), logs)
+
+    def test_the_no_goal_on_screen_skip_logs_once_per_streak_not_every_sweep(self):
+        # Adversarial-review finding (post-#266, cosmetic): a pane that can
+        # NEVER resolve a goal must keep RETRYING every sweep (defect 2's
+        # whole point -- recovery the instant a transcript appears), but
+        # must not re-LOG the identical refusal every 60s forever.
+        tmux = FakeTmux(self.STUCK_DRAFT_PANE)
+        state = {}
+        now = time.time()
+        with TemporaryDirectory() as empty_pd:
+            logs1 = wd.goal_autoarm(now, tmux, state,
+                                    projects_dir=Path(empty_pd))
+            logs2 = wd.goal_autoarm(now + 60, tmux, state,
+                                    projects_dir=Path(empty_pd))
+        self.assertTrue(any("no-goal-on-screen" in ln for ln in logs1), logs1)
+        self.assertFalse(any("no-goal-on-screen" in ln for ln in logs2), logs2)
 
     def test_existing_wrapped_no_transcript_behavior_is_unchanged(self):
         # regression control: a WRAPPED (truncated) /goal fragment IS on
