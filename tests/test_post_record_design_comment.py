@@ -310,6 +310,112 @@ class TestClassifiesEveryKindFromOneComment(_Base):
         self.assertIsNone(self.marker(41, "validated"))
 
 
+class TestEnvVarPrefixedGhCallIsRecognized(_Base):
+    """#277/#274 -- an inline env-var assignment ahead of `gh` (the
+    documented david-stream `GH_TOKEN=$(...) gh issue comment ...` recipe,
+    used because that stream has no persistently-exported GH_TOKEN) must
+    not defeat the cheap prefilter. The prefilter used to require `gh` be
+    preceded by start-of-string/`;`/`&`/`|`/`&&` (optionally `sudo `/
+    `env `) -- a leading `VAR=$(...)` assignment satisfies none of those,
+    so the hook exited 0 without ever touching python/gh and no marker
+    was ever written, even though the posted comment classified clean."""
+
+    def test_a_gh_token_prefixed_call_still_writes_the_marker(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-40",
+        }])
+        cmd = ("GH_TOKEN=$(grep -oP '(?<=kvaskodev:)[^@]+' ~/.git-credentials) "
+               'gh issue comment 41 --body "x"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+
+    def test_a_simple_var_assignment_prefix_also_works(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-41",
+        }])
+        r = self.run_hook('GH_TOKEN=abc123 gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+
+    def test_sudo_prefix_still_works_under_the_widened_boundary(self):
+        # regression control: the previously-explicit sudo/env handling
+        # must keep working once the boundary is widened to a plain \b.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-42",
+        }])
+        r = self.run_hook('sudo gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+
+    def test_unrelated_command_still_skips_the_network(self):
+        # widening the boundary must not turn the prefilter into "match
+        # anything" -- a command that never mentions gh issue comment at
+        # all stays a fast, no-network no-op.
+        log = self.home / "gh.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_LOG"] = str(log)
+        env["FAKE_GH_FAIL"] = "1"
+        payload = json.dumps({"tool_input": {"command": "git status && echo done"},
+                              "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(log.exists(), "gh should never have been invoked")
+
+
+class TestFallbackExceptionLogging(_Base):
+    """#274 -- a genuinely unexpected exception (not one of the routine
+    "nothing to do" sys.exit(0) cases) must leave a diagnosable trail
+    instead of vanishing into the blanket `2>/dev/null || true`."""
+
+    def test_an_import_failure_is_logged_not_silently_swallowed(self):
+        # A copy of the real hook under a REPO_ROOT that has no sibling
+        # design_gate.py/notify.py -- forces a genuine ImportError. The
+        # process cwd is ALSO pointed at that same bare root (never the
+        # real repo), so sys.path[0]="" (CWD, for a script read from
+        # stdin) cannot accidentally rescue the import.
+        bad_root = Path(tempfile.mkdtemp(prefix="airuleset-designhook-badroot-"))
+        self.addCleanup(shutil.rmtree, bad_root, True)
+        (bad_root / "hooks").mkdir()
+        bad_hook = bad_root / "hooks" / "post-record-design-comment.sh"
+        bad_hook.write_text(HOOK.read_text())
+        bad_hook.chmod(0o755)
+
+        payload = json.dumps({"tool_input": {"command": 'gh issue comment 41 --body "x"'},
+                              "cwd": str(self.repo)})
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env.pop("PYTHONPATH", None)
+        r = subprocess.run(["bash", str(bad_hook)], input=payload,
+                           capture_output=True, text=True, env=env,
+                           cwd=str(bad_root))
+        self.assertEqual(r.returncode, 0, r.stderr)   # never blocks
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertTrue(log_path.exists(),
+                        "an import failure must be logged, not silently swallowed")
+        text = log_path.read_text()
+        self.assertIn("import", text.lower())
+
+    def test_a_clean_run_never_writes_the_error_log(self):
+        # positive control -- the log stays absent on the ordinary
+        # happy path, so its presence is a genuine, meaningful signal.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-43",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertFalse(log_path.exists())
+
+
 class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
 
     def test_existing_marker_skips_the_gh_call_entirely(self):
