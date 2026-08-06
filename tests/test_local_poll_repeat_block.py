@@ -498,6 +498,95 @@ class Issue127LocalSideGapTest(_Runner):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
+class Issue281TargetKeyHardeningTest(_Runner):
+    """Findings from the fresh-context adversarial review of #281's GREEN
+    commit -- fixed in the SAME ticket, not deferred, per the review's own
+    MAJOR/MINOR/THEORETICAL classification.
+    """
+
+    PR_VIEW_LOOP = Issue127LocalSideGapTest.PR_VIEW_LOOP
+
+    @staticmethod
+    def _flagged_loop(pr, flag):
+        return ('for i in 1 2 3; do\n'
+                '  r=$(gh pr view %s %d --json mergeable,mergeStateStatus,'
+                'statusCheckRollup --jq \'.\')\n'
+                '  echo "$r"\n'
+                '  sleep 250\n'
+                'done' % (flag, pr))
+
+    def test_a_flag_between_view_and_the_number_still_extracts_the_target(self):
+        """MAJOR (review): `gh pr view -R o/r 436` / `--repo o/r 436` put a
+        flag (with its own value) BETWEEN `view` and the PR number -- both
+        routine, real invocation shapes in this repo's own corpus. Without
+        tolerating the flag, extraction silently falls back to the pure-
+        shape key and #281 reproduces verbatim for these two spellings."""
+        for flag in ("-R o/r", "--repo o/r"):
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    self.run_hook(self._flagged_loop(436, flag)).returncode,
+                    0)
+                out = self.run_hook(self._flagged_loop(704, flag))
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_first_gh_pr_view_target_in_a_chain_decides_the_key(self):
+        """MINOR/test-gap (review, mutant M5): `head -1` deliberately picks
+        the FIRST matched target, mirroring the sibling CI hook's own
+        RUN_ID `head -1` precedent (block-ci-poll-repeat.sh) -- pin WHICH
+        match wins so a future edit cannot silently flip it to `tail -1`
+        with nothing catching it. Two chains whose FIRST loop polls the
+        SAME PR (436) but whose SECOND loop polls a DIFFERENT PR (999 vs
+        111) must land on the SAME key -- proving the key is decided by
+        the FIRST match alone."""
+        chain_a = (self.PR_VIEW_LOOP % 436) + '\n' + (self.PR_VIEW_LOOP % 999)
+        chain_b = (self.PR_VIEW_LOOP % 436) + '\n' + (self.PR_VIEW_LOOP % 111)
+        self.assertEqual(self.run_hook(chain_a).returncode, 0)
+        out = self.run_hook(chain_b)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_the_state_filename_carries_a_separator_before_the_target(self):
+        """MINOR/test-gap (review, mutant M7): pin the literal `-t<digits>`
+        shape in the state filename -- harmless TODAY only because SHAPE is
+        a FIXED 12-char hex string (so a dropped separator can't yet
+        collide two different (shape, target) pairs), but the separator is
+        what keeps that true if SHAPE's width is ever changed later."""
+        self.run_hook(self.PR_VIEW_LOOP % 436)
+        names = [p.name for p in
+                 Path(self.state).glob("airuleset-localpoll-first-*")]
+        self.assertTrue(names, "no first-loop state file was created")
+        self.assertTrue(any("-t436" in n for n in names), names)
+
+    def test_the_block_log_records_the_target(self):
+        """MINOR/test-gap (review, mutant M8): the `target=` field appended
+        to the localpoll BLOCK log line had zero test coverage -- pin it
+        for both a targeted repeat and a non-targeted (`target=none`) one."""
+        self.run_hook(self.PR_VIEW_LOOP % 436)
+        self.run_hook(self.PR_VIEW_LOOP % 436)  # blocked, targeted
+        self.run_hook(obs_loop())
+        self.run_hook(obs_loop())  # blocked, no target
+        log = (Path(self.state) / "airuleset-localpoll-block.log").read_text()
+        self.assertIn("target=436", log)
+        self.assertIn("target=none", log)
+
+    def test_an_absurdly_long_target_digit_run_does_not_silently_fail_open(self):
+        """THEORETICAL (review): an UNBOUNDED TARGET digit run can produce a
+        state-file NAME long enough to exceed the filesystem's NAME_MAX --
+        the write's own `|| true` then hides the failure and the guard
+        fails OPEN (never creates the marker, never blocks) forever. No
+        real PR/issue number is remotely close to this long; TARGET is
+        capped so a decoy this long cannot disable the guard."""
+        huge = "9" * 300
+        loop = ('for i in 1 2 3; do\n'
+                '  r=$(gh pr view %s --json mergeable,mergeStateStatus,'
+                'statusCheckRollup --jq \'.\')\n'
+                '  echo "$r"\n'
+                '  sleep 250\n'
+                'done' % huge)
+        self.assertEqual(self.run_hook(loop).returncode, 0)
+        out = self.run_hook(loop)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 class FailOpenTest(_Runner):
     def test_unparseable_payload_fails_open(self):
         env = dict(os.environ)
