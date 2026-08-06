@@ -67,14 +67,36 @@ strip_mentions() {
     # bare offer. A file has no such ceiling; this is the same fix
     # hooks/lib-poll-payload.sh (#124) already shipped for an identical
     # failure class in a sibling hook.
+    # #195-review — a symlink-safe scratch DIR (this repo's own established
+    # residual: SIGKILL between mktemp and the `rm -f` below still leaks the
+    # file, the same untrappable class this repo already accepts for other
+    # scratch temp files; an EXIT trap would need to bake the path in via
+    # DOUBLE-quote expansion at registration time, since a `local` var is
+    # unbound by the time a trap fires after the function has returned —
+    # verified live — and that reopens a quote-injection surface via a
+    # hostile TMPDIR for a residual with zero observed leaks on any normal
+    # exit path, so it stays documented rather than "fixed").
     local _text="$1" _f _rc=0
     _f=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-mention.XXXXXX" 2>/dev/null) || return 1
-    printf '%s' "$_text" >"$_f" 2>/dev/null || { rm -f "$_f" 2>/dev/null || true; return 1; }
+    # #195-review — braced so a REDIRECTION failure (not a printf failure)
+    # is also caught by `2>/dev/null`: bash sets up `>"$_f"` before it sets
+    # up `2>/dev/null`, so an unbraced `cmd >"$_f" 2>/dev/null` still prints
+    # a bare redirection error to the CALLER's live stderr when `>"$_f"`
+    # itself fails — the same shape this file's own #196 fix already
+    # corrected for the retry-counter write, reproduced here on review.
+    { printf '%s' "$_text" >"$_f"; } 2>/dev/null || { rm -f "$_f" 2>/dev/null || true; return 1; }
     python3 - "$_f" <<'PYEOF' || _rc=$?
 import re
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8", errors="surrogateescape") as fh:
+# #195-review — newline="" disables universal-newline translation.
+# sys.argv[1] (the old input path) never ran through Python's text-mode I/O
+# layer at all, so a lone \r or a \r\n pair survived untouched; the default
+# newline=None here would silently translate both to \n, splitting a bare
+# offer straddling a lone \r across what grep sees as two lines and
+# un-blocking it — reproduced against the real hook, fixed by this one flag.
+with open(sys.argv[1], "r", encoding="utf-8", errors="surrogateescape",
+          newline="") as fh:
     text = fh.read()
 text = re.sub(r"```.*?```", " ", text, flags=re.S)   # fenced code block
 text = re.sub(r"`[^`]*`", " ", text)                  # backtick span
@@ -97,11 +119,29 @@ PYEOF
 # the fallback stays the raw, unstripped message — but record_undet() now
 # runs FIRST, so the note travels on the block reason instead of the failure
 # vanishing silently the way a bare `|| printf` fallback used to.
+#
+# #195-review — the note's own WORDING must not blame size: #194 argued this
+# fail-closed direction is acceptable because a wrong-closed block is
+# ACTIONABLE ("shortening removes the cause as well as the symptom"). Once
+# the message is read via a file, size can no longer BE the cause — the only
+# residual failures here are environmental (mktemp/write/python3 itself), so
+# the note says so explicitly instead of pointing the agent at a "repair"
+# that would not help. (An unwritable TMPDIR also breaks UNDET_FILE's own
+# mktemp a few lines above, so on THAT specific failure the note itself is
+# unavailable too — the fail DIRECTION still stays correct, only the
+# diagnostic degrades, exactly like every other UNDET_FILE-dependent note in
+# this file; see TestAnUnwritableTmpdirDoesNotInvertTheFailDirection.)
 MSG_MENTION=$(strip_mentions "$MSG") || {
-    # ${#MSG} is CHARACTERS under a UTF-8 locale, not bytes — labelled that
-    # way on purpose; a byte-exact count needs its own subprocess for a
-    # diagnostic that only needs to say "was this message large".
-    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG}-character message"
+    # #195-review — $? is captured FIRST, before any other statement (even a
+    # plain assignment) runs and overwrites it — the same "bookkeeping must
+    # not run before the verdict" ordering this file's own #196 fix already
+    # established elsewhere; a `_NOTE=...` assignment placed ahead of this
+    # read a strip failure would report as "check exited 0" instead of the
+    # real code (caught live while verifying this exact fix, before it ever
+    # reached a commit).
+    _RC=$?
+    _NOTE="strip_mentions (mention-strip) failed for the message — NOT a size problem (${#MSG} characters, well within any limit); the cause is environmental (mktemp/write/python3)"
+    record_undet "$_RC" "$_NOTE"
     MSG_MENTION="$MSG"
 }
 
@@ -270,7 +310,10 @@ fi
 # the raw-text fallback, so a strip failure on this call site leaves a note
 # too, instead of silently disarming the design-review gate's exemption.
 MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL") || {
-    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG_NOGOAL}-character NOGOAL message"
+    # #195-review — same $?-first ordering as MSG_MENTION above.
+    _RC=$?
+    _NOTE="strip_mentions (mention-strip) failed for the NOGOAL message — NOT a size problem (${#MSG_NOGOAL} characters, well within any limit); the cause is environmental (mktemp/write/python3)"
+    record_undet "$_RC" "$_NOTE"
     MSG_NOGOAL_MENTION="$MSG_NOGOAL"
 }
 
