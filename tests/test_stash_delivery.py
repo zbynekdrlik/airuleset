@@ -378,11 +378,13 @@ USER_DRAFT_PANE = ("✳ hotovo — súhrn turnu\n──── ultracode ─\n"
                    "❯\xa0nechať ako je\n────\n  ctx ██░░  caveman\n")
 
 
-def _sweep(state, captured, send, now, tm=None, run=None, waiting=True):
+def _sweep(state, captured, send, now, tm=None, run=None, waiting=True,
+          cwd=None, backlog_fetch=None):
     tmtime = tm if tm is not None else now - wd.PWEDGE_MIN_IDLE_S - 60
     return wd.prompt_wedge_check(now, state, "%2", captured, tmtime,
                                  "zbynek", "odoo-erp", send, run=run,
-                                 waiting=waiting)
+                                 waiting=waiting, cwd=cwd,
+                                 backlog_fetch=backlog_fetch)
 
 
 class _FakeSend:
@@ -453,6 +455,52 @@ class WaitingGate(unittest.TestCase):
         _sweep(state, USER_DRAFT_PANE, send, now, waiting=True)
         _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=True)
         self.assertEqual(len(send.calls), 1, send.calls)
+
+
+class WidenedNotWaitingBacklogPing(unittest.TestCase):
+    """#160 defect 4 — a NOT-waiting session with a stable unsent draft is
+    worth a ping when the repo's own backlog genuinely has open work nobody
+    else can reach while the draft blocks delivery. `cwd`/`backlog_fetch`
+    left unwired (every pre-#160 caller/test) is a complete no-op — see
+    `WaitingGate.test_non_waiting_session_never_pings` above, unchanged."""
+
+    def test_non_empty_backlog_pings_even_though_not_waiting(self):
+        state, send, now = {}, _FakeSend(), time.time()
+        _sweep(state, USER_DRAFT_PANE, send, now, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(send.calls), 1, send.calls)
+
+    def test_empty_backlog_stays_silent(self):
+        state, send, now = {}, _FakeSend(), time.time()
+        for i in range(5):
+            _sweep(state, USER_DRAFT_PANE, send, now + i * 70, waiting=False,
+                  cwd="/x/repo", backlog_fetch=lambda cwd: 0)
+        self.assertEqual(send.calls, [])
+
+    def test_unmeasurable_backlog_stays_silent(self):
+        state, send, now = {}, _FakeSend(), time.time()
+        for i in range(5):
+            _sweep(state, USER_DRAFT_PANE, send, now + i * 70, waiting=False,
+                  cwd="/x/repo", backlog_fetch=lambda cwd: (_ for _ in ()).throw(
+                      OSError("no network")))
+        self.assertEqual(send.calls, [])
+
+    def test_unwired_backlog_fetch_is_a_complete_noop(self):
+        # every pre-#160 caller (backlog_fetch=None default)
+        state, send, now = {}, _FakeSend(), time.time()
+        for i in range(5):
+            _sweep(state, USER_DRAFT_PANE, send, now + i * 70, waiting=False)
+        self.assertEqual(send.calls, [])
+
+    def test_ping_is_logged_distinctly_from_the_waiting_ping(self):
+        state, send, now = {}, _FakeSend(), time.time()
+        logs = _sweep(state, USER_DRAFT_PANE, send, now, waiting=False,
+                      cwd="/x/repo", backlog_fetch=lambda cwd: 1)
+        logs += _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=False,
+                       cwd="/x/repo", backlog_fetch=lambda cwd: 1)
+        self.assertTrue(any("backlog" in ln for ln in logs), logs)
 
 
 class PerPaneCooldown(unittest.TestCase):

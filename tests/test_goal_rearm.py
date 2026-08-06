@@ -113,6 +113,15 @@ def summary_entry(payload):
                         "earlier." % payload}}
 
 
+def assistant_entry(text, ts="2026-08-06T04:00:00.000Z"):
+    """A plain real `assistant` transcript entry — #160 defect 1's
+    goal-achieved backstop reads the session's LAST such entry
+    (`transcript_last_assistant_text`) to decide whether a genuine
+    `🏁 BACKLOG EMPTY:` claim is present."""
+    return {"type": "assistant", "timestamp": ts,
+            "message": {"id": "msg_achieved", "content": text}}
+
+
 def write_transcript(entries, root=None, cwd=CWD, sid=SID):
     d = Path(root) / wd.encode_project_dir(cwd)
     d.mkdir(parents=True, exist_ok=True)
@@ -355,7 +364,8 @@ class GoalRearmBase(unittest.TestCase):
         return write_transcript(entries, self.tmp.name)
 
     def _go(self, captured, entries=None, state=None, now=None, cap_seq=(),
-            handled=None, in_mode=False, dry_run=False, model_stash=False):
+            handled=None, in_mode=False, dry_run=False, model_stash=False,
+            backlog_fetch=None):
         # One `_go` call = ONE watchdog sweep. The transcript is written once
         # per test (appending it again would look like CC echoing a FRESH
         # `Goal set:` marker — a real signal this job keys on).
@@ -368,7 +378,8 @@ class GoalRearmBase(unittest.TestCase):
                              state if state is not None else {},
                              send_fn=self._send, dry_run=dry_run,
                              projects_dir=self.tmp.name, handled=handled,
-                             sleep_fn=lambda s: None)
+                             sleep_fn=lambda s: None,
+                             backlog_fetch=backlog_fetch)
         return tmux, logs
 
     def _typed_seq(self, text=GOAL_LINE):
@@ -1421,6 +1432,203 @@ class TestCmdWatchdogEnablesJob20(unittest.TestCase):
         p = str(seen.get("goal_templates_path"))
         self.assertTrue(p.endswith("skills/autopilot/SKILL.md"), p)
         self.assertNotIn("devel/airuleset", p)
+
+    def test_cmd_watchdog_wires_the_backlog_fetch(self):
+        # #160 defects 1/4 -- without this, both the goal-achieved backstop
+        # and the widened wedge ping are permanently disabled on every real
+        # box, even though this exact test file exercises them directly.
+        import contextlib
+        import io
+        import airuleset
+        seen = {}
+
+        def fake(*a, **kw):
+            seen.update(kw)
+            return []
+
+        with m.patch.object(wd, "run_once", side_effect=fake):
+            with contextlib.redirect_stdout(io.StringIO()):
+                airuleset.cmd_watchdog(self._Args())
+        self.assertTrue(callable(seen.get("backlog_fetch")), seen.keys())
+        self.assertIs(seen.get("backlog_fetch"), airuleset._watchdog_backlog_fetch)
+
+
+class TestGoalAchievedBacklogVerification(GoalRearmBase):
+    """#160 defect 1 — a `✔ Goal achieved` pane is only trusted unconditionally
+    when the session's own last real turn made NO genuine backlog-empty
+    CLAIM at all. A genuine claim gets verified against the real repo
+    backlog before being trusted."""
+
+    ACHIEVED_PANE = ("● Hotovo.\n"
+                     "✔ Goal achieved (3s · 1 turn · 56 tokens)\n" + FOOTER_DARK)
+
+    def test_no_genuine_claim_skips_without_ever_calling_backlog_fetch(self):
+        # the existing behavior (test_completed_goal_is_not_a_failure)
+        # unchanged -- and backlog_fetch, even if wired, must never be
+        # spent on a goal whose stop condition isn't backlog-shaped.
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 5)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("achieved" in ln.lower() for ln in logs), logs)
+        self.assertEqual(calls, [], "no genuine claim -> gh must never run")
+
+    def test_genuine_claim_but_backlog_non_empty_rearms(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("Some work happened.\n"
+                                  "🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        # cap_seq[0] is what goal_rearm's OWN initial capture-pane call
+        # returns (consumed before `_send_goal_verified`'s own captures) —
+        # it must be the ACHIEVED pane, not the plain `_typed_seq()` default,
+        # or the achieved-check never sees the right content at all.
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertEqual(tmux.typed()[0], GOAL_LINE)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_genuine_claim_and_backlog_verified_empty_skips(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: 0)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("verified empty" in ln for ln in logs), logs)
+
+    def test_genuine_claim_but_unmeasurable_backlog_fails_open(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+
+        def boom(cwd):
+            raise OSError("no gh")
+
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, backlog_fetch=boom)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("unverifiable" in ln for ln in logs), logs)
+
+    def test_unwired_backlog_fetch_keeps_the_old_behavior(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        tmux, logs = self._go(self.ACHIEVED_PANE, entries=entries)
+        self.assertFalse(tmux.typed(), logs)
+
+    def test_a_mere_mention_is_not_a_claim(self):
+        # a fenced/backticked mention (the worked-example shape) must not
+        # be read as a genuine claim.
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("The proof line looks like\n"
+                                  "`🏁 BACKLOG EMPTY: 0 open`\n"
+                                  "when genuine.\n✅ DONE: hotovo")]
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 5)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(calls, [])
+
+    def test_repeated_sweeps_within_ttl_reuse_the_cache(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        calls = []
+
+        def fetch(cwd):
+            calls.append(cwd)
+            return 0
+        state = {}
+        now = time.time()
+        self._go(self.ACHIEVED_PANE, entries=entries, state=state, now=now,
+                 backlog_fetch=fetch)
+        self._go(self.ACHIEVED_PANE, state=state, now=now + 60,
+                 backlog_fetch=fetch)
+        self.assertEqual(len(calls), 1, calls)
+
+
+class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
+    """#160 defect 3 — `GOAL_REARM_MAX_DARK_S` used to be a PERMANENT,
+    silent dead end. It now pings ONCE (never re-arms — a payload this
+    stale is not safe to type into an unknown pane)."""
+
+    def test_stale_goal_pings_once(self):
+        state = {}
+        now = time.time()
+        self._write([marker_entry("set", PAYLOAD,
+                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
+        self._wrote = True
+        # last_armed/mts both old -> stale-goal branch
+        self._go(PANE_DARK, state=state, now=now)
+        self._go(PANE_DARK, state=state, now=now + 60)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
+
+    def test_never_retypes_the_payload(self):
+        state = {}
+        now = time.time()
+        self._write([marker_entry("set", PAYLOAD,
+                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
+        self._wrote = True
+        tmux, _logs = self._go(PANE_DARK, state=state, now=now)
+        self.assertFalse(tmux.typed())
+
+    def test_a_later_dark_episode_after_a_real_revival_pings_again(self):
+        state = {}
+        now = time.time()
+        self._write([marker_entry("set", PAYLOAD,
+                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
+        self._wrote = True
+        self._go(PANE_DARK, state=state, now=now)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        # the goal comes back ARMED for real (a human re-armed it by hand)
+        self._go(PANE_LIT, state=state, now=now + 60)
+        # ... then dies again, dark for another MAX_DARK_S window
+        later = now + 60 + wd.GOAL_REARM_MAX_DARK_S + 1
+        self._go(PANE_DARK, state=state, now=later)
+        self.assertEqual(len(self.pings), 2, self.pings)
+
+
+class TestGoalGiveUpPingPerEpisode(GoalRearmBase):
+    """#160 defect 3 — the give-up ping's dedup key must be genuinely
+    DISTINCT per streak-reset episode, or the notify layer's dedup silently
+    swallows every give-up after the first (the live gk incident: 3 real
+    GAVE UP events, only 1 marker on disk)."""
+
+    def _attempt(self, state, now):
+        return self._go(PANE_DARK, state=state, now=now,
+                        cap_seq=self._typed_seq())
+
+    def test_dedup_key_differs_across_streak_episodes(self):
+        # mirrors TestGoalRearmBounded.test_gives_up_and_pings_once_after_
+        # the_attempt_cap's own structure: MAX_ATTEMPTS successful deliveries,
+        # THEN a separate confirming sweep is what actually reaches n >=
+        # max_attempts and fires GAVE UP (the delivery attempts themselves
+        # only ever bring n UP TO the cap, never past it in the same call).
+        state = {}
+        now = time.time()
+        for i in range(wd.GOAL_REARM_MAX_ATTEMPTS):
+            self._attempt(state, now + i * (wd.GOAL_REARM_CONFIRM_S + 30))
+        confirm1 = now + wd.GOAL_REARM_MAX_ATTEMPTS * (wd.GOAL_REARM_CONFIRM_S + 30)
+        self._go(PANE_DARK, state=state, now=confirm1)   # GAVE UP #1
+        late = now + wd.GOAL_REARM_STREAK_S + 10
+        for i in range(wd.GOAL_REARM_MAX_ATTEMPTS):
+            self._attempt(state, late + i * (wd.GOAL_REARM_CONFIRM_S + 30))
+        confirm2 = late + wd.GOAL_REARM_MAX_ATTEMPTS * (wd.GOAL_REARM_CONFIRM_S + 30)
+        self._go(PANE_DARK, state=state, now=confirm2)   # GAVE UP #2
+        gave_up = [kw.get("dedup_key") for _text, kw in self.pings
+                  if "dedup_key" in kw and str(kw["dedup_key"]).startswith("goalrearm:")]
+        self.assertEqual(len(gave_up), 2, self.pings)
+        self.assertNotEqual(gave_up[0], gave_up[1],
+                            "each streak episode's GAVE UP must get its OWN "
+                            "dedup key, or the notify layer silently drops "
+                            "every repeat after the first")
 
 
 if __name__ == "__main__":

@@ -177,8 +177,12 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # added on a NEW trailing line after `reopen_fetch=None,` — the
         # closing `):` moved off this line entirely. Anchor spans both
         # lines now; the mutation itself still targets only `vault_purge`.)
+        # (#160 re-pin: `backlog_fetch=None` was added on the SAME trailing
+        # line as `sweep_budget_s=None`, right before the closing `):` —
+        # the anchor moved again, the guard and the mutation target did not.)
         old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
-               "             time_fn=None, sweep_budget_s=None):")
+               "             time_fn=None, sweep_budget_s=None, "
+               "backlog_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         mutated = src.replace(
             old, "             vault_purge=lambda: [], log_fn=None, "

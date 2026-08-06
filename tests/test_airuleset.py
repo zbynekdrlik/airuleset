@@ -6525,6 +6525,68 @@ class TestWatchdogRepoSweepTimeouts_172(TestCase):
         self.assertTrue(all(kw.get("timeout") == 10 for kw in calls))
 
 
+class TestWatchdogBacklogFetch(TestCase):
+    """#160 defects 1/4 — `_watchdog_backlog_fetch(cwd)`: the count of open,
+    non-`autopilot-skip` issues for the repo at `cwd`, or None on failure.
+    Plain REST listing, client-side label filter -- never `--search` (#181:
+    the search API silently returns [] for a repo whose remote was renamed;
+    the plain listing still answers correctly)."""
+
+    def _fake(self, stdout=None, returncode=0, raises=None):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw))
+            if raises is not None:
+                raise raises
+            import subprocess as sp
+            return sp.CompletedProcess(argv, returncode, stdout=stdout or "[]")
+        return fake_run, calls
+
+    def test_counts_only_non_skip_open_issues(self):
+        rows = [{"number": 1, "labels": []},
+               {"number": 2, "labels": [{"name": "autopilot-skip"}]},
+               {"number": 3, "labels": [{"name": "bug"}]}]
+        fake_run, calls = self._fake(stdout=json.dumps(rows))
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1].get("cwd"), "/some/repo")
+        self.assertEqual(calls[0][1].get("timeout"), 10)
+        self.assertNotIn("--search", calls[0][0])
+
+    def test_zero_open_issues(self):
+        fake_run, _calls = self._fake(stdout="[]")
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 0)
+
+    def test_nonzero_exit_is_none(self):
+        fake_run, _calls = self._fake(returncode=1)
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertIsNone(result)
+
+    def test_exception_is_none(self):
+        fake_run, _calls = self._fake(raises=OSError("no gh"))
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertIsNone(result)
+
+    def test_malformed_json_is_none(self):
+        fake_run, _calls = self._fake(stdout="not json")
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertIsNone(result)
+
+    def test_non_list_json_is_none(self):
+        fake_run, _calls = self._fake(stdout='{"not": "a list"}')
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertIsNone(result)
+
+
 class TestTier0BuildBlock(TestCase):
     """PreToolUse(Bash) hook block-tier0-local-build.sh — heavy local builds
     (cargo build / cargo test / cargo tauri build / trunk build) are BLOCKED in a
