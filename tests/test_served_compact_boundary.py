@@ -12,14 +12,38 @@ served session's OWN compact boundary is a genuinely COMPLETED task/ticket
 rule/prompt extension (no new hook/job, per this repo's FREEZE), mirroring
 the `/goal` templates' existing worker-flow teaching.
 
-These tests lock two things:
+A fresh-context adversarial review of the first draft found two real
+problems (both fixed before this test file was finalized, both locked
+below so they cannot silently regress):
+
+- The first draft's trigger included a bare `✅ DONE:` line, not just the
+  full `## ✅ Work Complete` heading. Since the `self-callback` origin
+  deliberately SKIPS the #99/#48 substantiality gates (same exemption the
+  autopilot-worker's own boundary uses -- "the boundary is the TICKET, not
+  the size of its diff", `watchdog/__init__.py`'s own `#126` comment), a
+  bare `✅ DONE:` (which can mean nothing more than "this turn is over") is
+  NOT a safe trigger for that exemption -- it would compact on every
+  trivial exchange. The fix restricts the trigger to the full heading.
+- The first draft told the session to call `--self` AFTER writing the
+  report, "as your OWN last tool call" -- risking the report no longer
+  being `last_assistant_message`, which several Stop hooks (the phone
+  ping, the passive fallback itself, the report-structure gate) key on.
+  The fix reorders: call `--self` FIRST, then write the report as the
+  turn's actual final content.
+
+These tests lock three things:
 1. `modules/core/completion-report.md` carries the new teaching (so it
-   cannot silently regress in a future edit).
-2. `cmd_compact_request`'s `--self` branch in `airuleset.py` stays
-   agent-type-agnostic -- the structural fact the whole design rests on.
-   A future accidental gate addition there would make the completion-report
-   teaching wrong without touching completion-report.md at all, so this is
-   pinned independently.
+   cannot silently regress in a future edit) -- with POLARITY-sensitive
+   assertions, not bare keyword presence, so a rewrite that reverses the
+   meaning of a NEVER (e.g. "ALWAYS mid-work qualifies") still fails.
+2. The trigger is scoped to the FULL `## ✅ Work Complete` heading, never
+   a bare `✅ DONE:` marker alone.
+3. `cmd_compact_request`'s `--self` branch, `deliver_compact_self`, and
+   `resolve_self_pane` in this repo stay agent-type-agnostic -- the
+   structural fact the whole design rests on. A future accidental gate
+   addition in ANY of the three (not just the CLI branch) would make the
+   completion-report teaching wrong without touching completion-report.md
+   at all, so all three are scanned, not just the entry point.
 """
 
 import inspect
@@ -55,11 +79,42 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
             "to served (non-autopilot-worker) sessions",
         )
 
+    def test_trigger_is_the_full_heading_never_a_bare_done_marker(self):
+        t = read(self.MOD)
+        low = t.lower()
+        self.assertIn("never a bare", low)
+        self.assertIn("## ✅ work complete", low)
+        # the reasoning (#99/#48 exemption) must actually be present, not
+        # just the restriction itself -- else a future editor could widen
+        # the trigger back to a bare marker without understanding why it
+        # was narrowed.
+        self.assertTrue("#99" in t and "#48" in t)
+
+    def test_call_happens_before_the_report_not_after(self):
+        t = read(self.MOD)
+        low = t.lower()
+        self.assertIn("first", low)
+        self.assertIn("before writing the report", low)
+        # the rejected ordering must be explicitly named as rejected, not
+        # merely absent -- a bare "call it first" sentence could still be
+        # satisfied by a rewrite that puts it back after the report as
+        # long as SOME "first" appears elsewhere in the file.
+        self.assertTrue(
+            "never after" in low or "not after" in low,
+            "must explicitly reject calling --self AFTER the report",
+        )
+
     def test_never_right_after_answering_a_question(self):
         t = read(self.MOD)
-        self.assertIn("NEVER", t)
+        # polarity: forbid the INVERSION of this NEVER, not just require
+        # the phrase to appear somewhere in the file.
+        self.assertRegex(
+            t, r"NEVER right after just answering a question",
+        )
+        self.assertNotRegex(
+            t.upper(), r"ALWAYS RIGHT AFTER (JUST )?ANSWERING A QUESTION",
+        )
         low = t.lower()
-        self.assertIn("answer", low)
         self.assertTrue(
             "not a completion boundary" in low
             or "resumption" in low,
@@ -69,7 +124,22 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
 
     def test_never_mid_work(self):
         t = read(self.MOD)
-        self.assertIn("mid-work", t.lower())
+        # polarity: the literal NEVER-mid-work bullet must be present,
+        # and no rewrite may flip it to a permissive "ALWAYS" form.
+        self.assertRegex(t, r"NEVER mid-work")
+        self.assertNotRegex(t.upper(), r"ALWAYS MID-WORK")
+
+    def test_durability_precondition_present(self):
+        t = read(self.MOD)
+        low = t.lower()
+        # a clean ✅/no-⏳ report proves the TURN ended, not that the work
+        # is durable -- the compaction is unsafe if the only record of
+        # what happened lives in the conversation itself.
+        self.assertTrue(
+            "only record" in low or "only in this chat" in low,
+            "must guard against compacting away work that has no durable "
+            "record outside the conversation",
+        )
 
     def test_references_the_deciding_tickets(self):
         t = read(self.MOD)
@@ -80,13 +150,26 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         self.assertIn("notify-compact-request.sh", t)
 
 
-class TestSelfCallbackBranchStaysAgentTypeAgnostic(TestCase):
-    """Structural lock on the fact the whole #228 design depends on: the
-    `--self` branch of `cmd_compact_request` must never grow an
-    `agent_type`/`subagent_type` check. Bounded to just that branch (not
-    the whole function/file) so it can't pass by coincidence, and not the
-    whole file so it can't be defeated by an unrelated docstring mentioning
-    those words elsewhere in the function."""
+class TestSelfCallbackStaysAgentTypeAgnostic(TestCase):
+    """Structural lock on the fact the whole #228 design depends on: no
+    part of the `--self` call chain may grow an `agent_type`/
+    `subagent_type` check. Scoped to the THREE functions that make up the
+    chain (never the whole file, which would be defeated by an unrelated
+    docstring mentioning those words elsewhere), and NOT just the CLI
+    entry point -- a fresh-context adversarial review demonstrated that a
+    gate inserted inside `deliver_compact_self` or `resolve_self_pane`
+    (where a future editor would most naturally add "only for the
+    autopilot-worker" logic, since that is where the session is actually
+    resolved) was invisible to a scan bounded to the CLI branch alone."""
+
+    GATE_WORDS = ("agent_type", "subagent_type")
+
+    def _assert_clean(self, src, label):
+        for word in self.GATE_WORDS:
+            self.assertNotIn(
+                word, src,
+                "%s must stay agent-type-agnostic -- found %r" % (label, word),
+            )
 
     def test_self_branch_has_no_agent_type_gate(self):
         import airuleset
@@ -96,9 +179,23 @@ class TestSelfCallbackBranchStaysAgentTypeAgnostic(TestCase):
         # bounded by the next top-level branch in the same function
         end = src.index('if getattr(args, "record", False):', start)
         self.assertGreater(end, start)
-        branch = src[start:end]
-        self.assertNotIn("agent_type", branch)
-        self.assertNotIn("subagent_type", branch)
+        self._assert_clean(src[start:end], "cmd_compact_request's --self branch")
+
+    def test_deliver_compact_self_has_no_agent_type_gate(self):
+        import watchdog
+
+        self._assert_clean(
+            inspect.getsource(watchdog.deliver_compact_self),
+            "deliver_compact_self",
+        )
+
+    def test_resolve_self_pane_has_no_agent_type_gate(self):
+        import watchdog
+
+        self._assert_clean(
+            inspect.getsource(watchdog.resolve_self_pane),
+            "resolve_self_pane",
+        )
 
 
 if __name__ == "__main__":
