@@ -166,6 +166,42 @@ set -euo pipefail
 #     it was considered and REJECTED: a heredoc body is not inert here
 #     (`python3 <<EOF` genuinely executes), so that exemption would re-open a
 #     real read path to buy comfort.
+#   - VALUE_FILE_RE's config-extension allow-list (`.json`/`.yaml`/`.yml`/
+#     `.env`/`.toml`/`.ini`, #165) accepts `.env` DELIBERATELY, even though a
+#     `.env` file conventionally carries raw secrets itself. Rule B is a
+#     supplementary net for THIS vault's own value-file extension (the real
+#     store files are `~/.claude/secrets/<NAME>.secret`, matched by the
+#     TERMINAL case, never by an infix) — a file whose real extension is
+#     `.env` was never protected by rule B before this ticket either (only
+#     the accidental `.secret` infix ever made it match), so nothing here
+#     removes an existing protection for `.env` files in general; a real
+#     `.env` secret this hook never covered before still isn't covered now
+#     (verified live: `cat ~/.claude/channels/discord/.env`, which really
+#     holds a bot token on this box, was rc 0 both before and after). An
+#     adversarial review (agent a9a5c0191c3ffbc07) rated this
+#     RISKY-BUT-ACCEPTABLE rather than a fix-required finding, on that exact
+#     reasoning, and separately noted `.env` was the ticket's OWN requested
+#     entry, not the implementer's addition.
+#     What IS conceded, precisely (the review's real findings, F1/F2/F4/F7):
+#     naming a copy of an actual value file with a listed extension AS THE
+#     FINAL component (`cp DB_PASS.secret DB_PASS.secret.env`) slips this
+#     by-name net — the same class of deliberate-circumvention gap already
+#     stated above for the store directory (rule A still catches it while
+#     the copy sits inside the store); a SYMLINK to the real store file
+#     under an allow-listed name (`ln -s <store>/DB_PASS.secret ./x.secret.
+#     env`) is the cheaper version of the same gap, and needs no data
+#     duplication at all; a config-shaped name with an extra dot-segment
+#     before the extension (`config.secret.local.json`) is a genuine,
+#     plausible false positive that STAYS blocked, because the allow-list
+#     match requires the extension immediately after `.secret`; the match
+#     is case-SENSITIVE (`config.secret.JSON` stays blocked); and a
+#     non-ASCII byte immediately after a listed extension (`config.secret.
+#     jsonä`) is read as a genuine boundary, so that specific composition
+#     is allowed — a deliberately crafted filename, not a shape ordinary
+#     tooling produces. None of these are silent leaks: every one requires
+#     either an already-blocked authoring step (the copy/symlink/`echo`)
+#     or a hand-crafted filename nobody types by reflex — the same REFLEX
+#     boundary this hook's whole design already stakes its claim on.
 #   - Fail-closed is bounded by the harness: a hook that TIMES OUT (5s) is
 #     treated as an error and does not block, so a pathologically slow python3
 #     start fails open. Not agent-controllable, but real. Measured on dev1 the
@@ -295,8 +331,38 @@ STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
 # literal stem, and was the review's F3 bypass. A regex or source fragment
 # (`"\.secret\b"`, `(".secret",`) still does not match, which is the point of
 # requiring SOME stem character rather than none.
+#
+# The boundary after `.secret` accepts anything that is NOT an identifier
+# continuation (alnum/_/-) — including a bare `.` — so `<stem>.secret` blocks
+# every copy/archive/backup of a real value file (`.bak`, `.gz`, a tilde
+# backup, …) by DEFAULT, with no enumeration needed on that side. The one
+# carve-out is an EXPLICIT allow-list of common config-file extensions
+# (#165): `config.secret.json` is a config whose name merely carries
+# `.secret` as an infix — a real, ordinary local-config convention — not
+# this vault's own `<NAME>.secret` value file (the vault's real files match
+# the TERMINAL case above, never an infix), and was falsely refused. This is
+# an enumeration on the ALLOW side only; the guard's usual "no enumeration"
+# stance (stated throughout this file) is about the BLOCK side, where an
+# unlisted reader/head/extension would walk through SILENTLY — here an
+# extension that isn't on the list stays BLOCKED, so a missing entry is a
+# LOUD false positive: the file can be renamed to a listed extension, or the
+# user can grant the (out-of-session-only) env bypass — never a silent leak.
+#
+# The allow-list match must be the WHOLE, FINAL extension, never merely
+# present somewhere before a further suffix (adversarial review finding F1,
+# #165): a first draft's inner boundary accepted a `.` after the listed
+# extension as "terminal", which let `DB_PASS.secret.json.gz` — an archive
+# of a real value file wearing a config-shaped disguise — through
+# unblocked. The inner boundary below is the OUTER one PLUS `.` added to the
+# excluded class, so a listed extension followed by ANYTHING (including
+# another `.`) is never mistaken for the end of the name. The honest cost:
+# a real config's own future backup, `config.secret.json.bak`, is now
+# blocked too (a KNOWN GAPS bullet documents this trade explicitly).
+_VALUE_FILE_CONFIG_EXT = r"(?:json|yaml|yml|env|toml|ini)"
 VALUE_FILE_RE = re.compile(
-    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|[*?\]}])\.secret(?![A-Za-z0-9_-])")
+    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|[*?\]}])\.secret"
+    r"(?!\." + _VALUE_FILE_CONFIG_EXT + r"(?![A-Za-z0-9_.-]))"
+    r"(?![A-Za-z0-9_-])")
 # C. the store's PARENT swept recursively or archived (review F2). Anchored on
 # `.claude` NOT followed by a deeper path component, so `~/.claude/projects`
 # — the transcript greps this repo's own work runs constantly — is untouched.
