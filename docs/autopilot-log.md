@@ -3802,3 +3802,57 @@ this repo's direct-push model (no dev branch, no PR) — supervisor pushes.
 Full-repo suite green throughout (3953 → 3969 → 3979 tests as new
 regression/hardening tests were added). `ruff check .` and
 `python3 airuleset.py validate` both clean at the end.
+
+Batch (#263+#264): subdev stream account dev-env provisioning (montalu2/
+montalu3/montalu4 had the push target wired but no claude CLI binary and no
+tmux session — the user's reported top-priority regression). #263: extended
+cmd_install() (same shape as check_runtime_deps/ensure_playwright_browsers):
+ensure_claude_cli_installed() (curl-installs Anthropic's own public
+installer when the claude binary is missing, no OAuth needed for the
+install step itself), ensure_stream_tmux_session() (bootstraps the ONE tmux
+session a subdev stream account is expected to have, claude launched via
+send-keys into a fresh bash-backed pane -- never as the session's own
+foreground command), report_stream_dev_env()/_stream_provisioning_gaps()
+(loud stderr report of the two genuinely-human-only remaining steps --
+OAuth login, GitHub PAT -- and a rename-not-delete self-clean of
+TODO-PROVISIONING.md once both close). Necessary companion fix: cmd_push's
+per-remote ssh deploy had no exception handling around a hard 60s timeout
+and silently discarded a successful remote's stderr; this same gap was
+independently already filed as #262 -- commented there with the overlap,
+left open (not in this batch's named set) for the maintainer to close once
+merged. #264: apply_stream_ssh_attach() -- a new idempotent ~/.bashrc marker
+block, scoped to the AUTHORITY_BY_USER registry, that attaches an
+interactive ssh login straight into the account's tmux session
+(create-or-attach `-A`), guarded on three conditions (interactive shell,
+real ssh TTY, not already in tmux) so it structurally cannot fire during
+push's own non-interactive remote deploy command. Marker-block presence
+scan is a left-to-right positional scan (`_stream_marker_block_spans`),
+not the lazy-regex shape #235 already documented as corruption-prone.
+
+test:80cdc4d[red] (43 tests, genuine RED via `git stash push -- airuleset.py`
+against the untouched pre-fix code) -> feat:cfeaa53[green] Closes #264 ->
+feat:d9686b4[green] Closes #263 (split via `git add -p` + a temporary
+comment-out/restore dance, since the two features share one file and one
+constant) -> style:c7340e1 (ruff cleanup). A dispatched fresh-context
+adversarial review (opus) then found 4 real MAJOR bugs before any of this
+reached a live box: (1) the tmux bootstrap re-created + auto-launched
+claude into a session on EVERY install/push whenever has-session read
+"doesn't exist" -- including a session a human DELIBERATELY killed, exactly
+the standing user complaint this repo's memory already records; fixed with
+a one-time-ever bootstrap sentinel. (2) the 300s remote-deploy timeout was
+LESS than the ~780s worst-case sum of the inner best-effort timeouts one
+install can burn through -- raised to 900s. (3) tmux has-session does
+PREFIX matching on a bare `-t name` (live-verified, tmux 3.7b) -- fixed
+with the `-t "=name"` exact-match anchor. (4) a timed-out/failed remote
+just `continue`d with no other trace, so a partial fleet deploy could exit
+0 -- fixed by tracking failures and exiting non-zero with a summary.
+Several MINOR findings also fixed (docstring overclaims on the marker-scan
+residual, stderr routing, curl pipefail, an unused param, rename-not-delete
+for TODO-PROVISIONING.md, a login-shell PATH fallback, a missing-tmux
+guard, an atomic bashrc write). fix:75da61b[green] (10 new regression
+tests added for the review findings, 53 total in the new file). Full local
+suite green throughout (4022 -> 4032 tests), `ruff check .` clean at every
+step. Review findings + fixes posted as durable comments on both issues.
+Worked in an isolated worktree (this repo's own supervisor integrates +
+pushes + deploys + fires the per-ticket Discord cards; no PR, no CI, direct
+push to main per this repo's own two-branch-minus-PR model).
