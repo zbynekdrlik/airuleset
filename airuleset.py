@@ -4274,12 +4274,19 @@ def cmd_gk_request(args):
                 return 1
         print("gk-request filed: %s" % r.stdout.strip())
         return 0
+    # #221: since the primary create call no longer carries `--label`
+    # (the whole point of this fix), `r` failing here can no longer mean
+    # "the label was denied" — the create call itself failed (e.g. the
+    # actor can't even open new issues, an invalid title, a transient
+    # error). Retry once with the GATEKEEPER-ACTION prefix baked into the
+    # title, since that costs nothing and keeps the escalation
+    # discoverable if the retry happens to succeed.
     ft = (title if title.startswith("GATEKEEPER-ACTION:")
           else "GATEKEEPER-ACTION: " + title)
     r2 = _gh(["gh", "issue", "create", "--title", ft] + B + R)
     if r2.returncode == 0:
-        print("gk-request filed (label denied — GATEKEEPER-ACTION title "
-              "fallback): %s" % r2.stdout.strip())
+        print("gk-request filed (initial create failed — retried with "
+              "GATEKEEPER-ACTION title prefix): %s" % r2.stdout.strip())
         return 0
     print("gk-request FAILED: %s / %s"
           % (r.stderr.strip(), r2.stderr.strip()))

@@ -277,6 +277,12 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertTrue(
             any("needs-gatekeeper" in c for c in add_label_calls),
             add_label_calls)
+        # #221 adversarial review, MINOR: a "retitle unconditionally,
+        # ignore whether the label landed" mutant must NOT pass this
+        # test -- the label succeeded here, so no --title edit (the
+        # GATEKEEPER-ACTION degrade) should ever be attempted.
+        self.assertFalse(
+            any("edit" in c and "--title" in c for c in calls), calls)
 
     def test_create_label_denied_falls_back_to_title_prefix(self):
         calls = []
