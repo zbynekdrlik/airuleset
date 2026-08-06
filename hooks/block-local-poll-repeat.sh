@@ -215,9 +215,32 @@ SHAPE=$(printf ' %s ' "$CMD" | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
 # DIFFERENT targets never share a slot. A loop with no such target (no `gh
 # pr view`/`gh issue view` token — obs_loop/task_loop/ssh_loop, none of
 # which carry one) keeps the pure-shape key, unchanged.
+#
+# #281 adversarial review: several real `gh pr view <N>` spellings put a
+# FLAG (with its own value) BETWEEN `view` and the number —
+# `gh pr view -R o/r <N>`, `gh pr view --repo o/r <N>` — both routine in
+# this repo's own corpus. The optional `([[:space:]]+-[^[:space:]]+(…)?)*`
+# group tolerates zero or more such flag tokens before the required digit
+# run; the dominant `gh pr view <N> --repo o/r` spelling (digits right
+# after `view`) still matches with zero repetitions, unchanged. NOT chased
+# (accepted residual, same class of limitation the REST of this file's
+# text-only signatures already carry — CI_RX, the mutating-action regex —
+# the observed failure mode is defaulting, never adversarial
+# circumvention): a URL form (`.../pull/<N>`), a shell-variable form
+# (`gh pr view "$P"`), and a backslash line-continuation between `pr` and
+# `view` all still fall back to the pure-shape key, same as before #281
+# (not a regression); a decoy `gh pr view <N>` merely MENTIONED in an
+# echo/comment can still mis-key.
+#
+# TARGET is capped at 10 digits (`{1,10}`, both here and in the trailing
+# extraction) — no real GitHub PR/issue number is remotely close to that
+# length, but an unbounded digit run could build a state-file NAME past
+# the filesystem's NAME_MAX; the write below's own `|| true` would hide
+# that failure and the guard would fail OPEN (never mark, never block)
+# forever — the one direction this guard must never fail in.
 TARGET=$(printf '%s' "$FLAT" \
-    | grep -oE 'gh[[:space:]]+(pr|issue)[[:space:]]+view[[:space:]]+[0-9]+' \
-    | grep -oE '[0-9]+$' | head -1 || true)
+    | grep -oE 'gh[[:space:]]+(pr|issue)[[:space:]]+view([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+[0-9]{1,10}' \
+    | grep -oE '[0-9]{1,10}$' | head -1 || true)
 KEY="$SHAPE"
 [ -n "$TARGET" ] && KEY="${SHAPE}-t${TARGET}"
 FIRST_FILE="$STATE_DIR/airuleset-localpoll-first-${SID}-${KEY}"
