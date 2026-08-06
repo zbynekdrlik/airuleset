@@ -3115,11 +3115,25 @@ def _plugin_registry_keys(registry_path: Path = None) -> set:
     "installed_plugins.json"`, read at CALL time (never a precomputed
     constant) so patching `CLAUDE_DIR` in a test works exactly like it
     already does for every other CLAUDE_DIR-derived path in this file.
-    Missing file / unparsable JSON / a `plugins` field that isn't a dict —
-    all degrade to an empty set. Never guess a plugin is installed just
-    because the registry can't be read (issue #276)."""
+    Missing file / unreadable file (a directory, permission-denied,
+    invalid UTF-8) / unparsable JSON / a `plugins` field that isn't a dict
+    — all degrade to an empty set. Never guess a plugin is installed just
+    because the registry can't be read (issue #276; the unreadable-file
+    case is an adversarial-review MAJOR finding — `read_file_safe()`'s
+    `exists()` -> `read_text()` only catches a MISSING file, so a path
+    that EXISTS but genuinely cannot be read used to raise UNCAUGHT here,
+    escaping `_managed_plugin_built()` at `setup_managed_plugins()`'s own
+    `if _managed_plugin_built(key): continue` — which sits OUTSIDE the
+    per-plugin try/except — so `cmd_install()`'s outer try/except silently
+    swallowed it as "(non-fatal)": remaining plugins never ran, yet
+    "Install complete." was still reported)."""
     path = registry_path or (CLAUDE_DIR / "plugins" / "installed_plugins.json")
-    raw = read_file_safe(path)
+    try:
+        raw = read_file_safe(path)
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"    warning: cannot read plugin registry {path} ({e})",
+              file=sys.stderr)
+        return set()
     if not raw.strip():
         return set()
     try:
@@ -3208,7 +3222,9 @@ def setup_managed_plugins() -> bool:
        push: plugin installs fail on fresh stream accounts, 2026-08-06 —
        reconciling AFTER install, as this used to, means the settings write
        lands too late to help the very install call it's meant to unblock),
-    2. for every plugin whose cache is missing: register its marketplace
+    2. for every plugin whose REGISTRY ENTRY is missing (claude's own
+       installed_plugins.json — see _managed_plugin_built()'s docstring;
+       never a cache-file glob, #276): register its marketplace
        (idempotent `claude plugin marketplace add` — see
        ensure_marketplace_registered()'s docstring) THEN install it
        (best-effort, time-boxed). Installing without a registered
@@ -3216,7 +3232,7 @@ def setup_managed_plugins() -> bool:
        so a failed registration skips that plugin's install attempt
        entirely rather than trying anyway.
     Returns True iff nothing REQUIRED failed (marketplace registration and
-    install, for every plugin whose cache was missing) — a still-failing
+    install, for every plugin whose registry entry was missing) — a still-failing
     plugin install after correct marketplace registration is a genuine
     failure the caller (cmd_install) turns into a non-zero exit, per
     script-failure-policy. The other best-effort step here

@@ -601,6 +601,16 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         # everything else healthy it would still return True ("Install
         # complete.") while enabledPlugins/extraKnownMarketplaces were
         # never actually written.
+        #
+        # Adversarial-review MINOR finding #2: this test relied on the
+        # fast-path (registry lists both MANAGED_PLUGINS) to avoid
+        # subprocess calls but never actually mocked `subprocess.run` —
+        # observed live in the review: it ran REAL `claude` CLI commands
+        # against this box's own account (idempotent here, but a genuine
+        # unit test must never depend on that; on another box it could
+        # mutate real `~/.claude` state mid-suite). Mock it AND assert it
+        # is never called, matching the sibling
+        # test_already_built_plugins_never_call_marketplace_add.
         d = Path(tempfile.mkdtemp())
         _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
         settings_path = d / "settings.json"
@@ -611,9 +621,11 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
                 m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch("subprocess.run") as run, \
                 m.patch("sys.stderr", out):
             ok = airuleset.setup_managed_plugins()
         self.assertFalse(ok)
+        run.assert_not_called()
 
     def test_stuck_account_self_heals_settings_enabled_registry_absent(self):
         # #276: the exact montalu2/montalu3/montalu4 shape — settings.json
