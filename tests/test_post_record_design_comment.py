@@ -582,6 +582,62 @@ class TestAmbiguousRepoIsRefused(_Base):
         self.assertIsNotNone(dg.read_marker("aaa", 6))
 
 
+class TestRepoExtractionIsScopedToItsOwnSegment(_Base):
+    """#280 follow-up (adversarial-review F4, pre-existing -- not
+    introduced by the flag-blanking fix above): -R/--repo extraction used
+    to scan the WHOLE scan_cmd for ANY `-R`/`--repo`-shaped text, so a
+    value living in a segment that is NOT the `gh issue comment`
+    invocation at all (an `echo` argument, a different `gh` subcommand's
+    own flag/value elsewhere in the same compound command) was scavenged
+    as if it belonged to the invocation being classified -- silently
+    redirecting the marker to the wrong repo. Each of these must resolve
+    to the REAL repo (this test harness's own git remote, "airuleset"),
+    never the spurious repo named outside the invocation's own segment."""
+
+    def test_an_unrelated_echo_argument_naming_dash_R_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-80",
+        }])
+        cmd = 'echo "note: -R attacker/evil-repo" ; gh issue comment 41 --body "x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "issue #41 must classify under the REAL repo -- "
+                             "an unrelated echo argument's -R must be ignored")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil-repo", 41))
+
+    def test_a_dash_R_belonging_to_a_later_unrelated_gh_subcommand_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-81",
+        }])
+        cmd = ('gh issue comment 41 --body "x" ; '
+               'gh issue create --label "-R attacker/evil-repo"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a LATER unrelated gh subcommand's --label "
+                             "value must never be used as the repo")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil-repo", 41))
+
+    def test_a_dash_R_belonging_to_a_different_gh_subcommand_in_the_same_compound_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-82",
+        }])
+        cmd = 'gh issue comment 41 --body "x" && gh pr view 5 -R other/unrelated'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a DIFFERENT gh subcommand's own -R, later in "
+                             "the same compound command, must never be used")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("unrelated", 41))
+
+
 class TestPerIssueContinueIsNotSysExit(_Base):
     """Adversarial-review finding (post-#208): three of the per-issue
     `continue`s (already-recorded, claimed-url, the gh-view try/except)
