@@ -970,5 +970,61 @@ class TestScansControlFlowNotRawText(_Base):
                              "heredoc recipe must not swallow it")
 
 
+class TestBackslashAndSpliceIdiomDoNotDefeatBlanking(_Base):
+    """#282 (#280 adversarial-review F3, pre-existing -- not introduced by
+    that fix): `_TEXT_FLAG_VALUE_RE`'s naive `(['"])(.*?)\\1` closes the
+    "blanked" span at the FIRST quote character it sees, escaped or not,
+    and has no notion of the shell's `'"'"'` single-quote-splice idiom.
+    Everything after the premature close is left as live text -- a fake
+    `gh issue comment N` mention inside a flag's own value is then misread
+    as a real invocation (writes a marker for an issue nothing genuinely
+    invoked), and a smuggled `-R`/`--repo` value can redirect the marker
+    to the wrong repo."""
+
+    def test_an_escaped_quote_in_a_message_flag_does_not_fake_an_invocation(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/99#issuecomment-97",
+        }])
+        cmd = 'git commit -m "see \\"the doc\\" then gh issue comment 99 --body y"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(99),
+                          "no marker for #99 -- nothing in the command "
+                          "genuinely invokes gh issue comment 99, it is "
+                          "trapped inside an escaped-quote commit message")
+
+    def test_a_shell_single_quote_splice_idiom_does_not_fake_an_invocation(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/99#issuecomment-98",
+        }])
+        cmd = "git commit -m 'it'\"'\"'s documented: gh issue comment 99 --body y'"
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(99),
+                          "the standard shell single-quote-escape idiom "
+                          "must not defeat the blanking either")
+
+    def test_an_escaped_quote_dash_R_smuggle_does_not_redirect_the_marker(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-99",
+        }])
+        cmd = ('gh issue comment 41 --body "see \\"the doc\\" then '
+               '-R evilcorp/nastyrepo"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "issue #41 must still be classified under "
+                             "the REAL repo (derived from cwd's own git "
+                             "remote)")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("nastyrepo", 41),
+                          "the escaped-quote-smuggled -R value must never "
+                          "redirect the marker, even with a mismatched "
+                          "basename that no longer coincidentally masks it")
+
+
 if __name__ == "__main__":
     main()

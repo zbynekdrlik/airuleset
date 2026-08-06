@@ -56,6 +56,9 @@ LIBPY = HOOKS / "lib_poll_payload.py"
 NUDGE = HOOKS / "nudge-poll-loop-timeout.sh"
 CIBLOCK = HOOKS / "block-ci-poll-repeat.sh"
 
+sys.path.insert(0, str(HOOKS))
+import lib_poll_payload as lpp                                 # noqa: E402
+
 # Every fixture is built as DATA here, never read back from a repo file, so no
 # test can pass or fail because of prose that happens to sit near it.
 RUN = "30326991380"
@@ -408,6 +411,67 @@ class StripperTeethTest(_HookRunner):
         self.assertFalse(self.nudges(doc), "shipped stripper drops this")
         self.assertTrue(self.nudges(doc, hook=mut),
                         "a no-op stripper must reproduce the #124 bug")
+
+
+class BackslashAndSpliceIdiomDoNotDefeatBlankingTest(unittest.TestCase):
+    """#282 (F3 of #280's own adversarial review, pre-existing -- not
+    introduced by that fix): both `BODYFLAG`/`MSGFLAG` used a naive
+    `(['"])(.*?)\\1` quote-span match with no backslash-awareness and no
+    understanding of the shell's `'"'"'` single-quote-splice idiom (the
+    standard way to embed a literal `'` inside what is, at the bash
+    tokenization level, ONE continuous single-quoted argument). Either
+    shape closes the "blanked" span at the FIRST quote character seen,
+    leaving everything after it -- a fake `gh`/loop mention embedded in
+    the flag's own value -- as live, unblanked text. Direct import, not
+    the subprocess hook: this is the shared library both consumers of
+    `flag_spans()`/`strip()` depend on, and a unit-level pin is cheaper
+    and more precise than driving it through a full hook subprocess."""
+
+    FAKE_LOOP = "for i in 1 2 3; do sleep 5; done"
+
+    def test_an_escaped_quote_does_not_leak_a_fake_loop_past_the_blank(self):
+        cmd = 'gh pr comment 7 --body "see \\"the doc\\" then %s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "an escaped quote inside --body must not let the "
+                         "fake loop text survive blanking: %r" % out)
+
+    def test_a_single_quote_splice_idiom_does_not_leak_a_fake_loop(self):
+        cmd = "gh pr comment 7 --body 'it'\"'\"'s: %s'" % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "the shell splice idiom inside --body must not "
+                         "let the fake loop text survive blanking: %r" % out)
+
+    def test_a_message_flag_splice_idiom_also_blanks(self):
+        # MSGFLAG (-m/--message/--title/-t) is the sibling regex, gated on
+        # GITGH -- `git commit` supplies it.
+        cmd = "git commit -m 'it'\"'\"'s: %s'" % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "the splice idiom must also be closed for -m: %r" % out)
+
+    def test_a_message_flag_escaped_quote_also_blanks(self):
+        cmd = 'git commit -m "see \\"the doc\\" then %s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "an escaped quote must also be closed for -m: %r" % out)
+
+    def test_a_genuinely_live_loop_outside_any_quoted_value_survives(self):
+        # Control pin: the fix must never blank text that is NOT inside a
+        # BODYFLAG/MSGFLAG value at all -- only the flag's own value.
+        cmd = self.FAKE_LOOP + '; gh pr comment 7 --body "unrelated \\"note\\""'
+        out = lpp.strip(cmd)
+        self.assertIn("do sleep 5", out,
+                      "a real loop living outside the flag value must "
+                      "not be touched by the fix: %r" % out)
+
+    def test_a_plain_unescaped_value_is_still_blanked_as_before(self):
+        # Regression control: the ordinary, already-covered case must keep
+        # working -- this is not a case the fix should ever touch.
+        cmd = 'gh pr comment 7 --body "%s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out, repr(out))
 
 
 class FailOpenTest(_HookRunner):
