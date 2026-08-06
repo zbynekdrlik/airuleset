@@ -87,11 +87,18 @@ class TestSonioxKeyLine(TestCase):
         self.assertIsNone(airuleset._soniox_key_line(src))
 
     def test_defaults_to_the_module_level_source_constant(self):
-        # never actually reads it — just proves the default resolves to the
-        # documented dev1 voiceagent path, not a hardcoded literal elsewhere.
-        self.assertEqual(
-            airuleset.SONIOX_KEY_SOURCE,
-            Path.home() / "devel" / "voiceagent" / ".env")
+        # never actually reads it — just proves the default resolves under
+        # THIS account's own home dir, at the documented dev1 voiceagent
+        # path, never a hardcoded literal elsewhere. Structural SUFFIX
+        # check, never a live Path.home() re-call: some OTHER test module,
+        # elsewhere in a full `unittest discover` run, mutates $HOME
+        # without restoring it — a direct Path.home()-vs-Path.home()
+        # comparison here is then order-dependent and flakes depending on
+        # which tests ran first in the SAME process (SONIOX_KEY_SOURCE
+        # itself is unaffected — it's a module-level constant resolved
+        # ONCE at airuleset.py's own import time, before any such leak).
+        self.assertEqual(airuleset.SONIOX_KEY_SOURCE.parts[-3:],
+                         ("devel", "voiceagent", ".env"))
 
 
 # ---------------------------------------------------------------------------
