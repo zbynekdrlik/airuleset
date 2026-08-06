@@ -106,6 +106,145 @@ def _log_exception(where, exc):
         pass
 
 
+# Free-text flags gh/git themselves consume as literal data -- their VALUE
+# is NEVER separately executed by anything, sudo/env-prefixed or not. But
+# an UNCONDITIONAL blank is NOT safe on its own (#280 follow-up, F1):
+# `-t`/`-m` mean something ENTIRELY different when they belong to some
+# OTHER command sharing the same segment -- `ssh host -t "<remote gh
+# call>"` -- -t is ssh's OWN flag, and its value is code that actually
+# runs remotely, not a git/gh flag argument at all. Blanking it
+# unconditionally swallows the whole remote invocation, hiding the
+# `gh issue comment` call it carries.
+#
+# The fix: a flag only counts as gh/git's OWN when a `git`/`gh` command
+# word has ALREADY opened the SAME segment (reusing lib_poll_payload's own
+# SEP/GITGH building blocks) -- true for `gh issue comment ... --body
+# "..."` and for `sudo gh issue comment ... --body "..."` (sudo doesn't
+# consume the following args as its own flags, it just re-execs gh with
+# them, so "gh " still precedes --body in the segment), false for `ssh
+# host -t "..."` (the segment before -t is "ssh host ", no "gh "/"git "
+# yet). This is DELIBERATELY not lib_poll_payload's own INTERP-exemption
+# shape -- exempting a segment naming sudo/env/ssh would reopen the
+# earlier #280 -R-in-quoted-body leak for the sudo-prefixed shape (see
+# TestEnvVarPrefixedGhCallIsRecognized). GITGH-precedes is the correct,
+# narrower discriminator for this hook's domain.
+_TEXT_FLAG_VALUE_RE = re.compile(
+    r"(?:^|\s)(?:--body|--body-file|--notes|--notes-file|-b|-F|"
+    r"-m|--message|--title|-t)(?:=|\s+)(['\"])(.*?)\1", re.S)
+
+
+def _blank_gh_text_flag_values(text, lib_poll_payload):
+    """Blank the quoted VALUE of every gh/git free-text flag -- scoped to
+    the flag's OWN command segment (SEP-bounded, reusing lib_poll_payload's
+    own separator tuple) and requiring a `git`/`gh` command word to have
+    ALREADY opened that segment before the flag (reusing lib_poll_payload's
+    own GITGH regex) -- see `_TEXT_FLAG_VALUE_RE`'s own comment for why
+    this is neither fully unconditional nor lib_poll_payload's own
+    INTERP-exemption shape. Positional (offset-based, reverse order),
+    never by value -- the same discipline lib_poll_payload.py's own
+    `flag_spans`/`strip` already use, for the same reason (a value-based
+    `str.replace` can delete unrelated live text sharing the same bytes)."""
+    out = text
+    for m in reversed(list(_TEXT_FLAG_VALUE_RE.finditer(text))):
+        head = text[:m.start()]
+        cut = max([head.rfind(s) for s in lib_poll_payload.SEP] + [-1])
+        seg = text[cut + 1:m.start()]
+        if not lib_poll_payload.GITGH.search(seg):
+            continue
+        if m.group(2).strip():
+            out = out[:m.start(2)] + " " + out[m.end(2):]
+    return out
+
+
+# #280 follow-up (adversarial-review F4, pre-existing -- not introduced
+# by the flag-blanking fix above): the -R/--repo lookup below used to
+# scan the WHOLE scan_cmd for ANY `-R`/`--repo`-shaped text, so a value
+# living in a segment that is NOT the `gh issue comment` invocation at
+# all (an `echo` argument, a different `gh` subcommand's own flag/value
+# elsewhere in the SAME compound command -- `gh issue create --label
+# "-R attacker/x"`, `gh pr view 5 -R other/unrelated`) was scavenged as
+# if it belonged to the invocation being classified, silently
+# redirecting the marker to the wrong repo. `_REPO_FLAG_RE` is now only
+# ever searched WITHIN the SEP-bounded segment of the specific `gh issue
+# comment` match it's being resolved for.
+#
+# A LOCAL `_SEG_SEP` tuple, deliberately NOT `lib_poll_payload.SEP` --
+# this scoping must keep working even when that module failed to import
+# above (see `_control_flow_text`'s own fallback comment), and it is a
+# small, stable literal not worth a second import for.
+_REPO_FLAG_RE = re.compile(r'(?:-R|--repo)[= ]+([^\s\'"]+)')
+_SEG_SEP = (";", "&&", "||", "|", "\n")
+
+
+def _match_segment(text, start):
+    """The `_SEG_SEP`-bounded segment containing offset `start` -- bounded
+    on BOTH sides (a `-R` can appear either BEFORE or AFTER "gh issue
+    comment N" within the SAME invocation), unlike
+    `_blank_gh_text_flag_values`'s own left-only segment (it only ever
+    needs "does gh/git precede this flag")."""
+    left = max([text.rfind(s, 0, start) for s in _SEG_SEP] + [-1])
+    ends = [e for e in (text.find(s, start) for s in _SEG_SEP) if e != -1]
+    right = min(ends) if ends else len(text)
+    return text[left + 1:right]
+
+
+def _control_flow_text(text, repo_root):
+    """`text` with provably-inert heredoc bodies and quoted text-payload
+    argument VALUES blanked out -- REUSES hooks/lib_poll_payload.py's own
+    `strip()` (the #124 payload-vs-control-flow classifier: a heredoc body
+    is blanked only when its owner names no interpreter, is a plain
+    redirect to a literal file path, and every other mention of that path
+    is a text-file-flag argument -- so a heredoc genuinely `cat`'d into a
+    script and run in the SAME command stays visible), never a parallel
+    reimplementation of it. Chained with `_blank_gh_text_flag_values` (see
+    its own comment for why lib_poll_payload's flag-value blanking alone
+    is not enough here).
+
+    #280 -- both extraction regexes below used to scan the RAW command
+    text: a heredoc BODY that only documents/mentions "gh issue comment"
+    (never executed unless something later runs it), or a `-R` value
+    sitting inside a quoted `--body`/`-m` argument's free text, was
+    misread as a real invocation/flag. Scanning THIS text instead fixes
+    both without touching the distinct-repo ambiguity refusal below.
+
+    #280 follow-up (adversarial-review F1/F2) -- flag-VALUE blanking now
+    runs FIRST, the heredoc-aware strip SECOND (the reverse of the
+    original order): a --body VALUE whose prose merely mentions a
+    heredoc recipe (`cat > body.md << EOF`) was otherwise misread by the
+    heredoc detector as a REAL trigger, swallowing everything after it
+    (including a sibling `gh issue comment` invocation) as if it were
+    that fake heredoc's own body. Blanking the quoted value first removes
+    the fake trigger before heredoc detection ever runs.
+
+    Never crashes or disables the whole hook on failure -- but the exact
+    fallback VALUE depends on which stage failed (adversarial-review
+    MINOR, post-#280): an import failure returns `text` genuinely
+    UNCHANGED (the original raw command); a failure in EITHER later
+    processing stage returns whatever text the EARLIER stage(s) already
+    produced, not the original raw command -- each stage's own
+    try/except only ever refuses to advance PAST its own broken step, it
+    never rewinds an already-applied one. A logged import failure
+    (below) is the only one of the two that leaves the WHOLE hook
+    running on unprocessed raw text for every later command in this
+    invocation, which is why it is the one worth a diagnostic line."""
+    try:
+        hooks_dir = os.path.join(repo_root, "hooks")
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        import lib_poll_payload
+    except Exception as exc:
+        _log_exception("lib_poll_payload-import", exc)
+        return text
+    try:
+        text = _blank_gh_text_flag_values(text, lib_poll_payload)
+    except Exception:
+        pass
+    try:
+        return lib_poll_payload.strip(text)
+    except Exception:
+        return text
+
+
 try:
     import design_gate as dg
     import notify
@@ -117,12 +256,14 @@ try:
     if not cwd:
         sys.exit(0)
 
+    scan_cmd = _control_flow_text(cmd, repo_root)
+
     # #208 -- every `gh issue comment <N>` occurrence in the command text,
     # not just the first: a batch worker often posts several design/
     # validated/reviewed comments in ONE Bash call before a single bundled
     # commit, and `re.search` (a single, non-global match) used to extract
     # only the FIRST -- the rest silently never got checked or marked.
-    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', cmd))
+    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', scan_cmd))
     if not matches:
         sys.exit(0)
 
@@ -135,7 +276,15 @@ try:
     # command rather than guess which repo each issue belongs to -- this
     # hook has no per-segment command parser, and never guessing is safer
     # than resolving to a plausible-looking wrong repo.
-    mrepos = re.findall(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
+    #
+    # #280 follow-up F4 -- each match's own -R/--repo is now looked up
+    # ONLY within that match's own segment (`_match_segment`), never the
+    # whole command, so an unrelated -R/--repo-shaped string elsewhere in
+    # a compound command can no longer be scavenged as this invocation's
+    # repo (see `_match_segment`'s own comment for real examples).
+    mrepos = []
+    for m in matches:
+        mrepos.extend(_REPO_FLAG_RE.findall(_match_segment(scan_cmd, m.start())))
     distinct_repos = set(mrepos)
     if len(distinct_repos) > 1:
         _log_exception("ambiguous-repo", ValueError(

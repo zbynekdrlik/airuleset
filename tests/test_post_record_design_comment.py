@@ -403,6 +403,49 @@ class TestFallbackExceptionLogging(_Base):
         text = log_path.read_text()
         self.assertIn("import", text.lower())
 
+    def test_a_lib_poll_payload_import_failure_is_also_logged(self):
+        # #280 follow-up (adversarial-review MINOR): the OUTER import
+        # try/except (design_gate/notify, tested above) is a completely
+        # DIFFERENT try/except from `_control_flow_text`'s own inner
+        # `import lib_poll_payload` -- design_gate.py/notify/ are present
+        # here (the outer import succeeds and reaches _control_flow_text
+        # at all), but hooks/lib_poll_payload.py is deliberately absent.
+        bad_root = Path(tempfile.mkdtemp(prefix="airuleset-designhook-nolib-"))
+        self.addCleanup(shutil.rmtree, bad_root, True)
+        shutil.copy(ROOT / "design_gate.py", bad_root / "design_gate.py")
+        shutil.copytree(ROOT / "notify", bad_root / "notify",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (bad_root / "hooks").mkdir()
+        bad_hook = bad_root / "hooks" / "post-record-design-comment.sh"
+        bad_hook.write_text(HOOK.read_text())
+        bad_hook.chmod(0o755)
+        # deliberately NO lib_poll_payload.py under bad_root/hooks/
+
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-90",
+        }])
+        payload = json.dumps({"tool_input": {"command": 'gh issue comment 41 --body "x"'},
+                              "cwd": str(self.repo)})
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env.pop("PYTHONPATH", None)
+        r = subprocess.run(["bash", str(bad_hook)], input=payload,
+                           capture_output=True, text=True, env=env,
+                           cwd=str(bad_root))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "must still classify correctly -- a missing "
+                             "lib_poll_payload degrades gracefully, it "
+                             "never crashes or disables the whole hook")
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertTrue(log_path.exists(),
+                        "a lib_poll_payload import failure must be logged "
+                        "too, not silently swallowed")
+        self.assertIn("lib_poll_payload", log_path.read_text())
+
     def test_a_clean_run_never_writes_the_error_log(self):
         # positive control -- the log stays absent on the ordinary
         # happy path, so its presence is a genuine, meaningful signal.
@@ -582,6 +625,62 @@ class TestAmbiguousRepoIsRefused(_Base):
         self.assertIsNotNone(dg.read_marker("aaa", 6))
 
 
+class TestRepoExtractionIsScopedToItsOwnSegment(_Base):
+    """#280 follow-up (adversarial-review F4, pre-existing -- not
+    introduced by the flag-blanking fix above): -R/--repo extraction used
+    to scan the WHOLE scan_cmd for ANY `-R`/`--repo`-shaped text, so a
+    value living in a segment that is NOT the `gh issue comment`
+    invocation at all (an `echo` argument, a different `gh` subcommand's
+    own flag/value elsewhere in the same compound command) was scavenged
+    as if it belonged to the invocation being classified -- silently
+    redirecting the marker to the wrong repo. Each of these must resolve
+    to the REAL repo (this test harness's own git remote, "airuleset"),
+    never the spurious repo named outside the invocation's own segment."""
+
+    def test_an_unrelated_echo_argument_naming_dash_R_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-80",
+        }])
+        cmd = 'echo "note: -R attacker/evil-repo" ; gh issue comment 41 --body "x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "issue #41 must classify under the REAL repo -- "
+                             "an unrelated echo argument's -R must be ignored")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil-repo", 41))
+
+    def test_a_dash_R_belonging_to_a_later_unrelated_gh_subcommand_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-81",
+        }])
+        cmd = ('gh issue comment 41 --body "x" ; '
+               'gh issue create --label "-R attacker/evil-repo"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a LATER unrelated gh subcommand's --label "
+                             "value must never be used as the repo")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil-repo", 41))
+
+    def test_a_dash_R_belonging_to_a_different_gh_subcommand_in_the_same_compound_is_never_used(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-82",
+        }])
+        cmd = 'gh issue comment 41 --body "x" && gh pr view 5 -R other/unrelated'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a DIFFERENT gh subcommand's own -R, later in "
+                             "the same compound command, must never be used")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("unrelated", 41))
+
+
 class TestPerIssueContinueIsNotSysExit(_Base):
     """Adversarial-review finding (post-#208): three of the per-issue
     `continue`s (already-recorded, claimed-url, the gh-view try/except)
@@ -690,6 +789,185 @@ class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
         r = self.run_hook('gh issue comment 41 --body "x"', comments)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIsNotNone(self.marker(41, "validated"))
+
+
+class TestScansControlFlowNotRawText(_Base):
+    """#280 -- both extraction regexes used to scan the RAW command TEXT,
+    with no notion of what the shell actually EXECUTES vs merely CARRIES.
+    A heredoc BODY that only documents/mentions the `gh issue comment`
+    recipe (never executed unless something later runs it), or a `-R`
+    value sitting inside a quoted `--body`/`-m` argument's free text, was
+    read as a real invocation/flag. Fixed by scanning the SAME
+    payload-vs-control-flow text `hooks/lib_poll_payload.py` (#124)
+    already produces, rather than the raw command."""
+
+    def test_a_heredoc_body_merely_mentioning_the_recipe_makes_no_network_call(self):
+        # A `cat > file <<EOF` heredoc whose body TEXT is never read/run by
+        # anything else in the command is provably inert -- must not even
+        # be QUERIED, let alone granted a marker, no matter how fresh or
+        # valid a real comment for #41 happens to already exist.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-90",
+        }])
+        cmd = ("cat > body.md <<'EOF'\n"
+               "Recipe: post ONE `gh issue comment 41 -F b.md` per call.\n"
+               "EOF")
+        log = self.home / "gh.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_LOG"] = str(log)
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41))
+        self.assertFalse(log.exists(),
+                         "a heredoc body merely mentioning the recipe must "
+                         "never even query gh -- nothing in the command "
+                         "actually executes it")
+
+    def test_a_commit_message_quoting_two_issue_numbers_makes_no_network_call(self):
+        # #280's own measured table: pre-#277 this was 1 call/[41] (regex
+        # `search` finding only the first mention); post-#277's widened
+        # boundary made it 2 calls/[41,42] -- a `git commit -m "..."`
+        # quoting BOTH numbers as free text queried gh for both, and would
+        # have written real markers from real classifying comments.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-91",
+        }])
+        cmd = ('git commit -m "workers run gh issue comment 41 && '
+               'gh issue comment 42 in one call"')
+        log = self.home / "gh.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_LOG"] = str(log)
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41))
+        self.assertIsNone(self.marker(42))
+        self.assertFalse(log.exists(),
+                         "a commit message quoting issue numbers as free "
+                         "text must never query gh for either one")
+
+    def test_a_dash_R_inside_a_quoted_body_argument_is_never_used_as_the_repo(self):
+        # #280's second finding: `--body "compare against -R owner/evil"`
+        # resolved the repo lookup to owner/evil -- the genuine target repo
+        # (derived from cwd's own git remote) was never queried at all.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-92",
+        }])
+        cmd = 'gh issue comment 41 --body "compare against -R owner/evil"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "issue #41 must still be classified -- only "
+                             "the SPURIOUS -R value must be ignored")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil", 41),
+                          "the quoted -R text must never be treated as a "
+                          "real --repo flag")
+
+    def test_a_sudo_prefixed_dash_R_inside_a_quoted_body_is_also_never_used(self):
+        # Self-found residual: hooks/lib_poll_payload.py's own flag-value
+        # blanking deliberately EXEMPTS a segment naming an interpreter
+        # (sudo/env/ssh/...) -- correct for ITS domain (poll-loop
+        # detection, where a value might genuinely be forwarded to and
+        # executed by that interpreter), wrong for this hook's narrower
+        # question: a gh/git free-text flag's own VALUE is never separately
+        # executed by anything, sudo-prefixed or not. The documented
+        # sudo-prefix recipe (TestEnvVarPrefixedGhCallIsRecognized) must
+        # not reopen the exact -R leak `test_a_dash_R_inside_a_quoted_...`
+        # above closes for the un-prefixed shape.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-94",
+        }])
+        cmd = 'sudo gh issue comment 41 --body "compare against -R owner/evil"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil", 41),
+                          "sudo-prefixing the command must not resurrect "
+                          "the quoted -R leak")
+
+    def test_a_heredoc_genuinely_cat_and_run_in_the_same_command_still_fires(self):
+        # Regression control: NOT every heredoc is inert. One that is
+        # `cat`'d to a script and that script IS executed later in the
+        # SAME command must stay live -- this repo has already measured
+        # (lib_poll_payload.py's own header) that a heredoc body is not
+        # inert in general, and #280's fix must not become "blank every
+        # heredoc unconditionally".
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-93",
+        }])
+        cmd = ("cat > script.sh <<'EOF'\n"
+               "gh issue comment 41 -F body.md\n"
+               "EOF\n"
+               "bash script.sh")
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a heredoc genuinely cat'd into a script and "
+                             "run in the same command must still be "
+                             "treated as a real invocation")
+
+    def test_ssh_dash_t_remote_invocation_still_fires(self):
+        # Adversarial-review finding (post-#280, F1) -- a REGRESSION the
+        # `_blank_gh_text_flag_values` unconditional pass introduced:
+        # `-t`/`-m` mean something ENTIRELY different to ssh than to git/gh
+        # (`ssh -t '<cmd>'` EXECUTES its argument REMOTELY -- exactly the
+        # lib_poll_payload.py GITGH/MSGFLAG split this hook's own comment
+        # claims to mirror). Blanking `-t`'s value unconditionally silently
+        # swallowed a genuine invocation, reverting to the WORSE failure
+        # direction for this gate (a missing marker blocks a compliant
+        # worker's commit).
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-95",
+        }])
+        cmd = 'ssh host -t "gh issue comment 41 --body x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "an ssh -t remote invocation must still be "
+                             "detected -- -t is not a gh/git flag here")
+
+    def test_a_body_value_describing_a_heredoc_recipe_does_not_swallow_a_sibling(self):
+        # Adversarial-review finding (post-#280, F2) -- a REGRESSION
+        # `_control_flow_text`'s ORIGINAL pass order introduced: running
+        # lib_poll_payload.strip() BEFORE blanking --body/-F values let a
+        # `--body` argument whose PROSE happens to describe a heredoc
+        # recipe (`cat > body.md <<EOF`, exactly what a design comment in
+        # THIS repo routinely writes) be misread as a REAL heredoc trigger
+        # -- its own `is_live()` heredoc-inertness reasoning then swallowed
+        # a genuine SIBLING invocation appearing later in the command as
+        # if it were that fake heredoc's own body. Blanking the quoted
+        # flag values FIRST removes the fake trigger before heredoc
+        # detection ever runs.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/42#issuecomment-96",
+        }])
+        cmd = ('gh issue comment 41 --body '
+               '"Approach: write it with cat > body.md << EOF, then post"\n'
+               'gh issue comment 42 --body "second"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(42),
+                             "issue #42 must still be classified -- a "
+                             "sibling --body VALUE merely describing a "
+                             "heredoc recipe must not swallow it")
 
 
 if __name__ == "__main__":
