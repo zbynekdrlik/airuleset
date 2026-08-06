@@ -192,6 +192,34 @@ def resolve_owner():
     return ""
 
 
+def stream_redirect(raw_owner):
+    """Redirect a RAW owner string (a tmux session name, a unix account) to
+    its Discord identity via `STREAM_NOTIFY_OWNER` — the SAME map
+    `resolve_owner()` applies to `_current_user()` internally, exposed here
+    as a standalone form for a caller resolving SOMEONE/SOMETHING ELSE's raw
+    owner string. Returns `raw_owner` UNCHANGED for anyone not in the map (a
+    real person's own box, or an already-self-mapped stream like 'david').
+    Empty/falsy input passes through unchanged. Never raises.
+
+    airuleset#212: `watchdog.pane_owner()` resolves a SPECIFIC PANE's owner
+    straight from its tmux session name/group — a completely separate
+    implementation from `resolve_owner()`, with NO knowledge of this
+    redirect at all. On a stream-persona box (montalu/simap/montalu2-4)
+    that raw value is the box's own unix account name (e.g. 'montalu'),
+    which the deliberately-unconfigured per-owner `.env` keys (relying on
+    THIS redirect) cannot address — so an account-wide alert built from that
+    raw value (job 3's usage-limit ping, or any other watchdog job that
+    @mentions "the owner of this pane") fell back to whatever the box's
+    generic default channel/mention happened to be instead of the person
+    the redirect is meant to reach. `watchdog.run_once()` calls this
+    immediately after `pane_owner()` so every downstream consumer (job 3's
+    account-wide alert, job 5/6/10/21's per-session pings) gets the
+    corrected value."""
+    if not raw_owner:
+        return raw_owner
+    return STREAM_NOTIFY_OWNER.get(raw_owner, raw_owner)
+
+
 def notification_channel(env=None, owner=None):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 

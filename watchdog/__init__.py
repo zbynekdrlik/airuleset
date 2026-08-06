@@ -8519,6 +8519,68 @@ def _read_oauth_token():
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Box/account IDENTITY for the usage alert body (#212) — resolved at CALL
+# TIME from module-global paths (the `_USAGE_CACHE_PATH` convention: a
+# def-time default would bind the real `~/.claude.json`, so tests patch the
+# global instead of passing a path through 3 call frames).
+# --------------------------------------------------------------------------- #
+
+_CLAUDE_JSON_PATH = os.path.expanduser("~/.claude.json")
+
+
+def _account_email(path=None):
+    """The Claude account's login email (`~/.claude.json` ->
+    oauthAccount.emailAddress — the SAME field statusbar.account_email_segment
+    reads), or "" on any missing/malformed input. Never raises."""
+    try:
+        with open(path or _CLAUDE_JSON_PATH, encoding="utf-8") as fh:
+            d = json.load(fh)
+        if not isinstance(d, dict):
+            return ""
+        email = (d.get("oauthAccount") or {}).get("emailAddress")
+        return email if isinstance(email, str) else ""
+    except Exception:
+        return ""
+
+
+def _local_account():
+    """This box's own unix account (e.g. 'montalu') — distinct from the
+    Discord OWNER a message ends up addressed to (`notify.stream_redirect`
+    may redirect a stream persona to a different real person's thread)."""
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER", "") or ""
+
+
+def _box_hostname():
+    try:
+        return os.uname().nodename
+    except Exception:
+        return ""
+
+
+def _reset_bucket(resets_at):
+    """Normalize an ISO-8601 `resets_at` to whole-MINUTE granularity, for use
+    as a dedup key. Live-verified (airuleset#212): two `fetch_usage()` calls
+    seconds apart for the SAME weekly window returned DIFFERENT `resets_at`
+    strings (sub-second jitter) — comparing the raw string (the pre-fix
+    `check_usage` dedup) therefore NEVER matched, and the usage alert re-fired
+    every poll interval instead of once per window (11 duplicate Discord
+    pings observed live inside 2.5h). Falls back to the raw, unparsed value
+    on any malformed input — never worse than the pre-fix behavior, and the
+    human-readable `_human_reset()` display is unaffected either way (it
+    already truncates to %H:%M)."""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%dT%H:%M")
+    except Exception:
+        return resets_at
+
+
 def fetch_usage():
     """GET Anthropic's oauth/usage window state, or None on any error / 429. The
     `claude-code` User-Agent is REQUIRED (without it the endpoint 429s even harder)."""
@@ -8586,16 +8648,23 @@ def usage_windows(usage):
 
 
 def write_usage_cache(usage, now, path=None):
-    """Best-effort: persist {ts, windows} so the statusline renders a per-model
-    window without hitting the 429-prone endpoint. Never raises. `path` defaults to
-    the module global resolved AT CALL TIME (so tests can patch _USAGE_CACHE_PATH to
-    a tmp file — a def-time default would bind the real ~/.claude path and clobber
-    the user's live cache during the suite)."""
+    """Best-effort: persist {ts, account_email, windows} so the statusline
+    renders a per-model window without hitting the 429-prone endpoint, AND
+    (#212) so fleet usage reporting can tell WHICH Anthropic subscription a
+    box's percentages belong to — the original gap this cache existed
+    without: "impossible to reconcile without knowing the box→account
+    mapping". `account_email` is the SAME `~/.claude.json` field
+    `statusbar.account_email_segment` already renders; "" when unreadable
+    (never blocks the write). Never raises. `path` defaults to the module
+    global resolved AT CALL TIME (so tests can patch _USAGE_CACHE_PATH to
+    a tmp file — a def-time default would bind the real ~/.claude path and
+    clobber the user's live cache during the suite)."""
     path = path or _USAGE_CACHE_PATH
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"ts": int(now), "windows": usage_windows(usage)}, f)
+            json.dump({"ts": int(now), "account_email": _account_email(),
+                       "windows": usage_windows(usage)}, f)
         os.replace(tmp, path)
     except Exception:
         pass
@@ -8697,7 +8766,25 @@ def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
                 threshold=USAGE_THRESHOLD, interval=USAGE_INTERVAL):
     """Rate-limited weekly-usage poll: at most once per `interval`, and an alert
     ONCE per reset window when a weekly limit reaches `threshold`%. Mutates
-    state['usage']; returns a log line or ''. Best-effort (never raises)."""
+    state['usage']; returns a log line or ''. Best-effort (never raises).
+
+    The alert body carries this box's ACCOUNT IDENTITY (airuleset#212: a bare
+    "⚠️ Tokeny — týždenný limit na 99%" is undecodable on a phone with no
+    terminal context — WHICH account, WHICH box?) — the account email
+    (`_account_email()`), this box's hostname/unix-account
+    (`_box_hostname()`/`_local_account()`), and the Discord `owner` the alert
+    is actually addressed to. `owner` is trusted AS GIVEN by the caller — by
+    the time `run_once()` calls this, it has already been passed through
+    `notify.stream_redirect()`, so a stream persona (montalu/simap/…) shows
+    the REAL person it was routed to, not its own unix account name.
+
+    Dedup keys off `_reset_bucket(resets_at)`, never the raw `resets_at`
+    string — the raw string carries SUB-SECOND jitter from the Anthropic
+    API (live-verified on montalu@subdev: two polls of the SAME weekly
+    window, 3s apart, returned two DIFFERENT `resets_at` strings), which
+    used to defeat the "already alerted for THIS window" check on every
+    single 15-minute poll — 11 duplicate Discord pings observed live across
+    one incident window (98%→99%, ~05:15–07:47)."""
     fetch = fetch or fetch_usage
     u = state.get("usage") or {}
     if (now - u.get("last_check", 0)) < interval:
@@ -8712,17 +8799,22 @@ def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
     if not wk:
         return ""
     pct, resets_at, label = wk
+    bucket = _reset_bucket(resets_at)
     if pct < threshold:
         u["alerted_window"] = None         # back below threshold → re-arm the dedup
         state["usage"] = u
         return ""
-    if u.get("alerted_window") == resets_at:
+    if u.get("alerted_window") == bucket:
         return ""                          # already alerted for THIS reset window
-    u["alerted_window"] = resets_at
+    u["alerted_window"] = bucket
     state["usage"] = u
-    send_fn("⚠️ **Tokeny — %s na %d%%**\n> Práca sa môže čoskoro zastaviť "
-            "(vyčerpaný týždenný limit). Reset: %s." % (label, int(pct), _human_reset(resets_at)),
-            owner=owner, dedup_key="usage:%s:%d" % (resets_at, int(pct)), dry_run=dry_run)
+    send_fn("⚠️ **Tokeny — %s na %d%%**\n"
+            "> Účet: %s · Box: %s/%s → adresát: %s.\n"
+            "> Práca sa môže čoskoro zastaviť "
+            "(vyčerpaný týždenný limit). Reset: %s."
+            % (label, int(pct), _account_email() or "?", _box_hostname() or "?",
+               _local_account() or "?", owner or "?", _human_reset(resets_at)),
+            owner=owner, dedup_key="usage:%s:%d" % (bucket, int(pct)), dry_run=dry_run)
     return "usage-alert %s %d%%" % (label, int(pct))
 
 
@@ -9891,7 +9983,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     if sweep_budget_s <= 0:
         sweep_budget_s = SWEEP_WALL_CLOCK_BUDGET_S
     sweep_deadline = time_fn() + sweep_budget_s
-    from notify import compose_api_error_alert
+    from notify import compose_api_error_alert, stream_redirect
     if send_fn is None:
         from notify import send as send_fn
 
@@ -9958,7 +10050,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             key = tpath.stem                   # session id (stable across grouped panes)
             project_by_sid[key] = project      # job 21: a human label for the ping
             cwd_by_sid[key] = cwd              # job 24: which REPO this loop spends in
-            owner = pane_owner(pid, run)       # @mention the right person for THIS pane
+            owner = pane_owner(pid, run)       # raw tmux session name for THIS pane
+            owner = stream_redirect(owner)     # #212: STREAM_NOTIFY_OWNER-aware
             if owner:
                 owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
                 owner_by_cwd[cwd] = owner      # job 5: recover the owner when the sid is missing
@@ -10653,6 +10746,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             panes_by_sid[sid] = (pid, captured)
             hosted_users[sid] = fu
             owner = pane_owner(pid, run)
+            owner = stream_redirect(owner)     # #212: STREAM_NOTIFY_OWNER-aware
             if owner:
                 owner_by_sid.setdefault(sid, owner)
             # waiting=True: the FOREIGN transcript isn't cheaply readable from
