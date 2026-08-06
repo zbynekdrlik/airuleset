@@ -34,16 +34,70 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo ""
 # a genuine bare, unquoted offer keeps matching because it carries none of
 # these signals — verified in tests/test_quality_bypass_gate.py against
 # every existing unambiguous-bypass case.
+# #195 — UNDET_FILE and record_undet (the diagnostic-accumulator mechanism
+# explained in full a little further down, right before _msg_grep_rc) are
+# pulled UP ahead of strip_mentions(), out of their historical position ~80
+# lines later in this file, purely so a strip_mentions() failure can report
+# through the SAME channel the msg_has/msg_missing framework already uses —
+# no new mechanism, just an earlier definition point.
+UNDET_FILE=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-undet.XXXXXX" 2>/dev/null) || UNDET_FILE=""
+if [ -n "$UNDET_FILE" ]; then
+    trap 'rm -f "$UNDET_FILE"' EXIT
+fi
+
+# Announce + record a question a check could not answer (grep erroring,
+# further down, or here — strip_mentions() itself failing to run). Callers
+# run inside `$( )`, where a variable assignment would not survive the
+# subshell — hence a file.
+record_undet() {
+    echo "stop-check-prose-violations: check exited $1 for [$2] — this check is UNDETERMINABLE" >&2
+    if [ -n "$UNDET_FILE" ]; then
+        printf '%s\n' "$2" >>"$UNDET_FILE" 2>/dev/null || true
+    fi
+}
+
 strip_mentions() {
-    # Argv, never stdin: `python3 - <<'PYEOF'` would consume the heredoc AS
-    # the script source, leaving nothing in stdin for a piped message to
-    # fill — the same argv-over-stdin shape block-main-implementation.sh
-    # already uses for exactly this reason.
-    python3 - "$1" <<'PYEOF'
+    # #195 — the message is passed by a FILE, never argv. This used to be
+    # `python3 - "$1" <<'PYEOF'`, handing the WHOLE message to execve as a
+    # SINGLE argv entry; Linux's MAX_ARG_STRLEN caps that at 131072 bytes
+    # (measured: exec succeeds at 131,000 bytes, E2BIG at 140,000), so any
+    # message past it made python3 never start — and the caller's bare
+    # `|| printf` fallback then silently substituted the RAW, UNSTRIPPED
+    # message, so a MENTION (backticked/quoted/fenced) read exactly like a
+    # bare offer. A file has no such ceiling; this is the same fix
+    # hooks/lib-poll-payload.sh (#124) already shipped for an identical
+    # failure class in a sibling hook.
+    # #195-review — a symlink-safe scratch DIR (this repo's own established
+    # residual: SIGKILL between mktemp and the `rm -f` below still leaks the
+    # file, the same untrappable class this repo already accepts for other
+    # scratch temp files; an EXIT trap would need to bake the path in via
+    # DOUBLE-quote expansion at registration time, since a `local` var is
+    # unbound by the time a trap fires after the function has returned —
+    # verified live — and that reopens a quote-injection surface via a
+    # hostile TMPDIR for a residual with zero observed leaks on any normal
+    # exit path, so it stays documented rather than "fixed").
+    local _text="$1" _f _rc=0
+    _f=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-mention.XXXXXX" 2>/dev/null) || return 1
+    # #195-review — braced so a REDIRECTION failure (not a printf failure)
+    # is also caught by `2>/dev/null`: bash sets up `>"$_f"` before it sets
+    # up `2>/dev/null`, so an unbraced `cmd >"$_f" 2>/dev/null` still prints
+    # a bare redirection error to the CALLER's live stderr when `>"$_f"`
+    # itself fails — the same shape this file's own #196 fix already
+    # corrected for the retry-counter write, reproduced here on review.
+    { printf '%s' "$_text" >"$_f"; } 2>/dev/null || { rm -f "$_f" 2>/dev/null || true; return 1; }
+    python3 - "$_f" <<'PYEOF' || _rc=$?
 import re
 import sys
 
-text = sys.argv[1]
+# #195-review — newline="" disables universal-newline translation.
+# sys.argv[1] (the old input path) never ran through Python's text-mode I/O
+# layer at all, so a lone \r or a \r\n pair survived untouched; the default
+# newline=None here would silently translate both to \n, splitting a bare
+# offer straddling a lone \r across what grep sees as two lines and
+# un-blocking it — reproduced against the real hook, fixed by this one flag.
+with open(sys.argv[1], "r", encoding="utf-8", errors="surrogateescape",
+          newline="") as fh:
+    text = fh.read()
 text = re.sub(r"```.*?```", " ", text, flags=re.S)   # fenced code block
 text = re.sub(r"`[^`]*`", " ", text)                  # backtick span
 text = re.sub(r'"[^"]*"', " ", text)                  # double-quoted span
@@ -56,8 +110,40 @@ text = re.sub(r'"[^"]*"', " ", text)                  # double-quoted span
 # mention shape seen (#96).
 sys.stdout.write(text)
 PYEOF
+    rm -f "$_f" 2>/dev/null || true
+    return "$_rc"
 }
-MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
+# #195 — a strip that genuinely cannot run is an unresolvable EXONERATING
+# signal (a MENTION exempts a phrase from being read as a bare offer): per
+# this file's own #194 taxonomy an unsubstantiated exemption is DENIED, so
+# the fallback stays the raw, unstripped message — but record_undet() now
+# runs FIRST, so the note travels on the block reason instead of the failure
+# vanishing silently the way a bare `|| printf` fallback used to.
+#
+# #195-review — the note's own WORDING must not blame size: #194 argued this
+# fail-closed direction is acceptable because a wrong-closed block is
+# ACTIONABLE ("shortening removes the cause as well as the symptom"). Once
+# the message is read via a file, size can no longer BE the cause — the only
+# residual failures here are environmental (mktemp/write/python3 itself), so
+# the note says so explicitly instead of pointing the agent at a "repair"
+# that would not help. (An unwritable TMPDIR also breaks UNDET_FILE's own
+# mktemp a few lines above, so on THAT specific failure the note itself is
+# unavailable too — the fail DIRECTION still stays correct, only the
+# diagnostic degrades, exactly like every other UNDET_FILE-dependent note in
+# this file; see TestAnUnwritableTmpdirDoesNotInvertTheFailDirection.)
+MSG_MENTION=$(strip_mentions "$MSG") || {
+    # #195-review — $? is captured FIRST, before any other statement (even a
+    # plain assignment) runs and overwrites it — the same "bookkeeping must
+    # not run before the verdict" ordering this file's own #196 fix already
+    # established elsewhere; a `_NOTE=...` assignment placed ahead of this
+    # read a strip failure would report as "check exited 0" instead of the
+    # real code (caught live while verifying this exact fix, before it ever
+    # reached a commit).
+    _RC=$?
+    _NOTE="strip_mentions (mention-strip) failed for the message — NOT a size problem (${#MSG} characters, well within any limit); the cause is environmental (mktemp/write/python3)"
+    record_undet "$_RC" "$_NOTE"
+    MSG_MENTION="$MSG"
+}
 
 # #190 — every check below asks "does this text contain X". It must be
 # answered from the TEXT. It used to be answered by a pipeline's exit status:
@@ -115,19 +201,10 @@ MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
 # gone. UNDET_FILE survives PURELY as a diagnostic accumulator: nothing gates on
 # it, so a failed `mktemp` now costs a NOTE and can no longer invert the fail
 # direction.
-UNDET_FILE=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-undet.XXXXXX" 2>/dev/null) || UNDET_FILE=""
-if [ -n "$UNDET_FILE" ]; then
-    trap 'rm -f "$UNDET_FILE"' EXIT
-fi
-
-# Announce + record a question grep could not answer. Callers run inside `$( )`,
-# where a variable assignment would not survive the subshell — hence a file.
-record_undet() {
-    echo "stop-check-prose-violations: grep exited $1 for [$2] — this check is UNDETERMINABLE" >&2
-    if [ -n "$UNDET_FILE" ]; then
-        printf '%s\n' "$2" >>"$UNDET_FILE" 2>/dev/null || true
-    fi
-}
+#
+# #195 — UNDET_FILE and record_undet() are DEFINED earlier now (right before
+# strip_mentions(), which needs them too), not here. This is still the one
+# place their behaviour is explained in full.
 
 # The one place grep is asked anything. 0 = match, 1 = no match, 2 = UNKNOWN.
 # Never a writer process, so #190's SIGPIPE race cannot exist.
@@ -229,7 +306,16 @@ if [ "$_NOGOAL_RC" -ge 2 ]; then
     record_undet "$_NOGOAL_RC" "-v ^[[:space:]]*/goal "
     MSG_NOGOAL="$MSG"
 fi
-MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$MSG_NOGOAL")
+# #195 — same fallback shape as MSG_MENTION above: record_undet() runs before
+# the raw-text fallback, so a strip failure on this call site leaves a note
+# too, instead of silently disarming the design-review gate's exemption.
+MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL") || {
+    # #195-review — same $?-first ordering as MSG_MENTION above.
+    _RC=$?
+    _NOTE="strip_mentions (mention-strip) failed for the NOGOAL message — NOT a size problem (${#MSG_NOGOAL} characters, well within any limit); the cause is environmental (mktemp/write/python3)"
+    record_undet "$_RC" "$_NOTE"
+    MSG_NOGOAL_MENTION="$MSG_NOGOAL"
+}
 
 # HARD violations collected here trigger {"decision":"block"} response.
 # SOFT violations go to stderr as warnings. Both can fire in the same hook run.
