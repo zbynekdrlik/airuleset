@@ -251,6 +251,13 @@ class TestCmdGkRequest(unittest.TestCase):
         return m.Mock(**base)
 
     def test_create_with_label(self):
+        # #221 fix: the label is applied via its OWN `--add-label` call
+        # AFTER a bare create, never baked into the create call itself —
+        # baking it in is exactly the shape GitHub silently drops the
+        # label from when the actor lacks push access. This test used to
+        # assert `needs-gatekeeper` was present in the CREATE call itself
+        # (the pre-#221-fix, vulnerable shape); it now asserts the correct
+        # split.
         calls = []
 
         def run(argv, **kw):
@@ -265,7 +272,17 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         create = calls[0]
         self.assertIn("create", create)
-        self.assertIn("needs-gatekeeper", " ".join(create))
+        self.assertNotIn("needs-gatekeeper", " ".join(create), create)
+        add_label_calls = [c for c in calls if "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in add_label_calls),
+            add_label_calls)
+        # #221 adversarial review, MINOR: a "retitle unconditionally,
+        # ignore whether the label landed" mutant must NOT pass this
+        # test -- the label succeeded here, so no --title edit (the
+        # GATEKEEPER-ACTION degrade) should ever be attempted.
+        self.assertFalse(
+            any("edit" in c and "--title" in c for c in calls), calls)
 
     def test_create_label_denied_falls_back_to_title_prefix(self):
         calls = []
@@ -286,6 +303,103 @@ class TestCmdGkRequest(unittest.TestCase):
                   if "--title" in argv]
         self.assertTrue(any(t.startswith("GATEKEEPER-ACTION:")
                             for t in titles), titles)
+
+    def test_create_label_silently_dropped_degrades_to_prefix(self):
+        # #221 LIVE bug: GitHub's issue-create endpoint silently DROPS a
+        # `labels` field the actor lacks push access for -- unlike the
+        # dedicated add-label endpoint, it does NOT 403 the whole request
+        # (documented GitHub REST behavior: "Only users with push access
+        # can set labels for new issues... labels are silently dropped
+        # otherwise"). A read-only-fork actor's `gh issue create --label
+        # needs-gatekeeper` therefore returned rc=0 with the issue created
+        # and NO label on it at all, and cmd_gk_request reported "filed"
+        # as if the escalation were visible. Simulate the real split: the
+        # label must be applied in its OWN edit call (not baked into
+        # create), and that dedicated call correctly fails (403) for a
+        # read-only actor -- prove the command then degrades to the
+        # GATEKEEPER-ACTION title prefix instead of silently declaring
+        # success with neither signal present.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0,
+                              stdout="https://github.com/zbynekdrlik/"
+                                     "odoo-erp/issues/2779\n",
+                              stderr="")
+            if "--add-label" in argv and "needs-gatekeeper" in argv:
+                return m.Mock(returncode=1, stdout="",
+                              stderr="HTTP 403: Resource not accessible")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="DNS chyba blokuje hand-off",
+                           body="detail"))
+        self.assertIn(rc, (0, None))
+        # the initial create must NEVER bake the label into the same call
+        # -- that is precisely the field GitHub silently drops
+        create_call = [c for c in calls
+                       if "create" in c and "issue" in c][0]
+        self.assertNotIn("needs-gatekeeper", create_call, create_call)
+        # a real, separate add-label attempt must have been made and
+        # denied (the dedicated label endpoint correctly 403s)
+        self.assertTrue(any("--add-label" in c and "needs-gatekeeper" in c
+                            for c in calls), calls)
+        # denial must degrade to the GATEKEEPER-ACTION title prefix so the
+        # escalation stays discoverable by job 11's `in:title` query
+        edits = [c for c in calls if "edit" in c and "--title" in c]
+        self.assertTrue(edits, calls)
+        self.assertIn("GATEKEEPER-ACTION:", json.dumps(edits))
+
+    def test_create_neither_label_nor_prefix_fails_loudly(self):
+        # both the label add AND the retitle are denied -- must NEVER
+        # report success while the escalation is invisible to the
+        # supervisor (script-failure-policy: fail loudly, never guess).
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0,
+                              stdout="https://github.com/o/r/issues/2780\n",
+                              stderr="")
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "edit" in argv and "--title" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Nejaky problem", body="detail"))
+        self.assertEqual(rc, 1)
+
+    def test_create_unparseable_issue_number_fails_loudly(self):
+        # #221 adversarial review, MAJOR: a `gh issue create` success whose
+        # stdout does NOT end in a parseable issue number must not be
+        # allowed to short-circuit past both the label-add AND the
+        # retitle attempt straight to a false "gk-request filed" — that
+        # silently reproduces the exact invisible-escalation class this
+        # ticket exists to kill, just triggered by anomalous `gh` stdout
+        # instead of a denied label.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "create" in argv and "issue" in argv:
+                return m.Mock(returncode=0, stdout="done\n", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Neparsovatelne cislo", body="detail"))
+        self.assertEqual(rc, 1)
+        # never attempted a label/retitle against a garbage "issue number"
+        self.assertFalse(any("--add-label" in c for c in calls), calls)
+        self.assertFalse(
+            any("edit" in c and "--title" in c for c in calls), calls)
 
     def test_issue_mode_labels_and_comments(self):
         calls = []
@@ -477,22 +591,32 @@ class TestCmdGkRequest(unittest.TestCase):
                 self._args(title="Adopt the pipeline", body="detail"))
         self.assertIn(rc, (0, None))
         create = [c for c in calls if "issue" in c and "create" in c][0]
-        self.assertIn("needs-gatekeeper", create)
+        # #221 fix: needs-gatekeeper is ALSO applied via its own separate
+        # `--add-label` call now, never baked into create -- same reason
+        # as the origin label this test was originally about.
+        self.assertNotIn("needs-gatekeeper", create, create)
         self.assertNotIn("handed-by:simap", create)   # NOT baked into create
         edit_calls = [c for c in calls
                      if "issue" in c and "edit" in c and "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in edit_calls), edit_calls)
         self.assertTrue(
             any("40" in c and "handed-by:simap" in c for c in edit_calls),
             edit_calls)
 
     def test_create_mode_origin_label_failure_never_drops_needs_gatekeeper(self):
         # A rejected origin --add-label (after a successful create) must
-        # never retroactively undo the create or its needs-gatekeeper label.
+        # never retroactively undo the create or its needs-gatekeeper label
+        # -- the origin label's own denial is deliberately independent of
+        # the primary needs-gatekeeper --add-label call (#221: also its own
+        # separate call now, never baked into create), so only the ORIGIN
+        # label is denied here to prove the two are not coupled.
         calls = []
 
         def run(argv, **kw):
             calls.append(argv)
-            if "edit" in argv and "--add-label" in argv:
+            if "edit" in argv and "--add-label" in argv \
+                    and "handed-by:simap" in argv:
                 return m.Mock(returncode=1, stdout="", stderr="403")
             if "issue" in argv and "create" in argv:
                 return m.Mock(returncode=0,
@@ -508,7 +632,13 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         creates = [c for c in calls if "issue" in c and "create" in c]
         self.assertEqual(len(creates), 1, creates)   # never a fallback retry
-        self.assertIn("needs-gatekeeper", creates[0])
+        self.assertNotIn("needs-gatekeeper", creates[0], creates[0])
+        add_label_calls = [c for c in calls
+                           if "issue" in c and "edit" in c
+                           and "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in add_label_calls),
+            add_label_calls)
 
     def test_origin_label_skipped_when_not_a_registered_stream(self):
         # A full-authority box (dev1/gatekeeper) must never stamp a
