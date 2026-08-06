@@ -2207,6 +2207,70 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
     return best
 
 
+_REAL_TURN_TYPES = ("user", "assistant")
+
+
+def _last_real_turn_ts(tpath, tail_bytes=2_000_000):
+    """Epoch of the newest transcript entry whose top-level `type` is
+    `user` or `assistant` — a genuine conversational turn, never a
+    bookkeeping write. Job 10's own idle-clock fix, watchdog issue #177:
+    Claude Code appends several NON-TURN entry types to the SAME transcript
+    file (`mode`, `permission-mode`, `bridge-session`, `pr-link`,
+    `last-prompt`, and even a bare mtime touch with no new line at all —
+    all live-observed on the incident this fixes) that bump the transcript
+    FILE's own mtime with ZERO real progress. A consumer reading that raw
+    mtime as "how long has this session been idle" — `prompt_wedge_check`'s
+    own `now - tmtime < PWEDGE_MIN_IDLE_S` gate is exactly this — never
+    accumulates toward its threshold and never fires: live-reproduced, the
+    transcript's own LINE COUNT was identical across two checks minutes
+    apart while the file's mtime kept moving anyway.
+
+    Filtering to `user`/`assistant` mirrors `_last_human_prompt_ts`'s own
+    top-level-content discipline (never a nested `tool_result` quoting
+    ANOTHER session's transcript), but deliberately does NOT additionally
+    require human-typed content: an assistant turn, a machine-typed prompt,
+    or a tool_result-carrying `user` entry are all genuine session activity
+    for THIS purpose (job 10 asks "has anything real happened", not "did
+    the human type something" — `_last_human_prompt_ts` exists for the
+    latter, a different question with a different caller). `user`/
+    `assistant` is the closed, structurally-guaranteed pair every other
+    turn-boundary reader in this file already keys on (`transcript_last_
+    marker`, `scan_goal_markers`) — never widened to an open-ended allow-
+    list of "meaningful" bookkeeping types, which would need to track every
+    new entry kind CC's transcript format ever grows.
+
+    Returns None on any read failure or an entirely-untyped tail — never
+    asserts staleness from an unmeasurable read; the caller falls back to
+    the raw file mtime it already has (never worse than the pre-#177
+    behavior)."""
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return None
+    best = None
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") not in _REAL_TURN_TYPES:
+            continue
+        try:
+            ep = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ep > best:
+            best = ep
+    return best
+
+
 def _transcript_for_session(projects_dir, sid, cwd):
     """Path of the session's transcript, or None. The cwd-encoded dir is only
     a HINT: the ❓ hook records the session's CURRENT dir while CC keys the
@@ -9976,7 +10040,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # waiting: the LOCAL transcript is directly readable here, so the
             # gate is computed precisely (issue #35) — a parked draft only
             # pings while the session actually asks ❓ NEEDS YOU.
-            logs += prompt_wedge_check(now, state, pid, captured, tmtime,
+            #
+            # Watchdog #177: `tmtime` above is the transcript FILE's raw
+            # mtime, which several NON-TURN entry types keep bumping to
+            # "now" with zero real progress (see `_last_real_turn_ts`'s own
+            # docstring) — job 10's own 30-minute staleness gate then never
+            # accumulates and the job silently never fires. Job 10's idle
+            # clock reads the newest genuine `user`/`assistant` turn from
+            # the transcript's CONTENT instead, falling back to the raw
+            # mtime only when that tail is unmeasurable (never worse than
+            # before). Every OTHER consumer of `tmtime` in this loop is
+            # untouched — this is scoped to job 10's own gate only.
+            wedge_tmtime = _last_real_turn_ts(tpath)
+            if wedge_tmtime is None:
+                wedge_tmtime = tmtime
+            logs += prompt_wedge_check(now, state, pid, captured, wedge_tmtime,
                                        owner, project, send_fn,
                                        dry_run=dry_run, run=run,
                                        waiting=_session_is_waiting(tpath))
