@@ -1503,6 +1503,18 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # a one-time sweep on the very next push/install -- no new hook, no new
 # watchdog job needed.
 #
+# ADVERSARIAL-REVIEW FINDING (#254, MINOR): live-apply-safe and conf-
+# read-safe are INDEPENDENT claims (#236 vs #241's own lesson for
+# window-size -- one option was unsafe live-applied, the OTHER unsafe
+# merely READ from a conf file at server startup). This block's own live-
+# apply proof above was run against tmux 3.7b; the cold conf-PARSE half
+# was separately verified clean on BOTH the fleet's stock tmux 3.4 (the
+# only version Ubuntu 24.04 noble ships, and the live server on any box
+# not yet rebooted through #242's cutover) and 3.7b -- `set-option -g
+# destroy-unattached keep-last` in a conf file starts cleanly on both, and
+# a live `set-option` against a running 3.4 server also succeeds. No
+# #241-shaped crash-at-parse-time hazard on either binary.
+#
 # Pane addressing (verified, not assumed): every keystroke-sending job in
 # watchdog/__init__.py (list_claude_panes/_reconcile_candidate_panes)
 # addresses panes exclusively by tmux's stable `#{pane_id}` (`%N`,

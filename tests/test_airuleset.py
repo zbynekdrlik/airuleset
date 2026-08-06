@@ -3936,10 +3936,21 @@ class TestTmuxDestroyUnattached(TestCase):
         self.assertIn(["tmux", "set-option", "-g", "destroy-unattached", "keep-last"], calls)
 
     def test_custom_destroy_unattached_value_is_injectable(self):
+        # ADVERSARIAL-REVIEW FINDING (#254, MINOR): the first draft injected
+        # "keep-last" -- the DEFAULT -- which cannot distinguish real
+        # parameter threading from a hardcoded constant (a mutant reverting
+        # BOTH consumption sites, the render call and the live argv, to the
+        # module constant survived this test and 5 others). Inject a value
+        # that DIFFERS from the default (mirroring the sibling
+        # test_custom_history_limit_value's own limit=99999 != 50000
+        # convention) and assert it reached BOTH the conf text and the
+        # live-apply argv.
         p = self._tmp()
+        calls = []
         airuleset.apply_tmux_history_limit(
-            p, destroy_unattached="keep-last", run=lambda argv: None)
-        self.assertIn("destroy-unattached keep-last", p.read_text())
+            p, destroy_unattached="off", run=calls.append)
+        self.assertIn("destroy-unattached off", p.read_text())
+        self.assertIn(["tmux", "set-option", "-g", "destroy-unattached", "off"], calls)
 
     def test_idempotent_second_run_with_destroy_unattached_is_a_no_op(self):
         p = self._tmp("# my tmux conf\n")
