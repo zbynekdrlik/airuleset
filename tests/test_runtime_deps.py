@@ -148,6 +148,40 @@ class RuntimeDepsCheck(unittest.TestCase):
         for argv in npx_calls:
             self.assertNotIn("npx", argv, argv)
 
+    def test_a_returncode_0_install_with_the_binary_still_missing_is_reported_missing(self):
+        # #158 review (mutation-proven gap): a NON-NodeSource "nodejs" build
+        # can return rc=0 without actually providing `npx` — the re-verify
+        # MUST check the real binary (`which(d)`), never just trust the
+        # apt-get exit code or re-check the wrong name (`which(pkg)`).
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "npx" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)):
+            missing = airuleset.check_runtime_deps()
+        self.assertIn("npx", missing)
+
+    def test_missing_dep_warning_names_the_correct_apt_package(self):
+        # #158 review (mutation-proven gap): the remediation text must name
+        # the PACKAGE to install (nodejs), never the raw binary name (npx —
+        # not a real apt package at all, a dead-end instruction).
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "npx" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=1)):
+            out = StringIO()
+            with m.patch("sys.stdout", out):
+                airuleset.check_runtime_deps()
+        self.assertIn("apt-get install nodejs", out.getvalue())
+        self.assertNotIn("apt-get install npx", out.getvalue())
+
+    def test_node_and_npx_missing_together_share_one_install_attempt(self):
+        # #158 review: node + npx both resolve to "nodejs" — a single missing
+        # apt package must not be installed (and its failure warned about)
+        # twice for one real gap.
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d in ("node", "npx") else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.check_runtime_deps()
+        self.assertEqual(run.call_count, 1, run.call_args_list)
+
 
 class SudoLessToolRequestPath(unittest.TestCase):
     """#98: a sub-dev box (david/marek/montalu) has NO sudo, so

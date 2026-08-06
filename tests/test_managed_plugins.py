@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest.mock as m
+from io import StringIO
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -126,14 +127,28 @@ class TestManagedPluginBuilt(TestCase):
     def test_detects_installed_playwright_cache(self):
         # Playwright's real cache shape (confirmed live, dev1) differs from
         # superpowers': a literal "unknown" version segment instead of a
-        # content hash, so the glob has to match on the plugin manifest file.
+        # content hash, so the glob has to match on `.mcp.json` — the real
+        # load-bearing file for this plugin's MCP server (never the
+        # `.claude-plugin/plugin.json` manifest alone, which could survive
+        # an interrupted extraction and still report "built").
+        d = self._claude_dir_with(
+            "plugins/cache/claude-plugins-official/playwright/unknown")
+        (d / "plugins/cache/claude-plugins-official/playwright/unknown/"
+           ".mcp.json").write_text("{}")
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertTrue(airuleset._managed_plugin_built(
+                "playwright@claude-plugins-official"))
+
+    def test_manifest_alone_without_mcp_json_is_not_built(self):
+        # An interrupted extraction leaving only the manifest must NOT
+        # report "built" — #158 review finding.
         d = self._claude_dir_with(
             "plugins/cache/claude-plugins-official/playwright/unknown/"
             ".claude-plugin")
         (d / "plugins/cache/claude-plugins-official/playwright/unknown/"
            ".claude-plugin/plugin.json").write_text("{}")
         with m.patch.object(airuleset, "CLAUDE_DIR", d):
-            self.assertTrue(airuleset._managed_plugin_built(
+            self.assertFalse(airuleset._managed_plugin_built(
                 "playwright@claude-plugins-official"))
 
     def test_absent_playwright_cache_means_not_built(self):
@@ -173,6 +188,72 @@ class TestInstallWiresManagedPlugins(TestCase):
             src = inspect.getsource(fn)
             if "plugin" in src and "install" in src:
                 self.assertIn("env=_claude_cli_env()", src, fn.__name__)
+
+    def test_setup_managed_plugins_calls_ensure_playwright_browsers(self):
+        src = inspect.getsource(airuleset.setup_managed_plugins)
+        self.assertIn("ensure_playwright_browsers()", src)
+
+
+class TestPlaywrightBrowsers(TestCase):
+    """#158 review finding: enabling the plugin alone does NOT pull the
+    actual browser binaries — measured live, three fleet accounts (montalu2/
+    montalu3/montalu4) had node + the plugin enabled but an EMPTY browser
+    cache, so every real browser call would fail with "Executable doesn't
+    exist" until someone ran `npx playwright install chromium` by hand."""
+
+    def _empty_dir(self):
+        return Path(tempfile.mkdtemp())
+
+    def _populated_dir(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "chromium-1234").mkdir()
+        return d
+
+    def test_absent_cache_is_not_installed(self):
+        d = Path(tempfile.mkdtemp()) / "does-not-exist"
+        self.assertFalse(airuleset._playwright_browsers_installed(d))
+
+    def test_empty_cache_dir_is_not_installed(self):
+        # a bare `mkdir` from an interrupted install must NOT look "done"
+        # forever — only real content inside counts.
+        self.assertFalse(airuleset._playwright_browsers_installed(self._empty_dir()))
+
+    def test_populated_cache_dir_is_installed(self):
+        self.assertTrue(airuleset._playwright_browsers_installed(self._populated_dir()))
+
+    def test_no_op_when_playwright_not_in_the_baseline(self):
+        with m.patch.object(airuleset, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+                m.patch("subprocess.run") as run:
+            airuleset.ensure_playwright_browsers(self._empty_dir())
+        run.assert_not_called()
+
+    def test_no_op_when_already_populated(self):
+        with m.patch("subprocess.run") as run:
+            airuleset.ensure_playwright_browsers(self._populated_dir())
+        run.assert_not_called()
+
+    def test_installs_when_cache_is_missing(self):
+        with m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.ensure_playwright_browsers(self._empty_dir())
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["npx", "--yes", "playwright", "install", "chromium"])
+        self.assertIn("env", run.call_args.kwargs)
+
+    def test_install_failure_is_loud_but_non_fatal(self):
+        out = StringIO()
+        with m.patch("subprocess.run",
+                     return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
+                m.patch("sys.stderr", out):
+            airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
+        self.assertIn("playwright install chromium", out.getvalue())
+
+    def test_install_exception_is_non_fatal(self):
+        out = StringIO()
+        with m.patch("subprocess.run", side_effect=FileNotFoundError("npx")), \
+                m.patch("sys.stderr", out):
+            airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
+        self.assertIn("playwright install chromium", out.getvalue())
 
 
 if __name__ == "__main__":

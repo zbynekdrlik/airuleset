@@ -229,19 +229,27 @@ CAVEMAN_CACHE_GLOBS = (
 # verification (autonomous-verification.md's "ask the user to install
 # plugin:playwright" branch, e2e-real-user-testing.md, post-deploy-
 # verification / version-on-dashboard skills) but the plugin was only ever
-# installed BY HAND, per account — david@subdev had none at all, and no
-# future account ever would either. THE CONTEXT-COST DECISION (a CONNECTED
-# Playwright MCP injects its whole tool schema every turn — skills/mdreview/
-# SKILL.md already flags it as expensive): baseline-installed AND ENABLED
+# installed BY HAND, per account. Measured live across the whole fleet
+# (adversarial review of the first version of this fix, 2026-08-06):
+# dev1/dev2/gatekeeper/marek/montalu/simap already had it enabled by hand —
+# david, montalu2, montalu3 and montalu4 did NOT (four accounts missing it,
+# not just david). THE CONTEXT-COST DECISION: baseline-installed AND ENABLED
 # everywhere, not project-scoped. Reasoning: (a) it was ALREADY the fleet's
-# de facto norm — dev1/dev2/gatekeeper/marek/montalu all had it enabled by
-# hand already, only david (and any future account) was missing it, (b) the
-# rules require it as MANDATORY verification tooling on every project, not a
-# subset, (c) `superpowers` already set the "baseline plugin, always
-# enabled, accepted context cost" precedent this repo already lives with,
-# (d) true per-project scoping would need NEW machinery (project-level
-# plugin overrides) out of this ticket's scope and against the standing
-# FREEZE on inventing new supervision mechanisms.
+# de facto norm on 6 of 10 accounts, (b) the rules require it as MANDATORY
+# verification tooling on every project, not a subset, (c) `superpowers`
+# already set the "baseline plugin, always enabled" precedent this repo
+# already lives with, (d) true per-project scoping would need NEW machinery
+# (project-level plugin overrides) out of this ticket's scope and against
+# the standing FREEZE on inventing new supervision mechanisms. The actual
+# context cost is smaller than earlier assumed: Claude Code DEFERS an MCP
+# plugin's tool SCHEMAS (names only in the prompt, schemas fetched on
+# demand) — skills/mdreview/SKILL.md's "expensive" note is about the tool
+# LIST, not a full-schema injection every turn. Known accepted gap (like
+# superpowers before it): there is no per-user opt-out for a baseline
+# plugin — every install/push re-enables it, so an account that
+# deliberately wants Playwright OFF (e.g. a pure backend-only stream) would
+# need `MANAGED_DISABLED_PLUGINS` used deliberately against the baseline,
+# which today's reconcile forbids by design (see the sanity check below).
 MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
                     "playwright@claude-plugins-official")
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
@@ -261,10 +269,13 @@ MANAGED_PLUGIN_CACHE_GLOBS = {
     "superpowers@claude-plugins-official":
         "plugins/cache/claude-plugins-official/superpowers/*/skills",
     # Playwright's cache dir uses a literal "unknown" version segment rather
-    # than a content hash (confirmed live, dev1) — match the plugin manifest
-    # file instead, present under any version-segment name.
+    # than a content hash (confirmed live, dev1) — match on `.mcp.json`
+    # (present directly under that segment), the actual LOAD-BEARING file
+    # for this plugin's MCP server, rather than `.claude-plugin/plugin.json`
+    # (a manifest that could survive an interrupted extraction and still
+    # report "built" — #158 review finding).
     "playwright@claude-plugins-official":
-        "plugins/cache/claude-plugins-official/playwright/*/.claude-plugin/plugin.json",
+        "plugins/cache/claude-plugins-official/playwright/*/.mcp.json",
 }
 # Hash-independent entry to caveman's statusline + the usage-limit/ticket/
 # account meter line (the standalone context-fill BAR was dropped, #223 --
@@ -1559,16 +1570,27 @@ def check_runtime_deps(deps=RUNTIME_DEPS):
     import shutil
     import subprocess
     still = []
+    # Memoized per apt PACKAGE (not per binary): node/npx both resolve to
+    # "nodejs" via RUNTIME_DEP_PACKAGE, so if both are missing this makes
+    # sure `apt-get install -y nodejs` (and its warning, on failure) fires
+    # only ONCE for the pair, not twice (#158 review).
+    pkg_install_ok = {}
     for d in deps:
         if shutil.which(d):
             continue
         pkg = RUNTIME_DEP_PACKAGE.get(d, d)
-        try:
-            r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y", pkg],
-                               capture_output=True, text=True, timeout=300)
-            ok = r.returncode == 0 and shutil.which(d)
-        except Exception:
-            ok = False
+        if pkg not in pkg_install_ok:
+            try:
+                r = subprocess.run(["sudo", "-n", "apt-get", "install", "-y", pkg],
+                                   capture_output=True, text=True, timeout=300)
+                pkg_install_ok[pkg] = r.returncode == 0
+            except Exception:
+                pkg_install_ok[pkg] = False
+        # Re-verify by the BINARY name every time, even on a memoized package
+        # hit — the apt install can succeed while a SPECIFIC binary a
+        # package claims to provide is still missing (e.g. a non-NodeSource
+        # "nodejs" build that doesn't bundle npm/npx).
+        ok = pkg_install_ok[pkg] and shutil.which(d)
         if ok:
             print("  ✓ runtime dep '%s' was missing — auto-installed "
                   "(apt-get) and verified." % d)
@@ -2333,6 +2355,48 @@ def _managed_plugin_built(key: str) -> bool:
     return bool(glob.glob(str(CLAUDE_DIR / MANAGED_PLUGIN_CACHE_GLOBS[key])))
 
 
+PLAYWRIGHT_PLUGIN_KEY = "playwright@claude-plugins-official"
+PLAYWRIGHT_BROWSER_CACHE = Path.home() / ".cache" / "ms-playwright"
+
+
+def _playwright_browsers_installed(cache_dir: Path = None) -> bool:
+    """True iff the browser cache genuinely has something in it — not just
+    that the directory exists (an empty dir from an interrupted install
+    would otherwise look 'done' forever)."""
+    d = cache_dir or PLAYWRIGHT_BROWSER_CACHE
+    return d.is_dir() and any(d.iterdir())
+
+
+def ensure_playwright_browsers(cache_dir: Path = None):
+    """Best-effort, time-boxed, non-fatal `npx playwright install chromium`
+    (#158 review finding): enabling the plugin alone does NOT pull the
+    actual browser binaries — measured live, three fleet accounts had node
+    and the plugin enabled but an EMPTY browser cache, so every real browser
+    call would fail with "Executable doesn't exist" until someone ran this
+    by hand. No sudo needed (a per-user cache under $HOME), so this runs
+    even on the sudo-less subdev stream accounts. A no-op when the baseline
+    doesn't include Playwright, or the cache is already populated."""
+    import subprocess
+    if PLAYWRIGHT_PLUGIN_KEY not in MANAGED_PLUGINS:
+        return
+    if _playwright_browsers_installed(cache_dir):
+        return
+    try:
+        r = subprocess.run(
+            ["npx", "--yes", "playwright", "install", "chromium"],
+            capture_output=True, text=True, timeout=300, env=_claude_cli_env())
+        if r.returncode == 0:
+            print("    Playwright browsers: installed chromium (npx playwright install)")
+        else:
+            print("    ⚠ Playwright browsers missing and auto-install failed "
+                  "(rc=%d): %s\n    Run manually: npx playwright install chromium"
+                  % (r.returncode, (r.stderr or r.stdout).strip()[:200]),
+                  file=sys.stderr)
+    except Exception as e:
+        print("    ⚠ Playwright browsers missing and auto-install skipped (%s) — "
+              "run manually: npx playwright install chromium" % e, file=sys.stderr)
+
+
 def setup_managed_plugins():
     """Ensure the managed baseline plugins are installed + enabled (idempotent).
 
@@ -2376,6 +2440,8 @@ def setup_managed_plugins():
         print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
     else:
         print("    settings.json: already correct")
+
+    ensure_playwright_browsers()
 
 
 def _filedrop_serve():
