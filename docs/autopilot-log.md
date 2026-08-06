@@ -3737,3 +3737,68 @@ construction. Live-verified real end-to-end delivery per account
 each account's own `notify-delivery.log`) and confirmed all four resolve to
 the IDENTICAL Discord channel/thread id, matching montalu's own routing.
 Closed with evidence, no PR.
+
+**#148 — full-suite pytest flake, fixed (different specimen than filed,
+same class).** Reproduced live: 4 full-suite runs (3953 tests), 1 genuine
+failure in `TestTotalBindFailureIsFatal::test_a_server_that_binds_nothing_
+exits_nonzero_well_before_its_ttl` (took 3.34s under full-suite CPU
+contention vs a 2.0s bound with no headroom). Could not reproduce the
+ticket's own two named specimens in 3 runs, but the flake class (a real
+subprocess test's hardcoded elapsed-time bound with no load headroom) is
+the same family. Fix: the test now uses its own larger local ttl (20 vs the
+class's shared self.TTL=6, still needed small by the sibling expiry test)
+and a widened bound (ttl/2.0=10s), plus a new deterministic headroom test
+using a forced-delay launcher wrapper (same technique
+`test_readiness_wait_survives_a_slow_server_start` already uses).
+RED `8ab2e1e` / GREEN `61b9b9c`. Adversarial review found the new headroom
+test didn't actually guard the widened bound (independent constant copies)
+— fixed via shared FAST_FAIL_TTL/FAST_FAIL_DIVISOR class constants +
+a margin assertion, `6d9c560`. Full file green (42/42).
+
+**#151 — simap@subdev Discord .env, already resolved; closed with
+evidence.** No code — `.env` was already provisioned (2026-08-01, before
+this batch) during other subdev onboarding work. Closed directly.
+
+**#259 — simap Discord notifications routing to the wrong thread, fixed.**
+Root cause: `notify.resolve_owner()` fell back to the tmux SESSION NAME
+("simap") with no `DISCORD_NOTIFICATION_CHANNEL_SIMAP`/`DISCORD_MENTION_
+SIMAP` keys anywhere (by design — simap has no distinct Discord identity).
+montalu/david route correctly only via a bare, hand-added
+`AIRULESET_NOTIFY_OWNER` bashrc export from onboarding; simap's onboarding
+never got it. First fix (bashrc-managed, mirroring apply_ultracode_launcher)
+RED `df828c2` / GREEN `190da54`, live-verified via a fresh `bash -ic` shell
+on simap@subdev (channel-id/mention-prefix byte-identical to dev1's real
+zbynek resolution; a real Discord ping delivered successfully). Adversarial
+review found the bashrc approach only reaches shells started AFTER the
+write — simap's own already-running session stayed misrouted. Redesigned:
+`STREAM_NOTIFY_OWNER` now lives in `notify/__init__.py`, checked directly
+inside `resolve_owner()` itself, so every hook invocation (a fresh process)
+resolves correctly immediately with no restart dependency — `6a16148`. Also
+added a completeness-lock test cross-checking every `AUTHORITY_BY_USER` key
+against the routing map. Full suite green (633/633 in test_airuleset.py).
+
+**#158 — Playwright + node/npx now managed fleet-wide.** `MANAGED_PLUGINS`
+grew from just superpowers to also include
+`playwright@claude-plugins-official` (context-cost decision recorded in
+code: baseline-installed AND enabled everywhere, matching the existing
+fleet norm + the superpowers precedent). `RUNTIME_DEPS` grew `node`/`npx`
+plus a `RUNTIME_DEP_PACKAGE` override (`nodejs` — Debian's real "node"
+package is unrelated, npx has none of its own). RED `5dac819` / GREEN
+`40e9a26`. Adversarial review found the module comment's fleet enumeration
+was wrong (4 accounts missing it, not just david) and — more
+importantly — that montalu2/montalu3/montalu4 have node + the plugin
+enabled but an EMPTY browser cache (every real browser call would fail).
+Fixed via a new `ensure_playwright_browsers()` (best-effort `npx playwright
+install chromium`, no sudo needed) wired into `setup_managed_plugins()`,
+plus two mutation-proof test hardenings in `check_runtime_deps` (a
+returncode-0 install with the binary still missing must be reported
+missing; the warning must name the real apt package) — `9ed43dc`. Filed
+#262 as a follow-up for a separate, pre-existing `cmd_push` timeout
+robustness gap the review surfaced but which is out of this ticket's scope.
+Full suite green (45/45 in the two touched files).
+
+Batch of 4 (#148/#151/#259/#158): all committed locally on `main`, per
+this repo's direct-push model (no dev branch, no PR) — supervisor pushes.
+Full-repo suite green throughout (3953 → 3969 → 3979 tests as new
+regression/hardening tests were added). `ruff check .` and
+`python3 airuleset.py validate` both clean at the end.
