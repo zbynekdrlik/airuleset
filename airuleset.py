@@ -4276,10 +4276,26 @@ def cmd_push(args):
 
     # 0b. Run the full test suite — fail-closed before any push/deploy.
     print("Running test suite (fail-closed before push)...")
-    test_result = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-        cwd=str(REPO_DIR),
-    )
+    import tempfile
+    # #271: `deliver_with_stash`/`_send_goal_verified` persist non-empty
+    # input-box content to `watchdog.draft_rescue_dir()` (default
+    # `~/.claude/draft-rescue/`) BEFORE any keystroke — and the live
+    # systemd api-watchdog timer executes THIS repo's working tree every
+    # 60s on this box, so a test process writing into the REAL directory
+    # would be indistinguishable from production activity. Rather than
+    # isolate every one of the ~19 test files whose fixtures transitively
+    # reach these two functions via `run_once`, point the WHOLE test-suite
+    # subprocess at one throwaway directory here — `AIRULESET_DRAFT_RESCUE_DIR`
+    # is `draft_rescue_dir()`'s own env-override, so this is the single
+    # place that has to know it exists.
+    with tempfile.TemporaryDirectory() as _rescue_tmp:
+        test_env = dict(os.environ)
+        test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
+            Path(_rescue_tmp) / "draft-rescue")
+        test_result = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            cwd=str(REPO_DIR), env=test_env,
+        )
     if test_result.returncode != 0:
         print("  TESTS FAILED — refusing to push untested code.", file=sys.stderr)
         sys.exit(1)
