@@ -111,20 +111,13 @@ try:
     if not cwd:
         sys.exit(0)
 
-    m = re.search(r'gh\s+issue\s+comment\s+(\S+)', cmd)
-    if not m:
-        sys.exit(0)
-    target = m.group(1).strip("'\"")
-
-    issue = None
-    mnum = re.match(r'^(\d+)$', target)
-    if mnum:
-        issue = int(mnum.group(1))
-    else:
-        murl = re.search(r'/issues/(\d+)', target)
-        if murl:
-            issue = int(murl.group(1))
-    if issue is None:
+    # #208 -- every `gh issue comment <N>` occurrence in the command text,
+    # not just the first: a batch worker often posts several design/
+    # validated/reviewed comments in ONE Bash call before a single bundled
+    # commit, and `re.search` (a single, non-global match) used to extract
+    # only the FIRST -- the rest silently never got checked or marked.
+    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', cmd))
+    if not matches:
         sys.exit(0)
 
     mrepo = re.search(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
@@ -140,31 +133,8 @@ try:
     if not repo_key:
         sys.exit(0)
 
-    # Already recorded — never re-hit the network for a settled issue. "Settled"
-    # now means ALL THREE kinds are marked (#213/#214) -- if even one is still
-    # missing, a LATER comment for this same issue might supply it, so we must
-    # keep re-reading until design+validated+reviewed are all in.
-    if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
-        sys.exit(0)
-
-    try:
-        r = subprocess.run(
-            ["gh", "issue", "view", str(issue)] + gh_repo_args + ["--json", "comments"],
-            capture_output=True, text=True, timeout=10, cwd=cwd)
-    except Exception:
-        sys.exit(0)
-    if r.returncode != 0:
-        sys.exit(0)
-    try:
-        comments = json.loads(r.stdout or "{}").get("comments", [])
-    except (ValueError, TypeError, AttributeError):
-        sys.exit(0)
-    if not isinstance(comments, list):
-        sys.exit(0)
-
     FRESH_WINDOW_S = 180
     now = datetime.datetime.now(datetime.timezone.utc)
-
 
     def parsed_ts(c):
         raw = c.get("createdAt") or ""
@@ -174,46 +144,90 @@ try:
         except (ValueError, TypeError):
             return None
 
-
-    candidates = []
-    for c in comments:
-        if not isinstance(c, dict) or not c.get("viewerDidAuthor"):
-            continue
-        ts = parsed_ts(c)
-        if ts is None or (now - ts).total_seconds() > FRESH_WINDOW_S:
-            continue
-        candidates.append((ts, c))
-
-    if not candidates:
-        sys.exit(0)
-    candidates.sort(key=lambda pair: pair[0])
-    _, latest = candidates[-1]
-
-    body = latest.get("body", "")
-    url = latest.get("url", "")
-
-    # Adversarial-review finding: one comment must not grant more than one
-    # evidence kind -- (a) never re-use a comment url that already granted a
-    # DIFFERENT kind (a stale/unchanged "latest" comment re-read on a later,
-    # trivial `gh issue comment` call must not let a rich earlier comment keep
-    # paying out new kinds), and (b) even within ONE pass over a fresh comment,
-    # grant at most the FIRST still-missing kind it classifies for, never all
-    # that happen to match at once.
-    if url and url in dg.claimed_urls(repo_key, issue):
-        sys.exit(0)
-
     classifiers = {
         "design": dg.classify_design_comment,
         "validated": dg.classify_validation_comment,
         "reviewed": dg.classify_review_comment,
     }
-    for kind in dg.ALL_KINDS:
-        if dg.marker_exists(repo_key, issue, kind):
+
+    # Dedup issue numbers, first-seen order (mirrors design_gate.issue_refs's
+    # own dedup shape) -- a repeated mention of the same issue in one
+    # command should not re-hit the network twice.
+    seen_issues = []
+    for m in matches:
+        target = m.group(1).strip("'\"")
+        issue = None
+        mnum = re.match(r'^(\d+)$', target)
+        if mnum:
+            issue = int(mnum.group(1))
+        else:
+            murl = re.search(r'/issues/(\d+)', target)
+            if murl:
+                issue = int(murl.group(1))
+        if issue is not None and issue not in seen_issues:
+            seen_issues.append(issue)
+
+    for issue in seen_issues:
+        # Already recorded — never re-hit the network for a settled issue.
+        # "Settled" means ALL THREE kinds are marked (#213/#214) -- if even
+        # one is still missing, a LATER comment for this same issue might
+        # supply it, so we must keep re-reading until all are in. `continue`
+        # (never sys.exit(0)) so one issue's outcome never short-circuits
+        # the rest of the command's issues.
+        if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
             continue
-        ok, reason = classifiers[kind](body)
-        if ok:
-            dg.write_marker(repo_key, issue, url, reason, kind=kind)
-            break
+
+        try:
+            r = subprocess.run(
+                ["gh", "issue", "view", str(issue)] + gh_repo_args + ["--json", "comments"],
+                capture_output=True, text=True, timeout=10, cwd=cwd)
+        except Exception as exc:
+            _log_exception("gh-view #%d" % issue, exc)
+            continue
+        if r.returncode != 0:
+            continue
+        try:
+            comments = json.loads(r.stdout or "{}").get("comments", [])
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(comments, list):
+            continue
+
+        candidates = []
+        for c in comments:
+            if not isinstance(c, dict) or not c.get("viewerDidAuthor"):
+                continue
+            ts = parsed_ts(c)
+            if ts is None or (now - ts).total_seconds() > FRESH_WINDOW_S:
+                continue
+            candidates.append((ts, c))
+
+        if not candidates:
+            continue
+        candidates.sort(key=lambda pair: pair[0])
+        _, latest = candidates[-1]
+
+        body = latest.get("body", "")
+        url = latest.get("url", "")
+
+        # Adversarial-review finding: one comment must not grant more than
+        # one evidence kind -- (a) never re-use a comment url that already
+        # granted a DIFFERENT kind (a stale/unchanged "latest" comment
+        # re-read on a later, trivial `gh issue comment` call must not let
+        # a rich earlier comment keep paying out new kinds), and (b) even
+        # within ONE pass over a fresh comment, grant at most the FIRST
+        # still-missing kind it classifies for, never all that happen to
+        # match at once.
+        if url and url in dg.claimed_urls(repo_key, issue):
+            continue
+
+        for kind in dg.ALL_KINDS:
+            if dg.marker_exists(repo_key, issue, kind):
+                continue
+            ok, reason = classifiers[kind](body)
+            if ok:
+                dg.write_marker(repo_key, issue, url, reason, kind=kind)
+                break
 except SystemExit:
     raise
 except Exception as exc:
