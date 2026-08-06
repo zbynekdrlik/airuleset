@@ -251,6 +251,13 @@ class TestCmdGkRequest(unittest.TestCase):
         return m.Mock(**base)
 
     def test_create_with_label(self):
+        # #221 fix: the label is applied via its OWN `--add-label` call
+        # AFTER a bare create, never baked into the create call itself —
+        # baking it in is exactly the shape GitHub silently drops the
+        # label from when the actor lacks push access. This test used to
+        # assert `needs-gatekeeper` was present in the CREATE call itself
+        # (the pre-#221-fix, vulnerable shape); it now asserts the correct
+        # split.
         calls = []
 
         def run(argv, **kw):
@@ -265,7 +272,11 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         create = calls[0]
         self.assertIn("create", create)
-        self.assertIn("needs-gatekeeper", " ".join(create))
+        self.assertNotIn("needs-gatekeeper", " ".join(create), create)
+        add_label_calls = [c for c in calls if "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in add_label_calls),
+            add_label_calls)
 
     def test_create_label_denied_falls_back_to_title_prefix(self):
         calls = []
@@ -549,22 +560,32 @@ class TestCmdGkRequest(unittest.TestCase):
                 self._args(title="Adopt the pipeline", body="detail"))
         self.assertIn(rc, (0, None))
         create = [c for c in calls if "issue" in c and "create" in c][0]
-        self.assertIn("needs-gatekeeper", create)
+        # #221 fix: needs-gatekeeper is ALSO applied via its own separate
+        # `--add-label` call now, never baked into create -- same reason
+        # as the origin label this test was originally about.
+        self.assertNotIn("needs-gatekeeper", create, create)
         self.assertNotIn("handed-by:simap", create)   # NOT baked into create
         edit_calls = [c for c in calls
                      if "issue" in c and "edit" in c and "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in edit_calls), edit_calls)
         self.assertTrue(
             any("40" in c and "handed-by:simap" in c for c in edit_calls),
             edit_calls)
 
     def test_create_mode_origin_label_failure_never_drops_needs_gatekeeper(self):
         # A rejected origin --add-label (after a successful create) must
-        # never retroactively undo the create or its needs-gatekeeper label.
+        # never retroactively undo the create or its needs-gatekeeper label
+        # -- the origin label's own denial is deliberately independent of
+        # the primary needs-gatekeeper --add-label call (#221: also its own
+        # separate call now, never baked into create), so only the ORIGIN
+        # label is denied here to prove the two are not coupled.
         calls = []
 
         def run(argv, **kw):
             calls.append(argv)
-            if "edit" in argv and "--add-label" in argv:
+            if "edit" in argv and "--add-label" in argv \
+                    and "handed-by:simap" in argv:
                 return m.Mock(returncode=1, stdout="", stderr="403")
             if "issue" in argv and "create" in argv:
                 return m.Mock(returncode=0,
@@ -580,7 +601,13 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         creates = [c for c in calls if "issue" in c and "create" in c]
         self.assertEqual(len(creates), 1, creates)   # never a fallback retry
-        self.assertIn("needs-gatekeeper", creates[0])
+        self.assertNotIn("needs-gatekeeper", creates[0], creates[0])
+        add_label_calls = [c for c in calls
+                           if "issue" in c and "edit" in c
+                           and "--add-label" in c]
+        self.assertTrue(
+            any("needs-gatekeeper" in c for c in add_label_calls),
+            add_label_calls)
 
     def test_origin_label_skipped_when_not_a_registered_stream(self):
         # A full-authority box (dev1/gatekeeper) must never stamp a

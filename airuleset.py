@@ -4215,17 +4215,32 @@ def cmd_gk_request(args):
     body_file = getattr(args, "body_file", None)
     B = (["--body-file", body_file] if body_file
          else ["--body", getattr(args, "body", None) or title])
-    # #191 M4: the origin label is applied AFTER the primary create succeeds,
-    # in its OWN separate call — baking it into the create's `--label` list
-    # meant a REJECTED origin label (a race right after `_ensure_origin_
-    # label_usable`, an org restriction) failed the WHOLE create, dropping
-    # needs-gatekeeper too and silently falling through to the title-prefix
-    # fallback with no labels at all. This is the same genuinely-best-effort
-    # shape issue-mode already uses.
-    r = _gh(["gh", "issue", "create", "--title", title,
-             "--label", "needs-gatekeeper"] + B + R)
+    # #221: `gh issue create --label X` SILENTLY DROPS a label the actor
+    # lacks push access for while still returning success and creating the
+    # issue — GitHub's issue-create endpoint only enforces push access for
+    # labels/assignees/milestone by IGNORING them, not by failing the
+    # request (unlike the dedicated add-label endpoint, which correctly
+    # 403s). A read-only fork's create therefore looked like success with
+    # no needs-gatekeeper label anywhere on the resulting ticket — the
+    # exact silent-drop this channel exists to prevent, invisible to
+    # `r.returncode == 0` since that only reports the CREATE succeeding.
+    # Fix: never bake the primary label into the create call either — this
+    # is the SAME shape #191/M4 already established for the origin label
+    # ("baking it into create meant a rejected label failed the WHOLE
+    # create"). Applying `needs-gatekeeper` via its OWN `gh issue edit
+    # --add-label` call gets an honest exit code from GitHub's real
+    # (non-silent) label endpoint for free, and a denial degrades to the
+    # GATEKEEPER-ACTION title prefix exactly like the `--issue` mode
+    # already does. If BOTH the label add and the retitle are denied (a
+    # genuinely fully-read-only actor), fail loudly — never report success
+    # while the escalation would be invisible to the supervisor
+    # (script-failure-policy.md).
+    r = _gh(["gh", "issue", "create", "--title", title] + B + R)
     if r.returncode == 0:
         new_num = (r.stdout or "").strip().rsplit("/", 1)[-1]
+        labeled = new_num.isdigit() and _gh(
+            ["gh", "issue", "edit", new_num, "--add-label",
+             "needs-gatekeeper"] + R).returncode == 0
         if stream_label and new_num.isdigit() and \
                 _ensure_origin_label_usable(_gh, stream_label, R):
             origin = _gh(["gh", "issue", "edit", new_num, "--add-label",
@@ -4233,6 +4248,18 @@ def cmd_gk_request(args):
             if origin.returncode != 0:
                 print("gk-request: could not apply origin label %r to #%s: %s"
                       % (stream_label, new_num, (origin.stderr or "").strip()))
+        if not labeled and new_num.isdigit():
+            ft = (title if title.startswith("GATEKEEPER-ACTION:")
+                  else "GATEKEEPER-ACTION: " + title)
+            retitled = ft == title or _gh(
+                ["gh", "issue", "edit", new_num, "--title", ft] + R
+            ).returncode == 0
+            if not retitled:
+                print("gk-request FAILED: #%s created but neither the "
+                      "needs-gatekeeper label nor the GATEKEEPER-ACTION "
+                      "title prefix could be applied — escalation would "
+                      "be invisible to the supervisor" % new_num)
+                return 1
         print("gk-request filed: %s" % r.stdout.strip())
         return 0
     ft = (title if title.startswith("GATEKEEPER-ACTION:")
