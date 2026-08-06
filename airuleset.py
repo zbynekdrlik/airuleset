@@ -210,19 +210,6 @@ VALID_CAVEMAN_MODES = {
     "lite", "full", "ultra",
     "wenyan-lite", "wenyan-full", "wenyan-ultra",
 }
-# BOTH cache layouts: pre-2026-07 releases shipped <hash>/hooks/…, newer ones
-# ship <hash>/src/hooks/… (a fresh install produces ONLY the new layout — the
-# migrated gatekeeper box surfaced it: the old single-glob check saw "not
-# built" forever and re-installed the plugin on every run). NO LONGER used
-# to decide "built" (#279 — see _caveman_plugin_built()'s docstring: a
-# cache-file glob is a stale-file-presence proxy, and claude's own
-# installed_plugins.json registry replaced it). Kept as the canonical list
-# of the two layouts the runtime SHIM's own bash `ls -dt` glob still needs
-# to resolve the CURRENT cache hash at render time.
-CAVEMAN_CACHE_GLOBS = (
-    "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh",
-    "plugins/cache/caveman/caveman/*/src/hooks/caveman-statusline.sh",
-)
 # Managed BASELINE plugins — every managed user's Claude must have these. The
 # airuleset rules invoke their skills DIRECTLY (superpowers:brainstorming,
 # writing-plans, subagent-driven-development, requesting-code-review are baked
@@ -268,29 +255,43 @@ CAVEMAN_CACHE_GLOBS = (
 # which today's reconcile forbids by design (see the sanity check below).
 #
 # BENIGN, DOCUMENTED (#279, 2026-08-06): `claude plugin list` can show
-# playwright's Version as the literal "unknown" (montalu4) instead of a git
-# commit hash (montalu2/3, dev1/2, gatekeeper). Root cause, confirmed live
-# with byte-level evidence: `claude-plugins-official`'s "version" per plugin
-# is derived from a git-log lookup inside the marketplace CHECKOUT at
-# install time. That checkout materializes via TWO different Claude Code
-# code paths -- this repo's own explicit `claude plugin marketplace add`
-# (ensure_marketplace_registered(), a real `git clone`, confirmed via a
-# live `.git/` with objects/refs on montalu3) OR Claude Code's OWN internal
-# `officialMarketplaceAutoInstallAttempted`/`officialMarketplaceAutoInstalled`
-# self-heal (both `true` in montalu4's own ~/.claude.json, plus a `.gcs-sha`
-# marker file -- evidence of a GCS-blob delivery with no `.git` at all).
-# Which path wins on a given account is a Claude Code internal race outside
-# airuleset's control. Confirmed functionally IDENTICAL either way:
-# montalu4's and montalu3's playwright `.mcp.json` and
-# `.claude-plugin/plugin.json` are byte-for-byte identical, and
-# `_managed_plugin_built("playwright@claude-plugins-official")` (the
+# playwright's Version as the literal "unknown" instead of a git commit
+# hash. Live-verified: montalu3 shows a hash (`da7dc3b5ac48`), montalu4
+# shows "unknown" -- and a same-day adversarial review found dev1 ALSO
+# shows "unknown", so this is not montalu4-specific; expect it on any
+# account whose marketplace checkout lacks `.git` (case 3 below). The
+# version-source hierarchy, confirmed by
+# reading real plugin.json files + registry entries: (1) if the plugin's
+# own `.claude-plugin/plugin.json` declares a `version` field, that string
+# is used verbatim (e.g. discord@claude-plugins-official -> "0.0.4");
+# (2) else, if the marketplace CHECKOUT the plugin was read from is a real
+# git clone, a git-derived commit sha is used (playwright has NO `version`
+# field in its own plugin.json on EITHER montalu3 or montalu4, yet montalu3
+# still shows a hash -- because montalu3's `claude-plugins-official`
+# checkout is a real git clone, confirmed via a live `.git/` with
+# objects/refs); (3) else "unknown" (no declared version, no git info --
+# montalu4's and dev1's `claude-plugins-official` checkouts have NO `.git`
+# at all; both carry a `.gcs-sha` marker file instead, evidence of a
+# GCS-blob delivery). That checkout materializes via TWO different Claude
+# Code code paths -- this repo's own explicit `claude plugin marketplace
+# add` (ensure_marketplace_registered(), a real `git clone`) OR Claude
+# Code's OWN internal `officialMarketplaceAutoInstallAttempted`/
+# `officialMarketplaceAutoInstalled` self-heal (both `true` in the affected
+# accounts' own ~/.claude.json). Which path wins on a given account is a
+# Claude Code internal race outside airuleset's control. Confirmed
+# functionally IDENTICAL either way: montalu4's and montalu3's playwright
+# `.mcp.json` and `.claude-plugin/plugin.json` are byte-for-byte identical,
+# and `_managed_plugin_built("playwright@claude-plugins-official")` (the
 # registry-truth check, #276) already correctly reports it installed on
 # montalu4 regardless of the version string -- there is no install-loop
 # defect here, only a cosmetic display label. Deliberately NOT "fixed" by
-# forcing a re-`marketplace add`: that would be new machinery against the
-# standing FREEZE, cannot be validated without modifying a remote box (this
-# ticket's own remote-access rule forbids that), and Claude Code's own
-# auto-install could simply race ahead again on the very next invocation.
+# forcing a re-`marketplace add`: `ensure_marketplace_registered()` already
+# exists (this would not be new supervision machinery) but per the
+# standing FREEZE ("fix only what has actually failed in production") a
+# cosmetic label with zero functional impact does not qualify; it also was
+# not validated live, since doing so would require modifying a remote box,
+# and Claude Code's own auto-install could simply race ahead again on the
+# very next invocation regardless.
 MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
                     "playwright@claude-plugins-official")
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
@@ -374,7 +375,16 @@ def ensure_marketplace_registered(name: str) -> bool:
 # Must NEVER error (a broken statusline would break the prompt render).
 # Caveman's real script lives under a content-hashed cache dir that changes
 # on every `claude plugin update`; `ls -dt ... | head -1` resolves the
-# newest hash at runtime so the path can't rot. A custom statusLine occupies
+# newest hash at runtime so the path can't rot. BOTH cache layouts are
+# globbed below: pre-2026-07 releases shipped <hash>/hooks/…, newer ones
+# ship <hash>/src/hooks/… (a fresh install produces ONLY the new layout —
+# the migrated gatekeeper box surfaced it: an old single-glob check saw
+# "not built" forever and re-installed the plugin on every run). This is
+# the ONLY place these two paths live -- _caveman_plugin_built() (#279)
+# decides "installed" from claude's own installed_plugins.json registry,
+# never from a cache-file glob; a former CAVEMAN_CACHE_GLOBS constant
+# duplicating these same two strings was removed as dead code once nothing
+# read it any more. A custom statusLine occupies
 # the whole footer row, so the native context-fill indicator is unreliable —
 # Claude Code pipes the session JSON on stdin (context_window.used_percentage
 # etc., CC v2.1.132+) and caveman's script reads only its flag file, so the
@@ -2928,11 +2938,17 @@ def _caveman_plugin_built() -> bool:
     cache-present + registry-absent mismatch self-healing: the very next
     push retries the real install, no manual fix needed.
 
-    CAVEMAN_CACHE_GLOBS stays defined for the runtime SHIM's own bash
-    lookup (`ls -dt ... | head -1`, resolving the CURRENT cache hash at
-    render time -- a "where do I currently find the script" question,
-    unrelated to "is the plugin genuinely installed") -- it is no longer
-    read here."""
+    The runtime SHIM's own bash lookup (`ls -dt ... | head -1`, resolving
+    the CURRENT cache hash at render time -- a "where do I currently find
+    the script" question, unrelated to "is the plugin genuinely installed")
+    hardcodes its own two glob literals in CAVEMAN_SHIM_CONTENT and never
+    reads this function or any Python constant.
+
+    Adversarial-review confirmation (#279): reproduced the montalu4 shape
+    live in an isolated scratch profile (cache dir pre-extracted, no
+    installed_plugins.json) -- `claude plugin install caveman@caveman`
+    genuinely adopts the pre-existing stale cache rather than choking on it,
+    so the self-healing claim above is measured, not merely asserted."""
     return CAVEMAN_PLUGIN_KEY in _plugin_registry_keys()
 
 
@@ -2988,7 +3004,8 @@ def setup_caveman() -> bool:
         else:
             print("    settings.json: already correct")
 
-    # 3. register the marketplace THEN install if the plugin cache is missing.
+    # 3. register the marketplace THEN install if the plugin's registry
+    #    entry is missing (#279 — never a cache-file glob).
     if not _caveman_plugin_built():
         market = CAVEMAN_PLUGIN_KEY.split("@", 1)[1]
         if not ensure_marketplace_registered(market):

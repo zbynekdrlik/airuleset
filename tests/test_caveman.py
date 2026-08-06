@@ -8,6 +8,7 @@ idempotent enable/marketplace reconcile so a future edit can't reintroduce it.
 """
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest.mock as m
@@ -471,7 +472,9 @@ class TestCavemanPluginBuiltUsesRegistry(TestCase):
     caveman@caveman` call forever, with no log output at all."""
 
     def _claude_dir(self):
-        return Path(tempfile.mkdtemp())
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
 
     def _write_registry(self, d, keys):
         reg_dir = d / "plugins"
