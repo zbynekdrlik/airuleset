@@ -3926,39 +3926,53 @@ def _watchdog_delivery_probe(root, base):
 
 
 def _watchdog_backlog_fetch(cwd):
-    """#160 defect 1 / defect 4 — the count of OPEN, non-`autopilot-skip`
-    issues for the repo at `cwd`, or None on any failure.
+    """#160 defect 1 / defect 4 — does THIS BOX's own slice of the repo at
+    `cwd` still have open, non-`autopilot-skip` backlog work, or None on any
+    failure/refusal.
+
+    #238-review-style finding (🔴F1, this ticket's own review): the FIRST
+    version of this function counted the WHOLE REPO via a raw `gh issue
+    list`, which is the wrong population to verify a session's own `🏁
+    BACKLOG EMPTY` claim against — a full-authority box's `/goal` loop stops
+    on the CORE/OBLIGATION partition (`core-quals`), and a reduced-authority
+    stream's loop stops on its OWN slice (`slice-quals`), NOT on the whole
+    repo (which routinely still has plenty of OTHER streams' open tickets on
+    a shared tracker). Counting the whole repo would make this check refuse
+    to trust a genuinely-true "backlog empty" claim on any repo with other
+    streams' work still open — exactly the false-positive direction #164/
+    #181 already fixed for the footer and the `/goal` stop-proof commands.
+
+    Reuses those SAME commands (`core-quals --count` / `slice-quals
+    --count`), run as a subprocess against THIS repo (`cwd=cwd`) so
+    `resolve_authority`/`_repo_root` resolve exactly as they would inside
+    that session's own pane — never a second, independently-derived
+    partition that could drift from the one the session's own stop-proof
+    reads. Both commands already refuse (non-zero exit, no printed number)
+    on an untrustworthy empty result (#181's search-index guard) rather than
+    ever printing a false `0` — this function inherits that refusal as
+    `None` (unmeasurable), which every caller already treats as "never
+    guess, skip acting" (`_cached_backlog_open`).
 
     Wired HERE, like every other network call in this file, so run_once's
-    unit tests stay network-free. Uses the plain (non-search) issue listing
-    deliberately, never `--search` -- #181 measured the SEARCH API silently
-    returning `[]` for a repo whose local checkout's remote had been renamed
-    (the search index does not follow a rename; the plain REST listing still
-    answers correctly), and this repo has already hit that exact shape live.
-    Labels are filtered client-side rather than via a search qualifier for
-    the same reason."""
+    unit tests stay network-free."""
     import subprocess
     try:
-        r = subprocess.run(
-            ["gh", "issue", "list", "--state", "open", "--json",
-             "number,labels", "-L", "1000"],
-            cwd=cwd, capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
-            return None
-        rows = json.loads(r.stdout or "[]")
+        authority = resolve_authority(cwd=cwd)
     except Exception:
         return None
-    if not isinstance(rows, list):
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name, "--count"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
         return None
-    n = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        names = {lbl.get("name") for lbl in (row.get("labels") or [])
-                 if isinstance(lbl, dict)}
-        if "autopilot-skip" not in names:
-            n += 1
-    return n
+    if r.returncode != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except ValueError:
+        return None
 
 
 def _watchdog_vault_purge():

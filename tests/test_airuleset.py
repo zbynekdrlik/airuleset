@@ -6526,13 +6526,22 @@ class TestWatchdogRepoSweepTimeouts_172(TestCase):
 
 
 class TestWatchdogBacklogFetch(TestCase):
-    """#160 defects 1/4 — `_watchdog_backlog_fetch(cwd)`: the count of open,
-    non-`autopilot-skip` issues for the repo at `cwd`, or None on failure.
-    Plain REST listing, client-side label filter -- never `--search` (#181:
-    the search API silently returns [] for a repo whose remote was renamed;
-    the plain listing still answers correctly)."""
+    """#160 defects 1/4 — `_watchdog_backlog_fetch(cwd)`: does THIS box's
+    own slice of the repo at `cwd` still have open backlog work, or None on
+    any failure/refusal.
 
-    def _fake(self, stdout=None, returncode=0, raises=None):
+    #238-review-style finding 🔴F1 (this ticket's own review): the ORIGINAL
+    version counted the WHOLE REPO via a raw `gh issue list` -- the wrong
+    population to verify a session's own `🏁 BACKLOG EMPTY` claim against, a
+    full-authority box's /goal loop stops on the CORE/OBLIGATION partition,
+    a reduced-authority stream's loop stops on its OWN slice, never the
+    whole repo. Rewritten to shell `core-quals --count` / `slice-quals
+    --count` -- the SAME commands the `/goal` stop-proof templates
+    themselves use -- so this check reads exactly the population the
+    session's own claim is about, and inherits their refuse-rather-than-
+    guess contract (a non-zero exit prints no number at all)."""
+
+    def _fake(self, stdout="", returncode=0, raises=None):
         calls = []
 
         def fake_run(argv, **kw):
@@ -6540,51 +6549,81 @@ class TestWatchdogBacklogFetch(TestCase):
             if raises is not None:
                 raise raises
             import subprocess as sp
-            return sp.CompletedProcess(argv, returncode, stdout=stdout or "[]")
+            return sp.CompletedProcess(argv, returncode, stdout=stdout)
         return fake_run, calls
 
-    def test_counts_only_non_skip_open_issues(self):
-        rows = [{"number": 1, "labels": []},
-               {"number": 2, "labels": [{"name": "autopilot-skip"}]},
-               {"number": 3, "labels": [{"name": "bug"}]}]
-        fake_run, calls = self._fake(stdout=json.dumps(rows))
-        with m.patch("subprocess.run", side_effect=fake_run):
+    def test_full_authority_shells_core_quals(self):
+        fake_run, calls = self._fake(stdout="3\n")
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertEqual(result, 2)
+        self.assertEqual(result, 3)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1].get("cwd"), "/some/repo")
-        self.assertEqual(calls[0][1].get("timeout"), 10)
-        self.assertNotIn("--search", calls[0][0])
+        argv, kw = calls[0]
+        self.assertIn("core-quals", argv)
+        self.assertIn("--count", argv)
+        self.assertNotIn("slice-quals", argv)
+        self.assertEqual(kw.get("cwd"), "/some/repo")
+        self.assertEqual(kw.get("timeout"), 15)
 
-    def test_zero_open_issues(self):
-        fake_run, _calls = self._fake(stdout="[]")
-        with m.patch("subprocess.run", side_effect=fake_run):
+    def test_reduced_authority_shells_slice_quals(self):
+        fake_run, calls = self._fake(stdout="0\n")
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="fork-no-merge"), \
+             m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 0)
+        argv, _kw = calls[0]
+        self.assertIn("slice-quals", argv)
+        self.assertNotIn("core-quals", argv)
+
+    def test_authority_resolved_against_the_repo_cwd(self):
+        fake_run, calls = self._fake(stdout="1\n")
+        with m.patch.object(airuleset, "resolve_authority") as ra, \
+             m.patch("subprocess.run", side_effect=fake_run):
+            ra.return_value = "full"
+            airuleset._watchdog_backlog_fetch("/some/repo")
+        ra.assert_called_once_with(cwd="/some/repo")
 
     def test_nonzero_exit_is_none(self):
-        fake_run, _calls = self._fake(returncode=1)
-        with m.patch("subprocess.run", side_effect=fake_run):
+        # core-quals/slice-quals REFUSE (non-zero, no number) rather than
+        # ever print a false 0 -- this function inherits that refusal.
+        fake_run, _calls = self._fake(returncode=1, stdout="")
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertIsNone(result)
 
-    def test_exception_is_none(self):
+    def test_subprocess_exception_is_none(self):
         fake_run, _calls = self._fake(raises=OSError("no gh"))
-        with m.patch("subprocess.run", side_effect=fake_run):
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertIsNone(result)
 
-    def test_malformed_json_is_none(self):
-        fake_run, _calls = self._fake(stdout="not json")
-        with m.patch("subprocess.run", side_effect=fake_run):
+    def test_resolve_authority_exception_is_none(self):
+        with m.patch.object(airuleset, "resolve_authority",
+                           side_effect=RuntimeError("boom")):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertIsNone(result)
 
-    def test_non_list_json_is_none(self):
-        fake_run, _calls = self._fake(stdout='{"not": "a list"}')
-        with m.patch("subprocess.run", side_effect=fake_run):
+    def test_malformed_stdout_is_none(self):
+        fake_run, _calls = self._fake(stdout="not a number")
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertIsNone(result)
+
+    def test_invokes_this_own_script_via_the_current_interpreter(self):
+        # never a bare "airuleset.py" resolved off PATH -- sys.executable +
+        # an absolute path to THIS file, so it runs regardless of cwd/PATH.
+        fake_run, calls = self._fake(stdout="1\n")
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            airuleset._watchdog_backlog_fetch("/some/repo")
+        argv, _kw = calls[0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertTrue(os.path.isabs(argv[1]))
 
 
 class TestTier0BuildBlock(TestCase):

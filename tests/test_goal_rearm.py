@@ -1580,6 +1580,13 @@ class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
         self.assertFalse(tmux.typed())
 
     def test_a_later_dark_episode_after_a_real_revival_pings_again(self):
+        # #238-review-style finding 🔴F2 (this ticket's own review) — the
+        # ORIGINAL version of this test only asserted `len(self.pings)==2`,
+        # never that the two pings carry genuinely DISTINCT dedup keys —
+        # the exact same gap `TestGoalGiveUpPingPerEpisode` below already
+        # guards against for the give-up ping. Without a distinct key per
+        # episode the notify layer's own dedup would silently swallow the
+        # SECOND ping in production even though it landed here.
         state = {}
         now = time.time()
         self._write([marker_entry("set", PAYLOAD,
@@ -1593,6 +1600,32 @@ class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
         later = now + 60 + wd.GOAL_REARM_MAX_DARK_S + 1
         self._go(PANE_DARK, state=state, now=later)
         self.assertEqual(len(self.pings), 2, self.pings)
+        dark_keys = [kw.get("dedup_key") for _text, kw in self.pings
+                    if "dedup_key" in kw
+                    and str(kw["dedup_key"]).startswith("goaldark:")]
+        self.assertEqual(len(dark_keys), 2, self.pings)
+        self.assertNotEqual(dark_keys[0], dark_keys[1],
+                            "each dark episode must get its OWN dedup key, "
+                            "or the notify layer silently drops the repeat")
+
+    def test_dry_run_never_consumes_the_one_shot_ping(self):
+        # #238-review-style finding 🟡F4 (this ticket's own review) — the
+        # flag/save used to happen BEFORE the send_fn/dry_run check, so a
+        # `--dry-run` sweep (a normal manual diagnostic against REAL state,
+        # per this repo's own playbook) would permanently mark the episode
+        # as pinged with nothing ever actually sent. A dry-run sweep must
+        # be a complete no-op on the persisted flag; the NEXT real sweep
+        # still delivers the genuine ping.
+        state = {}
+        now = time.time()
+        self._write([marker_entry("set", PAYLOAD,
+                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
+        self._wrote = True
+        self._go(PANE_DARK, state=state, now=now, dry_run=True)
+        self.assertEqual(self.pings, [])
+        self._go(PANE_DARK, state=state, now=now + 60)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
 
 
 class TestGoalGiveUpPingPerEpisode(GoalRearmBase):

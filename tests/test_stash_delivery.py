@@ -502,6 +502,51 @@ class WidenedNotWaitingBacklogPing(unittest.TestCase):
                        cwd="/x/repo", backlog_fetch=lambda cwd: 1)
         self.assertTrue(any("backlog" in ln for ln in logs), logs)
 
+    def test_hash_churn_within_cooldown_never_repings(self):
+        # #238-review-style finding 🔴F3 (this ticket's own review) — the
+        # ORIGINAL version of this branch sent unconditionally, completely
+        # bypassing the per-pane `PWEDGE_PING_COOLDOWN_S` cooldown that the
+        # WAITING branch already applies (see `PerPaneCooldown` below) — a
+        # mere terminal-width re-wrap (changing the draft's HASH, resetting
+        # `pinged`) would re-ping every `PWEDGE_SWEEPS` cycle, reintroducing
+        # the exact "často mi chodí" spam issue #35 fixed for the sibling
+        # branch.
+        state, send, now = {}, _FakeSend(), time.time()
+        _sweep(state, USER_DRAFT_PANE, send, now, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(send.calls), 1, send.calls)
+        changed = USER_DRAFT_PANE.replace("nechať ako je", "nechať tak ako je")
+        _sweep(state, changed, send, now + 200, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        _sweep(state, changed, send, now + 270, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(send.calls), 1,
+                         "a re-wrapped draft within 24h must NOT re-ping: %r"
+                         % send.calls)
+
+    def test_cooldown_is_shared_with_the_waiting_branchs_own_ping(self):
+        # both branches ping about the SAME underlying stuck-pane condition
+        # (an unsent draft on this pid). Proving this needs a HASH CHANGE
+        # between the two pings (a re-wrap) -- otherwise the weaker
+        # per-(hash, pinged) episode flag alone would already suppress the
+        # second call, without ever exercising the ping_key cooldown this
+        # finding is actually about.
+        state, send, now = {}, _FakeSend(), time.time()
+        _sweep(state, USER_DRAFT_PANE, send, now, waiting=True)
+        _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=True)
+        self.assertEqual(len(send.calls), 1, send.calls)
+        changed = USER_DRAFT_PANE.replace("nechať ako je", "nechať tak ako je")
+        _sweep(state, changed, send, now + 200, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        _sweep(state, changed, send, now + 270, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(send.calls), 1,
+                         "the waiting ping's cooldown must also cover a "
+                         "LATER not-waiting backlog ping for the same pane, "
+                         "even across a hash change: %r" % send.calls)
+
 
 class PerPaneCooldown(unittest.TestCase):
     """A re-wrap that changes the draft's HASH must not defeat the per-pane

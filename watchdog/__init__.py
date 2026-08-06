@@ -3850,6 +3850,16 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             run(["tmux", "send-keys", "-t", pid, "Enter"])
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
+    # #238-review-style finding 🔴F3 (this ticket's own review): resolved
+    # ONCE, before EITHER branch below — the `not waiting` backlog-ping used
+    # to send unconditionally, completely bypassing this per-pane cooldown
+    # (a re-wrap resets `st["hash"]`/`st["pinged"]` above, so without this
+    # check a fresh PWEDGE_SWEEPS-cycle after a mere terminal-width reflow
+    # would re-ping every time — the EXACT "často mi chodí" spam issue #35
+    # already fixed for the waiting branch, reintroduced one branch over).
+    ping_key = "pwedge-ping:" + pid
+    last_ping = state.get(ping_key)
+    in_cooldown = last_ping and now - last_ping < PWEDGE_PING_COOLDOWN_S
     if not waiting:
         # #160 defect 4 — before giving up silently, check whether the
         # repo's own backlog genuinely has open work waiting: "not waiting
@@ -3864,7 +3874,12 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             # user, and a stash-around delivery (#35) can still reach it. A
             # later poll where `waiting` flips True (same stable draft) pings.
             return ["pwedge-parked (not waiting) %s (%s)" % (pid, project)]
+        if in_cooldown:
+            st["pinged"] = True
+            return ["pwedge-suppressed (cooldown, backlog) %s (%s)"
+                    % (pid, project)]
         st["pinged"] = True
+        state[ping_key] = now
         where = _pane_location(pid, run) if run else ""
         loc = " (%s)" % where if where else ""
         send_fn(
@@ -3876,9 +3891,7 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             owner=owner or None,
             dedup_key="pwedge-backlog:%s:%s" % (pid, h), dry_run=dry_run)
         return ["prompt-wedge ping (backlog) %s (%s)" % (pid, project)]
-    ping_key = "pwedge-ping:" + pid
-    last_ping = state.get(ping_key)
-    if last_ping and now - last_ping < PWEDGE_PING_COOLDOWN_S:
+    if in_cooldown:
         st["pinged"] = True
         return ["pwedge-suppressed (cooldown) %s (%s)" % (pid, project)]
     st["pinged"] = True
@@ -8805,9 +8818,17 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # purpose is unknown after this long dark would be the riskier
             # move) — at least tells a human this stream needs a look.
             if not rec.get("dark_pinged"):
-                rec["dark_pinged"] = True
-                _save()
+                # #238-review-style finding 🟡F4 (this ticket's own review):
+                # the flag/save used to happen BEFORE the `send_fn is not
+                # None and not dry_run` check, so a `--dry-run` sweep run
+                # against REAL state (a normal manual diagnostic on this
+                # repo, per its own playbook) would permanently consume the
+                # one-shot ping with nothing ever actually sent — moved
+                # inside the real-send branch so only a GENUINE send marks
+                # it delivered.
                 if send_fn is not None and not dry_run:
+                    rec["dark_pinged"] = True
+                    _save()
                     send_fn("⚠️ **%s** — `/goal` slučka stíchla pred vyše %d "
                             "hodinami (`◎ /goal` už dávno nesvieti) a nikdy "
                             "sa znovu neozvala; automatické preármovanie sa "
@@ -8817,8 +8838,23 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                             % (project_label(cwd),
                                GOAL_REARM_MAX_DARK_S // 3600, loc),
                             owner=pane_owner(pid, run) or None,
-                            dedup_key="goaldark:%s:%s" % (sid, rec.get("hash")
-                                                          or rec.get("mts")),
+                            # #238-review-style finding 🔴F2 (this ticket's
+                            # own review) — `hash`/`mts` alone are STABLE
+                            # across a revival: a session that goes dark,
+                            # gets pinged, revives (`dark_pinged` reset
+                            # above), then goes dark AGAIN with the SAME
+                            # goal payload and no new transcript marker in
+                            # between would produce the IDENTICAL dedup key
+                            # for the second, genuinely new dark episode —
+                            # the exact same bug class the give-up ping's
+                            # own `first`-timestamp fix (above) already
+                            # closed. Folding in `last_seen_alive` (this
+                            # episode's own anchor — the last confirmed-armed
+                            # instant BEFORE this specific dark stretch
+                            # began) makes each episode's ping distinct.
+                            dedup_key="goaldark:%s:%s:%d"
+                                      % (sid, rec.get("hash") or rec.get("mts"),
+                                         int(last_seen_alive or 0)),
                             dry_run=dry_run)
             continue
         if GOAL_ACHIEVED_MARKER in _above_input_box(captured):
