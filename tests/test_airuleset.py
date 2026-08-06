@@ -7452,6 +7452,63 @@ class TestCmdPushRuffGate(TestCase):
                          "must abort before git push")
 
 
+class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
+    """Adversarial-review CRITICAL finding (plugin-marketplace fix, 2026-08-06):
+    cmd_install() can now sys.exit(1) on a still-failing managed-plugin
+    install. cmd_push() calls `cmd_install(args)` IN-PROCESS with no
+    try/except (step "2. Install locally"), so an uncaught SystemExit
+    propagated straight out of cmd_push() BEFORE the remote-deploy loop
+    (step 3) ever ran — a single local plugin failure on dev1 would push to
+    GitHub and then deploy to ZERO of the 9 remote hosts, including
+    montalu2/montalu3/montalu4, the exact accounts this fix exists for.
+    This is the SAME class of bug #263 already fixed for a remote
+    TimeoutExpired (test_cmd_push_tracks_failures_and_exits_non_zero_when_
+    any_occur above) — the local install step needs the identical
+    treatment."""
+
+    def _fake_run(self, calls, ssh_rc=0):
+        import unittest.mock as m
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=ssh_rc, stdout="ok", stderr="")
+        return fake_run
+
+    def test_a_failed_local_install_does_not_abort_the_remote_loop(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "dev2", "host": "1.2.3.4", "user": "u", "repo_path": "~/x"},
+            {"name": "gk", "host": "5.6.7.8", "user": "g", "repo_path": "~/x",
+             "identity": "~/.secrets/k"},
+        ]
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls)), \
+                m.patch.object(airuleset, "cmd_install",
+                                side_effect=SystemExit(1)) as fake_install, \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts):
+            with self.assertRaises(SystemExit) as cm:
+                airuleset.cmd_push(args)
+        fake_install.assert_called_once()
+        self.assertEqual(cm.exception.code, 1)
+        ssh_calls = [c for c in calls if c and c[0] in ("ssh", "sshpass")]
+        self.assertEqual(len(ssh_calls), len(fake_hosts),
+                          "every remote host must still be attempted despite "
+                          "the local install failure")
+
+    def test_a_healthy_local_install_still_deploys_normally(self):
+        # control: a normal (non-failing) local install must not be affected
+        # by the new try/except at all.
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls)), \
+                m.patch.object(airuleset, "cmd_install") as fake_install, \
+                m.patch.object(airuleset, "REMOTE_HOSTS", []):
+            airuleset.cmd_push(args)   # must NOT raise
+        fake_install.assert_called_once()
+
+
 class TestBlockTestSkipsHook(TestCase):
     """hooks/block-test-skips.sh (issue #10) — mechanical enforcement of
     test-strictness.md's banned skip/tautology syntax. Only ADDED lines

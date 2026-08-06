@@ -223,8 +223,18 @@ CAVEMAN_CACHE_GLOBS = (
 # writing-plans, subagent-driven-development, requesting-code-review are baked
 # into the workflow + completion-report gates), so a user without them has
 # commands like /brainstorming simply missing and gated audits reference
-# nonexistent skills (david@gk, 2026-07-09). All from the built-in
-# claude-plugins-official marketplace — no extraKnownMarketplaces entry needed.
+# nonexistent skills (david@gk, 2026-07-09). All from the "official"
+# claude-plugins-official marketplace — NOT actually built into the CLI
+# (issue: push: plugin installs fail on fresh stream accounts, 2026-08-06):
+# it must be REGISTERED (`claude plugin marketplace add`, see
+# MARKETPLACE_SOURCES / ensure_marketplace_registered() below) before any
+# `claude plugin install X@claude-plugins-official` can resolve — confirmed
+# empirically in an isolated scratch profile, and confirmed to be missing
+# entirely on a fresh account (montalu2/montalu3/montalu4, #263) whose whole
+# lifecycle is this headless install flow. A long-lived interactively-used
+# account self-heals this via Claude Code's own internal
+# officialMarketplaceAutoInstall* routine (visible in ~/.claude.json) or a
+# manual `marketplace add` run long ago — neither ever fires headlessly.
 #
 # Playwright (#158, 2026-08-06): the ruleset MANDATES a real browser for
 # verification (autonomous-verification.md's "ask the user to install
@@ -278,6 +288,68 @@ MANAGED_PLUGIN_CACHE_GLOBS = {
     "playwright@claude-plugins-official":
         "plugins/cache/claude-plugins-official/playwright/*/.mcp.json",
 }
+# Marketplace SOURCES for `claude plugin marketplace add` (issue: push:
+# plugin installs fail on fresh stream accounts — marketplace not
+# registered, 2026-08-06). A plugin's marketplace must be REGISTERED before
+# `claude plugin install X@Y` can find it — writing extraKnownMarketplaces
+# into settings.json alone is NOT enough (empirically verified in an
+# isolated scratch CLAUDE_CONFIG_DIR, CC 2.1.223: with only that JSON key
+# present, install still fails "not found in marketplace Y ... try `claude
+# plugin marketplace update`"; only `claude plugin marketplace add
+# <source>` — which clones the marketplace repo onto disk AND declares it
+# in user settings itself — makes install succeed). A long-lived account
+# (montalu, dev1/dev2) has this from an old interactive session or CC's own
+# `officialMarketplaceAutoInstall*` self-heal (confirmed present in
+# ~/.claude.json); a fresh stream account provisioned entirely headlessly
+# (montalu2/3/4, #263) never gets either, so `~/.claude/plugins/` doesn't
+# exist there at all. `claude plugin marketplace add` is idempotent
+# (confirmed live: re-running on an already-materialized marketplace
+# returns rc=0 "already on disk"), so it is safe to run unconditionally on
+# every install/push. Values are the `owner/repo` shorthand `claude plugin
+# marketplace add` accepts directly (confirmed live for both).
+OFFICIAL_MARKETPLACE_SOURCE = "anthropics/claude-plugins-official"
+MARKETPLACE_SOURCES = {
+    "caveman": CAVEMAN_MARKETPLACE_REPO,
+    "claude-plugins-official": OFFICIAL_MARKETPLACE_SOURCE,
+}
+
+
+def _marketplace_names_for(plugin_keys) -> set:
+    """Derive the set of marketplace NAMES a collection of `plugin@marketplace`
+    keys needs registered — from the keys themselves, so there is never a
+    second, driftable list of marketplace names to keep in sync by hand."""
+    return {key.split("@", 1)[1] for key in plugin_keys if "@" in key}
+
+
+def ensure_marketplace_registered(name: str) -> bool:
+    """Best-effort, idempotent `claude plugin marketplace add <source>` —
+    MUST run before any `claude plugin install X@<name>` on a fresh account
+    (see MARKETPLACE_SOURCES' docstring above for why writing
+    extraKnownMarketplaces alone is not sufficient). Returns True iff the
+    marketplace is known to be usable afterward (rc==0, or `name` is one
+    this repo doesn't manage a source for — nothing to do). Loud on
+    failure, never raises."""
+    import subprocess
+    source = MARKETPLACE_SOURCES.get(name)
+    if source is None:
+        return True
+    try:
+        r = subprocess.run(
+            ["claude", "plugin", "marketplace", "add", source],
+            capture_output=True, text=True, timeout=150,
+            env=_claude_cli_env())
+    except Exception as e:
+        print(f"    could not register marketplace {name} ({e})", file=sys.stderr)
+        return False
+    if r.returncode == 0:
+        return True
+    print(f"    could not register marketplace {name} (rc={r.returncode}): "
+          f"{(r.stderr or r.stdout).strip()[:200]}\n"
+          f"    Run manually: claude plugin marketplace add {source}",
+          file=sys.stderr)
+    return False
+
+
 # Hash-independent entry to caveman's statusline + the usage-limit/ticket/
 # account meter line (the standalone context-fill BAR was dropped, #223 --
 # the context size stays visible via the 'ctx <size> ~$<cost>' segment).
@@ -2364,14 +2436,27 @@ def cmd_install(args):
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
+    # A still-failing plugin install (after correct marketplace registration)
+    # is now a REQUIRED-step failure, not a silent best-effort one (issue:
+    # push: plugin installs fail on fresh stream accounts, 2026-08-06) — it
+    # latches `install_failed`, which turns "Install complete." into a loud
+    # non-zero exit below, per script-failure-policy. An unexpected
+    # EXCEPTION from either function stays non-fatal-to-the-whole-install
+    # (the outer try/except here guards against a bug in OUR OWN code, not
+    # against the plugin-marketplace failure this ticket is about — that
+    # case is already caught INSIDE each setup_* function and reflected in
+    # its own `ok` return value).
+    install_failed = False
     try:
-        maybe_setup_caveman()
+        if not maybe_setup_caveman():
+            install_failed = True
     except Exception as e:
         print(f"  caveman setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6b. managed baseline plugins: superpowers (the rules invoke its skills) ---
     try:
-        setup_managed_plugins()
+        if not setup_managed_plugins():
+            install_failed = True
     except Exception as e:
         print(f"  managed plugins setup error (non-fatal): {e}", file=sys.stderr)
 
@@ -2382,6 +2467,11 @@ def cmd_install(args):
         print(f"  discord notify check error (non-fatal): {e}", file=sys.stderr)
 
     print()
+    if install_failed:
+        print("Install FAILED — a managed plugin's marketplace registration "
+              "or install did not complete (see warnings above).",
+              file=sys.stderr)
+        sys.exit(1)
     print("Install complete. Restart Claude Code for changes to take effect.")
 
 
@@ -2797,16 +2887,29 @@ def _caveman_plugin_built() -> bool:
     return any(glob.glob(str(CLAUDE_DIR / g)) for g in CAVEMAN_CACHE_GLOBS)
 
 
-def setup_caveman():
+def setup_caveman() -> bool:
     """Keep the caveman plugin correctly wired on THIS machine (idempotent).
 
     1. write the stable statusline shim (hash-independent),
-    2. install the plugin if its cache is missing (best-effort, time-boxed),
-    3. reconcile settings.json (enable + marketplace + statusLine -> shim),
+    2. reconcile settings.json (enable + marketplace known + statusLine ->
+       shim) — runs BEFORE any install attempt below (issue: push: plugin
+       installs fail on fresh stream accounts, 2026-08-06 — this used to
+       run AFTER the install attempt, so its own settings write landed too
+       late to help),
+    3. if the plugin cache is missing: register the marketplace (idempotent
+       `claude plugin marketplace add` — see ensure_marketplace_registered()'s
+       docstring; writing extraKnownMarketplaces alone is not sufficient)
+       THEN install (best-effort, time-boxed); a failed registration skips
+       the install attempt entirely,
     4. seed a valid `.caveman-active` mode (preserve a valid user pick).
-    Non-fatal: prints the manual step on any failure rather than aborting install."""
+    Returns True iff nothing REQUIRED failed (marketplace registration +
+    install, when the cache was missing) — see setup_managed_plugins()'s
+    docstring for the fatal-vs-non-fatal split this return value encodes.
+    Every OTHER step here (shim write, settings reconcile, mode seed) stays
+    exactly as non-fatal-on-its-own as before."""
     import subprocess
     print("  Wiring caveman plugin (managed)")
+    ok = True
 
     # 1. stable shim — survives `claude plugin update` cache-hash churn.
     try:
@@ -2815,31 +2918,14 @@ def setup_caveman():
     except OSError as e:
         print(f"    could not write caveman shim ({e})", file=sys.stderr)
 
-    # 2. install if the plugin cache is missing (best-effort).
-    if not _caveman_plugin_built():
-        try:
-            r = subprocess.run(
-                ["claude", "plugin", "install", CAVEMAN_PLUGIN_KEY],
-                capture_output=True, text=True, timeout=120,
-                env=_claude_cli_env())
-            if r.returncode == 0:
-                print(f"    installed {CAVEMAN_PLUGIN_KEY}")
-            else:
-                print(f"    could not install {CAVEMAN_PLUGIN_KEY} (rc={r.returncode}): "
-                      f"{(r.stderr or r.stdout).strip()[:200]}\n"
-                      f"    Run manually: claude plugin install {CAVEMAN_PLUGIN_KEY}",
-                      file=sys.stderr)
-        except Exception as e:
-            print(f"    caveman install skipped ({e}); run: "
-                  f"claude plugin install {CAVEMAN_PLUGIN_KEY}", file=sys.stderr)
-
-    # 3. reconcile settings.json (runs AFTER the main settings write in cmd_install).
+    # 2. reconcile settings.json FIRST.
     raw = read_file_safe(SETTINGS_JSON)
     try:
         settings = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         print("    settings.json invalid JSON — skipped caveman reconcile", file=sys.stderr)
         settings = None
+        ok = False
     if settings is not None:
         new_str = json.dumps(reconcile_caveman_settings(settings), indent=2) + "\n"
         if new_str.strip() != raw.strip():
@@ -2850,8 +2936,44 @@ def setup_caveman():
         else:
             print("    settings.json: already correct")
 
+    # 3. register the marketplace THEN install if the plugin cache is missing.
+    if not _caveman_plugin_built():
+        market = CAVEMAN_PLUGIN_KEY.split("@", 1)[1]
+        if not ensure_marketplace_registered(market):
+            ok = False
+        else:
+            try:
+                r = subprocess.run(
+                    ["claude", "plugin", "install", CAVEMAN_PLUGIN_KEY],
+                    capture_output=True, text=True, timeout=120,
+                    env=_claude_cli_env())
+                if r.returncode == 0:
+                    print(f"    installed {CAVEMAN_PLUGIN_KEY}")
+                else:
+                    print(f"    could not install {CAVEMAN_PLUGIN_KEY} (rc={r.returncode}): "
+                          f"{(r.stderr or r.stdout).strip()[:200]}\n"
+                          f"    Run manually: claude plugin install {CAVEMAN_PLUGIN_KEY}",
+                          file=sys.stderr)
+                    ok = False
+            except Exception as e:
+                print(f"    caveman install skipped ({e}); run: "
+                      f"claude plugin install {CAVEMAN_PLUGIN_KEY}", file=sys.stderr)
+                ok = False
+
     # 4. seed a valid mode (preserve a valid user choice).
-    existing = CAVEMAN_MODE_FILE.read_text() if CAVEMAN_MODE_FILE.exists() else None
+    # Adversarial-review MINOR finding: this read used to sit OUTSIDE any
+    # try/except — an OSError here (e.g. the mode file replaced by a
+    # directory) would propagate straight out of setup_caveman() UNCAUGHT,
+    # past cmd_install()'s own outer try/except (which just prints
+    # "(non-fatal)"), silently losing any `ok = False` step 3 already
+    # recorded and letting "Install complete." ship anyway. Never touches
+    # `ok` itself — a mode-read failure alone stays non-fatal, exactly as
+    # before; it just can no longer SWALLOW a real tracked failure.
+    try:
+        existing = CAVEMAN_MODE_FILE.read_text() if CAVEMAN_MODE_FILE.exists() else None
+    except OSError as e:
+        print(f"    could not read caveman mode ({e})", file=sys.stderr)
+        existing = None
     mode = caveman_mode_or_default(existing)
     if existing is None or existing.strip() != mode:
         try:
@@ -2860,10 +2982,12 @@ def setup_caveman():
         except OSError as e:
             print(f"    could not write caveman mode ({e})", file=sys.stderr)
 
+    return ok
 
-def maybe_setup_caveman():
+
+def maybe_setup_caveman() -> bool:
     """Wire the caveman plugin on this machine (every host)."""
-    setup_caveman()
+    return setup_caveman()
 
 
 # ---------------------------------------------------------------------------
@@ -2970,7 +3094,11 @@ def ensure_claude_cli_installed(env: dict = None):
 
 def reconcile_managed_plugins(settings: dict) -> dict:
     """Pure: return a new settings dict with every managed baseline plugin
-    enabled, and every MANAGED_DISABLED_PLUGINS key forced off (#39 item 3).
+    enabled, every MANAGED_DISABLED_PLUGINS key forced off (#39 item 3), and
+    every marketplace those plugins live in REGISTERED in
+    extraKnownMarketplaces (belt-and-suspenders alongside `claude plugin
+    marketplace add` in setup_managed_plugins() — a fresh account has no
+    marketplace registered at all otherwise; see MARKETPLACE_SOURCES).
     Every other key preserved untouched; idempotent."""
     result = dict(settings)
     enabled = dict(result.get("enabledPlugins", {}))
@@ -2979,6 +3107,12 @@ def reconcile_managed_plugins(settings: dict) -> dict:
     for key in MANAGED_DISABLED_PLUGINS:
         enabled[key] = False
     result["enabledPlugins"] = enabled
+    markets = dict(result.get("extraKnownMarketplaces", {}))
+    for name in _marketplace_names_for(MANAGED_PLUGINS):
+        repo = MARKETPLACE_SOURCES.get(name)
+        if repo is not None:
+            markets[name] = {"source": {"source": "github", "repo": repo}}
+    result["extraKnownMarketplaces"] = markets
     return result
 
 
@@ -3030,17 +3164,73 @@ def ensure_playwright_browsers(cache_dir: Path = None):
               "run manually: npx playwright install chromium" % e, file=sys.stderr)
 
 
-def setup_managed_plugins():
+def setup_managed_plugins() -> bool:
     """Ensure the managed baseline plugins are installed + enabled (idempotent).
 
-    1. install any plugin whose cache is missing (best-effort, time-boxed),
-    2. reconcile settings.json (enabledPlugins keys true).
-    Non-fatal: prints the manual step on failure rather than aborting install."""
+    1. reconcile settings.json (enabledPlugins keys true + marketplaces
+       registered) — runs FIRST, before any install attempt below (issue:
+       push: plugin installs fail on fresh stream accounts, 2026-08-06 —
+       reconciling AFTER install, as this used to, means the settings write
+       lands too late to help the very install call it's meant to unblock),
+    2. for every plugin whose cache is missing: register its marketplace
+       (idempotent `claude plugin marketplace add` — see
+       ensure_marketplace_registered()'s docstring) THEN install it
+       (best-effort, time-boxed). Installing without a registered
+       marketplace only reproduces the "not found in marketplace" failure,
+       so a failed registration skips that plugin's install attempt
+       entirely rather than trying anyway.
+    Returns True iff nothing REQUIRED failed (marketplace registration and
+    install, for every plugin whose cache was missing) — a still-failing
+    plugin install after correct marketplace registration is a genuine
+    failure the caller (cmd_install) turns into a non-zero exit, per
+    script-failure-policy. The other best-effort step here
+    (ensure_playwright_browsers) is unaffected — it stays exactly as
+    non-fatal as it already was."""
     import subprocess
     print("  Wiring managed baseline plugins")
+    ok = True
 
+    raw = read_file_safe(SETTINGS_JSON)
+    try:
+        settings = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        print("    settings.json invalid JSON — skipped plugin reconcile",
+              file=sys.stderr)
+        settings = None
+        ok = False
+    if settings is not None:
+        new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
+        if new_str.strip() != raw.strip():
+            if SETTINGS_JSON.exists():
+                shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
+            SETTINGS_JSON.write_text(new_str)
+            print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
+        else:
+            print("    settings.json: already correct")
+
+    market_ok = {}
     for key in MANAGED_PLUGINS:
+        # Adversarial-review MINOR finding: `_marketplace_names_for`
+        # deliberately tolerates a bare (no "@") key, but a bare key ALSO
+        # has no MANAGED_PLUGIN_CACHE_GLOBS entry — a raw KeyError inside
+        # `_managed_plugin_built()` (called next) would be swallowed by
+        # cmd_install()'s own outer try/except as "(non-fatal)", with
+        # `ok`/`install_failed` never set, silently reporting "Install
+        # complete." Check BEFORE that call, not after. A bare key is a
+        # real misconfiguration of MANAGED_PLUGINS; report it loudly and
+        # keep processing the rest.
+        if "@" not in key:
+            print(f"    skipping malformed plugin key {key!r} (missing "
+                  f"'@marketplace')", file=sys.stderr)
+            ok = False
+            continue
         if _managed_plugin_built(key):
+            continue
+        market = key.split("@", 1)[1]
+        if market not in market_ok:
+            market_ok[market] = ensure_marketplace_registered(market)
+        if not market_ok[market]:
+            ok = False
             continue
         try:
             r = subprocess.run(
@@ -3054,27 +3244,14 @@ def setup_managed_plugins():
                       f"{(r.stderr or r.stdout).strip()[:200]}\n"
                       f"    Run manually: claude plugin install {key}",
                       file=sys.stderr)
+                ok = False
         except Exception as e:
             print(f"    {key} install skipped ({e}); run: "
                   f"claude plugin install {key}", file=sys.stderr)
-
-    raw = read_file_safe(SETTINGS_JSON)
-    try:
-        settings = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
-        print("    settings.json invalid JSON — skipped plugin reconcile",
-              file=sys.stderr)
-        return
-    new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
-    if new_str.strip() != raw.strip():
-        if SETTINGS_JSON.exists():
-            shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
-        SETTINGS_JSON.write_text(new_str)
-        print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
-    else:
-        print("    settings.json: already correct")
+            ok = False
 
     ensure_playwright_browsers()
+    return ok
 
 
 def _filedrop_serve():
@@ -4272,11 +4449,22 @@ def _notify_run_card(args, compose_autopilot_card, send):
 # step after the point it was killed (managed plugins, file-drop, the
 # api-watchdog timer) would simply never execute on that remote — silently,
 # since the timeout branch below reports it as a plain timeout, not as
-# "install ran partway and was killed". 900s gives real headroom over the
-# worst-case inner sum. A remote whose ssh call genuinely can't complete
-# inside this window still gets caught below (subprocess.TimeoutExpired),
-# never crashes the whole push loop.
-REMOTE_DEPLOY_TIMEOUT_S = 900
+# "install ran partway and was killed". A remote whose ssh call genuinely
+# can't complete inside this window still gets caught below
+# (subprocess.TimeoutExpired), never crashes the whole push loop.
+#
+# Re-sized (adversarial review, plugin-marketplace fix, 2026-08-06):
+# ensure_marketplace_registered() adds up to TWO more 150s calls on a fresh
+# account (caveman's marketplace + the shared, market_ok-cached
+# claude-plugins-official one covering both superpowers and playwright's
+# own installs). Worst-case inner sum in sequence: apt-get(300) + claude
+# CLI curl(180) + caveman marketplace-add(150) + caveman install(120) +
+# managed-plugins marketplace-add(150) + superpowers install(180) +
+# playwright install(180) + npx playwright browsers(300) = 1560s. 1800s
+# gives real headroom over that (see
+# tests/test_dev_env_provisioning.py::TestPushRemoteDeployTimeoutAndStderr
+# for the exact sum this must stay above).
+REMOTE_DEPLOY_TIMEOUT_S = 1800
 
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
@@ -4456,23 +4644,38 @@ def cmd_push(args):
         sys.exit(1)
     print(f"  {result.stdout.strip() or result.stderr.strip()}")
 
+    # #263: `failed` accumulates every remote (and now the local install
+    # itself) that did NOT deploy cleanly. An adversarial review of the
+    # first version of this timeout fix caught a real regression it
+    # introduced: BEFORE, an uncaught TimeoutExpired propagated out of
+    # cmd_push() with a loud traceback and a non-zero exit — impossible to
+    # miss. The `continue` below (needed so one slow remote can't abort
+    # deployment to every REMAINING host) turned that into a single line
+    # among hundreds, with the run still ending "All deployments complete."
+    # at exit 0 — a SILENT partial deploy. Tracking every failure and
+    # exiting non-zero if any occurred restores the "impossible to miss"
+    # property without reintroducing the abort-the-whole-loop defect.
+    failed = []
+
     # 2. Install locally
+    # Adversarial-review CRITICAL finding (plugin-marketplace fix,
+    # 2026-08-06): cmd_install() can now sys.exit(1) on a still-failing
+    # managed-plugin install (script-failure-policy). Left uncaught here,
+    # that SystemExit propagated straight out of cmd_push() BEFORE the
+    # remote-deploy loop below ever ran — git had ALREADY pushed to
+    # GitHub by this point, so main would advance and ZERO of the 9 remote
+    # hosts (including montalu2/montalu3/montalu4, the very accounts this
+    # fix exists for) would ever deploy it. Give the local step the exact
+    # same "track it, keep going" treatment the remote loop already gets.
     print("\nInstalling locally...")
-    cmd_install(args)
+    try:
+        cmd_install(args)
+    except SystemExit as e:
+        if e.code:
+            print(f"  FAILED: local install exited {e.code} — continuing to remotes")
+            failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     # 3. Deploy to each remote
-    # #263: `failed` accumulates every remote that did NOT deploy cleanly.
-    # An adversarial review of the first version of this timeout fix caught
-    # a real regression it introduced: BEFORE, an uncaught TimeoutExpired
-    # propagated out of cmd_push() with a loud traceback and a non-zero
-    # exit — impossible to miss. The `continue` below (needed so one slow
-    # remote can't abort deployment to every REMAINING host) turned that
-    # into a single line among hundreds, with the run still ending "All
-    # deployments complete." at exit 0 — a SILENT partial deploy. Tracking
-    # every failure and exiting non-zero if any occurred restores the
-    # "impossible to miss" property without reintroducing the abort-the-
-    # whole-loop defect.
-    failed = []
     for remote in REMOTE_HOSTS:
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")

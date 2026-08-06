@@ -626,7 +626,18 @@ class TestPushRemoteDeployTimeoutAndStderr(TestCase):
         # gets killed mid-install on exactly the fresh-account case this
         # whole ticket is about, silently skipping every step after the
         # kill point (managed plugins, file-drop, the watchdog timer).
-        worst_case_inner_sum = 300 + 180 + 300
+        #
+        # Adversarial-review finding (plugin-marketplace fix, 2026-08-06):
+        # ensure_marketplace_registered() adds up to TWO more 150s calls on
+        # a fresh account -- one for caveman's marketplace, one (shared,
+        # market_ok-cached) for claude-plugins-official, which also covers
+        # BOTH superpowers and playwright's own install() calls (180s each).
+        # Sum every inner best-effort timeout a single fresh-account remote
+        # install can burn through in sequence: apt-get(300) + claude CLI
+        # curl(180) + caveman marketplace-add(150) + caveman install(120) +
+        # managed-plugins marketplace-add(150) + superpowers install(180) +
+        # playwright install(180) + npx playwright browsers(300) = 1560s.
+        worst_case_inner_sum = 300 + 180 + 150 + 120 + 150 + 180 + 180 + 300
         self.assertGreater(airuleset.REMOTE_DEPLOY_TIMEOUT_S, worst_case_inner_sum)
 
     def test_cmd_push_uses_the_named_timeout_constant(self):
