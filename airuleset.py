@@ -4254,7 +4254,7 @@ def cmd_compact_request(args):
             sys.exit(1)
         sys.stdout.write(word)
         return
-    from watchdog import (record_compact_request, deliver_compact_now,
+    from watchdog import (record_compact_request, deliver_compact_record,
                           clear_compact_request, compact_already_delivered,
                           mark_compact_delivered)
     if getattr(args, "record", False):
@@ -4265,23 +4265,24 @@ def cmd_compact_request(args):
             sys.stdout.write("dup")
             return
         # #250 -- capture the SAME `ts` used for the record call and thread
-        # it into `deliver_compact_now` as `request_ts=`, so its own
+        # it into `deliver_compact_record` as `request_ts=`, so its own
         # grace-bound live-tasks check (`_compact_live_tasks_in_grace`)
-        # measures age from the request this exact call just recorded --
-        # see that function's own docstring for why this is always
-        # in-grace in practice (called synchronously, moments after the
-        # record above).
+        # measures age from the request this exact call just recorded.
+        #
+        # #238 adversarial review 🔴1 -- this used to call
+        # `deliver_compact_now` ONCE with `now=req_now` (the SAME instant
+        # `request_ts` was captured at), which made the min-request-age
+        # gate an unconditional off-switch for every real call (age was
+        # always exactly 0.0). `deliver_compact_record` retries with a
+        # FRESH `now` for a few real seconds instead.
         req_now = time.time()
         ok = record_compact_request(args.session, args.cwd, now=req_now,
                                     msg_hash=msg_hash, origin=origin)
         if not ok:
             sys.stdout.write("skip")
             return
-        try:
-            delivered = deliver_compact_now(args.session, args.cwd, origin=origin,
-                                            request_ts=req_now, now=req_now)
-        except Exception:
-            delivered = ""
+        delivered = deliver_compact_record(args.session, args.cwd, origin=origin,
+                                           request_ts=req_now)
         if delivered:
             clear_compact_request(args.session)
             if msg_hash:

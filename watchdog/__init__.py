@@ -6469,15 +6469,18 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `"queued-compact"` — the pane already holds an unexecuted `/compact`.
     `"dropped-no-work"` — the #99 gate: zero commits since the anchor.
     `"dropped-small-context"` — the #48 gate: context too small to bother.
-    `"dropped-thin-context"` — the #238 gate: zero real assistant activity
-    since the last compact_boundary (the "Not enough messages" shape).
     Returns `""` (falsy) when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
     block (#102 — `_compact_blocked_by_question`), the session STILL has
     live background work of its own (#246 —
-    `_session_has_live_bg_tasks`, checked LAST, right before the send), or
+    `_session_has_live_bg_tasks`, checked LAST, right before the send), the
+    #238 thin-context gate reads zero real assistant activity since the
+    last compact_boundary (the "Not enough messages" shape — #238-review
+    🟡3: this SYNCHRONOUS path defers rather than drops, since the read
+    can be a false zero from a not-yet-flushed transcript; job 14's own
+    later re-check is what actually consumes a genuine thin boundary), or
     — the one case this function deliberately stays conservative on — the
     pane holds a genuine unsent DRAFT (job 14's `_compact_stash_attempt`,
     #67, handles that on retry; a synchronous multi-round-trip stash dance
@@ -6585,9 +6588,19 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # before the #99/#48 gates, and before a claim is ever set, so a request
     # this drops here strands NOTHING for `compact_claim_active`'s TTL
     # fallback to have to clean up later.
+    #
+    # #238-review 🟡3 -- this SYNCHRONOUS path runs moments after the
+    # triggering message was written, when the session's own transcript
+    # write may not have flushed to disk yet -- a "zero real assistant
+    # activity" read here can be a FALSE zero from an unflushed file, not
+    # a genuine thin boundary. Returning "" (falsy, non-consuming) defers
+    # to job 14's polled ~60s-later re-check instead of trusting this
+    # read as final; job 14's OWN thin-context branch (see its section
+    # comment) keeps consuming the request on a positive read, since by
+    # then the transcript has had time to catch up.
     if _compact_thin_context(cwd, sid, projects_dir=projects_dir):
-        _log_compact_sync("DROP thin-context sid=%s cwd=%s" % (sid, cwd))
-        return "dropped-thin-context"
+        _log_compact_sync("SKIP thin-context sid=%s cwd=%s" % (sid, cwd))
+        return ""
     # #126 -- a request carrying its OWN proof of a boundary
     # (`origin=="subagent-stop"`) is EXEMPT from BOTH substantiality
     # heuristics below (#99 and #48). Both exist only to GUESS whether an
@@ -6654,21 +6667,26 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
             _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
             return ""
         grace_elapsed = True
-    elif (origin != _COMPACT_SELF_CALLBACK_ORIGIN
-          and _compact_request_too_young(request_ts, now_ts)):
+    elif _compact_request_too_young(request_ts, now_ts):
         # #238 -- close the same-turn dispatch race: a "no live tasks"
         # verdict this fresh is not yet trustworthy (see
         # `_compact_request_too_young`'s own docstring). Left in place —
-        # job 14's polled retry re-checks well past this window.
+        # the CALLER retries (both `deliver_compact_self` and
+        # `deliver_compact_record` hold briefly and re-attempt with a
+        # FRESH `now`, so `request_ts` stays fixed while age genuinely
+        # grows across retries), or job 14's polled retry re-checks well
+        # past this window if the hold itself expires first.
         #
-        # `self-callback` is EXEMPT: that origin's own protocol
-        # (`skills/autopilot/SKILL.md`'s "do NOT dispatch the next issue in
-        # the same turn") structurally prevents the exact race this gate
-        # defends against — nothing new is ever dispatched in the same turn
-        # as `compact-request --self` — so gating it too would only add
-        # latency to a hold/retry loop the user explicitly wants fast
-        # ("holds briefly until it lands", #225), with no matching safety
-        # gain. `subagent-stop` and every other origin keep the gate.
+        # #238 adversarial-review (🟡6): no origin is exempt any more. The
+        # earlier `self-callback` exemption rested on that origin's own
+        # protocol never dispatching in the same turn — true, but (a) it
+        # is a PROSE constraint nothing enforces, defeated by a parallel
+        # tool-call batch, and (b) it was solving a problem that no
+        # longer exists once the caller genuinely retries: self-callback
+        # already re-attempts with a fresh `now_fn()` every
+        # `retry_interval`, so its own SECOND attempt (a few seconds
+        # later) clears this gate on real elapsed time, no exemption
+        # needed. One gate, every origin, no prose to keep correct.
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return ""
     send_continue(pid, COMPACT_TEXT, run)
@@ -6735,6 +6753,92 @@ def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
 
 COMPACT_SELF_HOLD_DEFAULT_S = 60
 COMPACT_SELF_RETRY_INTERVAL_S = 5
+
+
+def _compact_retry_until(attempt_fn, hold_s, retry_interval, clock_fn=None,
+                         sleep_fn=None):
+    """Call `attempt_fn()` (no args, returns a `deliver_compact_now`-shaped
+    disposition word or a falsy value) repeatedly until it returns truthy
+    or `hold_s` elapses, bounded on a MONOTONIC clock (#225-review: a
+    wall-clock hold is sensitive to a backward NTP step, which would
+    silently extend it). Returns the truthy word, or `""` if the hold
+    elapses with nothing landing -- never raises (an exception from
+    `attempt_fn` is treated as a falsy attempt, exactly like a caught
+    exception around a single `deliver_compact_now` call always was).
+
+    Shared by `deliver_compact_self` (60s hold, self-callback origin) and
+    `deliver_compact_record` (#238 adversarial review 🔴1 -- a SHORT hold
+    for the plain --record path, whose caller passes `request_ts == now`
+    on every real invocation, making `_compact_request_too_young` an
+    unconditional off-switch for that path without a genuine retry)."""
+    clock_fn = clock_fn or time.monotonic
+    sleep_fn = sleep_fn or time.sleep
+    deadline = clock_fn() + max(0.0, hold_s)
+    while True:
+        try:
+            word = attempt_fn()
+        except Exception:
+            word = ""
+        if word:
+            return word
+        now = clock_fn()
+        if now >= deadline:
+            return ""
+        sleep_fn(min(retry_interval, deadline - now))
+
+
+# #238 adversarial review 🔴1 (2026-08-06) -- the SAME bounded hold/retry
+# shape `deliver_compact_self` already used, for the PLAIN (non-self)
+# synchronous path (`cmd_compact_request --record`, called from the Stop /
+# SubagentStop hooks). Live-measured against this box's own real
+# `compact-decisions.log`: `cmd_compact_request` always captures ONE
+# `time.time()` read and passes it as BOTH `record_compact_request`'s `now=`
+# and `deliver_compact_now`'s `request_ts=`/`now=` -- so without a genuine
+# retry, `_compact_request_too_young`'s age is exactly 0.0 on every single
+# real call, meaning the min-request-age gate silently became an
+# UNCONDITIONAL off-switch for this whole path (18 of 87 real sends on this
+# box alone would have moved to job 14's slower poll, some of which lapse
+# entirely on the plain Stop-hook channel). A SHORT hold (a few seconds,
+# NOT self-callback's 60s -- this runs synchronously inside a Stop/
+# SubagentStop hook, which must return promptly) with a fresh `now_fn()` on
+# every retry gives the same-turn-dispatch race's own proxy signals
+# (`_session_has_live_bg_tasks`) a real chance to catch up, which is the
+# entire point of the gate.
+COMPACT_RECORD_HOLD_DEFAULT_S = 3.0   # env AIRULESET_COMPACT_RECORD_HOLD_S
+COMPACT_RECORD_RETRY_INTERVAL_S = 0.5
+
+
+def deliver_compact_record(sid, cwd, origin=None, request_ts=None, run=None,
+                           projects_dir=None, min_context=None, git_run=None,
+                           hold_s=None, retry_interval=None, now_fn=None,
+                           sleep_fn=None, clock_fn=None):
+    """`cmd_compact_request --record`'s own delivery attempt (see the
+    section comment above) -- a bounded hold/retry around
+    `deliver_compact_now`, re-evaluating with a FRESH `now_fn()` on every
+    attempt while `request_ts` stays fixed at the caller's own recorded
+    timestamp, so real elapsed time (not a single instantaneous read)
+    decides whether the min-request-age gate clears.
+
+    Returns whatever `deliver_compact_now` returns once truthy, or `""` if
+    the (short) hold elapses with nothing landing -- the caller's existing
+    contract (`""` means "leave the request recorded for job 14's polled
+    retry") is unchanged, this function just gives that first attempt a
+    real few seconds instead of exactly none."""
+    now_fn = now_fn or time.time
+    if hold_s is None:
+        try:
+            hold_s = float(os.environ.get("AIRULESET_COMPACT_RECORD_HOLD_S",
+                                          COMPACT_RECORD_HOLD_DEFAULT_S))
+        except ValueError:
+            hold_s = COMPACT_RECORD_HOLD_DEFAULT_S
+    if retry_interval is None:
+        retry_interval = COMPACT_RECORD_RETRY_INTERVAL_S
+    return _compact_retry_until(
+        lambda: deliver_compact_now(sid, cwd, run=run, projects_dir=projects_dir,
+                                    min_context=min_context, git_run=git_run,
+                                    origin=origin, request_ts=request_ts,
+                                    now=now_fn()),
+        hold_s, retry_interval, clock_fn=clock_fn, sleep_fn=sleep_fn)
 
 
 def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
@@ -6807,23 +6911,16 @@ def deliver_compact_self(run=None, projects_dir=None, pane_env=None,
     record_ts = now_fn()
     record_compact_request(sid, cwd, now=record_ts,
                            origin=_COMPACT_SELF_CALLBACK_ORIGIN)
-    deadline = clock_fn() + max(0.0, hold_s)
-    while True:
-        try:
-            word = deliver_compact_now(sid, cwd, run=run,
-                                       projects_dir=projects_dir,
-                                       min_context=min_context, git_run=git_run,
-                                       origin=_COMPACT_SELF_CALLBACK_ORIGIN,
-                                       request_ts=record_ts, now=now_fn())
-        except Exception:
-            word = ""
-        if word:
-            clear_compact_request(sid)
-            return word, sid
-        now = clock_fn()
-        if now >= deadline:
-            return "recorded", sid
-        sleep_fn(min(retry_interval, deadline - now))
+    word = _compact_retry_until(
+        lambda: deliver_compact_now(sid, cwd, run=run, projects_dir=projects_dir,
+                                    min_context=min_context, git_run=git_run,
+                                    origin=_COMPACT_SELF_CALLBACK_ORIGIN,
+                                    request_ts=record_ts, now=now_fn()),
+        hold_s, retry_interval, clock_fn=clock_fn, sleep_fn=sleep_fn)
+    if word:
+        clear_compact_request(sid)
+        return word, sid
+    return "recorded", sid
 
 
 # --------------------------------------------------------------------------- #
