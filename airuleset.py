@@ -4238,17 +4238,29 @@ def cmd_gk_request(args):
     r = _gh(["gh", "issue", "create", "--title", title] + B + R)
     if r.returncode == 0:
         new_num = (r.stdout or "").strip().rsplit("/", 1)[-1]
-        labeled = new_num.isdigit() and _gh(
-            ["gh", "issue", "edit", new_num, "--add-label",
-             "needs-gatekeeper"] + R).returncode == 0
-        if stream_label and new_num.isdigit() and \
-                _ensure_origin_label_usable(_gh, stream_label, R):
+        # #221 adversarial review, MAJOR: an unparseable issue number must
+        # NEVER fall through to a false "filed" success — that used to
+        # short-circuit BOTH the label-add and the retitle attempt
+        # (both were gated on `new_num.isdigit()`), silently reproducing
+        # the same invisible-escalation class this whole fix exists to
+        # kill. We cannot verify or fix up the escalation's visibility
+        # without a real issue number to `gh issue edit`, so fail loudly
+        # immediately rather than guess.
+        if not new_num.isdigit():
+            print("gk-request FAILED: create reported success but no "
+                  "parseable issue number in its output (%r) — cannot "
+                  "verify or fix up the escalation's visibility"
+                  % r.stdout.strip())
+            return 1
+        labeled = _gh(["gh", "issue", "edit", new_num, "--add-label",
+                       "needs-gatekeeper"] + R).returncode == 0
+        if stream_label and _ensure_origin_label_usable(_gh, stream_label, R):
             origin = _gh(["gh", "issue", "edit", new_num, "--add-label",
                          stream_label] + R)
             if origin.returncode != 0:
                 print("gk-request: could not apply origin label %r to #%s: %s"
                       % (stream_label, new_num, (origin.stderr or "").strip()))
-        if not labeled and new_num.isdigit():
+        if not labeled:
             ft = (title if title.startswith("GATEKEEPER-ACTION:")
                   else "GATEKEEPER-ACTION: " + title)
             retitled = ft == title or _gh(
