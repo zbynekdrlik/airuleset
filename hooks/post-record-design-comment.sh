@@ -91,7 +91,13 @@ def _log_exception(where, exc):
         log_path = os.path.join(os.path.expanduser("~"), ".claude",
                                  "design-gate-errors.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as fh:
+        # O_NOFOLLOW so a planted symlink at this path is never written
+        # THROUGH (this repo's own established vault-store/draft-rescue
+        # discipline for any new on-disk writer); the boxes this hook runs
+        # on host foreign uids by design.
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND |
+                     os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write("%s\t%s\t%s\t%r\n" % (
                 datetime.datetime.now(datetime.timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -120,8 +126,23 @@ try:
     if not matches:
         sys.exit(0)
 
-    mrepo = re.search(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
-    explicit_repo = mrepo.group(1) if mrepo else None
+    # Adversarial-review finding: `-R`/`--repo` is resolved ONCE and shared
+    # across every issue in the loop below -- correct for the realistic,
+    # reported shape (the SAME repo repeated on every call), but a command
+    # naming TWO DIFFERENT repos would otherwise write a LATER issue's
+    # marker under an EARLIER issue's (wrong) repo, silently unblocking a
+    # commit gate that was never actually satisfied. Refuse the whole
+    # command rather than guess which repo each issue belongs to -- this
+    # hook has no per-segment command parser, and never guessing is safer
+    # than resolving to a plausible-looking wrong repo.
+    mrepos = re.findall(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
+    distinct_repos = set(mrepos)
+    if len(distinct_repos) > 1:
+        _log_exception("ambiguous-repo", ValueError(
+            "multiple distinct -R/--repo values in one command: %r"
+            % sorted(distinct_repos)))
+        sys.exit(0)
+    explicit_repo = mrepos[0] if mrepos else None
 
     if explicit_repo:
         repo_key = explicit_repo.rstrip("/").split("/")[-1]
