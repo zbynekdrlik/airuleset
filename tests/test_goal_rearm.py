@@ -1210,6 +1210,72 @@ class TestGoalTemplateDrift(GoalDriftBase):
                         logs)
 
 
+class TestGoalDriftRespectsHandEdits(GoalDriftBase):
+    """#186 — the live incident: the user hand-widened a variant's stop
+    condition. The armed text now matches NO current template, but `tvar`
+    is still set from the earlier observation that it once did — the old
+    code read that mismatch as drift (indistinguishable from a real template
+    push) and silently retyped the shipped text over the user's edit."""
+
+    def test_a_hand_edited_goal_is_never_reverted(self):
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = (TPL_FULL[:-1] + ', and also count a ticket only the '
+                       'supervisor box can action as done.')
+        tmux, logs = self._sweep(hand_edited[len("/goal "):], templates_path=tp,
+                                 state=state)
+        self.assertFalse(tmux.typed(),
+                         "a deliberate hand-edit must never be retyped over")
+
+    def test_the_hand_edit_reason_is_logged_once_not_every_sweep(self):
+        state, seen = {}, []
+        tp = self._templates(TPL_FULL)
+        seen += self._sweep(TPL_FULL[len("/goal "):], templates_path=tp,
+                            state=state)[1]
+        hand_edited = TPL_FULL[:-1] + ', and never stop on a bare backlog count.'
+        seen += self._sweep(hand_edited[len("/goal "):], templates_path=tp,
+                            state=state)[1]
+        for _ in range(3):
+            seen += self._sweep(templates_path=tp, state=state)[1]
+        self.assertEqual(len([ln for ln in seen if "hand-edit" in ln]), 1,
+                         "a hand-edited goal must not spam the journal every "
+                         "sweep")
+
+    def test_a_hand_edit_survives_a_LATER_template_push_too(self):
+        """The mismatch persisting across a genuine template push must not
+        suddenly look like drift again — once the armed text has diverged
+        from what was last confirmed, only an EXACT match to a current
+        template re-establishes tracking."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also close it once merely reviewed.'
+        self._sweep(hand_edited[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2, TPL_BRANCH)          # a real push
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(),
+                         "a template push must not resurrect the reverted text "
+                         "for an already-hand-edited goal")
+
+    def test_returning_to_a_current_template_resumes_drift_tracking(self):
+        """Self-healing: if the user later types the shipped text exactly
+        (e.g. re-running `/autopilot`), the job resumes protecting it against
+        a real future template push."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also close a ticket the moment it ' \
+                                       'is merely reviewed.'
+        self._sweep(hand_edited[len("/goal "):], templates_path=tp, state=state)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp2 = self._templates(TPL_FULL_V2, TPL_BRANCH)
+        tmux, logs = self._sweep(templates_path=tp2, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+
+
 class TestGoalDriftRefusals(GoalDriftBase):
     def _drifted(self):
         """A tracked session whose template has since changed."""
