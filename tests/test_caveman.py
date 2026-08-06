@@ -8,6 +8,9 @@ idempotent enable/marketplace reconcile so a future edit can't reintroduce it.
 """
 
 import sys
+import tempfile
+import unittest.mock as m
+from io import StringIO
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -476,3 +479,73 @@ class TestCavemanNewCacheLayout(TestCase):
                 env={**os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("caveman:lite", r.stdout)
+
+
+class TestSetupCavemanRegistersMarketplaceBeforeInstall(TestCase):
+    """#273: caveman's OWN marketplace ("caveman") must be REGISTERED
+    (`claude plugin marketplace add`) before `claude plugin install
+    caveman@caveman` is attempted — a fresh account (montalu2/3/4) has no
+    marketplace known at all, so going straight to install reproduces the
+    reported "not found in marketplace caveman" failure."""
+
+    def _patched_dirs(self, d):
+        return (
+            m.patch.object(airuleset, "CLAUDE_DIR", d),
+            m.patch.object(airuleset, "SETTINGS_JSON", d / "settings.json"),
+            m.patch.object(airuleset, "CAVEMAN_SHIM_DEST", d / "shim.sh"),
+            m.patch.object(airuleset, "CAVEMAN_MODE_FILE", d / ".caveman-active"),
+        )
+
+    def test_registers_marketplace_before_installing_when_cache_missing(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = Path(tempfile.mkdtemp())
+        patches = self._patched_dirs(d)
+        with patches[0], patches[1], patches[2], patches[3], \
+                m.patch("subprocess.run", side_effect=fake_run):
+            ok = airuleset.setup_caveman()
+        self.assertTrue(ok)
+        add_calls = [c for c in calls if c[:3] == ["claude", "plugin", "marketplace"]]
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        self.assertTrue(add_calls, "marketplace add was never called")
+        self.assertTrue(install_calls, "plugin install was never called")
+        self.assertLess(calls.index(add_calls[0]), calls.index(install_calls[0]),
+                         "marketplace add must run BEFORE the install attempt")
+
+    def test_a_failed_marketplace_registration_skips_install_and_returns_false(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[:3] == ["claude", "plugin", "marketplace"]:
+                return m.Mock(returncode=1, stdout="", stderr="network down")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = Path(tempfile.mkdtemp())
+        patches = self._patched_dirs(d)
+        out = StringIO()
+        with patches[0], patches[1], patches[2], patches[3], \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.setup_caveman()
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        self.assertFalse(ok)
+        self.assertEqual(install_calls, [],
+                          "install must never be attempted once marketplace "
+                          "registration has failed")
+
+    def test_already_built_never_calls_marketplace_add(self):
+        d = Path(tempfile.mkdtemp())
+        cache_path = d / "plugins/cache/caveman/caveman/abcdef123/hooks/caveman-statusline.sh"
+        cache_path.parent.mkdir(parents=True)
+        cache_path.write_text("#!/usr/bin/env bash\n")
+        patches = self._patched_dirs(d)
+        with patches[0], patches[1], patches[2], patches[3], \
+                m.patch("subprocess.run") as run:
+            ok = airuleset.setup_caveman()
+        self.assertTrue(ok)
+        run.assert_not_called()

@@ -256,5 +256,176 @@ class TestPlaywrightBrowsers(TestCase):
         self.assertIn("playwright install chromium", out.getvalue())
 
 
+class TestMarketplaceSources(TestCase):
+    """#273: a fresh account (montalu2/montalu3/montalu4) has NO marketplaces
+    configured at all — `claude plugin install X@Y` fails "not found in
+    marketplace Y" until Y is REGISTERED (`claude plugin marketplace add`).
+    The set of marketplace NAMES needed is derived from MANAGED_PLUGINS
+    itself (never a second, driftable list of names); MARKETPLACE_SOURCES
+    supplies the one thing that can't be derived — each name's source."""
+
+    def test_every_marketplace_used_by_the_baseline_has_a_known_source(self):
+        for name in airuleset._marketplace_names_for(airuleset.MANAGED_PLUGINS):
+            self.assertIn(name, airuleset.MARKETPLACE_SOURCES)
+
+    def test_official_marketplace_source_matches_the_real_repo(self):
+        # Confirmed live (#273, isolated scratch CLAUDE_CONFIG_DIR, CC 2.1.223):
+        # `claude plugin marketplace add anthropics/claude-plugins-official`
+        # clones the real official marketplace successfully.
+        self.assertEqual(
+            airuleset.MARKETPLACE_SOURCES["claude-plugins-official"],
+            "anthropics/claude-plugins-official")
+
+    def test_marketplace_names_for_derives_from_the_keys(self):
+        self.assertEqual(
+            airuleset._marketplace_names_for(("a@x", "b@x", "c@y")),
+            {"x", "y"})
+
+    def test_marketplace_names_for_ignores_bare_keys(self):
+        self.assertEqual(airuleset._marketplace_names_for(("bare",)), set())
+
+
+class TestReconcileManagedPluginsRegistersMarketplace(TestCase):
+    def test_registers_claude_plugins_official(self):
+        out = airuleset.reconcile_managed_plugins({})
+        self.assertEqual(
+            out["extraKnownMarketplaces"]["claude-plugins-official"]["source"]["repo"],
+            airuleset.MARKETPLACE_SOURCES["claude-plugins-official"])
+
+    def test_preserves_existing_marketplace_entries(self):
+        settings = {"extraKnownMarketplaces":
+                    {"caveman": {"source": {"source": "github", "repo": "x/y"}}}}
+        out = airuleset.reconcile_managed_plugins(settings)
+        self.assertEqual(out["extraKnownMarketplaces"]["caveman"]["source"]["repo"], "x/y")
+        self.assertIn("claude-plugins-official", out["extraKnownMarketplaces"])
+
+    def test_idempotent_including_marketplaces(self):
+        once = airuleset.reconcile_managed_plugins({})
+        twice = airuleset.reconcile_managed_plugins(once)
+        self.assertEqual(once, twice)
+
+
+class TestEnsureMarketplaceRegistered(TestCase):
+    """`claude plugin marketplace add <source>` (#273) — confirmed live to be
+    idempotent (rc=0, "already on disk" on a re-run), so it is safe to call
+    unconditionally before every plugin-install attempt."""
+
+    def test_calls_marketplace_add_with_the_right_source(self):
+        with m.patch("subprocess.run", return_value=m.Mock(returncode=0, stdout="", stderr="")) as run:
+            ok = airuleset.ensure_marketplace_registered("claude-plugins-official")
+        self.assertTrue(ok)
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["claude", "plugin", "marketplace", "add",
+                                 airuleset.MARKETPLACE_SOURCES["claude-plugins-official"]])
+        self.assertIn("env", run.call_args.kwargs)
+
+    def test_reports_failure_loudly_and_returns_false(self):
+        out = StringIO()
+        with m.patch("subprocess.run",
+                     return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.ensure_marketplace_registered("claude-plugins-official")
+        self.assertFalse(ok)
+        self.assertIn("marketplace add", out.getvalue())
+
+    def test_exception_is_caught_and_returns_false(self):
+        out = StringIO()
+        with m.patch("subprocess.run", side_effect=FileNotFoundError("claude")), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.ensure_marketplace_registered("claude-plugins-official")
+        self.assertFalse(ok)
+
+    def test_unknown_marketplace_name_is_a_harmless_no_op(self):
+        with m.patch("subprocess.run") as run:
+            ok = airuleset.ensure_marketplace_registered("some-other-marketplace")
+        self.assertTrue(ok)
+        run.assert_not_called()
+
+
+class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
+    """#273: install must never be attempted before `claude plugin
+    marketplace add` for that plugin's marketplace has run — on a fresh
+    account, going straight to install reproduces the "not found in
+    marketplace" failure every time."""
+
+    def _empty_claude_dir(self):
+        return Path(tempfile.mkdtemp())
+
+    def test_registers_marketplace_before_installing_a_missing_plugin(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        add_calls = [c for c in calls if c[:3] == ["claude", "plugin", "marketplace"]]
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        self.assertTrue(add_calls, "marketplace add was never called")
+        self.assertTrue(install_calls, "plugin install was never called")
+        self.assertLess(calls.index(add_calls[0]), calls.index(install_calls[0]),
+                         "marketplace add must run BEFORE the first install attempt")
+
+    def test_a_failed_marketplace_registration_skips_the_install_and_fails(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if argv[:3] == ["claude", "plugin", "marketplace"]:
+                return m.Mock(returncode=1, stdout="", stderr="network down")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        out = StringIO()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.setup_managed_plugins()
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        self.assertFalse(ok)
+        self.assertEqual(install_calls, [],
+                          "install must never be attempted once its marketplace "
+                          "registration has failed")
+
+    def test_already_built_plugins_never_call_marketplace_add(self):
+        d = Path(tempfile.mkdtemp())
+        for glob_pat in airuleset.MANAGED_PLUGIN_CACHE_GLOBS.values():
+            p = d / Path(glob_pat.replace("*", "1.0.0"))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}")
+        settings_path = d / "settings.json"
+        playwright_cache = Path(tempfile.mkdtemp())
+        (playwright_cache / "chromium-1234").mkdir()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch("subprocess.run") as run:
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        run.assert_not_called()
+
+
+class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
+    """#273: a still-failing plugin install (after correct marketplace
+    registration) must fail the target's deploy loudly (non-zero exit),
+    consistent with script-failure-policy — not silently print "Install
+    complete." while a plugin never actually installed."""
+
+    def test_cmd_install_tracks_and_exits_on_plugin_setup_failure(self):
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("maybe_setup_caveman()", src)
+        self.assertIn("setup_managed_plugins()", src)
+        self.assertIn("install_failed", src)
+        self.assertIn("sys.exit(1)", src)
+
+
 if __name__ == "__main__":
     main()
