@@ -3925,6 +3925,42 @@ def _watchdog_delivery_probe(root, base):
     return None
 
 
+def _watchdog_backlog_fetch(cwd):
+    """#160 defect 1 / defect 4 — the count of OPEN, non-`autopilot-skip`
+    issues for the repo at `cwd`, or None on any failure.
+
+    Wired HERE, like every other network call in this file, so run_once's
+    unit tests stay network-free. Uses the plain (non-search) issue listing
+    deliberately, never `--search` -- #181 measured the SEARCH API silently
+    returning `[]` for a repo whose local checkout's remote had been renamed
+    (the search index does not follow a rename; the plain REST listing still
+    answers correctly), and this repo has already hit that exact shape live.
+    Labels are filtered client-side rather than via a search qualifier for
+    the same reason."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "open", "--json",
+             "number,labels", "-L", "1000"],
+            cwd=cwd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        rows = json.loads(r.stdout or "[]")
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    n = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        names = {lbl.get("name") for lbl in (row.get("labels") or [])
+                 if isinstance(lbl, dict)}
+        if "autopilot-skip" not in names:
+            n += 1
+    return n
+
+
 def _watchdog_vault_purge():
     """Job 29's credential-store sweep (#144) — the injection point so run_once
     never imports the store (or touches a real `~/.claude/secrets/`) in a test.
@@ -4124,6 +4160,12 @@ def cmd_watchdog(args):
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
                     git_fetch=_watchdog_git_fetch,
+                    # #160 defects 1/4 run on EVERY managed box — both are
+                    # per-repo `gh` reads (cached per cwd, 10-min TTL, so a
+                    # box with several panes on one repo costs at most one
+                    # extra call per window) consulted by job 20's
+                    # goal-achieved backstop and job 10's widened wedge ping.
+                    backlog_fetch=_watchdog_backlog_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

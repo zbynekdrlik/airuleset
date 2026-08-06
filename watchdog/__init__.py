@@ -445,6 +445,27 @@ def transcript_last_marker_line(path):
     return "", ""
 
 
+def transcript_last_assistant_text(path):
+    """FULL text of the session's last REAL assistant message (same
+    walk/skip semantics as `transcript_last_marker_line` — synthetic/
+    tool-only sentinels and an `isApiErrorMessage` entry are skipped), or
+    `''` if none. Unlike `transcript_last_marker_line` (which returns only
+    the tail-trimmed marker line), this returns the WHOLE message — job
+    20's goal-achieved backstop (#160) needs to scan it for a genuine
+    `🏁 BACKLOG EMPTY:` claim anywhere in the turn, not just its last 3
+    lines."""
+    for entry in reversed(_iter_jsonl_tail(path)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return ""
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
+        return text
+    return ""
+
+
 def subagent_active(transcript_path, now, window):
     """True if a SUBAGENT transcript of this session was written within `window`
     seconds — a dispatched worker / workflow is live, so the parent's `⏳ WORKING`
@@ -3562,6 +3583,52 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
 
 
 # --------------------------------------------------------------------------- #
+# #160 (2026-08-06) — SHARED cached "does this repo's own backlog still have
+# open, actionable work?" read, consulted by TWO jobs: job 20's
+# goal-achieved backstop (defect 1 — don't trust a false "✔ Goal achieved"
+# while tickets remain) and job 10's widened wedge ping (defect 4 — an
+# unsent draft blocking delivery while nothing runs and real work is
+# waiting IS worth a ping). One shared per-cwd cache in `state` means a repo
+# with several panes/sessions costs at most one `gh` call per TTL window,
+# never one per pane. `backlog_fetch(cwd)` (wired in airuleset.py, like
+# every other network call in this file, so tests stay network-free) returns
+# an int (possibly 0) or None on failure.
+# --------------------------------------------------------------------------- #
+
+BACKLOG_CHECK_INTERVAL_S = 10 * 60   # 10 min; a dead pane in this state can
+                                      # sit for HOURS (the whole point of
+                                      # both defects) — this bounds how often
+                                      # `gh` gets hit while it does
+
+
+def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
+    """True/False/None -- does the repo at `cwd` have an open, actionable
+    (non-`autopilot-skip`) issue backlog right now? Cached per `cwd` in
+    `state['backlog_cache']` for `ttl` (default `BACKLOG_CHECK_INTERVAL_S`)
+    seconds.
+
+    `backlog_fetch is None` (not wired) -> None, unconditionally, no cache
+    write -- same "wired = on" convention as every other injected fetch in
+    this file. None is UNMEASURABLE and every caller must treat it as
+    "cannot tell, do not act" -- never as either polarity (#166's
+    carried-forward fail-open requirement)."""
+    if backlog_fetch is None:
+        return None
+    ttl = BACKLOG_CHECK_INTERVAL_S if ttl is None else ttl
+    cache = state.setdefault("backlog_cache", {})
+    entry = cache.get(cwd)
+    if isinstance(entry, dict) and (now - entry.get("ts", 0)) < ttl:
+        return entry.get("open")
+    try:
+        count = backlog_fetch(cwd)
+    except Exception:
+        count = None
+    open_ = (count > 0) if isinstance(count, int) else None
+    cache[cwd] = {"ts": now, "open": open_}
+    return open_
+
+
+# --------------------------------------------------------------------------- #
 # /goal auto-arm (job 9, 2026-07-20) — the printed template pastes itself.
 # /autopilot and /process-subdev end by PRINTING the /goal template and asking
 # the user to paste it — the one manual step left in every stream ("dost mi
@@ -3619,7 +3686,8 @@ def _session_is_waiting(tpath, max_lines=50):
 
 
 def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
-                       send_fn, dry_run=False, run=None, waiting=True):
+                       send_fn, dry_run=False, run=None, waiting=True,
+                       cwd=None, backlog_fetch=None):
     """Job 10 (#20, reworked #35) — queued-prompt-wedge detection, PING-FIRST.
 
     Text sitting in the input box (a submitted-but-stuck queued prompt, or an
@@ -3647,7 +3715,19 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
         for `pid` regardless of the draft's hash changing (a re-wrap).
 
     Deliberately NO auto-Enter on a genuine foreign draft (the ticket's
-    decision — a machine must never submit a half-typed user draft)."""
+    decision — a machine must never submit a half-typed user draft).
+
+    #160 defect 4 (`cwd`/`backlog_fetch`, both optional): the `not waiting`
+    branch used to stay silent UNCONDITIONALLY — "tracked but nothing
+    urgent" — even though a session stuck this way (unsent draft, nothing
+    running, per the guard already above this branch) is worth a ping
+    whenever the repo's own backlog genuinely has open, actionable work
+    nobody else can reach while the draft blocks delivery. When
+    `backlog_fetch` is wired and `_cached_backlog_open` confirms the
+    backlog is non-empty, this falls through to the SAME ping path below
+    instead of returning silently. `cwd`/`backlog_fetch` left at their
+    default `None` (every pre-#160 caller/test) makes this a complete
+    no-op — unchanged behavior."""
     key = "pwedge:" + pid
     box = _find_input_box(captured)
     if box is None:
@@ -3771,10 +3851,31 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
     if not waiting:
-        # tracked but nothing urgent — the session isn't blocked on the
-        # user, and a stash-around delivery (#35) can still reach it. A
-        # later poll where `waiting` flips True (same stable draft) pings.
-        return ["pwedge-parked (not waiting) %s (%s)" % (pid, project)]
+        # #160 defect 4 — before giving up silently, check whether the
+        # repo's own backlog genuinely has open work waiting: "not waiting
+        # on the user" no longer means "nothing depends on this clearing" —
+        # a stash-around delivery (#35) already reaches the pane fine, but
+        # nobody benefits from that while nothing is running and real
+        # tickets sit unactioned. Unmeasurable/empty -> unchanged silent
+        # "not waiting" behavior; genuinely non-empty -> fall through to the
+        # SAME ping path below (own cooldown/dedup, tagged distinctly).
+        if _cached_backlog_open(cwd, backlog_fetch, state, now) is not True:
+            # tracked but nothing urgent — the session isn't blocked on the
+            # user, and a stash-around delivery (#35) can still reach it. A
+            # later poll where `waiting` flips True (same stable draft) pings.
+            return ["pwedge-parked (not waiting) %s (%s)" % (pid, project)]
+        st["pinged"] = True
+        where = _pane_location(pid, run) if run else ""
+        loc = " (%s)" % where if where else ""
+        send_fn(
+            "⚠️ **%s**%s — v okne visí NEODOSLANÝ text („%s…“), session stojí "
+            "vyše 30 minút a v repozitári čaká otvorená práca, ktorú kým "
+            "text blokuje, nikto neurobí. Stlač v tom okne Enter (text sa "
+            "odošle) alebo ho zmaž."
+            % (project, loc, head_txt[:60]),
+            owner=owner or None,
+            dedup_key="pwedge-backlog:%s:%s" % (pid, h), dry_run=dry_run)
+        return ["prompt-wedge ping (backlog) %s (%s)" % (pid, project)]
     ping_key = "pwedge-ping:" + pid
     last_ping = state.get(ping_key)
     if last_ping and now - last_ping < PWEDGE_PING_COOLDOWN_S:
@@ -8493,7 +8594,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
 
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
-               sleep_fn=None, templates_path=None):
+               sleep_fn=None, templates_path=None, backlog_fetch=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
@@ -8505,7 +8606,11 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
 
     `templates_path` (optional, #64): the installed autopilot SKILL. Wired =
     on, like jobs 13/14/16 — without it the STALE-TEMPLATE branch does not
-    run at all and this job behaves exactly as it did before."""
+    run at all and this job behaves exactly as it did before.
+
+    `backlog_fetch` (optional, #160 defect 1): wired like every other
+    network call in this file — without it the goal-achieved branch behaves
+    exactly as it did before (unconditional skip, no verification)."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     templates = load_goal_templates(templates_path)
@@ -8557,6 +8662,10 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                                             # goal was genuinely alive; the
                                             # revival path trusts THIS over an
                                             # old `mts` when it's available
+            if rec.get("dark_pinged"):
+                # #160 — genuinely alive again; a FUTURE dark episode (a
+                # different death) must be able to ping once more.
+                rec["dark_pinged"] = False
             if rec.get("queued_at"):
                 rec["queued_at"] = None
                 logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
@@ -8590,6 +8699,30 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # payload into whatever the pane is being used for now.
             logs.append("skip stale-goal (goal-rearm) %s (%d s since last "
                         "confirmed armed)" % (loc, int(now - last_seen_alive)))
+            # #160 defect 3 — this used to be a PERMANENT, silent dead end:
+            # the pane is retired forever and nobody is ever told (the live
+            # gatekeeper incident's own 07:05:29 boundary, confirmed by a
+            # hard-debug consult against the surviving systemd journal). A
+            # bounded, ONE-SHOT ping — never a retry, never a re-arm attempt
+            # (typing a potentially-stale payload into a pane whose current
+            # purpose is unknown after this long dark would be the riskier
+            # move) — at least tells a human this stream needs a look.
+            if not rec.get("dark_pinged"):
+                rec["dark_pinged"] = True
+                _save()
+                if send_fn is not None and not dry_run:
+                    send_fn("⚠️ **%s** — `/goal` slučka stíchla pred vyše %d "
+                            "hodinami (`◎ /goal` už dávno nesvieti) a nikdy "
+                            "sa znovu neozvala; automatické preármovanie sa "
+                            "vzdalo, lebo payload je príliš starý na to, aby "
+                            "sa dal bezpečne napísať do panela (%s). Pozri sa "
+                            "tam prosím ručne."
+                            % (project_label(cwd),
+                               GOAL_REARM_MAX_DARK_S // 3600, loc),
+                            owner=pane_owner(pid, run) or None,
+                            dedup_key="goaldark:%s:%s" % (sid, rec.get("hash")
+                                                          or rec.get("mts")),
+                            dry_run=dry_run)
             continue
         if GOAL_ACHIEVED_MARKER in _above_input_box(captured):
             # CC writes NO marker for a NATURAL resolution either (live:
@@ -8601,11 +8734,42 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # HEALTHY loop wrote `stop_hook_summary` entries with
             # `preventedContinuation: false` every ~19 min while working
             # perfectly — so the pane's own completion line is the signal.
-            # Skipping is the safe direction: no wasted turns, no false ping,
-            # and the stall branch still covers a loop that merely stopped.
-            logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
-                        "legitimately" % loc)
-            continue
+            #
+            # #160 defect 1 — that signal is only trustworthy when the
+            # session's own last real turn made a GENUINE backlog-empty
+            # CLAIM (`🏁 BACKLOG EMPTY:`, #159's own proof protocol) — a
+            # mere MENTION (fenced/backticked/mid-line) is not a claim at
+            # all (`backlog_marker_gate.classify_backlog_empty_claim`, #166).
+            # Only when a genuine claim is present is it worth spending a
+            # `gh` call (cached per repo, `_cached_backlog_open`) to verify
+            # it against reality: a claim proven FALSE (tickets remain) is
+            # NOT the safe direction to skip on — fall through into the
+            # SAME bounded payload/hash/streak/attempt machinery every
+            # other re-arm reason already uses below. No claim at all, a
+            # genuinely empty backlog, or an unmeasurable check (fail-open,
+            # #166) all keep the original skip.
+            import backlog_marker_gate
+            claim_present, claim_reason = backlog_marker_gate.classify_backlog_empty_claim(
+                transcript_last_assistant_text(tpath))
+            if not claim_present:
+                # no genuine claim to verify at all (mention-only, absent, or
+                # this goal's stop condition isn't backlog-shaped) -- nothing
+                # changes, same as before #160.
+                logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
+                            "legitimately (%s)" % (loc, claim_reason))
+                continue
+            backlog_open = _cached_backlog_open(cwd, backlog_fetch, state, now)
+            if backlog_open is True:
+                logs.append("FALSE-ACHIEVED (goal-rearm) %s -> claimed backlog "
+                            "empty but the repo's backlog is not, re-arming"
+                            % loc)
+                # falls through -- no `continue` here on purpose
+            else:
+                reason = ("backlog verified empty" if backlog_open is False
+                          else "backlog unverifiable")
+                logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
+                            "legitimately (%s)" % (loc, reason))
+                continue
         payload = rec.get("payload") or ""
         if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
             logs.append("skip unusable-payload (goal-rearm) %s (%d chars)"
@@ -8646,7 +8810,20 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                             "prosím ručne — dovtedy nič nebeží."
                             % (project_label(cwd), max_attempts, loc),
                             owner=pane_owner(pid, run) or None,
-                            dedup_key="goalrearm:%s:%s" % (sid, h),
+                            # #160 defect 3 — `h` (the payload hash) alone is
+                            # STABLE across a streak reset (same goal, same
+                            # text), so the notify layer's dedup silently
+                            # absorbed every GAVE UP after the first one —
+                            # live-confirmed (a hard-debug consult found
+                            # gatekeeper's own reset firing correctly twice
+                            # more, each producing a real GAVE UP that never
+                            # reached the phone). Folding in this EPISODE's
+                            # own `first` timestamp (stamped fresh on every
+                            # reset) makes each episode's give-up genuinely
+                            # distinct, so a LATER episode's ping is no
+                            # longer mistaken for a repeat of the first.
+                            dedup_key="goalrearm:%s:%s:%d"
+                                      % (sid, h, int(rec.get("first") or 0)),
                             dry_run=dry_run)
                 logs.append("GAVE UP (goal-rearm) %s after %d attempts"
                             % (loc, max_attempts))
@@ -9711,7 +9888,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              closed_fetch=None, compact_stall_enabled=False,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
              vault_purge=None, log_fn=None, reopen_fetch=None,
-             time_fn=None, sweep_budget_s=None):
+             time_fn=None, sweep_budget_s=None, backlog_fetch=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -9777,6 +9954,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           hours. Byte-identical box text across >= PWEDGE_SWEEPS sweeps with a
           stale transcript and no live-work signal → PING FIRST, never a blind
           keystroke into text the user may still want (prompt_wedge_check).
+          #160 defect 4 (only when `backlog_fetch` is given): a draft not
+          blocking a pending USER question is still worth a ping when the
+          repo's own backlog genuinely has open work nobody else can reach.
       (12) MODEL RECONCILE — REMOVED (#132, 2026-07-28). Restarted a session
           parked on an expensive tier by typing `/exit` into its pane and
           relaunching. Two independent reasons it is gone: the remedy
@@ -10204,7 +10384,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += prompt_wedge_check(now, state, pid, captured, tmtime,
                                        owner, project, send_fn,
                                        dry_run=dry_run, run=run,
-                                       waiting=_session_is_waiting(tpath))
+                                       waiting=_session_is_waiting(tpath),
+                                       cwd=cwd, backlog_fetch=backlog_fetch)
 
             # --- (6) 5-HOUR SESSION LIMIT → ping once, then RETRY a resume AFTER --
             # the reset, bounded, with a stable-draft submit path -------------------
@@ -11159,7 +11340,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                dry_run=dry_run, projects_dir=projects_dir,
                                handled=compact_handled_this_sweep,
                                sleep_fn=sleep_fn,
-                               templates_path=goal_templates_path)
+                               templates_path=goal_templates_path,
+                               backlog_fetch=backlog_fetch)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 
