@@ -358,7 +358,11 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2,
     (the real local cache) and is only overridden in tests; "" on any
     missing/unreadable/malformed cache — never blocks or crashes, mirroring
     `write_usage_cache()`'s own degrade-to-"" convention for this exact
-    field."""
+    field. "Malformed" explicitly includes a cache file that parses as
+    valid JSON but is NOT an object (e.g. a bare string/number/list) —
+    `load_usage_cache()` only returns `None` on an unparseable file, so a
+    JSON-valid-but-wrong-shape cache is caught HERE with its own
+    `isinstance` check, never passed through to `.get()`."""
     root = root or os.path.expanduser("~/.claude/projects")
     data = scan(root, days=days, now=now)
     end = now.astimezone().replace(minute=0, second=0, microsecond=0)
@@ -372,6 +376,8 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2,
     avg_ctx = int(round((row["cache_r"] + row["cache_w"]) / msgs)) if msgs else 0
     tools = data.get("by_hour_main_tools", {}).get(hour_key) or {}
     usage_cache = load_usage_cache(usage_cache_path)
+    if not isinstance(usage_cache, dict):
+        usage_cache = None
     return {
         "ts": start.isoformat(),
         "host": host or os.uname().nodename,
@@ -792,15 +798,22 @@ def group_fleet_by_account(per_host, cache=None):
       account's window is left `None` — rendered as "?" by `render_fleet()`,
       never fabricated.
 
-    Never raises: an empty/None `per_host` returns `[]`."""
+    Never raises: an empty/None `per_host` returns `[]`. Also never raises on
+    a malformed field crossing this legacy-file/ssh-tailed boundary — a
+    non-string `account_email` (a corrupted local cache, a hand-edited
+    `fleet.jsonl`) is treated exactly like a missing one (unknown bucket),
+    never sorted/hashed as-is (the account key must be `str` or `None` for
+    both `sorted()` and the dict grouping to stay safe)."""
     groups = {}
     for host, v in (per_host or {}).items():
         if not v or not isinstance(v, dict) or v.get("error"):
             continue
-        acct = v.get("account_email") or None
+        acct = v.get("account_email")
+        acct = acct if isinstance(acct, str) and acct else None
         g = groups.setdefault(acct, {"hosts": [], "total_usd": 0.0})
         g["hosts"].append(host)
         g["total_usd"] += v.get("usd", 0.0) or 0.0
+    cache = cache if isinstance(cache, dict) else None
     wk = shared_weekly_window(cache) if cache else None
     my_account = (cache or {}).get("account_email") or None
     out = []

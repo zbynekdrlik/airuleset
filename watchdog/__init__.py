@@ -4718,19 +4718,26 @@ def _pane_has_bg_agent(captured):
 
 
 def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
-                      host=None, user=None, dry_run=False):
+                      host=None, user=None, dry_run=False, usage_cache_path=None):
     """Job 13 — see the section comment. Guarded by `state['burn_snapshot_hour']`
     so the 60s sweep cadence writes AT MOST once per UTC-epoch hour, no matter
     how many times this fires inside that hour. `dry_run`: compute + log, but
     never write the file or claim the hour (so a later real sweep still
     writes it). Best-effort: exceptions are the caller's (run_once's)
-    responsibility to catch, same as every other job."""
+    responsibility to catch, same as every other job.
+
+    `usage_cache_path` (#269) is a thin pass-through to
+    `burn.hourly_snapshot()`'s own param (which stamps `account_email` onto
+    the row) — unset (the production default, `cmd_watchdog`'s real wiring)
+    means the real local `~/.claude/airuleset-usage-cache.json`; tests pass
+    an isolated path so they never read this box's own real cache file."""
     import burn as burn_mod
     hour_bucket = int(now // 3600)
     if state.get("burn_snapshot_hour") == hour_bucket:
         return []
     now_dt = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
-    row = burn_mod.hourly_snapshot(now_dt, root=transcripts_root, host=host, user=user)
+    row = burn_mod.hourly_snapshot(now_dt, root=transcripts_root, host=host, user=user,
+                                   usage_cache_path=usage_cache_path)
     if dry_run:
         return ["[dry-run] burn-snapshot %s $%.2f %d msgs avg_ctx=%d (not written)"
                % (row["host"], row["usd"], row["msgs"], row["avg_ctx"])]
