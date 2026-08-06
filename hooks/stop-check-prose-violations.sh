@@ -34,16 +34,48 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo ""
 # a genuine bare, unquoted offer keeps matching because it carries none of
 # these signals — verified in tests/test_quality_bypass_gate.py against
 # every existing unambiguous-bypass case.
+# #195 — UNDET_FILE and record_undet (the diagnostic-accumulator mechanism
+# explained in full a little further down, right before _msg_grep_rc) are
+# pulled UP ahead of strip_mentions(), out of their historical position ~80
+# lines later in this file, purely so a strip_mentions() failure can report
+# through the SAME channel the msg_has/msg_missing framework already uses —
+# no new mechanism, just an earlier definition point.
+UNDET_FILE=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-undet.XXXXXX" 2>/dev/null) || UNDET_FILE=""
+if [ -n "$UNDET_FILE" ]; then
+    trap 'rm -f "$UNDET_FILE"' EXIT
+fi
+
+# Announce + record a question a check could not answer (grep erroring,
+# further down, or here — strip_mentions() itself failing to run). Callers
+# run inside `$( )`, where a variable assignment would not survive the
+# subshell — hence a file.
+record_undet() {
+    echo "stop-check-prose-violations: check exited $1 for [$2] — this check is UNDETERMINABLE" >&2
+    if [ -n "$UNDET_FILE" ]; then
+        printf '%s\n' "$2" >>"$UNDET_FILE" 2>/dev/null || true
+    fi
+}
+
 strip_mentions() {
-    # Argv, never stdin: `python3 - <<'PYEOF'` would consume the heredoc AS
-    # the script source, leaving nothing in stdin for a piped message to
-    # fill — the same argv-over-stdin shape block-main-implementation.sh
-    # already uses for exactly this reason.
-    python3 - "$1" <<'PYEOF'
+    # #195 — the message is passed by a FILE, never argv. This used to be
+    # `python3 - "$1" <<'PYEOF'`, handing the WHOLE message to execve as a
+    # SINGLE argv entry; Linux's MAX_ARG_STRLEN caps that at 131072 bytes
+    # (measured: exec succeeds at 131,000 bytes, E2BIG at 140,000), so any
+    # message past it made python3 never start — and the caller's bare
+    # `|| printf` fallback then silently substituted the RAW, UNSTRIPPED
+    # message, so a MENTION (backticked/quoted/fenced) read exactly like a
+    # bare offer. A file has no such ceiling; this is the same fix
+    # hooks/lib-poll-payload.sh (#124) already shipped for an identical
+    # failure class in a sibling hook.
+    local _text="$1" _f _rc=0
+    _f=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-mention.XXXXXX" 2>/dev/null) || return 1
+    printf '%s' "$_text" >"$_f" 2>/dev/null || { rm -f "$_f" 2>/dev/null || true; return 1; }
+    python3 - "$_f" <<'PYEOF' || _rc=$?
 import re
 import sys
 
-text = sys.argv[1]
+with open(sys.argv[1], "r", encoding="utf-8", errors="surrogateescape") as fh:
+    text = fh.read()
 text = re.sub(r"```.*?```", " ", text, flags=re.S)   # fenced code block
 text = re.sub(r"`[^`]*`", " ", text)                  # backtick span
 text = re.sub(r'"[^"]*"', " ", text)                  # double-quoted span
@@ -56,8 +88,19 @@ text = re.sub(r'"[^"]*"', " ", text)                  # double-quoted span
 # mention shape seen (#96).
 sys.stdout.write(text)
 PYEOF
+    rm -f "$_f" 2>/dev/null || true
+    return "$_rc"
 }
-MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
+# #195 — a strip that genuinely cannot run is an unresolvable EXONERATING
+# signal (a MENTION exempts a phrase from being read as a bare offer): per
+# this file's own #194 taxonomy an unsubstantiated exemption is DENIED, so
+# the fallback stays the raw, unstripped message — but record_undet() now
+# runs FIRST, so the note travels on the block reason instead of the failure
+# vanishing silently the way a bare `|| printf` fallback used to.
+MSG_MENTION=$(strip_mentions "$MSG") || {
+    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG}-byte message"
+    MSG_MENTION="$MSG"
+}
 
 # #190 — every check below asks "does this text contain X". It must be
 # answered from the TEXT. It used to be answered by a pipeline's exit status:
@@ -115,19 +158,10 @@ MSG_MENTION=$(strip_mentions "$MSG" 2>/dev/null || printf '%s' "$MSG")
 # gone. UNDET_FILE survives PURELY as a diagnostic accumulator: nothing gates on
 # it, so a failed `mktemp` now costs a NOTE and can no longer invert the fail
 # direction.
-UNDET_FILE=$(mktemp "${TMPDIR:-/tmp}/airuleset-prose-undet.XXXXXX" 2>/dev/null) || UNDET_FILE=""
-if [ -n "$UNDET_FILE" ]; then
-    trap 'rm -f "$UNDET_FILE"' EXIT
-fi
-
-# Announce + record a question grep could not answer. Callers run inside `$( )`,
-# where a variable assignment would not survive the subshell — hence a file.
-record_undet() {
-    echo "stop-check-prose-violations: grep exited $1 for [$2] — this check is UNDETERMINABLE" >&2
-    if [ -n "$UNDET_FILE" ]; then
-        printf '%s\n' "$2" >>"$UNDET_FILE" 2>/dev/null || true
-    fi
-}
+#
+# #195 — UNDET_FILE and record_undet() are DEFINED earlier now (right before
+# strip_mentions(), which needs them too), not here. This is still the one
+# place their behaviour is explained in full.
 
 # The one place grep is asked anything. 0 = match, 1 = no match, 2 = UNKNOWN.
 # Never a writer process, so #190's SIGPIPE race cannot exist.
@@ -229,7 +263,13 @@ if [ "$_NOGOAL_RC" -ge 2 ]; then
     record_undet "$_NOGOAL_RC" "-v ^[[:space:]]*/goal "
     MSG_NOGOAL="$MSG"
 fi
-MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL" 2>/dev/null || printf '%s' "$MSG_NOGOAL")
+# #195 — same fallback shape as MSG_MENTION above: record_undet() runs before
+# the raw-text fallback, so a strip failure on this call site leaves a note
+# too, instead of silently disarming the design-review gate's exemption.
+MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL") || {
+    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG_NOGOAL}-byte NOGOAL message"
+    MSG_NOGOAL_MENTION="$MSG_NOGOAL"
+}
 
 # HARD violations collected here trigger {"decision":"block"} response.
 # SOFT violations go to stderr as warnings. Both can fire in the same hook run.
