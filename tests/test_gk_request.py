@@ -353,11 +353,54 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn('"gk-request"', src)
         self.assertIn("cmd_gk_request", src)
 
-    def test_issue_mode_also_applies_origin_stream_label(self):
+    def test_handoff_label_never_enters_the_goal_stop_proof_slice(self):
+        # #191 adversarial review, CRITICAL C1: a needs-gatekeeper ticket
+        # tagged with Part C's origin marker must NEVER appear in
+        # `slice-quals --count` (the `/goal` stop-proof's own termination
+        # check) -- that is exactly what reusing `stream:<user>` as the
+        # marker would have broken (the loop could never reach a real 0
+        # while any such ticket stayed open). `_slice_quals()` for a
+        # shared-account stream is `label:stream:<user>` ALONE and is
+        # completely unmodified by this fix; this proves `handed-by:<user>`
+        # structurally cannot match it.
+        import contextlib
+        import io
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if a[:2] == ("label", "list"):
+                # _label_exists_on_repo's own probe: stream:simap genuinely
+                # IS a defined repo label (the pre-existing ownership
+                # convention) -- it is simply never APPLIED to this ticket.
+                return '[{"name": "stream:simap"}]'
+            if "label:stream:simap" in j:
+                return "[]"    # the ticket carries handed-by:, not stream:
+            if "sort:created-desc" in j:
+                # proves the search index genuinely works (#181's own C2
+                # health guard) so the 0 above is trusted, not refused
+                return '[{"number": 999}]'
+            return "[]"
+
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"), \
+                m.patch.object(airuleset, "_current_user", return_value="simap"), \
+                m.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_slice_quals(
+                    m.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "0")
+
+    def test_issue_mode_also_applies_origin_handoff_label(self):
         # #191 Part C: a registered sub-dev stream's gk-request ALSO applies
-        # its own stream:<user> label at hand-off time -- the origin marker
-        # cmd_tickets_status's re-attribution step (_stream_label_ever_
-        # applied) reads later, even after a subsequent relabel removes it.
+        # its own handed-by:<user> label at hand-off time -- the origin
+        # marker cmd_tickets_status's re-attribution step
+        # (_last_origin_owner) reads later, even after a subsequent relabel
+        # removes it.
+        #
+        # #191 adversarial review, CRITICAL C1: deliberately handed-by:,
+        # NEVER stream: -- reusing the ownership label would have made a
+        # needs-gatekeeper ticket permanently part of the stream's own
+        # /goal stop-proof slice (slice-quals --count could never reach 0).
         calls = []
 
         def run(argv, **kw):
@@ -365,7 +408,7 @@ class TestCmdGkRequest(unittest.TestCase):
             return m.Mock(returncode=0, stdout="", stderr="")
 
         # Patch `_current_user` (exists both pre- and post-fix) rather than
-        # the not-yet-existing `_own_stream_label` -- this drives the SAME
+        # the not-yet-existing `_own_handoff_label` -- this drives the SAME
         # real entry point pre-fix, so a red run fails on genuine missing
         # behaviour (no origin-label calls) rather than on an AttributeError
         # from mocking an attribute the pre-fix module never had.
@@ -376,14 +419,49 @@ class TestCmdGkRequest(unittest.TestCase):
                 self._args(issue=2081, comment="obnov docker sock prístup"))
         flat = json.dumps(calls)
         self.assertIn("label", flat)
-        self.assertIn("create", flat)           # gh label create --force
-        self.assertIn("stream:simap", flat)
+        self.assertIn("create", flat)           # gh label create (checked-first)
+        self.assertIn("handed-by:simap", flat)
+        self.assertNotIn("stream:simap", flat)  # never the ownership label
         add_label_calls = [c for c in calls if "--add-label" in c]
         self.assertTrue(
-            any("stream:simap" in c for c in add_label_calls),
+            any("handed-by:simap" in c for c in add_label_calls),
             add_label_calls)
 
-    def test_create_mode_also_applies_origin_stream_label(self):
+    def test_ensure_origin_label_never_overwrites_an_existing_label(self):
+        # #191 adversarial review, MAJOR M1 (live-verified against real
+        # odoo-erp stream:* labels, each hand-curated with its own colour +
+        # Slovak description): the original --force version overwrote an
+        # EXISTING label's colour/description on EVERY call. A label
+        # `gh label list --search` reports as already present must never be
+        # passed to `gh label create` at all.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "list" in argv:
+                return m.Mock(returncode=0, stdout="handed-by:simap\n",
+                              stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="simap"):
+            airuleset.cmd_gk_request(
+                self._args(issue=3, comment="akcia"))
+        create_calls = [c for c in calls
+                        if "label" in c and "create" in c]
+        self.assertEqual(create_calls, [], create_calls)
+        add_label_calls = [c for c in calls if "--add-label" in c]
+        self.assertTrue(
+            any("handed-by:simap" in c for c in add_label_calls),
+            add_label_calls)
+
+    def test_create_mode_also_applies_origin_handoff_label(self):
+        # #191 adversarial review, MAJOR M4: the origin label must be
+        # applied AFTER the primary `gh issue create` succeeds, in a
+        # SEPARATE call -- baking it into the create call meant a rejected
+        # origin label failed the WHOLE create (dropping needs-gatekeeper
+        # too) and silently fell through to the title-prefix fallback.
         calls = []
 
         def run(argv, **kw):
@@ -400,25 +478,64 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         create = [c for c in calls if "issue" in c and "create" in c][0]
         self.assertIn("needs-gatekeeper", create)
-        self.assertIn("stream:simap", create)
+        self.assertNotIn("handed-by:simap", create)   # NOT baked into create
+        edit_calls = [c for c in calls
+                     if "issue" in c and "edit" in c and "--add-label" in c]
+        self.assertTrue(
+            any("40" in c and "handed-by:simap" in c for c in edit_calls),
+            edit_calls)
+
+    def test_create_mode_origin_label_failure_never_drops_needs_gatekeeper(self):
+        # A rejected origin --add-label (after a successful create) must
+        # never retroactively undo the create or its needs-gatekeeper label.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "edit" in argv and "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "issue" in argv and "create" in argv:
+                return m.Mock(returncode=0,
+                              stdout="https://github.com/o/r/issues/41\n",
+                              stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="simap"):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Adopt the pipeline", body="detail"))
+        self.assertIn(rc, (0, None))
+        creates = [c for c in calls if "issue" in c and "create" in c]
+        self.assertEqual(len(creates), 1, creates)   # never a fallback retry
+        self.assertIn("needs-gatekeeper", creates[0])
 
     def test_origin_label_skipped_when_not_a_registered_stream(self):
         # A full-authority box (dev1/gatekeeper) must never stamp a
         # meaningless origin label -- `_current_user` here resolves to
         # whatever box actually runs this test, never a registered stream,
-        # so no `gh label create` call should be attempted at all.
+        # so no `gh label` call should be attempted at all.
+        #
+        # #191 adversarial review, MINOR m5: this must patch `_current_user`
+        # to a KNOWN non-registered name -- unpatched, the assertion would
+        # fail outright if the suite is ever run AS one of the streams this
+        # feature targets (marek/montalu/david/simap).
         calls = []
 
         def run(argv, **kw):
             calls.append(argv)
             return m.Mock(returncode=0, stdout="", stderr="")
 
-        with m.patch("subprocess.run", side_effect=run):
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="newlevel"):
             airuleset.cmd_gk_request(
                 self._args(issue=99, comment="akcia"))
         flat = json.dumps(calls)
-        self.assertNotIn("label create", flat)
-        self.assertNotIn("stream:", flat)
+        self.assertNotIn("handed-by:", flat)
+        label_subcmds = [c for c in calls
+                        if len(c) > 1 and c[0] == "gh" and c[1] == "label"]
+        self.assertEqual(label_subcmds, [], label_subcmds)
 
     def test_origin_label_create_failure_is_logged_not_fatal(self):
         # The needs-gatekeeper hand-off (gk-request's PRIMARY job) must
@@ -441,7 +558,7 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn(rc, (0, None))
         add_label_calls = [c for c in calls if "--add-label" in c]
         self.assertFalse(
-            any("stream:simap" in c for c in add_label_calls),
+            any("handed-by:simap" in c for c in add_label_calls),
             add_label_calls)
         # needs-gatekeeper itself still went through
         self.assertTrue(any("needs-gatekeeper" in c for c in add_label_calls))

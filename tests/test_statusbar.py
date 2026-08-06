@@ -340,12 +340,104 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
 
+    def test_refresh_reattributes_via_the_new_handed_by_marker(self):
+        # #191 adversarial review, CRITICAL C1: Part C's origin marker is
+        # `handed-by:<user>`, NOT `stream:<user>` (reusing the ownership
+        # label would have made a needs-gatekeeper ticket permanently part
+        # of the stream's own `/goal` stop-proof slice). This proves the
+        # NEW marker form alone -- with no `stream:*` history at all --
+        # is sufficient for the footer to recover it.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            graphql_body = json.dumps({"data": {"repository": {"i7": {
+                "timelineItems": {"nodes": [
+                    {"label": {"name": "needs-gatekeeper"}},
+                    {"label": {"name": "handed-by:%s" % user}}]}}}}})
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":7,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *graphql*) echo \'%s\';;\n' % graphql_body +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache["gk"], 1)
+
+    def test_refresh_reattribution_uses_the_temporally_last_origin_event(self):
+        # #191 adversarial review, MAJOR M3: "was my label EVER applied" let
+        # TWO streams that both once owned a ticket (A -> B -> unlabelled)
+        # BOTH reclaim it. Ticket #8 has NO current stream label (so the
+        # cheap current-owner skip does not filter it out) but its history
+        # shows stream:marek FIRST, then this stream's own handed-by LAST --
+        # only the temporally-last event may win. `getpass.getuser()`'s own
+        # value is this stream's identity in the test.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            graphql_body = json.dumps({"data": {"repository": {"i8": {
+                "timelineItems": {"nodes": [
+                    {"label": {"name": "stream:marek"}},        # earlier
+                    {"label": {"name": "handed-by:%s" % user}},  # LAST
+                ]}}}}})
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":8,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *graphql*) echo \'%s\';;\n' % graphql_body +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["gk"], 1)   # LAST event wins -> this stream
+
     def test_refresh_reattribution_skipped_for_own_account_slice(self):
         # An own-account stream (assignee/author quals present, 3-qual union)
         # already recovers a relabelled hand-off for free via author:@me —
-        # the GraphQL re-attribution step must not even run for it. If it
-        # DID run, the candidate/graphql cases below would answer with a
-        # ticket this test never expects to see.
+        # the GraphQL re-attribution step must not even run for it.
+        #
+        # #191 adversarial review, MAJOR M5 (mutation-verified): the ORIGINAL
+        # version of this test stubbed graphql with an UNRELATED label
+        # ("stream:x"), so deleting the len(quals)==1 guard entirely still
+        # passed (the stub never matched anything either way) -- no teeth.
+        # The stub now answers with THIS test's own real identity, so if the
+        # guard were removed the count WOULD move and the assertion below
+        # would fail.
+        user = getpass.getuser()
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -363,11 +455,12 @@ class RefreshCLI(unittest.TestCase):
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
                 # if the (own-account) code wrongly ran the re-attribution
-                # step it would hit one of these and inflate the count.
+                # step it would hit one of these and MATCH.
                 '  *label:needs-gatekeeper,ready-for-review*) '
                 'echo \'[{"number":99,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
                 '  *graphql*) echo \'{"data":{"repository":{"i99":'
-                '{"timelineItems":{"nodes":[{"label":{"name":"stream:x"}}]}}}}}\';;\n'
+                '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
+                ']}}}}}\';;\n' % user +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -387,8 +480,14 @@ class RefreshCLI(unittest.TestCase):
         # #191 design review: a candidate currently owned by a DIFFERENT
         # registered stream must never be re-attributed to THIS stream, even
         # if this stream's label happens to appear in its history (a
-        # legitimate transfer). The GraphQL case below would answer "yes" if
-        # queried — the bounding check must never even reach it.
+        # legitimate transfer).
+        #
+        # #191 adversarial review, MAJOR M5 (mutation-verified): the ORIGINAL
+        # graphql stub returned "stream:whoever" here too -- deleting the
+        # `_stream_owner_of` skip still passed. The stub now answers with
+        # THIS test's own real identity, so removing the skip would make the
+        # candidate reach GraphQL, match, and move `gk` off 0.
+        user = getpass.getuser()
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -405,8 +504,8 @@ class RefreshCLI(unittest.TestCase):
                 'echo \'[{"number":55,"labels":[{"name":"needs-gatekeeper"},'
                 '{"name":"stream:marek"}]}]\';;\n'
                 '  *graphql*) echo \'{"data":{"repository":{"i55":'
-                '{"timelineItems":{"nodes":[{"label":{"name":"stream:whoever"}}'
-                ']}}}}}\';;\n'
+                '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
+                ']}}}}}\';;\n' % user +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
