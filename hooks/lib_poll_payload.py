@@ -66,7 +66,25 @@ def _shell_word_end(text, i):
     fragments forming one logical value) — a regex anchored on a single
     quote PAIR can never see past the first fragment. Backslash-aware
     inside double quotes (`\\"` does not close the span); single quotes have
-    NO escaping at all, per bash semantics (airuleset #282)."""
+    NO escaping at all, per bash semantics (airuleset #282).
+
+    Stops at whitespace, an UNQUOTED shell metacharacter (`;`/`&`/`|`/`(`/
+    `)`/`<`/`>`, real bash word terminators outside quotes too — a fix for
+    a review-found regression in the fix above: the first cut stopped only
+    at whitespace, so a separator glued directly to a value's closing quote
+    with no intervening space was consumed INTO the blanked span, eating
+    the first word of the very next command), or end-of-string.
+
+    Known, deliberate residual (pre-existing, unaffected either way by
+    this scanner — not something #282 introduces or closes): `$( … )`/
+    backtick command substitution containing its OWN quote characters
+    inside an outer double-quoted value is NOT parsed as nested — those
+    inner quotes are read as ordinary boundary characters. A value like
+    `--body "$(printf '%s' "hi") gh issue comment 99"` mis-tokenizes
+    identically before and after this fix. A full shell-grammar parser
+    was rejected as overkill for this narrow question (see the #282
+    design comment's own rejected-alternative)."""
+    METACHARS = ";&|()<>"
     n = len(text)
     while i < n and not text[i].isspace():
         c = text[i]
@@ -81,6 +99,8 @@ def _shell_word_end(text, i):
                 else:
                     j += 1
             i = (j + 1) if j < n else n
+        elif c in METACHARS:
+            break
         elif c == "\\" and i + 1 < n:
             i += 2
         else:
