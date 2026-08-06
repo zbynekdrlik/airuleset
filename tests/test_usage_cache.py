@@ -90,6 +90,38 @@ class TestUsageCacheWrite(TestCase):
                 watchdog._USAGE_CACHE_PATH = orig
             self.assertTrue(os.path.exists(patched), "must write to the patched global path")
 
+    def test_writes_account_email_from_claude_json(self):
+        # airuleset#212 — fleet usage reporting cannot map boxes to
+        # subscription accounts without the account identity IN the cache.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cache.json")
+            claude_json = os.path.join(d, "claude.json")
+            Path(claude_json).write_text(json.dumps(
+                {"oauthAccount": {"emailAddress": "t4user@example.com"}}))
+            orig = watchdog._CLAUDE_JSON_PATH
+            watchdog._CLAUDE_JSON_PATH = claude_json
+            try:
+                watchdog.write_usage_cache(SAMPLE_USAGE, 1_700_000_000, path=path)
+            finally:
+                watchdog._CLAUDE_JSON_PATH = orig
+            got = json.load(open(path))
+            self.assertEqual(got["account_email"], "t4user@example.com")
+
+    def test_account_email_empty_string_when_claude_json_unreadable(self):
+        # Never blocks the write — the cache still gets ts/windows even when
+        # the account identity can't be read (missing file, malformed JSON).
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cache.json")
+            orig = watchdog._CLAUDE_JSON_PATH
+            watchdog._CLAUDE_JSON_PATH = os.path.join(d, "does-not-exist.json")
+            try:
+                watchdog.write_usage_cache(SAMPLE_USAGE, 1, path=path)
+            finally:
+                watchdog._CLAUDE_JSON_PATH = orig
+            got = json.load(open(path))
+            self.assertEqual(got["account_email"], "")
+            self.assertEqual(got["ts"], 1)
+
 
 class TestStatuslineRendersEndToEnd(TestCase):
     """Run the ACTUAL generated shim with a controlled HOME + stdin. Locks the

@@ -3450,6 +3450,25 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), "", who)
 
+    # --- stream_redirect() (airuleset#212): the SAME map, for a caller
+    # resolving SOMEONE/SOMETHING ELSE's raw owner string (watchdog.pane_owner()
+    # has no _current_user()/env context of its own to resolve against). ---
+    def test_stream_redirect_maps_known_stream_personas(self):
+        self.assertEqual(self.notify.stream_redirect("montalu"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("montalu2"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("montalu4"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("simap"), "zbynek")
+        # david is self-mapped — the redirect is a documented no-op for it.
+        self.assertEqual(self.notify.stream_redirect("david"), "david")
+
+    def test_stream_redirect_passes_through_unmapped_and_empty(self):
+        self.assertEqual(self.notify.stream_redirect("marek"), "marek")
+        self.assertEqual(self.notify.stream_redirect("zbynek"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("newlevel"), "newlevel")
+        self.assertEqual(self.notify.stream_redirect(""), "")
+        self.assertIsNone(self.notify.stream_redirect(None))
+
 
 class TestStreamAuthorityHasNotifyRouting(TestCase):
     """Every stream in AUTHORITY_BY_USER must make an explicit Discord-
@@ -3464,6 +3483,41 @@ class TestStreamAuthorityHasNotifyRouting(TestCase):
         missing = (set(airuleset.AUTHORITY_BY_USER)
                    - set(notify.STREAM_NOTIFY_OWNER) - self.EXEMPT)
         self.assertEqual(missing, set(), missing)
+
+
+class TestPaneOwnerAlwaysRedirected(TestCase):
+    """Structural lock (airuleset#212 adversarial-review finding F2): every
+    `pane_owner(...)` CALL SITE in watchdog/__init__.py (other than its own
+    `def`) must be wrapped in `stream_redirect(...)` before the result can
+    reach a notify `owner=` argument — a bare `pane_owner(pid, run)` bypasses
+    notify.STREAM_NOTIFY_OWNER (#259) entirely, which is exactly how a stream
+    persona's own account-wide alert (job 3) mis-routed to begin with. Two
+    fix rounds found FOUR more un-redirected call sites (job 14's stash-skip
+    ping, job 20's stall/drift/rearm give-up pings) beyond the two the first
+    round covered — a source-level lock is cheaper than a full integration
+    test per job and catches ANY future call site the same way."""
+
+    def test_no_bare_pane_owner_call_reaches_the_source(self):
+        import re
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "watchdog", "__init__.py").read_text(encoding="utf-8")
+        # Every occurrence of the literal call `pane_owner(` that is NOT the
+        # function's own `def pane_owner(` line.
+        offending = []
+        for mm in re.finditer(r"pane_owner\(", src):
+            line_start = src.rfind("\n", 0, mm.start()) + 1
+            line = src[line_start:src.find("\n", mm.start())]
+            if line.lstrip().startswith("def pane_owner("):
+                continue
+            # The call itself must be immediately preceded by "stream_redirect("
+            # (allowing only whitespace between) — i.e. `stream_redirect(pane_owner(`.
+            before = src[:mm.start()]
+            if not re.search(r"stream_redirect\(\s*$", before):
+                lineno = src.count("\n", 0, mm.start()) + 1
+                offending.append("line %d: %s" % (lineno, line.strip()))
+        self.assertEqual(offending, [],
+                         "pane_owner() call(s) not wrapped in stream_redirect(): "
+                         + "; ".join(offending))
 
 
 class TestTmuxHistoryLimit(TestCase):
@@ -6468,6 +6522,129 @@ class TestApiWatchdog(TestCase):
                                usage_fetch=lambda: self._wk(98, "RW"))
         self.assertTrue(any("usage-alert" in ln for ln in logs))
         self.assertEqual(len(self.pings), 1)
+
+    # --- airuleset#212: identity in the usage-alert ping ----------------------
+    def test_check_usage_alert_carries_account_identity(self):
+        # A bare "Tokeny — 99%" is undecodable on a phone with zero terminal
+        # context (this ticket's live incident) — the body must name the
+        # account email, the box hostname/unix-account, and WHO it's
+        # addressed to.
+        st, now = {}, 1_000_000
+        with m.patch.object(self.w, "_account_email", return_value="t4user@example.com"), \
+                m.patch.object(self.w, "_box_hostname", return_value="subdev"), \
+                m.patch.object(self.w, "_local_account", return_value="montalu"):
+            self.w.check_usage(now, st, self._send, fetch=lambda: self._wk(99, "RWID"),
+                               owner="zbynek", threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        body = self.pings[0][0]
+        self.assertIn("t4user@example.com", body)
+        self.assertIn("subdev", body)
+        self.assertIn("montalu", body)
+        self.assertIn("zbynek", body)
+
+    def test_check_usage_alert_survives_unreadable_identity(self):
+        # _account_email()/_box_hostname()/_local_account() are never
+        # patched here — on THIS test box they resolve to real values (or
+        # "" on a broken box), but the send must never raise or blank out
+        # regardless.
+        st, now = {}, 1_000_000
+        self.w.check_usage(now, st, self._send, fetch=lambda: self._wk(99, "RWID2"),
+                           owner=None, threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        self.assertIn("99%", self.pings[0][0])
+
+    def test_check_usage_dedups_across_resets_at_subsecond_jitter(self):
+        # Live-verified (airuleset#212, montalu@subdev): two fetch_usage()
+        # calls for the SAME weekly window, seconds apart, returned TWO
+        # DIFFERENT resets_at strings (sub-second jitter) — the raw-string
+        # dedup this replaces re-fired on EVERY 15-min poll (11 duplicate
+        # pings observed live in one 2.5h window).
+        st, now = {}, 1_000_000
+
+        def wk(reset_iso):
+            return {"limits": [{"group": "weekly", "kind": "weekly_all",
+                                "percent": 99, "resets_at": reset_iso}]}
+        self.w.check_usage(now, st, self._send,
+                           fetch=lambda: wk("2026-08-08T10:59:59.540561+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        # SAME logical window, sub-second-jittered resets_at — must NOT re-fire.
+        self.w.check_usage(now + 900, st, self._send,
+                           fetch=lambda: wk("2026-08-08T10:59:59.840558+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "sub-second resets_at jitter must not defeat the dedup")
+        # A genuinely NEW window (different day) still fires.
+        self.w.check_usage(now + 1800, st, self._send,
+                           fetch=lambda: wk("2026-08-15T10:59:59.111111+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 2)
+
+    def test_check_usage_dedups_a_real_minute_boundary_straddle(self):
+        # Adversarial-review finding (airuleset#212 F1/F3): a real 456-sample
+        # replay of the fleet's own resets_at history showed EVERY weekly
+        # window straddles its reset BOUNDARY (roughly a whole hour) —
+        # samples land on BOTH sides, e.g. some at HH:59:59.xx and some at
+        # (HH+1):00:00.xx. A bare TRUNCATE-to-minute dedup (the first version
+        # of this fix) put those two sides in DIFFERENT buckets and still
+        # re-fired ~1 poll in 5. This is the real straddling pair from that
+        # history (2026-08-01T11:00:00Z window) — must land in the SAME
+        # bucket, unlike the same-minute pair above (which only proves
+        # granularity finer than a minute doesn't matter).
+        st, now = {}, 1_000_000
+
+        def wk(reset_iso):
+            return {"limits": [{"group": "weekly", "kind": "weekly_all",
+                                "percent": 99, "resets_at": reset_iso}]}
+        self.w.check_usage(now, st, self._send,
+                           fetch=lambda: wk("2026-08-01T10:59:59.999219+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        self.w.check_usage(now + 900, st, self._send,
+                           fetch=lambda: wk("2026-08-01T11:00:00.012015+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "a real minute-boundary straddle must not defeat the dedup")
+
+    def test_check_usage_missing_resets_at_still_alerts_once_and_dedupes(self):
+        # Adversarial-review finding (airuleset#212 F4, pre-existing but
+        # easy to fix while touching this line): a weekly window with NO
+        # resets_at field must still fire its FIRST alert (never silently
+        # swallowed by colliding with the "not yet alerted" None sentinel),
+        # and must still dedupe on repeat polls with the same missing value.
+        st, now = {}, 1_000_000
+
+        def wk_no_reset():
+            return {"limits": [{"group": "weekly", "kind": "weekly_all",
+                                "percent": 99}]}   # no resets_at key at all
+        self.w.check_usage(now, st, self._send, fetch=wk_no_reset,
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "a missing resets_at must not silently swallow the alert")
+        self.w.check_usage(now + 900, st, self._send, fetch=wk_no_reset,
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "repeat polls with the same missing resets_at must dedupe")
+
+    def test_run_once_usage_alert_redirects_stream_persona_owner(self):
+        # airuleset#212 root cause: `account_owner` came from the RAW
+        # pane_owner() tmux-session-name lookup, with NO knowledge of
+        # notify.STREAM_NOTIFY_OWNER (#259) — so a stream persona's own
+        # usage alert never got redirected to the real person's thread,
+        # unlike every other notification on that box.
+        now = 1_000_000
+        cwd = "/devel/montalutest"
+        self._transcript(cwd, [self._OK], 5, now)
+        fake = _FakeTmux(panes="%0\tclaude\t" + cwd + "\n", owners={"%0": "montalu"})
+        logs = self.w.run_once(now=now, run=fake, send_fn=self._send,
+                               projects_dir=self.projects, state_path=self.state,
+                               usage_fetch=lambda: self._wk(99, "RWSTREAM"))
+        self.assertTrue(any("usage-alert" in ln for ln in logs))
+        usage_pings = [p for p in self.pings if "Tokeny" in p[0]]
+        self.assertEqual(len(usage_pings), 1)
+        self.assertEqual(usage_pings[0][2], "zbynek",
+                         "a stream persona's raw pane owner must route through "
+                         "notify.STREAM_NOTIFY_OWNER, not its own unix account name")
 
     def test_run_once_skips_usage_without_fetcher(self):
         now = 1_000_000
