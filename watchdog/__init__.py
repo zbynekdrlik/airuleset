@@ -5334,6 +5334,176 @@ def _compact_live_tasks_in_grace(request_ts, now, grace=None):
         return True   # unmeasurable age -- stay in-grace, never guess "past"
     return age < _compact_defer_grace(grace)
 
+
+# #238 (2026-08-06) -- same-turn dispatch race. `_session_has_live_bg_tasks`'s
+# two signals are both PROXIES with real propagation latency: a subagent
+# transcript file only appears once the dispatched task's own process starts
+# writing, and the pane's ambient "Waiting for N background agents" text only
+# appears once CC re-renders. A task dispatched in the SAME turn that a
+# DIFFERENT worker's SubagentStop fires (triggering THIS session's compact
+# request) can be invisible to BOTH proxies for a short window right after
+# dispatch -- and the synchronous delivery path (`cmd_compact_request
+# --record` -> `deliver_compact_now`) evaluates `_session_has_live_bg_tasks`
+# milliseconds after the request was recorded, i.e. always inside that
+# window when it exists. Live incident: odoo-erp session sid f219f0e3,
+# 2026-08-05 04:11:52Z -- compacted mid-`⏳ WORKING` while the pane itself
+# still showed "Waiting for 1 background agent to finish".
+#
+# Scoped NARROWLY: this gate only matters on the "no live tasks found"
+# branch -- a genuinely-live verdict (`_session_has_live_bg_tasks` == True)
+# is completely unaffected, so the existing #246/#250 grace logic keeps its
+# exact current behavior. `request_ts is None` (every pre-#238 caller) makes
+# this a complete no-op, per the docstring below.
+COMPACT_MIN_REQUEST_AGE_S = 2.0   # env AIRULESET_COMPACT_MIN_REQUEST_AGE_S
+
+
+def _compact_min_request_age(min_age=None):
+    """An explicit `min_age=` (test/caller override) is returned verbatim.
+    The CONSTANT/ENV-derived default is clamped to a small positive floor --
+    a misconfigured `AIRULESET_COMPACT_MIN_REQUEST_AGE_S` of 0 or negative
+    would silently disable this gate outright (every request would read as
+    already old enough), the identical clamp shape `_compact_defer_grace`
+    already uses for the same reason."""
+    if min_age is not None:
+        return min_age
+    try:
+        raw = float(os.environ.get("AIRULESET_COMPACT_MIN_REQUEST_AGE_S",
+                                   COMPACT_MIN_REQUEST_AGE_S))
+    except ValueError:
+        raw = COMPACT_MIN_REQUEST_AGE_S
+    return raw if raw > 0 else COMPACT_MIN_REQUEST_AGE_S
+
+
+def _compact_request_too_young(request_ts, now, min_age=None):
+    """#238 -- True when `request_ts` is too fresh for a "no live tasks"
+    verdict to be trusted yet (see the section comment above for the exact
+    race this closes). Callers apply this ONLY on the branch where
+    `_session_has_live_bg_tasks` already returned False -- a genuinely live
+    signal is never affected by this function at all.
+
+    A missing/unreadable `request_ts` (every pre-#238 caller, and any
+    caller that genuinely cannot supply one) returns False -- "not too
+    young" -- so this gate is a complete no-op for them, exactly the
+    unchanged behavior every existing caller/test already relies on. This
+    mirrors every other unmeasurable-never-blocks gate in this file, with
+    one deliberate twist: here "unmeasurable" must default to NOT gating
+    (rather than to gating, the usual direction) because the age check is
+    itself an ADDITIONAL restriction layered on top of an already-passing
+    verdict, not a new safety property in its own right."""
+    if request_ts is None:
+        return False
+    try:
+        now_ts = float(now) if now is not None else time.time()
+        age = now_ts - float(request_ts)
+    except (TypeError, ValueError):
+        return False
+    return age < _compact_min_request_age(min_age)
+
+
+# #238 (2026-08-06) -- thin-context gate. Live evidence (gk sid f219f0e3,
+# 2026-08-05, compact-sync.log + transcript): the msg-hash dedup layer (#71)
+# treats ANY change in the supervisor's own `last_assistant_message` as a
+# NEW distinct completion worth a fresh `/compact` request -- but a
+# supervisor idling on a background worker produces a new hash on every
+# trivial re-evaluation turn even when ZERO real conversational content was
+# added since the last compaction actually landed. Measured directly:
+# counting real `type=="assistant"` transcript entries strictly after the
+# session's own newest `compact_boundary` entry, three real SENDs on that
+# session showed 28 / 26 / 0 such entries respectively -- the first two
+# landed real, distinct boundaries; the third (05:22:16Z) produced NONE (CC
+# replied "Not enough messages to compact") and is the exact needless-resend
+# shape this ticket names. No in-between case was observed, so the floor is
+# the smallest value that admits any genuine activity at all.
+#
+# Applied UNCONDITIONALLY, unlike #99/#48 (which #126 exempts for a PROVEN
+# boundary origin, because "the boundary is the ticket, not the size of its
+# diff"): the live ZERO-activity send WAS `origin=subagent-stop` (a
+# genuinely proven boundary by that same definition), so exempting proven
+# origins here would leave the exact incident unfixed. This gate asks a
+# different question than #99/#48 -- not "was the work worth compacting",
+# but "did ANY new conversational state exist to compact at all", which is
+# a precondition for compaction being possible, not a judgment about
+# whether it was worthwhile.
+COMPACT_THIN_CONTEXT_MIN_MESSAGES = 1
+
+
+def _compact_messages_since_boundary(path, tail_bytes=4_000_000):
+    """`(delta, boundary_ts)` -- `delta` is the count of real
+    `type=="assistant"` transcript entries found strictly AFTER the newest
+    `compact_boundary` entry in the file's bounded tail; `boundary_ts` is
+    that boundary's own epoch, or None if no boundary was found in the
+    scanned window at all (a session's first-ever compaction, or one
+    further back than `tail_bytes` covers -- unmeasurable, never a reason
+    to treat the request as thin).
+
+    Bounded tail read (mirrors `_transcript_compact_boundary_ts`'s own
+    shape) -- never loads a huge transcript whole. `boundary_ts is None`
+    must never be read as "thin" by any caller -- there is nothing to
+    measure a delta against, the same unmeasurable-never-blocks direction
+    every other gate in this file uses."""
+    from datetime import datetime
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return 0, None
+    lines = raw.splitlines()
+    boundary_idx = None
+    boundary_ts = None
+    for i, ln in enumerate(lines):
+        if b"compact_boundary" not in ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if (not isinstance(e, dict) or e.get("type") != "system"
+                or e.get("subtype") != "compact_boundary"):
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            ts = None
+        # JSONL is append-only chronological -- the LAST matching line found
+        # is always the newest, no timestamp comparison needed.
+        boundary_idx = i
+        boundary_ts = ts
+    if boundary_idx is None:
+        return 0, None
+    delta = 0
+    for ln in lines[boundary_idx + 1:]:
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(e, dict) and e.get("type") == "assistant":
+            delta += 1
+    return delta, boundary_ts
+
+
+def _compact_thin_context(cwd, sid, projects_dir=None, min_messages=None):
+    """True when there is NOT enough real conversational activity since the
+    session's last `compact_boundary` to justify another compaction -- see
+    the section comment above. Unmeasurable (no transcript resolves, or no
+    prior boundary exists yet for this session) never reads as thin --
+    same fail-direction as every other gate in this file."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    delta, boundary_ts = _compact_messages_since_boundary(str(tpath))
+    if boundary_ts is None:
+        return False
+    threshold = (COMPACT_THIN_CONTEXT_MIN_MESSAGES if min_messages is None
+                else min_messages)
+    return delta < threshold
+
+
 # #67 (2026-07-26 live incident, david@subdev): a forgotten USER DRAFT sitting
 # in the input box made job 14/15 log "skip draft" and retry FOREVER — the
 # same draft (one unfinished sentence) skipped 13 sweeps straight overnight
@@ -5916,6 +6086,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if kind == "busy" and not proven_boundary:
             logs.append("skip busy (compact-request) %s" % loc)
             continue
+        # #238 — the thin-context gate, UNCONDITIONAL (never skipped for a
+        # proven-boundary origin — see `_compact_thin_context`'s own section
+        # comment: the live incident this exists for WAS
+        # origin=subagent-stop). Checked BEFORE #99/#48 — mirroring
+        # `deliver_compact_now`'s own ordering — and before a claim is ever
+        # set, so nothing is left for `compact_claim_active`'s TTL fallback
+        # to have to release.
+        if _compact_thin_context(cwd, sid, projects_dir=pdir):
+            logs.append("skip thin-context (compact-request) %s" % loc)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
+            continue
         # #99 — did REAL work (>=1 commit) happen since the last genuine
         # boundary for this repo? A positively-confirmed zero drops the
         # request outright, regardless of context size. Unmeasurable falls
@@ -5990,6 +6175,16 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # fix exists to un-starve — would otherwise reset its own grace
         # anchor every time and never actually reach it, no matter how long
         # it has genuinely gone un-compacted.
+        # #238 — the same-turn dispatch race the min-request-age gate closes
+        # (`_compact_request_too_young`) is specific to the SYNCHRONOUS path
+        # (`deliver_compact_now`, called moments after the request is
+        # recorded — see that gate's own section comment). Job 14 is an
+        # independent ~60s poll; its own request is always well past that
+        # window by the time it is evaluated here, so the gate is
+        # deliberately NOT duplicated in this loop — it would be a pure
+        # no-op in production while still coupling this job's tests to a
+        # timing assumption ("evaluated long after recording") that a fast
+        # unit test cannot cheaply reproduce.
         grace_elapsed = False
         if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
                                       now=now, captured=captured):
@@ -6173,6 +6368,8 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `"queued-compact"` — the pane already holds an unexecuted `/compact`.
     `"dropped-no-work"` — the #99 gate: zero commits since the anchor.
     `"dropped-small-context"` — the #48 gate: context too small to bother.
+    `"dropped-thin-context"` — the #238 gate: zero real assistant activity
+    since the last compact_boundary (the "Not enough messages" shape).
     Returns `""` (falsy) when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
@@ -6281,6 +6478,15 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         # finally drains. The queued one IS the handling.
         _log_compact_sync("SKIP queued-compact sid=%s cwd=%s" % (sid, cwd))
         return "queued-compact"
+    # #238 -- the thin-context gate, UNCONDITIONAL (never skipped for a
+    # proven-boundary origin — see the gate's own section comment for why:
+    # the live incident this exists for WAS origin="subagent-stop"). Checked
+    # before the #99/#48 gates, and before a claim is ever set, so a request
+    # this drops here strands NOTHING for `compact_claim_active`'s TTL
+    # fallback to have to clean up later.
+    if _compact_thin_context(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("DROP thin-context sid=%s cwd=%s" % (sid, cwd))
+        return "dropped-thin-context"
     # #126 -- a request carrying its OWN proof of a boundary
     # (`origin=="subagent-stop"`) is EXEMPT from BOTH substantiality
     # heuristics below (#99 and #48). Both exist only to GUESS whether an
@@ -6338,13 +6544,32 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # (`_compact_live_tasks_in_grace`), using `request_ts` (see this
     # function's own docstring for why it is always in-grace in practice).
     grace_elapsed = False
-    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=captured):
-        now_ts = now if now is not None else time.time()
+    now_ts = now if now is not None else time.time()
+    has_live = _session_has_live_bg_tasks(pid, sid, cwd, run,
+                                          projects_dir=projects_dir,
+                                          captured=captured)
+    if has_live:
         if _compact_live_tasks_in_grace(request_ts, now_ts):
             _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
             return ""
         grace_elapsed = True
+    elif (origin != _COMPACT_SELF_CALLBACK_ORIGIN
+          and _compact_request_too_young(request_ts, now_ts)):
+        # #238 -- close the same-turn dispatch race: a "no live tasks"
+        # verdict this fresh is not yet trustworthy (see
+        # `_compact_request_too_young`'s own docstring). Left in place —
+        # job 14's polled retry re-checks well past this window.
+        #
+        # `self-callback` is EXEMPT: that origin's own protocol
+        # (`skills/autopilot/SKILL.md`'s "do NOT dispatch the next issue in
+        # the same turn") structurally prevents the exact race this gate
+        # defends against — nothing new is ever dispatched in the same turn
+        # as `compact-request --self` — so gating it too would only add
+        # latency to a hold/retry loop the user explicitly wants fast
+        # ("holds briefly until it lands", #225), with no matching safety
+        # gain. `subagent-stop` and every other origin keep the gate.
+        _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
+        return ""
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
