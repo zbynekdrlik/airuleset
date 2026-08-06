@@ -415,6 +415,29 @@ class TestFallbackExceptionLogging(_Base):
         log_path = self.home / ".claude" / "design-gate-errors.log"
         self.assertFalse(log_path.exists())
 
+    def test_an_exception_in_the_main_body_is_also_logged(self):
+        # Adversarial-review finding: the earlier import-failure test only
+        # exercises the NARROW import try/except -- the larger MAIN
+        # try/except (everything after imports) had zero coverage; a
+        # mutant replacing it with `except Exception: pass` still passed
+        # every prior test. An unexpected non-string "body" from `gh`
+        # (comments[].body an int, not caught by any inner try/except)
+        # raises inside the classifier -- `(123 or "").strip()` ->
+        # AttributeError -- and must still be logged and never crash the
+        # hook.
+        comments = json.dumps({"comments": [{
+            "body": 123, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://x/issues/41#issuecomment-44",
+        }]})
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)   # never blocks
+        self.assertIsNone(self.marker(41))             # never crash-writes
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertTrue(log_path.exists(),
+                        "an unexpected exception in the main body must be "
+                        "logged, not silently swallowed")
+        self.assertIn("main", log_path.read_text())
+
 
 class TestRecordsEveryIssueInACompoundCommand(_Base):
     """#208 -- `re.search` only ever extracts the FIRST `gh issue comment
@@ -517,6 +540,120 @@ esac
                              "issue #42's own fresh comment must still be "
                              "processed even though #41 (mentioned first) "
                              "had nothing usable")
+
+
+class TestAmbiguousRepoIsRefused(_Base):
+    """Adversarial-review finding (post-#208): the multi-issue loop shares
+    ONE `-R`/`--repo` resolution across the WHOLE command (`re.search`
+    finds only the first occurrence). A compound command naming TWO
+    DIFFERENT repos would silently write the SECOND issue's marker under
+    the FIRST issue's (wrong) repo -- a marker that never should have
+    existed there, which can wrongly unblock a `git commit` in that repo.
+    A command with more than one DISTINCT explicit repo value must be
+    refused entirely (no marker for ANY issue in it) rather than guess."""
+
+    def test_two_distinct_explicit_repos_writes_no_marker_at_all(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/owner/aaa/issues/5#issuecomment-70",
+        }])
+        cmd = 'gh issue comment 5 -R owner/aaa -F a.md && gh issue comment 7 -R owner/bbb -F b.md'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("aaa", 5))
+        self.assertIsNone(dg.read_marker("aaa", 7),
+                          "issue #7's marker must never be written under "
+                          "aaa's repo key -- its own command segment named bbb")
+        self.assertIsNone(dg.read_marker("bbb", 7))
+
+    def test_a_single_repeated_explicit_repo_still_processes_normally(self):
+        # regression control -- the SAME -R value repeated for every issue
+        # in the command (the realistic, reported shape) must still work.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/owner/aaa/issues/5#issuecomment-71",
+        }])
+        cmd = 'gh issue comment 5 -R owner/aaa -F a.md && gh issue comment 6 -R owner/aaa -F b.md'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNotNone(dg.read_marker("aaa", 5))
+        self.assertIsNotNone(dg.read_marker("aaa", 6))
+
+
+class TestPerIssueContinueIsNotSysExit(_Base):
+    """Adversarial-review finding (post-#208): three of the per-issue
+    `continue`s (already-recorded, claimed-url, the gh-view try/except)
+    had no test distinguishing them from the pre-fix `sys.exit(0)` they
+    replaced -- a mutant reverting any one of them to `sys.exit(0)` passed
+    the whole suite. Each test below is built so a SECOND, sibling issue
+    in the same command can ONLY get its own marker if the FIRST issue's
+    outcome used `continue`, never `sys.exit(0)`."""
+
+    def test_an_already_settled_issue_does_not_block_a_sibling(self):
+        os.environ["HOME"] = str(self.home)
+        for kind in dg.ALL_KINDS:
+            dg.write_marker("airuleset", 41,
+                            "https://x/issues/41#issuecomment-old", kind=kind)
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://x/issues/42#issuecomment-81",
+        }])
+        cmd = 'gh issue comment 41 -F a.md && gh issue comment 42 -F b.md'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(42),
+                             "issue #42 must still be processed even though "
+                             "#41 (mentioned first) was already fully settled")
+
+    def test_a_claimed_url_on_one_issue_does_not_block_a_sibling(self):
+        url = "https://x/issues/41#issuecomment-82"
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": url,
+        }])
+        os.environ["HOME"] = str(self.home)
+        # #41's OWN comment url is already claimed by an earlier "reviewed"
+        # marker -- classifying it again for "design" must be refused
+        # (distinct evidence kinds need distinct comments), but that must
+        # not stop #42 (a DIFFERENT issue, its own unclaimed url) from
+        # getting its marker from the SAME comment content.
+        dg.write_marker("airuleset", 41, url, kind="reviewed")
+        cmd = 'gh issue comment 41 -F a.md && gh issue comment 42 -F b.md'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41, "design"),
+                          "issue #41's comment url was already claimed by "
+                          "its own reviewed marker")
+        self.assertIsNotNone(self.marker(42, "design"),
+                             "issue #42 must still get its own marker")
+
+    def test_a_gh_view_failure_on_one_issue_does_not_block_a_sibling(self):
+        # An explicit `-R` bypasses cwd-based repo resolution (which would
+        # itself fail gracefully on a bad cwd, exiting BEFORE the loop --
+        # not what this test is about). `cwd=` IS passed straight into the
+        # per-issue `subprocess.run(...)` call, so a genuinely nonexistent
+        # cwd makes THAT call raise for every issue -- the discriminating
+        # question is whether the SECOND issue's own gh-view is still
+        # ATTEMPTED (and its own failure logged) after the first raises.
+        bad_cwd = "/nonexistent/does-not-exist-" + os.urandom(4).hex()
+        payload = json.dumps({"tool_input": {
+            "command": 'gh issue comment 41 -R o/r -F a.md && gh issue comment 42 -R o/r -F b.md'},
+            "cwd": bad_cwd})
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertTrue(log_path.exists())
+        text = log_path.read_text()
+        self.assertIn("gh-view #41", text)
+        self.assertIn("gh-view #42", text,
+                      "issue #42 must be ATTEMPTED even though #41 "
+                      "(processed first) already raised")
 
 
 class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
