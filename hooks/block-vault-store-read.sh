@@ -204,10 +204,17 @@ set -euo pipefail
 #     boundary this hook's whole design already stakes its claim on.
 #   - Fail-closed is bounded by the harness: a hook that TIMES OUT (5s) is
 #     treated as an error and does not block, so a pathologically slow python3
-#     start fails open. Not agent-controllable, but real. Measured on dev1 the
-#     whole hook runs in a median 33ms (min 29, max 41) against that 5000ms
-#     budget, and the gap is not closeable from inside a hook — it is tracked
-#     as its own ticket (#162) rather than as a bullet in a decision ticket.
+#     start fails open. This gap is TRACKED as its own ticket (#162), which
+#     found and closed the previously-DOMINANT reachable trigger: an
+#     O(n^2) regex sweep (VALUE_FILE_RE, see its own comment above) that a
+#     50KB ordinary long argument — no glob, no exploit shape — drove past
+#     the 5s budget on its own. Measured on dev1 post-fix: the whole hook
+#     runs in single-digit-to-low-double-digit ms for an ordinary command,
+#     and stays well under a second even for an adversarially long
+#     (100KB+) literal argument. What remains, and genuinely is not
+#     agent-controllable: a pathologically slow python3 interpreter START
+#     under extreme system load (swap, CPU starvation) — that residual is
+#     real but is now the WHOLE of the exposure, not the dominant part of it.
 #   - Fail-closed covers a payload that is PRESENT and unparseable, never an
 #     EMPTY one: no payload at all still exits 0. See the comment at the read
 #     loop for why that specific row was left open rather than closed.
@@ -358,9 +365,25 @@ STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
 # another `.`) is never mistaken for the end of the name. The honest cost:
 # a real config's own future backup, `config.secret.json.bak`, is now
 # blocked too (a KNOWN GAPS bullet documents this trade explicitly).
+#
+# The stem's quantifier is BOUNDED (#162), not `*` (unbounded). `.secret`
+# starts with characters the stem class ([A-Za-z0-9_.-]) itself accepts, so
+# an unbounded stem forces a full greedy-then-backtrack sweep at every start
+# offset whenever a segment has a long run of stem-legal characters with no
+# `.secret` anywhere -- O(n^2), measured at 10.5s for a 50KB ordinary
+# argument (a base64 blob, an embedded file body -- no glob, no exploit
+# shape) against this hook's own 5s harness timeout. `{0,254}` caps the
+# stem at Linux's own NAME_MAX (255 bytes/component: the 1 required leading
+# char + 254 more), which cannot reject a real `<NAME>.secret` value file --
+# no such file can ever be that long on any real filesystem. The one
+# behavioural difference is for a stem LONGER than 255 characters, which
+# cannot exist as a real filename on disk: the match still fires (still
+# blocks, still exit 2), only the logged excerpt is the trailing 255-char
+# slice rather than the full pathological string -- the same shape as this
+# hook's other bounds (GLOB_ANCHOR, BRACE_CAP, the depth-6 caps below).
 _VALUE_FILE_CONFIG_EXT = r"(?:json|yaml|yml|env|toml|ini)"
 VALUE_FILE_RE = re.compile(
-    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|[*?\]}])\.secret"
+    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,253}|[*?\]}])\.secret"
     r"(?!\." + _VALUE_FILE_CONFIG_EXT + r"(?![A-Za-z0-9_.-]))"
     r"(?![A-Za-z0-9_-])")
 # C. the store's PARENT swept recursively or archived (review F2). Anchored on
