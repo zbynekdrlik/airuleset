@@ -168,6 +168,46 @@ class TestAMentionPastTheArgvBoundaryIsNeverBlocked(_HookCase):
 
 
 # --------------------------------------------------------------------------- #
+# Adversarial-review finding (#195 follow-up): reading the message from a
+# FILE must be byte-equivalent to the old argv read — never silently apply
+# universal-newline translation.
+# --------------------------------------------------------------------------- #
+
+class TestTheFileReadDoesNotTranslateNewlines(_HookCase):
+    """`sys.argv[1]` never applied newline translation — argv strings are not
+    read through Python's text-mode I/O layer at all. `open(path, "r")`
+    DOES, by default (`newline=None`): a lone `\\r` or a `\\r\\n` pair both
+    become `\\n`. That silently SPLITS a line grep would otherwise see as
+    one — a genuine bare offer whose two halves straddle a lone `\\r` used
+    to block (argv preserved the `\\r`, so the phrase stayed on one grep
+    "line") and, reading via `open()` with the default `newline=None`,
+    stopped blocking (the `\\r` became a `\\n`, splitting the phrase across
+    two lines `grep -qE "merge.*despite"` no longer matches as one)."""
+
+    def test_a_bare_offer_split_by_a_lone_cr_still_blocks(self):
+        msg = "I will merge\rdespite the failing check.\n"
+        r = self._run(msg)
+        self.assertTrue(
+            self._blocked(r),
+            "a lone \\r inside a genuine bare bypass offer silently"
+            " unblocked it — the file read translated \\r to \\n and split"
+            " the phrase across what grep sees as two lines")
+        self.assertTrue(any(QUALITY_BYPASS in v for v in self._violations(r)),
+                        self._violations(r))
+
+    def test_a_bare_offer_with_crlf_line_endings_still_blocks(self):
+        """CRLF is the more common real-world case (a Windows-authored
+        paste). Today's patterns don't anchor `^`/`$` so this one already
+        passed even with translation — kept as an explicit control so a
+        future anchored pattern is covered too."""
+        msg = "I will merge despite the failing check.\r\n"
+        r = self._run(msg)
+        self.assertTrue(self._blocked(r), self._violations(r))
+        self.assertTrue(any(QUALITY_BYPASS in v for v in self._violations(r)),
+                        self._violations(r))
+
+
+# --------------------------------------------------------------------------- #
 # A genuine (non-size) strip failure must still fail closed AND leave a note.
 # --------------------------------------------------------------------------- #
 
@@ -182,6 +222,31 @@ class TestAGenuineStripFailureRecordsUndeterminable(_HookCase):
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
         stub = d / "python3"
         stub.write_text("#!/bin/sh\nexit 1\n")
+        stub.chmod(0o755)
+        return {**os.environ, "PATH": "%s:%s" % (d, os.environ["PATH"])}
+
+    def _python3_fails_on_call(self, n):
+        """A python3 stub that fails ONLY its Nth invocation in one hook run
+        and delegates to the REAL python3 (via an absolute path, since PATH
+        is overridden) on every other call — so exactly ONE of the two
+        strip_mentions() call sites (MSG_MENTION is call 1, MSG_NOGOAL_MENTION
+        is call 2) fails while the other succeeds normally. Isolates each
+        call site's OWN record_undet() from the other's (adversarial-review
+        finding: a stub that fails BOTH calls can't tell which call site's
+        record_undet() actually fired)."""
+        d = Path(tempfile.mkdtemp(prefix="airuleset-py3n-"))
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        counter = d / "count"
+        stub = d / "python3"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "N=0\n"
+            "[ -f %s ] && N=$(cat %s)\n"
+            "N=$((N+1))\n"
+            "echo $N > %s\n"
+            'if [ "$N" = "%d" ]; then exit 1; fi\n'
+            "exec /usr/bin/python3 \"$@\"\n"
+            % (counter, counter, counter, n))
         stub.chmod(0o755)
         return {**os.environ, "PATH": "%s:%s" % (d, os.environ["PATH"])}
 
@@ -216,6 +281,29 @@ class TestAGenuineStripFailureRecordsUndeterminable(_HookCase):
         r = self._run("Nothing to report; the refactor is done.\n",
                       env=self._no_python3())
         self.assertFalse(self._blocked(r), self._violations(r))
+
+    def test_the_first_call_sites_own_record_undet_is_reached(self):
+        """Isolates the MSG_MENTION call site: only the FIRST strip_mentions()
+        invocation fails, the second (MSG_NOGOAL_MENTION) succeeds normally.
+        Without this call site's OWN record_undet(), the note would depend
+        entirely on the second call site failing too."""
+        r = self._run(self.MSG, env=self._python3_fails_on_call(1))
+        self.assertIn(
+            "undeterminable", self._reason(r).lower(),
+            "the FIRST strip_mentions() call (MSG_MENTION) failed alone, and"
+            " no undeterminable note reached the block reason: %r"
+            % self._reason(r)[:400])
+
+    def test_the_second_call_sites_own_record_undet_is_reached(self):
+        """Isolates the MSG_NOGOAL_MENTION call site: only the SECOND
+        strip_mentions() invocation fails, the first (MSG_MENTION) succeeds
+        normally."""
+        r = self._run(self.MSG, env=self._python3_fails_on_call(2))
+        self.assertIn(
+            "undeterminable", self._reason(r).lower(),
+            "the SECOND strip_mentions() call (MSG_NOGOAL_MENTION) failed"
+            " alone, and no undeterminable note reached the block reason:"
+            " %r" % self._reason(r)[:400])
 
 
 if __name__ == "__main__":
