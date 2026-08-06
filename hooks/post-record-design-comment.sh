@@ -49,8 +49,17 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 [ -n "$CMD" ] || exit 0
 
-# Cheap prefilter before touching python/gh at all.
-echo "$CMD" | grep -qE '(^|[;&|]|&&)[[:space:]]*(sudo[[:space:]]+|env[[:space:]]+)?gh[[:space:]]+issue[[:space:]]+comment\b' || exit 0
+# Cheap prefilter before touching python/gh at all. #277/#274: a plain
+# word-boundary match, not a prefix-anchored alternation -- GNU grep's \b
+# is a correct word boundary, so it matches "gh issue comment" regardless
+# of what precedes it (an inline `VAR=$(...)` assignment of any shape,
+# `sudo `/`env `, a command separator, or start-of-string) while still
+# refusing a "gh" glued onto another word. The prior alternation
+# (`(^|[;&|]|&&)...(sudo|env)?gh...`) missed the documented stream-account
+# recipe `GH_TOKEN=$(...) gh issue comment ...` entirely -- no marker was
+# ever written for that shape, even for a fresh, valid, classifying
+# comment, because the hook exited here before touching python/gh at all.
+echo "$CMD" | grep -qE '\bgh[[:space:]]+issue[[:space:]]+comment\b' || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 REPO_ROOT="$(dirname "$HOOK_DIR")"
@@ -61,124 +70,154 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 python3 - "$REPO_ROOT" "$CMD" "$CWD" <<'PYEOF' 2>/dev/null || true
 import datetime
 import json
+import os
 import re
 import subprocess
 import sys
 
 repo_root, cmd, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, repo_root)
+
+
+def _log_exception(where, exc):
+    # #274 -- best-effort diagnostic trail for a genuinely UNEXPECTED
+    # failure (never one of the routine "nothing to do" sys.exit(0) cases
+    # below, which raise SystemExit and are never caught here). Never
+    # raises, never blocks, never touches stdout/stderr -- the hook stays
+    # silent and non-blocking either way; this replaces the previous total
+    # silence under the outer `2>/dev/null || true` with a file a human can
+    # actually read later.
+    try:
+        log_path = os.path.join(os.path.expanduser("~"), ".claude",
+                                 "design-gate-errors.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write("%s\t%s\t%s\t%r\n" % (
+                datetime.datetime.now(datetime.timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                where, cwd, exc))
+    except Exception:
+        pass
+
+
 try:
     import design_gate as dg
     import notify
-except Exception:
-    sys.exit(0)
-
-if not cwd:
-    sys.exit(0)
-
-m = re.search(r'gh\s+issue\s+comment\s+(\S+)', cmd)
-if not m:
-    sys.exit(0)
-target = m.group(1).strip("'\"")
-
-issue = None
-mnum = re.match(r'^(\d+)$', target)
-if mnum:
-    issue = int(mnum.group(1))
-else:
-    murl = re.search(r'/issues/(\d+)', target)
-    if murl:
-        issue = int(murl.group(1))
-if issue is None:
-    sys.exit(0)
-
-mrepo = re.search(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
-explicit_repo = mrepo.group(1) if mrepo else None
-
-if explicit_repo:
-    repo_key = explicit_repo.rstrip("/").split("/")[-1]
-    gh_repo_args = ["-R", explicit_repo]
-else:
-    repo_key = notify.repo_name_for(cwd)
-    gh_repo_args = []
-
-if not repo_key:
-    sys.exit(0)
-
-# Already recorded — never re-hit the network for a settled issue. "Settled"
-# now means ALL THREE kinds are marked (#213/#214) -- if even one is still
-# missing, a LATER comment for this same issue might supply it, so we must
-# keep re-reading until design+validated+reviewed are all in.
-if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
+except Exception as exc:
+    _log_exception("import", exc)
     sys.exit(0)
 
 try:
-    r = subprocess.run(
-        ["gh", "issue", "view", str(issue)] + gh_repo_args + ["--json", "comments"],
-        capture_output=True, text=True, timeout=10, cwd=cwd)
-except Exception:
-    sys.exit(0)
-if r.returncode != 0:
-    sys.exit(0)
-try:
-    comments = json.loads(r.stdout or "{}").get("comments", [])
-except (ValueError, TypeError, AttributeError):
-    sys.exit(0)
-if not isinstance(comments, list):
-    sys.exit(0)
+    if not cwd:
+        sys.exit(0)
 
-FRESH_WINDOW_S = 180
-now = datetime.datetime.now(datetime.timezone.utc)
+    m = re.search(r'gh\s+issue\s+comment\s+(\S+)', cmd)
+    if not m:
+        sys.exit(0)
+    target = m.group(1).strip("'\"")
 
+    issue = None
+    mnum = re.match(r'^(\d+)$', target)
+    if mnum:
+        issue = int(mnum.group(1))
+    else:
+        murl = re.search(r'/issues/(\d+)', target)
+        if murl:
+            issue = int(murl.group(1))
+    if issue is None:
+        sys.exit(0)
 
-def parsed_ts(c):
-    raw = c.get("createdAt") or ""
+    mrepo = re.search(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
+    explicit_repo = mrepo.group(1) if mrepo else None
+
+    if explicit_repo:
+        repo_key = explicit_repo.rstrip("/").split("/")[-1]
+        gh_repo_args = ["-R", explicit_repo]
+    else:
+        repo_key = notify.repo_name_for(cwd)
+        gh_repo_args = []
+
+    if not repo_key:
+        sys.exit(0)
+
+    # Already recorded — never re-hit the network for a settled issue. "Settled"
+    # now means ALL THREE kinds are marked (#213/#214) -- if even one is still
+    # missing, a LATER comment for this same issue might supply it, so we must
+    # keep re-reading until design+validated+reviewed are all in.
+    if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
+        sys.exit(0)
+
     try:
-        return datetime.datetime.strptime(
-            raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-    except (ValueError, TypeError):
-        return None
+        r = subprocess.run(
+            ["gh", "issue", "view", str(issue)] + gh_repo_args + ["--json", "comments"],
+            capture_output=True, text=True, timeout=10, cwd=cwd)
+    except Exception:
+        sys.exit(0)
+    if r.returncode != 0:
+        sys.exit(0)
+    try:
+        comments = json.loads(r.stdout or "{}").get("comments", [])
+    except (ValueError, TypeError, AttributeError):
+        sys.exit(0)
+    if not isinstance(comments, list):
+        sys.exit(0)
+
+    FRESH_WINDOW_S = 180
+    now = datetime.datetime.now(datetime.timezone.utc)
 
 
-candidates = []
-for c in comments:
-    if not isinstance(c, dict) or not c.get("viewerDidAuthor"):
-        continue
-    ts = parsed_ts(c)
-    if ts is None or (now - ts).total_seconds() > FRESH_WINDOW_S:
-        continue
-    candidates.append((ts, c))
+    def parsed_ts(c):
+        raw = c.get("createdAt") or ""
+        try:
+            return datetime.datetime.strptime(
+                raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        except (ValueError, TypeError):
+            return None
 
-if not candidates:
-    sys.exit(0)
-candidates.sort(key=lambda pair: pair[0])
-_, latest = candidates[-1]
 
-body = latest.get("body", "")
-url = latest.get("url", "")
+    candidates = []
+    for c in comments:
+        if not isinstance(c, dict) or not c.get("viewerDidAuthor"):
+            continue
+        ts = parsed_ts(c)
+        if ts is None or (now - ts).total_seconds() > FRESH_WINDOW_S:
+            continue
+        candidates.append((ts, c))
 
-# Adversarial-review finding: one comment must not grant more than one
-# evidence kind -- (a) never re-use a comment url that already granted a
-# DIFFERENT kind (a stale/unchanged "latest" comment re-read on a later,
-# trivial `gh issue comment` call must not let a rich earlier comment keep
-# paying out new kinds), and (b) even within ONE pass over a fresh comment,
-# grant at most the FIRST still-missing kind it classifies for, never all
-# that happen to match at once.
-if url and url in dg.claimed_urls(repo_key, issue):
-    sys.exit(0)
+    if not candidates:
+        sys.exit(0)
+    candidates.sort(key=lambda pair: pair[0])
+    _, latest = candidates[-1]
 
-classifiers = {
-    "design": dg.classify_design_comment,
-    "validated": dg.classify_validation_comment,
-    "reviewed": dg.classify_review_comment,
-}
-for kind in dg.ALL_KINDS:
-    if dg.marker_exists(repo_key, issue, kind):
-        continue
-    ok, reason = classifiers[kind](body)
-    if ok:
-        dg.write_marker(repo_key, issue, url, reason, kind=kind)
-        break
+    body = latest.get("body", "")
+    url = latest.get("url", "")
+
+    # Adversarial-review finding: one comment must not grant more than one
+    # evidence kind -- (a) never re-use a comment url that already granted a
+    # DIFFERENT kind (a stale/unchanged "latest" comment re-read on a later,
+    # trivial `gh issue comment` call must not let a rich earlier comment keep
+    # paying out new kinds), and (b) even within ONE pass over a fresh comment,
+    # grant at most the FIRST still-missing kind it classifies for, never all
+    # that happen to match at once.
+    if url and url in dg.claimed_urls(repo_key, issue):
+        sys.exit(0)
+
+    classifiers = {
+        "design": dg.classify_design_comment,
+        "validated": dg.classify_validation_comment,
+        "reviewed": dg.classify_review_comment,
+    }
+    for kind in dg.ALL_KINDS:
+        if dg.marker_exists(repo_key, issue, kind):
+            continue
+        ok, reason = classifiers[kind](body)
+        if ok:
+            dg.write_marker(repo_key, issue, url, reason, kind=kind)
+            break
+except SystemExit:
+    raise
+except Exception as exc:
+    _log_exception("main", exc)
 PYEOF
 
 exit 0
