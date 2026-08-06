@@ -39,16 +39,73 @@ SINK_OWNER = re.compile(
     r"\b[^\n;&|]*(?:-F|--body-file|--notes-file|--file)(?:=|\s+)-(?:\s|$|<)")
 
 # Text-payload flags. `-c` is absent on purpose: `bash -c 'while :; do …; sleep
-# 60; done'` is the sanctioned waiter itself.
+# 60; done'` is the sanctioned waiter itself. Deliberately matches only up to
+# the OPENING quote character (no `.*?...\1` value capture) — the naive
+# quote-pair regex used to close at the FIRST quote it saw, escaped or not,
+# and had no notion of the shell's `'"'"'` single-quote-splice idiom (airuleset
+# #282). `_shell_word_end` below resolves the true value span instead.
 BODYFLAG = re.compile(
     r"(?:^|\s)(?:--body|--body-file|--notes|--notes-file|-b|-F)"
-    r"(?:=|\s+)(['\"])(.*?)\1", re.S)
+    r"(?:=|\s+)(['\"])")
 # `-m`/`-t` mean other things to ssh/docker/grep, so these are honoured only in
 # a segment that names git/gh and names no interpreter.
 MSGFLAG = re.compile(
-    r"(?:^|\s)(?:-m|--message|--title|-t)(?:=|\s+)(['\"])(.*?)\1", re.S)
+    r"(?:^|\s)(?:-m|--message|--title|-t)(?:=|\s+)(['\"])")
 GITGH = re.compile(r"(?:^|[\s;&|(])(?:git|gh)\s")
 SEP = (";", "&&", "||", "|", "\n")
+
+
+def _shell_word_end(text, i):
+    """Index just past the shell WORD beginning at `i` (the position of a
+    quote character) — the whole possibly-multi-fragment value a flag
+    actually receives, matching real bash tokenization rather than a single
+    quote-pair: adjacent quoted/unquoted fragments with NO separating
+    whitespace concatenate into ONE argument. That is exactly what the
+    standard `'"'"'` single-quote-splice idiom is (close-single /
+    open-double-containing-a-lone-quote / close-double / reopen-single, four
+    fragments forming one logical value) — a regex anchored on a single
+    quote PAIR can never see past the first fragment. Backslash-aware
+    inside double quotes (`\\"` does not close the span); single quotes have
+    NO escaping at all, per bash semantics (airuleset #282).
+
+    Stops at whitespace, an UNQUOTED shell metacharacter (`;`/`&`/`|`/`(`/
+    `)`/`<`/`>`, real bash word terminators outside quotes too — a fix for
+    a review-found regression in the fix above: the first cut stopped only
+    at whitespace, so a separator glued directly to a value's closing quote
+    with no intervening space was consumed INTO the blanked span, eating
+    the first word of the very next command), or end-of-string.
+
+    Known, deliberate residual (pre-existing, unaffected either way by
+    this scanner — not something #282 introduces or closes): `$( … )`/
+    backtick command substitution containing its OWN quote characters
+    inside an outer double-quoted value is NOT parsed as nested — those
+    inner quotes are read as ordinary boundary characters. A value like
+    `--body "$(printf '%s' "hi") gh issue comment 99"` mis-tokenizes
+    identically before and after this fix. A full shell-grammar parser
+    was rejected as overkill for this narrow question (see the #282
+    design comment's own rejected-alternative)."""
+    METACHARS = ";&|()<>"
+    n = len(text)
+    while i < n and not text[i].isspace():
+        c = text[i]
+        if c == "'":
+            j = text.find("'", i + 1)
+            i = (j + 1) if j != -1 else n
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                else:
+                    j += 1
+            i = (j + 1) if j < n else n
+        elif c in METACHARS:
+            break
+        elif c == "\\" and i + 1 < n:
+            i += 2
+        else:
+            i += 1
+    return i
 
 
 def heredoc_spans(lines):
@@ -101,6 +158,11 @@ def flag_spans(text):
     Scoped to the flag's OWN command segment: `ssh -t '<loop>'` executes its
     argument remotely, and a whole-command git/gh test would license stripping
     it because some unrelated `git status` appears elsewhere in the line.
+
+    The span covers the WHOLE resolved shell word (`_shell_word_end`), quote
+    characters included — never just a single quote-pair's inner text — so a
+    multi-fragment splice-idiom value is blanked in one piece rather than
+    leaving its later fragments as live-looking text.
     """
     out = []
     for rx, need_gitgh in ((BODYFLAG, False), (MSGFLAG, True)):
@@ -112,8 +174,10 @@ def flag_spans(text):
                 continue
             if need_gitgh and not GITGH.search(seg):
                 continue
-            if m.group(2).strip():
-                out.append((m.start(2), m.end(2)))
+            start = m.start(1)
+            end = _shell_word_end(text, start)
+            if end - start > 2:            # more than a bare '' / ""
+                out.append((start, end))
     return out
 
 

@@ -56,6 +56,9 @@ LIBPY = HOOKS / "lib_poll_payload.py"
 NUDGE = HOOKS / "nudge-poll-loop-timeout.sh"
 CIBLOCK = HOOKS / "block-ci-poll-repeat.sh"
 
+sys.path.insert(0, str(HOOKS))
+import lib_poll_payload as lpp                                 # noqa: E402
+
 # Every fixture is built as DATA here, never read back from a repo file, so no
 # test can pass or fail because of prose that happens to sit near it.
 RUN = "30326991380"
@@ -408,6 +411,130 @@ class StripperTeethTest(_HookRunner):
         self.assertFalse(self.nudges(doc), "shipped stripper drops this")
         self.assertTrue(self.nudges(doc, hook=mut),
                         "a no-op stripper must reproduce the #124 bug")
+
+
+class BackslashAndSpliceIdiomDoNotDefeatBlankingTest(unittest.TestCase):
+    """#282 (F3 of #280's own adversarial review, pre-existing -- not
+    introduced by that fix): both `BODYFLAG`/`MSGFLAG` used a naive
+    `(['"])(.*?)\\1` quote-span match with no backslash-awareness and no
+    understanding of the shell's `'"'"'` single-quote-splice idiom (the
+    standard way to embed a literal `'` inside what is, at the bash
+    tokenization level, ONE continuous single-quoted argument). Either
+    shape closes the "blanked" span at the FIRST quote character seen,
+    leaving everything after it -- a fake `gh`/loop mention embedded in
+    the flag's own value -- as live, unblanked text. Direct import, not
+    the subprocess hook: this is the shared library both consumers of
+    `flag_spans()`/`strip()` depend on, and a unit-level pin is cheaper
+    and more precise than driving it through a full hook subprocess."""
+
+    FAKE_LOOP = "for i in 1 2 3; do sleep 5; done"
+
+    def test_an_escaped_quote_does_not_leak_a_fake_loop_past_the_blank(self):
+        cmd = 'gh pr comment 7 --body "see \\"the doc\\" then %s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "an escaped quote inside --body must not let the "
+                         "fake loop text survive blanking: %r" % out)
+
+    def test_a_single_quote_splice_idiom_does_not_leak_a_fake_loop(self):
+        cmd = "gh pr comment 7 --body 'it'\"'\"'s: %s'" % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "the shell splice idiom inside --body must not "
+                         "let the fake loop text survive blanking: %r" % out)
+
+    def test_a_message_flag_splice_idiom_also_blanks(self):
+        # MSGFLAG (-m/--message/--title/-t) is the sibling regex, gated on
+        # GITGH -- `git commit` supplies it.
+        cmd = "git commit -m 'it'\"'\"'s: %s'" % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "the splice idiom must also be closed for -m: %r" % out)
+
+    def test_a_message_flag_escaped_quote_also_blanks(self):
+        cmd = 'git commit -m "see \\"the doc\\" then %s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out,
+                         "an escaped quote must also be closed for -m: %r" % out)
+
+    def test_a_genuinely_live_loop_outside_any_quoted_value_survives(self):
+        # Control pin: the fix must never blank text that is NOT inside a
+        # BODYFLAG/MSGFLAG value at all -- only the flag's own value.
+        cmd = self.FAKE_LOOP + '; gh pr comment 7 --body "unrelated \\"note\\""'
+        out = lpp.strip(cmd)
+        self.assertIn("do sleep 5", out,
+                      "a real loop living outside the flag value must "
+                      "not be touched by the fix: %r" % out)
+
+    def test_a_plain_unescaped_value_is_still_blanked_as_before(self):
+        # Regression control: the ordinary, already-covered case must keep
+        # working -- this is not a case the fix should ever touch.
+        cmd = 'gh pr comment 7 --body "%s"' % self.FAKE_LOOP
+        out = lpp.strip(cmd)
+        self.assertNotIn("do sleep 5", out, repr(out))
+
+
+class ShellWordEndStopsAtUnquotedMetacharsTest(unittest.TestCase):
+    """Adversarial review of #282's own fix (Finding 1): `_shell_word_end`
+    stopped ONLY at whitespace, never at an unquoted shell metacharacter
+    (`;`/`&`/`|`/`(`/`)`/`<`/`>`) -- real bash ends a word there too. A
+    separator glued directly to a flag value's closing quote (no space,
+    e.g. `"x";gh issue comment 99`, the exact shape #208's batch-posting
+    tests already exercise) was consumed INTO the blanked span, eating the
+    first word of the very next command. Fail-safe direction (a real later
+    invocation goes undetected rather than a fake one surviving), but a
+    real regression the #282 fix itself introduced -- own bug, own RED."""
+
+    def test_a_semicolon_glued_to_the_closing_quote_does_not_swallow_the_next_invocation(self):
+        cmd = 'gh issue comment 7 --body "x";gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out,
+                      "a real invocation chained via ; with NO space "
+                      "after the closing quote must not be swallowed: %r"
+                      % out)
+
+    def test_an_ampersand_glued_to_the_closing_quote_does_not_swallow_the_next_invocation(self):
+        cmd = 'gh issue comment 7 --body "x"&gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+    def test_a_pipe_glued_to_the_closing_quote_does_not_swallow_the_next_word(self):
+        cmd = 'gh issue comment 7 --body "x"|gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+    def test_a_separator_with_surrounding_whitespace_was_never_affected(self):
+        # Control pin: the bug is specific to NO space around the
+        # separator -- the whitespace-separated shape already worked.
+        cmd = 'gh issue comment 7 --body "x" ; gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+
+class ShellWordContinuationDiscriminatorTest(unittest.TestCase):
+    """Adversarial review of #282's own fix (Finding 4): none of the
+    existing tests distinguish the correct, continuation-aware scanner
+    from a subtly-wrong reimplementation that simply stops scanning at
+    the FIRST closing quote (i.e. reverts to the pre-#282 shape for
+    anything glued to a quote with no separator at all -- real bash
+    concatenates `"safe"gh` into ONE word, exactly the splice-idiom
+    continuation rule, one level plainer: no second quote pair at all,
+    just bare unquoted text glued straight on)."""
+
+    def test_bare_text_glued_to_the_closing_quote_with_no_separator_is_absorbed(self):
+        # Real bash: `--body "safe"gh` is the SINGLE token `safegh` (word
+        # concatenation, zero whitespace between the fragments) -- the
+        # correct scanner must keep consuming past the closing quote, so
+        # the "gh" is blanked WITH the rest of the value and #99 is never
+        # visible as a live invocation. A wrong "stop at the first closing
+        # quote" reimplementation would leave "gh issue comment 99"
+        # completely unblanked -- exactly the #282 leak, reintroduced.
+        cmd = 'gh issue comment 7 --body "safe"gh issue comment 99'
+        out = lpp.strip(cmd)
+        self.assertNotIn("gh issue comment 99", out,
+                         "text glued directly to a value's closing quote "
+                         "(no separator) is part of the SAME shell word "
+                         "and must be absorbed into the blank: %r" % out)
 
 
 class FailOpenTest(_HookRunner):

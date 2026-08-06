@@ -128,9 +128,19 @@ def _log_exception(where, exc):
 # earlier #280 -R-in-quoted-body leak for the sudo-prefixed shape (see
 # TestEnvVarPrefixedGhCallIsRecognized). GITGH-precedes is the correct,
 # narrower discriminator for this hook's domain.
+#
+# #282 -- matches only up to the OPENING quote (no `.*?...\1` value
+# capture): that shape used to close the "value" at the FIRST quote
+# character seen, escaped or not, and had no notion of the shell's
+# `'"'"'` single-quote-splice idiom -- letting a fake `gh issue comment N`
+# mention (or a smuggled `-R owner/evil`) trapped inside the flag's own
+# value survive as live-looking text past the premature close.
+# `lib_poll_payload._shell_word_end` (the SAME resolver
+# lib_poll_payload.py's own BODYFLAG/MSGFLAG now use, reused here rather
+# than reimplemented) resolves the true end of the value instead.
 _TEXT_FLAG_VALUE_RE = re.compile(
     r"(?:^|\s)(?:--body|--body-file|--notes|--notes-file|-b|-F|"
-    r"-m|--message|--title|-t)(?:=|\s+)(['\"])(.*?)\1", re.S)
+    r"-m|--message|--title|-t)(?:=|\s+)(['\"])")
 
 
 def _blank_gh_text_flag_values(text, lib_poll_payload):
@@ -143,7 +153,9 @@ def _blank_gh_text_flag_values(text, lib_poll_payload):
     INTERP-exemption shape. Positional (offset-based, reverse order),
     never by value -- the same discipline lib_poll_payload.py's own
     `flag_spans`/`strip` already use, for the same reason (a value-based
-    `str.replace` can delete unrelated live text sharing the same bytes)."""
+    `str.replace` can delete unrelated live text sharing the same bytes).
+    The blanked span covers the WHOLE resolved shell word (#282, quote
+    characters included), not just a single quote-pair's inner text."""
     out = text
     for m in reversed(list(_TEXT_FLAG_VALUE_RE.finditer(text))):
         head = text[:m.start()]
@@ -151,8 +163,10 @@ def _blank_gh_text_flag_values(text, lib_poll_payload):
         seg = text[cut + 1:m.start()]
         if not lib_poll_payload.GITGH.search(seg):
             continue
-        if m.group(2).strip():
-            out = out[:m.start(2)] + " " + out[m.end(2):]
+        start = m.start(1)
+        end = lib_poll_payload._shell_word_end(text, start)
+        if end - start > 2:                # more than a bare '' / ""
+            out = out[:start] + " " + out[end:]
     return out
 
 
