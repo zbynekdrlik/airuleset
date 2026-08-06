@@ -276,18 +276,6 @@ MANAGED_DISABLED_PLUGINS = (
     "rust-analyzer-lsp@claude-plugins-official",
     "claude-md-management@claude-plugins-official",
 )
-MANAGED_PLUGIN_CACHE_GLOBS = {
-    "superpowers@claude-plugins-official":
-        "plugins/cache/claude-plugins-official/superpowers/*/skills",
-    # Playwright's cache dir uses a literal "unknown" version segment rather
-    # than a content hash (confirmed live, dev1) — match on `.mcp.json`
-    # (present directly under that segment), the actual LOAD-BEARING file
-    # for this plugin's MCP server, rather than `.claude-plugin/plugin.json`
-    # (a manifest that could survive an interrupted extraction and still
-    # report "built" — #158 review finding).
-    "playwright@claude-plugins-official":
-        "plugins/cache/claude-plugins-official/playwright/*/.mcp.json",
-}
 # Marketplace SOURCES for `claude plugin marketplace add` (issue: push:
 # plugin installs fail on fresh stream accounts — marketplace not
 # registered, 2026-08-06). A plugin's marketplace must be REGISTERED before
@@ -3116,10 +3104,72 @@ def reconcile_managed_plugins(settings: dict) -> dict:
     return result
 
 
+def _plugin_registry_keys(registry_path: Path = None) -> set:
+    """Read claude's OWN plugin registry — `~/.claude/plugins/
+    installed_plugins.json`, the exact backing store `claude plugin list`
+    renders its output from (confirmed live, dev1: the registry's `plugins`
+    dict keys match `claude plugin list`'s printed plugin names 1:1;
+    shape `{"version": N, "plugins": {"<key>@<marketplace>": [{...}]}}`) —
+    and return the set of `plugin@marketplace` keys it genuinely knows
+    about. `registry_path` defaults to `CLAUDE_DIR / "plugins" /
+    "installed_plugins.json"`, read at CALL time (never a precomputed
+    constant) so patching `CLAUDE_DIR` in a test works exactly like it
+    already does for every other CLAUDE_DIR-derived path in this file.
+    Missing file / unreadable file (a directory, permission-denied,
+    invalid UTF-8) / unparsable JSON / a `plugins` field that isn't a dict
+    — all degrade to an empty set. Never guess a plugin is installed just
+    because the registry can't be read (issue #276; the unreadable-file
+    case is an adversarial-review MAJOR finding — `read_file_safe()`'s
+    `exists()` -> `read_text()` only catches a MISSING file, so a path
+    that EXISTS but genuinely cannot be read used to raise UNCAUGHT here,
+    escaping `_managed_plugin_built()` at `setup_managed_plugins()`'s own
+    `if _managed_plugin_built(key): continue` — which sits OUTSIDE the
+    per-plugin try/except — so `cmd_install()`'s outer try/except silently
+    swallowed it as "(non-fatal)": remaining plugins never ran, yet
+    "Install complete." was still reported)."""
+    path = registry_path or (CLAUDE_DIR / "plugins" / "installed_plugins.json")
+    try:
+        raw = read_file_safe(path)
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"    warning: cannot read plugin registry {path} ({e})",
+              file=sys.stderr)
+        return set()
+    if not raw.strip():
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return set(plugins.keys()) if isinstance(plugins, dict) else set()
+
+
 def _managed_plugin_built(key: str) -> bool:
-    """True iff the plugin's cache exists on disk (any version dir)."""
-    import glob
-    return bool(glob.glob(str(CLAUDE_DIR / MANAGED_PLUGIN_CACHE_GLOBS[key])))
+    """True iff claude's OWN plugin registry (installed_plugins.json) has
+    an entry for this plugin key — never a proxy for it.
+
+    ISSUE #276 (2026-08-06): the OLD check globbed for a cache file (e.g.
+    playwright's `.mcp.json` under `plugins/cache/.../*/`) and treated its
+    mere presence as "genuinely installed". A stale/partial cache dir left
+    by a FAILED pre-#273 install (before marketplace registration existed,
+    `claude plugin install` used to fail "not found in marketplace" after
+    already half-extracting files) satisfies that glob while claude's own
+    registry — and `claude plugin list` — correctly report the plugin
+    ABSENT: settings.json says enabled, but `setup_managed_plugins()`'s
+    `if _managed_plugin_built(key): continue` silently skipped the real
+    `claude plugin install` forever (montalu2/montalu3: playwright never
+    installed; montalu4: zero plugins ever installed this way). Checking
+    the registry instead makes a settings-enabled + registry-absent
+    mismatch self-healing: the very next push retries the real install,
+    with no manual fix needed on any of the three stuck accounts.
+
+    (Playwright's real cache layout, for context: a literal "unknown"
+    version segment rather than a content hash, with `.mcp.json` — the
+    actual load-bearing file for its MCP server — as the last thing written
+    by a completed extraction, never the `.claude-plugin/plugin.json`
+    manifest alone; #158 review finding. None of that matters to THIS
+    check any more — it is entirely superseded by the registry read.)"""
+    return key in _plugin_registry_keys()
 
 
 PLAYWRIGHT_PLUGIN_KEY = "playwright@claude-plugins-official"
@@ -3172,7 +3222,9 @@ def setup_managed_plugins() -> bool:
        push: plugin installs fail on fresh stream accounts, 2026-08-06 —
        reconciling AFTER install, as this used to, means the settings write
        lands too late to help the very install call it's meant to unblock),
-    2. for every plugin whose cache is missing: register its marketplace
+    2. for every plugin whose REGISTRY ENTRY is missing (claude's own
+       installed_plugins.json — see _managed_plugin_built()'s docstring;
+       never a cache-file glob, #276): register its marketplace
        (idempotent `claude plugin marketplace add` — see
        ensure_marketplace_registered()'s docstring) THEN install it
        (best-effort, time-boxed). Installing without a registered
@@ -3180,7 +3232,7 @@ def setup_managed_plugins() -> bool:
        so a failed registration skips that plugin's install attempt
        entirely rather than trying anyway.
     Returns True iff nothing REQUIRED failed (marketplace registration and
-    install, for every plugin whose cache was missing) — a still-failing
+    install, for every plugin whose registry entry was missing) — a still-failing
     plugin install after correct marketplace registration is a genuine
     failure the caller (cmd_install) turns into a non-zero exit, per
     script-failure-policy. The other best-effort step here
@@ -3211,14 +3263,15 @@ def setup_managed_plugins() -> bool:
     market_ok = {}
     for key in MANAGED_PLUGINS:
         # Adversarial-review MINOR finding: `_marketplace_names_for`
-        # deliberately tolerates a bare (no "@") key, but a bare key ALSO
-        # has no MANAGED_PLUGIN_CACHE_GLOBS entry — a raw KeyError inside
-        # `_managed_plugin_built()` (called next) would be swallowed by
-        # cmd_install()'s own outer try/except as "(non-fatal)", with
-        # `ok`/`install_failed` never set, silently reporting "Install
-        # complete." Check BEFORE that call, not after. A bare key is a
-        # real misconfiguration of MANAGED_PLUGINS; report it loudly and
-        # keep processing the rest.
+        # deliberately tolerates a bare (no "@") key, but `key.split("@",
+        # 1)[1]` a few lines below is unguarded — a raw IndexError there
+        # would be swallowed by cmd_install()'s own outer try/except as
+        # "(non-fatal)", with `ok`/`install_failed` never set, silently
+        # reporting "Install complete." (`_managed_plugin_built()`, called
+        # next, is a pure registry-membership check and can't raise on a
+        # bare key — #276 — but the split below still can.) Check BEFORE
+        # that call, not after. A bare key is a real misconfiguration of
+        # MANAGED_PLUGINS; report it loudly and keep processing the rest.
         if "@" not in key:
             print(f"    skipping malformed plugin key {key!r} (missing "
                   f"'@marketplace')", file=sys.stderr)
