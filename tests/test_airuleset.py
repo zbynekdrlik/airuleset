@@ -8775,6 +8775,48 @@ class TestLocalhostOnGlobeLineHook(TestCase):
         self.assertNotIn('"decision": "block"', r.stdout)
 
 
+class TestLocalhostOnApkLineHook(TestCase):
+    """stop-check-prose-violations.sh (#265) — completion-report.md now names
+    `\U0001F4F1 <platform>:` (APK/IPA/installable-build) as a sibling artifact
+    marker to `\U0001F310`, for client-app projects. no-localhost-urls.md's
+    own rule ("This applies to ALL URLs") extends the SAME localhost/
+    127.0.0.1/0.0.0.0 ban that already covers \U0001F310 lines to a
+    \U0001F4F1-marked line too — one-character widening of the existing
+    selector regex, same near-zero-FP shape (scoped ONLY to lines carrying
+    the marker)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
+
+    def _run(self, msg, session_id=None):
+        sid = session_id or f"apk-localhost-test-{uuid.uuid4().hex[:8]}"
+        retry_file = f"/tmp/airuleset-stop-block-{sid}"
+        if os.path.exists(retry_file):
+            os.remove(retry_file)
+        self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
+        payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+        return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                              capture_output=True, timeout=30)
+
+    def test_blocks_apk_line_with_localhost(self):
+        r = self._run("Build is ready: \U0001F4F1 APK: http://localhost:8788/app.apk")
+        self.assertIn('"decision": "block"', r.stdout)
+        self.assertIn("localhost", r.stdout.lower())
+
+    def test_blocks_apk_line_with_127001(self):
+        r = self._run("Grab it here: \U0001F4F1 http://127.0.0.1:8788/build.apk")
+        self.assertIn('"decision": "block"', r.stdout)
+
+    def test_allows_apk_line_with_real_ip(self):
+        msg = ("\U0001F310 Demo: http://100.104.8.125:8080\n"
+              "\U0001F4F1 APK: http://100.104.8.125:8788/app-v1.2.3.apk")
+        r = self._run(msg)
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+    def test_allows_localhost_in_prose_without_apk_marker(self):
+        r = self._run("The apk build server runs on localhost:8788 during development.")
+        self.assertNotIn('"decision": "block"', r.stdout)
+
+
 class TestTesterHandoffHook(TestCase):
     """stop-check-prose-violations.sh (issue #13 sub-item 4) — VERIFIES the
     autonomous-verification.md claim 'The Stop hook blocks them' for banned
