@@ -52,15 +52,38 @@ class TestClaudeCliInstalled(TestCase):
         with m.patch("shutil.which", return_value="/usr/bin/claude"):
             self.assertTrue(airuleset._claude_cli_installed(env))
 
-    def test_false_when_which_finds_nothing(self):
+    def test_false_when_which_and_login_shell_both_find_nothing(self):
         env = {"PATH": "/usr/bin:/bin"}
-        with m.patch("shutil.which", return_value=None):
+        with m.patch("shutil.which", return_value=None), \
+                m.patch("subprocess.run",
+                        return_value=m.Mock(returncode=1, stdout="")):
             self.assertFalse(airuleset._claude_cli_installed(env))
+
+    def test_true_via_login_shell_fallback_when_which_finds_nothing(self):
+        # #263 review finding: an account whose PATH machinery only
+        # resolves `claude` through a LOGIN shell (nvm, .profile, etc.)
+        # must not read as "missing" and get a second, shadowing install.
+        env = {"PATH": "/usr/bin:/bin"}
+        with m.patch("shutil.which", return_value=None), \
+                m.patch("subprocess.run",
+                        return_value=m.Mock(returncode=0,
+                                             stdout="/opt/claude/claude\n")) as run:
+            self.assertTrue(airuleset._claude_cli_installed(env))
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["bash", "-lc", "command -v claude"])
+
+    def test_login_shell_fallback_exception_is_treated_as_missing(self):
+        env = {"PATH": "/usr/bin:/bin"}
+        with m.patch("shutil.which", return_value=None), \
+                m.patch("subprocess.run", side_effect=OSError("no bash")):
+            self.assertFalse(airuleset._claude_cli_installed(env))   # must not raise
 
     def test_defaults_to_claude_cli_env_when_no_env_given(self):
         with m.patch.object(airuleset, "_claude_cli_env",
                              return_value={"PATH": "/x"}) as env_fn, \
-                m.patch("shutil.which", return_value=None) as which_fn:
+                m.patch("shutil.which", return_value=None) as which_fn, \
+                m.patch("subprocess.run",
+                        return_value=m.Mock(returncode=1, stdout="")):
             airuleset._claude_cli_installed()
         env_fn.assert_called_once()
         self.assertEqual(which_fn.call_args.kwargs.get("path"), "/x")
@@ -87,8 +110,11 @@ class TestEnsureClaudeCliInstalled(TestCase):
             airuleset.ensure_claude_cli_installed({"PATH": "/x"})
         run.assert_called_once()
         argv = run.call_args[0][0]
-        self.assertEqual(argv, ["bash", "-c",
-                                 "curl -fsSL https://claude.ai/install.sh | bash"])
+        self.assertEqual(argv[0], "bash")
+        self.assertEqual(argv[1], "-c")
+        # pipefail so a curl failure isn't masked by bash's own exit code
+        self.assertIn("set -o pipefail", argv[2])
+        self.assertIn("curl -fsSL https://claude.ai/install.sh | bash", argv[2])
         self.assertIn("env", run.call_args.kwargs)
         self.assertEqual(run.call_args.kwargs["env"], {"PATH": "/x"})
 
@@ -145,7 +171,12 @@ class TestTmuxSessionExists(TestCase):
             raise OSError("no such file")
         self.assertIsNone(airuleset._tmux_session_exists("montalu2", run=run))
 
-    def test_calls_has_session_with_the_right_target(self):
+    def test_calls_has_session_with_an_exact_match_target(self):
+        # #263 review finding: a bare `-t name` does PREFIX matching (tmux
+        # 3.7b, live-verified) -- `has-session -t montalu2` reports "exists"
+        # even when only `montalu2-review` is alive. `-t "=name"` anchors
+        # to an EXACT match; without it this check silently reports a
+        # not-yet-provisioned account as already done, forever.
         calls = []
 
         def run(argv):
@@ -153,14 +184,20 @@ class TestTmuxSessionExists(TestCase):
             return _FakeCP(returncode=1)
 
         airuleset._tmux_session_exists("montalu2", run=run)
-        self.assertEqual(calls, [["tmux", "has-session", "-t", "montalu2"]])
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "=montalu2"]])
 
 
 class TestEnsureStreamTmuxSession(TestCase):
+    def _sentinel(self):
+        # a fresh, nonexistent path per test -- the real default
+        # (STREAM_TMUX_BOOTSTRAP_SENTINEL) lives under this machine's own
+        # real ~/.claude/ and must never be touched by a test.
+        return Path(tempfile.mkdtemp()) / ".airuleset-stream-session-bootstrapped"
+
     def test_none_for_a_non_stream_user(self):
         # dev1/dev2/gatekeeper's own linux users are never in AUTHORITY_BY_USER
-        result = airuleset.ensure_stream_tmux_session(user="newlevel",
-                                                        run=lambda a: _FakeCP())
+        result = airuleset.ensure_stream_tmux_session(
+            user="newlevel", run=lambda a: _FakeCP(), sentinel_path=self._sentinel())
         self.assertIsNone(result)
 
     def test_never_touches_an_existing_session(self):
@@ -170,7 +207,8 @@ class TestEnsureStreamTmuxSession(TestCase):
             calls.append(argv)
             return _FakeCP(returncode=0)   # has-session says: exists
 
-        result = airuleset.ensure_stream_tmux_session(user="montalu2", run=run)
+        result = airuleset.ensure_stream_tmux_session(
+            user="montalu2", run=run, sentinel_path=self._sentinel())
         self.assertIn("already exists", result)
         # ONLY the has-session probe ran -- no new-session, no send-keys
         self.assertEqual(len(calls), 1)
@@ -188,7 +226,8 @@ class TestEnsureStreamTmuxSession(TestCase):
         d = Path(tempfile.mkdtemp())
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
-                user="montalu2", run=run, launch_script="/x/launch.sh")
+                user="montalu2", run=run, launch_script="/x/launch.sh",
+                sentinel_path=self._sentinel())
         self.assertIn("created session 'montalu2'", result)
         self.assertIn("claude launched", result)
         self.assertTrue(any(
@@ -214,7 +253,8 @@ class TestEnsureStreamTmuxSession(TestCase):
         checkout = d / "devel" / "odoo" / "odoo-erp"
         checkout.mkdir(parents=True)
         with m.patch.object(Path, "home", return_value=d):
-            airuleset.ensure_stream_tmux_session(user="montalu3", run=run)
+            airuleset.ensure_stream_tmux_session(
+                user="montalu3", run=run, sentinel_path=self._sentinel())
         new_session_call = next(c for c in calls if c[:2] == ["tmux", "new-session"])
         self.assertIn(str(checkout), new_session_call)
 
@@ -229,15 +269,77 @@ class TestEnsureStreamTmuxSession(TestCase):
                 return _FakeCP(returncode=1, stderr="no server running")
             return _FakeCP(returncode=0)
 
-        result = airuleset.ensure_stream_tmux_session(user="montalu4", run=run)
+        result = airuleset.ensure_stream_tmux_session(
+            user="montalu4", run=run, sentinel_path=self._sentinel())
         self.assertIn("FAILED", result)
         self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
 
     def test_unreachable_tmux_is_reported_and_left_untouched(self):
         def run(argv):
             raise OSError("tmux missing")
-        result = airuleset.ensure_stream_tmux_session(user="marek", run=run)
+        result = airuleset.ensure_stream_tmux_session(
+            user="marek", run=run, sentinel_path=self._sentinel())
         self.assertIn("unreachable", result)
+
+    def test_unreachable_tmux_never_writes_the_sentinel(self):
+        # nothing was decided -- a later push should still get the very
+        # first real attempt once tmux becomes reachable.
+        sentinel = self._sentinel()
+
+        def run(argv):
+            raise OSError("tmux missing")
+
+        airuleset.ensure_stream_tmux_session(
+            user="marek", run=run, sentinel_path=sentinel)
+        self.assertFalse(sentinel.exists())
+
+    def test_second_call_never_recreates_a_session_the_user_deliberately_killed(self):
+        # #263 review CRITICAL finding: the original version re-created (and
+        # auto-launched claude into) a session on EVERY install/push run
+        # whenever has-session reported "doesn't exist" -- including a
+        # session the user had deliberately killed (out of token budget,
+        # done for the day). This is the standing, repeatedly-reported user
+        # complaint this repo's own memory records ('never touch a session
+        # the user deliberately stopped'). The fix: bootstrap exactly ONCE,
+        # ever, per account, gated on a sentinel file.
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return _FakeCP(returncode=1)   # doesn't exist (either fresh, or killed)
+            return _FakeCP(returncode=0)
+
+        sentinel = self._sentinel()
+        d = Path(tempfile.mkdtemp())
+        with m.patch.object(Path, "home", return_value=d):
+            first = airuleset.ensure_stream_tmux_session(
+                user="montalu2", run=run, sentinel_path=sentinel)
+        self.assertIn("created session", first)
+        self.assertTrue(sentinel.exists())
+
+        calls.clear()
+        with m.patch.object(Path, "home", return_value=d):
+            second = airuleset.ensure_stream_tmux_session(
+                user="montalu2", run=run, sentinel_path=sentinel)
+        self.assertIn("already bootstrapped once", second)
+        self.assertIn("never re-created", second)
+        # NOT ONE tmux call this time -- no has-session, no new-session,
+        # no send-keys -- the account is left completely alone.
+        self.assertEqual(calls, [])
+
+    def test_sentinel_is_written_even_when_the_session_already_existed(self):
+        # the ONE-TIME decision (whether to act or not) is what's recorded,
+        # not just "we created something" -- a session that already existed
+        # on the very first sighting must also never be re-evaluated later.
+        sentinel = self._sentinel()
+
+        def run(argv):
+            return _FakeCP(returncode=0)   # has-session: exists
+
+        airuleset.ensure_stream_tmux_session(
+            user="montalu2", run=run, sentinel_path=sentinel)
+        self.assertTrue(sentinel.exists())
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +362,7 @@ class TestStreamProvisioningGaps(TestCase):
     def test_both_gaps_reported_on_a_fresh_account(self):
         d = self._home()
         with m.patch.object(Path, "home", return_value=d):
-            gaps = airuleset._stream_provisioning_gaps("montalu2")
+            gaps = airuleset._stream_provisioning_gaps()
         self.assertEqual(len(gaps), 2)
         self.assertTrue(any("OAuth" in g or "login" in g for g in gaps))
         self.assertTrue(any("PAT" in g or "gh auth" in g for g in gaps))
@@ -268,43 +370,50 @@ class TestStreamProvisioningGaps(TestCase):
     def test_no_gaps_once_both_are_satisfied(self):
         d = self._home(claude_creds=True, gh_hosts=True)
         with m.patch.object(Path, "home", return_value=d):
-            gaps = airuleset._stream_provisioning_gaps("montalu2")
+            gaps = airuleset._stream_provisioning_gaps()
         self.assertEqual(gaps, [])
 
     def test_git_credentials_alone_also_satisfies_the_pat_gap(self):
         d = self._home(claude_creds=True, git_creds=True)
         with m.patch.object(Path, "home", return_value=d):
-            gaps = airuleset._stream_provisioning_gaps("montalu2")
+            gaps = airuleset._stream_provisioning_gaps()
         self.assertEqual(gaps, [])
 
     def test_empty_credentials_file_does_not_count_as_present(self):
         d = self._home()
         (d / ".claude" / ".credentials.json").write_text("")
         with m.patch.object(Path, "home", return_value=d):
-            gaps = airuleset._stream_provisioning_gaps("montalu2")
+            gaps = airuleset._stream_provisioning_gaps()
         self.assertTrue(any("OAuth" in g or "login" in g for g in gaps))
 
 
 class TestReportStreamDevEnv(TestCase):
     def test_no_op_for_non_stream_user(self):
-        out = StringIO()
-        with m.patch("sys.stdout", out):
+        out, err = StringIO(), StringIO()
+        with m.patch("sys.stdout", out), m.patch("sys.stderr", err):
             airuleset.report_stream_dev_env(user="newlevel")
         self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")
 
-    def test_reports_gaps_loudly_and_leaves_todo_file_in_place(self):
+    def test_reports_gaps_loudly_to_stderr_and_leaves_todo_file_in_place(self):
+        # #263 review finding: the gap report must go to STDERR (loud,
+        # never buried on stdout among hundreds of routine install lines).
         d = Path(tempfile.mkdtemp())
         (d / ".claude").mkdir()
         todo = d / "TODO-PROVISIONING.md"
         todo.write_text("STILL MISSING: ...\n")
-        out = StringIO()
+        out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
-                m.patch("sys.stdout", out):
+                m.patch("sys.stdout", out), m.patch("sys.stderr", err):
             airuleset.report_stream_dev_env(user="montalu2")
-        self.assertIn("gap(s)", out.getvalue())
+        self.assertIn("gap(s)", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
         self.assertTrue(todo.exists())
 
-    def test_removes_todo_file_once_fully_provisioned(self):
+    def test_renames_todo_file_once_fully_provisioned(self):
+        # #263 review finding: RENAME, never unlink -- the file is
+        # gatekeeper-authored and airuleset cannot recreate it, so a
+        # false-positive gap-closed read must not destroy it.
         d = Path(tempfile.mkdtemp())
         (d / ".claude").mkdir()
         (d / ".claude" / ".credentials.json").write_text("{}")
@@ -312,12 +421,15 @@ class TestReportStreamDevEnv(TestCase):
         (d / ".config" / "gh" / "hosts.yml").write_text("github.com:\n")
         todo = d / "TODO-PROVISIONING.md"
         todo.write_text("STILL MISSING: ...\n")
-        out = StringIO()
+        out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
-                m.patch("sys.stdout", out):
+                m.patch("sys.stdout", out), m.patch("sys.stderr", err):
             airuleset.report_stream_dev_env(user="montalu2")
-        self.assertIn("Removed", out.getvalue())
+        self.assertIn("Renamed", out.getvalue())
         self.assertFalse(todo.exists())
+        done = d / "TODO-PROVISIONING.md.done"
+        self.assertTrue(done.exists())
+        self.assertEqual(done.read_text(), "STILL MISSING: ...\n")
 
     def test_no_todo_file_and_fully_provisioned_prints_nothing(self):
         d = Path(tempfile.mkdtemp())
@@ -325,11 +437,12 @@ class TestReportStreamDevEnv(TestCase):
         (d / ".claude" / ".credentials.json").write_text("{}")
         (d / ".config" / "gh").mkdir(parents=True)
         (d / ".config" / "gh" / "hosts.yml").write_text("github.com:\n")
-        out = StringIO()
+        out, err = StringIO(), StringIO()
         with m.patch.object(Path, "home", return_value=d), \
-                m.patch("sys.stdout", out):
+                m.patch("sys.stdout", out), m.patch("sys.stderr", err):
             airuleset.report_stream_dev_env(user="montalu2")
         self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +494,21 @@ class TestApplyStreamSshAttach(TestCase):
         self.assertIn('SSH_TTY', block)             # a real ssh TTY
         self.assertIn('-z "${TMUX:-}"', block)       # not already inside tmux
 
+    def test_guarded_against_a_missing_tmux_binary(self):
+        # #263 review finding: without this, `exec tmux ...` on a box where
+        # tmux is missing/broken fails AFTER the shell has already been
+        # replaced -- closing the ssh session outright instead of leaving
+        # a working interactive shell behind.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("command -v tmux", block)
+
+    def test_write_is_atomic_no_tmp_file_left_behind(self):
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        tmp = p.with_suffix(p.suffix + ".airuleset-tmp")
+        self.assertFalse(tmp.exists())
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, p.read_text())
+
     def test_creates_file_when_absent(self):
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
@@ -417,6 +545,48 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
         airuleset.apply_stream_ssh_attach(p, user="montalu2")
         self.assertIn("IMPORTANT_UNRELATED_LINE=1", p.read_text())
 
+    def test_two_full_blocks_both_rewrite_cleanly_and_preserve_content_between(self):
+        two_blocks = (
+            f"{airuleset.STREAM_SSH_ATTACH_BLOCK}\n"
+            "MID_CONTENT=kept\n"
+            f"{airuleset.STREAM_SSH_ATTACH_BLOCK}\n"
+        )
+        p = Path(tempfile.mkdtemp()) / ".bashrc"
+        p.write_text(two_blocks)
+        # both copies are already byte-identical to the canonical block, so
+        # the FIRST call is a genuine no-op (nothing to rewrite) -- the
+        # real assertion is that BOTH blocks survive, distinct, with the
+        # mid-content preserved, never merged/deduplicated into one.
+        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        text1 = p.read_text()
+        self.assertIn("MID_CONTENT=kept", text1)
+        self.assertEqual(text1.count(airuleset.STREAM_SSH_ATTACH_MARK_START), 2)
+        # idempotent on a second run too
+        changed2 = airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        self.assertFalse(changed2)
+        self.assertEqual(p.read_text(), text1)
+
+    def test_known_residual_a_single_isolated_stray_pair_still_loses_its_content(self):
+        # Honestly-documented limitation (both functions' own docstrings
+        # say so explicitly, per an adversarial review that found the
+        # original docstring OVERCLAIMED "self-heals... never loses
+        # content"): a single ISOLATED stray START/END pair, with no OTHER
+        # marker literal between them, is structurally indistinguishable
+        # from "this is genuinely our own block" to a purely positional
+        # scan -- so its content IS still lost on rewrite. This test locks
+        # that the documented residual stays exactly what the docstring
+        # claims, so a future "fix" that silently changes this behavior
+        # either way is caught rather than drifting unnoticed.
+        corrupted = (
+            f"{airuleset.STREAM_SSH_ATTACH_MARK_START}\n"
+            "export IMPORTANT_SECRET=xyz\n"
+            f"{airuleset.STREAM_SSH_ATTACH_MARK_END}\n"
+        )
+        p = Path(tempfile.mkdtemp()) / ".bashrc"
+        p.write_text(corrupted)
+        airuleset.apply_stream_ssh_attach(p, user="montalu2")
+        self.assertNotIn("IMPORTANT_SECRET", p.read_text())
+
 
 # ---------------------------------------------------------------------------
 # cmd_install wiring
@@ -445,11 +615,19 @@ class TestInstallWiresDevEnvProvisioning(TestCase):
 # ---------------------------------------------------------------------------
 
 class TestPushRemoteDeployTimeoutAndStderr(TestCase):
-    def test_timeout_constant_is_generous_enough_for_a_first_time_install(self):
-        # the old bound (60s) is not enough headroom for a curl-install of
-        # the claude CLI binary plus ensure_playwright_browsers()'s npx
-        # install on a slow link; must be meaningfully larger.
-        self.assertGreaterEqual(airuleset.REMOTE_DEPLOY_TIMEOUT_S, 180)
+    def test_timeout_constant_exceeds_the_worst_case_inner_timeout_sum(self):
+        # #263 review MAJOR finding: the first version set this to 300s,
+        # which is LESS than the sum of the inner best-effort timeouts a
+        # single install can burn through in the exact scenario #263 exists
+        # for -- check_runtime_deps()'s apt-get (300s PER package),
+        # ensure_claude_cli_installed()'s curl-install (180s), and
+        # ensure_playwright_browsers()'s npx install (300s) -- up to ~780s.
+        # A remote timeout SHORTER than that guarantees the outer ssh call
+        # gets killed mid-install on exactly the fresh-account case this
+        # whole ticket is about, silently skipping every step after the
+        # kill point (managed plugins, file-drop, the watchdog timer).
+        worst_case_inner_sum = 300 + 180 + 300
+        self.assertGreater(airuleset.REMOTE_DEPLOY_TIMEOUT_S, worst_case_inner_sum)
 
     def test_cmd_push_uses_the_named_timeout_constant(self):
         src = inspect.getsource(airuleset.cmd_push)
@@ -461,10 +639,25 @@ class TestPushRemoteDeployTimeoutAndStderr(TestCase):
         self.assertIn("subprocess.TimeoutExpired", src)
 
     def test_cmd_push_surfaces_stderr_on_a_successful_remote_call(self):
-        # a successful remote install's own loud "MISSING"/"gap" warnings
-        # go to stderr -- cmd_push used to discard it entirely on success.
+        # a successful remote install's own loud warnings go to stderr --
+        # cmd_push used to discard it entirely on success.
         src = inspect.getsource(airuleset.cmd_push)
         self.assertIn("stderr_out", src)
+
+    def test_cmd_push_tracks_failures_and_exits_non_zero_when_any_occur(self):
+        # #263 review MAJOR finding: before this diff, an uncaught
+        # TimeoutExpired propagated out of cmd_push() with a loud
+        # traceback and non-zero exit -- impossible to miss. The `continue`
+        # needed so ONE slow remote can't abort deployment to every
+        # REMAINING host turned that into a single line among hundreds,
+        # with the run still ending "All deployments complete." at exit 0
+        # -- a SILENT partial deploy. Every failure (timeout or non-zero
+        # rc) must be tracked and the whole command must exit non-zero if
+        # any occurred.
+        src = inspect.getsource(airuleset.cmd_push)
+        self.assertIn("failed.append", src)
+        self.assertIn("if failed:", src)
+        self.assertIn("sys.exit(1)", src)
 
 
 if __name__ == "__main__":

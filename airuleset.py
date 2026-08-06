@@ -843,7 +843,13 @@ STREAM_SSH_ATTACH_BLOCK = (
     "# 'i' and no PTY at all, so this whole block is a no-op for them; guarded\n"
     "# on all three explicitly anyway (interactive shell, a real ssh TTY, not\n"
     "# already inside tmux) so nothing here can ever race a live session.\n"
-    'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ]; then\n'
+    # command -v tmux: if tmux is ever missing/broken on a stream account,
+    # `exec tmux ...` would fail AFTER the shell has already been replaced
+    # -- closing the ssh session outright instead of leaving a working
+    # interactive shell behind (an adversarial review's finding — this
+    # guard keeps that failure mode from ever being reachable).
+    'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
+    '&& command -v tmux >/dev/null 2>&1; then\n'
     f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
     '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
     '  exec tmux new-session -A -s "$(whoami)" -c "$__airuleset_cwd"\n'
@@ -856,11 +862,23 @@ def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
                                 end=STREAM_SSH_ATTACH_MARK_END):
     """Left-to-right positional scan for CLEAN (start, end) marker pairs --
     NEVER a lazy regex `.*?` search, which silently deletes real content
-    between a stray leftover START and the nearest END on a SECOND run
-    against a conf/rc file externally corrupted with an unpaired marker
-    (#235's own documented failure of that exact shape, `_clean_tmux_block_
-    spans`). A pair with another marker literal crossing it is skipped and
-    left as inert text -- never merged with anything else."""
+    sitting between a stray leftover START and a LATER, genuine block's END
+    on a second run against a conf/rc file externally corrupted with a
+    marker literal (#235's own documented failure of that exact shape,
+    `_clean_tmux_block_spans`). A pair CROSSED by another marker literal is
+    skipped and left as inert text, never merged into a neighbouring block
+    -- that specific corruption class is closed.
+
+    Known residual (live-verified by an adversarial review, kept honest
+    here rather than overclaimed): a single ISOLATED stray START/END pair
+    with no OTHER marker literal between them (e.g. a truncated copy-paste
+    accident) still reads as one clean span and its own real content IS
+    still lost on rewrite -- no purely positional scan can distinguish that
+    shape from "this is genuinely our own block". Also: an unpaired,
+    never-matched marker line is never removed by this function on its
+    own -- it stays as inert text forever (harmless, since it's a bash
+    comment, but neither `apply_stream_ssh_attach` add nor remove path
+    "self-heals" it)."""
     spans = []
     pos = 0
     s_len = len(start)
@@ -894,8 +912,11 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     Same overall idempotent-marker-block shape as apply_ultracode_launcher
     (#77) -- create/update if this account should have it, strip if not --
     but the presence check + rewrite use a positional span scan
-    (`_stream_marker_block_spans`), not a lazy regex search, so a corrupted
-    file self-heals instead of silently losing content on a later run.
+    (`_stream_marker_block_spans`), not a lazy regex search, which closes
+    the WORST failure of that class (a stray leftover START silently
+    eating real content up to a LATER genuine block's END) without
+    claiming to close every possible corruption shape -- see that
+    function's own docstring for the residual it honestly leaves open.
     Returns True iff ~/.bashrc changed."""
     bpath = bashrc_path or BASHRC
     u = user or _current_user()
@@ -924,7 +945,14 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
         out.append(existing[cursor:])
         new = "".join(out)
     if new != existing:
-        bpath.write_text(new)
+        # Atomic write: a plain write_text() truncates-then-writes, a real
+        # (if narrow) window for a killed process (e.g. this account's own
+        # `push` install, now running longer network steps that can time
+        # out) to leave ~/.bashrc half-written. tmp-write + os.replace
+        # makes the swap atomic on the same filesystem.
+        tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
+        tmp.write_text(new)
+        os.replace(str(tmp), str(bpath))
         return True
     return False
 
@@ -2483,10 +2511,26 @@ def _claude_cli_installed(env: dict = None) -> bool:
     where the official installer puts it). Never just "a file exists at the
     expected spot" — `shutil.which` also confirms it's executable, same
     discipline as `_playwright_browsers_installed`'s guard against a
-    partial/interrupted install looking permanently "done"."""
+    partial/interrupted install looking permanently "done".
+
+    Falls back to a real LOGIN shell's own `command -v claude` (sources
+    `.profile`/nvm/etc — whatever PATH machinery an account actually uses,
+    which `_claude_cli_env`'s hand-repaired PATH cannot anticipate) before
+    declaring the binary truly absent. An adversarial review flagged that
+    an account with `claude` resolvable ONLY via login-shell-only PATH
+    machinery would otherwise read as missing and get a SECOND, shadowing
+    native install laid down on top by ensure_claude_cli_installed()."""
     import shutil
+    import subprocess
     e = env or _claude_cli_env()
-    return shutil.which("claude", path=e.get("PATH", "")) is not None
+    if shutil.which("claude", path=e.get("PATH", "")) is not None:
+        return True
+    try:
+        r = subprocess.run(["bash", "-lc", "command -v claude"],
+                            capture_output=True, text=True, timeout=10, env=e)
+        return r.returncode == 0 and r.stdout.strip() != ""
+    except Exception:
+        return False
 
 
 def ensure_claude_cli_installed(env: dict = None):
@@ -2521,8 +2565,16 @@ def ensure_claude_cli_installed(env: dict = None):
     if _claude_cli_installed(e):
         return
     try:
+        # `set -o pipefail`: without it, a curl failure (bad network, DNS,
+        # the download host down) is MASKED by bash's own exit code (which
+        # is the LAST command in the pipe, `bash`'s own — live-verified:
+        # `curl <invalid-url> | bash` exits 0 even though curl failed).
+        # `_claude_cli_installed(e)` already catches the resulting failure
+        # correctly (the binary genuinely isn't there), but the printed
+        # "rc=0" in that case is actively misleading to whoever reads it.
         r = subprocess.run(
-            ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"],
+            ["bash", "-c",
+             "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"],
             capture_output=True, text=True, timeout=180, env=e)
         if r.returncode == 0 and _claude_cli_installed(e):
             print("    claude CLI: installed (curl -fsSL "
@@ -3672,13 +3724,25 @@ def _notify_run_card(args, compose_autopilot_card, send):
 # ---------------------------------------------------------------------------
 
 # Per-remote SSH deploy timeout (#263): `cmd_install()` now includes best-
-# effort network-heavy provisioning (curl-installing the claude CLI binary
-# on a box that's missing it, ensure_playwright_browsers()'s own npx install)
-# that can legitimately take well over the old 60s bound on a first-time run
-# — 300s gives real headroom without hanging forever. A remote whose ssh
-# call genuinely can't complete inside this window still gets caught below
-# (subprocess.TimeoutExpired), never crashes the whole push loop.
-REMOTE_DEPLOY_TIMEOUT_S = 300
+# effort network-heavy provisioning that can legitimately take well over the
+# old 60s bound on a first-time run — the sum of the INNER timeouts a single
+# install can burn through: check_runtime_deps()'s `apt-get install` (300s
+# PER missing package), ensure_claude_cli_installed()'s curl-install (180s),
+# and ensure_playwright_browsers()'s npx install (300s) — up to ~780s of
+# best-effort network work alone before any of the ordinary install steps.
+# An adversarial review of the first version of this fix caught it set at
+# 300s, LESS than that inner sum: on the exact scenario #263 exists for (a
+# fresh subdev account missing both claude and the Playwright cache), the
+# outer ssh call would hit ITS OWN bound first, sshd would SIGHUP the
+# remote's still-running `python3 airuleset.py install` mid-run, and every
+# step after the point it was killed (managed plugins, file-drop, the
+# api-watchdog timer) would simply never execute on that remote — silently,
+# since the timeout branch below reports it as a plain timeout, not as
+# "install ran partway and was killed". 900s gives real headroom over the
+# worst-case inner sum. A remote whose ssh call genuinely can't complete
+# inside this window still gets caught below (subprocess.TimeoutExpired),
+# never crashes the whole push loop.
+REMOTE_DEPLOY_TIMEOUT_S = 900
 
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
@@ -3863,6 +3927,18 @@ def cmd_push(args):
     cmd_install(args)
 
     # 3. Deploy to each remote
+    # #263: `failed` accumulates every remote that did NOT deploy cleanly.
+    # An adversarial review of the first version of this timeout fix caught
+    # a real regression it introduced: BEFORE, an uncaught TimeoutExpired
+    # propagated out of cmd_push() with a loud traceback and a non-zero
+    # exit — impossible to miss. The `continue` below (needed so one slow
+    # remote can't abort deployment to every REMAINING host) turned that
+    # into a single line among hundreds, with the run still ending "All
+    # deployments complete." at exit 0 — a SILENT partial deploy. Tracking
+    # every failure and exiting non-zero if any occurred restores the
+    # "impossible to miss" property without reintroducing the abort-the-
+    # whole-loop defect.
+    failed = []
     for remote in REMOTE_HOSTS:
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")
@@ -3899,21 +3975,28 @@ def cmd_push(args):
         except subprocess.TimeoutExpired:
             print(f"  FAILED: timed out after {REMOTE_DEPLOY_TIMEOUT_S}s "
                   f"— continuing to the next host")
+            failed.append((remote["name"], "timeout"))
             continue
         if ssh_result.returncode != 0:
             print(f"  FAILED: {ssh_result.stderr.strip()}")
+            failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
         else:
             print(f"  {ssh_result.stdout.strip()}")
             # #263: a successful remote install's STDERR was being silently
-            # discarded here — every existing "⚠ MISSING"-style loud warning
-            # (RUNTIME_DEPS, playwright, the new #263 dev-env gap report)
-            # writes to stderr, so on the common success path NONE of them
-            # ever reached the push console. Surface it too, so a gap really
-            # is reported loudly rather than swallowed by push's own success
-            # branch.
+            # discarded here — this repo's own ensure_playwright_browsers()
+            # warning writes to stderr (RUNTIME_DEPS' and this diff's own
+            # report_stream_dev_env() gap warnings write to STDOUT and were
+            # already reaching the console via the branch above), so on the
+            # common success path that warning never reached the push
+            # console. Surface it too, so a gap really is reported loudly
+            # rather than swallowed by push's own success branch.
             stderr_out = ssh_result.stderr.strip()
             if stderr_out:
                 print(f"  [stderr] {stderr_out}")
+    if failed:
+        print(f"\n⚠ {len(failed)} of {len(REMOTE_HOSTS)} remote(s) FAILED: "
+              f"{failed}", file=sys.stderr)
+        sys.exit(1)
     print("\nAll deployments complete.")
 
 
@@ -4540,16 +4623,27 @@ def _stream_session_cwd() -> Path:
 
 def _tmux_session_exists(name, run=None):
     """None = "can't tell" (tmux unreachable/missing) -- the caller must
-    treat that as "don't touch", never as "doesn't exist"."""
+    treat that as "don't touch", never as "doesn't exist".
+
+    `-t "=%s"` is the EXACT-match target form -- a bare `-t name` does
+    PREFIX matching (live-verified against tmux 3.7b: with only a session
+    named `montalu2-review` alive, `has-session -t montalu2` returns rc=0,
+    i.e. "exists", even though no session named exactly `montalu2` does).
+    Without the `=` anchor this function would silently report a stream
+    account "already has its session" and skip provisioning it forever."""
     run = run or _default_tmux_run
     try:
-        result = run(["tmux", "has-session", "-t", name])
+        result = run(["tmux", "has-session", "-t", "=%s" % name])
     except Exception:
         return None
     return getattr(result, "returncode", 1) == 0
 
 
-def ensure_stream_tmux_session(user=None, run=None, launch_script=None):
+STREAM_TMUX_BOOTSTRAP_SENTINEL = CLAUDE_DIR / ".airuleset-stream-session-bootstrapped"
+
+
+def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
+                                sentinel_path=None):
     """#263: bootstrap the ONE tmux session a subdev stream account is
     expected to have -- session name == the linux username (one user = one
     session, matching every already-working peer account's live-verified
@@ -4566,19 +4660,46 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None):
     Scoped STRICTLY to AUTHORITY_BY_USER's keys -- dev1/dev2/gatekeeper are
     the human's own interactive login and are NEVER touched.
 
-    NEVER touches an EXISTING session (has-session check first, always) --
-    only creates one that does not exist yet. An existing session, even one
-    sitting on a bare shell, may be the account's own live work or a
-    deliberately-stopped pane and is left completely alone (same discipline
-    as the tmux-cutover unit's own "never touch a possibly-live server" rule,
-    and the standing 'never touch stopped sessions' precedent)."""
+    ONE-TIME ONLY, ever, per account -- gated on `sentinel_path` (default
+    `STREAM_TMUX_BOOTSTRAP_SENTINEL`). An adversarial review of the first
+    version of this fix caught the real defect: "never touches an EXISTING
+    session" alone is not enough, because a session that a human
+    DELIBERATELY killed (out of token budget, done for the day, a VPS
+    reboot) also reads as "doesn't exist" to has-session -- so the OLD code
+    would silently re-create the session and auto-launch claude into it on
+    the very next `push`, which is exactly the standing, angry, repeated
+    user complaint this repo's own memory already records ('never touch a
+    session the user deliberately stopped'). The sentinel is written the
+    MOMENT this function makes its one real decision (right after resolving
+    `exists`, before creating anything) -- so even a failed first attempt
+    never retries automatically, and a session that later disappears (killed
+    on purpose) is never resurrected. A genuinely UNREACHABLE tmux (`exists
+    is None`) does NOT write the sentinel -- nothing was decided, so a later
+    push may still get the very first real attempt."""
     user = user or _current_user()
     if user not in AUTHORITY_BY_USER:
         return None
+    sentinel = sentinel_path or STREAM_TMUX_BOOTSTRAP_SENTINEL
+    if sentinel.exists():
+        return ("already bootstrapped once for '%s' -- never re-created "
+                 "(a since-stopped session stays stopped)" % user)
     run = run or _default_tmux_run
     exists = _tmux_session_exists(user, run)
     if exists is None:
         return "tmux unreachable -- left untouched"
+    try:
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("bootstrapped for %s\n" % user)
+    except OSError as e:
+        # Best-effort; a failed write just means one more push may retry
+        # this same one-time decision -- never a resurrection of an
+        # already-seen-and-stopped session, since none has been seen yet
+        # on this account. Logged so a persistently-failing write (e.g. a
+        # permissions problem) is visible rather than silently retried
+        # forever.
+        print("  ⚠ could not write %s (%s) -- this one-time bootstrap "
+              "decision may repeat on the next install" % (sentinel, e),
+              file=sys.stderr)
     if exists:
         return "session '%s' already exists -- left untouched" % user
     cwd = _stream_session_cwd()
@@ -4599,15 +4720,23 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None):
     return "created session '%s' in %s, claude launched" % (user, cwd)
 
 
-def _stream_provisioning_gaps(user=None) -> list:
-    """The genuinely-human-only steps remaining for a subdev stream account
-    (#263): the claude CLI's OWN first-run OAuth login, and a GitHub PAT /
-    `gh auth login`. Neither is automatable (OAuth is an interactive human
-    flow; a PAT is generated by a human in GitHub's UI) -- this only DETECTS
-    and reports them, loudly, every install/push, matching #98's existing
-    'a sudo-less box that hits a still-missing dep' LOUD-reporting shape.
-    Returns a list of human-readable gap strings (empty when fully
-    provisioned)."""
+def _stream_provisioning_gaps() -> list:
+    """The genuinely-human-only steps remaining for the CURRENT subdev
+    stream account (#263): the claude CLI's OWN first-run OAuth login, and
+    a GitHub PAT / `gh auth login`. Neither is automatable (OAuth is an
+    interactive human flow; a PAT is generated by a human in GitHub's UI)
+    -- this only DETECTS and reports them, loudly, every install/push,
+    matching #98's existing 'a sudo-less box that hits a still-missing dep'
+    LOUD-reporting shape. Returns a list of human-readable gap strings
+    (empty when fully provisioned).
+
+    Deliberately takes NO `user` parameter -- an adversarial review of an
+    earlier version flagged that every probe below is inherently
+    `Path.home()`-relative, i.e. this account's own environment, and there
+    is no way to introspect ANOTHER account's credentials without switching
+    uid. A `user=` argument that was silently ignored is exactly the shape
+    a future caller mis-uses (calls it for a DIFFERENT account expecting a
+    per-account answer); dropping it removes the possibility entirely."""
     gaps = []
     creds = Path.home() / ".claude" / ".credentials.json"
     try:
@@ -4637,30 +4766,35 @@ def _stream_provisioning_gaps(user=None) -> list:
 def report_stream_dev_env(user=None):
     """#263: called from cmd_install() for every subdev stream account
     (AUTHORITY_BY_USER's keys) — reports the two still-human gaps LOUDLY
-    (never silently) and, once both are satisfied, removes ~/TODO-
-    PROVISIONING.md if present (the file's own text: "Once all of the above
-    land, delete this file" — gatekeeper's Phase-1 handoff contract, which
-    this function fulfils on the account's own behalf once genuinely done).
-    No-op (prints nothing) for a non-stream account."""
+    (stderr, never silently, never merely stdout where it can scroll off
+    among hundreds of routine install lines) and, once both are satisfied,
+    RENAMES ~/TODO-PROVISIONING.md to ~/TODO-PROVISIONING.md.done if present
+    (the file's own text: "Once all of the above land, delete this file" —
+    gatekeeper's Phase-1 handoff contract; renaming rather than deleting is
+    the same signal with zero data loss if a gap-closed read ever turns out
+    to be a false positive — the file is gatekeeper-authored and airuleset
+    cannot recreate it). No-op (prints nothing) for a non-stream account."""
     user = user or _current_user()
     if user not in AUTHORITY_BY_USER:
         return
-    gaps = _stream_provisioning_gaps(user)
+    gaps = _stream_provisioning_gaps()
     todo = Path.home() / "TODO-PROVISIONING.md"
     if gaps:
-        print("  ⚠ dev-env gap(s) on this stream account (human step required):")
+        print("  ⚠ dev-env gap(s) on this stream account (human step required):",
+              file=sys.stderr)
         for g in gaps:
-            print("    - %s" % g)
+            print("    - %s" % g, file=sys.stderr)
         if todo.exists():
             print("    (%s left in place — human steps above still missing)"
-                  % todo)
+                  % todo, file=sys.stderr)
     elif todo.exists():
+        done = todo.with_name(todo.name + ".done")
         try:
-            todo.unlink()
-            print("  Removed: %s (all provisioning steps confirmed complete)"
-                  % todo)
+            todo.rename(done)
+            print("  Renamed: %s -> %s (all provisioning steps confirmed complete)"
+                  % (todo, done))
         except OSError as e:
-            print("  ⚠ could not remove %s (%s) — remove by hand"
+            print("  ⚠ could not rename %s (%s) — remove/rename by hand"
                   % (todo, e), file=sys.stderr)
 
 
