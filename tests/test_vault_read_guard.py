@@ -387,6 +387,78 @@ class TheWideningDoesNotDenyOrdinaryWork(unittest.TestCase):
         self.assertAllowed("cat ~/.claude-backup/notes.txt")
 
 
+class ValueFileInfixVsConfigExtension(unittest.TestCase):
+    """#165 — `VALUE_FILE_RE` matched `.secret` as an INFIX, not just a
+    terminal extension, so an ordinary `<name>.secret.<config-ext>` config
+    (a gitignored local config named to remind that it holds secrets) was
+    falsely refused. The fix narrows the match with an explicit ALLOW-list
+    of common config extensions, while every OTHER extension (including a
+    copy/archive of a real value file) stays blocked by the pattern's own
+    existing deny-by-default boundary — no explicit block-side enumeration
+    needed. See the design comment on the ticket for the full reasoning.
+    """
+
+    def assertBlocked(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for: %s\nstdout=%s\nstderr=%s"
+                         % (cmd, r.stdout, r.stderr))
+
+    def assertAllowed(self, cmd):
+        r = run(cmd)
+        self.assertEqual(r.returncode, 0,
+                         "expected ALLOW for: %s\nstderr=%s" % (cmd, r.stderr))
+
+    # --- the ticket's own false-positive examples must now be ALLOWED ------
+    def test_config_json_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("cat config.secret.json")
+
+    def test_config_yaml_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("cat app.secret.yaml")
+
+    def test_config_env_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("vim deploy.secret.env")
+
+    # --- the rest of the config-ext allow-list, not literally in the ticket,
+    # covered here for completeness of the shipped extension list -----------
+    def test_config_yml_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("cat service.secret.yml")
+
+    def test_config_toml_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("cat settings.secret.toml")
+
+    def test_config_ini_with_a_secret_infix_is_allowed(self):
+        self.assertAllowed("cat app.secret.ini")
+
+    # --- a bare value file and its copies/archives must STAY blocked -------
+    def test_the_bare_terminal_value_file_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret")
+
+    def test_a_bak_copy_of_a_value_file_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret.bak")
+
+    def test_a_gz_archive_of_a_value_file_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret.gz")
+
+    def test_a_tilde_backup_of_a_value_file_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret~")
+
+    def test_an_unlisted_extension_stays_blocked_by_default(self):
+        # No enumeration needed on the block side: anything NOT on the
+        # allow-list stays blocked, including an extension nobody thought of.
+        self.assertBlocked("cat DB_PASS.secret.mystery")
+
+    # --- boundary correctness: a config extension must match WHOLE --------
+    def test_a_config_extension_prefix_that_is_not_the_whole_extension_blocks(self):
+        # `.jsonx` is not `.json` — the allow-list match must not be fooled
+        # by a mere prefix of a listed extension.
+        self.assertBlocked("cat config.secret.jsonx")
+
+    # --- the vault's own real value files are unaffected --------------------
+    def test_the_real_store_value_file_by_absolute_path_still_blocks(self):
+        self.assertBlocked("cat %s/DB_PASS.secret" % STORE)
+
+
 class Allows(unittest.TestCase):
     def assertAllowed(self, cmd, **kw):
         r = run(cmd, **kw)
