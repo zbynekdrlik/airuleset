@@ -106,6 +106,35 @@ def _log_exception(where, exc):
         pass
 
 
+def _control_flow_text(text, repo_root):
+    """`text` with provably-inert heredoc bodies and quoted text-payload
+    argument VALUES blanked out -- REUSES hooks/lib_poll_payload.py's own
+    `strip()` (the #124 payload-vs-control-flow classifier: a heredoc body
+    is blanked only when its owner names no interpreter, is a plain
+    redirect to a literal file path, and every other mention of that path
+    is a text-file-flag argument -- so a heredoc genuinely `cat`'d into a
+    script and run in the SAME command stays visible), never a parallel
+    reimplementation of it.
+
+    #280 -- both extraction regexes below used to scan the RAW command
+    text: a heredoc BODY that only documents/mentions "gh issue comment"
+    (never executed unless something later runs it), or a `-R` value
+    sitting inside a quoted `--body`/`-m` argument's free text, was
+    misread as a real invocation/flag. Scanning THIS text instead fixes
+    both without touching the distinct-repo ambiguity refusal below.
+
+    Falls back to `text` UNCHANGED on any import/processing failure --
+    this must never crash or disable the whole hook."""
+    try:
+        hooks_dir = os.path.join(repo_root, "hooks")
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        import lib_poll_payload
+        return lib_poll_payload.strip(text)
+    except Exception:
+        return text
+
+
 try:
     import design_gate as dg
     import notify
@@ -117,12 +146,14 @@ try:
     if not cwd:
         sys.exit(0)
 
+    scan_cmd = _control_flow_text(cmd, repo_root)
+
     # #208 -- every `gh issue comment <N>` occurrence in the command text,
     # not just the first: a batch worker often posts several design/
     # validated/reviewed comments in ONE Bash call before a single bundled
     # commit, and `re.search` (a single, non-global match) used to extract
     # only the FIRST -- the rest silently never got checked or marked.
-    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', cmd))
+    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', scan_cmd))
     if not matches:
         sys.exit(0)
 
@@ -135,7 +166,7 @@ try:
     # command rather than guess which repo each issue belongs to -- this
     # hook has no per-segment command parser, and never guessing is safer
     # than resolving to a plausible-looking wrong repo.
-    mrepos = re.findall(r'(?:-R|--repo)[= ]+([^\s\'"]+)', cmd)
+    mrepos = re.findall(r'(?:-R|--repo)[= ]+([^\s\'"]+)', scan_cmd)
     distinct_repos = set(mrepos)
     if len(distinct_repos) > 1:
         _log_exception("ambiguous-repo", ValueError(
