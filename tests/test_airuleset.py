@@ -8817,6 +8817,56 @@ class TestLocalhostOnApkLineHook(TestCase):
         self.assertNotIn('"decision": "block"', r.stdout)
 
 
+class TestCompletionReportClientAppArtifacts(TestCase):
+    """completion-report.md (#265) — the user's complaint (2026-08-06):
+    completion reports on a client-app project (a React-Native driver app)
+    carried the demo URL on some tickets, the APK URL on exactly one, and
+    neither on the rest, because nothing in the module required them
+    TOGETHER on every ticket. Locks the broadened wording: the 🌐/📱
+    obligation is 'every user-facing artifact this work produced or
+    affects' (not just 'one per env × surface'), a client-app project
+    needs BOTH 🌐 Demo AND 📱 <platform> on every touching ticket, and a
+    still-current artifact URL must be REPEATED, never back-referenced."""
+
+    MODULE = airuleset.REPO_DIR / "modules" / "core" / "completion-report.md"
+
+    def test_module_exists_and_in_profile(self):
+        self.assertTrue(self.MODULE.exists())
+        entries = airuleset.parse_profile(airuleset.UNIVERSAL_PROFILE)
+        self.assertIn("modules/core/completion-report.md", entries)
+
+    def test_broadens_the_globe_requirement_past_deploy_shaped(self):
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("every user-facing artifact this work produced or affects", t)
+
+    def test_names_both_demo_and_apk_for_client_app_projects(self):
+        t = self.MODULE.read_text(encoding="utf-8")
+        for phrase in ("client-app project", "\U0001F310 Demo:",
+                       "\U0001F4F1 <platform>:", "APK/IPA/signed binary",
+                       "every ticket that touched the app"):
+            self.assertIn(phrase, t, phrase)
+
+    def test_bans_back_referencing_a_still_current_artifact_url(self):
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("search the transcript for an artifact URL", t)
+        self.assertIn("REPEAT it in the report", t)
+
+    def test_template_carries_demo_and_apk_example_lines(self):
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("\U0001F310 Demo: <url>", t)
+        self.assertIn("\U0001F4F1 APK:  <url>", t)
+
+    def test_reserves_apk_marker_exclusively_like_globe(self):
+        # Adversarial-review finding (#265): the hook's localhost-ban widening
+        # claims BOTH markers are used EXCLUSIVELY for a presented artifact
+        # URL "per completion-report.md" — that claim was false for 📱 until
+        # this bullet existed (📱 could plausibly decorate an unrelated
+        # "mobile" sentence). Locks the reservation that makes it true.
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("installable-build DOWNLOAD URL only", t)
+        self.assertIn("never a decorative", t)
+
+
 class TestTesterHandoffHook(TestCase):
     """stop-check-prose-violations.sh (issue #13 sub-item 4) — VERIFIES the
     autonomous-verification.md claim 'The Stop hook blocks them' for banned
