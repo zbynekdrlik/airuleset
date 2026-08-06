@@ -9376,6 +9376,69 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     return logs
 
 
+def _goal_dark_died_by_outage(tpath):
+    """True when job 20's dark-goal check (#173) should treat a goal that
+    has been dark past `GOAL_REARM_MAX_DARK_S` as a technical OUTAGE (a
+    crash, a binary update, an API error during the dark stretch — or the
+    watchdog itself being unable to sweep for hours, #172) rather than a
+    deliberate `/goal clear` (#170) — i.e. safe to re-arm PAST the cap
+    instead of the permanent stale-goal skip.
+
+    Decided (user, 2026-08-06, #173 comment): re-read the transcript for
+    the NEWEST `/goal` marker. No `Goal cleared:` after the last `Goal
+    set:` -> the goal died by outage, not by the user's own hand -> keep
+    re-arming past the cap. A `Goal cleared:` IS present -> #170's
+    invariant stands untouched -> leave it dark forever.
+
+    Reuses `scan_goal_markers` -- the SAME transcript mechanism #266 wired
+    for job 9's own clear-detection (`_goal_was_cleared_by_user`) -- never
+    a second marker reader (FREEZE, no new hook/job). Re-reads the
+    transcript FRESH, independent of job 20's own incremental
+    `rec['mark']` bookkeeping (which reaching this branch at all already
+    implies is "set" -- this is a defensive, independent re-derivation
+    made at the exact instant the risky decision is taken, never a trust
+    of state that may have gone stale).
+
+    `off=0` (the WHOLE file), never a bare `scan_goal_markers(tpath)`
+    (which bootstraps from a `GOAL_MARK_TAIL_BYTES`, 4 MB, TAIL) —
+    adversarial review of this exact ticket (fresh-context, 2026-08-06)
+    PROVED the tail-bootstrap form regresses on precisely the population
+    #173 exists to revive: a long-lived, busy loop that keeps writing
+    (and so keeps pushing its own `Goal set:` marker further from EOF)
+    for hours during an outage before dying. Live-reproduced against the
+    shipped tail-bootstrap code: a transcript with one `set` marker
+    followed by >4 MB of filler and NO clear read back `mark is None`
+    (nothing found in the tail window) -> `False` -> the OPPOSITE of the
+    decided semantics (permanent skip+ping despite no clear ever having
+    happened). `off=0` closes this by construction — it is the exact
+    scenario `GOAL_MARK_TAIL_BYTES`'s own docstring says the incremental,
+    stored-offset read exists to avoid re-paying for on every sweep
+    (montalu's own 240 MB single-session transcript); THIS call pays that
+    cost deliberately, because it fires only for the narrow, already-rare
+    population that is BOTH dark past the cap AND unconfirmed (never for
+    a healthy sweep), and correctness here outweighs the incremental
+    read's savings.
+
+    Fail-safe direction is the OPPOSITE of `_goal_was_cleared_by_user`'s:
+    that function arms a FRESH session, so failing open (an unreadable
+    transcript keeps arming) is the safe direction there. This function
+    revives a goal that has been genuinely DARK for
+    `GOAL_REARM_MAX_DARK_S` (>=6h) with a payload that may be stale, into
+    a pane whose current use is unknown -- so an unreadable, absent, or
+    markerless transcript must stay CONSERVATIVE here: False (not an
+    outage), leaving the existing skip+ping in place. Multiple set/clear
+    cycles: `scan_goal_markers` already returns only the NEWEST marker in
+    the bytes it reads, so only the LAST set/clear pair is ever consulted
+    -- exactly the ticket's own edge case."""
+    try:
+        _off, mark = scan_goal_markers(tpath, off=0)
+    except Exception:
+        return False
+    if not mark:
+        return False
+    return mark.get("state") == "set"
+
+
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
                sleep_fn=None, templates_path=None, backlog_fetch=None,
@@ -9502,63 +9565,104 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             last_seen_alive = rec.get("mts")
         if (last_seen_alive is not None
                 and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S):
-            # #101 — this job never saw the goal actually lit recently (or at
-            # all), and the viewport-based achieved check just below only
-            # protects a RECENT death (days of normal conversation scroll the
-            # `✔ Goal achieved` line out of view). A marker this old is
-            # presumed already resolved, one way or another; never type its
-            # payload into whatever the pane is being used for now.
-            logs.append("skip stale-goal (goal-rearm) %s (%d s since last "
-                        "confirmed armed)" % (loc, int(now - last_seen_alive)))
-            # #160 defect 3 — this used to be a PERMANENT, silent dead end:
-            # the pane is retired forever and nobody is ever told (the live
-            # gatekeeper incident's own 07:05:29 boundary, confirmed by a
-            # hard-debug consult against the surviving systemd journal). A
-            # bounded, ONE-SHOT ping — never a retry, never a re-arm attempt
-            # (typing a potentially-stale payload into a pane whose current
-            # purpose is unknown after this long dark would be the riskier
-            # move) — at least tells a human this stream needs a look.
-            if not rec.get("dark_pinged"):
-                # #238-review-style finding 🟡F4 (this ticket's own review):
-                # the flag/save used to happen BEFORE the `send_fn is not
-                # None and not dry_run` check, so a `--dry-run` sweep run
-                # against REAL state (a normal manual diagnostic on this
-                # repo, per its own playbook) would permanently consume the
-                # one-shot ping with nothing ever actually sent — moved
-                # inside the real-send branch so only a GENUINE send marks
-                # it delivered.
-                if send_fn is not None and not dry_run:
-                    from notify import stream_redirect  # #212: STREAM_NOTIFY_OWNER-aware
-                    rec["dark_pinged"] = True
+            if _goal_dark_died_by_outage(tpath):
+                # #173 — a fresh, independent re-read of the transcript
+                # finds NO `Goal cleared:` after the last `Goal set:`, so
+                # this darkness is presumed a technical OUTAGE (a crash, a
+                # binary update, an API error, or the watchdog itself
+                # being unable to sweep for hours — #172's own incident)
+                # rather than a deliberate #170 clear. Fall through into
+                # the SAME bounded payload/hash/streak/attempt machinery
+                # every other re-arm reason already uses below, instead
+                # of the permanent stale-goal skip.
+                #
+                # Adversarial-review findings on this exact ticket
+                # (2026-08-06), accepted as the DIRECT, disclosed cost of
+                # the decided semantics rather than bugs to route around:
+                # (a) a goal that finished NATURALLY (never writes a
+                # marker, #101) is byte-indistinguishable from an outage
+                # here — the `GOAL_ACHIEVED_MARKER` viewport check right
+                # below still catches this for a RECENT completion still
+                # in view; a completion the user has since scrolled past
+                # (typically: they kept using the same session for other
+                # work) can be re-armed once more, self-terminating on
+                # the next sweep once its own fresh `✔ Goal achieved` or
+                # `Goal set:` becomes the newest signal again; (b) the
+                # dark cap used to be this cycle's only permanent
+                # terminator — a session that revives-and-fails
+                # repeatedly now gets a GAVE UP ping roughly every
+                # `GOAL_REARM_STREAK_S` (2h) instead of exactly once,
+                # which is the direct, accepted cost of "re-arm continues
+                # normally" (the ticket's own words) rather than a new
+                # cap invented here.
+                logs.append("stale-but-outage (goal-rearm) %s (%d s dark, "
+                            "no explicit clear -> re-arming past the cap)"
+                            % (loc, int(now - last_seen_alive)))
+                if rec.get("dark_pinged"):
+                    # a later genuinely-unconfirmable dark episode must
+                    # still be able to ping once more (mirrors the ARMED
+                    # branch's own reset above) — this session is no
+                    # longer presumed-resolved.
+                    rec["dark_pinged"] = False
                     _save()
-                    send_fn("⚠️ **%s** — `/goal` slučka stíchla pred vyše %d "
-                            "hodinami (`◎ /goal` už dávno nesvieti) a nikdy "
-                            "sa znovu neozvala; automatické preármovanie sa "
-                            "vzdalo, lebo payload je príliš starý na to, aby "
-                            "sa dal bezpečne napísať do panela (%s). Pozri sa "
-                            "tam prosím ručne."
-                            % (project_label(cwd),
-                               GOAL_REARM_MAX_DARK_S // 3600, loc),
-                            owner=stream_redirect(pane_owner(pid, run)) or None,
-                            # #238-review-style finding 🔴F2 (this ticket's
-                            # own review) — `hash`/`mts` alone are STABLE
-                            # across a revival: a session that goes dark,
-                            # gets pinged, revives (`dark_pinged` reset
-                            # above), then goes dark AGAIN with the SAME
-                            # goal payload and no new transcript marker in
-                            # between would produce the IDENTICAL dedup key
-                            # for the second, genuinely new dark episode —
-                            # the exact same bug class the give-up ping's
-                            # own `first`-timestamp fix (above) already
-                            # closed. Folding in `last_seen_alive` (this
-                            # episode's own anchor — the last confirmed-armed
-                            # instant BEFORE this specific dark stretch
-                            # began) makes each episode's ping distinct.
-                            dedup_key="goaldark:%s:%s:%d"
-                                      % (sid, rec.get("hash") or rec.get("mts"),
-                                         int(last_seen_alive or 0)),
-                            dry_run=dry_run)
-            continue
+            else:
+                # #101 — this job never saw the goal actually lit recently (or at
+                # all), and the viewport-based achieved check just below only
+                # protects a RECENT death (days of normal conversation scroll the
+                # `✔ Goal achieved` line out of view). A marker this old is
+                # presumed already resolved, one way or another; never type its
+                # payload into whatever the pane is being used for now.
+                logs.append("skip stale-goal (goal-rearm) %s (%d s since last "
+                            "confirmed armed)" % (loc, int(now - last_seen_alive)))
+                # #160 defect 3 — this used to be a PERMANENT, silent dead end:
+                # the pane is retired forever and nobody is ever told (the live
+                # gatekeeper incident's own 07:05:29 boundary, confirmed by a
+                # hard-debug consult against the surviving systemd journal). A
+                # bounded, ONE-SHOT ping — never a retry, never a re-arm attempt
+                # (typing a potentially-stale payload into a pane whose current
+                # purpose is unknown after this long dark would be the riskier
+                # move) — at least tells a human this stream needs a look.
+                if not rec.get("dark_pinged"):
+                    # #238-review-style finding 🟡F4 (this ticket's own review):
+                    # the flag/save used to happen BEFORE the `send_fn is not
+                    # None and not dry_run` check, so a `--dry-run` sweep run
+                    # against REAL state (a normal manual diagnostic on this
+                    # repo, per its own playbook) would permanently consume the
+                    # one-shot ping with nothing ever actually sent — moved
+                    # inside the real-send branch so only a GENUINE send marks
+                    # it delivered.
+                    if send_fn is not None and not dry_run:
+                        from notify import stream_redirect  # #212: STREAM_NOTIFY_OWNER-aware
+                        rec["dark_pinged"] = True
+                        _save()
+                        send_fn("⚠️ **%s** — `/goal` slučka stíchla pred vyše %d "
+                                "hodinami (`◎ /goal` už dávno nesvieti) a nikdy "
+                                "sa znovu neozvala; automatické preármovanie sa "
+                                "vzdalo, lebo payload je príliš starý na to, aby "
+                                "sa dal bezpečne napísať do panela (%s). Pozri sa "
+                                "tam prosím ručne."
+                                % (project_label(cwd),
+                                   GOAL_REARM_MAX_DARK_S // 3600, loc),
+                                owner=stream_redirect(pane_owner(pid, run)) or None,
+                                # #238-review-style finding 🔴F2 (this ticket's
+                                # own review) — `hash`/`mts` alone are STABLE
+                                # across a revival: a session that goes dark,
+                                # gets pinged, revives (`dark_pinged` reset
+                                # above), then goes dark AGAIN with the SAME
+                                # goal payload and no new transcript marker in
+                                # between would produce the IDENTICAL dedup key
+                                # for the second, genuinely new dark episode —
+                                # the exact same bug class the give-up ping's
+                                # own `first`-timestamp fix (above) already
+                                # closed. Folding in `last_seen_alive` (this
+                                # episode's own anchor — the last confirmed-armed
+                                # instant BEFORE this specific dark stretch
+                                # began) makes each episode's ping distinct.
+                                dedup_key="goaldark:%s:%s:%d"
+                                          % (sid, rec.get("hash") or rec.get("mts"),
+                                             int(last_seen_alive or 0)),
+                                dry_run=dry_run)
+                continue
         if GOAL_ACHIEVED_MARKER in _above_input_box(captured):
             # CC writes NO marker for a NATURAL resolution either (live:
             # `/goal` -> `✔ Goal achieved (3s · 1 turn)` -> indicator gone,

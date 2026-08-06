@@ -666,19 +666,108 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
     """#101 live incident (dev2, 2026-07-27): the last `Goal set:` marker on
     record was 3 days old, from an already-closed autopilot run — and this
     job tried to type that dead payload into whatever the pane was now being
-    used for. The natural-completion viewport check only protects a RECENT
-    death (days of conversation scroll `✔ Goal achieved` out of view), so a
-    marker this old — never recently confirmed armed — must never be
-    revived at all."""
+    used for.
 
-    def test_marker_older_than_the_bound_is_skipped(self):
+    #173 refined this (dev1, 2026-08-06 — a 7h watchdog livelock, #172,
+    silently stranded every session that happened to go dark during it): a
+    marker this old is skipped forever ONLY when the transcript itself
+    proves the darkness was a DELIBERATE `/goal clear` (#170's own
+    invariant, untouched). When no `Goal cleared:` exists anywhere after
+    the last `Goal set:`, the darkness is presumed a technical OUTAGE (a
+    crash, a binary update, an API error, or the watchdog itself being
+    unable to sweep for hours) rather than the user's own hand, and
+    re-arming now continues normally past the cap — see
+    `_goal_dark_died_by_outage` and `TestGoalDarkDiedByOutage` below."""
+
+    def test_marker_with_no_clear_ever_rearms_past_the_cap(self):
+        # #173 — the PRIMARY scenario this ticket exists for: nothing in
+        # the transcript ever says `Goal cleared:`, so a marker this old is
+        # now an outage-eligible re-arm, not a permanent dead end.
         base = time.time()
         old_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
         tmux, logs = self._go(PANE_DARK,
                               entries=[marker_entry("set", PAYLOAD, old_ts)],
-                              now=base)
+                              now=base, cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
+
+    def test_dark_pinged_is_reset_by_the_outage_branch_itself(self):
+        # Adversarial-review finding F2 (this ticket's own review,
+        # 2026-08-06): the outage branch's own `dark_pinged` reset
+        # (mirroring the ARMED branch's reset above it) had ZERO test
+        # coverage — a mutant deleting it passed the WHOLE suite, because
+        # every existing test that had `dark_pinged==True` going in
+        # either kept the transcript unreadable (never reaching the
+        # reset at all) or routed the reset through the ARMED branch's
+        # OWN sibling code instead (`TestGoalDarkSilentDeadEndPings`'s
+        # "later dark episode" test always revives via `PANE_LIT`). This
+        # isolates the outage branch's reset specifically: establish,
+        # ping while unreadable, then confirm outage (readable again,
+        # still only `set`, STILL `PANE_DARK` -- never `PANE_LIT`/armed)
+        # and read the flag directly.
+        state = {}
+        now = time.time()
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD)],
+                 state=state, now=now)
+        p = (Path(self.tmp.name) / wd.encode_project_dir(CWD)
+             / (SID + ".jsonl"))
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        later = now + wd.GOAL_REARM_MAX_DARK_S + 60
+        self._go(PANE_DARK, state=state, now=later)
+        self.assertTrue(state["goal_rearm"][SID]["dark_pinged"])
+        os.chmod(p, 0o600)
+        even_later = later + 60
+        tmux, logs = self._go(PANE_DARK, state=state, now=even_later,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertFalse(state["goal_rearm"][SID]["dark_pinged"],
+                         "the outage branch must reset dark_pinged itself "
+                         "-- this session was never observed ARMED "
+                         "(PANE_LIT), so the sibling reset in the armed "
+                         "branch never ran")
+
+    def test_marker_with_an_explicit_clear_is_still_never_revived(self):
+        # #173 — a genuine `Goal cleared:` after the last `Goal set:` keeps
+        # #170's invariant intact: never re-armed, however long it has been
+        # dark. This scenario reaches the EARLIER `if rec.get("mark") !=
+        # "set": continue` gate (job 20's own incremental scan already
+        # sees the newest marker as "cleared") -- it proves the overall
+        # OBSERVABLE outcome end-to-end, never the fresh
+        # `_goal_dark_died_by_outage` re-derivation itself (that function's
+        # own "set-then-cleared" case is unit-tested directly in
+        # `TestGoalDarkDiedByOutage`).
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        cleared_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 1800)
+        tmux, _logs = self._go(
+            PANE_DARK,
+            entries=[marker_entry("set", PAYLOAD, old_ts),
+                     marker_entry("cleared", PAYLOAD, cleared_ts)],
+            now=base)
         self.assertFalse(tmux.typed())
-        self.assertTrue(any("skip stale-goal" in ln for ln in logs), logs)
+
+    def test_just_under_the_cap_is_the_normal_revival_path(self):
+        # #173 edge case — the dark threshold is a strict `>`; comfortably
+        # under it must behave exactly as before this ticket (no outage
+        # log line at all — the whole dark branch is never entered).
+        base = time.time()
+        under_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S + 60)
+        tmux, logs = self._go(
+            PANE_DARK, entries=[marker_entry("set", PAYLOAD, under_ts)],
+            now=base, cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertFalse(any("stale-but-outage" in ln for ln in logs), logs)
+        self.assertFalse(any("skip stale-goal" in ln for ln in logs), logs)
+
+    def test_just_over_the_cap_triggers_the_outage_branch(self):
+        base = time.time()
+        over_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 60)
+        tmux, logs = self._go(
+            PANE_DARK, entries=[marker_entry("set", PAYLOAD, over_ts)],
+            now=base, cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
 
     def test_marker_within_the_bound_is_revived_normally(self):
         base = time.time()
@@ -701,6 +790,96 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
         tmux, logs = self._go(PANE_DARK, state=state, now=base + 60,
                               cap_seq=self._typed_seq())
         self.assertTrue(tmux.typed(), logs)
+
+
+class TestGoalDarkDiedByOutage(unittest.TestCase):
+    """Direct unit coverage of `_goal_dark_died_by_outage` (#173) — the
+    reused #266 transcript mechanism `goal_rearm`'s dark-cap decision now
+    re-derives INDEPENDENTLY of job 20's own incremental `rec['mark']`
+    bookkeeping, right before the risky "type a potentially stale payload"
+    decision.
+
+    Fail-safe direction is the OPPOSITE of `_goal_was_cleared_by_user`'s:
+    job 9 arms a FRESH session, so failing open (an unreadable transcript
+    keeps arming) is the safe direction there. This function revives a
+    goal that has been genuinely dark for `GOAL_REARM_MAX_DARK_S` (>=6h)
+    into a pane whose current use is unknown, so an unreadable, absent, or
+    markerless transcript must stay CONSERVATIVE here: False — never
+    presume an outage without proof."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, *entries):
+        return write_transcript(list(entries), self.tmp.name)
+
+    def test_missing_transcript_is_not_an_outage(self):
+        missing = Path(self.tmp.name) / "nope.jsonl"
+        self.assertFalse(wd._goal_dark_died_by_outage(missing))
+
+    def test_unreadable_transcript_is_not_an_outage(self):
+        p = self._write(marker_entry("set", PAYLOAD))
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_markerless_transcript_is_not_an_outage(self):
+        p = self._write({"type": "assistant", "message": {"content": "hi"}})
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_only_a_set_marker_no_clear_ever_is_an_outage(self):
+        p = self._write(marker_entry("set", PAYLOAD))
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_set_then_cleared_is_not_an_outage(self):
+        p = self._write(marker_entry("set", PAYLOAD),
+                        marker_entry("cleared", PAYLOAD,
+                                     "2026-07-26T13:10:00.000Z"))
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_set_cleared_set_only_the_last_pair_matters(self):
+        # a full set/clear/set cycle -- the goal was cleared, then armed
+        # again; the NEWEST marker is `set`, so this is an outage-eligible
+        # episode, not a governed clear.
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        marker_entry("cleared", PAYLOAD,
+                                     "2026-07-26T11:00:00.000Z"),
+                        marker_entry("set", PAYLOAD,
+                                     "2026-07-26T12:00:00.000Z"))
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_set_cleared_set_cleared_only_the_last_pair_matters(self):
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        marker_entry("cleared", PAYLOAD,
+                                     "2026-07-26T11:00:00.000Z"),
+                        marker_entry("set", PAYLOAD,
+                                     "2026-07-26T12:00:00.000Z"),
+                        marker_entry("cleared", PAYLOAD,
+                                     "2026-07-26T13:00:00.000Z"))
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_a_set_marker_buried_past_the_old_tail_window_is_still_an_outage(self):
+        # Adversarial-review finding F1 (this ticket's own review,
+        # 2026-08-06, live-reproduced against the tail-bootstrap form):
+        # a long-lived, busy loop keeps WRITING for hours before it dies
+        # (exactly the #172 stranded population #173 exists to revive),
+        # so its own `Goal set:` marker can end up sitting well past
+        # `GOAL_MARK_TAIL_BYTES` (4 MB) before EOF by the time this check
+        # runs. A bootstrap-from-tail read would find NOTHING in that
+        # window and wrongly conclude "not an outage" -- the read must
+        # cover the WHOLE file (`off=0`), never just the tail.
+        p = self._write(marker_entry("set", PAYLOAD))
+        with open(p, "a") as f:
+            filler = json.dumps({"type": "assistant",
+                                 "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
+                f.write(filler)
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
 
 
 class TestLongPasteVerification(GoalRearmBase):
@@ -1901,28 +2080,46 @@ class TestGoalAchievedClassifierImportFailure(GoalRearmBase):
 
 class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
     """#160 defect 3 — `GOAL_REARM_MAX_DARK_S` used to be a PERMANENT,
-    silent dead end. It now pings ONCE (never re-arms — a payload this
-    stale is not safe to type into an unknown pane)."""
+    silent dead end. It still pings ONCE — but #173 narrowed WHEN this
+    branch is even reached: a marker this old with NO explicit clear is
+    now revived past the cap instead (see
+    `TestGoalRearmStaleMarkerIsNeverRevived`). This class exercises the
+    residual case that still lands here — the transcript genuinely
+    cannot be RE-READ to confirm "no clear" at the exact moment of the
+    dark decision (a transient permission/IO failure AFTER job 20
+    already recorded `mark == 'set'` from a real earlier sweep) — the
+    ticket's own "transcript file missing/unreadable = fail-safe =
+    current conservative behavior, no re-arm" edge case."""
+
+    def _establish_and_break(self, state, now):
+        """Sweep 1 genuinely reads the transcript and records mark=='set'
+        (ARMED, so `last_armed` is set); then the transcript becomes
+        unreadable for every later sweep, so `_goal_dark_died_by_outage`'s
+        own fresh re-derivation can never confirm "no clear" again — the
+        fail-safe path, never a real deliberate clear."""
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD)],
+                 state=state, now=now)
+        p = (Path(self.tmp.name) / wd.encode_project_dir(CWD)
+             / (SID + ".jsonl"))
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        return p
 
     def test_stale_goal_pings_once(self):
         state = {}
         now = time.time()
-        self._write([marker_entry("set", PAYLOAD,
-                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
-        self._wrote = True
-        # last_armed/mts both old -> stale-goal branch
-        self._go(PANE_DARK, state=state, now=now)
-        self._go(PANE_DARK, state=state, now=now + 60)
+        self._establish_and_break(state, now)
+        later = now + wd.GOAL_REARM_MAX_DARK_S + 60
+        self._go(PANE_DARK, state=state, now=later)
         self.assertEqual(len(self.pings), 1, self.pings)
         self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
 
     def test_never_retypes_the_payload(self):
         state = {}
         now = time.time()
-        self._write([marker_entry("set", PAYLOAD,
-                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
-        self._wrote = True
-        tmux, _logs = self._go(PANE_DARK, state=state, now=now)
+        self._establish_and_break(state, now)
+        later = now + wd.GOAL_REARM_MAX_DARK_S + 60
+        tmux, _logs = self._go(PANE_DARK, state=state, now=later)
         self.assertFalse(tmux.typed())
 
     def test_a_later_dark_episode_after_a_real_revival_pings_again(self):
@@ -1935,16 +2132,18 @@ class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
         # SECOND ping in production even though it landed here.
         state = {}
         now = time.time()
-        self._write([marker_entry("set", PAYLOAD,
-                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
-        self._wrote = True
-        self._go(PANE_DARK, state=state, now=now)
+        p = self._establish_and_break(state, now)
+        later = now + wd.GOAL_REARM_MAX_DARK_S + 60
+        self._go(PANE_DARK, state=state, now=later)
         self.assertEqual(len(self.pings), 1, self.pings)
         # the goal comes back ARMED for real (a human re-armed it by hand)
-        self._go(PANE_LIT, state=state, now=now + 60)
-        # ... then dies again, dark for another MAX_DARK_S window
-        later = now + 60 + wd.GOAL_REARM_MAX_DARK_S + 1
-        self._go(PANE_DARK, state=state, now=later)
+        os.chmod(p, 0o600)
+        self._go(PANE_LIT, state=state, now=later + 60)
+        # ... then dies again, dark for another MAX_DARK_S window, still
+        # unreadable so the outage check still cannot confirm "no clear"
+        os.chmod(p, 0)
+        even_later = later + 60 + wd.GOAL_REARM_MAX_DARK_S + 1
+        self._go(PANE_DARK, state=state, now=even_later)
         self.assertEqual(len(self.pings), 2, self.pings)
         dark_keys = [kw.get("dedup_key") for _text, kw in self.pings
                     if "dedup_key" in kw
@@ -1964,12 +2163,11 @@ class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
         # still delivers the genuine ping.
         state = {}
         now = time.time()
-        self._write([marker_entry("set", PAYLOAD,
-                                  ts=_iso(now - wd.GOAL_REARM_MAX_DARK_S - 1))])
-        self._wrote = True
-        self._go(PANE_DARK, state=state, now=now, dry_run=True)
+        self._establish_and_break(state, now)
+        later = now + wd.GOAL_REARM_MAX_DARK_S + 60
+        self._go(PANE_DARK, state=state, now=later, dry_run=True)
         self.assertEqual(self.pings, [])
-        self._go(PANE_DARK, state=state, now=now + 60)
+        self._go(PANE_DARK, state=state, now=later + 60)
         self.assertEqual(len(self.pings), 1, self.pings)
         self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
 
