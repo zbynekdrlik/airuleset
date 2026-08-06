@@ -3389,91 +3389,81 @@ class TestUltracodeLauncher(TestCase):
         self.assertNotIn("--model", plain_branch)
 
 
-class TestNotifyOwnerProvisioning(TestCase):
-    """apply_notify_owner manages the AIRULESET_NOTIFY_OWNER bashrc block
-    (airuleset#151/#259): before this, the override was ONLY ever hand-added
-    per stream account at onboarding time ("the AIRULESET_NOTIFY_OWNER loss
-    pattern" -- see the comment above STREAM_NOTIFY_OWNER), and simap's own
-    onboarding missed it, so its pings fell back to the shared main-channel
-    thread instead of claude-zbynek."""
+class TestStreamNotifyOwnerRouting(TestCase):
+    """notify.STREAM_NOTIFY_OWNER + resolve_owner() (airuleset#151/#259):
+    before this, an automated persona's Discord routing (montalu/david) was
+    ONLY ever hand-added per account, as a bashrc AIRULESET_NOTIFY_OWNER
+    export -- and simap's own onboarding missed it, so its pings fell back
+    to the shared main-channel thread instead of claude-zbynek.
 
-    def _tmp(self, content=None):
-        from pathlib import Path
-        d = tempfile.mkdtemp()
-        p = Path(d) / ".bashrc"
-        if content is not None:
-            p.write_text(content)
-        return p
+    Checked directly inside notify.resolve_owner() (NOT via a bashrc export
+    a live session's process environment could predate) so an already-running
+    session routes correctly on its very next ping, no restart needed -- an
+    adversarial review of an earlier bashrc-based version of this fix
+    live-verified that a real already-running session on simap@subdev kept
+    misrouting after the bashrc line was written, since the fix only reaches
+    shells STARTED after the write."""
+
+    def setUp(self):
+        import notify
+        self.notify = notify
 
     def test_stream_users_route_to_the_expected_owner(self):
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["simap"], "zbynek")
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["montalu"], "zbynek")
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
-        self.assertEqual(airuleset.STREAM_NOTIFY_OWNER["david"], "david")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["simap"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david"], "david")
         # marek is deliberately absent: its own tmux session name already
         # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
-        self.assertNotIn("marek", airuleset.STREAM_NOTIFY_OWNER)
+        self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
 
-    def test_a_user_not_in_the_map_is_a_pure_no_op(self):
-        p = self._tmp("export PATH=$PATH:/x\n")
-        for who in ("newlevel", "gatekeeper", "marek", ""):
-            changed = airuleset.apply_notify_owner(p, user=who)
-            self.assertFalse(changed, who)
-        self.assertNotIn("AIRULESET_NOTIFY_OWNER", p.read_text())
+    def test_a_mapped_user_resolves_with_no_tmux_and_no_env_override(self):
+        # THE ACTUAL FIX: no AIRULESET_NOTIFY_OWNER env var, no TMUX at all
+        # (mirrors a fresh `bash -ic` probe, or any non-interactive hook
+        # invocation) -- the mapped owner still resolves.
+        with m.patch.dict(os.environ, {}, clear=True), \
+                m.patch.object(self.notify, "_current_user", return_value="simap"):
+            self.assertEqual(self.notify.resolve_owner(), "zbynek")
 
-    def test_writes_the_export_for_a_mapped_stream_user(self):
-        p = self._tmp("# my rc\n")
-        changed = airuleset.apply_notify_owner(p, user="simap")
-        self.assertTrue(changed)
-        text = p.read_text()
-        self.assertIn("export AIRULESET_NOTIFY_OWNER=zbynek", text)
-        self.assertIn(airuleset.NOTIFY_OWNER_MARK_START, text)
-        self.assertIn(airuleset.NOTIFY_OWNER_MARK_END, text)
+    def test_david_routes_to_its_own_owner_not_zbyneks(self):
+        with m.patch.dict(os.environ, {}, clear=True), \
+                m.patch.object(self.notify, "_current_user", return_value="david"):
+            self.assertEqual(self.notify.resolve_owner(), "david")
 
-    def test_idempotent_no_change_second_run(self):
-        p = self._tmp("# rc\n")
-        self.assertTrue(airuleset.apply_notify_owner(p, user="simap"))
-        self.assertFalse(airuleset.apply_notify_owner(p, user="simap"))
+    def test_env_override_still_wins_over_the_stream_map(self):
+        # montalu/david keep a redundant hand-added bashrc export from
+        # before this fix -- it must still take precedence (same value,
+        # but the precedence itself must hold for a genuinely DIFFERENT
+        # override too).
+        with m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "someoneelse"}), \
+                m.patch.object(self.notify, "_current_user", return_value="simap"):
+            self.assertEqual(self.notify.resolve_owner(), "someoneelse")
 
-    def test_replaces_block_in_place_no_duplicate(self):
-        p = self._tmp("# rc\n")
-        airuleset.apply_notify_owner(p, user="simap")
-        text = p.read_text().replace("AIRULESET_NOTIFY_OWNER=zbynek",
-                                      "AIRULESET_NOTIFY_OWNER=BROKEN")
-        p.write_text(text)
-        airuleset.apply_notify_owner(p, user="simap")
-        out = p.read_text()
-        self.assertEqual(out.count(airuleset.NOTIFY_OWNER_MARK_START), 1)
-        self.assertNotIn("BROKEN", out)
-        self.assertIn("export AIRULESET_NOTIFY_OWNER=zbynek", out)
+    def test_an_unmapped_user_falls_through_to_tmux_resolution(self):
+        # marek, newlevel, gatekeeper, montalu5 (a hypothetical future
+        # account never added to the map): no override at all -> "" when
+        # there's no TMUX either, exactly the pre-existing behavior.
+        for who in ("marek", "newlevel", "gatekeeper", "montalu5", ""):
+            with m.patch.dict(os.environ, {}, clear=True), \
+                    m.patch.object(self.notify, "_current_user", return_value=who):
+                self.assertEqual(self.notify.resolve_owner(), "", who)
 
-    def test_creates_bashrc_when_absent(self):
-        from pathlib import Path
-        d = tempfile.mkdtemp()
-        p = Path(d) / ".bashrc"
-        self.assertTrue(airuleset.apply_notify_owner(p, user="simap"))
-        self.assertIn("export AIRULESET_NOTIFY_OWNER=zbynek", p.read_text())
 
-    def test_david_routes_to_its_own_thread_not_zbyneks(self):
-        p = self._tmp()
-        airuleset.apply_notify_owner(p, user="david")
-        self.assertIn("export AIRULESET_NOTIFY_OWNER=david", p.read_text())
+class TestStreamAuthorityHasNotifyRouting(TestCase):
+    """Every stream in AUTHORITY_BY_USER must make an explicit Discord-
+    routing decision -- either a notify.STREAM_NOTIFY_OWNER entry or a
+    documented exemption -- or the NEXT new stream account repeats #259
+    exactly as simap did (no onboarding step is guaranteed to catch it)."""
 
-    def test_defaults_to_the_real_current_user_when_unspecified(self):
-        p = self._tmp()
-        with m.patch.object(airuleset, "_whoami", return_value="simap"):
-            changed = airuleset.apply_notify_owner(p)
-        self.assertTrue(changed)
-        self.assertIn("export AIRULESET_NOTIFY_OWNER=zbynek", p.read_text())
+    EXEMPT = {"marek"}   # own tmux session name + own DISCORD_*_MAREK keys
 
-    def test_preserves_existing_bashrc_content(self):
-        p = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
-        airuleset.apply_notify_owner(p, user="simap")
-        text = p.read_text()
-        self.assertIn("export PATH=$PATH:/x", text)
-        self.assertIn("alias ll='ls -la'", text)
+    def test_every_authority_user_has_a_routing_decision(self):
+        import notify
+        missing = (set(airuleset.AUTHORITY_BY_USER)
+                   - set(notify.STREAM_NOTIFY_OWNER) - self.EXEMPT)
+        self.assertEqual(missing, set(), missing)
 
 
 class TestTmuxHistoryLimit(TestCase):

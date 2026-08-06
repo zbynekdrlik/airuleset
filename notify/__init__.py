@@ -36,6 +36,39 @@ _ENV_REL = "channels/discord/.env"
 _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
 
+# Stream personas whose tmux session name has NO Discord identity of its own
+# (airuleset#259, 2026-08-06): montalu/montalu2-4/simap route to zbynek's own
+# thread, david to its own. Checked in resolve_owner() ITSELF — never via a
+# bashrc AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT
+# hook invocation everywhere. A bashrc export only reaches shells started
+# AFTER the write; an adversarial review of the first version of this fix
+# live-verified that simap's OWN already-running session kept misrouting
+# after the bashrc line was applied, because that session's process
+# environment predated the write and nothing short of restarting the live
+# session (never done to another user's session) would have picked it up.
+# `marek` is deliberately absent: its own tmux session name ("marek") already
+# has its own DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys,
+# so no override is needed. montalu/david ALSO still carry a redundant,
+# hand-added `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this
+# fix existed — harmless, since the env override is checked FIRST in
+# resolve_owner() and carries the identical value either way.
+STREAM_NOTIFY_OWNER = {
+    "david": "david",
+    "montalu": "zbynek",
+    "montalu2": "zbynek",
+    "montalu3": "zbynek",
+    "montalu4": "zbynek",
+    "simap": "zbynek",
+}
+
+
+def _current_user():
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USER", "")
+
 # --- delivery log (#135) ---------------------------------------------------
 # A delivery that never happened used to leave NO trace anywhere: the shell
 # `emit_one()` set DELIVERY_FAILED=1 and returned silently, and this module
@@ -131,12 +164,19 @@ def resolve_owner():
     'marek'), or "" when it can't be determined.
 
     AIRULESET_NOTIFY_OWNER overrides everything — for the non-tmux / test / future
-    board-daemon path. Otherwise the tmux SESSION GROUP is authoritative (sessions
-    are 'zbynek-18' in group 'zbynek'); the session name with a trailing '-<n>'
-    stripped is the fallback."""
+    board-daemon path. Next, STREAM_NOTIFY_OWNER maps the current LINUX USER (an
+    automated persona like simap/montalu/david, whose tmux session name carries
+    no Discord identity of its own) straight to its real owner — checked here,
+    not via a bashrc export, so it is correct on every invocation with no
+    restart needed (#259). Otherwise the tmux SESSION GROUP is authoritative
+    (sessions are 'zbynek-18' in group 'zbynek'); the session name with a
+    trailing '-<n>' stripped is the fallback."""
     forced = os.environ.get("AIRULESET_NOTIFY_OWNER")
     if forced is not None:
         return re.sub(r"[^a-z0-9]", "", forced.strip().lower())
+    mapped = STREAM_NOTIFY_OWNER.get(_current_user())
+    if mapped:
+        return mapped
     if not os.environ.get("TMUX"):
         return ""
     for fmt in ("#{session_group}", "#S"):
