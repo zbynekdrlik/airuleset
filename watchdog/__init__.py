@@ -6013,7 +6013,8 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                             % (grace_tag, loc))
                 continue
             project = project_label(cwd)
-            owner = pane_owner(pid, run)
+            from notify import stream_redirect  # #212/#270: STREAM_NOTIFY_OWNER-aware
+            owner = stream_redirect(pane_owner(pid, run))
             if _compact_stash_attempt(pid, run, captured, state, sid, loc,
                                       project, owner=owner, ctx=ctx,
                                       send_fn=send_fn):
@@ -8100,13 +8101,14 @@ def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
         if not rec.get("spinged"):
             rec["spinged"] = True
             if send_fn is not None and not dry_run:
+                from notify import stream_redirect     # #212: STREAM_NOTIFY_OWNER-aware
                 send_fn("⚠️ **%s** — `/goal` je armovaný (`◎ /goal` svieti), ale "
                         "slučka sa už %d minút nepohla a ani po %d šťuchnutiach "
                         "sa nerozbehla (%s). Pozri sa na ňu prosím — dovtedy "
                         "nič nepokračuje."
                         % (project_label(cwd), int(idle // 60),
                            GOAL_STALL_MAX_NUDGES, loc),
-                        owner=pane_owner(pid, run) or None,
+                        owner=stream_redirect(pane_owner(pid, run)) or None,
                         dedup_key="goalstall:%s:%d" % (sid, int(tmtime or 0)),
                         dry_run=dry_run)
             logs.append("GAVE UP (goal-stall) %s after %d nudges"
@@ -8193,12 +8195,13 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
         if not rec.get("dpinged"):
             rec["dpinged"] = True
             if send_fn is not None and not dry_run:
+                from notify import stream_redirect     # #212: STREAM_NOTIFY_OWNER-aware
                 send_fn("⚠️ **%s** — beží `/goal` slučka so STAROU verziou "
                         "autopilot šablóny a automatické preármovanie sa "
                         "nechytilo ani po %d pokusoch (%s). Preármuj ju prosím "
                         "ručne — dovtedy sa riadi starými podmienkami."
                         % (project_label(cwd), GOAL_DRIFT_MAX_ATTEMPTS, loc),
-                        owner=pane_owner(pid, run) or None,
+                        owner=stream_redirect(pane_owner(pid, run)) or None,
                         dedup_key="goaldrift:%s:%s" % (sid, th),
                         dry_run=dry_run)
             logs.append("GAVE UP (goal-drift) %s after %d attempts"
@@ -8415,12 +8418,13 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 rec["pinged"] = True
                 _save()
                 if send_fn is not None and not dry_run:
+                    from notify import stream_redirect  # #212: STREAM_NOTIFY_OWNER-aware
                     send_fn("⚠️ **%s** — `/goal` slučka ticho zanikla (v pätičke "
                             "už nie je `◎ /goal`) a automatické prearmovanie sa "
                             "nechytilo ani po %d pokusoch (%s). Prearmuj ju "
                             "prosím ručne — dovtedy nič nebeží."
                             % (project_label(cwd), max_attempts, loc),
-                            owner=pane_owner(pid, run) or None,
+                            owner=stream_redirect(pane_owner(pid, run)) or None,
                             dedup_key="goalrearm:%s:%s" % (sid, h),
                             dry_run=dry_run)
                 logs.append("GAVE UP (goal-rearm) %s after %d attempts"
@@ -8563,22 +8567,46 @@ def _box_hostname():
 
 
 def _reset_bucket(resets_at):
-    """Normalize an ISO-8601 `resets_at` to whole-MINUTE granularity, for use
-    as a dedup key. Live-verified (airuleset#212): two `fetch_usage()` calls
+    """Normalize an ISO-8601 `resets_at` to a stable dedup key by ROUNDING
+    (never truncating) to the nearest whole minute in UTC — for use as a
+    dedup key. Live-verified (airuleset#212): two `fetch_usage()` calls
     seconds apart for the SAME weekly window returned DIFFERENT `resets_at`
     strings (sub-second jitter) — comparing the raw string (the pre-fix
     `check_usage` dedup) therefore NEVER matched, and the usage alert re-fired
     every poll interval instead of once per window (11 duplicate Discord
-    pings observed live inside 2.5h). Falls back to the raw, unparsed value
-    on any malformed input — never worse than the pre-fix behavior, and the
-    human-readable `_human_reset()` display is unaffected either way (it
-    already truncates to %H:%M)."""
+    pings observed live inside 2.5h).
+
+    ROUND, not truncate (adversarial-review finding): the jitter is centered
+    ON the reset BOUNDARY itself (typically a whole hour), not offset from
+    it — a real 456-sample replay of `~/.claude/burn-history/fleet.jsonl`
+    showed every window straddles its own boundary (samples land on BOTH
+    sides, e.g. some at `HH:59:59.xx`, some at `(HH+1):00:00.xx`). A bare
+    TRUNCATE-to-minute (the first version of this fix) therefore still
+    split roughly one poll in five into the WRONG bucket (43 of 231 replayed
+    real polls for one window, instead of 1). Adding 30s before truncating
+    moves the bucket boundary to `:30`, comfortably clear of the observed
+    ~1s jitter, so both sides of a real straddle round to the SAME minute.
+    `.astimezone(timezone.utc)` additionally stops two DIFFERENT instants at
+    different UTC offsets from colliding on the same rounded string
+    (unreachable today — the endpoint always returns `+00:00` — free to
+    close while already touching this line).
+
+    Falls back to a STABLE, never-time-varying sentinel — `"raw:<value>"`,
+    NEVER bare `None` — on any missing/unparseable input: `check_usage`
+    uses `None` in `state["usage"]["alerted_window"]` to mean "not currently
+    alerted for any window" (both the fresh-state default and the
+    below-threshold re-arm), so returning `None` here for a genuinely
+    missing `resets_at` would make the very FIRST real alert compare
+    `None == None` and silently never fire. A fixed sentinel per distinct
+    bad input still fires once and then correctly dedupes on repeat polls
+    with the same missing/malformed value."""
     try:
-        from datetime import datetime
+        from datetime import datetime, timedelta, timezone
         dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+        dt = dt.astimezone(timezone.utc) + timedelta(seconds=30)
         return dt.strftime("%Y-%m-%dT%H:%M")
     except Exception:
-        return resets_at
+        return "raw:%s" % (resets_at,)
 
 
 def fetch_usage():
@@ -10050,8 +10078,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             key = tpath.stem                   # session id (stable across grouped panes)
             project_by_sid[key] = project      # job 21: a human label for the ping
             cwd_by_sid[key] = cwd              # job 24: which REPO this loop spends in
-            owner = pane_owner(pid, run)       # raw tmux session name for THIS pane
-            owner = stream_redirect(owner)     # #212: STREAM_NOTIFY_OWNER-aware
+            # #212: STREAM_NOTIFY_OWNER-aware — raw tmux session name redirected
+            # to its Discord identity (a stream persona's own account name
+            # otherwise bypasses the SAME map every other notification uses).
+            owner = stream_redirect(pane_owner(pid, run))
             if owner:
                 owner_by_sid[key] = owner      # so job 5's ✅ ping @mentions this session's owner
                 owner_by_cwd[cwd] = owner      # job 5: recover the owner when the sid is missing
@@ -10745,8 +10775,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             captured = capture_pane(pid, run)
             panes_by_sid[sid] = (pid, captured)
             hosted_users[sid] = fu
-            owner = pane_owner(pid, run)
-            owner = stream_redirect(owner)     # #212: STREAM_NOTIFY_OWNER-aware
+            owner = stream_redirect(pane_owner(pid, run))  # #212: STREAM_NOTIFY_OWNER-aware
             if owner:
                 owner_by_sid.setdefault(sid, owner)
             # waiting=True: the FOREIGN transcript isn't cheaply readable from

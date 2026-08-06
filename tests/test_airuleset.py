@@ -3485,6 +3485,41 @@ class TestStreamAuthorityHasNotifyRouting(TestCase):
         self.assertEqual(missing, set(), missing)
 
 
+class TestPaneOwnerAlwaysRedirected(TestCase):
+    """Structural lock (airuleset#212 adversarial-review finding F2): every
+    `pane_owner(...)` CALL SITE in watchdog/__init__.py (other than its own
+    `def`) must be wrapped in `stream_redirect(...)` before the result can
+    reach a notify `owner=` argument — a bare `pane_owner(pid, run)` bypasses
+    notify.STREAM_NOTIFY_OWNER (#259) entirely, which is exactly how a stream
+    persona's own account-wide alert (job 3) mis-routed to begin with. Two
+    fix rounds found FOUR more un-redirected call sites (job 14's stash-skip
+    ping, job 20's stall/drift/rearm give-up pings) beyond the two the first
+    round covered — a source-level lock is cheaper than a full integration
+    test per job and catches ANY future call site the same way."""
+
+    def test_no_bare_pane_owner_call_reaches_the_source(self):
+        import re
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "watchdog", "__init__.py").read_text(encoding="utf-8")
+        # Every occurrence of the literal call `pane_owner(` that is NOT the
+        # function's own `def pane_owner(` line.
+        offending = []
+        for mm in re.finditer(r"pane_owner\(", src):
+            line_start = src.rfind("\n", 0, mm.start()) + 1
+            line = src[line_start:src.find("\n", mm.start())]
+            if line.lstrip().startswith("def pane_owner("):
+                continue
+            # The call itself must be immediately preceded by "stream_redirect("
+            # (allowing only whitespace between) — i.e. `stream_redirect(pane_owner(`.
+            before = src[:mm.start()]
+            if not re.search(r"stream_redirect\(\s*$", before):
+                lineno = src.count("\n", 0, mm.start()) + 1
+                offending.append("line %d: %s" % (lineno, line.strip()))
+        self.assertEqual(offending, [],
+                         "pane_owner() call(s) not wrapped in stream_redirect(): "
+                         + "; ".join(offending))
+
+
 class TestTmuxHistoryLimit(TestCase):
     """apply_tmux_history_limit ensures ~/.tmux.conf carries the managed
     tmux block: history-limit 50000 (#235: tmux's built-in default of 2000
@@ -6544,6 +6579,52 @@ class TestApiWatchdog(TestCase):
                            fetch=lambda: wk("2026-08-15T10:59:59.111111+00:00"),
                            threshold=98, interval=900)
         self.assertEqual(len(self.pings), 2)
+
+    def test_check_usage_dedups_a_real_minute_boundary_straddle(self):
+        # Adversarial-review finding (airuleset#212 F1/F3): a real 456-sample
+        # replay of the fleet's own resets_at history showed EVERY weekly
+        # window straddles its reset BOUNDARY (roughly a whole hour) —
+        # samples land on BOTH sides, e.g. some at HH:59:59.xx and some at
+        # (HH+1):00:00.xx. A bare TRUNCATE-to-minute dedup (the first version
+        # of this fix) put those two sides in DIFFERENT buckets and still
+        # re-fired ~1 poll in 5. This is the real straddling pair from that
+        # history (2026-08-01T11:00:00Z window) — must land in the SAME
+        # bucket, unlike the same-minute pair above (which only proves
+        # granularity finer than a minute doesn't matter).
+        st, now = {}, 1_000_000
+
+        def wk(reset_iso):
+            return {"limits": [{"group": "weekly", "kind": "weekly_all",
+                                "percent": 99, "resets_at": reset_iso}]}
+        self.w.check_usage(now, st, self._send,
+                           fetch=lambda: wk("2026-08-01T10:59:59.999219+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1)
+        self.w.check_usage(now + 900, st, self._send,
+                           fetch=lambda: wk("2026-08-01T11:00:00.012015+00:00"),
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "a real minute-boundary straddle must not defeat the dedup")
+
+    def test_check_usage_missing_resets_at_still_alerts_once_and_dedupes(self):
+        # Adversarial-review finding (airuleset#212 F4, pre-existing but
+        # easy to fix while touching this line): a weekly window with NO
+        # resets_at field must still fire its FIRST alert (never silently
+        # swallowed by colliding with the "not yet alerted" None sentinel),
+        # and must still dedupe on repeat polls with the same missing value.
+        st, now = {}, 1_000_000
+
+        def wk_no_reset():
+            return {"limits": [{"group": "weekly", "kind": "weekly_all",
+                                "percent": 99}]}   # no resets_at key at all
+        self.w.check_usage(now, st, self._send, fetch=wk_no_reset,
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "a missing resets_at must not silently swallow the alert")
+        self.w.check_usage(now + 900, st, self._send, fetch=wk_no_reset,
+                           threshold=98, interval=900)
+        self.assertEqual(len(self.pings), 1,
+                         "repeat polls with the same missing resets_at must dedupe")
 
     def test_run_once_usage_alert_redirects_stream_persona_owner(self):
         # airuleset#212 root cause: `account_owner` came from the RAW
