@@ -200,7 +200,27 @@ SHAPE=$(printf ' %s ' "$CMD" | tr -c 'A-Za-z0-9_' ' ' | tr -s ' ' \
     | sed -E 's/(^| )[0-9]+( |$)/ N /g; s/[0-9]+/N/g' \
     | md5sum 2>/dev/null | cut -c1-12 || true)
 [ -n "$SHAPE" ] || exit 0
-FIRST_FILE="$STATE_DIR/airuleset-localpoll-first-${SID}-${SHAPE}"
+
+# ---- #281: fold a known TARGET number into the key, when one exists ----
+# The shape hash above is deliberately digit-blind so a retuned wait
+# (`sleep 15`->`sleep 20`, `seq 1 30`->`seq 1 60`) still collides with its
+# own earlier loop — see test_the_key_is_digit_blind_so_retuning_the_loop_
+# still_collides. But for a `gh pr view <N>` / `gh issue view <N>` loop the
+# blinded number IS the identifying TARGET (which PR/issue is being
+# watched), not a tuning knob — so `gh pr view 436` and `gh pr view 704`
+# hashed to the SAME shape and the second read as a repeat of the first
+# (reported live: workaround was "never chain two different PR/issue-number
+# poll calls in one Bash call"). Mirrors #118's own RUN_ID extraction in the
+# sibling CI hook — fold a known target's number into the key so two
+# DIFFERENT targets never share a slot. A loop with no such target (no `gh
+# pr view`/`gh issue view` token — obs_loop/task_loop/ssh_loop, none of
+# which carry one) keeps the pure-shape key, unchanged.
+TARGET=$(printf '%s' "$FLAT" \
+    | grep -oE 'gh[[:space:]]+(pr|issue)[[:space:]]+view[[:space:]]+[0-9]+' \
+    | grep -oE '[0-9]+$' | head -1 || true)
+KEY="$SHAPE"
+[ -n "$TARGET" ] && KEY="${SHAPE}-t${TARGET}"
+FIRST_FILE="$STATE_DIR/airuleset-localpoll-first-${SID}-${KEY}"
 
 # ---- the carve-out: loop 1 per shape is free ---------------------------
 if [ ! -e "$FIRST_FILE" ]; then
@@ -219,8 +239,8 @@ if printf '%s' "$FLAT" \
     WAIT_KIND="task"
 fi
 
-printf '%s localpoll BLOCK session=%s shape=%s agent=%s kind=%s cmd=%s\n' \
-    "$(date -Is)" "$SID" "$SHAPE" "${AGENT_ID:-main}" "$WAIT_KIND" "$SNIPPET" \
+printf '%s localpoll BLOCK session=%s shape=%s target=%s agent=%s kind=%s cmd=%s\n' \
+    "$(date -Is)" "$SID" "$SHAPE" "${TARGET:-none}" "${AGENT_ID:-main}" "$WAIT_KIND" "$SNIPPET" \
     >> "$BLOCK_LOG" 2>/dev/null || true
 
 if [ -n "$AGENT_ID" ]; then
