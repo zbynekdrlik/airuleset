@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -944,6 +945,44 @@ class ToolsOtherThanBash(unittest.TestCase):
         self.assertIn("tool=Read", body)
         self.assertIn("DB_PASS.secret", body)
         self.assertIn("sha256=", body)
+
+
+class PerformanceIsBoundedFarBelowTheHarnessTimeout(unittest.TestCase):
+    """#162 — a hook that TIMES OUT (settings/hooks.json: timeout=5) is treated
+    by Claude Code as a non-blocking error, so the guarded command runs. The
+    architectural gap (a harness-level kill mid-python3-start) cannot be closed
+    from inside the script — but the DOMINANT reachable trigger can: VALUE_FILE_RE
+    (`:362-365`) had a stem class overlapping the literal it searches for
+    (`.secret` starts with characters the stem class itself accepts), so
+    `.search()`/`.finditer()` over a long run with no `.secret` anywhere forced a
+    full greedy-then-backtrack sweep at every start offset — O(n^2). Measured on
+    dev1 before the fix: 50 KB -> 10,497 ms, 100 KB -> 54,643 ms, both far past
+    the 5,000 ms budget, from an entirely ordinary long argument (a base64 blob,
+    an embedded file body) with no glob, no exploit shape, nothing hidden.
+
+    This test asserts the hook completes an 18,000-char plain-literal Bash
+    argument well under the harness timeout. Pre-fix it measured ~2.0s against
+    the 1.5s bound here; the fix (bounding the stem quantifier to Linux's own
+    NAME_MAX, 255 bytes/component — no real `<NAME>.secret` value file can ever
+    exceed it) brings the same payload under 200ms.
+    """
+
+    BOUND_S = 1.5
+
+    def test_a_long_literal_argument_completes_well_under_the_timeout(self):
+        cmd = "cat " + "x" * 18000
+        start = time.perf_counter()
+        r = run(cmd)
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, self.BOUND_S,
+            "hook took %.3fs on an 18KB literal argument — this alone is close "
+            "to (or past) the 5s harness timeout on a real box under load, "
+            "which is the #162 fail-open this test exists to prevent"
+            % elapsed)
+        # And the verdict must still be correct — a long literal with no store
+        # reference anywhere is genuinely allowed, not accidentally blocked.
+        self.assertEqual(r.returncode, 0)
 
 
 class Registered(unittest.TestCase):
