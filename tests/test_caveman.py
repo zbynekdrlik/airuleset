@@ -7,6 +7,7 @@ these tests lock in the fix (statusLine -> a hash-independent shim) and the
 idempotent enable/marketplace reconcile so a future edit can't reintroduce it.
 """
 
+import json
 import sys
 import tempfile
 import unittest.mock as m
@@ -479,6 +480,73 @@ class TestCavemanNewCacheLayout(TestCase):
                 env={**os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("caveman:lite", r.stdout)
+
+
+class TestCavemanPluginBuiltUsesRegistry(TestCase):
+    """Issue #279: "built" for caveman must be decided by claude's OWN
+    plugin registry (installed_plugins.json), never by cache-file presence
+    — mirrors #276's fix for MANAGED_PLUGINS/_managed_plugin_built()
+    exactly. Live evidence (montalu4, 2026-08-06): the caveman cache dir
+    for hash ec83e5bace4c is FULLY extracted (every real-install file
+    present, matching montalu3's own successful install byte-for-byte,
+    satisfying BOTH known cache layouts) while claude's own registry has
+    ZERO entry for caveman@caveman — `claude plugin list` correctly
+    reports it ABSENT. The OLD glob-based check said "already built" and
+    setup_caveman() silently skipped the real `claude plugin install
+    caveman@caveman` call forever, with no log output at all."""
+
+    def _claude_dir(self):
+        return Path(tempfile.mkdtemp())
+
+    def _write_registry(self, d, keys):
+        reg_dir = d / "plugins"
+        reg_dir.mkdir(parents=True, exist_ok=True)
+        data = {"version": 2,
+                "plugins": {k: [{"scope": "user"}] for k in keys}}
+        (reg_dir / "installed_plugins.json").write_text(json.dumps(data))
+
+    def test_registry_entry_present_means_built(self):
+        d = self._claude_dir()
+        self._write_registry(d, ["caveman@caveman"])
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertTrue(airuleset._caveman_plugin_built())
+
+    def test_no_registry_at_all_means_not_built(self):
+        d = self._claude_dir()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertFalse(airuleset._caveman_plugin_built())
+
+    def test_registry_present_but_caveman_key_absent_means_not_built(self):
+        d = self._claude_dir()
+        self._write_registry(d, ["superpowers@claude-plugins-official"])
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertFalse(airuleset._caveman_plugin_built())
+
+    def test_fully_extracted_cache_dir_with_no_registry_entry_is_not_built(self):
+        # #279's own headline RED test -- the EXACT live montalu4 shape: a
+        # completely extracted cache dir (satisfying BOTH the old hooks/
+        # and the new src/hooks/ layout the OLD glob check accepted) with
+        # claude's registry never having heard of caveman at all.
+        d = self._claude_dir()
+        for rel in (
+                "plugins/cache/caveman/caveman/ec83e5bace4c/hooks/caveman-statusline.sh",
+                "plugins/cache/caveman/caveman/ec83e5bace4c/src/hooks/caveman-statusline.sh"):
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("#!/usr/bin/env bash\n")
+        # no installed_plugins.json at all -- claude's registry never heard
+        # of this plugin, exactly like the live montalu4 evidence.
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertFalse(airuleset._caveman_plugin_built())
+
+    def test_settings_enabled_alone_never_satisfies_the_check(self):
+        d = self._claude_dir()
+        settings_path = d / "settings.json"
+        settings_path.write_text(json.dumps(
+            {"enabledPlugins": {"caveman@caveman": True}}))
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path):
+            self.assertFalse(airuleset._caveman_plugin_built())
 
 
 class TestSetupCavemanRegistersMarketplaceBeforeInstall(TestCase):
