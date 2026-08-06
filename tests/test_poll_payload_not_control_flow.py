@@ -474,6 +474,69 @@ class BackslashAndSpliceIdiomDoNotDefeatBlankingTest(unittest.TestCase):
         self.assertNotIn("do sleep 5", out, repr(out))
 
 
+class ShellWordEndStopsAtUnquotedMetacharsTest(unittest.TestCase):
+    """Adversarial review of #282's own fix (Finding 1): `_shell_word_end`
+    stopped ONLY at whitespace, never at an unquoted shell metacharacter
+    (`;`/`&`/`|`/`(`/`)`/`<`/`>`) -- real bash ends a word there too. A
+    separator glued directly to a flag value's closing quote (no space,
+    e.g. `"x";gh issue comment 99`, the exact shape #208's batch-posting
+    tests already exercise) was consumed INTO the blanked span, eating the
+    first word of the very next command. Fail-safe direction (a real later
+    invocation goes undetected rather than a fake one surviving), but a
+    real regression the #282 fix itself introduced -- own bug, own RED."""
+
+    def test_a_semicolon_glued_to_the_closing_quote_does_not_swallow_the_next_invocation(self):
+        cmd = 'gh issue comment 7 --body "x";gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out,
+                      "a real invocation chained via ; with NO space "
+                      "after the closing quote must not be swallowed: %r"
+                      % out)
+
+    def test_an_ampersand_glued_to_the_closing_quote_does_not_swallow_the_next_invocation(self):
+        cmd = 'gh issue comment 7 --body "x"&gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+    def test_a_pipe_glued_to_the_closing_quote_does_not_swallow_the_next_word(self):
+        cmd = 'gh issue comment 7 --body "x"|gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+    def test_a_separator_with_surrounding_whitespace_was_never_affected(self):
+        # Control pin: the bug is specific to NO space around the
+        # separator -- the whitespace-separated shape already worked.
+        cmd = 'gh issue comment 7 --body "x" ; gh issue comment 99 --body "y"'
+        out = lpp.strip(cmd)
+        self.assertIn("gh issue comment 99", out, repr(out))
+
+
+class ShellWordContinuationDiscriminatorTest(unittest.TestCase):
+    """Adversarial review of #282's own fix (Finding 4): none of the
+    existing tests distinguish the correct, continuation-aware scanner
+    from a subtly-wrong reimplementation that simply stops scanning at
+    the FIRST closing quote (i.e. reverts to the pre-#282 shape for
+    anything glued to a quote with no separator at all -- real bash
+    concatenates `"safe"gh` into ONE word, exactly the splice-idiom
+    continuation rule, one level plainer: no second quote pair at all,
+    just bare unquoted text glued straight on)."""
+
+    def test_bare_text_glued_to_the_closing_quote_with_no_separator_is_absorbed(self):
+        # Real bash: `--body "safe"gh` is the SINGLE token `safegh` (word
+        # concatenation, zero whitespace between the fragments) -- the
+        # correct scanner must keep consuming past the closing quote, so
+        # the "gh" is blanked WITH the rest of the value and #99 is never
+        # visible as a live invocation. A wrong "stop at the first closing
+        # quote" reimplementation would leave "gh issue comment 99"
+        # completely unblanked -- exactly the #282 leak, reintroduced.
+        cmd = 'gh issue comment 7 --body "safe"gh issue comment 99'
+        out = lpp.strip(cmd)
+        self.assertNotIn("gh issue comment 99", out,
+                         "text glued directly to a value's closing quote "
+                         "(no separator) is part of the SAME shell word "
+                         "and must be absorbed into the blank: %r" % out)
+
+
 class FailOpenTest(_HookRunner):
     def test_unparseable_payload_is_silent_and_exit_zero(self):
         out = subprocess.run(["bash", str(NUDGE)], input="not json at all",

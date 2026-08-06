@@ -1026,5 +1026,27 @@ class TestBackslashAndSpliceIdiomDoNotDefeatBlanking(_Base):
                           "basename that no longer coincidentally masks it")
 
 
+class TestShellWordEndStopsAtUnquotedMetachars(_Base):
+    """Adversarial review of #282's own fix (Finding 1): `_shell_word_end`
+    stopped ONLY at whitespace, never at an unquoted shell metacharacter
+    (`;`/`&`/`|`) -- so a batch of chained `gh issue comment` calls (the
+    exact shape `TestRecordsEveryIssueInACompoundCommand` already covers)
+    with NO space between a `--body` value's closing quote and the next
+    call's separator silently lost the later issue's marker."""
+
+    def test_a_semicolon_glued_to_the_closing_quote_still_records_the_next_issue(self):
+        comments7 = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/7#issuecomment-100",
+        }])
+        cmd = 'gh issue comment 7 --body "x";gh issue comment 99 --body "y"'
+        r = self.run_hook(cmd, comments7)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(7), "issue #7 must still classify")
+        self.assertIsNotNone(self.marker(99),
+                             "issue #99, chained via ; with NO space after "
+                             "the closing quote, must still be recorded")
+
+
 if __name__ == "__main__":
     main()
