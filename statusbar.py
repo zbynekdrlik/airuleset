@@ -305,19 +305,32 @@ def model_segment(payload, managed_model=None):
     session reports back for its own model id (the exact bug the removed
     watchdog job 23 hit, #132) -- `burn.tier()` is already suffix-agnostic
     (substring match), so comparing tiers sidesteps that regression by
-    construction."""
+    construction.
+
+    Two failure surfaces closed by adversarial review (#133): (1) a truthy
+    NON-STRING `id`/`display_name` (int/float/list/dict/bool -- all valid
+    JSON scalars a hostile/malformed payload can carry) used to reach
+    `burn.tier()`'s `.lower()` uncaught; coerced to `str()` first, since
+    every JSON scalar stringifies safely. (2) an UNRECOGNIZED managed_model
+    (burn.tier() -> "other", e.g. a future MANAGED_MODEL value with no tier
+    word) used to stand in as a real tier and compare as a genuine
+    mismatch -- "other" is now treated the same as an unresolvable
+    comparison (never a manufactured false alarm), matching how the
+    session's OWN "other" tier already renders "" above."""
     if not isinstance(payload, dict):
         return ""
     model = payload.get("model")
     if not isinstance(model, dict):
         return ""
-    model_id = model.get("id") or model.get("display_name") or ""
+    model_id = str(model.get("id") or model.get("display_name") or "")
     tier = burn.tier(model_id)
     if tier == "other":
         return ""
     if managed_model is None:
         managed_model = _managed_model()
     managed_tier = burn.tier(managed_model) if managed_model else None
+    if managed_tier == "other":
+        managed_tier = None
     color = 40 if (managed_tier is None or tier == managed_tier) else 220
     return "\033[38;5;%dm%s\033[0m" % (color, tier)
 
