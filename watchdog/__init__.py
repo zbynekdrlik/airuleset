@@ -4023,7 +4023,7 @@ def _goal_was_cleared_by_user(tpath):
 
 
 def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
-                 time_fn=None, sweep_deadline=None):
+                 time_fn=None, sweep_deadline=None, sleep_fn=None):
     """Job 9 — see the section comment. Mutates state['goalarm']; returns log
     lines. Best-effort (never raises).
 
@@ -4032,11 +4032,17 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
     (both optional, default None -> unbounded, today's behavior) are
     checked strictly BETWEEN panes, before a pane's own delivery starts —
     never nested inside one pane's own capture/classify/deliver sequence.
-    A deferred pane writes no dedup state, so it is retried next sweep."""
+    A deferred pane writes no dedup state, so it is retried next sweep.
+
+    #266 Defect 1: `sleep_fn` (default None -> real `time.sleep`) is
+    threaded into the plain (bare-box) branch's verified-delivery
+    primitive, mirroring `goal_rearm`'s own signature — tests stub it to
+    avoid real sleeps."""
     ga = state.get("goalarm") or {}
     logs = []
     projects_dir = projects_dir or PROJECTS_DIR
     time_fn = time_fn or time.monotonic
+    sleep_fn = sleep_fn or time.sleep
     panes = list_claude_panes(run)
     for idx, (pid, cwd) in enumerate(panes):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -4083,10 +4089,23 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         kind, draft = _classify_boundary(cap)
         if kind != "input":
             continue
+        loc = os.path.basename(cwd.rstrip("/"))
+        # #266 Defect 2: a literal `/goal …` line printed IN THE VIEWPORT
+        # used to be a HARD requirement here, enforced BEFORE anything else
+        # was even attempted — but the payload is TRANSCRIPT-sourced
+        # whenever a transcript resolves (below), so this regex is only
+        # ever needed as the LAST-RESORT fallback (no local transcript AND
+        # no foreign transcript). A held draft — including job 9's OWN
+        # earlier stuck paste (defect 1) — visually pushes the printed
+        # `/goal ` line out of the CURRENT viewport, so requiring it up
+        # front turned that draft into a PERMANENT dead end: `ga[pid]`
+        # never gets set (arming never proceeds far enough to reach it), so
+        # the identical doomed check re-runs every sweep forever with ZERO
+        # journal trace (live, spinbike 2026-08-06 — 1h24m+ with a hanging
+        # draft and not one relevant log line). `goals`/`frag` are now
+        # computed lazily and every skip below LOGS why.
         goals = re.findall(r"^\s*(/goal \S.*)$", cap, re.M)
-        if not goals:
-            continue
-        frag = goals[-1].strip()
+        frag = goals[-1].strip() if goals else None
         # The rendered viewport hard-wraps long goals — arm the TRANSCRIPT's
         # exact bytes when available; the fragment only when provably whole.
         full = None
@@ -4106,7 +4125,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
                     logs.append(
                         "skip cleared (goal-autoarm) %s (%s) -> the user "
                         "cleared this goal; not re-arming until they arm it "
-                        "again" % (pid, os.path.basename(cwd.rstrip("/"))))
+                        "again" % (pid, loc))
                 continue
             # No longer cleared — drop the bookkeeping rather than leaving a
             # key per session forever. The state file is long-lived and this
@@ -4119,12 +4138,17 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             # user's HOME — read it via sudo -n (best-effort).
             full = _foreign_transcript_goal(cwd)
         if full is None:
+            if frag is None:
+                logs.append(
+                    "skip no-goal-on-screen (goal-autoarm) %s (%s) -> no "
+                    "transcript payload resolved and no printed /goal line "
+                    "visible in the viewport -- nothing to arm" % (pid, loc))
+                continue
             if _viewport_goal_wrapped(cap, frag):
                 logs.append("goal wrapped + no transcript — not arming %s (%s)"
-                            % (pid, os.path.basename(cwd.rstrip("/"))))
+                            % (pid, loc))
                 continue
             full = frag
-        loc = os.path.basename(cwd.rstrip("/"))
         if draft:
             if dry_run:
                 logs.append("goal-autoarm READY (stash) %s (%s)" % (pid, loc))
@@ -4148,9 +4172,21 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             continue
         ga[pid] = int(now)
         state["goalarm"] = ga          # key exists only once something armed
-        if not dry_run:
-            send_continue(pid, full, run)
-        logs.append("goal-autoarm %s (%s)" % (pid, loc))
+        # #266 Defect 1: this branch used to fire-and-forget
+        # (`send_continue`) — `send-keys -l` + an IMMEDIATE Enter, no
+        # settle/verify poll — the exact paste-collapse render race that
+        # left a long /goal payload sitting unsubmitted after the type
+        # never got a chance to render before Enter fired (live, spinbike
+        # 2026-08-06). Job 20 and job 9's OWN stash branch above already
+        # use a verified primitive; this plain branch was the one path
+        # left unguarded.
+        if dry_run:
+            logs.append("goal-autoarm READY %s (%s)" % (pid, loc))
+        else:
+            ok = _send_goal_verified(pid, full, run, captured=cap,
+                                     sleep_fn=sleep_fn)
+            logs.append("goal-autoarm %s %s (%s)"
+                        % ("OK" if ok else "FAIL", pid, loc))
     return logs
 
 
