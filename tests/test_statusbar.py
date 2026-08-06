@@ -7,6 +7,7 @@ issues. Hard rule: the statusline render NEVER blocks on gh — it reads local
 caches and refreshes them via a detached background command.
 """
 
+import getpass
 import json
 import os
 import subprocess
@@ -247,6 +248,278 @@ class RefreshCLI(unittest.TestCase):
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
             self.assertIn("I 1", seg)
             self.assertIn("gk 2", seg)
+
+    def test_refresh_needs_gatekeeper_lane_also_counts_as_handed_off(self):
+        # #191 root cause 1 ("different lane"): needs-gatekeeper is
+        # airuleset's OWN hand-off lane (cmd_gk_request) — a ticket carrying
+        # it is equally out-of-my-hands as one carrying ready-for-review, so
+        # it must fold into the SAME gk bucket. Against pre-#191 main this
+        # ticket miscounted as ACTIVE (I 1, gk 0) instead of handed-off
+        # (I 0, gk 1).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":7,'
+                '"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)      # NOT active — handed off
+            self.assertEqual(cache["gk"], 1)
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("I 0", seg)
+            self.assertIn("gk 1", seg)
+
+    def test_refresh_reattributes_relabeled_handoff_for_shared_account(self):
+        # #191 root cause 2 ("ownership relabel") + the issue's own literal
+        # acceptance spec: a SHARED-gh-account stream's slice is
+        # `label:stream:<user>` ALONE. Ticket #42 was relabelled away from
+        # stream:<user> to stream:core once the fix moved to shared code —
+        # the ONLY query the shared-account slice runs finds nothing. GitHub's
+        # own LABELED timeline event survives that relabel and is the one
+        # signal a shared identity can still use to recover it. Against
+        # pre-#191 main this rendered "I 0" with no gk bucket at all — the
+        # ticket was completely invisible.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            graphql_body = json.dumps({"data": {"repository": {"i42": {
+                "timelineItems": {"nodes": [
+                    {"label": {"name": "stream:%s" % user}}]}}}}})
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                # shared-account slice: the ONLY query it runs finds nothing
+                '  *label:stream:*) echo "[]";;\n'
+                # repo-wide hand-off candidates not yet in the slice
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":42,"labels":[{"name":"needs-gatekeeper"},'
+                '{"name":"stream:core"}]}]\';;\n'
+                '  *graphql*) echo \'%s\';;\n' % graphql_body +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache.get("scope"), "mine")
+            self.assertEqual(cache["open"], 0)      # not active-on-me
+            self.assertEqual(cache["gk"], 1)        # re-attributed, handed off
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertNotEqual(seg, "")
+            self.assertIn("I 0", seg)
+            self.assertIn("gk 1", seg)
+
+    def test_refresh_reattributes_via_the_new_handed_by_marker(self):
+        # #191 adversarial review, CRITICAL C1: Part C's origin marker is
+        # `handed-by:<user>`, NOT `stream:<user>` (reusing the ownership
+        # label would have made a needs-gatekeeper ticket permanently part
+        # of the stream's own `/goal` stop-proof slice). This proves the
+        # NEW marker form alone -- with no `stream:*` history at all --
+        # is sufficient for the footer to recover it.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            graphql_body = json.dumps({"data": {"repository": {"i7": {
+                "timelineItems": {"nodes": [
+                    {"label": {"name": "needs-gatekeeper"}},
+                    {"label": {"name": "handed-by:%s" % user}}]}}}}})
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":7,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *graphql*) echo \'%s\';;\n' % graphql_body +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache["gk"], 1)
+
+    def test_refresh_reattribution_uses_the_temporally_last_origin_event(self):
+        # #191 adversarial review, MAJOR M3: "was my label EVER applied" let
+        # TWO streams that both once owned a ticket (A -> B -> unlabelled)
+        # BOTH reclaim it. Ticket #8 has NO current stream label (so the
+        # cheap current-owner skip does not filter it out) but its history
+        # shows stream:marek FIRST, then this stream's own handed-by LAST --
+        # only the temporally-last event may win. `getpass.getuser()`'s own
+        # value is this stream's identity in the test.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            graphql_body = json.dumps({"data": {"repository": {"i8": {
+                "timelineItems": {"nodes": [
+                    {"label": {"name": "stream:marek"}},        # earlier
+                    {"label": {"name": "handed-by:%s" % user}},  # LAST
+                ]}}}}})
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":8,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *graphql*) echo \'%s\';;\n' % graphql_body +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["gk"], 1)   # LAST event wins -> this stream
+
+    def test_refresh_reattribution_skipped_for_own_account_slice(self):
+        # An own-account stream (assignee/author quals present, 3-qual union)
+        # already recovers a relabelled hand-off for free via author:@me —
+        # the GraphQL re-attribution step must not even run for it.
+        #
+        # #191 adversarial review, MAJOR M5 (mutation-verified): the ORIGINAL
+        # version of this test stubbed graphql with an UNRELATED label
+        # ("stream:x"), so deleting the len(quals)==1 guard entirely still
+        # passed (the stub never matched anything either way) -- no teeth.
+        # The stub now answers with THIS test's own real identity, so if the
+        # guard were removed the count WOULD move and the assertion below
+        # would fail.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                # own-account: gh api user answers something other than the
+                # maintainer login (matches the existing convention in this
+                # file — the "16" fallback below never matches "api user").
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo "[]";;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                # if the (own-account) code wrongly ran the re-attribution
+                # step it would hit one of these and MATCH.
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":99,"labels":[{"name":"needs-gatekeeper"}]}]\';;\n'
+                '  *graphql*) echo \'{"data":{"repository":{"i99":'
+                '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
+                ']}}}}}\';;\n' % user +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache["gk"], 0)
+
+    def test_refresh_reattribution_bounded_to_unowned_candidates(self):
+        # #191 design review: a candidate currently owned by a DIFFERENT
+        # registered stream must never be re-attributed to THIS stream, even
+        # if this stream's label happens to appear in its history (a
+        # legitimate transfer).
+        #
+        # #191 adversarial review, MAJOR M5 (mutation-verified): the ORIGINAL
+        # graphql stub returned "stream:whoever" here too -- deleting the
+        # `_stream_owner_of` skip still passed. The stub now answers with
+        # THIS test's own real identity, so removing the skip would make the
+        # candidate reach GraphQL, match, and move `gk` off 0.
+        user = getpass.getuser()
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *label:needs-gatekeeper,ready-for-review*) '
+                'echo \'[{"number":55,"labels":[{"name":"needs-gatekeeper"},'
+                '{"name":"stream:marek"}]}]\';;\n'
+                '  *graphql*) echo \'{"data":{"repository":{"i55":'
+                '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
+                ']}}}}}\';;\n' % user +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache["gk"], 0)     # #55 stays marek's, not ours
 
     def test_refresh_full_authority_excludes_other_streams_labels(self):
         # Stream-label ownership (odoo-erp PR #1440, 2026-07-11): the FULL box's

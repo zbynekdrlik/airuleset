@@ -3927,10 +3927,85 @@ def cmd_tickets_status(args):
                         n_num = x["number"]
                         mine.add(n_num)
                         labels = {(lb or {}).get("name") for lb in (x.get("labels") or [])}
+                        # #191 Part A ("different lane"): needs-gatekeeper is
+                        # airuleset's OWN hand-off lane (cmd_gk_request), not
+                        # just the repo-workflow's ready-for-review — a ticket
+                        # carrying either is equally "out of my hands, waiting
+                        # on someone else" from this stream's point of view,
+                        # so both fold into the SAME gk bucket (no new badge;
+                        # #223 already shortened every label to keep the
+                        # footer on one line).
                         handed[n_num] = handed.get(n_num, False) or \
-                            ("ready-for-review" in labels)
+                            ("ready-for-review" in labels) or \
+                            ("needs-gatekeeper" in labels)
                 except (ValueError, TypeError, KeyError):
                     failed = True   # gh error ≠ empty slice — keep open=None
+            # #191 Part B ("ownership relabel"): a SHARED-account stream's
+            # slice is `label:stream:<user>` ALONE (see _slice_quals) — once
+            # a handed-off ticket's stream:<user> label is removed (the fix
+            # moved to shared code this stream cannot push to), it vanishes
+            # from `mine` entirely, because that label was the only query
+            # that could ever find it. Own-account streams (assignee/author
+            # quals present) already see this for free via author:@me and
+            # need no recovery step — scope this to the single-qual shared
+            # shape only, the same discriminator `_refuse_unless_empty_is_
+            # trustworthy` already uses for its own C2 guard.
+            #
+            # #191 adversarial review (round 1): the ORIGINAL recovery here
+            # checked "was MY stream label EVER applied", which lets TWO
+            # streams that both once owned a ticket (A -> B -> unlabelled)
+            # BOTH reclaim it — the current-label bounding below only helps
+            # when a current label survives, exactly the case this recovery
+            # exists to handle the ABSENCE of. `_last_origin_owner` resolves
+            # the TEMPORALLY-LAST origin-shaped labeled event instead of
+            # "ever", which settles a genuine competing claim correctly. The
+            # cheap current-label skip stays as a volume-reducing
+            # OPTIMISATION only (never re-ask GraphQL about a ticket a
+            # DIFFERENT registered stream currently, visibly owns) — it is
+            # not the correctness guarantee any more.
+            if not failed and len(quals) == 1 and \
+                    quals[0].startswith("label:stream:"):
+                user = _current_user()
+                raw = _out(["gh", "issue", "list", "--state", "open", "--search",
+                            "-label:autopilot-skip "
+                            "label:needs-gatekeeper,ready-for-review",
+                            "-L", "200", "--json", "number,labels"], root)
+                # #191 m1: a failed candidate query (or a failed
+                # _last_origin_owner call below) degrades to "recover
+                # nothing this refresh" rather than setting `failed=True` —
+                # deliberately asymmetric with the loop above, since this
+                # whole step is a BEST-EFFORT enrichment on top of an
+                # already-valid `mine`/`gk` count, not a correctness
+                # precondition for it. The footer looks healthy either way;
+                # a transient gh error here just means one refresh cycle
+                # missed a re-attribution, retried automatically next TTL.
+                try:
+                    candidates = json.loads(raw)
+                except (ValueError, TypeError):
+                    candidates = []
+                to_check = []
+                if isinstance(candidates, list):
+                    for x in candidates:
+                        try:
+                            n_num = x["number"]
+                        except (TypeError, KeyError):
+                            continue
+                        if n_num in mine:
+                            continue
+                        if _stream_owner_of(x.get("labels")):
+                            continue  # currently owned by ANOTHER stream
+                        to_check.append(n_num)
+                # #191 m3: bound the GraphQL fan-out — the current-label skip
+                # above already trims most repos to a handful, but nothing
+                # else caps a repo with an unusually large open hand-off
+                # population.
+                to_check = to_check[:50]
+                if to_check:
+                    owners = _last_origin_owner(to_check, cwd=root)
+                    for n_num, owner in owners.items():
+                        if owner == user:
+                            mine.add(n_num)
+                            handed[n_num] = True
             gk = sum(1 for n_num in mine if handed.get(n_num))
             entry["open"] = None if failed else len(mine) - gk
             entry["gk"] = None if failed else gk
@@ -4012,6 +4087,41 @@ def cmd_tickets_status(args):
     print("refreshed open=%s name=%s" % (entry["open"], entry["name"] or "-"))
 
 
+def _ensure_origin_label_usable(gh_fn, label, R):
+    """Best-effort idempotent `gh label create` — returns True when `label`
+    is confirmed usable (already existed, or was just created), and logs
+    (never raises) on any failure. #191 Part C: closes the data gap
+    `_last_origin_owner` (statusbar's `cmd_tickets_status`) relies on — a
+    repo seeing this stream's FIRST ticket ever has no `handed-by:<user>`
+    label yet, and `--add-label`/`--label` on a nonexistent label errors
+    rather than creating it.
+
+    #191 adversarial review, MAJOR M1 (live-verified against
+    zbynekdrlik/odoo-erp's real `stream:*` labels — each stream had its own
+    hand-curated colour + Slovak description): the original version used
+    `--force`, which OVERWRITES an EXISTING label's colour/description on
+    EVERY call, unconditionally. Read-only existence check FIRST — an
+    already-existing label (this marker's own prior run, or any label that
+    happens to share the name) is never touched.
+
+    This is the ONE place that failure is allowed to be loud: gk-request's
+    PRIMARY job (the needs-gatekeeper hand-off) must never be blocked by
+    this best-effort enrichment, so callers only attempt the origin-label
+    APPLY once this returns True."""
+    have = gh_fn(["gh", "label", "list", "--search", label,
+                  "--json", "name", "-q", ".[].name"] + R)
+    if have.returncode == 0 and label in (have.stdout or "").splitlines():
+        return True   # already exists — never touch its colour/description
+    r = gh_fn(["gh", "label", "create", label, "--color", "5319e7",
+               "--description",
+               "Sub-dev stream hand-off origin marker (airuleset#191)"] + R)
+    if r.returncode != 0:
+        print("gk-request: could not ensure origin label %r exists: %s"
+              % (label, (r.stderr or "").strip()))
+        return False
+    return True
+
+
 def cmd_gk_request(args):
     """Stream→supervisor action request (#30): file (or mark) the ticket that
     asks the gatekeeper/supervisor for an action the stream cannot perform
@@ -4021,7 +4131,31 @@ def cmd_gk_request(args):
     which the watchdog's job-11 query also matches (the supervisor adds the
     label on pickup). Delivery to the supervisor is the watchdog's job — the
     stream files and keeps working; no user middleman, no ssh to foreign
-    boxes."""
+    boxes.
+
+    #191 Part C: when this box IS a registered sub-dev stream
+    (`_own_handoff_label()`), it ALSO best-effort applies its own
+    `handed-by:<user>` label at the moment of filing/hand-off — origin
+    provenance for `cmd_tickets_status`'s own-slice recovery
+    (`_last_origin_owner`), which can otherwise never tell a handed-off
+    ticket apart from anyone else's once GitHub's shared-identity author
+    field is the only signal left. Best-effort in both directions: never
+    blocks the needs-gatekeeper hand-off, never applied at all on a
+    full-authority box (a `handed-by:newlevel`/`handed-by:gatekeeper` label
+    would be meaningless).
+
+    #191 adversarial review, CRITICAL C1: the marker is deliberately
+    `handed-by:<user>`, NEVER `stream:<user>` — `stream:<user>` is the
+    repo's OWNERSHIP primitive (`_slice_quals`/`_core_search_excl`/
+    `_row_action` all key on it), and a needs-gatekeeper ticket tagged with
+    it would become PERMANENTLY part of the stream's own `/goal` stop-proof
+    slice (`slice-quals --count` could never reach 0 while one is open —
+    #181's never-stops failure at a new address) and would be misclassified
+    `implement` instead of `action-only`. `handed-by:*` is invisible to all
+    three of those ownership consumers by construction, so a gk-request
+    ticket is recoverable in the FOOTER (via `_last_origin_owner`) without
+    ever entering the stop-proof's own slice or the gatekeeper's own core
+    count (#191 M2)."""
     import subprocess
 
     def _gh(argv):
@@ -4033,10 +4167,17 @@ def cmd_gk_request(args):
 
     repo = getattr(args, "repo", None)
     R = ["-R", repo] if repo else []
+    stream_label = _own_handoff_label()
     issue = getattr(args, "issue", None)
     if issue:
         labeled = _gh(["gh", "issue", "edit", str(issue), "--add-label",
                        "needs-gatekeeper"] + R).returncode == 0
+        if stream_label and _ensure_origin_label_usable(_gh, stream_label, R):
+            origin = _gh(["gh", "issue", "edit", str(issue), "--add-label",
+                          stream_label] + R)
+            if origin.returncode != 0:
+                print("gk-request: could not apply origin label %r to #%s: %s"
+                      % (stream_label, issue, (origin.stderr or "").strip()))
         text = getattr(args, "comment", None) or (
             "Žiadosť o akciu supervízora — detail v tickete.")
         if not labeled and not text.startswith("GATEKEEPER-ACTION:"):
@@ -4074,9 +4215,24 @@ def cmd_gk_request(args):
     body_file = getattr(args, "body_file", None)
     B = (["--body-file", body_file] if body_file
          else ["--body", getattr(args, "body", None) or title])
+    # #191 M4: the origin label is applied AFTER the primary create succeeds,
+    # in its OWN separate call — baking it into the create's `--label` list
+    # meant a REJECTED origin label (a race right after `_ensure_origin_
+    # label_usable`, an org restriction) failed the WHOLE create, dropping
+    # needs-gatekeeper too and silently falling through to the title-prefix
+    # fallback with no labels at all. This is the same genuinely-best-effort
+    # shape issue-mode already uses.
     r = _gh(["gh", "issue", "create", "--title", title,
              "--label", "needs-gatekeeper"] + B + R)
     if r.returncode == 0:
+        new_num = (r.stdout or "").strip().rsplit("/", 1)[-1]
+        if stream_label and new_num.isdigit() and \
+                _ensure_origin_label_usable(_gh, stream_label, R):
+            origin = _gh(["gh", "issue", "edit", new_num, "--add-label",
+                         stream_label] + R)
+            if origin.returncode != 0:
+                print("gk-request: could not apply origin label %r to #%s: %s"
+                      % (stream_label, new_num, (origin.stderr or "").strip()))
         print("gk-request filed: %s" % r.stdout.strip())
         return 0
     ft = (title if title.startswith("GATEKEEPER-ACTION:")
@@ -6336,6 +6492,112 @@ def _stream_owner_of(labels):
         if profile != "full" and ("stream:%s" % user) in names:
             return user
     return ""
+
+
+def _own_handoff_label():
+    """This box's own `handed-by:<user>` hand-off origin marker, or None
+    when this box is not a registered sub-dev stream (#191 Part C). Guards
+    `cmd_gk_request`'s origin-marker write against a full-authority box
+    (dev1/gatekeeper) stamping a meaningless `handed-by:newlevel`/
+    `handed-by:gatekeeper` label onto a gk-request filed for its own
+    testing or on another stream's behalf.
+
+    #191 adversarial review, CRITICAL C1: deliberately `handed-by:<user>`,
+    NEVER `stream:<user>` — see `cmd_gk_request`'s own docstring for why
+    reusing the ownership label would have broken the `/goal` stop-proof's
+    termination condition."""
+    user = _current_user()
+    return "handed-by:" + user if user in AUTHORITY_BY_USER else None
+
+
+# A candidate's ORIGIN-shaped labeled events, both the legacy ownership
+# convention (`stream:<user>`, applied by a human during triage — the
+# original, pre-#191 signal `_last_origin_owner` recovers) and the new
+# hand-off marker (`handed-by:<user>`, #191 Part C) — either settles who a
+# ticket belongs to for re-attribution purposes.
+_ORIGIN_LABEL_RE = re.compile(r"^(?:stream|handed-by):(.+)$")
+
+
+def _last_origin_owner(numbers, cwd=None):
+    """For each issue in `numbers`, the stream that owns it per the
+    TEMPORALLY-LAST origin-shaped (`stream:<user>` or `handed-by:<user>`)
+    labeled event in its history — regardless of who applied it (a SHARED
+    gh identity, e.g. montalu/marek/simap all authenticating as the
+    maintainer, carries ZERO discrimination power between the streams that
+    share it) and regardless of whether that label is STILL present (the
+    timeline event survives a LATER relabel that removes it, unlike the
+    label itself). #191 root cause 2: a shared-account stream's slice is
+    `label:stream:<user>` alone, so a ticket relabelled away from it (the
+    fix moved to shared code the stream cannot push to) silently vanishes —
+    this recovers it from GitHub's own event history instead of guessing.
+
+    #191 adversarial review, MAJOR M3: the original version asked "was MY
+    label EVER applied", which let TWO streams that both once owned a
+    ticket (A -> B -> unlabelled) BOTH reclaim it — the current-label
+    bounding a caller may ALSO apply only helps when a current label
+    survives, exactly the case this function exists to handle the absence
+    of. Taking the LAST (not "ever") origin-shaped event settles a genuine
+    competing claim correctly: whichever stream's label was applied most
+    recently is the one this returns.
+
+    ONE batched GraphQL call for the WHOLE candidate set, aliased per issue
+    number -- never one REST call per candidate. A per-candidate REST loop
+    shares a rate-limit bucket across every stream authenticating as the
+    same PAT (#191 design review); batching collapses N candidates to O(1)
+    calls regardless of how many there are. `timelineItems(last: 20, ...)`
+    (#191 m2: NOT `first:`, which would read the OLDEST events on a churned
+    ticket and truncate away the very origin/hand-off label this function
+    exists to find). `owner`/`name` resolve via gh's own `-F owner=
+    '{owner}' -F name='{repo}'` placeholder expansion from `cwd`'s git
+    remote (the SAME shape `_watchdog_closed_fetch` already uses) -- no
+    separate `gh repo view` call needed.
+
+    Returns `{number: user}` for every candidate with at least one
+    origin-shaped event found; a candidate with none is simply absent
+    (never a guess). Returns `{}` on any failure or malformed response."""
+    if not numbers:
+        return {}
+    aliases = "\n".join(
+        "i%d: issue(number: %d) { timelineItems(last: 20, "
+        "itemTypes: [LABELED_EVENT]) { nodes { ... on LabeledEvent "
+        "{ label { name } } } } }" % (int(n), int(n))
+        for n in numbers)
+    query = ("query($owner: String!, $name: String!) { repository(owner: "
+             "$owner, name: $name) { %s } }" % aliases)
+    raw = _gh_out("api", "graphql", "-f", "query=" + query,
+                  "-F", "owner={owner}", "-F", "name={repo}",
+                  cwd=cwd, timeout=20)
+    try:
+        data = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict) or data.get("errors"):
+        return {}
+    repo = (data.get("data") or {}).get("repository")
+    if not isinstance(repo, dict):
+        return {}
+    owners = {}
+    for n in numbers:
+        node = repo.get("i%d" % int(n))
+        if not isinstance(node, dict):
+            continue
+        items = (node.get("timelineItems") or {}).get("nodes") or []
+        if not isinstance(items, list):
+            continue
+        # `nodes` is chronological (oldest first) — walk it in order and
+        # keep the LAST origin-shaped match, so a later relabel always
+        # wins over an earlier one.
+        last_owner = None
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            name = (it.get("label") or {}).get("name")
+            m = _ORIGIN_LABEL_RE.match(name or "")
+            if m:
+                last_owner = m.group(1)
+        if last_owner is not None:
+            owners[n] = last_owner
+    return owners
 
 
 def _row_action(row, own_stream=None):
