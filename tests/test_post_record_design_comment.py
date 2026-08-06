@@ -416,6 +416,109 @@ class TestFallbackExceptionLogging(_Base):
         self.assertFalse(log_path.exists())
 
 
+class TestRecordsEveryIssueInACompoundCommand(_Base):
+    """#208 -- `re.search` only ever extracts the FIRST `gh issue comment
+    <N>` occurrence in the command text. A batch worker posting several
+    design/validated/reviewed comments in ONE Bash call (e.g. `gh issue
+    comment 117 -F a.md && gh issue comment 118 -F b.md && gh issue
+    comment 119 -F c.md`) only ever got a marker for the first issue --
+    the rest silently got none, even with a fresh, valid, classifying
+    comment already posted for each."""
+
+    def test_three_chained_gh_issue_comment_calls_all_get_markers(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/999#issuecomment-50",
+        }])
+        cmd = ('gh issue comment 117 -F a.md && '
+               'gh issue comment 118 -F b.md && '
+               'gh issue comment 119 -F c.md')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(117), "issue #117 (first) missing a marker")
+        self.assertIsNotNone(self.marker(118), "issue #118 (second) missing a marker")
+        self.assertIsNotNone(self.marker(119), "issue #119 (third) missing a marker")
+
+    def test_the_same_issue_mentioned_twice_only_queries_gh_once(self):
+        # dedup, first-seen order -- a repeated mention of the SAME issue
+        # in one command should not re-hit the network twice.
+        log = self.home / "gh.log"
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-51",
+        }])
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_FAIL"] = "0"
+        env["FAKE_GH_LOG"] = str(log)
+        cmd = 'gh issue comment 41 -F a.md && gh issue comment 41 -F a.md'
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+        calls = [ln for ln in log.read_text().splitlines() if ln.startswith("issue view")]
+        self.assertEqual(len(calls), 1,
+                         "the same issue mentioned twice should query gh once, saw %r" % calls)
+
+    def test_one_issue_with_only_a_stale_comment_does_not_block_a_sibling(self):
+        # A fake `gh` that answers DIFFERENTLY per queried issue number
+        # (the shared harness's fake always returns the SAME JSON
+        # regardless of which issue is queried, which can't discriminate
+        # this case): #41 gets ONLY a stale comment (no marker expected,
+        # either pre- or post-fix -- freshness rejects it either way),
+        # #42 gets a genuine fresh one. Pre-fix, `re.search` only ever
+        # extracts #41 (the first match) and the script exits after
+        # finding #41's candidates empty -- #42 is NEVER QUERIED AT ALL,
+        # so it gets no marker for a DIFFERENT reason than "stale": it was
+        # simply never reached. Post-fix, #42 is independently queried and
+        # DOES get a marker from its own genuine fresh comment. This is
+        # the discriminating case a same-content-both-issues test cannot
+        # be: the two implementations disagree on #42's marker.
+        per_issue_gh = """#!/usr/bin/env bash
+echo "$@" >> "${FAKE_GH_LOG:-/dev/null}"
+ISSUE="$3"
+VAR="FAKE_GH_JSON_$ISSUE"
+JSON="${!VAR:-}"
+[ -z "$JSON" ] && JSON='{"comments":[]}'
+case "$1 $2" in
+  "issue view") echo "$JSON";;
+  *) exit 1;;
+esac
+"""
+        gh_dir = Path(tempfile.mkdtemp(prefix="airuleset-designhook-fakegh-periss-"))
+        self.addCleanup(shutil.rmtree, gh_dir, True)
+        (gh_dir / "gh").write_text(per_issue_gh)
+        (gh_dir / "gh").chmod(0o755)
+
+        stale_only = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(3600), "viewerDidAuthor": True,
+            "url": "https://x/issues/41#issuecomment-62",
+        }])
+        fresh_good = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://x/issues/42#issuecomment-63",
+        }])
+
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = str(gh_dir) + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_JSON_41"] = stale_only
+        env["FAKE_GH_JSON_42"] = fresh_good
+        cmd = 'gh issue comment 41 -F a.md && gh issue comment 42 -F b.md'
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41), "issue #41 only had a stale comment")
+        self.assertIsNotNone(self.marker(42),
+                             "issue #42's own fresh comment must still be "
+                             "processed even though #41 (mentioned first) "
+                             "had nothing usable")
+
+
 class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
 
     def test_existing_marker_skips_the_gh_call_entirely(self):
