@@ -1915,14 +1915,36 @@ def cmd_install(args):
     except Exception as e:
         print(f"  tmux cutover unit (subdev) error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3g. subdev ssh auto-attach (#264). True no-op on every non-stream
-    # box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own scope.
+    # --- 3f. claude CLI binary: fleet-wide, best-effort (#263) ---
+    # Every OTHER piece of dev-env provisioning above manages a WRAPPER
+    # around `claude` (the launcher script, the tmux cutover) -- nothing
+    # has ever installed the BINARY itself. Harmless no-op wherever it
+    # already resolves.
+    try:
+        ensure_claude_cli_installed()
+    except Exception as e:
+        print(f"  claude CLI install error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3g. subdev stream dev-env bootstrap: tmux session + claude launched
+    # (#263), ssh auto-attach (#264), human-gap report (#263). True no-ops on
+    # every non-stream box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own
+    # scope.
+    try:
+        result = ensure_stream_tmux_session()
+        if result:
+            print(f"  stream tmux session: {result}")
+    except Exception as e:
+        print(f"  stream tmux session error (non-fatal): {e}", file=sys.stderr)
     try:
         ssh_attach_changed = apply_stream_ssh_attach()
         if ssh_attach_changed:
             print(f"  Updated:   {BASHRC} (subdev ssh auto-attach, #264)")
     except Exception as e:
         print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
+    try:
+        report_stream_dev_env()
+    except Exception as e:
+        print(f"  stream dev-env gap report error (non-fatal): {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
@@ -2453,6 +2475,68 @@ def _claude_cli_env() -> dict:
     if local_bin not in path.split(":"):
         path = f"{local_bin}:{path}" if path else local_bin
     return {**os.environ, "PATH": path}
+
+
+def _claude_cli_installed(env: dict = None) -> bool:
+    """True iff the `claude` CLI binary itself resolves on PATH (repaired via
+    _claude_cli_env — a non-login ssh shell's raw PATH lacks ~/.local/bin,
+    where the official installer puts it). Never just "a file exists at the
+    expected spot" — `shutil.which` also confirms it's executable, same
+    discipline as `_playwright_browsers_installed`'s guard against a
+    partial/interrupted install looking permanently "done"."""
+    import shutil
+    e = env or _claude_cli_env()
+    return shutil.which("claude", path=e.get("PATH", "")) is not None
+
+
+def ensure_claude_cli_installed(env: dict = None):
+    """Best-effort, time-boxed, non-fatal install of the `claude` CLI BINARY
+    itself, via Anthropic's own public installer (#263: three subdev stream
+    accounts — montalu2/montalu3/montalu4 — had every OTHER piece airuleset
+    manages (the launcher wrapper script, the ~/.bashrc marks, ~/.claude/
+    CLAUDE.md) but `which claude` came back empty/rc=1, because nothing in
+    push/install has ever installed the BINARY — only the WRAPPER around it
+    (apply_ultracode_launcher's script just `exec`s `claude`, silently
+    assuming it already resolves).
+
+    `curl -fsSL https://claude.ai/install.sh | bash` needs NO login/OAuth for
+    the install step itself — confirmed by reading the full script (it
+    downloads + checksum-verifies a versioned binary, then runs `<binary>
+    install` to lay down the launcher; the human OAuth step only happens on
+    the FIRST interactive `claude` invocation) and by every already-working
+    peer account's identical `~/.local/bin/claude -> ~/.local/share/claude/
+    versions/<ver>` symlink shape (live-verified: montalu, marek, david,
+    simap). This function only installs the BINARY — it never attempts the
+    OAuth login itself; `ensure_stream_tmux_session()` launches `claude` into
+    a session where a human can complete that later.
+
+    Same shape as `ensure_playwright_browsers()`: no sudo needed (installs
+    under $HOME), so this runs on the sudo-less subdev stream accounts too,
+    and fleet-wide (a harmless no-op wherever `claude` already resolves) —
+    enabling a plugin/wrapper is not the same as provisioning the runtime
+    dependency it wraps (#158's own lesson, applied here to the binary
+    itself rather than a plugin's downloaded assets)."""
+    import subprocess
+    e = env or _claude_cli_env()
+    if _claude_cli_installed(e):
+        return
+    try:
+        r = subprocess.run(
+            ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"],
+            capture_output=True, text=True, timeout=180, env=e)
+        if r.returncode == 0 and _claude_cli_installed(e):
+            print("    claude CLI: installed (curl -fsSL "
+                  "https://claude.ai/install.sh | bash)")
+        else:
+            print("    ⚠ claude CLI MISSING and auto-install failed (rc=%s): "
+                  "%s\n    Install manually: curl -fsSL "
+                  "https://claude.ai/install.sh | bash"
+                  % (r.returncode, (r.stderr or r.stdout).strip()[:300]),
+                  file=sys.stderr)
+    except Exception as ex:
+        print("    ⚠ claude CLI MISSING and auto-install skipped (%s) — "
+              "install manually: curl -fsSL https://claude.ai/install.sh | "
+              "bash" % ex, file=sys.stderr)
 
 
 def reconcile_managed_plugins(settings: dict) -> dict:
@@ -3587,6 +3671,15 @@ def _notify_run_card(args, compose_autopilot_card, send):
 # Remote deployment
 # ---------------------------------------------------------------------------
 
+# Per-remote SSH deploy timeout (#263): `cmd_install()` now includes best-
+# effort network-heavy provisioning (curl-installing the claude CLI binary
+# on a box that's missing it, ensure_playwright_browsers()'s own npx install)
+# that can legitimately take well over the old 60s bound on a first-time run
+# — 300s gives real headroom without hanging forever. A remote whose ssh
+# call genuinely can't complete inside this window still gets caught below
+# (subprocess.TimeoutExpired), never crashes the whole push loop.
+REMOTE_DEPLOY_TIMEOUT_S = 300
+
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
 REMOTE_HOSTS = [
@@ -3790,16 +3883,37 @@ def cmd_push(args):
                 f"{remote['user']}@{remote['host']}",
                 remote_cmd,
             ]
-        ssh_result = subprocess.run(
-            ssh_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        # #263: never let ONE slow/hanging remote (a first-time claude-CLI
+        # curl install, ensure_playwright_browsers()'s npx install) abort
+        # deployment to every REMAINING host — the loop used to have no
+        # try/except around this call at all, so a TimeoutExpired here
+        # propagated straight out of cmd_push() and silently skipped every
+        # host still queued after this one.
+        try:
+            ssh_result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=REMOTE_DEPLOY_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  FAILED: timed out after {REMOTE_DEPLOY_TIMEOUT_S}s "
+                  f"— continuing to the next host")
+            continue
         if ssh_result.returncode != 0:
             print(f"  FAILED: {ssh_result.stderr.strip()}")
         else:
             print(f"  {ssh_result.stdout.strip()}")
+            # #263: a successful remote install's STDERR was being silently
+            # discarded here — every existing "⚠ MISSING"-style loud warning
+            # (RUNTIME_DEPS, playwright, the new #263 dev-env gap report)
+            # writes to stderr, so on the common success path NONE of them
+            # ever reached the push console. Surface it too, so a gap really
+            # is reported loudly rather than swallowed by push's own success
+            # branch.
+            stderr_out = ssh_result.stderr.strip()
+            if stderr_out:
+                print(f"  [stderr] {stderr_out}")
     print("\nAll deployments complete.")
 
 
@@ -4411,6 +4525,143 @@ AUTHORITY_BY_USER = {
     "montalu3": "branch-merge",
     "montalu4": "branch-merge",
 }
+
+
+# --- #263: subdev stream dev-env bootstrap (claude tmux session + gap report) --
+def _stream_session_cwd() -> Path:
+    """The convention working directory for a subdev stream account's tmux
+    session (see STREAM_DEV_CWD_REL's own comment, above apply_ultracode_
+    launcher). Falls back to $HOME when that checkout doesn't exist yet, so
+    bootstrap never hard-fails on an account gatekeeper hasn't finished
+    Phase 1 for."""
+    p = Path.home() / STREAM_DEV_CWD_REL
+    return p if p.is_dir() else Path.home()
+
+
+def _tmux_session_exists(name, run=None):
+    """None = "can't tell" (tmux unreachable/missing) -- the caller must
+    treat that as "don't touch", never as "doesn't exist"."""
+    run = run or _default_tmux_run
+    try:
+        result = run(["tmux", "has-session", "-t", name])
+    except Exception:
+        return None
+    return getattr(result, "returncode", 1) == 0
+
+
+def ensure_stream_tmux_session(user=None, run=None, launch_script=None):
+    """#263: bootstrap the ONE tmux session a subdev stream account is
+    expected to have -- session name == the linux username (one user = one
+    session, matching every already-working peer account's live-verified
+    shape: montalu/marek/david/simap all have exactly one tmux session named
+    after themselves), cwd the stream's odoo-erp checkout, `claude` launched
+    inside it via a typed `send-keys` -- NEVER as the session's own
+    foreground command. A still-missing (or first-run-OAuth-prompting)
+    `claude` would otherwise kill the pane+session outright the instant it
+    exits (tmux's `remain-on-exit` is off by default); typing it into an
+    ordinary bash-backed pane degrades to a visible error at a live prompt
+    instead, matching what peer accounts already look like today (e.g.
+    david's own second window sits on a bare `bash` right now).
+
+    Scoped STRICTLY to AUTHORITY_BY_USER's keys -- dev1/dev2/gatekeeper are
+    the human's own interactive login and are NEVER touched.
+
+    NEVER touches an EXISTING session (has-session check first, always) --
+    only creates one that does not exist yet. An existing session, even one
+    sitting on a bare shell, may be the account's own live work or a
+    deliberately-stopped pane and is left completely alone (same discipline
+    as the tmux-cutover unit's own "never touch a possibly-live server" rule,
+    and the standing 'never touch stopped sessions' precedent)."""
+    user = user or _current_user()
+    if user not in AUTHORITY_BY_USER:
+        return None
+    run = run or _default_tmux_run
+    exists = _tmux_session_exists(user, run)
+    if exists is None:
+        return "tmux unreachable -- left untouched"
+    if exists:
+        return "session '%s' already exists -- left untouched" % user
+    cwd = _stream_session_cwd()
+    script = launch_script or CLAUDE_LAUNCH_SCRIPT_DEST
+    try:
+        r = run(["tmux", "new-session", "-d", "-s", user, "-c", str(cwd)])
+        rc = getattr(r, "returncode", 1)
+        if rc != 0:
+            return ("FAILED to create session '%s' (rc=%s): %s"
+                     % (user, rc, (getattr(r, "stderr", "") or "").strip()))
+    except Exception as e:
+        return "FAILED to create session '%s': %s" % (user, e)
+    try:
+        run(["tmux", "send-keys", "-t", user, "%s default" % script, "Enter"])
+    except Exception as e:
+        return ("session '%s' created in %s, but claude launch failed: %s"
+                 % (user, cwd, e))
+    return "created session '%s' in %s, claude launched" % (user, cwd)
+
+
+def _stream_provisioning_gaps(user=None) -> list:
+    """The genuinely-human-only steps remaining for a subdev stream account
+    (#263): the claude CLI's OWN first-run OAuth login, and a GitHub PAT /
+    `gh auth login`. Neither is automatable (OAuth is an interactive human
+    flow; a PAT is generated by a human in GitHub's UI) -- this only DETECTS
+    and reports them, loudly, every install/push, matching #98's existing
+    'a sudo-less box that hits a still-missing dep' LOUD-reporting shape.
+    Returns a list of human-readable gap strings (empty when fully
+    provisioned)."""
+    gaps = []
+    creds = Path.home() / ".claude" / ".credentials.json"
+    try:
+        creds_ok = creds.is_file() and creds.stat().st_size > 0
+    except OSError:
+        creds_ok = False
+    if not creds_ok:
+        gaps.append("Claude Code login/session (human OAuth step) — run "
+                     "`claude` interactively in this account's tmux session "
+                     "and complete the login flow.")
+    gh_hosts = Path.home() / ".config" / "gh" / "hosts.yml"
+    git_creds = Path.home() / ".git-credentials"
+    try:
+        has_gh = gh_hosts.is_file() and gh_hosts.stat().st_size > 0
+    except OSError:
+        has_gh = False
+    try:
+        has_git_creds = git_creds.is_file() and git_creds.stat().st_size > 0
+    except OSError:
+        has_git_creds = False
+    if not (has_gh or has_git_creds):
+        gaps.append("GitHub PAT / `gh auth login` — no ~/.config/gh/"
+                     "hosts.yml and no ~/.git-credentials found.")
+    return gaps
+
+
+def report_stream_dev_env(user=None):
+    """#263: called from cmd_install() for every subdev stream account
+    (AUTHORITY_BY_USER's keys) — reports the two still-human gaps LOUDLY
+    (never silently) and, once both are satisfied, removes ~/TODO-
+    PROVISIONING.md if present (the file's own text: "Once all of the above
+    land, delete this file" — gatekeeper's Phase-1 handoff contract, which
+    this function fulfils on the account's own behalf once genuinely done).
+    No-op (prints nothing) for a non-stream account."""
+    user = user or _current_user()
+    if user not in AUTHORITY_BY_USER:
+        return
+    gaps = _stream_provisioning_gaps(user)
+    todo = Path.home() / "TODO-PROVISIONING.md"
+    if gaps:
+        print("  ⚠ dev-env gap(s) on this stream account (human step required):")
+        for g in gaps:
+            print("    - %s" % g)
+        if todo.exists():
+            print("    (%s left in place — human steps above still missing)"
+                  % todo)
+    elif todo.exists():
+        try:
+            todo.unlink()
+            print("  Removed: %s (all provisioning steps confirmed complete)"
+                  % todo)
+        except OSError as e:
+            print("  ⚠ could not remove %s (%s) — remove by hand"
+                  % (todo, e), file=sys.stderr)
 
 
 # Which Discord OWNER key a stream's linux user routes its pings under lives
