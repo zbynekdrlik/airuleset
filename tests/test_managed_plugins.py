@@ -165,6 +165,45 @@ class TestPluginRegistryKeys(TestCase):
             d / "plugins" / "installed_plugins.json")
         self.assertEqual(keys, set())
 
+    def test_registry_path_is_a_directory_degrades_to_empty_set(self):
+        # Adversarial-review MAJOR finding (#276): read_file_safe()'s
+        # exists()->read_text() only catches a MISSING file — a path that
+        # exists but genuinely cannot be READ (a directory, unreadable
+        # permissions, invalid UTF-8) raised uncaught, and that raise
+        # escapes `_managed_plugin_built()` at setup_managed_plugins()'s
+        # `if _managed_plugin_built(key): continue` -- which is OUTSIDE the
+        # per-plugin try/except -- so cmd_install()'s own outer try/except
+        # silently swallows it as "(non-fatal)": remaining plugins and
+        # ensure_playwright_browsers() never run, yet "Install complete."
+        # is still reported. Never guess, but never CRASH either.
+        d = self._claude_dir()
+        reg_as_dir = d / "plugins" / "installed_plugins.json"
+        reg_as_dir.mkdir(parents=True)
+        keys = airuleset._plugin_registry_keys(reg_as_dir)   # must not raise
+        self.assertEqual(keys, set())
+
+    def test_unreadable_registry_file_degrades_to_empty_set(self):
+        if os.geteuid() == 0:
+            self.skipTest("running as root -- chmod 0 does not deny root")
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        reg = d / "plugins" / "installed_plugins.json"
+        reg.write_text(json.dumps({"plugins": {"x@y": [{}]}}))
+        reg.chmod(0)
+        try:
+            keys = airuleset._plugin_registry_keys(reg)   # must not raise
+        finally:
+            reg.chmod(0o644)
+        self.assertEqual(keys, set())
+
+    def test_invalid_utf8_registry_degrades_to_empty_set(self):
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        reg = d / "plugins" / "installed_plugins.json"
+        reg.write_bytes(b"\xff\xfe\x00\x01not-utf8-garbage")
+        keys = airuleset._plugin_registry_keys(reg)   # must not raise
+        self.assertEqual(keys, set())
+
     def test_defaults_to_claude_dir_when_no_path_given(self):
         d = self._claude_dir()
         _write_plugin_registry(d, ["caveman@caveman"])
