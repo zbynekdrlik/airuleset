@@ -4595,5 +4595,396 @@ class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
 
 
+# --------------------------------------------------------------------------- #
+# #238 (2026-08-06) — the same-turn dispatch race: `_session_has_live_bg_tasks`
+# returning False is not trustworthy for a request younger than
+# COMPACT_MIN_REQUEST_AGE_S (see the section comment in watchdog/__init__.py
+# right above `_compact_request_too_young`).
+# --------------------------------------------------------------------------- #
+
+class TestDeliverCompactNowMinRequestAge(unittest.TestCase):
+    SID = "sess-minage-1"
+    CWD = "/home/newlevel/devel/minage"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, request_ts, now, live=False):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        with m.patch.object(wd, "_session_has_live_bg_tasks",
+                           return_value=live):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj,
+                                        origin="subagent-stop",
+                                        request_ts=request_ts, now=now)
+        return ok, tmux
+
+    def test_a_fresh_request_with_no_live_signal_still_defers(self):
+        # the same-turn dispatch race: request_ts and now only milliseconds
+        # apart, exactly like the real synchronous path -- a "no live
+        # tasks" verdict this fresh must not be trusted yet.
+        now = 1_000_000.0
+        ok, tmux = self._go(request_ts=now, now=now, live=False)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP too-young", log_text)
+
+    def test_the_same_request_delivers_once_aged_past_the_gate(self):
+        request_ts = 1_000_000.0
+        later = request_ts + wd.COMPACT_MIN_REQUEST_AGE_S + 1
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        alive_proc = _alive_proc_fingerprint(self)
+        with m.patch.object(wd, "_session_has_live_bg_tasks",
+                           return_value=False), \
+             m.patch.object(wd, "_pane_claude_proc_fingerprint",
+                           return_value=alive_proc):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj,
+                                        origin="subagent-stop",
+                                        request_ts=request_ts, now=later)
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_a_genuinely_live_signal_is_unaffected_by_the_age_gate(self):
+        # the age gate only matters on the "no live tasks" branch -- a
+        # REAL live-tasks defer (existing #246/#250 behavior) is untouched,
+        # fresh request_ts or not.
+        now = 1_000_000.0
+        ok, tmux = self._go(request_ts=now, now=now, live=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SKIP live-tasks", log_text)
+        self.assertNotIn("too-young", log_text)
+
+    def test_no_request_ts_at_all_is_a_complete_noop(self):
+        # every pre-#238 caller (request_ts=None default) sees NO behavior
+        # change at all.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        alive_proc = _alive_proc_fingerprint(self)
+        with m.patch.object(wd, "_session_has_live_bg_tasks",
+                           return_value=False), \
+             m.patch.object(wd, "_pane_claude_proc_fingerprint",
+                           return_value=alive_proc):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj)
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_self_callback_origin_is_exempt_from_the_age_gate(self):
+        # self-callback's own protocol ("do NOT dispatch the next issue in
+        # the same turn") structurally prevents the exact race this gate
+        # exists for -- gating it too would only add latency to a
+        # hold/retry loop that must stay fast (#225).
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        alive_proc = _alive_proc_fingerprint(self)
+        now = 1_000_000.0
+        with m.patch.object(wd, "_session_has_live_bg_tasks",
+                           return_value=False), \
+             m.patch.object(wd, "_pane_claude_proc_fingerprint",
+                           return_value=alive_proc):
+            ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                        projects_dir=proj,
+                                        origin="self-callback",
+                                        request_ts=now, now=now)
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+
+class TestCompactRequestTooYoungHelper(unittest.TestCase):
+    """Unit coverage of `_compact_request_too_young` in isolation."""
+
+    def test_none_request_ts_is_never_too_young(self):
+        self.assertFalse(wd._compact_request_too_young(None, 1000.0))
+
+    def test_fresh_request_is_too_young(self):
+        self.assertTrue(wd._compact_request_too_young(1000.0, 1000.5))
+
+    def test_aged_request_is_not_too_young(self):
+        self.assertFalse(wd._compact_request_too_young(
+            1000.0, 1000.0 + wd.COMPACT_MIN_REQUEST_AGE_S + 1))
+
+    def test_unmeasurable_now_never_raises_and_is_not_too_young(self):
+        self.assertFalse(wd._compact_request_too_young(1000.0, "not-a-number"))
+
+    def test_env_override_widens_the_window(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_REQUEST_AGE_S": "10"}):
+            self.assertTrue(wd._compact_request_too_young(1000.0, 1005.0))
+
+    def test_nonpositive_env_override_falls_back_to_the_default(self):
+        # a misconfigured 0/negative override must not silently disable
+        # the gate outright (every request would read as already old
+        # enough) -- same clamp shape `_compact_defer_grace` already uses.
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_REQUEST_AGE_S": "0"}):
+            self.assertTrue(wd._compact_request_too_young(1000.0, 1000.5))
+
+
+# --------------------------------------------------------------------------- #
+# #238 — the thin-context gate: zero real `assistant` activity since the
+# session's last `compact_boundary` entry means "Not enough messages to
+# compact" is coming, so drop the request instead of sending and stranding a
+# claim.
+# --------------------------------------------------------------------------- #
+
+def _write_boundary_transcript(base, cwd, sid, n_assistant_after,
+                               ctx_tokens=300_000, boundary_ts=None):
+    """A transcript with ONE `compact_boundary` entry followed by
+    `n_assistant_after` real `assistant` entries. The LAST such entry (if
+    any) carries usage data so a caller that ALSO reads
+    `transcript_current_context` (the #48 gate, exercised alongside #238 in
+    `deliver_compact_now`/job 14) still sees a real context size rather than
+    0."""
+    from datetime import datetime, timezone
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    ts = boundary_ts if boundary_ts is not None else 1_700_000_000.0
+    iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+    lines = [json.dumps({"type": "system", "subtype": "compact_boundary",
+                         "timestamp": iso,
+                         "compactMetadata": {"preTokens": 1, "postTokens": 1}})]
+    for i in range(n_assistant_after):
+        usage = ({"cache_read_input_tokens": ctx_tokens,
+                  "cache_creation_input_tokens": 0}
+                 if i == n_assistant_after - 1 else {})
+        lines.append(json.dumps({"type": "assistant", "message": {
+            "id": "msg_%d" % i, "content": "turn %d" % i, "usage": usage}}))
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+class TestCompactMessagesSinceBoundary(unittest.TestCase):
+    """Unit coverage of `_compact_messages_since_boundary` /
+    `_compact_thin_context` in isolation."""
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_zero_assistant_entries_since_the_boundary(self):
+        proj = self._dir()
+        p = _write_boundary_transcript(proj, "/x", "sid-z", 0)
+        delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
+        self.assertEqual(delta, 0)
+        self.assertIsNotNone(boundary_ts)
+
+    def test_several_assistant_entries_since_the_boundary(self):
+        proj = self._dir()
+        p = _write_boundary_transcript(proj, "/x", "sid-many", 28)
+        delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
+        self.assertEqual(delta, 28)
+        self.assertIsNotNone(boundary_ts)
+
+    def test_no_boundary_at_all_is_unmeasurable(self):
+        proj = self._dir()
+        p = _write_ctx_transcript(proj, "/x", "sid-none", 300_000)
+        delta, boundary_ts = wd._compact_messages_since_boundary(str(p))
+        self.assertIsNone(boundary_ts)
+
+    def test_missing_file_is_unmeasurable_not_thin(self):
+        delta, boundary_ts = wd._compact_messages_since_boundary(
+            "/no/such/file.jsonl")
+        self.assertEqual(delta, 0)
+        self.assertIsNone(boundary_ts)
+
+    def test_thin_context_true_on_zero_activity(self):
+        proj = self._dir()
+        _write_boundary_transcript(proj, "/x", "sid-thin", 0)
+        self.assertTrue(wd._compact_thin_context("/x", "sid-thin",
+                                                 projects_dir=proj))
+
+    def test_thin_context_false_on_real_activity(self):
+        proj = self._dir()
+        _write_boundary_transcript(proj, "/x", "sid-real", 26)
+        self.assertFalse(wd._compact_thin_context("/x", "sid-real",
+                                                   projects_dir=proj))
+
+    def test_thin_context_false_with_no_prior_boundary_at_all(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, "/x", "sid-first", 300_000)
+        self.assertFalse(wd._compact_thin_context("/x", "sid-first",
+                                                   projects_dir=proj))
+
+    def test_thin_context_false_when_no_transcript_resolves(self):
+        proj = self._dir()
+        self.assertFalse(wd._compact_thin_context("/x", "sid-missing",
+                                                   projects_dir=proj))
+
+
+class TestDeliverCompactNowThinContext(unittest.TestCase):
+    SID = "sess-thin-dcn"
+    CWD = "/home/newlevel/devel/thin-dcn"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_zero_activity_since_boundary_drops_with_no_keystrokes(self):
+        proj = self._dir()
+        _write_boundary_transcript(proj, self.CWD, self.SID, 0)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj,
+                                    origin="subagent-stop")
+        self.assertEqual(ok, "dropped-thin-context")
+        self.assertEqual(tmux.sent, [])
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("DROP thin-context", log_text)
+
+    def test_real_activity_since_boundary_still_delivers(self):
+        proj = self._dir()
+        _write_boundary_transcript(proj, self.CWD, self.SID, 26)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj,
+                                    origin="subagent-stop")
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_zero_activity_is_dropped_even_for_a_proven_boundary_origin(self):
+        # #238 -- deliberately NOT exempted for subagent-stop/self-callback,
+        # unlike #99/#48 (#126). The live incident this exists for WAS
+        # origin=subagent-stop.
+        for origin in ("subagent-stop", "self-callback"):
+            with self.subTest(origin=origin):
+                proj = self._dir()
+                sid = self.SID + "-" + origin
+                _write_boundary_transcript(proj, self.CWD, sid, 0)
+                tmux = DeliverCompactNowFakeTmux(
+                    [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+                ok = wd.deliver_compact_now(sid, self.CWD, run=tmux,
+                                            projects_dir=proj, origin=origin)
+                self.assertEqual(ok, "dropped-thin-context")
+                self.assertEqual(tmux.sent, [])
+
+    def test_first_ever_boundary_is_never_treated_as_thin(self):
+        # no PRIOR compact_boundary exists at all -- unmeasurable, must
+        # never block the first real compaction of a session's life.
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj)
+        self.assertEqual(ok, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+
+class TestCompactTicketBoundaryThinContext(unittest.TestCase):
+    PANE = "%9"
+    SID = "sess-thin-j14"
+    CWD = "/home/x/thin-j14"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, n_assistant_after, origin=None):
+        proj = self._dir()
+        _write_boundary_transcript(proj, self.CWD, self.SID, n_assistant_after)
+        path = str(proj / "compact-requests.json")
+        wd.record_compact_request(self.SID, self.CWD, path=path, origin=origin)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(time.time(), tmux, {}, panes_by_sid,
+                                          path=path, projects_dir=proj)
+        return tmux, logs, path
+
+    def test_zero_activity_drops_the_request_with_no_keystrokes(self):
+        tmux, logs, path = self._go(0, origin="subagent-stop")
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip thin-context (compact-request)" in ln
+                            for ln in logs), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_real_activity_still_delivers(self):
+        tmux, logs, path = self._go(26, origin="subagent-stop")
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
+# #238 defect 3 — a thin-context DROP must never set the shared claim, so a
+# later legitimate send for the SAME session is never blocked by a stranded
+# claim (the "Not enough messages to compact" shape #140's TTL used to be
+# the only thing that ever released).
+# --------------------------------------------------------------------------- #
+
+class TestThinContextNeverStrandsAClaim(unittest.TestCase):
+    SID = "sess-thin-claim"
+    CWD = "/home/newlevel/devel/thin-claim"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_a_thin_drop_never_sets_the_shared_claim(self):
+        proj = self._dir()
+        _write_boundary_transcript(proj, self.CWD, self.SID, 0)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                    projects_dir=proj, origin="subagent-stop")
+        self.assertEqual(ok, "dropped-thin-context")
+        self.assertFalse(wd.compact_claim_active(self.SID, self.CWD,
+                                                 projects_dir=proj))
+
+    def test_a_later_genuine_send_for_the_same_session_is_not_blocked(self):
+        # simulates: a thin request drops (no claim set), then MORE real
+        # conversation happens and a genuine follow-up request for the SAME
+        # session must be able to send immediately -- nothing stranded.
+        proj = self._dir()
+        _write_boundary_transcript(proj, self.CWD, self.SID, 0)
+        tmux1 = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok1 = wd.deliver_compact_now(self.SID, self.CWD, run=tmux1,
+                                     projects_dir=proj, origin="subagent-stop")
+        self.assertEqual(ok1, "dropped-thin-context")
+        # now the session gains real activity since the boundary
+        _write_boundary_transcript(proj, self.CWD, self.SID, 3)
+        tmux2 = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        ok2 = wd.deliver_compact_now(self.SID, self.CWD, run=tmux2,
+                                     projects_dir=proj, origin="subagent-stop")
+        self.assertEqual(ok2, "sent")
+        self.assertIn("/compact", tmux2.typed_texts())
+
+
 if __name__ == "__main__":
     unittest.main()
