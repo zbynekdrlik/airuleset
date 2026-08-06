@@ -98,7 +98,10 @@ PYEOF
 # runs FIRST, so the note travels on the block reason instead of the failure
 # vanishing silently the way a bare `|| printf` fallback used to.
 MSG_MENTION=$(strip_mentions "$MSG") || {
-    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG}-byte message"
+    # ${#MSG} is CHARACTERS under a UTF-8 locale, not bytes — labelled that
+    # way on purpose; a byte-exact count needs its own subprocess for a
+    # diagnostic that only needs to say "was this message large".
+    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG}-character message"
     MSG_MENTION="$MSG"
 }
 
@@ -267,7 +270,7 @@ fi
 # the raw-text fallback, so a strip failure on this call site leaves a note
 # too, instead of silently disarming the design-review gate's exemption.
 MSG_NOGOAL_MENTION=$(strip_mentions "$MSG_NOGOAL") || {
-    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG_NOGOAL}-byte NOGOAL message"
+    record_undet "$?" "strip_mentions (mention-strip) for a ${#MSG_NOGOAL}-character NOGOAL message"
     MSG_NOGOAL_MENTION="$MSG_NOGOAL"
 }
 
