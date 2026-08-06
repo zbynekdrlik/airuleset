@@ -286,7 +286,15 @@ def run_arm(sock, base_dir, mode, n_lines, model, resizes, ctrl_o_n, shift_tab_n
 
 
 def teardown(sock, root, keep):
-    tmux(sock, "kill-server", timeout=10)
+    # #267 adversarial-review finding F9: `root` holds a COPY of the real
+    # ~/.claude/.credentials.json (bootstrap_profile) -- the rmtree must
+    # happen even if kill-server hangs/raises on a wedged server, or the
+    # credential copy leaks under /tmp indefinitely. Best-effort kill
+    # first (harmless if it fails), cleanup always attempted after.
+    try:
+        tmux(sock, "kill-server", timeout=10)
+    except Exception as e:
+        print(f"teardown: kill-server failed (non-fatal): {e}", file=sys.stderr)
     if not keep:
         shutil.rmtree(root, ignore_errors=True)
 

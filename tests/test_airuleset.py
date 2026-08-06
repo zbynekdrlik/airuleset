@@ -3669,6 +3669,33 @@ class TestTmuxHistoryLimit(TestCase):
         airuleset.apply_tmux_history_limit(p, run=_runner)
         self.assertEqual(len(calls), 4)
 
+    def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
+        # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
+        # above only covers half of #235's own already-documented asymmetry
+        # (test_live_apply_nonzero_return_without_raising_is_logged):
+        # subprocess.run does NOT raise on a nonzero exit code with no
+        # check=True -- a real `tmux bind-key` against a dead socket exits
+        # nonzero WITHOUT raising. A mutant that `break`s out of the
+        # live-apply loop inside the `if rc:` branch survived the suite
+        # before this test existed (43/43 passed) -- prove the SAME
+        # per-call independence holds for a non-raising nonzero-rc result,
+        # not just for a raised exception.
+        p = self._tmp()
+        calls = []
+
+        class _FakeFailedResult:
+            returncode = 1
+            stderr = "no server running on default socket"
+
+        def _runner(argv):
+            calls.append(argv)
+            if len(calls) == 2:
+                return _FakeFailedResult()
+            return None
+
+        airuleset.apply_tmux_history_limit(p, run=_runner)
+        self.assertEqual(len(calls), 4)
+
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
         # propagate, and must not affect the conf-file write result.
@@ -3872,6 +3899,20 @@ class TestTmuxScrollbackKeybinds(TestCase):
         tables = {argv[2] for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS
                   if argv[0] == "bind-key" and argv[1] == "-T"}
         self.assertEqual(tables, {"copy-mode", "copy-mode-vi"})
+
+    def test_no_argv_element_contains_whitespace(self):
+        # ADVERSARIAL-REVIEW FINDING (#267, MINOR -- F6): the rendered conf
+        # line is built with a bare `" ".join(argv)` -- the shared-constant
+        # guarantee only holds for TOKENS, not MEANING, if a future keybind
+        # ever needed a quoted multi-word argument (e.g. a `search-forward
+        # "foo bar"` command): the conf line would parse as extra words
+        # while the live-apply argv (passed straight to subprocess, no
+        # shell involved) would stay correct -- a silent divergence despite
+        # sharing one source. None of the CURRENT entries need this, so
+        # lock it structurally rather than leave it to be noticed later.
+        for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS:
+            for token in argv:
+                self.assertNotIn(" ", token, argv)
 
 
 class _FakeCP:
@@ -4566,6 +4607,40 @@ class TestClaudeHistoryScript(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("new session", r.stdout)
         self.assertNotIn("old session", r.stdout)
+
+    def test_cwd_with_underscore_and_dot_resolves_correctly(self):
+        # ADVERSARIAL-REVIEW FINDING (#267, MINOR -- F2): the OTHER tests in
+        # this class use a plain "proj" cwd, so a mutant that broke the
+        # embedded script's OWN copy of encode_project_dir (e.g. dropping
+        # the "_" -> "-" substitution) only got caught in 9/12 mutation
+        # runs -- purely by luck of tempfile's random suffix sometimes
+        # containing an underscore. A cwd carrying BOTH special characters
+        # `encode_project_dir` must transform makes this deterministic.
+        cwd = self.home / "my_proj.v2"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("underscore and dot"),
+                                      self._assistant(self._text_block("found it"))])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("found it", r.stdout)
+
+    def test_encode_project_dir_copies_stay_in_sync(self):
+        # ADVERSARIAL-REVIEW FINDING (#267, MINOR -- F2): airuleset.py's own
+        # top-level encode_project_dir and the IDENTICAL copy embedded
+        # inline in CLAUDE_HISTORY_SCRIPT_CONTENT (the deployed script
+        # cannot import airuleset.py itself) must never silently drift
+        # apart. Load the embedded copy as its own module (no dataclasses
+        # involved, so no sys.modules pre-registration needed) and compare
+        # against a battery of real Claude Code cwd shapes.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_claude_history_probe", self.script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for cwd in ("/home/newlevel/devel/airuleset",
+                    "/home/newlevel/devel/tomas_pardubsky/cold_mailing",
+                    "/tmp/web_app.ai", "/a/b.c_d"):
+            self.assertEqual(mod.encode_project_dir(cwd),
+                              airuleset.encode_project_dir(cwd), cwd)
 
     def test_merges_multiple_content_blocks_of_the_same_turn_into_one(self):
         # A real Claude Code assistant response is written as SEVERAL jsonl

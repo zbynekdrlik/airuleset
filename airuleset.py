@@ -885,6 +885,17 @@ def _tool_summary(name, inp, max_len=100):
     return "%s: %s" % (name, val) if val else name
 
 
+# #267 adversarial-review finding F5: a bare `text.startswith("<")` also ate
+# a genuine user prompt that happens to start with a literal "<" (e.g. "<div>
+# why does this render badly?") -- silently DROPPING a real question is
+# worse than showing one noise line. Anchor on the actual wrapper tags
+# Claude Code injects instead of a bare prefix character.
+_WRAPPER_NOISE_PREFIXES = (
+    "<local-command-stdout>", "<command-name>", "<command-message>",
+    "<task-notification>", "<system-reminder>",
+)
+
+
 def merge_turns(records):
     """Collapse consecutive same-role transcript lines into readable turns:
     {"role": "user"|"assistant", "text": str, "tools": [str, ...]}. A
@@ -912,7 +923,7 @@ def merge_turns(records):
             if not isinstance(content, str):
                 continue  # a tool_result entry, not a real user prompt
             text = content.strip()
-            if not text or text.startswith("<"):
+            if not text or text.startswith(_WRAPPER_NOISE_PREFIXES):
                 continue  # local-command-stdout / injected wrapper noise
             if pending and pending["role"] == "user":
                 pending["texts"].append(text)
@@ -930,12 +941,19 @@ def merge_turns(records):
                     continue
                 btype = block.get("type")
                 if btype == "text":
+                    # #267 F3: a malformed transcript's "text" value can be
+                    # anything JSON allows -- only a real string is a real
+                    # message; anything else would crash "\n".join() later.
                     t = block.get("text", "")
-                    if t:
+                    if isinstance(t, str) and t:
                         texts.append(t)
                 elif btype == "tool_use":
-                    tools.append(_tool_summary(block.get("name", "?"),
-                                                block.get("input") or {}))
+                    # #267 F3: `input` can be a malformed non-dict shape --
+                    # _tool_summary() calls .get() on it unconditionally.
+                    inp = block.get("input")
+                    if not isinstance(inp, dict):
+                        inp = {}
+                    tools.append(_tool_summary(block.get("name", "?"), inp))
             if not texts and not tools:
                 continue
             if pending and pending["role"] == "assistant":
@@ -983,6 +1001,11 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true",
                      help="list available transcripts for this project and exit")
     args = ap.parse_args(argv)
+    # #267 F4: `--last 0`/negative would print "showing last N" then
+    # actually show something else entirely (Python slice semantics:
+    # turns[-0:] is every turn, turns[-3:] drops the wrong end) -- the
+    # printed header must never contradict what's actually rendered.
+    args.last = max(1, args.last)
 
     projects_dir = Path.home() / ".claude" / "projects"
 

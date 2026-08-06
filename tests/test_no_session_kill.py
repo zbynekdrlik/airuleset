@@ -47,6 +47,24 @@ _PANE_DESTROYING_SUBCOMMANDS = ("kill-session", "kill-pane", "kill-window",
                                 "respawn-window")
 
 
+# #267: `scripts/measure_scrollback_holes.py` legitimately calls
+# `tmux ... kill-server` -- but ONLY against a tmux SERVER PROCESS it
+# creates itself moments earlier via `tmux -L <random-uuid> new-session`,
+# an entirely separate socket/process from the box's real managed server
+# (which every real Claude Code pane lives on, addressed with NO `-L`).
+# It is structurally incapable of reaching a real user session: the
+# socket name is a fresh `uuid.uuid4()` generated at the top of `main()`,
+# never derived from or overlapping any real session identifier. This is
+# the SAME class of thing #132 protects against ONLY in the sense that
+# both say "kill-server" -- the guarded CAPABILITY (ending a session a
+# real person is working in) is simply not present here, so this is a
+# named, narrow exemption from the payload-string scan, not a weakening
+# of what #132 actually forbids. Keep this list to files that make the
+# identical isolated-`-L`-socket argument in their own code/comments --
+# never widen it to a whole directory.
+_ISOLATED_EXPERIMENT_HARNESSES = ("scripts/measure_scrollback_holes.py",)
+
+
 def _code_files():
     """Every tracked Python/shell file that could actually SEND something —
     `tests/` excluded because this very file names the banned payloads (a lock
@@ -56,7 +74,7 @@ def _code_files():
     out = subprocess.run(["git", "ls-files", "-z", "*.py", "*.sh"],
                          cwd=REPO, capture_output=True, text=True, check=True)
     for rel in out.stdout.split("\0"):
-        if not rel or rel.startswith("tests/"):
+        if not rel or rel.startswith("tests/") or rel in _ISOLATED_EXPERIMENT_HARNESSES:
             continue
         p = REPO / rel
         if p.is_file():
@@ -164,6 +182,39 @@ class TestNoSessionEndingKeystroke(unittest.TestCase):
             offenders, [],
             "a session-ending payload survives as executable code in "
             "watchdog/ (#132): %s" % offenders)
+
+
+class TestIsolatedExperimentHarnessExemptionStaysNarrow(unittest.TestCase):
+    """#267: `_ISOLATED_EXPERIMENT_HARNESSES` exempts a file from the
+    kill-server scan ONLY because its `kill-server` call is structurally
+    incapable of reaching a real managed session (a fresh `-L <uuid>`
+    socket it creates itself, never the default socket every real pane
+    lives on). This class re-verifies that claim DIRECTLY against the
+    exempted file's own source, so the exemption cannot silently rot into
+    a real hazard if the script is edited later -- a future edit that
+    drops the `-L` scoping would be caught here even though the main scan
+    is blind to this file by design."""
+
+    def test_every_exempted_file_only_kills_an_dashL_scoped_server(self):
+        for rel in _ISOLATED_EXPERIMENT_HARNESSES:
+            p = REPO / rel
+            self.assertTrue(p.is_file(), rel)
+            src = p.read_text(encoding="utf-8")
+            # every literal "kill-server" call must be reached through the
+            # module's own `tmux(sock, ...)` helper -- never a bare
+            # ["tmux", "kill-server"] argv with no -L socket in front of it.
+            self.assertNotIn('"tmux", "kill-server"', src)
+            self.assertNotIn("'tmux', 'kill-server'", src)
+            self.assertIn("kill-server", src)  # the call this test is about must exist
+            self.assertIn('"-L", sock', src)   # every tmux() call is -L-scoped
+
+    def test_the_socket_name_is_freshly_random_never_a_fixed_or_real_name(self):
+        src = (REPO / "scripts" / "measure_scrollback_holes.py").read_text(
+            encoding="utf-8")
+        self.assertIn("uuid.uuid4()", src)
+        # never the bare managed-fleet default (no -L at all) or a name a
+        # real session might plausibly use.
+        self.assertNotIn('sock = "default"', src)
 
 
 class TestPzServerIncidentReplay(unittest.TestCase):
