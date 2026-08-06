@@ -305,6 +305,24 @@ class TestAGenuineStripFailureRecordsUndeterminable(_HookCase):
             " alone, and no undeterminable note reached the block reason:"
             " %r" % self._reason(r)[:400])
 
+    def test_the_reported_exit_code_is_not_clobbered_by_bookkeeping(self):
+        """Self-caught while verifying the review fixes: a first draft built
+        the `${#MSG}`-note string as a SEPARATE assignment statement BEFORE
+        reading `$?`, so `record_undet` reported "check exited 0" for a
+        strip_mentions() call that had genuinely returned 1 — the plain
+        assignment's own (successful) exit status silently overwrote `$?`
+        between the failed command substitution and the read. `$?` must be
+        captured as the FIRST statement inside the fallback block."""
+        env = {**os.environ, "TMPDIR": "/nonexistent-airuleset-195-exitcode"}
+        r = self._run(self.MSG, env=env)
+        self.assertTrue(self._blocked(r), self._violations(r))
+        self.assertNotIn(
+            "check exited 0", r.stderr,
+            "a genuine strip_mentions() failure (mktemp on an unwritable"
+            " TMPDIR) was reported as exit code 0 -- $? was clobbered by a"
+            " bookkeeping statement before record_undet read it: %r"
+            % r.stderr[:400])
+
 
 if __name__ == "__main__":
     unittest.main()
