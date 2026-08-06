@@ -9,6 +9,7 @@ typed + submitted. Safety gates: bare empty prompt only (never over user
 text), never when a goal is already armed (`◎ /goal` in the statusline),
 never into a busy pane, one arm per pane per window (dedup)."""
 
+import re
 import sys
 import time
 import unittest
@@ -21,6 +22,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import watchdog as wd
 import statusbar
 import json as _json
+
+# #266 Defect 1: goal_autoarm's plain (bare-box) branch now calls
+# `_send_goal_verified`, which bounded-polls (`time.sleep`) waiting for the
+# type to render before it will press Enter. Every pre-existing test in
+# this file drives the DEFAULT (non-model_stash) `FakeTmux`, whose static
+# capture never reflects a typed keystroke -- so the real, unmocked
+# primitive would exhaust its whole settle window (real sleeps) on EVERY
+# such test. None of those tests assert on the verified OK/FAIL outcome
+# (only that a `send-keys -l` happened at all, which still fires
+# unconditionally before the verify poll), so patching `time.sleep`
+# globally for this file's run is correct, not just convenient -- it
+# changes no test's semantics, only how long a genuinely-never-verifying
+# fake pane takes to give up.
+_time_sleep_patcher = None
+
+
+def setUpModule():
+    global _time_sleep_patcher
+    _time_sleep_patcher = m.patch("time.sleep", lambda s: None)
+    _time_sleep_patcher.start()
+
+
+def tearDownModule():
+    if _time_sleep_patcher is not None:
+        _time_sleep_patcher.stop()
 
 
 def seed_repo_cache(home, root, name):
@@ -54,15 +80,22 @@ class FakeTmux:
 
     A frozen capture makes every Ctrl+S look like a no-op, which made a pane
     holding a draft LOOK like it refused the arm — when in production the
-    draft is parked and the goal is delivered around it (issue 35)."""
+    draft is parked and the goal is delivered around it (issue 35).
 
-    def __init__(self, captured, model_stash=False):
+    `capture_seq` (optional): a SCRIPTED sequence of successive capture-pane
+    replies, consumed one per call in order, falling back to `captured` once
+    exhausted (mirrors `test_goal_rearm.py`'s own `FakeTmux.cap_seq`) — for
+    proving a race between the loop's TOP-of-iteration capture and a LATER
+    re-capture immediately before a send (#266 adversarial-review finding)."""
+
+    def __init__(self, captured, model_stash=False, capture_seq=()):
         self.captured = captured
         self.sent = []
         self.model_stash = model_stash
         self.stash = None
         self.submitted = []
         self._box = self._box_of(captured)
+        self._capture_seq = list(capture_seq)
 
     @staticmethod
     def _box_of(cap):
@@ -98,6 +131,8 @@ class FakeTmux:
         if "list-panes" in j:
             return "%1\tclaude\t/home/x/devel/demo"
         if "capture-pane" in j:
+            if self._capture_seq:
+                return self._capture_seq.pop(0)
             return self._render() if self.model_stash else self.captured
         if "display" in j:
             return "0"
@@ -711,3 +746,168 @@ class TestWrappedGoalUsesTranscript(unittest.TestCase):
         tmux = FakeTmux(pane)
         wd.goal_autoarm(time.time(), tmux, {}, projects_dir=self._projects())
         self.assertEqual(tmux.typed()[0], self.FULL_GOAL)
+
+
+class TestPlainBranchUsesVerifiedDelivery(unittest.TestCase):
+    """#266 Defect 1: the plain (non-draft) branch of goal_autoarm used
+    `send_continue` — an UNVERIFIED `send-keys -l` + immediate Enter, no
+    settle/verify poll — while job 20 and job 9's OWN stash branch already
+    use a verified primitive (`_send_goal_verified` / `deliver_with_stash`).
+    A long payload hitting the documented paste-collapse render race then
+    left an unsubmitted pasted draft in the box forever (live, spinbike
+    2026-08-06). The plain branch must go through the SAME verified-
+    delivery primitive, never a blind fire-and-forget send."""
+
+    def test_bare_box_arm_uses_the_verified_primitive_not_blind_send(self):
+        calls = []
+
+        def _fake(pid, text, run, captured=None, sleep_fn=None):
+            calls.append((pid, text))
+            return True
+
+        with m.patch.object(wd, "_send_goal_verified", side_effect=_fake), \
+                m.patch.object(wd, "send_continue") as fake_send_continue:
+            _tmux, logs = go(ARM_PANE)
+        self.assertEqual(len(calls), 1, "the bare-box arm must go through "
+                         "the verified-delivery primitive, not a direct send")
+        self.assertEqual(calls[0][1], GOAL_LINE)
+        fake_send_continue.assert_not_called()
+        self.assertTrue(any(ln.startswith("goal-autoarm OK") for ln in logs),
+                        logs)
+
+    def test_a_type_that_never_verifies_is_reported_failed_never_silently_armed(self):
+        with m.patch.object(wd, "_send_goal_verified", return_value=False):
+            _tmux, logs = go(ARM_PANE)
+        self.assertTrue(any(ln.startswith("goal-autoarm FAIL") for ln in logs),
+                        logs)
+
+    def test_dry_run_never_calls_the_verified_primitive(self):
+        with m.patch.object(wd, "_send_goal_verified") as fake:
+            tmux = FakeTmux(ARM_PANE)
+            logs = wd.goal_autoarm(time.time(), tmux, {}, dry_run=True)
+        fake.assert_not_called()
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("READY" in ln for ln in logs), logs)
+
+    def test_a_pane_that_stops_being_bare_between_capture_and_send_is_never_typed_into(self):
+        # Adversarial-review finding (post-#266): the pane was bare at the
+        # TOP of its loop iteration (that capture is what let arming reach
+        # this far at all -- transcript reads / a foreign-transcript sudo
+        # call can genuinely take a moment), but a FRESH re-capture right
+        # before the send shows a draft has since appeared. Must refuse
+        # WITHOUT ever calling the verified primitive, and must NOT consume
+        # the 10-minute dedup window -- a zero-keystroke refusal.
+        now_typed_pane = ARM_PANE.replace("❯ \n", "❯ time-critical draft\n")
+        tmux = FakeTmux(ARM_PANE, capture_seq=[ARM_PANE, now_typed_pane])
+        state = {}
+        with m.patch.object(wd, "_send_goal_verified") as fake:
+            logs = wd.goal_autoarm(time.time(), tmux, state)
+        fake.assert_not_called()
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any(ln.startswith("goal-autoarm SKIP-TRANSIENT")
+                            for ln in logs), logs)
+        self.assertEqual(
+            state.get("goalarm", {}), {},
+            "a pre-send (zero-keystroke) refusal must not consume the "
+            "per-pane dedup window")
+
+
+class TestGoalsOnScreenGateNoLongerPermanentlyVetoes(unittest.TestCase):
+    """#266 Defect 2: the viewport `/goal ...` regex used to be a HARD
+    requirement, checked BEFORE any attempt to resolve the payload from the
+    session transcript — so a held draft (including job 9's OWN earlier
+    stuck paste, defect 1) that visually pushes the printed `/goal` line
+    out of the viewport turned arming into a PERMANENT dead end: `ga[pid]`
+    only gets set once arming actually proceeds, so the identical doomed
+    viewport check re-runs every sweep forever with zero journal trace
+    (live, spinbike 2026-08-06)."""
+
+    STUCK_DRAFT_PANE = (
+        "● autopilot · merge=auto · authority=branch-merge · 7 ticketov\n"
+        "**Otázka — projekt odoo-erp (Money→Odoo):** autopilot je pripravený.\n"
+        "• Vlož /goal riadok vyššie (odporúčam) — loop sa rozbehne a ide sám\n"
+        "• Nič nevkladaj — autopilot sa nespustí\n"
+        "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne\n"
+        "❯\xa0[Pasted text #1 +1 lines]\n  ctx ███░  caveman\n")
+
+    def _projects_with_goal(self, cwd="/home/x/devel/demo"):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name) / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True)
+        entry = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Report.\n\n" + GOAL_LINE + "\n"}]}}
+        (d / "sess-266.jsonl").write_text(_json.dumps(entry) + "\n")
+        return tmp.name
+
+    def test_no_goal_line_on_screen_never_blocks_when_transcript_resolves(self):
+        # sanity: this pane genuinely has NO literal `/goal ` line anywhere —
+        # the exact condition defect 2 used to veto on, permanently.
+        self.assertEqual(
+            re.findall(r"^\s*(/goal \S.*)$", self.STUCK_DRAFT_PANE, re.M), [])
+        calls = []
+
+        def _fake(pid, text, run, captured=None, logs=None):
+            calls.append((pid, text))
+            return True
+
+        pd = self._projects_with_goal()
+        tmux = FakeTmux(self.STUCK_DRAFT_PANE)
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake):
+            logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertEqual(
+            len(calls), 1,
+            "the draft branch must still reach deliver_with_stash even "
+            "though no /goal line is visible in the viewport — the "
+            "TRANSCRIPT resolves the payload regardless")
+        self.assertEqual(calls[0][1], GOAL_LINE)
+        self.assertTrue(any("goal-autoarm" in ln for ln in logs), logs)
+
+    def test_the_veto_now_logs_a_reason_when_nothing_resolves(self):
+        # genuinely nothing to arm (no transcript, no viewport /goal line) —
+        # still refuses, but the refusal is LOGGED, never a silent continue.
+        tmux = FakeTmux(self.STUCK_DRAFT_PANE)
+        with TemporaryDirectory() as empty_pd:
+            logs = wd.goal_autoarm(time.time(), tmux, {},
+                                   projects_dir=Path(empty_pd))
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("no-goal-on-screen" in ln for ln in logs), logs)
+
+    def test_the_no_goal_on_screen_skip_logs_once_per_streak_not_every_sweep(self):
+        # Adversarial-review finding (post-#266, cosmetic): a pane that can
+        # NEVER resolve a goal must keep RETRYING every sweep (defect 2's
+        # whole point -- recovery the instant a transcript appears), but
+        # must not re-LOG the identical refusal every 60s forever.
+        tmux = FakeTmux(self.STUCK_DRAFT_PANE)
+        state = {}
+        now = time.time()
+        with TemporaryDirectory() as empty_pd:
+            logs1 = wd.goal_autoarm(now, tmux, state,
+                                    projects_dir=Path(empty_pd))
+            logs2 = wd.goal_autoarm(now + 60, tmux, state,
+                                    projects_dir=Path(empty_pd))
+        self.assertTrue(any("no-goal-on-screen" in ln for ln in logs1), logs1)
+        self.assertFalse(any("no-goal-on-screen" in ln for ln in logs2), logs2)
+
+    def test_existing_wrapped_no_transcript_behavior_is_unchanged(self):
+        # regression control: a WRAPPED (truncated) /goal fragment IS on
+        # screen but no transcript resolves the full payload -- still
+        # refused (never arm a truncated fragment, the #36 lesson), still
+        # logs the pre-existing "wrap" reason, unaffected by the lazy move
+        # of the goals/frag computation.
+        wrapped_pane = self.STUCK_DRAFT_PANE.replace(
+            "❯\xa0[Pasted text #1 +1 lines]\n",
+            "/goal STOP CONDITIONS — the loop is DONE the moment EIT\n"
+            "  list --state open` shows ZERO ... continuation\n"
+            "❯\xa0\n")
+        tmux = FakeTmux(wrapped_pane)
+        with TemporaryDirectory() as empty_pd:
+            logs = wd.goal_autoarm(time.time(), tmux, {},
+                                   projects_dir=Path(empty_pd))
+        self.assertFalse(tmux.typed(),
+                         "a truncated wrapped fragment must never be armed")
+        self.assertTrue(any("wrap" in ln.lower() for ln in logs), logs)
+
+
+if __name__ == "__main__":
+    unittest.main()

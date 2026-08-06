@@ -2229,6 +2229,70 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
     return best
 
 
+_REAL_TURN_TYPES = ("user", "assistant")
+
+
+def _last_real_turn_ts(tpath, tail_bytes=2_000_000):
+    """Epoch of the newest transcript entry whose top-level `type` is
+    `user` or `assistant` — a genuine conversational turn, never a
+    bookkeeping write. Job 10's own idle-clock fix, watchdog issue #177:
+    Claude Code appends several NON-TURN entry types to the SAME transcript
+    file (`mode`, `permission-mode`, `bridge-session`, `pr-link`,
+    `last-prompt`, and even a bare mtime touch with no new line at all —
+    all live-observed on the incident this fixes) that bump the transcript
+    FILE's own mtime with ZERO real progress. A consumer reading that raw
+    mtime as "how long has this session been idle" — `prompt_wedge_check`'s
+    own `now - tmtime < PWEDGE_MIN_IDLE_S` gate is exactly this — never
+    accumulates toward its threshold and never fires: live-reproduced, the
+    transcript's own LINE COUNT was identical across two checks minutes
+    apart while the file's mtime kept moving anyway.
+
+    Filtering to `user`/`assistant` mirrors `_last_human_prompt_ts`'s own
+    top-level-content discipline (never a nested `tool_result` quoting
+    ANOTHER session's transcript), but deliberately does NOT additionally
+    require human-typed content: an assistant turn, a machine-typed prompt,
+    or a tool_result-carrying `user` entry are all genuine session activity
+    for THIS purpose (job 10 asks "has anything real happened", not "did
+    the human type something" — `_last_human_prompt_ts` exists for the
+    latter, a different question with a different caller). `user`/
+    `assistant` is the closed, structurally-guaranteed pair every other
+    turn-boundary reader in this file already keys on (`transcript_last_
+    marker`, `scan_goal_markers`) — never widened to an open-ended allow-
+    list of "meaningful" bookkeeping types, which would need to track every
+    new entry kind CC's transcript format ever grows.
+
+    Returns None on any read failure or an entirely-untyped tail — never
+    asserts staleness from an unmeasurable read; the caller falls back to
+    the raw file mtime it already has (never worse than the pre-#177
+    behavior)."""
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return None
+    best = None
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") not in _REAL_TURN_TYPES:
+            continue
+        try:
+            ep = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ep > best:
+            best = ep
+    return best
+
+
 def _transcript_for_session(projects_dir, sid, cwd):
     """Path of the session's transcript, or None. The cwd-encoded dir is only
     a HINT: the ❓ hook records the session's CURRENT dir while CC keys the
@@ -4106,7 +4170,7 @@ def _goal_was_cleared_by_user(tpath):
 
 
 def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
-                 time_fn=None, sweep_deadline=None):
+                 time_fn=None, sweep_deadline=None, sleep_fn=None):
     """Job 9 — see the section comment. Mutates state['goalarm']; returns log
     lines. Best-effort (never raises).
 
@@ -4115,11 +4179,17 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
     (both optional, default None -> unbounded, today's behavior) are
     checked strictly BETWEEN panes, before a pane's own delivery starts —
     never nested inside one pane's own capture/classify/deliver sequence.
-    A deferred pane writes no dedup state, so it is retried next sweep."""
+    A deferred pane writes no dedup state, so it is retried next sweep.
+
+    #266 Defect 1: `sleep_fn` (default None -> real `time.sleep`) is
+    threaded into the plain (bare-box) branch's verified-delivery
+    primitive, mirroring `goal_rearm`'s own signature — tests stub it to
+    avoid real sleeps."""
     ga = state.get("goalarm") or {}
     logs = []
     projects_dir = projects_dir or PROJECTS_DIR
     time_fn = time_fn or time.monotonic
+    sleep_fn = sleep_fn or time.sleep
     panes = list_claude_panes(run)
     for idx, (pid, cwd) in enumerate(panes):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -4166,12 +4236,39 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         kind, draft = _classify_boundary(cap)
         if kind != "input":
             continue
+        loc = os.path.basename(cwd.rstrip("/"))
+        # #266 Defect 2: a literal `/goal …` line printed IN THE VIEWPORT
+        # used to be a HARD requirement here, enforced BEFORE anything else
+        # was even attempted — but the payload is TRANSCRIPT-sourced
+        # whenever a transcript resolves (below), so this regex is only
+        # ever needed as the LAST-RESORT fallback (no local transcript AND
+        # no foreign transcript). A held draft — including job 9's OWN
+        # earlier stuck paste (defect 1) — visually pushes the printed
+        # `/goal ` line out of the CURRENT viewport, so requiring it up
+        # front turned that draft into a PERMANENT dead end: `ga[pid]`
+        # never gets set (arming never proceeds far enough to reach it), so
+        # the identical doomed check re-runs every sweep forever with ZERO
+        # journal trace (live, spinbike 2026-08-06 — 1h24m+ with a hanging
+        # draft and not one relevant log line). `goals`/`frag` are now
+        # computed lazily and every skip below LOGS why.
         goals = re.findall(r"^\s*(/goal \S.*)$", cap, re.M)
-        if not goals:
-            continue
-        frag = goals[-1].strip()
+        frag = goals[-1].strip() if goals else None
         # The rendered viewport hard-wraps long goals — arm the TRANSCRIPT's
         # exact bytes when available; the fragment only when provably whole.
+        #
+        # Adversarial-review finding (post-#266, MINOR, narrow): with the
+        # viewport `/goal` line no longer REQUIRED (defect 2 above),
+        # `find_active_transcript` still returns the newest `.jsonl` in
+        # this `cwd`'s dir regardless of which SESSION the pane actually
+        # hosts — a second window/process sharing the same cwd with a
+        # materially different `/goal` text could, in principle, get its
+        # newest line armed into THIS pane with no on-screen cross-check at
+        # all (the gk 2026-07-20 "stale/wrong goal" incident class). Not
+        # observed and not realistically constructible today (same-repo
+        # `/goal` templates are near-identical across sessions), so left as
+        # a documented residual rather than adding session-id matching
+        # (`_find_pane_for_session`'s stronger, pane<->transcript-stem
+        # discipline) here.
         full = None
         tr = find_active_transcript(projects_dir, cwd)
         if tr:
@@ -4189,7 +4286,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
                     logs.append(
                         "skip cleared (goal-autoarm) %s (%s) -> the user "
                         "cleared this goal; not re-arming until they arm it "
-                        "again" % (pid, os.path.basename(cwd.rstrip("/"))))
+                        "again" % (pid, loc))
                 continue
             # No longer cleared — drop the bookkeeping rather than leaving a
             # key per session forever. The state file is long-lived and this
@@ -4202,12 +4299,38 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             # user's HOME — read it via sudo -n (best-effort).
             full = _foreign_transcript_goal(cwd)
         if full is None:
+            if frag is None:
+                # Adversarial-review finding (post-#266, cosmetic): unlike
+                # "skip cleared" above (logged once per session, then
+                # quiet), a pane that can NEVER resolve a goal anywhere (no
+                # local transcript, no foreign transcript, no printed
+                # `/goal` line either) re-hits this branch every 60s sweep
+                # forever. Keyed on `pid` -- there is no `sid` here by
+                # definition, since neither transcript resolved -- logged
+                # ONCE per pane per continuous streak; ARMING itself is
+                # UNCHANGED and keeps silently retrying every sweep (the
+                # whole point of the fix: recover the instant a transcript
+                # later resolves), only the noisy repeat LOG is suppressed.
+                nr = state.setdefault("goalarm_noresolve", {})
+                if not nr.get(pid):
+                    nr[pid] = True
+                    logs.append(
+                        "skip no-goal-on-screen (goal-autoarm) %s (%s) -> "
+                        "no transcript payload resolved and no printed "
+                        "/goal line visible in the viewport -- nothing to "
+                        "arm" % (pid, loc))
+                continue
             if _viewport_goal_wrapped(cap, frag):
                 logs.append("goal wrapped + no transcript — not arming %s (%s)"
-                            % (pid, os.path.basename(cwd.rstrip("/"))))
+                            % (pid, loc))
                 continue
             full = frag
-        loc = os.path.basename(cwd.rstrip("/"))
+        # A goal resolved (from the transcript OR the viewport fallback) —
+        # this pane is no longer in the "nothing to arm anywhere" streak,
+        # so the log-once marker above is stale; drop it rather than
+        # leaving a key per pane forever (mirrors the `cl.pop(sid, None)`
+        # cleanup for the cleared-goal bookkeeping just above).
+        state.get("goalarm_noresolve", {}).pop(pid, None)
         if draft:
             if dry_run:
                 logs.append("goal-autoarm READY (stash) %s (%s)" % (pid, loc))
@@ -4229,11 +4352,43 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             logs.append("goal-autoarm %s (stash%s) %s (%s)"
                         % (status, reason, pid, loc))
             continue
+        # #266 Defect 1: this branch used to fire-and-forget
+        # (`send_continue`) — `send-keys -l` + an IMMEDIATE Enter, no
+        # settle/verify poll — the exact paste-collapse render race that
+        # left a long /goal payload sitting unsubmitted after the type
+        # never got a chance to render before Enter fired (live, spinbike
+        # 2026-08-06). Job 20 and job 9's OWN stash branch above already
+        # use a verified primitive; this plain branch was the one path
+        # left unguarded.
+        if dry_run:
+            ga[pid] = int(now)
+            state["goalarm"] = ga      # key exists only once something armed
+            logs.append("goal-autoarm READY %s (%s)" % (pid, loc))
+            continue
+        # Adversarial-review finding (post-#266): `cap` above was captured
+        # at the TOP of this pane's iteration, before
+        # `_transcript_goal_line`/`_foreign_transcript_goal` (a sudo
+        # subprocess, timeout 15s) ran — job 20's own bare-box sibling
+        # re-verifies against a FRESH capture immediately before sending
+        # for exactly this reason ("by now the sweep's own capture is
+        # several tmux round-trips old, which is exactly the width of the
+        # race"). Re-capture and re-check bareness HERE, right before the
+        # send: a pane that stopped being bare in the interim (a) never
+        # gets typed into at all and (b) is a PRE-SEND refusal — zero
+        # keystrokes sent — so it must NOT consume the 10-minute dedup
+        # window, the same carve-out the stash branch above already gets
+        # via `_GOAL_REARM_TRANSIENT_STASH_REASONS` (the #101 lesson).
+        fresh = run(["tmux", "capture-pane", "-p", "-J", "-t", pid]) or ""
+        if _input_line_text(fresh) != "":
+            logs.append("goal-autoarm SKIP-TRANSIENT %s (%s) -> pane no "
+                        "longer bare" % (pid, loc))
+            continue
         ga[pid] = int(now)
         state["goalarm"] = ga          # key exists only once something armed
-        if not dry_run:
-            send_continue(pid, full, run)
-        logs.append("goal-autoarm %s (%s)" % (pid, loc))
+        ok = _send_goal_verified(pid, full, run, captured=fresh,
+                                 sleep_fn=sleep_fn)
+        logs.append("goal-autoarm %s %s (%s)"
+                    % ("OK" if ok else "FAIL", pid, loc))
     return logs
 
 
@@ -10828,7 +10983,36 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # waiting: the LOCAL transcript is directly readable here, so the
             # gate is computed precisely (issue #35) — a parked draft only
             # pings while the session actually asks ❓ NEEDS YOU.
-            logs += prompt_wedge_check(now, state, pid, captured, tmtime,
+            #
+            # Watchdog #177: `tmtime` above is the transcript FILE's raw
+            # mtime, which several NON-TURN entry types keep bumping to
+            # "now" with zero real progress (see `_last_real_turn_ts`'s own
+            # docstring) — job 10's own 30-minute staleness gate then never
+            # accumulates and the job silently never fires. Job 10's idle
+            # clock reads the newest genuine `user`/`assistant` turn from
+            # the transcript's CONTENT instead, falling back to the raw
+            # mtime only when that tail is unmeasurable (never worse than
+            # before). Every OTHER consumer of `tmtime` in this loop is
+            # untouched — this is scoped to job 10's own gate only.
+            #
+            # Adversarial-review hardening (post-#177): the "can only fire
+            # MORE readily, never later" claim holds because raw mtime is
+            # normally >= the true last-real-turn timestamp — but ONLY if
+            # every entry's own `timestamp` field is trustworthy. A single
+            # entry with a clock-skewed/future timestamp (never observed
+            # live, but not provably impossible) would make
+            # `_last_real_turn_ts` return something NEWER than the file's
+            # own mtime, which would make job 10 wait LONGER than before —
+            # the one direction the fix must never move. Clamping to the
+            # file's own mtime removes that failure mode by construction
+            # (a min() can only ever REMOVE a violation of the invariant,
+            # never introduce a new one) at zero cost to the real fix.
+            wedge_tmtime = _last_real_turn_ts(tpath)
+            if wedge_tmtime is None:
+                wedge_tmtime = tmtime
+            else:
+                wedge_tmtime = min(wedge_tmtime, tmtime)
+            logs += prompt_wedge_check(now, state, pid, captured, wedge_tmtime,
                                        owner, project, send_fn,
                                        dry_run=dry_run, run=run,
                                        waiting=_session_is_waiting(tpath),
@@ -11511,6 +11695,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # waiting=True: the FOREIGN transcript isn't cheaply readable from
             # here (a different HOME) — stay eligible-by-default rather than
             # silently going quiet for every hosted pane (issue #35).
+            #
+            # Adversarial-review finding (post-#177, MINOR, no live victim):
+            # `f_mtime` here is STILL the raw foreign-transcript mtime — the
+            # SAME #177 non-turn-write staleness bug the local-pane call
+            # site above was fixed for is knowingly retained here, because
+            # `_last_real_turn_ts` needs to read the transcript's own
+            # CONTENT and this transcript lives under a different user's
+            # HOME (a `sudo -n` read, not a cheap local one). No hosted
+            # pane exists on any managed box today (#34) — if this shape
+            # returns, give it its own sudo-based content read rather than
+            # silently trusting raw mtime forever.
             logs += prompt_wedge_check(now, state, pid, captured, f_mtime,
                                        owner, project_label(cwd) + "-" + fu,
                                        send_fn, dry_run=dry_run, run=run,
