@@ -37,6 +37,8 @@
 
 🌐 Dev:  <url>          ← USER-CLICKABLE web URLs only (one per env × user-facing surface)
 🌐 Prod: <url>          ← never list backend/API URLs
+🌐 Demo: <url>          ← client-app projects: the running demo the user can click NOW — every ticket that touched the app
+📱 APK:  <url>          ← client-app projects: the installable build (APK/IPA/signed binary) — same rule, every ticket
 
 **[<project>] PR #<N>: <full PR title>**
 <full PR URL> — merged <merge-sha>        ← default-auto; manual-marker projects: `— mergeable, clean` + end with ❓ approve merge
@@ -64,6 +66,9 @@ No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay
 - **Order matters.** Audits at TOP, `---` separator, Goal/What changed/URLs/PR/Question at BOTTOM. The user reads the bottom of the terminal first.
 - **🌐 lines = USER-CLICKABLE web URLs only.** Backend/API URLs (`:8000`, `/api/`, `backend:`) go in `✅ Deploy:` as evidence, never in 🌐. URLs in prose (`curl http://...`, `verified at https://...`) do NOT count.
 - **Multi-env deploy ⇒ ≥2 🌐 lines** (one per env × user-facing surface). Read project CLAUDE.md `## Dashboards` / `## URLs` for declared URLs. If you cannot determine the URL set, ask via `❓ Question:` rather than ship a report missing URLs.
+- **The 🌐/📱 requirement is "every user-facing artifact this work produced or affects" — the env×surface rule above is the deploy-shaped CASE of it, not the whole rule.** For a client-app project (a mobile/desktop app the user installs, not just a web dashboard) this means BOTH `🌐 Demo:` (the running app the user can click NOW) AND `📱 <platform>:` (the installable build — APK/IPA/signed binary) — on EVERY ticket that touched the app, not only the ticket that happened to produce them. Both verified LIVE (HTTP 200 / a real, current download) before pasting, same no-dead-links discipline as any other 🌐 line — see `no-localhost-urls.md`.
+- **📱 lines = the installable-build DOWNLOAD URL only — reserved exactly like 🌐, never a decorative "mobile" note in prose.** `📱 iOS: <url>` / `📱 <platform>: <url>` names the artifact link itself; a sentence merely mentioning mobile testing, an emulator, or a phone does NOT get a 📱-prefixed line just because it discusses mobile — put that in prose without the marker.
+- **Never make the user search the transcript for an artifact URL.** If a link (demo, APK, dashboard, anything else) was produced earlier in THIS session and is still current, REPEAT it in the report — never a back-reference ("see above", "same URL as before", "unchanged from last ticket"). The report is self-contained; the user does not scroll back through the terminal to find it.
 - **Goal + What changed = plain language.** Restate the user's ask in their words. NOT implementation jargon. If you cannot summarize in 1+2 sentences a non-engineer would understand, you don't understand the work yet.
 - **Issue/PR refs MUST include titles.** `PR #54` / `Fixes #234` alone is wrong. `PR #54: Refactor driver.rs and add lyrics test` / `Fixes #234 (driver.rs over 1000-line cap)` is right. Apply everywhere — completion reports, plan steps, follow-up suggestions.
 - **Questions MUST be marked with ❓** as the very LAST line. Trailing `?` without ❓ is banned. ONE decision only, shaped as the structured Slovak question block (`**Otázka — projekt …:**` briefing + options + the ❓ line — `user-questions-slovak.md`, hook-enforced). If you have nothing to ask, OMIT the line.
@@ -92,7 +97,7 @@ The whole report fits in ~20 lines (audits + optional plan steps + Goal + What c
 
 #### Enforcement
 
-The Stop hook (`stop-check-prose-violations.sh`) BLOCKS completion reports missing required structure (Goal / What changed / plan-check / review lines, wrong order, missing 🌐 for multi-env deploys, banned shortcut menus). When blocked, fix the report and resend in the same turn. The hook covers all detectable violations; trust it to catch your slips, but write the full template the first time so blocking is rare.
+The Stop hook (`stop-check-prose-violations.sh`) BLOCKS completion reports missing required structure (Goal / What changed / plan-check / review lines, wrong order, missing 🌐 for multi-env deploys, banned shortcut menus) and HARD-blocks a `🌐` or `📱` line pointing at localhost/127.0.0.1/0.0.0.0. When blocked, fix the report and resend in the same turn. The hook covers all detectable violations; trust it to catch your slips, but write the full template the first time so blocking is rare. It cannot mechanically check whether a client-app project's `🌐 Demo:`/`📱 <platform>:` lines are actually PRESENT — that obligation is yours to apply from the rule above.
 
 #### Compact at your own boundary — served (non-worker) sessions too (#228)
 

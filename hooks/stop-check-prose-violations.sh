@@ -852,28 +852,33 @@ if { [ "$IS_COMPLETION" = "1" ] || [ "$HAS_DEPLOY_LINE" = "1" ]; } && msg_has "$
     fi
 fi
 
-# Check for a localhost/127.0.0.1/0.0.0.0 URL on a 🌐 line — issue #13 sub-item 3.
-# Scoped ONLY to lines carrying the 🌐 marker (never the whole message) — that
-# marker is used EXCLUSIVELY for "USER-CLICKABLE URL being presented right now"
-# per completion-report.md, so this has near-zero FP risk: a code block or
-# prose paragraph discussing "the dev server runs on localhost:5173" is never
-# touched, only an actual 🌐-prefixed URL line. Not gated on IS_COMPLETION —
-# a mid-work "here's the preview: 🌐 http://localhost:3000" is exactly the
-# no-localhost-urls.md violation ("the user works remotely and cannot open
-# localhost on their own machine"), completion report or not. HARD block:
-# no-localhost-urls.md documents no legitimate exception for presenting one.
+# Check for a localhost/127.0.0.1/0.0.0.0 URL on a 🌐 (or 📱) line — issue #13
+# sub-item 3, widened by #265 to the sibling artifact marker completion-
+# report.md now teaches for client-app installable builds (APK/IPA/signed
+# binary). Scoped ONLY to lines carrying one of these two markers (never the
+# whole message) — both markers are used EXCLUSIVELY for "USER-CLICKABLE (or
+# user-downloadable) URL being presented right now" per completion-report.md,
+# so this has near-zero FP risk: a code block or prose paragraph discussing
+# "the dev server runs on localhost:5173" is never touched, only an actual
+# 🌐/📱-prefixed URL line. Not gated on IS_COMPLETION — a mid-work "here's the
+# preview: 🌐 http://localhost:3000" is exactly the no-localhost-urls.md
+# violation ("the user works remotely and cannot open localhost on their own
+# machine"), completion report or not — and no-localhost-urls.md's own scope
+# ("This applies to ALL URLs") is why 📱 gets the identical treatment the
+# moment the module names it, not a narrower one. HARD block: no-localhost-
+# urls.md documents no legitimate exception for presenting one.
 # Two stages, both on here-strings, and they are NOT the same kind of question.
 # Stage 1 is a SELECTOR — it only chooses which lines stage 2 reads — so it is
 # neither incriminating nor exonerating, and an unanswerable selector must WIDEN
 # the scope and let the real pattern decide, exactly as the /goal filter above
 # falls back to the full MSG. Resolving a selector as a VERDICT accuses a message
-# that carries no 🌐 line at all, prints an EMPTY offending-lines block, and
+# that carries no 🌐/📱 line at all, prints an EMPTY offending-lines block, and
 # attaches a note blaming message size that points the wrong way. Stage 2 IS the
 # incriminating pattern, so its own unknown resolves as "present" and the gate
 # fires — it simply cannot quote the lines it never obtained.
 GLOBE_LOCALHOST=""
 GLOBE_LOCALHOST_UNKNOWN=0
-if ! _GLOBE_LINES=$(msg_lines "$MSG" -E "🌐"); then
+if ! _GLOBE_LINES=$(msg_lines "$MSG" -E "🌐|📱"); then
     _GLOBE_LINES="$MSG"
 fi
 if ! GLOBE_LOCALHOST=$(msg_lines "$_GLOBE_LINES" -iE "localhost|127\.0\.0\.1|0\.0\.0\.0"); then
@@ -881,10 +886,10 @@ if ! GLOBE_LOCALHOST=$(msg_lines "$_GLOBE_LINES" -iE "localhost|127\.0\.0\.1|0\.
     GLOBE_LOCALHOST_UNKNOWN=1
 fi
 if [ -n "$GLOBE_LOCALHOST" ] || [ "$GLOBE_LOCALHOST_UNKNOWN" = "1" ]; then
-    echo "VIOLATION: A 🌐 URL line points at localhost/127.0.0.1/0.0.0.0. The user works remotely and cannot open a localhost URL on their own machine. Use the machine's real LAN/tailscale IP instead (\`hostname -I\`), and verify it returns 200 before presenting it. See no-localhost-urls.md." >&2
+    echo "VIOLATION: A 🌐/📱 URL line points at localhost/127.0.0.1/0.0.0.0. The user works remotely and cannot open a localhost URL on their own machine. Use the machine's real LAN/tailscale IP instead (\`hostname -I\`), and verify it returns 200 before presenting it. See no-localhost-urls.md." >&2
     echo "  Offending line(s):" >&2
     echo "$GLOBE_LOCALHOST" | sed 's/^/    /' >&2
-    add_hard "🌐 URL line points at localhost/127.0.0.1/0.0.0.0 — use the real LAN IP"
+    add_hard "🌐/📱 URL line points at localhost/127.0.0.1/0.0.0.0 — use the real LAN IP"
 fi
 
 # #194 — the global suppression that used to sit here is GONE. It asked "did ANY
