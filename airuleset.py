@@ -213,7 +213,12 @@ VALID_CAVEMAN_MODES = {
 # BOTH cache layouts: pre-2026-07 releases shipped <hash>/hooks/…, newer ones
 # ship <hash>/src/hooks/… (a fresh install produces ONLY the new layout — the
 # migrated gatekeeper box surfaced it: the old single-glob check saw "not
-# built" forever and re-installed the plugin on every run).
+# built" forever and re-installed the plugin on every run). NO LONGER used
+# to decide "built" (#279 — see _caveman_plugin_built()'s docstring: a
+# cache-file glob is a stale-file-presence proxy, and claude's own
+# installed_plugins.json registry replaced it). Kept as the canonical list
+# of the two layouts the runtime SHIM's own bash `ls -dt` glob still needs
+# to resolve the CURRENT cache hash at render time.
 CAVEMAN_CACHE_GLOBS = (
     "plugins/cache/caveman/caveman/*/hooks/caveman-statusline.sh",
     "plugins/cache/caveman/caveman/*/src/hooks/caveman-statusline.sh",
@@ -261,6 +266,31 @@ CAVEMAN_CACHE_GLOBS = (
 # deliberately wants Playwright OFF (e.g. a pure backend-only stream) would
 # need `MANAGED_DISABLED_PLUGINS` used deliberately against the baseline,
 # which today's reconcile forbids by design (see the sanity check below).
+#
+# BENIGN, DOCUMENTED (#279, 2026-08-06): `claude plugin list` can show
+# playwright's Version as the literal "unknown" (montalu4) instead of a git
+# commit hash (montalu2/3, dev1/2, gatekeeper). Root cause, confirmed live
+# with byte-level evidence: `claude-plugins-official`'s "version" per plugin
+# is derived from a git-log lookup inside the marketplace CHECKOUT at
+# install time. That checkout materializes via TWO different Claude Code
+# code paths -- this repo's own explicit `claude plugin marketplace add`
+# (ensure_marketplace_registered(), a real `git clone`, confirmed via a
+# live `.git/` with objects/refs on montalu3) OR Claude Code's OWN internal
+# `officialMarketplaceAutoInstallAttempted`/`officialMarketplaceAutoInstalled`
+# self-heal (both `true` in montalu4's own ~/.claude.json, plus a `.gcs-sha`
+# marker file -- evidence of a GCS-blob delivery with no `.git` at all).
+# Which path wins on a given account is a Claude Code internal race outside
+# airuleset's control. Confirmed functionally IDENTICAL either way:
+# montalu4's and montalu3's playwright `.mcp.json` and
+# `.claude-plugin/plugin.json` are byte-for-byte identical, and
+# `_managed_plugin_built("playwright@claude-plugins-official")` (the
+# registry-truth check, #276) already correctly reports it installed on
+# montalu4 regardless of the version string -- there is no install-loop
+# defect here, only a cosmetic display label. Deliberately NOT "fixed" by
+# forcing a re-`marketplace add`: that would be new machinery against the
+# standing FREEZE, cannot be validated without modifying a remote box (this
+# ticket's own remote-access rule forbids that), and Claude Code's own
+# auto-install could simply race ahead again on the very next invocation.
 MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
                     "playwright@claude-plugins-official")
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
@@ -2879,10 +2909,31 @@ def caveman_mode_or_default(existing) -> str:
 
 
 def _caveman_plugin_built() -> bool:
-    """True iff caveman's plugin cache (the real statusline script) exists on disk
-    — in EITHER cache layout (old <hash>/hooks/, new <hash>/src/hooks/)."""
-    import glob
-    return any(glob.glob(str(CLAUDE_DIR / g)) for g in CAVEMAN_CACHE_GLOBS)
+    """True iff claude's OWN plugin registry (installed_plugins.json) has an
+    entry for caveman@caveman -- never a cache-file-presence proxy for it.
+
+    ISSUE #279 (2026-08-06): mirrors the sibling registry-truth fix that
+    already replaced `_managed_plugin_built()`'s glob check verbatim. The
+    OLD check globbed the cache dir for the real statusline script (in
+    EITHER cache layout -- old <hash>/hooks/, new <hash>/src/hooks/) and
+    treated its mere presence as "genuinely installed". Live evidence
+    (montalu4): the cache dir for hash ec83e5bace4c is FULLY extracted --
+    matching montalu3's own successful install byte-for-byte, satisfying
+    BOTH globs -- while claude's own registry has ZERO entry for
+    caveman@caveman: `claude plugin list` correctly reports it ABSENT, but
+    the glob said "already built" and setup_caveman()'s `if not
+    _caveman_plugin_built(): register + install` silently skipped the real
+    `claude plugin install caveman@caveman` call forever, with no log
+    output at all. Checking the registry instead makes a
+    cache-present + registry-absent mismatch self-healing: the very next
+    push retries the real install, no manual fix needed.
+
+    CAVEMAN_CACHE_GLOBS stays defined for the runtime SHIM's own bash
+    lookup (`ls -dt ... | head -1`, resolving the CURRENT cache hash at
+    render time -- a "where do I currently find the script" question,
+    unrelated to "is the plugin genuinely installed") -- it is no longer
+    read here."""
+    return CAVEMAN_PLUGIN_KEY in _plugin_registry_keys()
 
 
 def setup_caveman() -> bool:
@@ -2894,15 +2945,18 @@ def setup_caveman() -> bool:
        installs fail on fresh stream accounts, 2026-08-06 — this used to
        run AFTER the install attempt, so its own settings write landed too
        late to help),
-    3. if the plugin cache is missing: register the marketplace (idempotent
+    3. if the plugin's REGISTRY ENTRY is missing (claude's own
+       installed_plugins.json — see _caveman_plugin_built()'s docstring;
+       never a cache-file glob, #279): register the marketplace (idempotent
        `claude plugin marketplace add` — see ensure_marketplace_registered()'s
        docstring; writing extraKnownMarketplaces alone is not sufficient)
        THEN install (best-effort, time-boxed); a failed registration skips
        the install attempt entirely,
     4. seed a valid `.caveman-active` mode (preserve a valid user pick).
     Returns True iff nothing REQUIRED failed (marketplace registration +
-    install, when the cache was missing) — see setup_managed_plugins()'s
-    docstring for the fatal-vs-non-fatal split this return value encodes.
+    install, when the registry entry was missing) — see
+    setup_managed_plugins()'s docstring for the fatal-vs-non-fatal split
+    this return value encodes.
     Every OTHER step here (shim write, settings reconcile, mode seed) stays
     exactly as non-fatal-on-its-own as before."""
     import subprocess

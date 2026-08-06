@@ -423,38 +423,13 @@ class TestCavemanShimTickets(TestCase):
 class TestCavemanNewCacheLayout(TestCase):
     """Upstream caveman moved its statusline script from <hash>/hooks/ to
     <hash>/src/hooks/ (seen live on the migrated gatekeeper box, 2026-07-05: a
-    fresh `claude plugin install` produces ONLY the new layout). The built-check
-    and the shim's runtime resolve must recognise BOTH layouts — with only the
-    old glob, install re-installs the plugin on EVERY run and the shim silently
-    drops the badge (the exact rot class the shim exists to kill)."""
-
-    def _claude_dir_with(self, rel):
-        import os
-        import tempfile
-        home = tempfile.mkdtemp()
-        if rel:
-            d = os.path.join(home, os.path.dirname(rel))
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(home, rel), "w") as fh:
-                fh.write("#!/usr/bin/env bash\nprintf '[CAVEMAN:LITE]'\n")
-        return home
-
-    def _built(self, rel):
-        from unittest import mock
-        home = self._claude_dir_with(rel)
-        with mock.patch.object(airuleset, "CLAUDE_DIR", Path(home)):
-            return airuleset._caveman_plugin_built()
-
-    def test_plugin_built_detects_old_hooks_layout(self):
-        self.assertTrue(self._built(
-            "plugins/cache/caveman/caveman/abc123/hooks/caveman-statusline.sh"))
-
-    def test_plugin_built_detects_new_src_hooks_layout(self):
-        self.assertTrue(self._built(
-            "plugins/cache/caveman/caveman/25d22f864ad6/src/hooks/caveman-statusline.sh"))
-
-    def test_plugin_built_false_when_absent(self):
-        self.assertFalse(self._built(None))
+    fresh `claude plugin install` produces ONLY the new layout). The shim's
+    OWN runtime resolve (bash `ls -dt ... | head -1`, at RENDER time) must
+    recognise BOTH layouts, or the badge silently drops the moment upstream
+    ships the new layout only. (The "is it built" question moved off cache
+    layout entirely -- #279 -- see TestCavemanPluginBuiltUsesRegistry, whose
+    own headline case covers a cache dir satisfying BOTH layouts here with
+    no registry entry.)"""
 
     def test_shim_badge_resolves_new_src_hooks_layout(self):
         # A HOME whose ONLY caveman script sits in the NEW src/hooks layout —
@@ -611,6 +586,10 @@ class TestSetupCavemanRegistersMarketplaceBeforeInstall(TestCase):
         cache_path = d / "plugins/cache/caveman/caveman/abcdef123/hooks/caveman-statusline.sh"
         cache_path.parent.mkdir(parents=True)
         cache_path.write_text("#!/usr/bin/env bash\n")
+        # #279: "built" is decided by claude's OWN registry now -- the cache
+        # file alone (above) no longer proves it; a registry entry does.
+        (d / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"caveman@caveman": [{"scope": "user"}]}}))
         patches = self._patched_dirs(d)
         with patches[0], patches[1], patches[2], patches[3], \
                 m.patch("subprocess.run") as run:
