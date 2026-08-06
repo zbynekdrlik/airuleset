@@ -9,6 +9,7 @@ the cache if missing, force the enabledPlugins key true, idempotently.
 """
 
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -20,6 +21,20 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+
+
+def _write_plugin_registry(claude_dir: Path, keys):
+    """Write a fake claude plugin registry (installed_plugins.json shape --
+    the exact backing store `claude plugin list` renders its output from,
+    confirmed live on dev1: its `plugins` dict keys match `claude plugin
+    list`'s printed plugin names 1:1) declaring `keys` as genuinely
+    installed. Used across this file wherever a test needs claude's OWN
+    registry to say a plugin IS installed (#276 -- file-presence proxy)."""
+    reg_dir = claude_dir / "plugins"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+    data = {"version": 2,
+            "plugins": {k: [{"scope": "user"}] for k in keys}}
+    (reg_dir / "installed_plugins.json").write_text(json.dumps(data))
 
 
 class TestReconcileManagedPlugins(TestCase):
@@ -100,62 +115,131 @@ class TestManagedDisabledPlugins(TestCase):
         self.assertTrue(out["enabledPlugins"]["discord@claude-plugins-official"])
 
 
+class TestPluginRegistryKeys(TestCase):
+    """`installed_plugins.json` is claude's OWN plugin registry — the exact
+    backing store `claude plugin list` renders its output from (confirmed
+    live, dev1: its `plugins` dict keys match `claude plugin list`'s
+    printed plugin names 1:1). `_plugin_registry_keys()` reads it directly
+    — no subprocess, no CLI text-output parsing (#276)."""
+
+    def _claude_dir(self):
+        return Path(tempfile.mkdtemp())
+
+    def test_reads_the_real_registry_shape(self):
+        d = self._claude_dir()
+        _write_plugin_registry(d, ["superpowers@claude-plugins-official",
+                                    "playwright@claude-plugins-official"])
+        keys = airuleset._plugin_registry_keys(
+            d / "plugins" / "installed_plugins.json")
+        self.assertEqual(keys, {"superpowers@claude-plugins-official",
+                                 "playwright@claude-plugins-official"})
+
+    def test_missing_registry_file_is_an_empty_set(self):
+        d = self._claude_dir()
+        keys = airuleset._plugin_registry_keys(
+            d / "plugins" / "installed_plugins.json")
+        self.assertEqual(keys, set())
+
+    def test_malformed_json_is_an_empty_set_never_a_crash(self):
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        (d / "plugins" / "installed_plugins.json").write_text("{not valid json")
+        keys = airuleset._plugin_registry_keys(
+            d / "plugins" / "installed_plugins.json")
+        self.assertEqual(keys, set())
+
+    def test_plugins_field_not_a_dict_is_an_empty_set(self):
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        (d / "plugins" / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": ["a", "b"]}))
+        keys = airuleset._plugin_registry_keys(
+            d / "plugins" / "installed_plugins.json")
+        self.assertEqual(keys, set())
+
+    def test_top_level_not_a_dict_is_an_empty_set(self):
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        (d / "plugins" / "installed_plugins.json").write_text("[]")
+        keys = airuleset._plugin_registry_keys(
+            d / "plugins" / "installed_plugins.json")
+        self.assertEqual(keys, set())
+
+    def test_defaults_to_claude_dir_when_no_path_given(self):
+        d = self._claude_dir()
+        _write_plugin_registry(d, ["caveman@caveman"])
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            keys = airuleset._plugin_registry_keys()
+        self.assertEqual(keys, {"caveman@caveman"})
+
+
 class TestManagedPluginBuilt(TestCase):
-    def _claude_dir_with(self, rel):
-        d = tempfile.mkdtemp()
-        if rel:
-            (Path(d) / rel).mkdir(parents=True)
-        return Path(d)
+    """#276: "built" is decided by claude's OWN registry
+    (installed_plugins.json), never by cache-file presence — a stale/
+    partial cache dir left by a FAILED pre-#273 install must never look
+    "genuinely installed" again just because a glob happens to match it."""
 
-    def test_detects_installed_superpowers_cache(self):
-        d = self._claude_dir_with(
-            "plugins/cache/claude-plugins-official/superpowers/6.1.1/skills")
+    def _claude_dir(self):
+        return Path(tempfile.mkdtemp())
+
+    def test_registry_entry_present_means_built(self):
+        d = self._claude_dir()
+        _write_plugin_registry(d, ["superpowers@claude-plugins-official"])
         with m.patch.object(airuleset, "CLAUDE_DIR", d):
             self.assertTrue(airuleset._managed_plugin_built(
                 "superpowers@claude-plugins-official"))
 
-    def test_absent_cache_means_not_built(self):
-        d = self._claude_dir_with(None)
+    def test_no_registry_at_all_means_not_built(self):
+        d = self._claude_dir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d):
             self.assertFalse(airuleset._managed_plugin_built(
                 "superpowers@claude-plugins-official"))
 
-    def test_every_baseline_plugin_has_a_cache_glob(self):
-        for key in airuleset.MANAGED_PLUGINS:
-            self.assertIn(key, airuleset.MANAGED_PLUGIN_CACHE_GLOBS)
-
-    def test_detects_installed_playwright_cache(self):
-        # Playwright's real cache shape (confirmed live, dev1) differs from
-        # superpowers': a literal "unknown" version segment instead of a
-        # content hash, so the glob has to match on `.mcp.json` — the real
-        # load-bearing file for this plugin's MCP server (never the
-        # `.claude-plugin/plugin.json` manifest alone, which could survive
-        # an interrupted extraction and still report "built").
-        d = self._claude_dir_with(
-            "plugins/cache/claude-plugins-official/playwright/unknown")
-        (d / "plugins/cache/claude-plugins-official/playwright/unknown/"
-           ".mcp.json").write_text("{}")
+    def test_registry_present_but_key_absent_means_not_built(self):
+        d = self._claude_dir()
+        _write_plugin_registry(d, ["caveman@caveman"])
         with m.patch.object(airuleset, "CLAUDE_DIR", d):
-            self.assertTrue(airuleset._managed_plugin_built(
-                "playwright@claude-plugins-official"))
+            self.assertFalse(airuleset._managed_plugin_built(
+                "superpowers@claude-plugins-official"))
 
-    def test_manifest_alone_without_mcp_json_is_not_built(self):
-        # An interrupted extraction leaving only the manifest must NOT
-        # report "built" — #158 review finding.
-        d = self._claude_dir_with(
-            "plugins/cache/claude-plugins-official/playwright/unknown/"
-            ".claude-plugin")
-        (d / "plugins/cache/claude-plugins-official/playwright/unknown/"
-           ".claude-plugin/plugin.json").write_text("{}")
+    def test_malformed_registry_is_not_built_never_guessed_true(self):
+        d = self._claude_dir()
+        (d / "plugins").mkdir(parents=True)
+        (d / "plugins" / "installed_plugins.json").write_text("{not json")
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            self.assertFalse(airuleset._managed_plugin_built(
+                "superpowers@claude-plugins-official"))
+
+    def test_stale_cache_dir_with_no_registry_entry_is_not_built(self):
+        # #276's own headline RED test: a STALE cache dir (the exact shape
+        # a FAILED pre-#273 install left behind on montalu2/montalu3 for
+        # playwright) must NEVER look "genuinely installed" just because it
+        # satisfies a file glob — only claude's own registry can say that.
+        # This is the file-presence-proxy defect the ticket exists to fix.
+        d = self._claude_dir()
+        stale_cache = (d / "plugins" / "cache" / "claude-plugins-official"
+                       / "playwright" / "unknown")
+        stale_cache.mkdir(parents=True)
+        (stale_cache / ".mcp.json").write_text("{}")
+        # no installed_plugins.json at all — claude's registry never heard
+        # of this plugin, exactly like the live batch10/batch11 evidence.
         with m.patch.object(airuleset, "CLAUDE_DIR", d):
             self.assertFalse(airuleset._managed_plugin_built(
                 "playwright@claude-plugins-official"))
 
-    def test_absent_playwright_cache_means_not_built(self):
-        d = self._claude_dir_with(None)
-        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+    def test_settings_enabled_alone_never_satisfies_the_check(self):
+        # #276 acceptance: "settings-enable sam osebe nesmie stacit" —
+        # _managed_plugin_built() takes no settings.json input at all, so
+        # an "enabled" flag with an absent registry can only ever read
+        # False through this function; only a real registry entry counts.
+        d = self._claude_dir()
+        settings_path = d / "settings.json"
+        settings_path.write_text(json.dumps(
+            {"enabledPlugins": {"superpowers@claude-plugins-official": True}}))
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path):
             self.assertFalse(airuleset._managed_plugin_built(
-                "playwright@claude-plugins-official"))
+                "superpowers@claude-plugins-official"))
 
 
 class TestClaudeCliEnv(TestCase):
@@ -414,10 +498,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
 
     def test_already_built_plugins_never_call_marketplace_add(self):
         d = Path(tempfile.mkdtemp())
-        for glob_pat in airuleset.MANAGED_PLUGIN_CACHE_GLOBS.values():
-            p = d / Path(glob_pat.replace("*", "1.0.0"))
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{}")
+        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
         settings_path = d / "settings.json"
         playwright_cache = Path(tempfile.mkdtemp())
         (playwright_cache / "chromium-1234").mkdir()
@@ -482,10 +563,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         # complete.") while enabledPlugins/extraKnownMarketplaces were
         # never actually written.
         d = Path(tempfile.mkdtemp())
-        for glob_pat in airuleset.MANAGED_PLUGIN_CACHE_GLOBS.values():
-            p = d / Path(glob_pat.replace("*", "1.0.0"))
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{}")
+        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
         settings_path = d / "settings.json"
         settings_path.write_text("{not valid json")
         playwright_cache = Path(tempfile.mkdtemp())
@@ -497,6 +575,41 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
                 m.patch("sys.stderr", out):
             ok = airuleset.setup_managed_plugins()
         self.assertFalse(ok)
+
+    def test_stuck_account_self_heals_settings_enabled_registry_absent(self):
+        # #276: the exact montalu2/montalu3/montalu4 shape — settings.json
+        # ALREADY says the plugin is enabled (a prior push wrote it) AND a
+        # stale cache dir sits on disk (left by a pre-#273 failed install),
+        # but claude's own registry has never heard of the plugin. The next
+        # push must actually retry the real install — no manual fix needed.
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = Path(tempfile.mkdtemp())
+        stale_cache = (d / "plugins" / "cache" / "claude-plugins-official"
+                       / "playwright" / "unknown")
+        stale_cache.mkdir(parents=True)
+        (stale_cache / ".mcp.json").write_text("{}")
+        # no installed_plugins.json — registry never heard of either plugin
+        settings_path = d / "settings.json"
+        settings_path.write_text(json.dumps(
+            {"enabledPlugins": {"playwright@claude-plugins-official": True,
+                                 "superpowers@claude-plugins-official": True}}))
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        installed_keys = {c[3] for c in install_calls}
+        self.assertEqual(
+            installed_keys, set(airuleset.MANAGED_PLUGINS),
+            "a settings-enabled + registry-absent plugin must trigger a "
+            "real install, even with a stale cache on disk and settings."
+            "json already saying enabled")
 
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
