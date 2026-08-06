@@ -445,6 +445,12 @@ try:
     sys.path.insert(0, "{{REPO_DIR}}")
     import statusbar
     cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or ""
+    # --- which model this session runs: 'opus'/'sonnet'/'fable'/'haiku',
+    # highlighted when it differs from this box's MANAGED_MODEL default
+    # (#133 -- passive replacement for the #37 model-cost signal) ---
+    mdl = statusbar.model_segment(d)
+    if mdl:
+        segs.append(mdl)
     # --- monthly subscription renewal: 'sub 12.8.(8d)' (#223) ---
     sub = statusbar.subscription_segment()
     if sub:
