@@ -403,6 +403,49 @@ class TestFallbackExceptionLogging(_Base):
         text = log_path.read_text()
         self.assertIn("import", text.lower())
 
+    def test_a_lib_poll_payload_import_failure_is_also_logged(self):
+        # #280 follow-up (adversarial-review MINOR): the OUTER import
+        # try/except (design_gate/notify, tested above) is a completely
+        # DIFFERENT try/except from `_control_flow_text`'s own inner
+        # `import lib_poll_payload` -- design_gate.py/notify/ are present
+        # here (the outer import succeeds and reaches _control_flow_text
+        # at all), but hooks/lib_poll_payload.py is deliberately absent.
+        bad_root = Path(tempfile.mkdtemp(prefix="airuleset-designhook-nolib-"))
+        self.addCleanup(shutil.rmtree, bad_root, True)
+        shutil.copy(ROOT / "design_gate.py", bad_root / "design_gate.py")
+        shutil.copytree(ROOT / "notify", bad_root / "notify",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (bad_root / "hooks").mkdir()
+        bad_hook = bad_root / "hooks" / "post-record-design-comment.sh"
+        bad_hook.write_text(HOOK.read_text())
+        bad_hook.chmod(0o755)
+        # deliberately NO lib_poll_payload.py under bad_root/hooks/
+
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-90",
+        }])
+        payload = json.dumps({"tool_input": {"command": 'gh issue comment 41 --body "x"'},
+                              "cwd": str(self.repo)})
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env.pop("PYTHONPATH", None)
+        r = subprocess.run(["bash", str(bad_hook)], input=payload,
+                           capture_output=True, text=True, env=env,
+                           cwd=str(bad_root))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "must still classify correctly -- a missing "
+                             "lib_poll_payload degrades gracefully, it "
+                             "never crashes or disables the whole hook")
+        log_path = self.home / ".claude" / "design-gate-errors.log"
+        self.assertTrue(log_path.exists(),
+                        "a lib_poll_payload import failure must be logged "
+                        "too, not silently swallowed")
+        self.assertIn("lib_poll_payload", log_path.read_text())
+
     def test_a_clean_run_never_writes_the_error_log(self):
         # positive control -- the log stays absent on the ordinary
         # happy path, so its presence is a genuine, meaningful signal.

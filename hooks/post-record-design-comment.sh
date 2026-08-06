@@ -156,6 +156,38 @@ def _blank_gh_text_flag_values(text, lib_poll_payload):
     return out
 
 
+# #280 follow-up (adversarial-review F4, pre-existing -- not introduced
+# by the flag-blanking fix above): the -R/--repo lookup below used to
+# scan the WHOLE scan_cmd for ANY `-R`/`--repo`-shaped text, so a value
+# living in a segment that is NOT the `gh issue comment` invocation at
+# all (an `echo` argument, a different `gh` subcommand's own flag/value
+# elsewhere in the SAME compound command -- `gh issue create --label
+# "-R attacker/x"`, `gh pr view 5 -R other/unrelated`) was scavenged as
+# if it belonged to the invocation being classified, silently
+# redirecting the marker to the wrong repo. `_REPO_FLAG_RE` is now only
+# ever searched WITHIN the SEP-bounded segment of the specific `gh issue
+# comment` match it's being resolved for.
+#
+# A LOCAL `_SEG_SEP` tuple, deliberately NOT `lib_poll_payload.SEP` --
+# this scoping must keep working even when that module failed to import
+# above (see `_control_flow_text`'s own fallback comment), and it is a
+# small, stable literal not worth a second import for.
+_REPO_FLAG_RE = re.compile(r'(?:-R|--repo)[= ]+([^\s\'"]+)')
+_SEG_SEP = (";", "&&", "||", "|", "\n")
+
+
+def _match_segment(text, start):
+    """The `_SEG_SEP`-bounded segment containing offset `start` -- bounded
+    on BOTH sides (a `-R` can appear either BEFORE or AFTER "gh issue
+    comment N" within the SAME invocation), unlike
+    `_blank_gh_text_flag_values`'s own left-only segment (it only ever
+    needs "does gh/git precede this flag")."""
+    left = max([text.rfind(s, 0, start) for s in _SEG_SEP] + [-1])
+    ends = [e for e in (text.find(s, start) for s in _SEG_SEP) if e != -1]
+    right = min(ends) if ends else len(text)
+    return text[left + 1:right]
+
+
 def _control_flow_text(text, repo_root):
     """`text` with provably-inert heredoc bodies and quoted text-payload
     argument VALUES blanked out -- REUSES hooks/lib_poll_payload.py's own
@@ -184,14 +216,24 @@ def _control_flow_text(text, repo_root):
     that fake heredoc's own body. Blanking the quoted value first removes
     the fake trigger before heredoc detection ever runs.
 
-    Falls back to `text` UNCHANGED on any import/processing failure --
-    this must never crash or disable the whole hook."""
+    Never crashes or disables the whole hook on failure -- but the exact
+    fallback VALUE depends on which stage failed (adversarial-review
+    MINOR, post-#280): an import failure returns `text` genuinely
+    UNCHANGED (the original raw command); a failure in EITHER later
+    processing stage returns whatever text the EARLIER stage(s) already
+    produced, not the original raw command -- each stage's own
+    try/except only ever refuses to advance PAST its own broken step, it
+    never rewinds an already-applied one. A logged import failure
+    (below) is the only one of the two that leaves the WHOLE hook
+    running on unprocessed raw text for every later command in this
+    invocation, which is why it is the one worth a diagnostic line."""
     try:
         hooks_dir = os.path.join(repo_root, "hooks")
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
         import lib_poll_payload
-    except Exception:
+    except Exception as exc:
+        _log_exception("lib_poll_payload-import", exc)
         return text
     try:
         text = _blank_gh_text_flag_values(text, lib_poll_payload)
@@ -234,7 +276,15 @@ try:
     # command rather than guess which repo each issue belongs to -- this
     # hook has no per-segment command parser, and never guessing is safer
     # than resolving to a plausible-looking wrong repo.
-    mrepos = re.findall(r'(?:-R|--repo)[= ]+([^\s\'"]+)', scan_cmd)
+    #
+    # #280 follow-up F4 -- each match's own -R/--repo is now looked up
+    # ONLY within that match's own segment (`_match_segment`), never the
+    # whole command, so an unrelated -R/--repo-shaped string elsewhere in
+    # a compound command can no longer be scavenged as this invocation's
+    # repo (see `_match_segment`'s own comment for real examples).
+    mrepos = []
+    for m in matches:
+        mrepos.extend(_REPO_FLAG_RE.findall(_match_segment(scan_cmd, m.start())))
     distinct_repos = set(mrepos)
     if len(distinct_repos) > 1:
         _log_exception("ambiguous-repo", ValueError(
