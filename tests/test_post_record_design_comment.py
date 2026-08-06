@@ -692,5 +692,113 @@ class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
         self.assertIsNotNone(self.marker(41, "validated"))
 
 
+class TestScansControlFlowNotRawText(_Base):
+    """#280 -- both extraction regexes used to scan the RAW command TEXT,
+    with no notion of what the shell actually EXECUTES vs merely CARRIES.
+    A heredoc BODY that only documents/mentions the `gh issue comment`
+    recipe (never executed unless something later runs it), or a `-R`
+    value sitting inside a quoted `--body`/`-m` argument's free text, was
+    read as a real invocation/flag. Fixed by scanning the SAME
+    payload-vs-control-flow text `hooks/lib_poll_payload.py` (#124)
+    already produces, rather than the raw command."""
+
+    def test_a_heredoc_body_merely_mentioning_the_recipe_makes_no_network_call(self):
+        # A `cat > file <<EOF` heredoc whose body TEXT is never read/run by
+        # anything else in the command is provably inert -- must not even
+        # be QUERIED, let alone granted a marker, no matter how fresh or
+        # valid a real comment for #41 happens to already exist.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-90",
+        }])
+        cmd = ("cat > body.md <<'EOF'\n"
+               "Recipe: post ONE `gh issue comment 41 -F b.md` per call.\n"
+               "EOF")
+        log = self.home / "gh.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_LOG"] = str(log)
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41))
+        self.assertFalse(log.exists(),
+                         "a heredoc body merely mentioning the recipe must "
+                         "never even query gh -- nothing in the command "
+                         "actually executes it")
+
+    def test_a_commit_message_quoting_two_issue_numbers_makes_no_network_call(self):
+        # #280's own measured table: pre-#277 this was 1 call/[41] (regex
+        # `search` finding only the first mention); post-#277's widened
+        # boundary made it 2 calls/[41,42] -- a `git commit -m "..."`
+        # quoting BOTH numbers as free text queried gh for both, and would
+        # have written real markers from real classifying comments.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-91",
+        }])
+        cmd = ('git commit -m "workers run gh issue comment 41 && '
+               'gh issue comment 42 in one call"')
+        log = self.home / "gh.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_LOG"] = str(log)
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41))
+        self.assertIsNone(self.marker(42))
+        self.assertFalse(log.exists(),
+                         "a commit message quoting issue numbers as free "
+                         "text must never query gh for either one")
+
+    def test_a_dash_R_inside_a_quoted_body_argument_is_never_used_as_the_repo(self):
+        # #280's second finding: `--body "compare against -R owner/evil"`
+        # resolved the repo lookup to owner/evil -- the genuine target repo
+        # (derived from cwd's own git remote) was never queried at all.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-92",
+        }])
+        cmd = 'gh issue comment 41 --body "compare against -R owner/evil"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "issue #41 must still be classified -- only "
+                             "the SPURIOUS -R value must be ignored")
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil", 41),
+                          "the quoted -R text must never be treated as a "
+                          "real --repo flag")
+
+    def test_a_heredoc_genuinely_cat_and_run_in_the_same_command_still_fires(self):
+        # Regression control: NOT every heredoc is inert. One that is
+        # `cat`'d to a script and that script IS executed later in the
+        # SAME command must stay live -- this repo has already measured
+        # (lib_poll_payload.py's own header) that a heredoc body is not
+        # inert in general, and #280's fix must not become "blank every
+        # heredoc unconditionally".
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-93",
+        }])
+        cmd = ("cat > script.sh <<'EOF'\n"
+               "gh issue comment 41 -F body.md\n"
+               "EOF\n"
+               "bash script.sh")
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "a heredoc genuinely cat'd into a script and "
+                             "run in the same command must still be "
+                             "treated as a real invocation")
+
+
 if __name__ == "__main__":
     main()
