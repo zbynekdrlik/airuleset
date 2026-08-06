@@ -428,6 +428,15 @@ class TestTotalBindFailureIsFatal(TestCase):
 
     TTL = 6
     DEAD_IP = "203.0.113.9"     # TEST-NET-3: never local → bind always fails
+    # #148: the two FAST-FAIL tests below share these — never the class's
+    # own self.TTL (still 6s, needed small by the EXPIRY test further down).
+    # A single shared pair is what makes the headroom test below actually
+    # GUARD the bound: an adversarial review proved that giving each test
+    # its own independent copy of these numbers let a full revert of the
+    # first test's bound (back to the old, flaky ttl/3.0 at ttl=6) pass the
+    # whole class clean — the "guard" test was checking nothing.
+    FAST_FAIL_TTL = 20
+    FAST_FAIL_DIVISOR = 2.0
 
     def _run_to_exit(self, proc, budget_s):
         """(stderr, elapsed) — or fail naming what the process was still doing."""
@@ -445,16 +454,20 @@ class TestTotalBindFailureIsFatal(TestCase):
         # death instead of burning its budget — #113's `_wait_until_serving`),
         # and finds the diagnosis on stderr.
         #
-        # #148: this method uses its OWN larger TTL, not the class's shared
-        # `self.TTL` (6s, still used by the sibling expiry test below). At
-        # ttl=6 the old bound (ttl/3.0 = 2.0s) had no headroom for full-suite
-        # CPU contention — live-reproduced taking 3.34s under load, a false
-        # flake, not the #113/#114 regression (whose signature is ~6.06s, the
-        # timer holding the process for the FULL ttl). ttl=20 / bound=ttl/2.0
-        # (10s) keeps the same "exits well under half the ttl" shape with
-        # ~8.6s of headroom over the worst load-driven time observed, while
-        # staying far below where the regression would land (~20s).
-        ttl = 20
+        # #148: this method uses the class's shared FAST_FAIL_TTL/DIVISOR
+        # (20s / /2.0 = 10s bound), not `self.TTL` (6s, still used by the
+        # sibling expiry test below). At the OLD ttl=6/bound=ttl/3.0 (2.0s)
+        # the bound had no headroom for full-suite CPU contention —
+        # live-reproduced taking 3.34s under load on dev1 (4-core, 3953-test
+        # suite, 2026-08-06), a false flake, not the #113/#114 regression
+        # (whose signature is ~6.06s, the timer holding the process for the
+        # FULL ttl). The wider ttl/bound keep the same "exits well under
+        # half the ttl" shape with real headroom over the worst load-driven
+        # time observed, while staying far below where the regression would
+        # land (~ttl) — see the sibling headroom test below, which locks
+        # this relationship directly rather than just hoping it holds.
+        ttl = self.FAST_FAIL_TTL
+        bound = ttl / self.FAST_FAIL_DIVISOR
         dest = Path(tempfile.mkdtemp())
         t0 = time.monotonic()
         proc, _ = _spawn(self, "tok114dead", dest, ips=self.DEAD_IP, ttl=ttl)
@@ -467,19 +480,28 @@ class TestTotalBindFailureIsFatal(TestCase):
             "a server that bound nothing reported SUCCESS (rc=0) — the parked "
             "SystemExit was overtaken by the TTL timer's os._exit(0) (#114); "
             "stderr was:\n%s" % err)
+        # NOTE on the message below: by this line #114 is ALREADY ruled out
+        # (its signature is rc=0, and the assertNotEqual above just proved
+        # rc != 0) — so a trip here can never actually BE #114. Don't blame
+        # it; name what it really is (load, or a genuinely new delay).
         self.assertLess(
-            took, ttl / 2.0,
-            "the failure took %.2fs of a %ds TTL — the non-daemon timer thread "
-            "is holding the interpreter open through its own exit (#114)"
-            % (took, ttl))
+            took, bound,
+            "exited in %.2fs, past the %.1fs bound of a %ds TTL — rc was "
+            "non-zero so this is NOT #114 (that reports rc=0 at ~the full "
+            "TTL); suspect CPU contention or a new delay in the bind/exit "
+            "path (#148)" % (took, bound, ttl))
 
     def test_the_fast_fail_bound_has_headroom_over_realistic_subprocess_overhead(self):
         # #148: the ABOVE test's own bound is only meaningful if it has real
         # headroom over what full-suite CPU contention actually does to
         # subprocess spawn/exit timing. Live-reproduced (3 consecutive full
-        # `pytest tests/` runs on this repo, unchanged tree): the SAME fast-
-        # fail path took 3.34s on a loaded box, comfortably tripping the OLD
-        # `ttl/3.0` bound (2.0s at ttl=6) with no code regression at all.
+        # `pytest tests/` runs on dev1, a 4-core box, this repo's 3953-test
+        # suite as of 2026-08-06, unchanged tree): the SAME fast-fail path
+        # took 3.34s once under load, comfortably tripping the OLD `ttl/3.0`
+        # bound (2.0s at ttl=6) with no code regression at all. A weaker/
+        # busier box (this repo also manages shared-vCPU VPS targets) could
+        # plausibly see a larger worst case, hence the margin check below
+        # rather than trusting a single measured number forever.
         #
         # Reproduced DETERMINISTICALLY here (never by waiting for real load,
         # same technique as `test_readiness_wait_survives_a_slow_server_start`
@@ -487,22 +509,38 @@ class TestTotalBindFailureIsFatal(TestCase):
         # fixed startup delay comfortably above the worst load-driven time
         # actually observed, comfortably below the widened bound, and far
         # below where the #113/#114 regression itself would land (~ttl).
+        #
+        # This test shares FAST_FAIL_TTL/FAST_FAIL_DIVISOR with the test
+        # ABOVE (never its own private copy) — an adversarial review proved
+        # that two independent copies let a full revert of the test above,
+        # back to the exact pre-#148 flaky constants, pass this whole class
+        # clean, which means the "guard" checked nothing.
         dest = Path(tempfile.mkdtemp())
-        ttl = 20
+        ttl = self.FAST_FAIL_TTL
+        bound = ttl / self.FAST_FAIL_DIVISOR
         forced_delay_s = 3.5          # > the 3.34s worst case observed live
+        # Real teeth, checked without spending any wall-clock: the bound
+        # must keep a real (>=2x) margin over the worst realistic startup
+        # overhead used below — this fails immediately if either constant is
+        # re-tightened, independent of how fast THIS run's box happens to be.
+        self.assertGreater(
+            bound, forced_delay_s * 2.0,
+            "FAST_FAIL_TTL/FAST_FAIL_DIVISOR give only %.2fs of bound against "
+            "a %.1fs worst-case delay — less than the required 2x margin (#148)"
+            % (bound, forced_delay_s))
         slow = ("import os, sys, time; time.sleep(%r); "
                 "os.execv(sys.executable, [sys.executable, %r] + sys.argv[1:])"
                 % (forced_delay_s, str(SERVER)))
         t0 = time.monotonic()
         proc, _ = _spawn(self, "tok148slow", dest, ips=self.DEAD_IP, ttl=ttl,
-                          launcher=[sys.executable, "-c", slow])
+                         launcher=[sys.executable, "-c", slow])
         err, _ = self._run_to_exit(proc, ttl + 20)
         took = time.monotonic() - t0
 
         self.assertIn("no address", err)
         self.assertNotEqual(0, proc.returncode)
         self.assertLess(
-            took, ttl / 2.0,
+            took, bound,
             "a %.1fs forced startup delay (realistic full-suite load, not "
             "the #113/#114 regression) still tripped the bound — took %.2fs "
             "of a %ds ttl; the bound has no real headroom left (#148)"
