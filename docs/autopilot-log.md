@@ -3802,3 +3802,78 @@ this repo's direct-push model (no dev branch, no PR) — supervisor pushes.
 Full-repo suite green throughout (3953 → 3969 → 3979 tests as new
 regression/hardening tests were added). `ruff check .` and
 `python3 airuleset.py validate` both clean at the end.
+
+
+**Batch 8 (#238, #160): compact-delivery race/thin-context + goal-rearm
+backlog-verification/dark-ping — both committed locally on `main`, direct-push
+model (no dev branch, no PR), supervisor pushes.**
+
+**#238 — same-turn dispatch race + thin-context re-compacts.** Design
+(root cause, chosen approach, rejected alternative for all three defects)
+posted before the first code commit. RED `42769c1` / GREEN `c6afb57`: a
+min-request-age gate (`_compact_request_too_young`, 2.0s default) closes
+the same-turn dispatch race; a thin-context gate
+(`_compact_messages_since_boundary`/`_compact_thin_context`, real
+`assistant`-entry count since the last `compact_boundary`) prevents
+needless "Not enough messages to compact" resends; the thin gate is
+checked before any claim is set, so it never strands one. Adversarial
+review round 1 (opus, fresh-context) found 🔴1 (the age gate was inert in
+production — `cmd_compact_request --record` shared one `time.time()` read
+for both `request_ts`/`now`) and 🔴2 (a vacuous claim-stranding test)
+plus 🟡3/🟡5/🔵9-18 — fixed `3a58e1d` via a shared bounded-retry helper
+(`_compact_retry_until`) + `deliver_compact_record`, a de-vacuoued test
+(real process fingerprint), a non-consuming thin-context return on the
+sync path, and two new mutation-locked boundary-scan fixtures. A SECOND
+fresh-context review of that fix found the retry mechanism itself had
+ZERO test coverage (a mutant reverting it to a bare call passed all 349
+existing tests), +102s of real sleep added to the suite, a 3s-overshoot
+latency regression on self-callback, and an env-var coupling gap that
+could silently restore the original off-switch — fixed `22484c4`: direct
+tests for `_compact_retry_until`/`deliver_compact_record`, an env
+override threaded through every hook-shelling test harness (113s → 9s for
+this file), a tightened self-callback retry interval, and a floor coupling
+`deliver_compact_record`'s hold to the currently-resolved min-age. Plus 5
+more mutation-verified minor fixes (unparseable boundary timestamp,
+duplicate retry-log lines, an untested threshold boundary, non-finite
+hold/interval clamps). Filed #268 as an explicit, un-scoped follow-up for
+one residual config-coupling observation (hook-timeout headroom).
+Full suite green throughout (4073/4073 at the end). `ruff check .` clean.
+
+**#160 — goal-achieved silent dead end / retry budget / streak-reset /
+wedge job silence.** Design posted before the first code commit,
+including the STEP-0 finding that the "stale draft burns retry budget"
+defect was already fixed by an unrelated earlier commit, and a hard-debug
+consult (real gatekeeper journal) that redefined the streak-reset defect
+as a dedup-key bug, not a firing bug. RED `d6e73b7` / GREEN `7c87184`:
+`goal_rearm`'s achieved branch now verifies a genuine `🏁 BACKLOG EMPTY`
+claim against the real repo backlog before trusting it
+(`backlog_marker_gate.classify_backlog_empty_claim` + `_cached_backlog_open`,
+shared with job 10); the give-up ping's dedup key now folds in the
+streak episode's own anchor; `GOAL_REARM_MAX_DARK_S` sends one bounded
+ping instead of a permanent silent dead end; `prompt_wedge_check`'s
+not-waiting branch pings when the repo's own backlog is genuinely open.
+Adversarial review round 1 found 🔴F1 (`_watchdog_backlog_fetch` counted
+the WHOLE repo, not the loop's own core/slice partition), 🔴F2 (the
+dark-ping dedup key was stable across a revival), 🔴F3 (the widened wedge
+ping bypassed its own cooldown), 🟡F4 (dry-run consumed the dark-ping
+one-shot) — fixed `294f1c0`: `_watchdog_backlog_fetch` now shells
+`core-quals`/`slice-quals --count`, the dark-ping key folds in the dark
+episode's own anchor, the wedge ping's cooldown is now resolved once and
+shared by both branches, and the dry-run gate matches the dark-ping's own
+fix. A SECOND fresh-context review, live-measured against this box's own
+journal and a real two-sweep reproduction, found 🔴F1 (a cached "backlog
+open" verdict a re-arm ACTED ON was never invalidated, letting a loop
+that closed its own remaining ticket get re-armed a second time on stale
+evidence), 🟡F2 (`goal_rearm` had no wall-clock self-bound at all despite
+now making a blocking subprocess call per repo, on a box already hitting
+its service-timeout kill several times a day), 🟡F3 (authority resolved
+against the pane cwd instead of the repo root — the #181 I-5 bug
+reintroduced one layer up), 🟡F4 (the wedge job's own new branch had the
+identical dry-run gap round 1 fixed for the dark ping) — fixed `a1ea77a`:
+the cache entry a re-arm acts on is dropped immediately, `goal_rearm`
+shares jobs 8/9's own `tail_deadline` budget, authority resolves against
+`_repo_root(cwd=cwd)`, and the wedge branch's dry-run gate matches the
+dark ping's shape. Plus 4 more mutation-verified minor fixes (a shorter
+negative-cache TTL, `backlog_cache` pruning, a guarded sibling-module
+import, a malformed-timestamp guard). Full suite green throughout
+(4073/4073 at the end). `ruff check .` clean.
