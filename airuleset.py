@@ -1394,6 +1394,22 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
+# #254: "keep-last", NOT "keep-group" -- despite the ticket's own title
+# naming keep-group, that value DESTROYS EVERY ORDINARY STANDALONE
+# (non-grouped) session the moment its one client detaches, identical to
+# boolean `on` -- confirmed live against a real tmux 3.7b server via a
+# genuine pty-attached client on an isolated `-L` scratch socket (never
+# the box's real default server). Since almost every real project session
+# on the fleet is a plain standalone session, keep-group would nuke
+# essentially all of them on every detach -- far worse than the pile-up
+# bug it exists to fix. keep-last is the value that matches what the
+# ticket's OWN prose actually describes: destroy a detached GROUPED
+# sibling only while another session remains in its group, and leave both
+# a group's last surviving member and every standalone session untouched.
+# See render_tmux_history_block/apply_tmux_history_limit below, and
+# TestTmuxDestroyUnattached in tests/test_airuleset.py for the full
+# regression lock against reverting to keep-group or bare `on`.
+TMUX_DESTROY_UNATTACHED = "keep-last"
 TMUX_MARK_START = "# >>> airuleset tmux >>>"
 TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # #235: tmux's own built-in default (2000-line scrollback) plus the current
@@ -1465,6 +1481,50 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # correctly entered copy-mode and scrolled up, Shift+PageDown correctly
 # scrolled back down and auto-exited to the live view, with the pane's
 # own content completely undisturbed throughout.
+#
+# #254: each attach to a tmux session-GROUP (e.g. zbynek-1..4, all sharing
+# the same underlying windows -- the shape a grouped `new-session -t`
+# attach produces) left the detached duplicate orphaned forever under
+# tmux's factory-default `destroy-unattached off` -- reproduced live on
+# dev1 against the real default socket with a genuine pty-attached-then-
+# detached grouped sibling (STILL-VALID evidence on #254). Fix:
+# `destroy-unattached keep-last` (see TMUX_DESTROY_UNATTACHED above for
+# why NOT the ticket's own literally-named keep-group). UNLIKE window-size
+# above, this is safe to LIVE-APPLY for a different reason: by
+# definition it only ever evaluates sessions with ZERO attached clients,
+# so it structurally cannot disturb anything currently on screen. Verified
+# live: applying it against a running server holding a pre-existing
+# pile-up (one attached session, two already-detached grouped duplicates
+# -- the exact zbynek-1/2/3/4 shape before manual cleanup) immediately
+# swept the two duplicates away with no new attach/detach cycle needed,
+# while leaving the attached grouped session AND a separate attached
+# standalone session completely untouched. This also answers "how do
+# already-piled-up siblings get cleaned": the live-apply itself performs
+# a one-time sweep on the very next push/install -- no new hook, no new
+# watchdog job needed.
+#
+# ADVERSARIAL-REVIEW FINDING (#254, MINOR): live-apply-safe and conf-
+# read-safe are INDEPENDENT claims (#236 vs #241's own lesson for
+# window-size -- one option was unsafe live-applied, the OTHER unsafe
+# merely READ from a conf file at server startup). This block's own live-
+# apply proof above was run against tmux 3.7b; the cold conf-PARSE half
+# was separately verified clean on BOTH the fleet's stock tmux 3.4 (the
+# only version Ubuntu 24.04 noble ships, and the live server on any box
+# not yet rebooted through #242's cutover) and 3.7b -- `set-option -g
+# destroy-unattached keep-last` in a conf file starts cleanly on both, and
+# a live `set-option` against a running 3.4 server also succeeds. No
+# #241-shaped crash-at-parse-time hazard on either binary.
+#
+# Pane addressing (verified, not assumed): every keystroke-sending job in
+# watchdog/__init__.py (list_claude_panes/_reconcile_candidate_panes)
+# addresses panes exclusively by tmux's stable `#{pane_id}` (`%N`,
+# server-global, independent of which session name currently references
+# the underlying window -- their own docstrings already say "grouped
+# sessions share the same pane_id"). `_pane_location()` (which renders a
+# `session:window.pane` string like the `zbynek-4:2.0` the ticket cites)
+# is used PURELY as human-readable text interpolated into log lines,
+# never as a `tmux -t` target -- so destroying a detached grouped
+# sibling's session name can never break pane resolution.
 
 
 # #267: the three Shift+PgUp/PgDn keyboard-scrollback bindings, as tmux
@@ -1482,11 +1542,13 @@ TMUX_SCROLLBACK_KEYBINDS = [
 
 
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
-                               default_size=TMUX_DEFAULT_SIZE):
+                               default_size=TMUX_DEFAULT_SIZE,
+                               destroy_unattached=TMUX_DESTROY_UNATTACHED):
     keybind_lines = "\n".join(" ".join(argv) for argv in TMUX_SCROLLBACK_KEYBINDS)
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
+        f"set-option -g destroy-unattached {destroy_unattached}\n"
         f"set-option -g default-size {default_size}\n"
         f"{keybind_lines}\n"
         f"{TMUX_MARK_END}"
@@ -1537,13 +1599,15 @@ def _default_tmux_run(argv):
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
                               default_size: str = TMUX_DEFAULT_SIZE,
+                              destroy_unattached: str = TMUX_DESTROY_UNATTACHED,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
-    (#235) plus default-size (#236). `window-size manual` was REMOVED
-    again by #241 -- it crashes tmux 3.4's server outright at startup, so
-    it is never emitted here at all, conf-only or otherwise (see the
-    module-level comment above `render_tmux_history_block` for the full
-    incident history and the `default-size`-alone trade-off this leaves).
+    (#235), destroy-unattached (#254), and default-size (#236).
+    `window-size manual` was REMOVED again by #241 -- it crashes tmux
+    3.4's server outright at startup, so it is never emitted here at all,
+    conf-only or otherwise (see the module-level comment above
+    `render_tmux_history_block` for the full incident history and the
+    `default-size`-alone trade-off this leaves).
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
     block's CONTENT in place if a clean pair of markers already exists
@@ -1551,14 +1615,24 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     `_clean_tmux_block_spans`), no-op on a second run with nothing
     changed. Returns True iff the conf file's bytes changed.
 
-    Also live-applies history-limit -- and ONLY history-limit -- on any
-    RUNNING tmux server for this user (`tmux set-option -g history-limit
-    N`), exactly #235's original, already-shipped, already-proven-safe
-    scope: an already-running session's NEW panes/windows pick it up
-    immediately, without waiting for the next server start; EXISTING panes
-    keep their creation-time limit (tmux has no way to grow an existing
-    pane's history buffer in place). This is a server OPTION set, never a
-    keystroke into any pane.
+    Also live-applies history-limit on any RUNNING tmux server for this
+    user (`tmux set-option -g history-limit N`), exactly #235's original,
+    already-shipped, already-proven-safe scope: an already-running
+    session's NEW panes/windows pick it up immediately, without waiting
+    for the next server start; EXISTING panes keep their creation-time
+    limit (tmux has no way to grow an existing pane's history buffer in
+    place). This is a server OPTION set, never a keystroke into any pane.
+
+    #254: destroy-unattached is ALSO live-applied, right after
+    history-limit -- unlike window-size/default-size it only ever
+    evaluates sessions with ZERO attached clients, so it structurally
+    cannot disturb anything currently on screen (verified live: see the
+    module comment above `render_tmux_history_block`). Live-applying it
+    is what immediately self-heals any ALREADY-existing detached grouped
+    pile-up (e.g. zbynek-1/2/3 while zbynek-4 stays attached) on the very
+    next push, with no new hook and no new watchdog job needed -- tmux's
+    own destroy-unattached evaluation re-fires on every future detach
+    from then on.
 
     default-size is DELIBERATELY CONF-ONLY -- never live-applied via a
     real tmux subprocess call, in any code path. It lands in the conf
@@ -1588,7 +1662,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     conf-file write result above -- mirroring the ticket's own "ignore
     failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
-    block = render_tmux_history_block(limit, default_size)
+    block = render_tmux_history_block(limit, default_size, destroy_unattached)
 
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(existing)
@@ -1609,7 +1683,10 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         path.write_text(new)
 
     runner = run or _default_tmux_run
-    live_argvs = [["tmux", "set-option", "-g", "history-limit", str(limit)]]
+    live_argvs = [
+        ["tmux", "set-option", "-g", "history-limit", str(limit)],
+        ["tmux", "set-option", "-g", "destroy-unattached", str(destroy_unattached)],
+    ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     for argv in live_argvs:
         try:
