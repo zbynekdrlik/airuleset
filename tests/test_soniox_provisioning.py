@@ -233,7 +233,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0][0], "montalu@subdev")
 
-    def test_writes_to_soniox_env_under_a_tight_umask(self):
+    def test_writes_to_soniox_env_under_a_tight_umask_and_chmod(self):
         src = self._source_with_key()
         calls = []
 
@@ -249,6 +249,11 @@ class TestProvisionSubdevSonioxKey(TestCase):
         remote_cmd = argv[-1]
         self.assertIn("umask 077", remote_cmd)
         self.assertIn("~/.soniox.env", remote_cmd)
+        # #275 adversarial-review MINOR: umask only governs file CREATION —
+        # `cat >` over an already-existing, loosely-permissioned file would
+        # otherwise leave the old mode in place. An explicit chmod after the
+        # write closes that regardless of what was there before.
+        self.assertIn("chmod 600 ~/.soniox.env", remote_cmd)
 
     def test_ssh_failure_exception_is_tracked_not_raised(self):
         src = self._source_with_key()
@@ -265,60 +270,119 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# ffmpeg static binary — the no-sudo subdev accounts have NO other install
-# path (RUNTIME_DEPS' apt-get can never run there).
+# ffmpeg + ffprobe static binaries — the no-sudo subdev accounts have NO
+# other install path (RUNTIME_DEPS' apt-get can never run there). #275
+# adversarial-review MAJOR-1/2/3: extract.sh needs BOTH binaries, they must
+# land somewhere the launcher's own PATH fix-up already covers (~/.local/bin,
+# never ~/bin), and a hard-killed subprocess must never leave a
+# truncated-but-"executable" binary at the final destination.
 # ---------------------------------------------------------------------------
 
-class TestFfmpegAvailable(TestCase):
-    def test_false_when_dest_missing_and_no_system_ffmpeg(self):
+class TestBinaryReachable(TestCase):
+    def test_false_when_dest_missing_and_not_on_path(self):
         d = Path(tempfile.mkdtemp()) / "does-not-exist" / "ffmpeg"
         with m.patch("shutil.which", return_value=None):
-            self.assertFalse(airuleset._ffmpeg_available(d))
+            self.assertFalse(airuleset._binary_reachable(d, "ffmpeg"))
 
-    def test_true_when_the_destination_already_holds_an_executable(self):
-        # this is what recognizes montalu's own HAND install as already-done,
-        # not just a freshly-managed one.
+    def test_true_when_dest_is_a_real_executable(self):
+        # this is what recognizes montalu's own HAND install as already-done.
         d = Path(tempfile.mkdtemp()) / "ffmpeg"
         d.write_text("#!/bin/sh\n")
         d.chmod(0o755)
         with m.patch("shutil.which", return_value=None):
-            self.assertTrue(airuleset._ffmpeg_available(d))
+            self.assertTrue(airuleset._binary_reachable(d, "ffmpeg"))
 
     def test_a_non_executable_destination_falls_back_to_path(self):
         d = Path(tempfile.mkdtemp()) / "ffmpeg"
         d.write_text("not executable, e.g. a truncated download")
         with m.patch("shutil.which", return_value="/usr/bin/ffmpeg"):
-            self.assertTrue(airuleset._ffmpeg_available(d))
+            self.assertTrue(airuleset._binary_reachable(d, "ffmpeg"))
 
     def test_true_via_system_path_when_our_own_destination_is_absent(self):
         d = Path(tempfile.mkdtemp()) / "does-not-exist"
         with m.patch("shutil.which", return_value="/usr/bin/ffmpeg"):
-            self.assertTrue(airuleset._ffmpeg_available(d))
+            self.assertTrue(airuleset._binary_reachable(d, "ffmpeg"))
+
+    def test_asks_which_for_the_exact_binary_name_given(self):
+        seen = []
+
+        def fake_which(name):
+            seen.append(name)
+            return None
+
+        d = Path(tempfile.mkdtemp()) / "does-not-exist"
+        with m.patch("shutil.which", side_effect=fake_which):
+            airuleset._binary_reachable(d, "ffprobe")
+        self.assertEqual(seen, ["ffprobe"])
+
+
+class TestFfmpegAvailable(TestCase):
+    def _paths(self):
+        base = Path(tempfile.mkdtemp())
+        return base / "ffmpeg", base / "ffprobe"
+
+    def test_false_when_only_ffmpeg_is_present(self):
+        # #275 review MAJOR-1: ffmpeg alone is NOT "available" -- extract.sh
+        # needs ffprobe too.
+        d, p = self._paths()
+        d.write_text("#!/bin/sh\n")
+        d.chmod(0o755)
+        with m.patch("shutil.which", return_value=None):
+            self.assertFalse(airuleset._ffmpeg_available(d, p))
+
+    def test_false_when_only_ffprobe_is_present(self):
+        d, p = self._paths()
+        p.write_text("#!/bin/sh\n")
+        p.chmod(0o755)
+        with m.patch("shutil.which", return_value=None):
+            self.assertFalse(airuleset._ffmpeg_available(d, p))
+
+    def test_true_when_both_are_present(self):
+        d, p = self._paths()
+        for f in (d, p):
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        with m.patch("shutil.which", return_value=None):
+            self.assertTrue(airuleset._ffmpeg_available(d, p))
+
+    def test_true_via_system_path_for_both_when_our_own_dests_are_absent(self):
+        d, p = self._paths()
+        with m.patch("shutil.which", return_value="/usr/bin/x"):
+            self.assertTrue(airuleset._ffmpeg_available(d, p))
+
+    def test_uses_the_dot_local_bin_destination_by_default(self):
+        # #275 review MAJOR-2: never ~/bin -- only ~/.local/bin is on PATH
+        # inside an actual Bash tool call (the launcher's own fix-up).
+        self.assertEqual(airuleset.FFMPEG_STATIC_DEST.parts[-3:],
+                         (".local", "bin", "ffmpeg"))
+        self.assertEqual(airuleset.FFPROBE_STATIC_DEST.parts[-3:],
+                         (".local", "bin", "ffprobe"))
 
 
 class TestEnsureFfmpegStaticBinary(TestCase):
-    def _dest(self):
-        return Path(tempfile.mkdtemp()) / "bin" / "ffmpeg"
+    def _dests(self):
+        base = Path(tempfile.mkdtemp()) / "local" / "bin"
+        return base / "ffmpeg", base / "ffprobe"
 
     def test_no_op_when_already_available(self):
-        d = self._dest()
+        d, p = self._dests()
         with m.patch.object(airuleset, "_ffmpeg_available", return_value=True), \
                 m.patch("subprocess.run") as run:
-            airuleset.ensure_ffmpeg_static_binary(d)
+            airuleset.ensure_ffmpeg_static_binary(d, p)
         run.assert_not_called()
 
     def test_installs_via_one_subprocess_call_when_missing(self):
-        d = self._dest()
+        d, p = self._dests()
         calls = {"n": 0}
 
-        def fake_available(dest=None):
+        def fake_available(dest=None, probe_dest=None):
             calls["n"] += 1
             return calls["n"] > 1   # missing on the check, present after install
 
         with m.patch.object(airuleset, "_ffmpeg_available",
                              side_effect=fake_available), \
                 m.patch("subprocess.run", return_value=_fake_cp()) as run:
-            airuleset.ensure_ffmpeg_static_binary(d)
+            airuleset.ensure_ffmpeg_static_binary(d, p)
         run.assert_called_once()
         argv = run.call_args[0][0]
         self.assertEqual(argv[0], "bash")
@@ -328,25 +392,89 @@ class TestEnsureFfmpegStaticBinary(TestCase):
         self.assertIn(airuleset.FFMPEG_STATIC_URL, script)
         self.assertIn("tar -xJ", script)
         self.assertIn(str(d), script)
+        self.assertIn(str(p), script)
+        # #275 review MAJOR-3: extraction/chmod happen inside a SCRATCH dir
+        # under the destination's own parent (never the final path directly,
+        # and never a separate /tmp -- same filesystem is what makes the
+        # final `mv` atomic), only `mv`d into place at the very end.
+        self.assertIn("mktemp -d -p", script)
+        self.assertIn('mv "$TMP/ffmpeg.new" %s' % d, script)
+        self.assertIn('mv "$TMP/ffprobe.new" %s' % p, script)
+        self.assertNotIn('cp "$MBIN" %s' % d, script,
+                         "must never cp directly INTO the final destination")
 
     def test_install_failure_is_loud_but_non_fatal(self):
         out = StringIO()
-        d = self._dest()
+        d, p = self._dests()
         with m.patch.object(airuleset, "_ffmpeg_available", return_value=False), \
                 m.patch("subprocess.run",
                         return_value=_fake_cp(returncode=1, stderr="boom")), \
                 m.patch("sys.stderr", out):
-            airuleset.ensure_ffmpeg_static_binary(d)   # must not raise
+            airuleset.ensure_ffmpeg_static_binary(d, p)   # must not raise
         self.assertIn("ffmpeg static install failed", out.getvalue())
 
     def test_install_exception_is_non_fatal(self):
         out = StringIO()
-        d = self._dest()
+        d, p = self._dests()
         with m.patch.object(airuleset, "_ffmpeg_available", return_value=False), \
                 m.patch("subprocess.run", side_effect=FileNotFoundError("curl")), \
                 m.patch("sys.stderr", out):
-            airuleset.ensure_ffmpeg_static_binary(d)   # must not raise
+            airuleset.ensure_ffmpeg_static_binary(d, p)   # must not raise
         self.assertIn("ffmpeg static install skipped", out.getvalue())
+
+    def test_a_real_extraction_writes_both_binaries_atomically(self):
+        # #275 review MAJOR-3, end-to-end: build a REAL small tar.xz fixture
+        # (no network) containing both "binaries", run the REAL bash script
+        # this function constructs (only the curl step is stubbed, via a
+        # fake `curl` earlier on PATH that just cats the fixture archive),
+        # and confirm both land at their real final destinations, correctly
+        # executable, with nothing left mid-way.
+        import subprocess
+        import tarfile
+
+        d, p = self._dests()
+        work = Path(tempfile.mkdtemp())
+        srcdir = work / "ffmpeg-release-amd64-static"
+        srcdir.mkdir()
+        (srcdir / "ffmpeg").write_text("#!/bin/sh\necho fake-ffmpeg\n")
+        (srcdir / "ffprobe").write_text("#!/bin/sh\necho fake-ffprobe\n")
+        for f in (srcdir / "ffmpeg", srcdir / "ffprobe"):
+            f.chmod(0o755)
+        archive = work / "fixture.tar.xz"
+        with tarfile.open(archive, "w:xz") as tf:
+            tf.add(srcdir, arcname=srcdir.name)
+
+        fake_bin = work / "fakebin"
+        fake_bin.mkdir()
+        curl_stub = fake_bin / "curl"
+        curl_stub.write_text("#!/bin/sh\ncat %s\n" % archive)
+        curl_stub.chmod(0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = "%s:%s" % (fake_bin, env.get("PATH", ""))
+
+        # captured BEFORE `subprocess.run` gets patched below -- calling the
+        # (post-patch) name `subprocess.run` from inside this same helper
+        # would recurse into the mock itself forever.
+        _real_subprocess_run = subprocess.run
+
+        def real_run(argv, **kw):
+            kw.setdefault("env", env)
+            return _real_subprocess_run(argv, **kw)
+
+        with m.patch.object(airuleset, "_ffmpeg_available",
+                             side_effect=lambda dd=None, pp=None:
+                             (dd or d).is_file() and (pp or p).is_file()), \
+                m.patch("subprocess.run", side_effect=real_run):
+            airuleset.ensure_ffmpeg_static_binary(d, p)
+
+        self.assertTrue(d.is_file() and os.access(d, os.X_OK))
+        self.assertTrue(p.is_file() and os.access(p, os.X_OK))
+        self.assertEqual(d.read_text(), "#!/bin/sh\necho fake-ffmpeg\n")
+        self.assertEqual(p.read_text(), "#!/bin/sh\necho fake-ffprobe\n")
+        # no leftover scratch dirs under the destination's parent
+        leftovers = [c for c in d.parent.iterdir() if c.name not in ("ffmpeg", "ffprobe")]
+        self.assertEqual(leftovers, [], "scratch dir must be cleaned up: %s" % leftovers)
 
 
 if __name__ == "__main__":

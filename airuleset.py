@@ -3104,30 +3104,51 @@ def ensure_claude_cli_installed(env: dict = None):
 
 FFMPEG_STATIC_URL = ("https://johnvansickle.com/ffmpeg/releases/"
                       "ffmpeg-release-amd64-static.tar.xz")
-FFMPEG_STATIC_DEST = Path.home() / "bin" / "ffmpeg"
+# ~/.local/bin, NOT ~/bin (#275 adversarial-review MAJOR-2): only
+# `~/.profile` (a LOGIN shell) adds `~/bin` to PATH, but a Claude Code Bash
+# tool call is NOT one — `~/.local/bin` is the one directory this repo's own
+# managed claude launcher ALREADY prepends to PATH on every invocation (see
+# the `case ":$PATH:" in ...` line above, "claude installs to ~/.local/bin"),
+# so every Bash tool call inside a session started that way already has it,
+# with zero new PATH machinery needed.
+FFMPEG_STATIC_BIN_DIR = Path.home() / ".local" / "bin"
+FFMPEG_STATIC_DEST = FFMPEG_STATIC_BIN_DIR / "ffmpeg"
+# skills/meeting-analysis/scripts/extract.sh hard-fails at `command -v
+# ffprobe` too (#275 adversarial-review MAJOR-1) -- ffmpeg alone leaves
+# Phase 1 broken on the no-sudo accounts. The static tarball already
+# contains both binaries in the ONE download; only one extra `cp` is needed.
+FFPROBE_STATIC_DEST = FFMPEG_STATIC_BIN_DIR / "ffprobe"
 
 
-def _ffmpeg_available(dest: Path = None) -> bool:
-    """True iff a working ffmpeg is already reachable -- either on PATH (a
-    system package, the common case on dev1/dev2/gatekeeper) or at our own
-    managed destination (a prior install here, INCLUDING one done BY HAND --
-    montalu already installed a static ffmpeg into ~/bin this way before
-    this function existed, #275; checking the destination path directly,
-    not just PATH, is what recognizes that as already-done instead of
+def _binary_reachable(dest: Path, which_name: str) -> bool:
+    """True iff `dest` is a genuinely executable file, or `which_name` (the
+    bare command name the skill invokes, e.g. "ffmpeg"/"ffprobe") is
+    otherwise on PATH already -- a system package, or a prior install here
+    done BY HAND (montalu already installed a static ffmpeg before this
+    function existed, #275; checking the destination path directly, not
+    just PATH, is what recognizes that as already-done instead of
     reinstalling over it)."""
-    d = dest or FFMPEG_STATIC_DEST
-    if d.is_file() and os.access(d, os.X_OK):
+    if dest.is_file() and os.access(dest, os.X_OK):
         return True
-    return shutil.which("ffmpeg") is not None
+    return shutil.which(which_name) is not None
 
 
-def ensure_ffmpeg_static_binary(dest: Path = None):
-    """Best-effort, time-boxed, non-fatal static-ffmpeg install into
-    `~/bin/ffmpeg` (#275): the subdev stream accounts have NO sudo at all,
-    so `check_runtime_deps()`'s `apt-get install` path can never run there
-    -- montalu already worked around this by hand, and montalu2/montalu3/
-    montalu4 (and any future stream account) hit the identical wall the
-    moment they run meeting-analysis. A per-user ~/bin install needs no
+def _ffmpeg_available(dest: Path = None, probe_dest: Path = None) -> bool:
+    """True iff BOTH ffmpeg AND ffprobe are already reachable -- the skill's
+    own extraction step needs both (#275 review MAJOR-1); ffmpeg alone
+    being present is not "available" for this skill's purposes."""
+    d = dest or FFMPEG_STATIC_DEST
+    p = probe_dest or FFPROBE_STATIC_DEST
+    return _binary_reachable(d, "ffmpeg") and _binary_reachable(p, "ffprobe")
+
+
+def ensure_ffmpeg_static_binary(dest: Path = None, probe_dest: Path = None):
+    """Best-effort, time-boxed, non-fatal static-ffmpeg(+ffprobe) install
+    into `~/.local/bin` (#275): the subdev stream accounts have NO sudo at
+    all, so `check_runtime_deps()`'s `apt-get install` path can never run
+    there -- montalu already worked around this by hand, and montalu2/
+    montalu3/montalu4 (and any future stream account) hit the identical
+    wall the moment they run meeting-analysis. A per-user install needs no
     privilege at all.
 
     Same shape as `ensure_claude_cli_installed()`: ONE subprocess call does
@@ -3135,40 +3156,59 @@ def ensure_ffmpeg_static_binary(dest: Path = None):
     or real tar archive to test -- only the constructed shell command and
     the subprocess's own returncode are asserted.
 
-    Harmless no-op wherever ffmpeg is already reachable (dev1/dev2/
-    gatekeeper's system package, or an already-completed prior run here --
-    including montalu's own hand install)."""
+    The extract+chmod step writes into a SCRATCH subdirectory of the FINAL
+    destination dir (never the final path directly), then `mv`s both
+    binaries into place only once BOTH are confirmed extracted and
+    chmod'd (#275 adversarial-review MAJOR-3): `cp` into a live destination
+    path creates the target file with its final executable mode BEFORE its
+    content is fully written, so a hard-killed subprocess (this call's own
+    180s `timeout=` sends SIGKILL, which no shell `trap` can intercept)
+    could otherwise leave a truncated-but-"executable" binary that
+    `_ffmpeg_available()` would then report as done FOREVER. Placing the
+    scratch dir under the SAME parent as the final destination (rather than
+    a separate `/tmp`) keeps the final `mv` an atomic same-filesystem
+    rename, not a cross-device copy.
+
+    Harmless no-op wherever both binaries are already reachable (dev1/dev2/
+    gatekeeper's system packages, or an already-completed prior run here --
+    including montalu's own hand-installed ffmpeg)."""
     import subprocess
     import shlex
     d = dest or FFMPEG_STATIC_DEST
-    if _ffmpeg_available(d):
+    p = probe_dest or FFPROBE_STATIC_DEST
+    if _ffmpeg_available(d, p):
         return
     script = (
         "set -o pipefail; "
-        "TMP=$(mktemp -d) && trap 'rm -rf \"$TMP\"' EXIT && "
+        "mkdir -p %s && "
+        "TMP=$(mktemp -d -p %s) && trap 'rm -rf \"$TMP\"' EXIT && "
         "curl -fsSL %s | tar -xJ -C \"$TMP\" && "
-        "BIN=$(find \"$TMP\" -type f -name ffmpeg -perm -u+x | head -1) && "
-        "[ -n \"$BIN\" ] && "
-        "mkdir -p %s && cp \"$BIN\" %s && chmod 755 %s"
-    ) % (shlex.quote(FFMPEG_STATIC_URL), shlex.quote(str(d.parent)),
-         shlex.quote(str(d)), shlex.quote(str(d)))
+        "MBIN=$(find \"$TMP\" -type f -name ffmpeg -perm -u+x | head -1) && "
+        "PBIN=$(find \"$TMP\" -type f -name ffprobe -perm -u+x | head -1) && "
+        "[ -n \"$MBIN\" ] && [ -n \"$PBIN\" ] && "
+        "cp \"$MBIN\" \"$TMP/ffmpeg.new\" && cp \"$PBIN\" \"$TMP/ffprobe.new\" && "
+        "chmod 755 \"$TMP/ffmpeg.new\" \"$TMP/ffprobe.new\" && "
+        "mv \"$TMP/ffmpeg.new\" %s && mv \"$TMP/ffprobe.new\" %s"
+    ) % (shlex.quote(str(d.parent)), shlex.quote(str(d.parent)),
+         shlex.quote(FFMPEG_STATIC_URL), shlex.quote(str(d)), shlex.quote(str(p)))
     try:
         r = subprocess.run(["bash", "-c", script],
                             capture_output=True, text=True, timeout=180)
-        if r.returncode == 0 and _ffmpeg_available(d):
-            print("    ffmpeg: installed static binary -> %s" % d)
+        if r.returncode == 0 and _ffmpeg_available(d, p):
+            print("    ffmpeg: installed static ffmpeg+ffprobe -> %s" % d.parent)
         else:
             print("    ⚠ ffmpeg static install failed (rc=%s): %s\n"
                   "    Install manually: curl -fsSL %s | tar -xJ -C /tmp && "
-                  "cp /tmp/*/ffmpeg %s && chmod 755 %s"
+                  "cp /tmp/*/ffmpeg %s && cp /tmp/*/ffprobe %s && "
+                  "chmod 755 %s %s"
                   % (r.returncode, (r.stderr or r.stdout).strip()[:200],
-                     FFMPEG_STATIC_URL, d, d),
+                     FFMPEG_STATIC_URL, d, p, d, p),
                   file=sys.stderr)
     except Exception as e:
         print("    ⚠ ffmpeg static install skipped (%s) — "
               "install manually: curl -fsSL %s | tar -xJ -C /tmp && "
-              "cp /tmp/*/ffmpeg %s && chmod 755 %s"
-              % (e, FFMPEG_STATIC_URL, d, d), file=sys.stderr)
+              "cp /tmp/*/ffmpeg %s && cp /tmp/*/ffprobe %s && chmod 755 %s %s"
+              % (e, FFMPEG_STATIC_URL, d, p, d, p), file=sys.stderr)
 
 
 def reconcile_managed_plugins(settings: dict) -> dict:
@@ -4734,7 +4774,8 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
             ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
                           "-o", "StrictHostKeyChecking=no"]
         argv = ssh_prefix + [f"{remote['user']}@{remote['host']}",
-                              "umask 077; cat > ~/.soniox.env"]
+                              "umask 077; cat > ~/.soniox.env && "
+                              "chmod 600 ~/.soniox.env"]
         try:
             r = run(argv, input=line + "\n", capture_output=True,
                     text=True, timeout=20)
