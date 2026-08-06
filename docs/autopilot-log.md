@@ -3802,3 +3802,49 @@ this repo's direct-push model (no dev branch, no PR) — supervisor pushes.
 Full-repo suite green throughout (3953 → 3969 → 3979 tests as new
 regression/hardening tests were added). `ruff check .` and
 `python3 airuleset.py validate` both clean at the end.
+
+2026-08-06 worktree #212 (usage-alert identity + misroute + dedup): live
+reproduction on montalu@subdev (read-only ssh, default key) confirmed all
+three parts of the 2026-08-06 comment's scope extension. Root cause 1
+(identity): check_usage()'s Discord body carried only label+percent+reset,
+undecodable on a phone. Root cause 2 (misroute): `account_owner` in
+run_once() came from `pane_owner()` — a raw tmux-session-name lookup with
+ZERO knowledge of notify.STREAM_NOTIFY_OWNER (#259's montalu/simap→zbynek,
+david→david redirect) — live-verified: on montalu's own box `pane_owner()`
+resolves "montalu" (no per-owner .env keys, by #259's own design), while
+`notify.resolve_owner()` on the SAME box correctly resolves "zbynek" with
+both channel+mention populated. Root cause 3 (found investigating, same
+function): Anthropic's oauth/usage endpoint returns `resets_at` with
+sub-second jitter — two live fetch_usage() calls 3s apart returned
+different strings for the SAME window — so the raw-string dedup re-fired
+every 15-min poll (11 duplicate journal lines observed live, 98%→99%
+across ~2.5h). Design comment posted BEFORE first commit:
+https://github.com/zbynekdrlik/airuleset/issues/212#issuecomment-5202661998
+Fix round 1: test:03e445a[red]→feat:307af48[green] — identity fields
+(account email from ~/.claude.json, hostname/unix-account, resolved owner)
+in the alert body; write_usage_cache() now records account_email; new
+notify.stream_redirect() applied at run_once()'s two pane_owner() call
+sites (main loop + hosted-panes); _reset_bucket() dedup (truncate to
+minute). Fresh-context adversarial review (Opus) found 1🔴+3🟡: the
+truncate-not-round bucket still mis-deduped ~1 poll in 5 (real jitter
+straddles the boundary, not offset from it — verified against a replay of
+real fleet.jsonl resets_at history), 4 MORE un-redirected pane_owner()
+call sites (job 14 compact-stash-skip, job 20 goal-stall/drift/rearm), and
+a missing-resets_at input would silently NEVER alert (collided with the
+"not yet alerted" None sentinel). Fix round 2: fix:d72dc57 — round
+(not truncate) + UTC-normalize the dedup bucket, redirect all 4 remaining
+call sites, stable "raw:<value>" sentinel for missing/malformed
+resets_at, new structural test (TestPaneOwnerAlwaysRedirected) locking
+EVERY pane_owner() call site to be wrapped in stream_redirect() so a
+future un-redirected site fails CI instead of silently mis-routing.
+Review comment posted:
+https://github.com/zbynekdrlik/airuleset/issues/212#issuecomment-5203135580
+Filed #269 (fleet usage reporting group-by-account — cross-cutting,
+explicit follow-up per the issue's original broader scope) and #270
+(superseded mid-fix — job 14's instance was fixed directly in round 2
+after all, see the issue comment). Full suite 3990 passed / 2 pre-existing
+unrelated flakes (confirmed passing in isolation: a banned-phrase-gate
+test and a SIGTERM-timing test, neither touches notify/watchdog/usage-
+cache). ruff clean throughout. Worktree-isolated (direct-to-main repo,
+this dispatch never pushes) — commits are on branch
+`worktree-agent-a3c9550651cd159ae`; supervisor integrates.
