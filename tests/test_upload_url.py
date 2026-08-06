@@ -256,6 +256,26 @@ class TestReceiveFilesModule(TestCase):
         t = read("skills/meeting-analysis/SKILL.md")
         self.assertIn("airuleset.py upload", t)
 
+    def test_documents_the_credential_channel(self):
+        # #256: nothing always-on told a session that `airuleset.py secret`
+        # exists, so a session needing a credential reached for `upload`
+        # (the file channel) instead — the wrong tool for a credential.
+        t = read(self.MOD)
+        self.assertIn("secret request", t)
+        self.assertIn("secret exec", t)
+        self.assertIn("CREDENTIAL", t.upper())
+
+    def test_bans_pasting_a_credential_into_chat(self):
+        t = read(self.MOD)
+        # Scope to the credential-specific BANNED paragraph, not the
+        # generic scp-banned line above it and not merely the section
+        # heading (both of which would make this assertion vacuous —
+        # they're already true on the pre-#256 file).
+        section = t.index("CREDENTIALS FROM the User")
+        idx = t.index("BANNED", section)
+        tail = t[idx:]
+        self.assertIn("chat", tail.lower())
+
 
 class TestMultiInterfaceUrls(TestCase):
     """The URL must be shown on EVERY private interface (tailscale + LAN), because
