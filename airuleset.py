@@ -3953,11 +3953,26 @@ def _watchdog_backlog_fetch(cwd):
     `None` (unmeasurable), which every caller already treats as "never
     guess, skip acting" (`_cached_backlog_open`).
 
+    #160-review-style finding 🟡F3 (this ticket's own review, proven live)
+    — the very #181 I-5 bug `_repo_root`'s own docstring describes (a
+    project's `airuleset:authority=...` marker invisible whenever cwd is a
+    SUBDIRECTORY of the repo) was reintroduced ONE LEVEL UP here: `cwd` is
+    the PANE's cwd, which can be a subdirectory of the actual repo root, so
+    resolving authority against it directly can pick a DIFFERENT profile
+    than the CHILD subprocess (which always resolves against `_repo_root()`
+    inside `cmd_core_quals`/`cmd_slice_quals`) — the child then refuses
+    outright, permanently and silently disabling both defect 1 and defect 4
+    for any such repo. Resolving authority against `_repo_root(cwd=cwd)`
+    here (falling back to the raw `cwd` only when the root itself cannot be
+    resolved) guarantees this function picks the SAME command the child
+    would independently choose for itself.
+
     Wired HERE, like every other network call in this file, so run_once's
     unit tests stay network-free."""
     import subprocess
     try:
-        authority = resolve_authority(cwd=cwd)
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
     except Exception:
         return None
     cmd_name = "core-quals" if authority == "full" else "slice-quals"

@@ -1552,6 +1552,175 @@ class TestGoalAchievedBacklogVerification(GoalRearmBase):
                  backlog_fetch=fetch)
         self.assertEqual(len(calls), 1, calls)
 
+    def test_stale_cached_true_never_double_rearms_after_backlog_empties(self):
+        # #160-review-style finding 🔴F1 (this ticket's own review, proven
+        # live against this exact harness) -- once a cached `True` verdict
+        # is ACTED ON (a re-arm), it must be dropped so the NEXT
+        # achieved-with-claim sweep for this cwd reads FRESH data.
+        # Otherwise: a loop closes the remaining ticket(s), claims empty
+        # again within the SAME 10-minute cache window, and job 20 reads
+        # the STALE cached `True` again -> a SECOND spurious re-arm ->
+        # the 2-attempt cap is exhausted by re-arms that were never
+        # wrong -> the give-up ping fires at a loop that finished
+        # correctly every time.
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("Some work happened.\n"
+                                  "🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        open_flag = [True]
+        calls = []
+
+        def fetch(cwd):
+            calls.append(cwd)
+            return 3 if open_flag[0] else 0
+
+        state = {}
+        now = time.time()
+        _tmux1, logs1 = self._go(
+            self.ACHIEVED_PANE, entries=entries, state=state, now=now,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=fetch)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs1), logs1)
+        self.assertEqual(len(calls), 1, calls)
+        # the re-arm closed the remaining ticket(s) -- backlog genuinely
+        # empty now, WITHIN the same 10-minute cache TTL window.
+        open_flag[0] = False
+        _tmux2, logs2 = self._go(
+            self.ACHIEVED_PANE, state=state, now=now + 60,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=fetch)
+        self.assertFalse(any("FALSE-ACHIEVED" in ln for ln in logs2), logs2)
+        self.assertTrue(any("verified empty" in ln for ln in logs2), logs2)
+        self.assertEqual(len(calls), 2,
+                         "the cache entry a re-arm ACTED ON must be dropped "
+                         "so the next sweep reads FRESH data, not the "
+                         "stale True this very re-arm invalidated: %r"
+                         % calls)
+
+
+class TestCachedBacklogOpen(unittest.TestCase):
+    """`_cached_backlog_open` — the shared per-cwd cache both job 10 and
+    job 20 read. Covers #160-review-style findings 🔵F5 (a failed/refused
+    fetch gets a MUCH shorter negative TTL than a genuine answer), 🔵F9 (a
+    malformed persisted `ts` degrades rather than raising), and the
+    `stale_after` prune this ticket's own review's 🔵F6 finding added to
+    `run_once`'s cleanup pass."""
+
+    def test_genuine_answer_is_cached_for_the_full_ttl(self):
+        calls = []
+        state = {}
+        now = time.time()
+        wd._cached_backlog_open("/x", lambda cwd: calls.append(cwd) or 3,
+                                state, now)
+        wd._cached_backlog_open("/x", lambda cwd: calls.append(cwd) or 3,
+                                state, now + wd.BACKLOG_CHECK_INTERVAL_S - 1)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_failed_fetch_expires_much_sooner_than_a_genuine_answer(self):
+        # #160-review-style finding 🔵F5 (this ticket's own review) -- the
+        # expensive-and-useless case (a transient `gh` hiccup) must not be
+        # rate-limited IN for the SAME long window a real answer gets.
+        calls = []
+
+        def boom(cwd):
+            calls.append(cwd)
+            raise OSError("no gh")
+
+        state = {}
+        now = time.time()
+        r1 = wd._cached_backlog_open("/x", boom, state, now)
+        self.assertIsNone(r1)
+        # well past the SHORT failure TTL, but still well inside the long
+        # genuine-answer TTL -- a retry must happen.
+        r2 = wd._cached_backlog_open(
+            "/x", boom, state, now + wd.BACKLOG_CHECK_FAILURE_TTL_S + 1)
+        self.assertIsNone(r2)
+        self.assertEqual(len(calls), 2, calls)
+
+    def test_a_malformed_persisted_ts_degrades_to_expired_not_a_crash(self):
+        # #160-review-style finding 🔵F9 (this ticket's own review) -- `ts`
+        # crosses a JSON persistence boundary; a corrupt/legacy value must
+        # never raise, and must read as EXPIRED (never "cannot tell, keep
+        # forever").
+        calls = []
+        state = {"backlog_cache": {"/x": {"ts": "not-a-number", "open": True}}}
+        result = wd._cached_backlog_open(
+            "/x", lambda cwd: calls.append(cwd) or 5, state, time.time())
+        self.assertEqual(result, True)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_unwired_fetch_never_writes_the_cache(self):
+        state = {}
+        result = wd._cached_backlog_open("/x", None, state, time.time())
+        self.assertIsNone(result)
+        self.assertNotIn("backlog_cache", state)
+
+
+class TestBacklogCachePrune(unittest.TestCase):
+    """#160-review-style finding 🔵F6 (this ticket's own review) --
+    `state['backlog_cache']` is a NAMED store the flat-key cleanup pass in
+    `run_once` never touches (by design); nothing else pruned it either, so
+    it grew by one entry per new repo ever monitored, forever."""
+
+    def _sweep_cleanup_only(self, initial_state, now):
+        # drive run_once's own REAL cleanup pass (not a reimplemented copy
+        # of it) by round-tripping state through a real temp file, with
+        # every other job a no-op (an empty `list-panes` answer, nothing
+        # wired) -- save_state() is unconditional even under dry_run, per
+        # this file's own established contract.
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        state_path = str(Path(d.name) / "state.json")
+        wd.save_state(state_path, initial_state)
+        wd.run_once(now=now, dry_run=True, run=lambda argv, timeout=8: "",
+                    state_path=state_path)
+        return wd.load_state(state_path)
+
+    def test_a_stale_entry_is_pruned(self):
+        now = 100 * wd.BACKLOG_CHECK_INTERVAL_S
+        state = {"backlog_cache": {"/x/old": {"ts": 0.0, "open": True}}}
+        result = self._sweep_cleanup_only(state, now)
+        self.assertNotIn("/x/old", result.get("backlog_cache", {}))
+
+    def test_a_fresh_entry_survives(self):
+        now = 100 * wd.BACKLOG_CHECK_INTERVAL_S
+        state = {"backlog_cache": {"/x/fresh": {"ts": now - 30, "open": False}}}
+        result = self._sweep_cleanup_only(state, now)
+        self.assertIn("/x/fresh", result.get("backlog_cache", {}))
+
+    def test_a_malformed_entry_is_pruned_rather_than_raising(self):
+        now = 100 * wd.BACKLOG_CHECK_INTERVAL_S
+        state = {"backlog_cache": {"/x/bad": {"ts": "garbage"}}}
+        result = self._sweep_cleanup_only(state, now)   # must not raise
+        self.assertNotIn("/x/bad", result.get("backlog_cache", {}))
+
+
+class TestGoalAchievedClassifierImportFailure(GoalRearmBase):
+    """#160-review-style finding 🔵F7 (this ticket's own review) -- an
+    unguarded `import backlog_marker_gate` inside the per-pane loop would
+    take down job 20 for EVERY pane in the sweep on any failure (a
+    mid-deploy window where one file has landed and its sibling hasn't is
+    real -- this repo's api-watchdog timer runs the working tree live).
+    A failure here must degrade to "no claim" for the ONE affected pane,
+    loudly, never escape and kill the whole sweep."""
+
+    ACHIEVED_PANE = ("● Hotovo.\n"
+                     "✔ Goal achieved (3s · 1 turn · 56 tokens)\n" + FOOTER_DARK)
+
+    def test_classifier_failure_degrades_to_no_claim_for_this_pane_only(self):
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        with m.patch.dict("sys.modules", {"backlog_marker_gate": None}):
+            tmux, logs = self._go(
+                self.ACHIEVED_PANE, entries=entries,
+                backlog_fetch=lambda cwd: 5)
+        # never crashed the whole job (goal_rearm returns log lines, not an
+        # exception) and never trusted/typed anything on the degraded read.
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("classifier error" in ln or "achieved" in ln.lower()
+                            for ln in logs), logs)
+
 
 class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
     """#160 defect 3 — `GOAL_REARM_MAX_DARK_S` used to be a PERMANENT,
@@ -1626,6 +1795,71 @@ class TestGoalDarkSilentDeadEndPings(GoalRearmBase):
         self._go(PANE_DARK, state=state, now=now + 60)
         self.assertEqual(len(self.pings), 1, self.pings)
         self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
+
+
+class TestGoalRearmSweepDeadline(unittest.TestCase):
+    """#160-review-style finding 🟡F2 (this ticket's own review, measured
+    live) — goal_rearm now makes a blocking network call per distinct repo
+    it re-verifies (`_watchdog_backlog_fetch`), and previously had NO
+    wall-clock self-bound of its own (unlike jobs 8/9, #255's own
+    `tail_deadline`). The per-pane loop must never START a new pane's work
+    once the shared sweep budget is exhausted -- mirrors jobs 8/9's own
+    tested pattern exactly."""
+
+    def _run_two_panes(self):
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%1\tclaude\t/x/repo-a\n%2\tclaude\t/x/repo-b"
+            if "capture-pane" in j:
+                return PANE_DARK
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                return "sess:0.0"
+            return ""
+        return run
+
+    def test_never_starts_a_new_pane_past_the_deadline(self):
+        proj = TemporaryDirectory()
+        self.addCleanup(proj.cleanup)
+        for i, cwd in enumerate(["/x/repo-a", "/x/repo-b"]):
+            write_transcript([marker_entry("set", PAYLOAD)], proj.name,
+                             cwd=cwd, sid="sid-%d" % i)
+        logs = wd.goal_rearm(time.time(), self._run_two_panes(), {},
+                             send_fn=lambda *a, **k: None,
+                             projects_dir=proj.name,
+                             time_fn=lambda: 100.0, sweep_deadline=0.0)
+        self.assertTrue(any("goal-rearm-budget-exceeded" in ln for ln in logs),
+                        logs)
+        self.assertTrue(any("0/2 panes handled" in ln for ln in logs), logs)
+
+    def test_a_deferred_pane_is_untouched_state_wise(self):
+        # deferring must lose NOTHING -- the pane is simply retried next
+        # sweep, exactly like an untouched pane always would be.
+        proj = TemporaryDirectory()
+        self.addCleanup(proj.cleanup)
+        for i, cwd in enumerate(["/x/repo-a", "/x/repo-b"]):
+            write_transcript([marker_entry("set", PAYLOAD)], proj.name,
+                             cwd=cwd, sid="sid-%d" % i)
+        state = {}
+        wd.goal_rearm(time.time(), self._run_two_panes(), state,
+                     send_fn=lambda *a, **k: None, projects_dir=proj.name,
+                     time_fn=lambda: 100.0, sweep_deadline=0.0)
+        self.assertEqual(state.get("goal_rearm", {}), {})
+
+    def test_no_deadline_given_is_unbounded_unchanged_behavior(self):
+        # default None -> the pre-#160-review behavior: no budget message
+        # at all, every pane is visited.
+        proj = TemporaryDirectory()
+        self.addCleanup(proj.cleanup)
+        for i, cwd in enumerate(["/x/repo-a", "/x/repo-b"]):
+            write_transcript([marker_entry("set", PAYLOAD)], proj.name,
+                             cwd=cwd, sid="sid-%d" % i)
+        logs = wd.goal_rearm(time.time(), self._run_two_panes(), {},
+                             send_fn=lambda *a, **k: None,
+                             projects_dir=proj.name)
+        self.assertFalse(any("budget-exceeded" in ln for ln in logs), logs)
 
 
 class TestGoalGiveUpPingPerEpisode(GoalRearmBase):

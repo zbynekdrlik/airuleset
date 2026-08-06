@@ -379,12 +379,12 @@ USER_DRAFT_PANE = ("✳ hotovo — súhrn turnu\n──── ultracode ─\n"
 
 
 def _sweep(state, captured, send, now, tm=None, run=None, waiting=True,
-          cwd=None, backlog_fetch=None):
+          cwd=None, backlog_fetch=None, dry_run=False):
     tmtime = tm if tm is not None else now - wd.PWEDGE_MIN_IDLE_S - 60
     return wd.prompt_wedge_check(now, state, "%2", captured, tmtime,
                                  "zbynek", "odoo-erp", send, run=run,
                                  waiting=waiting, cwd=cwd,
-                                 backlog_fetch=backlog_fetch)
+                                 backlog_fetch=backlog_fetch, dry_run=dry_run)
 
 
 class _FakeSend:
@@ -501,6 +501,22 @@ class WidenedNotWaitingBacklogPing(unittest.TestCase):
         logs += _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=False,
                        cwd="/x/repo", backlog_fetch=lambda cwd: 1)
         self.assertTrue(any("backlog" in ln for ln in logs), logs)
+
+    def test_dry_run_never_consumes_the_one_shot_cooldown(self):
+        # #160-review-style finding 🟡F4 (this ticket's own review, proven
+        # live) -- a --dry-run sweep run against REAL state (a routine
+        # manual diagnostic on this repo, per its own playbook) used to
+        # permanently mark the cooldown as spent with nothing ever sent,
+        # since the state write happened unconditionally. A dry-run sweep
+        # must be a complete no-op on the persisted cooldown; the NEXT real
+        # sweep still delivers the genuine ping.
+        state, send, now = {}, _FakeSend(), time.time()
+        _sweep(state, USER_DRAFT_PANE, send, now, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3, dry_run=True)
+        self.assertEqual(send.calls, [])
+        _sweep(state, USER_DRAFT_PANE, send, now + 70, waiting=False,
+              cwd="/x/repo", backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(send.calls), 1, send.calls)
 
     def test_hash_churn_within_cooldown_never_repings(self):
         # #238-review-style finding 🔴F3 (this ticket's own review) — the

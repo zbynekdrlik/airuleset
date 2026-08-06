@@ -6554,7 +6554,8 @@ class TestWatchdogBacklogFetch(TestCase):
 
     def test_full_authority_shells_core_quals(self):
         fake_run, calls = self._fake(stdout="3\n")
-        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
              m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 3)
@@ -6568,7 +6569,8 @@ class TestWatchdogBacklogFetch(TestCase):
 
     def test_reduced_authority_shells_slice_quals(self):
         fake_run, calls = self._fake(stdout="0\n")
-        with m.patch.object(airuleset, "resolve_authority",
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority",
                            return_value="fork-no-merge"), \
              m.patch("subprocess.run", side_effect=fake_run):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
@@ -6577,9 +6579,27 @@ class TestWatchdogBacklogFetch(TestCase):
         self.assertIn("slice-quals", argv)
         self.assertNotIn("core-quals", argv)
 
-    def test_authority_resolved_against_the_repo_cwd(self):
-        fake_run, calls = self._fake(stdout="1\n")
-        with m.patch.object(airuleset, "resolve_authority") as ra, \
+    def test_authority_resolved_against_the_repo_root_not_the_bare_cwd(self):
+        # #160-review-style finding 🟡F3 (this ticket's own review) — a
+        # PANE cwd can be a SUBDIRECTORY of the actual repo root; authority
+        # must resolve against the ROOT (mirroring `cmd_core_quals`'s/
+        # `cmd_slice_quals`'s own `_repo_root()` call inside the child
+        # subprocess), never the bare cwd directly, or the parent and the
+        # child can pick DIFFERENT profiles and the child refuses forever.
+        fake_run, _calls = self._fake(stdout="1\n")
+        with m.patch.object(airuleset, "_repo_root",
+                           return_value="/some/repo") as rr, \
+             m.patch.object(airuleset, "resolve_authority") as ra, \
+             m.patch("subprocess.run", side_effect=fake_run):
+            ra.return_value = "full"
+            airuleset._watchdog_backlog_fetch("/some/repo/sub/dir")
+        rr.assert_called_once_with(cwd="/some/repo/sub/dir")
+        ra.assert_called_once_with(cwd="/some/repo")
+
+    def test_falls_back_to_the_bare_cwd_when_the_root_cannot_be_resolved(self):
+        fake_run, _calls = self._fake(stdout="1\n")
+        with m.patch.object(airuleset, "_repo_root", return_value=""), \
+             m.patch.object(airuleset, "resolve_authority") as ra, \
              m.patch("subprocess.run", side_effect=fake_run):
             ra.return_value = "full"
             airuleset._watchdog_backlog_fetch("/some/repo")
@@ -6618,7 +6638,8 @@ class TestWatchdogBacklogFetch(TestCase):
         # never a bare "airuleset.py" resolved off PATH -- sys.executable +
         # an absolute path to THIS file, so it runs regardless of cwd/PATH.
         fake_run, calls = self._fake(stdout="1\n")
-        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
              m.patch("subprocess.run", side_effect=fake_run):
             airuleset._watchdog_backlog_fetch("/some/repo")
         argv, _kw = calls[0]

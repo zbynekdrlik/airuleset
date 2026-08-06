@@ -3600,13 +3600,22 @@ BACKLOG_CHECK_INTERVAL_S = 10 * 60   # 10 min; a dead pane in this state can
                                       # sit for HOURS (the whole point of
                                       # both defects) — this bounds how often
                                       # `gh` gets hit while it does
+# #160-review-style finding 🔵F5 (this ticket's own review) — a FAILED/
+# refused fetch (`open_ is None`) used to be cached for the SAME 10-minute
+# TTL as a genuine answer, which is backwards: the expensive-and-useless
+# case (a transient `gh` hiccup, an auth blip, a 15s subprocess timeout) is
+# what gets rate-limited IN for the longest, exactly when a retry is
+# cheapest to want. A much shorter negative TTL still bounds `gh` load
+# while letting the next sweep try again soon.
+BACKLOG_CHECK_FAILURE_TTL_S = 60
 
 
 def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
     """True/False/None -- does the repo at `cwd` have an open, actionable
     (non-`autopilot-skip`) issue backlog right now? Cached per `cwd` in
-    `state['backlog_cache']` for `ttl` (default `BACKLOG_CHECK_INTERVAL_S`)
-    seconds.
+    `state['backlog_cache']` for `ttl` (default `BACKLOG_CHECK_INTERVAL_S`
+    seconds for a genuine True/False answer, `BACKLOG_CHECK_FAILURE_TTL_S`
+    for an unmeasurable/failed one — #160-review 🔵F5).
 
     `backlog_fetch is None` (not wired) -> None, unconditionally, no cache
     write -- same "wired = on" convention as every other injected fetch in
@@ -3618,8 +3627,20 @@ def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
     ttl = BACKLOG_CHECK_INTERVAL_S if ttl is None else ttl
     cache = state.setdefault("backlog_cache", {})
     entry = cache.get(cwd)
-    if isinstance(entry, dict) and (now - entry.get("ts", 0)) < ttl:
-        return entry.get("open")
+    if isinstance(entry, dict):
+        # #160-review 🔵F9 -- `ts` crosses a JSON persistence boundary
+        # (this repo's own established rule: never trust a `.get()` off
+        # such a boundary without a type check) -- a malformed/legacy
+        # entry must read as EXPIRED, never raise or silently misbehave.
+        try:
+            age = now - float(entry.get("ts", 0))
+        except (TypeError, ValueError):
+            age = None
+        if age is not None:
+            entry_ttl = (ttl if entry.get("open") is not None
+                        else BACKLOG_CHECK_FAILURE_TTL_S)
+            if age < entry_ttl:
+                return entry.get("open")
     try:
         count = backlog_fetch(cwd)
     except Exception:
@@ -3879,6 +3900,17 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             st["pinged"] = True
             return ["pwedge-suppressed (cooldown, backlog) %s (%s)"
                     % (pid, project)]
+        if dry_run:
+            # #160-review-style finding 🟡F4 (this ticket's own review,
+            # proven live) -- a --dry-run sweep run against REAL state (a
+            # routine manual diagnostic on this repo) used to permanently
+            # consume the one-shot cooldown with nothing ever actually
+            # sent, since the state write happened unconditionally. Matches
+            # this file's own established convention elsewhere (e.g. the
+            # long-turn ping: `if dry_run ...: <skip, no state write>`
+            # BEFORE ever calling send_fn) -- state is written only on a
+            # genuine delivery.
+            return ["prompt-wedge dry-run (backlog) %s (%s)" % (pid, project)]
         st["pinged"] = True
         state[ping_key] = now
         where = _pane_location(pid, run) if run else ""
@@ -8804,7 +8836,8 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
 
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
-               sleep_fn=None, templates_path=None, backlog_fetch=None):
+               sleep_fn=None, templates_path=None, backlog_fetch=None,
+               time_fn=None, sweep_deadline=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
@@ -8820,7 +8853,23 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
 
     `backlog_fetch` (optional, #160 defect 1): wired like every other
     network call in this file — without it the goal-achieved branch behaves
-    exactly as it did before (unconditional skip, no verification)."""
+    exactly as it did before (unconditional skip, no verification).
+
+    `time_fn`/`sweep_deadline` (both optional, default None -> unbounded,
+    exactly the pre-#160-review behavior) — #160-review-style finding 🟡F2
+    (this ticket's own review, measured live): before this fix, this job
+    had NO wall-clock self-bound of its own (unlike jobs 8/9, #255) and now
+    makes a blocking `subprocess.run` per distinct repo it re-verifies
+    (`_watchdog_backlog_fetch`, measured 4-6s per call on this box, versus
+    the ~1s the raw listing it replaced cost) — on a box already being
+    SIGTERM-killed by the systemd 120s `TimeoutStartSec` several times a
+    day with essentially no headroom left, an unbounded number of such
+    calls in the LAST big job of the sweep is the #172 livelock shape at a
+    new address. Mirrors jobs 8/9's OWN `time_fn`/`sweep_deadline` pattern
+    exactly (checked strictly BETWEEN panes, before a pane's own work
+    starts, never nested inside one pane's delivery) — a deferred pane's
+    state is untouched, so it is retried next sweep exactly like an
+    untouched pane always would be."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     templates = load_goal_templates(templates_path)
@@ -8829,11 +8878,21 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
     confirm_s = GOAL_REARM_CONFIRM_S if confirm_s is None else confirm_s
     recs = state.get("goal_rearm") or {}
     logs = []
+    time_fn = time_fn or time.monotonic
 
     def _save():
         state["goal_rearm"] = recs
 
-    for pid, cwd, _cmd in _reconcile_candidate_panes(run):
+    candidates = list(_reconcile_candidate_panes(run))
+    for idx, (pid, cwd, _cmd) in enumerate(candidates):
+        if sweep_deadline is not None and time_fn() >= sweep_deadline:
+            # #160-review 🟡F2 — never START a new pane's work once the
+            # shared sweep budget is exhausted; nothing has been fetched or
+            # typed for THIS (or any later) pane yet, so deferring here
+            # loses nothing.
+            logs.append("goal-rearm-budget-exceeded — %d/%d panes handled "
+                        "this tick, rest retried next" % (idx, len(candidates)))
+            break
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
             continue
@@ -8981,9 +9040,24 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # other re-arm reason already uses below. No claim at all, a
             # genuinely empty backlog, or an unmeasurable check (fail-open,
             # #166) all keep the original skip.
-            import backlog_marker_gate
-            claim_present, claim_reason = backlog_marker_gate.classify_backlog_empty_claim(
-                transcript_last_assistant_text(tpath))
+            # #160-review-style finding 🔵F7 (this ticket's own review) --
+            # a repo-root SIBLING module import executed inside the
+            # per-pane loop; the ExecStart wiring makes this resolve in
+            # production (verified, not assumed), but this repo runs its
+            # OWN working tree live every 60s -- a mid-deploy window where
+            # one file has landed and its sibling hasn't is real. Any
+            # failure here degrades to "no claim" (the pre-#160 skip),
+            # loudly, rather than escaping and killing job 20 for EVERY
+            # pane this sweep (this repo's own established rule: "resolve
+            # a new name in its OWN try, fall back to None, and LOG the
+            # degraded mode").
+            try:
+                import backlog_marker_gate
+                claim_present, claim_reason = (
+                    backlog_marker_gate.classify_backlog_empty_claim(
+                        transcript_last_assistant_text(tpath)))
+            except Exception as e:
+                claim_present, claim_reason = False, "classifier error: %r" % (e,)
             if not claim_present:
                 # no genuine claim to verify at all (mention-only, absent, or
                 # this goal's stop condition isn't backlog-shaped) -- nothing
@@ -8996,6 +9070,22 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs.append("FALSE-ACHIEVED (goal-rearm) %s -> claimed backlog "
                             "empty but the repo's backlog is not, re-arming"
                             % loc)
+                # #160-review-style finding 🔴F1 (this ticket's own review,
+                # proven live) — a stale CACHED `True` re-arms a loop whose
+                # backlog THIS RE-ARM just emptied: the loop closes the
+                # remaining ticket(s) and claims empty again within the
+                # SAME 10-minute cache window, and job 20 reads the stale
+                # `True` again -> a SECOND spurious re-arm -> the two-attempt
+                # cap is now exhausted by re-arms that were never wrong,
+                # and the NEXT achieved sweep fires the give-up ping at a
+                # loop that finished correctly every time. Dropping the
+                # cwd's own cache entry the moment `True` is ACTED ON (never
+                # just read) forces the next achieved-with-claim sweep for
+                # this repo onto a fresh read, so a re-arm this one caused
+                # can never be double-counted as evidence of a second one.
+                cache = state.get("backlog_cache")
+                if isinstance(cache, dict):
+                    cache.pop(cwd, None)
                 # falls through -- no `continue` here on purpose
             else:
                 reason = ("backlog verified empty" if backlog_open is False
@@ -11381,6 +11471,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # (doing so starved the ticket-fallback, 2026-07-21).
             del state[k]
 
+    # #160-review-style finding 🔵F6 (this ticket's own review) --
+    # `state["backlog_cache"]` (one entry per distinct cwd ever measured by
+    # `_cached_backlog_open`, shared by jobs 10/20) is a NAMED store, so the
+    # flat-key cleanup loop above correctly never touches it (per its own
+    # comment: "NEVER cleanup's to delete") -- but nothing else pruned it
+    # either, so it grows by one small entry per NEW repo this box ever
+    # monitors, forever. A bound well past either TTL keeps normal reads
+    # (freshness is already re-checked per-entry on every lookup) unaffected.
+    bc = state.get("backlog_cache")
+    if isinstance(bc, dict):
+        stale_after = 10 * BACKLOG_CHECK_INTERVAL_S
+        for k in list(bc.keys()):
+            entry = bc.get(k)
+            try:
+                ts = float(entry.get("ts", 0)) if isinstance(entry, dict) else 0.0
+            except (TypeError, ValueError):
+                ts = 0.0
+            if (now - ts) > stale_after:
+                del bc[k]
+
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
     # the aggressively-429'd endpoint. Best-effort: never breaks the tmux jobs.
@@ -11569,12 +11679,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Best-effort.
     if goal_rearm_enabled:
         try:
+            # #160-review 🟡F2 — the SAME `tail_deadline` jobs 8/9 already
+            # share (never the bare per-transcript-loop `sweep_deadline`,
+            # which can legitimately be fully consumed before this point —
+            # see the #255 comment on `tail_deadline`'s own definition
+            # above).
             logs += goal_rearm(now, run, state, send_fn=send_fn,
                                dry_run=dry_run, projects_dir=projects_dir,
                                handled=compact_handled_this_sweep,
                                sleep_fn=sleep_fn,
                                templates_path=goal_templates_path,
-                               backlog_fetch=backlog_fetch)
+                               backlog_fetch=backlog_fetch,
+                               time_fn=time_fn, sweep_deadline=tail_deadline)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 
