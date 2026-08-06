@@ -384,10 +384,11 @@ class GoalRearmBase(unittest.TestCase):
 
     def _typed_seq(self, text=GOAL_LINE):
         """cap_seq for a SUCCESSFUL verified delivery into a bare box: the
-        job's own first capture, then post-type (our text at the boundary),
-        then post-Enter (box empty again)."""
+        job's own first capture, #271's own re-capture-immediately-before-
+        typing (still bare), then post-type (our text at the boundary), then
+        post-Enter (box empty again)."""
         typed_pane = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + text[-40:] + "\n")
-        return [PANE_DARK, typed_pane, PANE_DARK]
+        return [PANE_DARK, PANE_DARK, typed_pane, PANE_DARK]
 
 
 class TestGoalRearmDetectsAndArms(GoalRearmBase):
@@ -735,7 +736,7 @@ class TestLongPasteVerification(GoalRearmBase):
     def test_long_rearm_is_submitted_not_abandoned(self):
         typed_pane = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
         tmux, logs = self._go(PANE_DARK,
-                              cap_seq=[PANE_DARK, typed_pane, PANE_DARK])
+                              cap_seq=[PANE_DARK, PANE_DARK, typed_pane, PANE_DARK])
         self.assertEqual(tmux.typed()[0], GOAL_LINE)
         self.assertIn("Enter", tmux.keys(),
                       "a collapsed paste is a SUCCESSFUL type — submit it")
@@ -767,7 +768,7 @@ class TestLongPasteVerification(GoalRearmBase):
         bounded moment to clear that it gets to fill."""
         typed = CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.PASTED + "\n")
         tmux, logs = self._go(PANE_DARK,
-                              cap_seq=[PANE_DARK, typed, typed, PANE_DARK])
+                              cap_seq=[PANE_DARK, PANE_DARK, typed, typed, PANE_DARK])
         self.assertTrue(any(ln.startswith("OK (goal-rearm)") for ln in logs),
                         logs)
         self.assertNotIn("Escape", tmux.keys(),
@@ -1085,10 +1086,11 @@ class GoalDriftBase(unittest.TestCase):
 
     def _lit_seq(self, text):
         """cap_seq for a verified delivery into the bare box of an ARMED pane:
-        the job's own sweep capture, the FRESH pre-delivery re-check, then
-        post-type and post-Enter."""
+        the job's own sweep capture, `_goal_template_drift`'s own FRESH
+        pre-delivery re-check, #271's own SECOND re-capture immediately
+        before typing (still bare), then post-type and post-Enter."""
         typed = CONV + FOOTER_LIT.replace("❯ \n", "❯ " + text[-40:] + "\n")
-        return [PANE_LIT, PANE_LIT, typed, PANE_LIT]
+        return [PANE_LIT, PANE_LIT, PANE_LIT, typed, PANE_LIT]
 
     def _sweep(self, armed_payload=None, templates_path=None, state=None,
                now=None, cap_seq=(), pane=None, handled=None, dry_run=False,

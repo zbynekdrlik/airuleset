@@ -2576,6 +2576,233 @@ def _undo_typed_text(pid, run, text):
     return _input_line_text(capture_pane(pid, run, lines=30)) == ""
 
 
+def draft_rescue_dir():
+    """`~/.claude/draft-rescue/`, resolved at CALL time (same reasoning as
+    `compact_claims_path()`: never a frozen module-level constant, so a
+    relocated `$HOME`/override is honoured on every call, not just the one
+    that happened to run at import time).
+
+    `AIRULESET_DRAFT_RESCUE_DIR`, when set, overrides the default. This is
+    NOT a security boundary (there is nothing to bypass here — see the
+    vault-store env-override lesson in the playbook, which is about a
+    guard an attacker could defeat; this is a plain write-only, self-pruning
+    diagnostic directory nothing else reads or acts on). It exists so
+    `airuleset.py`'s own push-gate test-suite subprocess (`cmd_push`) can
+    point the WHOLE `unittest discover` run at a throwaway directory in one
+    place, instead of adding per-file test isolation to every one of the
+    ~19 test files whose fixtures transitively reach `deliver_with_stash`/
+    `_send_goal_verified` via `run_once` (#271) — the live systemd watchdog
+    executes this repo's own working tree every 60s, so a test process that
+    wrote into the REAL directory would be indistinguishable from production
+    activity. A single test wanting a precise, deterministic rescue-file
+    assertion still patches this function directly
+    (`unittest.mock.patch.object(wd, "draft_rescue_dir", return_value=<tmp>)`
+    — the same established shape `compact_claims_path()` already uses)."""
+    override = os.environ.get("AIRULESET_DRAFT_RESCUE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".claude" / "draft-rescue"
+
+
+# 14 days: deliberately generous (#271). This file exists ONLY so a human can
+# recover text nothing else could save — the cost of keeping one around too
+# long is a few KB, the cost of pruning too eagerly is the exact
+# unrecoverable loss this mechanism exists to prevent. There is no "restore
+# confirmed, safe to delete now" signal available to this process (the
+# restore is Claude Code's own async, on-screen-only effect, fired once the
+# DELIVERED turn completes — minutes away, and never observed here), so age
+# is the only thing that ever removes a rescue file.
+DRAFT_RESCUE_TTL_S = 14 * 24 * 3600
+
+# `<safe-pid>-<epoch-ms, >=10 digits>[-<retry-n>].txt` — the EXACT shape
+# `_draft_rescue_persist` writes. `_draft_rescue_prune` matches against this
+# (adversarial-review MAJOR finding, #271) rather than unlinking every name
+# in the directory: a misconfigured `AIRULESET_DRAFT_RESCUE_DIR` pointed at
+# an already-populated directory must never let a routine prune delete
+# unrelated content it happens to share a mtime-age with.
+_DRAFT_RESCUE_NAME_RX = re.compile(r"^.+-\d{10,}(?:-\d+)?\.txt$")
+
+
+def _draft_rescue_text(captured):
+    """Best-effort plain-text reconstruction of the pane's CURRENT input-box
+    content — "" when the box is bare or unlocatable (nothing to rescue).
+
+    Never the exact original bytes: a WRAPPED draft loses its true line
+    breaks the instant Claude Code re-flows it (#189) — this is the
+    RENDERED rows (`_input_box_rows_raw`, already head-first and chrome-
+    stripped) joined back together, with the leading `❯` glyph + its
+    separator stripped off the head row only. Enough for a human to read
+    and retype, which is the whole point of a rescue file.
+
+    `_input_box_rows_raw`'s own glyph-based fallback (a borderless capture)
+    deliberately returns exactly ONE row and never more — so a borderless
+    capture can never pull agent-strip/chrome text into a rescue file; only
+    the STRUCTURAL (bordered) strategy can return multiple rows, and it
+    returns strictly the box's own interior, already guarded (#243) against
+    a transcript-quoted box being misread as the real one."""
+    rows = _input_box_rows_raw(captured)
+    if not rows:
+        return ""
+    head = _normalize_queued_hint(rows[0])
+    if not _is_draft_head(head):
+        return ""            # bare box ("❯" alone) — nothing to rescue
+    first = head[1:].lstrip(" \xa0")
+    body = [first] + list(rows[1:])
+    return "\n".join(ln for ln in body if ln)
+
+
+def _draft_rescue_prune(now, dir_path=None, ttl_s=None):
+    """Remove rescue files older than the TTL. Best-effort (never raises) —
+    called inline from EVERY write (`_draft_rescue_persist`), never a
+    separate job: the repo FREEZE forbids a new numbered watchdog job, and
+    there is no "confirmed delivered" event to hang a dedicated sweep off
+    of anyway (see `DRAFT_RESCUE_TTL_S`'s own docstring) — an inline prune
+    on every write is sufficient to keep the directory bounded.
+
+    Only names matching `_DRAFT_RESCUE_NAME_RX` are ever candidates for
+    deletion — never a bare "everything in this directory" sweep."""
+    dir_path = dir_path or draft_rescue_dir()
+    ttl_s = DRAFT_RESCUE_TTL_S if ttl_s is None else ttl_s
+    try:
+        names = os.listdir(dir_path)
+    except OSError:
+        return
+    for name in names:
+        if not _DRAFT_RESCUE_NAME_RX.match(name):
+            continue
+        p = Path(dir_path) / name
+        try:
+            # A matching-named SYMLINK is never one of our own writes (we
+            # only ever create real files, via O_EXCL|O_NOFOLLOW) — remove
+            # it unconditionally, on age or not. `Path.unlink()` removes the
+            # link itself, never follows it, so this is safe either way.
+            if os.path.islink(p) or now - p.stat().st_mtime > ttl_s:
+                p.unlink()
+        except OSError:
+            continue
+
+
+def _draft_rescue_ensure_dir(dir_path):
+    """Create `dir_path` as an owner-only (0700) directory if missing, and
+    refuse — creating nothing — if it is, or becomes, a symlink.
+
+    Mirrors this repo's own vault-store discipline (checked BEFORE *and*
+    AFTER `os.makedirs`, since that call happily succeeds against a symlink
+    to an existing directory and a later `chmod` would then tighten the
+    TARGET, not a real directory of our own) — these boxes host foreign
+    uids by design, and the rescue directory holds arbitrary user-typed
+    text that can include a pasted credential (adversarial-review CRITICAL
+    finding, #271). Returns True only when `dir_path` is a genuine,
+    owner-only directory ready to receive a write."""
+    try:
+        if os.path.islink(dir_path):
+            return False
+        os.makedirs(dir_path, mode=0o700, exist_ok=True)
+        if os.path.islink(dir_path):
+            return False
+        os.chmod(dir_path, 0o700)
+        return True
+    except OSError:
+        return False
+
+
+# Bounds the filename-collision retry loop below — two rescue writes for the
+# SAME pane landing in the same millisecond needs two full tmux round-trips
+# inside 1ms, which is not realistic in production, but `O_EXCL` makes the
+# collision loud (FileExistsError) instead of a silent O_TRUNC overwrite, so
+# bound the retry rather than loop forever on a persistently occupied name.
+_DRAFT_RESCUE_MAX_RETRIES = 5
+
+
+def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
+    """Persist the pane's CURRENT input-box content to disk BEFORE any
+    keystroke of OURS lands in it (#271).
+
+    `deliver_with_stash` parks a real draft via `C-s` and Claude Code
+    auto-restores it once the delivered turn completes — but that restore is
+    entirely on-screen and asynchronous; nothing in this process ever
+    observes it landing. The reported incident (2026-08-06): a long typed
+    message sat in the box, a goal-autoarm delivery ran, and the draft was
+    gone with NO trace at all — CC's input box renders in-place via cursor
+    addressing, so unsent text never even enters tmux scrollback (confirmed
+    against the real incident capture, forensics comment on this issue).
+
+    So every primitive that is about to touch a pane's box
+    (`deliver_with_stash`, `_send_goal_verified`) calls this FIRST,
+    unconditionally, with the SAME capture it is about to act on — before
+    its own first `send-keys`. Stash+restore stays the PRIMARY recovery
+    path; this file is the safety net and is NEVER deleted here on a claimed
+    success (there is no verifiable "the restore actually landed" signal to
+    delete on) — only `_draft_rescue_prune`'s generous TTL, run inline on
+    every write, ever removes one. `send_continue` (job 1/4/7's short-nudge
+    primitive) needs no equivalent: it only ever types into a box its own
+    caller already verified bare, and on the rare swallowed-submit case a
+    stuck draft is APPENDED to and later submitted or auto-recovered — never
+    silently discarded the way an unrestored stash can be.
+
+    The write is owner-only (0600, via `os.O_EXCL | os.O_NOFOLLOW` — never
+    followed through a planted symlink, never silently overwritten by a
+    filename collision) into an owner-only (0700) directory
+    (`_draft_rescue_ensure_dir`) — the content can be arbitrary user-typed
+    text, including a pasted credential (adversarial-review CRITICAL
+    finding, #271), and these boxes host foreign uids by design.
+
+    Returns the path written, or None (box was bare, the directory could not
+    be secured, or the write failed after exhausting the collision-retry
+    budget — best-effort; never blocks the delivery it is protecting, but
+    now LOGS why whenever it fails with a real draft in hand, so a failure
+    here is never as silent as the incident this whole mechanism exists to
+    prevent)."""
+    text = _draft_rescue_text(captured)
+    if not text:
+        return None
+    now = time.time() if now is None else now
+    dir_path = dir_path or draft_rescue_dir()
+    if not _draft_rescue_ensure_dir(dir_path):
+        if isinstance(logs, list):
+            logs.append("draft-rescue: FAILED to secure %s (pane %s, %d "
+                        "chars would have been lost with no trace)"
+                        % (dir_path, pid, len(text)))
+        return None
+    _draft_rescue_prune(now, dir_path=dir_path)
+    safe_pid = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pid)).strip("_") or "pane"
+    base = "%s-%d" % (safe_pid, int(now * 1000))
+    for attempt in range(_DRAFT_RESCUE_MAX_RETRIES):
+        suffix = "" if attempt == 0 else "-%d" % (attempt + 1)
+        path = Path(dir_path) / (base + suffix + ".txt")
+        try:
+            fd = os.open(str(path),
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600)
+        except FileExistsError:
+            continue                       # a genuine name collision — retry
+        except OSError as exc:
+            if isinstance(logs, list):
+                logs.append("draft-rescue: FAILED to open %s (pane %s, %d "
+                            "chars would have been lost with no trace) -> %r"
+                            % (path, pid, len(text), exc))
+            return None
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as exc:
+            if isinstance(logs, list):
+                logs.append("draft-rescue: FAILED to write %s (pane %s, %d "
+                            "chars would have been lost with no trace) -> %r"
+                            % (path, pid, len(text), exc))
+            return None
+        if isinstance(logs, list):
+            logs.append("draft-rescue: saved %d chars (pane %s) -> %s"
+                        % (len(text), pid, path))
+        return str(path)
+    if isinstance(logs, list):
+        logs.append("draft-rescue: FAILED for pane %s -> %d consecutive "
+                    "filename collisions, %d chars would have been lost "
+                    "with no trace" % (pid, _DRAFT_RESCUE_MAX_RETRIES,
+                                       len(text)))
+    return None
+
+
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
@@ -2661,6 +2888,18 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     if "esc to interrupt" in (cap or ""):
         _log("stash-abort: live turn")
         return False
+    # #271: from here on we are genuinely about to act on this box — persist
+    # whatever it currently holds BEFORE the first keystroke of ours lands,
+    # so a stash whose eventual on-screen restore silently fails still has a
+    # recoverable trace. A no-op (returns None, writes nothing) whenever the
+    # box is bare, which is the common case. Honesty note (adversarial
+    # review, #271): `cap` is the CALLER's own capture, which for some
+    # callers (job 7's Discord reply, job 20's silent-death re-arm) can be a
+    # few tmux round-trips stale by the time the actual `C-s` fires a couple
+    # of lines below — the rescued text is therefore a best-effort SNAPSHOT
+    # near the moment of action, not a byte-exact guarantee of what the box
+    # holds at the literal instant `C-s` lands.
+    _draft_rescue_persist(pid, cap, logs=logs)
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "C-s"])
@@ -2983,7 +3222,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 # through to the pre-#35 pending/fallback path, unchanged.
                 if not dry_run and not pane_in_mode(pid, run):
                     _record_dreply_typed(state, pid, prompt, now)
-                    if deliver_with_stash(pid, prompt, run, captured=captured):
+                    if deliver_with_stash(pid, prompt, run, captured=captured,
+                                          logs=logs):
                         idead = state.get("inputdead")
                         if isinstance(idead, dict):
                             idead.pop(r["session"], None)
@@ -3440,8 +3680,15 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # it, deliver the nudge, let CC restore it (issue #35). A
                 # verify failure still skips, but never silently (#193).
                 why = []
-                if not _try_stash_nudge(pid, captured, BOUNCE_NUDGE % (tick_str, name),
-                                        run, dry_run, logs=why):
+                ok = _try_stash_nudge(pid, captured, BOUNCE_NUDGE % (tick_str, name),
+                                      run, dry_run, logs=why)
+                # #271 (adversarial-review MAJOR finding): `why` also carries
+                # `deliver_with_stash`'s own rescue-persist line — promote it
+                # to the main journal on EITHER outcome, not just failure, or
+                # a successful rescue here is as silent as the incident this
+                # mechanism exists to prevent.
+                logs.extend(ln for ln in why if "draft-rescue" in ln)
+                if not ok:
                     if not dry_run:
                         logs.append("bounce-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
@@ -3618,8 +3865,11 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # log list at all, which is why 48h of stranded nudges left
                 # not one `stash-*` line in the journal.
                 why = []
-                if not _try_stash_nudge(pid, captured, GKREQ_NUDGE % (tick_str, name),
-                                        run, dry_run, logs=why):
+                ok = _try_stash_nudge(pid, captured, GKREQ_NUDGE % (tick_str, name),
+                                      run, dry_run, logs=why)
+                # #271 — see bounce_backstop's identical fix above.
+                logs.extend(ln for ln in why if "draft-rescue" in ln)
+                if not ok:
                     if not dry_run:
                         logs.append("gkreq-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
@@ -4386,7 +4636,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         ga[pid] = int(now)
         state["goalarm"] = ga          # key exists only once something armed
         ok = _send_goal_verified(pid, full, run, captured=fresh,
-                                 sleep_fn=sleep_fn)
+                                 sleep_fn=sleep_fn, logs=logs)
         logs.append("goal-autoarm %s %s (%s)"
                     % ("OK" if ok else "FAIL", pid, loc))
     return logs
@@ -5861,7 +6111,7 @@ COMPACT_STASH_SKIP_PING_EVERY = 3
 
 
 def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
-                           owner=None, ctx=None, send_fn=None):
+                           owner=None, ctx=None, send_fn=None, logs=None):
     """Try `deliver_with_stash` for a session whose pane holds a DRAFT (#67).
 
     Returns True if `/compact` was actually delivered (caller proceeds
@@ -5874,8 +6124,14 @@ def _compact_stash_attempt(pid, run, captured, state, sid, loc, project,
     `state['compact_stash_skips'][sid]` and the owner is pinged once every
     Nth consecutive occupied-skip (deduped per (sid, n) so it never spams
     every single sweep). A successful delivery clears any prior count for
-    this session."""
-    delivered = deliver_with_stash(pid, COMPACT_TEXT, run, captured=captured)
+    this session.
+
+    `logs` (optional, #271): the caller's own accumulating log list, so a
+    draft rescued here (before the /compact keystroke) is journaled like
+    every other job's decision rather than silently written with no trace
+    in `run_once`'s own output."""
+    delivered = deliver_with_stash(pid, COMPACT_TEXT, run, captured=captured,
+                                   logs=logs)
     skips = state.get("compact_stash_skips") or {}
     if delivered:
         skips.pop(sid, None)
@@ -6550,7 +6806,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             owner = stream_redirect(pane_owner(pid, run))
             if _compact_stash_attempt(pid, run, captured, state, sid, loc,
                                       project, owner=owner, ctx=ctx,
-                                      send_fn=send_fn):
+                                      send_fn=send_fn, logs=logs):
                 reqs.pop(sid, None)
                 changed = True
                 if handled is not None:
@@ -8752,7 +9008,7 @@ def _await_typed(pid, text, run, sleep_fn, want=True):
     return not want
 
 
-def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None):
+def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None):
     """Type a LONG `/goal …` into a BARE input box and submit it, verifying
     every step against a fresh capture — the same protocol
     `deliver_with_stash` uses for its own type/submit steps (steps 5-7), minus
@@ -8761,14 +9017,32 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None):
     NEVER presses Enter after a type-verify failure: submitting a truncated
     goal is the exact #36 disaster this job exists to avoid. NEVER sends two
     consecutive Escapes (that permanently deletes a draft, #35). Returns True
-    only when the box is provably empty again after the submit."""
+    only when the box is provably empty again after the submit.
+
+    #271 (adversarial-review MAJOR finding): persisting `cap` — the SAME
+    capture object the caller already verified bare — can never observe a
+    draft, because every real caller already gates entry on that exact
+    object reading bare; a rescue call there is provably a no-op in
+    production. The race this primitive actually needs to guard is a draft
+    appearing AFTER the caller's own check but BEFORE this function's real
+    type keystroke, several tmux round-trips later — so a SECOND, FRESH
+    capture is taken immediately before typing (job 20's own
+    re-capture-right-before-send pattern, #176-F3) and THAT is what gets
+    persisted-and-refused-on, not the stale one. A genuinely bare box still
+    costs nothing (persist is a no-op on empty content); only a real race
+    ever writes a file."""
     run = run or _default_run
     sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else capture_pane(pid, run, lines=40)
     if _input_line_text(cap) != "":
+        _draft_rescue_persist(pid, cap, logs=logs)
         return False                       # not a bare box — caller's problem
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
+    fresh = capture_pane(pid, run, lines=40)
+    if _input_line_text(fresh) != "":
+        _draft_rescue_persist(pid, fresh, logs=logs)
+        return False                       # raced — a draft appeared since the caller's own check
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     if not _await_typed(pid, text, run, sleep_fn, want=True):
         return False                       # never rendered — never submit it
@@ -9089,7 +9363,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
             return logs
         dlogs = []
         ok = _send_goal_verified(pid, target, run, captured=fresh,
-                                 sleep_fn=sleep_fn)
+                                 sleep_fn=sleep_fn, logs=dlogs)
         tag = "goal-drift"
     rec["dn"] = rec.get("dn", 0) + 1
     if ok:
@@ -9456,7 +9730,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 continue
             dlogs = []
             ok = _send_goal_verified(pid, text, run, captured=captured,
-                                     sleep_fn=sleep_fn)
+                                     sleep_fn=sleep_fn, logs=dlogs)
             tag = "goal-rearm"
         if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_STASH_REASONS:
             # #101 — deliver_with_stash bailed BEFORE sending a single

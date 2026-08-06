@@ -761,7 +761,7 @@ class TestPlainBranchUsesVerifiedDelivery(unittest.TestCase):
     def test_bare_box_arm_uses_the_verified_primitive_not_blind_send(self):
         calls = []
 
-        def _fake(pid, text, run, captured=None, sleep_fn=None):
+        def _fake(pid, text, run, captured=None, sleep_fn=None, logs=None):
             calls.append((pid, text))
             return True
 
