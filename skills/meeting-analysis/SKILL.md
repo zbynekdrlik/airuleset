@@ -118,8 +118,8 @@ WORK=$HOME/uploads/acme-call/work
 # key sources, first hit wins: env already set → per-user local secret (isolated boxes,
 # e.g. montalu — provisioned outside git, delivered by `airuleset.py push` to
 # ~/.soniox.env, NEVER the vault-guarded ~/.claude/secrets/ — that path collides
-# with block-vault-store-read.sh's own guard and refuses this exact grep, #275)
-# → the maintainer box's voiceagent .env
+# with block-vault-store-read.sh's own guard and refuses this exact grep) →
+# the maintainer box's voiceagent .env
 export SONIOX_API_KEY=${SONIOX_API_KEY:-$(grep -hoE 'SONIOX_API_KEY=[^[:space:]]+' "$HOME/.soniox.env" /home/newlevel/devel/voiceagent/.env 2>/dev/null | head -1 | cut -d= -f2)}
 # sanity: newest async model still stt-async-v5?  (verify + track — user's standing instruction)
 curl -s https://api.soniox.com/v1/models -H "Authorization: Bearer $SONIOX_API_KEY" | grep -o 'stt-async-v[0-9]*' | sort -u | tail -1
