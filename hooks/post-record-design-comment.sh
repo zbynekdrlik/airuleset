@@ -106,6 +106,31 @@ def _log_exception(where, exc):
         pass
 
 
+# Free-text flags gh/git themselves consume as literal data -- their VALUE
+# is NEVER separately executed by anything, sudo-prefixed or not, unlike
+# lib_poll_payload.py's own `-m`/`-c`-style values which sometimes ARE
+# forwarded to and executed by a preceding interpreter (its whole reason
+# for exempting a segment that names one). Blanking these unconditionally
+# is the second pass below, chained after the reused heredoc-aware strip.
+_TEXT_FLAG_VALUE_RE = re.compile(
+    r"(?:^|\s)(?:--body|--body-file|--notes|--notes-file|-b|-F|"
+    r"-m|--message|--title|-t)(?:=|\s+)(['\"])(.*?)\1", re.S)
+
+
+def _blank_gh_text_flag_values(text):
+    """Blank the quoted VALUE of every gh/git free-text flag, UNCONDITIONALLY
+    -- see `_TEXT_FLAG_VALUE_RE`'s own comment for why this hook needs no
+    interpreter-prefix exemption. Positional (offset-based, reverse order),
+    never by value -- the same discipline lib_poll_payload.py's own
+    `flag_spans`/`strip` already use, for the same reason (a value-based
+    `str.replace` can delete unrelated live text sharing the same bytes)."""
+    out = text
+    for m in reversed(list(_TEXT_FLAG_VALUE_RE.finditer(text))):
+        if m.group(2).strip():
+            out = out[:m.start(2)] + " " + out[m.end(2):]
+    return out
+
+
 def _control_flow_text(text, repo_root):
     """`text` with provably-inert heredoc bodies and quoted text-payload
     argument VALUES blanked out -- REUSES hooks/lib_poll_payload.py's own
@@ -114,7 +139,9 @@ def _control_flow_text(text, repo_root):
     redirect to a literal file path, and every other mention of that path
     is a text-file-flag argument -- so a heredoc genuinely `cat`'d into a
     script and run in the SAME command stays visible), never a parallel
-    reimplementation of it.
+    reimplementation of it. Chained with `_blank_gh_text_flag_values` (see
+    its own comment for why lib_poll_payload's flag-value blanking alone
+    is not enough here).
 
     #280 -- both extraction regexes below used to scan the RAW command
     text: a heredoc BODY that only documents/mentions "gh issue comment"
@@ -130,7 +157,11 @@ def _control_flow_text(text, repo_root):
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
         import lib_poll_payload
-        return lib_poll_payload.strip(text)
+        text = lib_poll_payload.strip(text)
+    except Exception:
+        pass
+    try:
+        return _blank_gh_text_flag_values(text)
     except Exception:
         return text
 
