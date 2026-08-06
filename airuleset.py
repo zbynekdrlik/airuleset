@@ -2924,6 +2924,7 @@ def setup_caveman() -> bool:
     except json.JSONDecodeError:
         print("    settings.json invalid JSON — skipped caveman reconcile", file=sys.stderr)
         settings = None
+        ok = False
     if settings is not None:
         new_str = json.dumps(reconcile_caveman_settings(settings), indent=2) + "\n"
         if new_str.strip() != raw.strip():
@@ -2959,7 +2960,19 @@ def setup_caveman() -> bool:
                 ok = False
 
     # 4. seed a valid mode (preserve a valid user choice).
-    existing = CAVEMAN_MODE_FILE.read_text() if CAVEMAN_MODE_FILE.exists() else None
+    # Adversarial-review MINOR finding: this read used to sit OUTSIDE any
+    # try/except — an OSError here (e.g. the mode file replaced by a
+    # directory) would propagate straight out of setup_caveman() UNCAUGHT,
+    # past cmd_install()'s own outer try/except (which just prints
+    # "(non-fatal)"), silently losing any `ok = False` step 3 already
+    # recorded and letting "Install complete." ship anyway. Never touches
+    # `ok` itself — a mode-read failure alone stays non-fatal, exactly as
+    # before; it just can no longer SWALLOW a real tracked failure.
+    try:
+        existing = CAVEMAN_MODE_FILE.read_text() if CAVEMAN_MODE_FILE.exists() else None
+    except OSError as e:
+        print(f"    could not read caveman mode ({e})", file=sys.stderr)
+        existing = None
     mode = caveman_mode_or_default(existing)
     if existing is None or existing.strip() != mode:
         try:
@@ -3183,6 +3196,7 @@ def setup_managed_plugins() -> bool:
         print("    settings.json invalid JSON — skipped plugin reconcile",
               file=sys.stderr)
         settings = None
+        ok = False
     if settings is not None:
         new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
         if new_str.strip() != raw.strip():
@@ -3195,6 +3209,20 @@ def setup_managed_plugins() -> bool:
 
     market_ok = {}
     for key in MANAGED_PLUGINS:
+        # Adversarial-review MINOR finding: `_marketplace_names_for`
+        # deliberately tolerates a bare (no "@") key, but a bare key ALSO
+        # has no MANAGED_PLUGIN_CACHE_GLOBS entry — a raw KeyError inside
+        # `_managed_plugin_built()` (called next) would be swallowed by
+        # cmd_install()'s own outer try/except as "(non-fatal)", with
+        # `ok`/`install_failed` never set, silently reporting "Install
+        # complete." Check BEFORE that call, not after. A bare key is a
+        # real misconfiguration of MANAGED_PLUGINS; report it loudly and
+        # keep processing the rest.
+        if "@" not in key:
+            print(f"    skipping malformed plugin key {key!r} (missing "
+                  f"'@marketplace')", file=sys.stderr)
+            ok = False
+            continue
         if _managed_plugin_built(key):
             continue
         market = key.split("@", 1)[1]
@@ -4263,11 +4291,22 @@ def _notify_run_card(args, compose_autopilot_card, send):
 # step after the point it was killed (managed plugins, file-drop, the
 # api-watchdog timer) would simply never execute on that remote — silently,
 # since the timeout branch below reports it as a plain timeout, not as
-# "install ran partway and was killed". 900s gives real headroom over the
-# worst-case inner sum. A remote whose ssh call genuinely can't complete
-# inside this window still gets caught below (subprocess.TimeoutExpired),
-# never crashes the whole push loop.
-REMOTE_DEPLOY_TIMEOUT_S = 900
+# "install ran partway and was killed". A remote whose ssh call genuinely
+# can't complete inside this window still gets caught below
+# (subprocess.TimeoutExpired), never crashes the whole push loop.
+#
+# Re-sized (adversarial review, plugin-marketplace fix, 2026-08-06):
+# ensure_marketplace_registered() adds up to TWO more 150s calls on a fresh
+# account (caveman's marketplace + the shared, market_ok-cached
+# claude-plugins-official one covering both superpowers and playwright's
+# own installs). Worst-case inner sum in sequence: apt-get(300) + claude
+# CLI curl(180) + caveman marketplace-add(150) + caveman install(120) +
+# managed-plugins marketplace-add(150) + superpowers install(180) +
+# playwright install(180) + npx playwright browsers(300) = 1560s. 1800s
+# gives real headroom over that (see
+# tests/test_dev_env_provisioning.py::TestPushRemoteDeployTimeoutAndStderr
+# for the exact sum this must stay above).
+REMOTE_DEPLOY_TIMEOUT_S = 1800
 
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
@@ -4447,23 +4486,38 @@ def cmd_push(args):
         sys.exit(1)
     print(f"  {result.stdout.strip() or result.stderr.strip()}")
 
+    # #263: `failed` accumulates every remote (and now the local install
+    # itself) that did NOT deploy cleanly. An adversarial review of the
+    # first version of this timeout fix caught a real regression it
+    # introduced: BEFORE, an uncaught TimeoutExpired propagated out of
+    # cmd_push() with a loud traceback and a non-zero exit — impossible to
+    # miss. The `continue` below (needed so one slow remote can't abort
+    # deployment to every REMAINING host) turned that into a single line
+    # among hundreds, with the run still ending "All deployments complete."
+    # at exit 0 — a SILENT partial deploy. Tracking every failure and
+    # exiting non-zero if any occurred restores the "impossible to miss"
+    # property without reintroducing the abort-the-whole-loop defect.
+    failed = []
+
     # 2. Install locally
+    # Adversarial-review CRITICAL finding (plugin-marketplace fix,
+    # 2026-08-06): cmd_install() can now sys.exit(1) on a still-failing
+    # managed-plugin install (script-failure-policy). Left uncaught here,
+    # that SystemExit propagated straight out of cmd_push() BEFORE the
+    # remote-deploy loop below ever ran — git had ALREADY pushed to
+    # GitHub by this point, so main would advance and ZERO of the 9 remote
+    # hosts (including montalu2/montalu3/montalu4, the very accounts this
+    # fix exists for) would ever deploy it. Give the local step the exact
+    # same "track it, keep going" treatment the remote loop already gets.
     print("\nInstalling locally...")
-    cmd_install(args)
+    try:
+        cmd_install(args)
+    except SystemExit as e:
+        if e.code:
+            print(f"  FAILED: local install exited {e.code} — continuing to remotes")
+            failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     # 3. Deploy to each remote
-    # #263: `failed` accumulates every remote that did NOT deploy cleanly.
-    # An adversarial review of the first version of this timeout fix caught
-    # a real regression it introduced: BEFORE, an uncaught TimeoutExpired
-    # propagated out of cmd_push() with a loud traceback and a non-zero
-    # exit — impossible to miss. The `continue` below (needed so one slow
-    # remote can't abort deployment to every REMAINING host) turned that
-    # into a single line among hundreds, with the run still ending "All
-    # deployments complete." at exit 0 — a SILENT partial deploy. Tracking
-    # every failure and exiting non-zero if any occurred restores the
-    # "impossible to miss" property without reintroducing the abort-the-
-    # whole-loop defect.
-    failed = []
     for remote in REMOTE_HOSTS:
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")

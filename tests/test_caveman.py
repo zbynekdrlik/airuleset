@@ -549,3 +549,53 @@ class TestSetupCavemanRegistersMarketplaceBeforeInstall(TestCase):
             ok = airuleset.setup_caveman()
         self.assertTrue(ok)
         run.assert_not_called()
+
+    def test_a_failed_install_after_successful_registration_returns_false(self):
+        # Adversarial-review MAJOR finding: the earlier tests here only ever
+        # exercised the marketplace-REGISTRATION-failure branch (fake_run
+        # returned rc=0 for install every time) — the "install itself still
+        # fails after correct registration" branch (the ticket's own
+        # headline claim) had zero test coverage; deleting its `ok = False`
+        # line survived the whole suite. Registration succeeds; the install
+        # call itself fails.
+        def fake_run(argv, **kwargs):
+            if argv[:3] == ["claude", "plugin", "marketplace"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            return m.Mock(returncode=1, stdout="", stderr="install exploded")
+
+        d = Path(tempfile.mkdtemp())
+        patches = self._patched_dirs(d)
+        out = StringIO()
+        with patches[0], patches[1], patches[2], patches[3], \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.setup_caveman()
+        self.assertFalse(ok)
+
+    def test_mode_file_read_failure_does_not_swallow_a_tracked_failure(self):
+        # Adversarial-review MINOR finding: CAVEMAN_MODE_FILE.read_text()
+        # (step 4) sits OUTSIDE any try/except. If step 3 already failed
+        # (ok=False) and step 4's read then raises, the exception used to
+        # propagate straight out of setup_caveman() uncaught, past
+        # cmd_install()'s own outer try/except (which just prints
+        # "(non-fatal)") — silently losing the already-tracked failure and
+        # letting "Install complete." ship anyway. Point CAVEMAN_MODE_FILE
+        # at a DIRECTORY: `.exists()` is True, `.read_text()` raises
+        # IsADirectoryError (an OSError).
+        def fake_run(argv, **kwargs):
+            if argv[:3] == ["claude", "plugin", "marketplace"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            return m.Mock(returncode=1, stdout="", stderr="install exploded")
+
+        d = Path(tempfile.mkdtemp())
+        mode_dir = d / ".caveman-active"
+        mode_dir.mkdir()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", d / "settings.json"), \
+                m.patch.object(airuleset, "CAVEMAN_SHIM_DEST", d / "shim.sh"), \
+                m.patch.object(airuleset, "CAVEMAN_MODE_FILE", mode_dir), \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", StringIO()):
+            ok = airuleset.setup_caveman()   # must NOT raise
+        self.assertFalse(ok, "a genuine install failure must still be "
+                          "reported even when the mode-file read also fails")

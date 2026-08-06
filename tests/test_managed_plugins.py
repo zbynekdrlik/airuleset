@@ -268,6 +268,17 @@ class TestMarketplaceSources(TestCase):
         for name in airuleset._marketplace_names_for(airuleset.MANAGED_PLUGINS):
             self.assertIn(name, airuleset.MARKETPLACE_SOURCES)
 
+    def test_caveman_marketplace_also_has_a_known_source(self):
+        # Adversarial-review MINOR finding: the check above only iterates
+        # MANAGED_PLUGINS — caveman is registered/installed through a
+        # completely separate call site (setup_caveman()) and was never
+        # covered. ensure_marketplace_registered() silently no-ops ("nothing
+        # to do") for a name absent from MARKETPLACE_SOURCES, so a future
+        # rename of CAVEMAN_PLUGIN_KEY's marketplace segment would regress
+        # to the exact pre-fix failure with no test catching it.
+        market = airuleset.CAVEMAN_PLUGIN_KEY.split("@", 1)[1]
+        self.assertIn(market, airuleset.MARKETPLACE_SOURCES)
+
     def test_official_marketplace_source_matches_the_real_repo(self):
         # Confirmed live (#273, isolated scratch CLAUDE_CONFIG_DIR, CC 2.1.223):
         # `claude plugin marketplace add anthropics/claude-plugins-official`
@@ -317,7 +328,13 @@ class TestEnsureMarketplaceRegistered(TestCase):
         argv = run.call_args[0][0]
         self.assertEqual(argv, ["claude", "plugin", "marketplace", "add",
                                  airuleset.MARKETPLACE_SOURCES["claude-plugins-official"]])
-        self.assertIn("env", run.call_args.kwargs)
+        # Adversarial-review THEORETICAL finding: a bare `"env" in kwargs`
+        # check is satisfied by `env=os.environ` too — the actual historical
+        # bug (a non-login ssh shell's PATH lacking ~/.local/bin, where the
+        # claude CLI lives — "[Errno 2] 'claude'" on the gatekeeper
+        # migration) would survive that assertion. Check the PATH content.
+        local_bin = str(Path.home() / ".local" / "bin")
+        self.assertIn(local_bin, run.call_args.kwargs["env"]["PATH"].split(":"))
 
     def test_reports_failure_loudly_and_returns_false(self):
         out = StringIO()
@@ -412,6 +429,75 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         self.assertTrue(ok)
         run.assert_not_called()
 
+    def test_a_failed_install_after_successful_registration_returns_false(self):
+        # Adversarial-review MAJOR finding: the two tests above only ever
+        # exercise the REGISTRATION-failure branch (fake_run returns rc=0
+        # for every install) — the "install itself still fails after
+        # correct registration" branch (this ticket's own headline claim)
+        # had zero coverage; deleting its `ok = False` line survived the
+        # whole suite. Registration always succeeds; every install fails.
+        def fake_run(argv, **kwargs):
+            if argv[:3] == ["claude", "plugin", "marketplace"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            return m.Mock(returncode=1, stdout="", stderr="install exploded")
+
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        out = StringIO()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.setup_managed_plugins()
+        self.assertFalse(ok)
+
+    def test_a_bare_key_is_skipped_loudly_not_a_crash(self):
+        # Adversarial-review MINOR finding: `_marketplace_names_for`
+        # deliberately tolerates a bare (no "@") key, but
+        # setup_managed_plugins()'s own `key.split("@", 1)[1]` is unguarded
+        # — an IndexError there would be swallowed by cmd_install()'s outer
+        # try/except as "(non-fatal)", with `install_failed` never set,
+        # silently reporting "Install complete." A bare key must never
+        # crash the whole function; the OTHER real plugins must still be
+        # processed.
+        def fake_run(argv, **kwargs):
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        out = StringIO()
+        bad_plugins = ("bare-key-no-at",) + airuleset.MANAGED_PLUGINS
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch.object(airuleset, "MANAGED_PLUGINS", bad_plugins), \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            airuleset.setup_managed_plugins()   # must NOT raise
+        self.assertIn("bare-key-no-at", out.getvalue())
+
+    def test_invalid_settings_json_is_reflected_in_the_return_value(self):
+        # Adversarial-review MINOR finding: on a JSON-decode failure the
+        # function printed a warning but left `ok` untouched — with
+        # everything else healthy it would still return True ("Install
+        # complete.") while enabledPlugins/extraKnownMarketplaces were
+        # never actually written.
+        d = Path(tempfile.mkdtemp())
+        for glob_pat in airuleset.MANAGED_PLUGIN_CACHE_GLOBS.values():
+            p = d / Path(glob_pat.replace("*", "1.0.0"))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}")
+        settings_path = d / "settings.json"
+        settings_path.write_text("{not valid json")
+        playwright_cache = Path(tempfile.mkdtemp())
+        (playwright_cache / "chromium-1234").mkdir()
+        out = StringIO()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch("sys.stderr", out):
+            ok = airuleset.setup_managed_plugins()
+        self.assertFalse(ok)
+
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
     """#273: a still-failing plugin install (after correct marketplace
@@ -420,9 +506,16 @@ class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
     complete." while a plugin never actually installed."""
 
     def test_cmd_install_tracks_and_exits_on_plugin_setup_failure(self):
+        # Adversarial-review MAJOR finding: `assertIn("maybe_setup_caveman()"
+        # ...)` alone is satisfied by a BARE (unwrapped, return-value-
+        # ignoring) call too — replacing both wirings with plain
+        # `maybe_setup_caveman()` / `setup_managed_plugins()` statements (so
+        # `install_failed` can never become True) left this test green,
+        # since every literal string it checked was still present somewhere
+        # in the source. Anchor on the actual CONDITIONAL wiring.
         src = inspect.getsource(airuleset.cmd_install)
-        self.assertIn("maybe_setup_caveman()", src)
-        self.assertIn("setup_managed_plugins()", src)
+        self.assertIn("if not maybe_setup_caveman():", src)
+        self.assertIn("if not setup_managed_plugins():", src)
         self.assertIn("install_failed", src)
         self.assertIn("sys.exit(1)", src)
 
