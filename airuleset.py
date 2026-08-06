@@ -818,6 +818,117 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
     return False
 
 
+# --- #263/#264: subdev stream account dev-env convention -------------------
+# The convention working directory for a subdev stream account's tmux
+# session: every currently-provisioned account (montalu/marek/david/simap,
+# live-verified; montalu2/montalu3/montalu4 per their own TODO-PROVISIONING.md
+# gatekeeper Phase-1 contract) checks out the odoo-erp repo at exactly this
+# path. Used by both #263's tmux bootstrap (_stream_session_cwd, below
+# AUTHORITY_BY_USER) and #264's ssh auto-attach block (right below) -- ONE
+# literal, not two independently-maintained copies.
+STREAM_DEV_CWD_REL = "devel/odoo/odoo-erp"
+
+# --- #264: subdev stream ssh auto-attach ------------------------------------
+# One subdev stream account = one tmux session; an interactive ssh login
+# should attach straight into it instead of the user attaching by hand.
+STREAM_SSH_ATTACH_MARK_START = "# >>> airuleset: subdev ssh auto-attach >>>"
+STREAM_SSH_ATTACH_MARK_END = "# <<< airuleset: subdev ssh auto-attach <<<"
+STREAM_SSH_ATTACH_BLOCK = (
+    f"{STREAM_SSH_ATTACH_MARK_START}\n"
+    "# #264: one subdev stream account = one tmux session -- an interactive\n"
+    "# ssh login attaches straight into it (create-or-attach, `-A`). NEVER\n"
+    "# fires for a NON-interactive ssh run (push's `git pull && python3\n"
+    "# airuleset.py install`, scp/rsync, watchdog/gatekeeper automation) --\n"
+    "# those pass a COMMAND to ssh, which bash executes with `$-` carrying no\n"
+    "# 'i' and no PTY at all, so this whole block is a no-op for them; guarded\n"
+    "# on all three explicitly anyway (interactive shell, a real ssh TTY, not\n"
+    "# already inside tmux) so nothing here can ever race a live session.\n"
+    'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ]; then\n'
+    f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
+    '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
+    '  exec tmux new-session -A -s "$(whoami)" -c "$__airuleset_cwd"\n'
+    "fi\n"
+    f"{STREAM_SSH_ATTACH_MARK_END}"
+)
+
+
+def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
+                                end=STREAM_SSH_ATTACH_MARK_END):
+    """Left-to-right positional scan for CLEAN (start, end) marker pairs --
+    NEVER a lazy regex `.*?` search, which silently deletes real content
+    between a stray leftover START and the nearest END on a SECOND run
+    against a conf/rc file externally corrupted with an unpaired marker
+    (#235's own documented failure of that exact shape, `_clean_tmux_block_
+    spans`). A pair with another marker literal crossing it is skipped and
+    left as inert text -- never merged with anything else."""
+    spans = []
+    pos = 0
+    s_len = len(start)
+    while True:
+        s = existing.find(start, pos)
+        if s == -1:
+            break
+        e = existing.find(end, s + s_len)
+        if e == -1:
+            pos = s + s_len
+            continue
+        inner = existing[s + s_len:e]
+        if start in inner or end in inner:
+            pos = s + s_len
+            continue
+        e_full = e + len(end)
+        spans.append((s, e_full))
+        pos = e_full
+    return spans
+
+
+def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
+    """Idempotently add/remove the #264 ssh-auto-attach marker block in
+    ~/.bashrc, scoped STRICTLY to subdev stream accounts (AUTHORITY_BY_USER's
+    keys -- the exact registry #263's tmux bootstrap also keys off, single
+    source of truth for "which accounts are subdev streams"). Absent from
+    every other box (dev1/dev2/gatekeeper): the marker is actively REMOVED
+    there if ever present, so a future AUTHORITY_BY_USER edit can never leave
+    a stale attach block on the wrong account.
+
+    Same overall idempotent-marker-block shape as apply_ultracode_launcher
+    (#77) -- create/update if this account should have it, strip if not --
+    but the presence check + rewrite use a positional span scan
+    (`_stream_marker_block_spans`), not a lazy regex search, so a corrupted
+    file self-heals instead of silently losing content on a later run.
+    Returns True iff ~/.bashrc changed."""
+    bpath = bashrc_path or BASHRC
+    u = user or _current_user()
+    should_have = u in AUTHORITY_BY_USER
+    existing = bpath.read_text() if bpath.exists() else ""
+    spans = _stream_marker_block_spans(existing)
+    if should_have:
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(STREAM_SSH_ATTACH_BLOCK)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{STREAM_SSH_ATTACH_BLOCK}\n"
+    else:
+        if not spans:
+            return False
+        out, cursor = [], 0
+        for s, e in spans:
+            out.append(existing[cursor:s])
+            cursor = e
+        out.append(existing[cursor:])
+        new = "".join(out)
+    if new != existing:
+        bpath.write_text(new)
+        return True
+    return False
+
+
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
@@ -1803,6 +1914,15 @@ def cmd_install(args):
             print("  tmux cutover unit (subdev via gatekeeper): installed + enabled")
     except Exception as e:
         print(f"  tmux cutover unit (subdev) error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3g. subdev ssh auto-attach (#264). True no-op on every non-stream
+    # box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own scope.
+    try:
+        ssh_attach_changed = apply_stream_ssh_attach()
+        if ssh_attach_changed:
+            print(f"  Updated:   {BASHRC} (subdev ssh auto-attach, #264)")
+    except Exception as e:
+        print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
