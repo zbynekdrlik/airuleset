@@ -2390,6 +2390,16 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude CLI install error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3f-bis. ffmpeg static binary: fleet-wide, best-effort, no sudo
+    # needed (#275) -- the meeting-analysis skill's own ffmpeg extraction
+    # step has no other install path on the no-sudo subdev stream accounts
+    # (RUNTIME_DEPS' apt-get path structurally cannot run there). Same
+    # shape as the claude-CLI step right above.
+    try:
+        ensure_ffmpeg_static_binary()
+    except Exception as e:
+        print(f"  ffmpeg static install error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3g. subdev stream dev-env bootstrap: tmux session + claude launched
     # (#263), ssh auto-attach (#264), human-gap report (#263). True no-ops on
     # every non-stream box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own
@@ -3078,6 +3088,115 @@ def ensure_claude_cli_installed(env: dict = None):
         print("    ⚠ claude CLI MISSING and auto-install skipped (%s) — "
               "install manually: curl -fsSL https://claude.ai/install.sh | "
               "bash" % ex, file=sys.stderr)
+
+
+FFMPEG_STATIC_URL = ("https://johnvansickle.com/ffmpeg/releases/"
+                      "ffmpeg-release-amd64-static.tar.xz")
+# ~/.local/bin, NOT ~/bin (#275 adversarial-review MAJOR-2): only
+# `~/.profile` (a LOGIN shell) adds `~/bin` to PATH, but a Claude Code Bash
+# tool call is NOT one — `~/.local/bin` is the one directory this repo's own
+# managed claude launcher ALREADY prepends to PATH on every invocation (see
+# the `case ":$PATH:" in ...` line above, "claude installs to ~/.local/bin"),
+# so every Bash tool call inside a session started that way already has it,
+# with zero new PATH machinery needed.
+FFMPEG_STATIC_BIN_DIR = Path.home() / ".local" / "bin"
+FFMPEG_STATIC_DEST = FFMPEG_STATIC_BIN_DIR / "ffmpeg"
+# skills/meeting-analysis/scripts/extract.sh hard-fails at `command -v
+# ffprobe` too (#275 adversarial-review MAJOR-1) -- ffmpeg alone leaves
+# Phase 1 broken on the no-sudo accounts. The static tarball already
+# contains both binaries in the ONE download; only one extra `cp` is needed.
+FFPROBE_STATIC_DEST = FFMPEG_STATIC_BIN_DIR / "ffprobe"
+
+
+def _binary_reachable(dest: Path, which_name: str) -> bool:
+    """True iff `dest` is a genuinely executable file, or `which_name` (the
+    bare command name the skill invokes, e.g. "ffmpeg"/"ffprobe") is
+    otherwise on PATH already -- a system package, or a prior install here
+    done BY HAND (montalu already installed a static ffmpeg before this
+    function existed, #275; checking the destination path directly, not
+    just PATH, is what recognizes that as already-done instead of
+    reinstalling over it)."""
+    if dest.is_file() and os.access(dest, os.X_OK):
+        return True
+    return shutil.which(which_name) is not None
+
+
+def _ffmpeg_available(dest: Path = None, probe_dest: Path = None) -> bool:
+    """True iff BOTH ffmpeg AND ffprobe are already reachable -- the skill's
+    own extraction step needs both (#275 review MAJOR-1); ffmpeg alone
+    being present is not "available" for this skill's purposes."""
+    d = dest or FFMPEG_STATIC_DEST
+    p = probe_dest or FFPROBE_STATIC_DEST
+    return _binary_reachable(d, "ffmpeg") and _binary_reachable(p, "ffprobe")
+
+
+def ensure_ffmpeg_static_binary(dest: Path = None, probe_dest: Path = None):
+    """Best-effort, time-boxed, non-fatal static-ffmpeg(+ffprobe) install
+    into `~/.local/bin` (#275): the subdev stream accounts have NO sudo at
+    all, so `check_runtime_deps()`'s `apt-get install` path can never run
+    there -- montalu already worked around this by hand, and montalu2/
+    montalu3/montalu4 (and any future stream account) hit the identical
+    wall the moment they run meeting-analysis. A per-user install needs no
+    privilege at all.
+
+    Same shape as `ensure_claude_cli_installed()`: ONE subprocess call does
+    download + extract + place + chmod, so this needs no real network call
+    or real tar archive to test -- only the constructed shell command and
+    the subprocess's own returncode are asserted.
+
+    The extract+chmod step writes into a SCRATCH subdirectory of the FINAL
+    destination dir (never the final path directly), then `mv`s both
+    binaries into place only once BOTH are confirmed extracted and
+    chmod'd (#275 adversarial-review MAJOR-3): `cp` into a live destination
+    path creates the target file with its final executable mode BEFORE its
+    content is fully written, so a hard-killed subprocess (this call's own
+    180s `timeout=` sends SIGKILL, which no shell `trap` can intercept)
+    could otherwise leave a truncated-but-"executable" binary that
+    `_ffmpeg_available()` would then report as done FOREVER. Placing the
+    scratch dir under the SAME parent as the final destination (rather than
+    a separate `/tmp`) keeps the final `mv` an atomic same-filesystem
+    rename, not a cross-device copy.
+
+    Harmless no-op wherever both binaries are already reachable (dev1/dev2/
+    gatekeeper's system packages, or an already-completed prior run here --
+    including montalu's own hand-installed ffmpeg)."""
+    import subprocess
+    import shlex
+    d = dest or FFMPEG_STATIC_DEST
+    p = probe_dest or FFPROBE_STATIC_DEST
+    if _ffmpeg_available(d, p):
+        return
+    script = (
+        "set -o pipefail; "
+        "mkdir -p %s && "
+        "TMP=$(mktemp -d -p %s) && trap 'rm -rf \"$TMP\"' EXIT && "
+        "curl -fsSL %s | tar -xJ -C \"$TMP\" && "
+        "MBIN=$(find \"$TMP\" -type f -name ffmpeg -perm -u+x | head -1) && "
+        "PBIN=$(find \"$TMP\" -type f -name ffprobe -perm -u+x | head -1) && "
+        "[ -n \"$MBIN\" ] && [ -n \"$PBIN\" ] && "
+        "cp \"$MBIN\" \"$TMP/ffmpeg.new\" && cp \"$PBIN\" \"$TMP/ffprobe.new\" && "
+        "chmod 755 \"$TMP/ffmpeg.new\" \"$TMP/ffprobe.new\" && "
+        "mv \"$TMP/ffmpeg.new\" %s && mv \"$TMP/ffprobe.new\" %s"
+    ) % (shlex.quote(str(d.parent)), shlex.quote(str(d.parent)),
+         shlex.quote(FFMPEG_STATIC_URL), shlex.quote(str(d)), shlex.quote(str(p)))
+    try:
+        r = subprocess.run(["bash", "-c", script],
+                            capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and _ffmpeg_available(d, p):
+            print("    ffmpeg: installed static ffmpeg+ffprobe -> %s" % d.parent)
+        else:
+            print("    ⚠ ffmpeg static install failed (rc=%s): %s\n"
+                  "    Install manually: curl -fsSL %s | tar -xJ -C /tmp && "
+                  "cp /tmp/*/ffmpeg %s && cp /tmp/*/ffprobe %s && "
+                  "chmod 755 %s %s"
+                  % (r.returncode, (r.stderr or r.stdout).strip()[:200],
+                     FFMPEG_STATIC_URL, d, p, d, p),
+                  file=sys.stderr)
+    except Exception as e:
+        print("    ⚠ ffmpeg static install skipped (%s) — "
+              "install manually: curl -fsSL %s | tar -xJ -C /tmp && "
+              "cp /tmp/*/ffmpeg %s && cp /tmp/*/ffprobe %s && chmod 755 %s %s"
+              % (e, FFMPEG_STATIC_URL, d, p, d, p), file=sys.stderr)
 
 
 def reconcile_managed_plugins(settings: dict) -> dict:
@@ -4641,6 +4760,93 @@ REMOTE_HOSTS = [
 ]
 
 
+# --- #275: deliver the meeting-analysis Soniox key to every subdev stream
+# account, sourced from dev1's own local voiceagent checkout ------------------
+SONIOX_KEY_SOURCE = Path.home() / "devel" / "voiceagent" / ".env"
+
+
+def _soniox_key_line(source: Path = None):
+    """Extract ONLY the `SONIOX_API_KEY=...` line out of dev1's voiceagent
+    `.env` -- that file carries MANY other unrelated secrets (Discord
+    tokens, etc.), so the whole file is never read out, only this one line
+    ever leaves this process. Returns None when the source is missing or
+    carries no such key -- never raises, so a caller can treat "not found"
+    uniformly regardless of the reason."""
+    src = source if source is not None else SONIOX_KEY_SOURCE
+    if not src.is_file():
+        return None
+    for line in read_file_safe(src).splitlines():
+        line = line.rstrip("\r\n")
+        if line.startswith("SONIOX_API_KEY="):
+            return line
+    return None
+
+
+def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
+    """Deliver `~/.soniox.env` (the meeting-analysis skill's canonical,
+    UN-guarded Soniox key path -- see skills/meeting-analysis/SKILL.md and
+    hooks/block-vault-store-read.sh) to every subdev stream account (#275).
+
+    The value is piped to each remote via `input=` on the ssh subprocess
+    call -- never embedded in argv, never printed by this process -- and
+    the source read is scoped to the ONE matching line (`_soniox_key_line`),
+    never the whole voiceagent `.env`. Targets are filtered to
+    `AUTHORITY_BY_USER`'s keys FIRST, before the source is ever read, so a
+    host list with no subdev stream account in it (dev2, gatekeeper) never
+    touches the filesystem at all.
+
+    A missing source on this box is a LOUD stderr failure -- every subdev
+    target is reported failed, exactly like a real per-host delivery
+    failure -- never a silent skip (the gatekeeper Discord `.env` lesson:
+    a silent provisioning gap is a dead feature). Returns the list of
+    `(remote_name, reason)` failures, mirroring `cmd_push()`'s own
+    `failed` accumulator shape."""
+    import subprocess
+    run = run or subprocess.run
+    targets = [h for h in (hosts if hosts is not None else REMOTE_HOSTS)
+               if h.get("user") in AUTHORITY_BY_USER]
+    if not targets:
+        return []
+
+    line = _soniox_key_line(source)
+    if line is None:
+        src = source if source is not None else SONIOX_KEY_SOURCE
+        print("  ⚠ SONIOX KEY SOURCE MISSING (%s) — skipping ~/.soniox.env "
+              "delivery to %d subdev stream account(s). Run `airuleset.py "
+              "push` from dev1 (the maintainer box) instead."
+              % (src, len(targets)), file=sys.stderr)
+        return [(h["name"], "soniox-key-source-missing") for h in targets]
+
+    failed = []
+    for remote in targets:
+        identity = remote.get("identity")
+        if identity:
+            ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
+                          "-o", "StrictHostKeyChecking=no"]
+        else:
+            ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
+                          "-o", "StrictHostKeyChecking=no"]
+        argv = ssh_prefix + [f"{remote['user']}@{remote['host']}",
+                              "umask 077; cat > ~/.soniox.env && "
+                              "chmod 600 ~/.soniox.env"]
+        try:
+            r = run(argv, input=line + "\n", capture_output=True,
+                    text=True, timeout=20)
+        except Exception as e:
+            print("  ⚠ soniox key delivery to %s failed: %s"
+                  % (remote["name"], e), file=sys.stderr)
+            failed.append((remote["name"], repr(e)))
+            continue
+        if r.returncode != 0:
+            print("  ⚠ soniox key delivery to %s failed (rc=%d): %s"
+                  % (remote["name"], r.returncode,
+                     (r.stderr or "").strip()[:200]), file=sys.stderr)
+            failed.append((remote["name"], "rc=%d" % r.returncode))
+        else:
+            print("    soniox key: delivered to %s" % remote["name"])
+    return failed
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -4799,6 +5005,14 @@ def cmd_push(args):
             stderr_out = ssh_result.stderr.strip()
             if stderr_out:
                 print(f"  [stderr] {stderr_out}")
+
+    # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
+    # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
+    # (dev2/gatekeeper-only pushes never reach the source read at all).
+    print(f"\n{'=' * 50}")
+    print("Delivering Soniox key to subdev stream accounts...")
+    failed.extend(provision_subdev_soniox_key())
+
     if failed:
         print(f"\n⚠ {len(failed)} of {len(REMOTE_HOSTS)} remote(s) FAILED: "
               f"{failed}", file=sys.stderr)
