@@ -131,11 +131,13 @@ class TestStreamSessionCwd(TestCase):
 
 class TestTmuxSessionExists(TestCase):
     def test_true_on_rc_zero(self):
-        run = lambda argv: _FakeCP(returncode=0)
+        def run(argv):
+            return _FakeCP(returncode=0)
         self.assertTrue(airuleset._tmux_session_exists("montalu2", run=run))
 
     def test_false_on_rc_nonzero(self):
-        run = lambda argv: _FakeCP(returncode=1)
+        def run(argv):
+            return _FakeCP(returncode=1)
         self.assertFalse(airuleset._tmux_session_exists("montalu2", run=run))
 
     def test_none_when_tmux_unreachable(self):
@@ -189,7 +191,6 @@ class TestEnsureStreamTmuxSession(TestCase):
                 user="montalu2", run=run, launch_script="/x/launch.sh")
         self.assertIn("created session 'montalu2'", result)
         self.assertIn("claude launched", result)
-        joined = [" ".join(c) for c in calls]
         self.assertTrue(any(
             c[:4] == ["tmux", "new-session", "-d", "-s"] and "montalu2" in c
             for c in calls))
