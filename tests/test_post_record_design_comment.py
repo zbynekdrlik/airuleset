@@ -777,6 +777,30 @@ class TestScansControlFlowNotRawText(_Base):
                           "the quoted -R text must never be treated as a "
                           "real --repo flag")
 
+    def test_a_sudo_prefixed_dash_R_inside_a_quoted_body_is_also_never_used(self):
+        # Self-found residual: hooks/lib_poll_payload.py's own flag-value
+        # blanking deliberately EXEMPTS a segment naming an interpreter
+        # (sudo/env/ssh/...) -- correct for ITS domain (poll-loop
+        # detection, where a value might genuinely be forwarded to and
+        # executed by that interpreter), wrong for this hook's narrower
+        # question: a gh/git free-text flag's own VALUE is never separately
+        # executed by anything, sudo-prefixed or not. The documented
+        # sudo-prefix recipe (TestEnvVarPrefixedGhCallIsRecognized) must
+        # not reopen the exact -R leak `test_a_dash_R_inside_a_quoted_...`
+        # above closes for the un-prefixed shape.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-94",
+        }])
+        cmd = 'sudo gh issue comment 41 --body "compare against -R owner/evil"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41))
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNone(dg.read_marker("evil", 41),
+                          "sudo-prefixing the command must not resurrect "
+                          "the quoted -R leak")
+
     def test_a_heredoc_genuinely_cat_and_run_in_the_same_command_still_fires(self):
         # Regression control: NOT every heredoc is inert. One that is
         # `cat`'d to a script and that script IS executed later in the
