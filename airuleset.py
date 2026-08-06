@@ -767,6 +767,286 @@ def render_claude_launch_script():
     return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}", MANAGED_MODEL)
 
 
+def encode_project_dir(cwd):
+    """Claude Code's transcript-dir name for a cwd: every '/', '.' and '_'
+    become '-'. airuleset.py's own top-level copy (#267, reused by
+    tests seeding a synthetic ~/.claude/projects/<enc>/ tree) -- the
+    IDENTICAL logic also lives inline inside CLAUDE_HISTORY_SCRIPT_CONTENT
+    below (that script is deployed standalone and must not import
+    airuleset.py itself) and, independently, in watchdog/__init__.py."""
+    return "".join("-" if c in "/._" else c for c in str(cwd))
+
+
+# #267: the "claude-history" companion. Measured live (dev1, two replicates,
+# real interactive sessions + real relayout events -- resizes, Ctrl+O,
+# Shift+Tab -- via `scripts/measure_scrollback_holes.py`, results pinned to
+# the ticket): CLAUDE_CODE_NO_FLICKER=1 does NOT fix tmux scrollback holes --
+# it makes NATIVE tmux scrollback almost entirely EMPTY (78.5-87.33% of a
+# generated response missing, even with ZERO relayout stress, because
+# alternate-screen mode never writes into tmux's native history buffer at
+# all), categorically WORSE than default mode's real-but-small corruption
+# (0-6% of lines, ONLY after an actual relayout event). So it never becomes
+# the default (CLAUDE_LAUNCH_SCRIPT_CONTENT's `fullscreen` branch stays
+# opt-in), and the honest fix for "what did claude do and write" is this
+# companion: it reads the session's own transcript JSONL -- the API's
+# source of truth, which the upstream renderer defect (#253:
+# anthropics/claude-code#84247/#46834) cannot touch at all, since it never
+# passes through the terminal renderer a second time -- and prints a plain,
+# linear, readable log of every real user prompt / assistant message / tool
+# call. A live key-by-key test on the installed CC 2.1.223 confirmed there
+# is no in-app pager to lean on instead (Ctrl+O is only an inline verbose
+# toggle -- no pager, the documented PgUp/PgDn/{/}/[/] keys inside it do
+# nothing at all); `/export` (a slash command, typed inside a LIVE session)
+# is a validated alternative for a session you're currently in, but this
+# script also covers the common case of checking a session's history AFTER
+# it exited, or from a DIFFERENT pane entirely (`--pane`), with zero risk of
+# ever typing a keystroke into someone else's live session.
+CLAUDE_HISTORY_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history.py"
+CLAUDE_HISTORY_SCRIPT_CONTENT = r'''#!/usr/bin/env python3
+# airuleset-managed (do NOT edit) -- claude-history (#267): a readable,
+# un-corrupted view of what a Claude Code session did and wrote, built
+# straight from its own transcript JSONL -- the source of truth, immune to
+# the upstream TUI renderer's tmux-scrollback corruption (#253/#267).
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def encode_project_dir(cwd):
+    """Claude Code's transcript-dir name for a cwd: every '/', '.' and '_'
+    become '-' (matches airuleset's own encode_project_dir verbatim)."""
+    return "".join("-" if c in "/._" else c for c in str(cwd))
+
+
+def find_transcripts(projects_dir, cwd):
+    """Every *.jsonl transcript for `cwd`, newest first."""
+    d = Path(projects_dir) / encode_project_dir(cwd)
+    if not d.is_dir():
+        return []
+    rows = []
+    for p in d.glob("*.jsonl"):
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        rows.append((m, p))
+    rows.sort(reverse=True)
+    return [p for _m, p in rows]
+
+
+def resolve_pane_cwd(pane_id):
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_current_path}"],
+            capture_output=True, text=True, timeout=5)
+    except Exception as e:
+        print("claude-history: could not resolve pane %r: %s" % (pane_id, e),
+              file=sys.stderr)
+        return None
+    out = (r.stdout or "").strip()
+    return out or None
+
+
+def _read_jsonl(path):
+    records = []
+    try:
+        f = open(path, "r", encoding="utf-8", errors="replace")
+    except OSError as e:
+        print("claude-history: cannot read %s: %s" % (path, e), file=sys.stderr)
+        return records
+    with f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                records.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def _tool_summary(name, inp, max_len=100):
+    if name == "Bash":
+        val = inp.get("command", "")
+    elif name in ("Read", "Write", "Edit", "NotebookEdit"):
+        val = inp.get("file_path") or inp.get("notebook_path") or ""
+    elif name in ("Grep", "Glob"):
+        val = inp.get("pattern", "")
+    else:
+        val = ", ".join("%s=%r" % (k, v) for k, v in list(inp.items())[:3])
+    val = str(val).replace("\n", " ")
+    if len(val) > max_len:
+        val = val[:max_len - 1] + "…"
+    return "%s: %s" % (name, val) if val else name
+
+
+def merge_turns(records):
+    """Collapse consecutive same-role transcript lines into readable turns:
+    {"role": "user"|"assistant", "text": str, "tools": [str, ...]}. A
+    real assistant API response is written as SEVERAL jsonl lines (one per
+    content block) -- this is display grouping, not the #131 request-level
+    token dedup (a different, unrelated concern)."""
+    turns = []
+    pending = None
+
+    def flush():
+        if pending is None:
+            return
+        text = "\n".join(t for t in pending["texts"] if t).strip()
+        if text or pending["tools"]:
+            turns.append({"role": pending["role"], "text": text,
+                          "tools": pending["tools"]})
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rtype = rec.get("type")
+        if rtype == "user":
+            msg = rec.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, str):
+                continue  # a tool_result entry, not a real user prompt
+            text = content.strip()
+            if not text or text.startswith("<"):
+                continue  # local-command-stdout / injected wrapper noise
+            if pending and pending["role"] == "user":
+                pending["texts"].append(text)
+                continue
+            flush()
+            pending = {"role": "user", "texts": [text], "tools": []}
+        elif rtype == "assistant":
+            msg = rec.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            texts, tools = [], []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    t = block.get("text", "")
+                    if t:
+                        texts.append(t)
+                elif btype == "tool_use":
+                    tools.append(_tool_summary(block.get("name", "?"),
+                                                block.get("input") or {}))
+            if not texts and not tools:
+                continue
+            if pending and pending["role"] == "assistant":
+                pending["texts"].extend(texts)
+                pending["tools"].extend(tools)
+                continue
+            flush()
+            pending = {"role": "assistant", "texts": texts, "tools": tools}
+        # system / attachment / other entry types: not displayed turns.
+    flush()
+    return turns
+
+
+def render(turns, last=None):
+    if last is not None:
+        turns = turns[-last:]
+    lines = []
+    for t in turns:
+        label = "USER" if t["role"] == "user" else "CLAUDE"
+        lines.append("===== %s =====" % label)
+        if t["text"]:
+            lines.append(t["text"])
+        for tool in t["tools"]:
+            lines.append("  -> %s" % tool)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="claude-history",
+        description="Readable Claude Code session history, built from the "
+                     "transcript (source of truth -- immune to tmux "
+                     "scrollback corruption, airuleset#267).")
+    ap.add_argument("--cwd", default=None,
+                     help="project directory (default: current directory)")
+    ap.add_argument("--pane", default=None,
+                     help="tmux pane id -- resolve ITS cwd instead of --cwd")
+    ap.add_argument("--transcript", default=None,
+                     help="read this transcript file directly")
+    ap.add_argument("--last", type=int, default=20,
+                     help="show only the last N turns (default 20)")
+    ap.add_argument("--full", action="store_true",
+                     help="show the whole session (overrides --last)")
+    ap.add_argument("--list", action="store_true",
+                     help="list available transcripts for this project and exit")
+    args = ap.parse_args(argv)
+
+    projects_dir = Path.home() / ".claude" / "projects"
+
+    if args.transcript:
+        path = Path(args.transcript)
+    else:
+        if args.pane:
+            cwd = resolve_pane_cwd(args.pane)
+            if not cwd:
+                print("claude-history: pane %r not found or has no cwd" % args.pane,
+                      file=sys.stderr)
+                return 1
+        else:
+            cwd = args.cwd or os.getcwd()
+        paths = find_transcripts(projects_dir, cwd)
+        if not paths:
+            print("claude-history: no Claude Code session transcript found for %s"
+                  % cwd, file=sys.stderr)
+            return 1
+        if args.list:
+            for p in paths:
+                try:
+                    when = time.strftime("%Y-%m-%d %H:%M",
+                                          time.localtime(p.stat().st_mtime))
+                except OSError:
+                    when = "?"
+                print("%s  %s" % (when, p))
+            return 0
+        path = paths[0]
+
+    if not path.exists():
+        print("claude-history: transcript not found: %s" % path, file=sys.stderr)
+        return 1
+
+    turns = merge_turns(_read_jsonl(path))
+    if not turns:
+        print("claude-history: transcript has no displayable turns: %s" % path,
+              file=sys.stderr)
+        return 1
+
+    print("# %s" % path)
+    if args.full:
+        print("# %d turn(s) total" % len(turns))
+    else:
+        print("# %d turn(s) total -- showing last %d" % (len(turns), args.last))
+    print("")
+    print(render(turns, None if args.full else args.last))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def render_claude_history_script():
+    """The claude-history script content -- no template substitution needed
+    (unlike render_claude_launch_script), but the same "always render
+    through a function, never write the raw constant" discipline (same
+    reason as render_caveman_shim/render_claude_launch_script: a future
+    templated field must never be forgotten at the one real write site)."""
+    return CLAUDE_HISTORY_SCRIPT_CONTENT
+
+
 # .bashrc holds ONLY thin one-line functions -- no flag literal survives here,
 # so nothing flag-shaped can ever be frozen in a shell's memory again.
 ULTRACODE_BASHRC_BLOCK = (
@@ -776,19 +1056,27 @@ ULTRACODE_BASHRC_BLOCK = (
     f'claude-ultracode() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" ultracode "$@"; }}\n'
     f'claude-plain() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" plain "$@"; }}\n'
     f'claude-fullscreen() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" fullscreen "$@"; }}\n'
+    f'claude-history() {{ python3 "$HOME/.claude/{CLAUDE_HISTORY_SCRIPT_DEST.name}" "$@"; }}\n'
     f"{ULTRACODE_MARK_END}"
 )
 
 
-def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None) -> bool:
-    """Install/refresh the managed claude launcher (#77).
+def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
+                              history_script_path: Path = None) -> bool:
+    """Install/refresh the managed claude launcher (#77) AND the
+    claude-history companion (#267 -- same mechanism, same self-heal
+    discipline, deliberately extended in place rather than given its own
+    parallel marker-block machinery).
 
     The SCRIPT (script_path, default CLAUDE_LAUNCH_SCRIPT_DEST) is written and
     chmod +x UNCONDITIONALLY on every call — like the caveman shim, it must
     self-heal any tampering/rollback, and a missing script after write is a
     loud RuntimeError, never a silent loss of `claude`. It carries ALL the
     actual logic, so a `push` changes launch behavior in every already-running
-    shell immediately, with no `source ~/.bashrc` and no restart.
+    shell immediately, with no `source ~/.bashrc` and no restart. The
+    claude-history script (history_script_path, default
+    CLAUDE_HISTORY_SCRIPT_DEST) gets the IDENTICAL unconditional write +
+    chmod +x + missing-after-write RuntimeError treatment.
 
     The ~/.bashrc block is idempotent (replaces the marked block if present,
     else appends it) and holds ONLY thin wrapper functions with no flag
@@ -796,12 +1084,19 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None)
     import re
     bpath = bashrc_path or BASHRC
     spath = script_path or CLAUDE_LAUNCH_SCRIPT_DEST
+    hpath = history_script_path or CLAUDE_HISTORY_SCRIPT_DEST
 
     spath.parent.mkdir(parents=True, exist_ok=True)
     spath.write_text(render_claude_launch_script())
     os.chmod(str(spath), 0o755)
     if not spath.exists():
         raise RuntimeError(f"claude launcher script missing right after write: {spath}")
+
+    hpath.parent.mkdir(parents=True, exist_ok=True)
+    hpath.write_text(render_claude_history_script())
+    os.chmod(str(hpath), 0o755)
+    if not hpath.exists():
+        raise RuntimeError(f"claude-history script missing right after write: {hpath}")
 
     existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
@@ -865,14 +1160,57 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # TestTmuxWindowSizeNoResize for the structural, whole-file lock (the
 # exact tmux subcommand name is deliberately not spelled out here so this
 # comment can't ever collide with that lock).
+#
+# #267: raising history-limit only fixed how much scrollback SURVIVES --
+# the user's live complaint ("neviem sa v tom pretacat, kolieskom cez ssh
+# sa to blbo pouziva") was that reaching it needs a MOUSE (tmux's default
+# scroll-wheel-into-copy-mode binding), which is awkward over ssh, and the
+# user explicitly asked for the keyboard shortcut old Linux virtual
+# consoles used: Shift+PageUp/PageDown. `bind-key -n S-PageUp copy-mode
+# -eu` (root table, no prefix key) enters copy-mode and scrolls up one
+# page in one keystroke; `-e` auto-exits copy-mode the moment the user
+# scrolls back down to the bottom, so Shift+PageDown alone (bound in BOTH
+# copy-mode key tables, vi and emacs, since the managed conf pins neither
+# `mode-keys` setting) returns to the live view -- matching the user's own
+# "Shift+PgDn / navrat na spodok vrati live view" acceptance line.
+# UNLIKE window-size/default-size above, a `bind-key` call is SAFE to
+# live-apply against a running server: it only registers a key-table
+# entry -- it does not touch any window's geometry, force a
+# recalculate_sizes() pass, or read/write anything CC's renderer has
+# already drawn, so it carries none of #236's live-apply hazard. Verified
+# live (#267): bound against a real running server, then driven through a
+# REAL attached pty client sending the actual xterm CSI byte sequences for
+# Shift+PageUp/PageDown (`send-keys -t <pane>` alone does NOT exercise a
+# key-table binding -- it writes bytes straight into the pane's pty,
+# bypassing the server's key dispatch entirely; only a genuinely attached
+# client's input passes through the binding tables) -- Shift+PageUp
+# correctly entered copy-mode and scrolled up, Shift+PageDown correctly
+# scrolled back down and auto-exited to the live view, with the pane's
+# own content completely undisturbed throughout.
+
+
+# #267: the three Shift+PgUp/PgDn keyboard-scrollback bindings, as tmux
+# argv lists -- shared verbatim between the rendered conf lines
+# (render_tmux_history_block, below) and the live-apply calls
+# (apply_tmux_history_limit) so the two can never drift apart. A `bind-key`
+# call is a pure key-table registration -- see the incident-history comment
+# above for why that makes it safe to live-apply, unlike window-size/
+# default-size.
+TMUX_SCROLLBACK_KEYBINDS = [
+    ["bind-key", "-n", "S-PageUp", "copy-mode", "-eu"],
+    ["bind-key", "-T", "copy-mode", "S-PageDown", "send-keys", "-X", "page-down"],
+    ["bind-key", "-T", "copy-mode-vi", "S-PageDown", "send-keys", "-X", "page-down"],
+]
 
 
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE):
+    keybind_lines = "\n".join(" ".join(argv) for argv in TMUX_SCROLLBACK_KEYBINDS)
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
         f"set-option -g default-size {default_size}\n"
+        f"{keybind_lines}\n"
         f"{TMUX_MARK_END}"
     )
 
@@ -954,6 +1292,16 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     lock, and TestTmuxWindowSizeNoResize for the separate, unrelated
     per-window-resize / format-expansion-query lock.
 
+    #267: the three `TMUX_SCROLLBACK_KEYBINDS` (Shift+PgUp/PgDn) are ALSO
+    live-applied, unlike default-size -- a `bind-key` call only registers
+    a key-table entry, so it carries none of window-size's live-apply
+    hazard (see the module comment above `render_tmux_history_block`).
+    Each keybind is attempted independently of the others and of the
+    history-limit call above: a failure/nonzero-exit on one never skips
+    the rest, so a session that has already reached a running server
+    picks up the keyboard scrollback shortcut immediately, with no
+    restart and no keystroke sent to any pane.
+
     `run` defaults to a real `tmux` invocation and is injectable so tests
     never touch a real tmux server. A missing server / a nonzero exit
     (which `subprocess.run` does NOT raise on without `check=True` -- a
@@ -982,20 +1330,25 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
 
-    try:
-        result = (run or _default_tmux_run)(
-            ["tmux", "set-option", "-g", "history-limit", str(limit)])
-        rc = getattr(result, "returncode", 0)
-        if rc:
-            stderr = (getattr(result, "stderr", "") or "").strip()
-            print(f"  tmux live-apply skipped (rc={rc}): "
-                  f"{stderr or 'no server running?'}", file=sys.stderr)
-    except Exception as e:
-        # No server running / tmux missing from PATH / timeout, etc. --
-        # expected and harmless (a new server reads the conf file we just
-        # wrote anyway); logged for visibility, never re-raised, and never
-        # affects the conf-file write result above.
-        print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
+    runner = run or _default_tmux_run
+    live_argvs = [["tmux", "set-option", "-g", "history-limit", str(limit)]]
+    live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
+    for argv in live_argvs:
+        try:
+            result = runner(argv)
+            rc = getattr(result, "returncode", 0)
+            if rc:
+                stderr = (getattr(result, "stderr", "") or "").strip()
+                print(f"  tmux live-apply skipped (rc={rc}): "
+                      f"{stderr or 'no server running?'}", file=sys.stderr)
+        except Exception as e:
+            # No server running / tmux missing from PATH / timeout, etc. --
+            # expected and harmless (a new server reads the conf file we
+            # just wrote anyway); logged for visibility, never re-raised,
+            # and never affects the conf-file write result above. Each
+            # call is independently guarded so one failure never skips
+            # the rest (#267).
+            print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
 
     return changed
 

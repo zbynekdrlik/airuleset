@@ -3254,13 +3254,14 @@ class TestUltracodeLauncher(TestCase):
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
         s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
+        h = Path(d) / ".claude" / "airuleset-claude-history.py"
         if content is not None:
             p.write_text(content)
-        return p, s
+        return p, s, h
 
     def test_appends_to_existing_bashrc_preserving_content(self):
-        p, s = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
-        changed = airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
+        changed = airuleset.apply_ultracode_launcher(p, s, h)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn("export PATH=$PATH:/x", text)           # preserved
@@ -3270,17 +3271,17 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn(airuleset.ULTRACODE_MARK_END, text)
 
     def test_idempotent_bashrc_no_change_second_run(self):
-        p, s = self._tmp("# my rc\n")
-        self.assertTrue(airuleset.apply_ultracode_launcher(p, s))
-        self.assertFalse(airuleset.apply_ultracode_launcher(p, s))  # bashrc no-op
+        p, s, h = self._tmp("# my rc\n")
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h))
+        self.assertFalse(airuleset.apply_ultracode_launcher(p, s, h))  # bashrc no-op
 
     def test_replaces_block_in_place_no_duplicate(self):
-        p, s = self._tmp("# rc\n")
-        airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp("# rc\n")
+        airuleset.apply_ultracode_launcher(p, s, h)
         # tamper inside the block, re-run -> block restored, exactly ONE block
         text = p.read_text().replace("claude-ultracode()", "BROKEN")
         p.write_text(text)
-        airuleset.apply_ultracode_launcher(p, s)
+        airuleset.apply_ultracode_launcher(p, s, h)
         out = p.read_text()
         self.assertEqual(out.count(airuleset.ULTRACODE_MARK_START), 1)
         self.assertNotIn("BROKEN", out)
@@ -3291,12 +3292,13 @@ class TestUltracodeLauncher(TestCase):
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
         s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
-        self.assertTrue(airuleset.apply_ultracode_launcher(p, s))
+        h = Path(d) / ".claude" / "airuleset-claude-history.py"
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h))
         self.assertIn("claude()", p.read_text())
 
     def test_function_not_alias_and_has_plain_escape(self):
-        p, s = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h)
         text = p.read_text()
         self.assertIn("claude() {", text)
         self.assertNotIn("alias claude=", text)
@@ -3304,6 +3306,7 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn("claude-ultracode()", text)
         self.assertIn("claude-plain()", text)
         self.assertIn("claude-fullscreen()", text)
+        self.assertIn("claude-history()", text)
 
     def test_bashrc_block_has_no_flag_literals_only_script_calls(self):
         # THE ACCEPTANCE CRITERION (#77): the .bashrc block must contain NO
@@ -3311,8 +3314,8 @@ class TestUltracodeLauncher(TestCase):
         # only a call into the managed script. This is what makes a `push`
         # take effect in an already-running shell: nothing flag-shaped is
         # frozen in that shell's memory anymore.
-        p, s = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h)
         block = p.read_text().split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
         for literal in ("--settings", "--model", "--dangerously-skip-permissions",
@@ -3326,24 +3329,37 @@ class TestUltracodeLauncher(TestCase):
             line = next(ln for ln in block.splitlines() if ln.startswith(f"{fn}() {{"))
             self.assertIn(f'"$HOME/.claude/{airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name}" {mode} "$@"',
                           line)
+        history_line = next(ln for ln in block.splitlines()
+                             if ln.startswith("claude-history() {"))
+        self.assertIn(f'python3 "$HOME/.claude/{airuleset.CLAUDE_HISTORY_SCRIPT_DEST.name}" "$@"',
+                       history_line)
 
     def test_writes_executable_script_at_script_path(self):
-        p, s = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h)
         self.assertTrue(s.exists())
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertTrue(os.access(s, os.X_OK))
+
+    def test_writes_executable_history_script_at_history_script_path(self):
+        p, s, h = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h)
+        self.assertTrue(h.exists())
+        self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
+        self.assertTrue(os.access(h, os.X_OK))
 
     def test_script_rewritten_unconditionally_every_call(self):
         # Unlike the bashrc block (idempotent no-op when unchanged), the
         # script is ALWAYS (re)written -- so tampering with it (or a stale
         # copy from a rollback) is self-healed on the very next install/push,
         # the same unconditional-rewrite guarantee the caveman shim gives.
-        p, s = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s)
+        p, s, h = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h)
         s.write_text("BROKEN")
-        airuleset.apply_ultracode_launcher(p, s)
+        h.write_text("BROKEN")
+        airuleset.apply_ultracode_launcher(p, s, h)
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
+        self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
 
     def test_default_launchers_carry_no_ultracode_in_the_script(self):
         # #53: ultracode used to be baked into EVERY default launch. The
@@ -3511,6 +3527,12 @@ class TestTmuxHistoryLimit(TestCase):
         # never the resize-window/list-windows shape this ticket's incident
         # history explicitly rejected -- see TestTmuxWindowSizeNoResize.
         self.assertNotIn("resize-window", text)
+        # #267: the Shift+PgUp/PgDn keyboard-scrollback bindings.
+        self.assertIn("bind-key -n S-PageUp copy-mode -eu", text)
+        self.assertIn(
+            "bind-key -T copy-mode S-PageDown send-keys -X page-down", text)
+        self.assertIn(
+            "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down", text)
 
     def test_appends_to_existing_conf_preserving_content_byte_for_byte(self):
         original = "set -g mouse on\nset -g status-bg colour234\n"
@@ -3576,6 +3598,9 @@ class TestTmuxHistoryLimit(TestCase):
             f"{airuleset.TMUX_MARK_START}\n"
             "set-option -g history-limit 50000\n"
             "set-option -g default-size 176x50\n"
+            "bind-key -n S-PageUp copy-mode -eu\n"
+            "bind-key -T copy-mode S-PageDown send-keys -X page-down\n"
+            "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
             f"{airuleset.TMUX_MARK_END}"
             "\n\nset -g status-bg colour234\n"
         )
@@ -3592,7 +3617,7 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(p.stat().st_mtime_ns, before_mtime)
 
     def test_live_applies_via_injected_run_regardless_of_server_state(self):
-        # Keystroke-free, safe: ONLY the history-limit set-option is live-
+        # Keystroke-free, safe: the history-limit set-option is live-
         # applied against a running server -- exactly #235's original,
         # already-shipped, already-proven-safe scope. default-size is
         # DELIBERATELY never live-applied via a real tmux subprocess call
@@ -3612,11 +3637,37 @@ class TestTmuxHistoryLimit(TestCase):
         # surviving options; they take effect for the NEXT server/session/
         # window, the same safe path already established for resize-
         # window itself.
+        #
+        # #267: the three Shift+PgUp/PgDn `bind-key` calls ARE ALSO live-
+        # applied (a pure key-table registration -- none of window-size's
+        # live-apply hazard, see the module comment above
+        # render_tmux_history_block), so the total is now 4 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
+        self.assertEqual(calls[1], ["tmux", "bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
+        self.assertEqual(calls[2], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
+                                     "send-keys", "-X", "page-down"])
+        self.assertEqual(calls[3], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
+                                     "send-keys", "-X", "page-down"])
+
+    def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
+        # #267: each live-apply call is independently guarded -- a runner
+        # that raises on the SECOND call must not prevent the third/fourth
+        # from being attempted.
+        p = self._tmp()
+        calls = []
+
+        def _runner(argv):
+            calls.append(argv)
+            if len(calls) == 2:
+                raise OSError("transient failure on this one call")
+            return None
+
+        airuleset.apply_tmux_history_limit(p, run=_runner)
+        self.assertEqual(len(calls), 4)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -3742,11 +3793,19 @@ class TestTmuxWindowSizeRemoved(TestCase):
         # dropped from the feature.
         self.assertIn("set-option -g default-size 176x50", p.read_text())
 
-    def test_only_one_live_tmux_call_is_ever_issued(self):
+    def test_no_window_size_or_resize_shaped_live_call_is_ever_issued(self):
+        # #267 widened the live-apply call count from 1 (history-limit
+        # alone) to 4 (history-limit + the three Shift+PgUp/PgDn
+        # `bind-key` calls, see TestTmuxHistoryLimit above) -- what THIS
+        # class still locks is narrower and unaffected by that widening:
+        # no call ever mentions window-size, resize-window or list-windows.
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 1)
+        joined = " ".join(" ".join(c) for c in calls)
+        self.assertNotIn("window-size", joined)
+        self.assertNotIn("resize-window", joined)
+        self.assertNotIn("list-windows", joined)
 
 
 class TestTmuxWindowSizeNoResize(TestCase):
@@ -3769,6 +3828,50 @@ class TestTmuxWindowSizeNoResize(TestCase):
     def test_list_windows_is_never_constructed_or_invoked_anywhere(self):
         src = Path(airuleset.__file__).read_text()
         self.assertNotIn("list-windows", src)
+
+
+class TestTmuxScrollbackKeybinds(TestCase):
+    """#267: the user rejected Ctrl+O (a live key-by-key test on the
+    installed CC 2.1.223 found it is only an inline verbose toggle -- no
+    pager, the documented PgUp/PgDn/{/}/[/] keys inside it do nothing at
+    all) and the mouse-wheel-into-copy-mode default (awkward over ssh, no
+    scroll wheel forwarding) -- and asked explicitly for the keyboard
+    shortcut old Linux virtual consoles used: Shift+PageUp/PageDown.
+    `TMUX_SCROLLBACK_KEYBINDS` is the single source of truth for the three
+    `bind-key` argv lists, shared verbatim by both the rendered conf block
+    and the live-apply calls (TestTmuxHistoryLimit above) -- this class
+    locks that sharing so the two can never silently drift apart."""
+
+    def test_rendered_block_lines_are_built_from_the_shared_constant(self):
+        text = airuleset.render_tmux_history_block()
+        for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS:
+            self.assertIn(" ".join(argv), text)
+
+    def test_live_apply_argvs_are_built_from_the_shared_constant(self):
+        p = Path(tempfile.mkdtemp()) / ".tmux.conf"
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        keybind_calls = calls[1:]  # calls[0] is the history-limit set-option
+        self.assertEqual(len(keybind_calls), len(airuleset.TMUX_SCROLLBACK_KEYBINDS))
+        for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
+            self.assertEqual(call, ["tmux"] + argv)
+
+    def test_shift_pageup_enters_copy_mode_with_scroll_up(self):
+        # The exact bind this ticket's own live pty-client verification
+        # used: `-eu` (auto-exit at the bottom, scroll up one page on
+        # entry). Locking the literal flag spelling here means a future
+        # accidental `-e -u` split (two argv entries) or a dropped flag
+        # would be caught by this test even without a live tmux server.
+        argv = airuleset.TMUX_SCROLLBACK_KEYBINDS[0]
+        self.assertEqual(argv, ["bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
+
+    def test_shift_pagedown_is_bound_in_both_copy_mode_key_tables(self):
+        # The managed conf pins neither `mode-keys` (vi vs emacs), so
+        # Shift+PageDown must work regardless of which one a box/user ends
+        # up on -- bound in BOTH `copy-mode` and `copy-mode-vi`.
+        tables = {argv[2] for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS
+                  if argv[0] == "bind-key" and argv[1] == "-T"}
+        self.assertEqual(tables, {"copy-mode", "copy-mode-vi"})
 
 
 class _FakeCP:
@@ -4155,7 +4258,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
     def _run_launcher(self, home, cwd, fn="claude", stub_body=None):
         bashrc = Path(home) / ".bashrc"
         script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
-        airuleset.apply_ultracode_launcher(bashrc, script)
+        history_script = Path(home) / ".claude" / "airuleset-claude-history.py"
+        airuleset.apply_ultracode_launcher(bashrc, script, history_script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir(exist_ok=True)
         stub = stub_dir / "claude"
@@ -4327,7 +4431,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         cwd.mkdir()
         bashrc = Path(home) / ".bashrc"
         script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
-        airuleset.apply_ultracode_launcher(bashrc, script)
+        history_script = Path(home) / ".claude" / "airuleset-claude-history.py"
+        airuleset.apply_ultracode_launcher(bashrc, script, history_script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir()
         stub = stub_dir / "claude"
@@ -4369,6 +4474,209 @@ class TestClaudeLauncherContinueOrNew(TestCase):
             proc.stdin.write("exit\n")
             proc.stdin.flush()
             proc.wait(timeout=10)
+
+
+class TestClaudeHistoryScript(TestCase):
+    """#267: `claude-history` -- a readable, un-corrupted view of a Claude
+    Code session, read straight from its own transcript JSONL (the source
+    of truth). Measured live (scripts/measure_scrollback_holes.py, results
+    pinned to the ticket): CLAUDE_CODE_NO_FLICKER=1 does NOT fix tmux
+    scrollback holes -- it makes native scrollback almost entirely EMPTY
+    (78.5-87.33% of a generated response missing even with zero relayout
+    stress), categorically worse than default mode's real-but-small
+    corruption (0-6%, only after an actual relayout event). This is the
+    honest companion instead: it never touches the terminal renderer at
+    all, so it is structurally immune to the class of defect (#253:
+    anthropics/claude-code#84247/#46834) this whole ticket is about.
+
+    Every test here runs the ACTUAL rendered script content
+    (render_claude_history_script()) as a real subprocess against a
+    synthetic transcript directory -- never a reimplementation of its
+    parsing logic -- so a regression in the shipped script is what fails,
+    not a regression in a parallel test-only copy."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.script = self.home / "claude-history.py"
+        self.script.write_text(airuleset.render_claude_history_script())
+        os.chmod(self.script, 0o755)
+        self.projects_dir = self.home / ".claude" / "projects"
+
+    def _write_transcript(self, cwd, lines, sid="s1"):
+        enc = airuleset.encode_project_dir(str(cwd))
+        d = self.projects_dir / enc
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{sid}.jsonl"
+        p.write_text("\n".join(json.dumps(ln) for ln in lines) + "\n")
+        return p
+
+    def _run(self, *args, env=None):
+        # `Path.home()` inside the script must resolve to the ISOLATED
+        # self.home, not the real box's $HOME -- --transcript bypasses
+        # this (it's given an absolute path directly), but --cwd/--pane/
+        # --list all read ~/.claude/projects/... under Path.home().
+        run_env = {**os.environ, "HOME": str(self.home)}
+        if env:
+            run_env.update(env)
+        r = subprocess.run(
+            [sys.executable, str(self.script), *args],
+            capture_output=True, text=True, timeout=15, env=run_env)
+        return r
+
+    @staticmethod
+    def _user(text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    @staticmethod
+    def _assistant(*blocks):
+        return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+
+    @staticmethod
+    def _text_block(t):
+        return {"type": "text", "text": t}
+
+    @staticmethod
+    def _tool_block(name, **inp):
+        return {"type": "tool_use", "name": name, "input": inp}
+
+    def test_reads_a_real_transcript_and_shows_user_and_assistant_turns(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("what is 2+2?"),
+            self._assistant(self._text_block("2+2 is 4.")),
+        ])
+        r = self._run("--transcript", str(self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "s1.jsonl"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("===== USER =====", r.stdout)
+        self.assertIn("what is 2+2?", r.stdout)
+        self.assertIn("===== CLAUDE =====", r.stdout)
+        self.assertIn("2+2 is 4.", r.stdout)
+
+    def test_resolves_the_newest_transcript_for_a_cwd_by_default(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("old session")], sid="old")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "old.jsonl"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("new session")], sid="new")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "new.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("new session", r.stdout)
+        self.assertNotIn("old session", r.stdout)
+
+    def test_merges_multiple_content_blocks_of_the_same_turn_into_one(self):
+        # A real Claude Code assistant response is written as SEVERAL jsonl
+        # lines (one per content block, #131) -- but here it's ONE
+        # assistant record with several blocks in `content`; the important
+        # behavioral claim is that a `tool_use` block renders as an
+        # activity line ALONGSIDE the surrounding text, in one turn.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("list the files"),
+            self._assistant(
+                self._text_block("Let me check."),
+                self._tool_block("Bash", command="ls -la"),
+                self._text_block("Done."),
+            ),
+        ])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # exactly one CLAUDE turn header, not one per content block
+        self.assertEqual(r.stdout.count("===== CLAUDE ====="), 1)
+        self.assertIn("Let me check.", r.stdout)
+        self.assertIn("Done.", r.stdout)
+        self.assertIn("Bash: ls -la", r.stdout)
+
+    def test_skips_tool_result_entries_and_system_noise(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("do something"),
+            {"type": "user", "message": {"role": "user",
+                                          "content": [{"type": "tool_result", "content": "output"}]}},
+            {"type": "system", "subtype": "compact_boundary"},
+            self._assistant(self._text_block("done")),
+        ])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.count("===== USER ====="), 1)  # tool_result not shown as a user turn
+        self.assertNotIn("compact_boundary", r.stdout)
+
+    def test_last_truncates_to_the_most_recent_n_turns(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        records = []
+        for i in range(5):
+            records.append(self._user(f"question {i}"))
+            records.append(self._assistant(self._text_block(f"answer {i}")))
+        self._write_transcript(cwd, records)
+        r = self._run("--cwd", str(cwd), "--last", "2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("question 4", r.stdout)
+        self.assertIn("answer 4", r.stdout)
+        self.assertNotIn("question 0", r.stdout)
+        self.assertIn("10 turn(s) total", r.stdout)
+
+    def test_full_shows_every_turn_regardless_of_last(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        records = []
+        for i in range(5):
+            records.append(self._user(f"q{i}"))
+            records.append(self._assistant(self._text_block(f"a{i}")))
+        self._write_transcript(cwd, records)
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("q0", r.stdout)
+        self.assertIn("q4", r.stdout)
+
+    def test_list_prints_every_transcript_for_the_cwd_without_rendering_content(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("secret prompt")], sid="s1")
+        r = self._run("--cwd", str(cwd), "--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("s1.jsonl", r.stdout)
+        self.assertNotIn("secret prompt", r.stdout)
+
+    def test_no_transcript_for_cwd_fails_loud_not_silent(self):
+        cwd = self.home / "empty-proj"
+        cwd.mkdir()
+        r = self._run("--cwd", str(cwd))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no Claude Code session transcript found", r.stderr)
+
+    def test_pane_flag_resolves_cwd_via_tmux_display_message(self):
+        # A fake `tmux` on PATH proves the script asks display-message for
+        # the pane's cwd -- never a keystroke, never touching a real pane.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"), self._assistant(self._text_block("hello"))])
+        stub_dir = self.home / "bin"
+        stub_dir.mkdir()
+        stub = stub_dir / "tmux"
+        stub.write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = display-message ]; then echo '%s'; exit 0; fi\n"
+            "exit 1\n" % cwd)
+        stub.chmod(0o755)
+        r = self._run("--pane", "%3",
+                      env={"PATH": f"{stub_dir}:{os.environ['PATH']}"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hello", r.stdout)
+
+    def test_explicit_transcript_path_overrides_cwd_resolution(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        p = self._write_transcript(cwd, [self._user("direct read"),
+                                          self._assistant(self._text_block("ok"))])
+        r = self._run("--transcript", str(p))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("direct read", r.stdout)
 
 
 class TestDiscordAutopilotNotify(TestCase):
