@@ -920,6 +920,20 @@ class TestGroupFleetByAccount(unittest.TestCase):
         accounts = [g["account"] for g in groups]
         self.assertEqual(accounts, ["zzz@example.com", None])
 
+    def test_multiple_real_accounts_plus_unknown_bucket_together(self):
+        # #269 review finding t4: no prior fixture combined MORE THAN TWO
+        # real accounts WITH an unknown bucket in one call.
+        per_host = {
+            "c-box": self._row(1.0, "charlie@example.com"),
+            "old-box": self._row(1.0, ""),
+            "a-box": self._row(1.0, "alpha@example.com"),
+            "b-box": self._row(1.0, "bravo@example.com"),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        accounts = [g["account"] for g in groups]
+        self.assertEqual(accounts, ["alpha@example.com", "bravo@example.com",
+                                    "charlie@example.com", None])
+
     def test_weekly_pct_and_resets_at_populated_only_for_the_reporting_boxs_own_account(self):
         per_host = {
             "dev1": self._row(1.0, "z@example.com"),
