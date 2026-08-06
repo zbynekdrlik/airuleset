@@ -1210,6 +1210,181 @@ class TestGoalTemplateDrift(GoalDriftBase):
                         logs)
 
 
+class TestGoalDriftRespectsHandEdits(GoalDriftBase):
+    """#186 — the live incident: the user hand-widened a variant's stop
+    condition. The armed text now matches NO current template, but `tvar`
+    is still set from the earlier observation that it once did — the old
+    code read that mismatch as drift (indistinguishable from a real template
+    push) and silently retyped the shipped text over the user's edit."""
+
+    def test_a_hand_edited_goal_is_never_reverted(self):
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = (TPL_FULL[:-1] + ', and also count a ticket only the '
+                       'supervisor box can action as done.')
+        tmux, logs = self._sweep(hand_edited[len("/goal "):], templates_path=tp,
+                                 state=state)
+        self.assertFalse(tmux.typed(),
+                         "a deliberate hand-edit must never be retyped over")
+
+    def test_the_hand_edit_reason_is_logged_once_not_every_sweep(self):
+        state, seen = {}, []
+        tp = self._templates(TPL_FULL)
+        seen += self._sweep(TPL_FULL[len("/goal "):], templates_path=tp,
+                            state=state)[1]
+        hand_edited = TPL_FULL[:-1] + ', and never stop on a bare backlog count.'
+        seen += self._sweep(hand_edited[len("/goal "):], templates_path=tp,
+                            state=state)[1]
+        for _ in range(3):
+            seen += self._sweep(templates_path=tp, state=state)[1]
+        self.assertEqual(len([ln for ln in seen if "hand-edit" in ln]), 1,
+                         "a hand-edited goal must not spam the journal every "
+                         "sweep")
+
+    def test_a_hand_edit_survives_a_LATER_template_push_too(self):
+        """The mismatch persisting across a genuine template push must not
+        suddenly look like drift again — once the armed text has diverged
+        from what was last confirmed, only an EXACT match to a current
+        template re-establishes tracking."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also close it once merely reviewed.'
+        self._sweep(hand_edited[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2, TPL_BRANCH)          # a real push
+        tmux, logs = self._sweep(templates_path=tp, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(),
+                         "a template push must not resurrect the reverted text "
+                         "for an already-hand-edited goal")
+
+    def test_returning_to_a_current_template_resumes_drift_tracking(self):
+        """Self-healing: if the user later types the shipped text exactly
+        (e.g. re-running `/autopilot`), the job resumes protecting it against
+        a real future template push."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also close a ticket the moment it ' \
+                                       'is merely reviewed.'
+        self._sweep(hand_edited[len("/goal "):], templates_path=tp, state=state)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp2 = self._templates(TPL_FULL_V2, TPL_BRANCH)
+        tmux, logs = self._sweep(templates_path=tp2, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+
+    def test_reverting_to_the_stale_confirmed_text_never_resumes_drift(self):
+        """#186-review finding — clearing `tvar` itself (not just the
+        delivery bookkeeping) on a hand-edit matters: without it, the STALE
+        `armed_hash` recorded BEFORE the edit can coincidentally match again
+        if the user later types the OLD confirmed text back, which must
+        never resurrect drift-healing on evidence that predates the edit."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also close it once merely reviewed.'
+        self._sweep(hand_edited[len("/goal "):], templates_path=tp, state=state)
+        tp2 = self._templates(TPL_FULL_V2, TPL_BRANCH)          # a real push
+        # the OLD confirmed text (never the new current one) comes back
+        tmux, logs = self._sweep(TPL_FULL[len("/goal "):], templates_path=tp2,
+                                 state=state, cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertFalse(tmux.typed(),
+                         "a hand-edited session must not resume drift "
+                         "protection from evidence recorded before the edit")
+
+    def test_a_legacy_record_missing_armed_hash_still_migrates_when_up_to_date(self):
+        """#186-review finding 🟡 (kills the "only refresh armed_hash when
+        something ELSE changed" mutant) — a session whose `tvar` predates
+        this fix (no `armed_hash` yet) but is STILL currently running the
+        shipped template must have `armed_hash` re-established the very
+        next time it is observed matching, even though `tvar`/`dhash`/`dq`
+        all already look unchanged — or it can never migrate at all."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        state["goal_rearm"][SID].pop("armed_hash", None)   # simulate legacy state
+        self._sweep(templates_path=tp, state=state)   # still up to date, re-observed
+        self.assertIn("armed_hash", state["goal_rearm"][SID],
+                     "armed_hash must be re-established on re-observation")
+        tp2 = self._templates(TPL_FULL_V2, TPL_BRANCH)          # NOW a real push
+        tmux, logs = self._sweep(templates_path=tp2, state=state,
+                                 cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(tmux.typed(), [TPL_FULL_V2], logs)
+
+    def test_a_legacy_record_that_no_longer_matches_gets_pinged_once(self):
+        """#186-review finding 1 — a session whose `tvar` predates this fix
+        (armed_hash never recorded) that ALSO no longer matches any current
+        template must not silently vanish with zero signal: the pre-fix
+        behaviour would eventually reach the GAVE UP ping for such a loop,
+        and this branch now short-circuits before ever reaching it. A
+        genuinely OBSERVED hand-edit (armed_hash present but different)
+        stays quiet — this is the LEGACY, unmeasurable-either-way case."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        state["goal_rearm"][SID].pop("armed_hash", None)
+        tp2 = self._templates(TPL_FULL_V2, TPL_BRANCH)          # push landed
+        tmux, logs = self._sweep(templates_path=tp2, state=state)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(len(self.pings), 1, logs)
+        self.assertIn("#186", self.pings[0][0])
+        for _ in range(3):
+            self._sweep(templates_path=tp2, state=state)
+        self.assertEqual(len(self.pings), 1,
+                         "the legacy ping must fire at most once per episode")
+
+    def test_dry_run_never_downgrades_real_state(self):
+        """#186-review finding 🟡 — a manual `--dry-run` diagnostic sweep
+        must never permanently disable healing for a real session: the
+        `tvar` downgrade plus the one-shot log flag are irreversible state
+        MUTATIONS, exactly the class `#238-review 🟡F4` already fixed once
+        for `dark_pinged` in this same file."""
+        state = {}
+        tp = self._templates(TPL_FULL, TPL_BRANCH)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        hand_edited = TPL_FULL[:-1] + ', and also stop counting a bare handoff ' \
+                                       'as done.'
+        tmux, logs = self._sweep(hand_edited[len("/goal "):], templates_path=tp,
+                                 state=state, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("READY" in ln and "goal-drift" in ln for ln in logs),
+                        logs)
+        rec = state["goal_rearm"][SID]
+        self.assertEqual(rec.get("tvar"), 0,
+                         "a dry-run sweep must not downgrade tvar")
+        self.assertFalse(rec.get("untracked_logged"),
+                         "a dry-run sweep must not consume the one-shot log flag")
+        # a REAL sweep afterward must still detect and correctly handle it
+        tmux2, logs2 = self._sweep(templates_path=tp, state=state)
+        self.assertFalse(tmux2.typed())
+        self.assertTrue(state["goal_rearm"][SID].get("untracked_logged"), logs2)
+
+    def test_own_delivery_landing_survives_a_SECOND_push_before_confirmation(self):
+        """#186-review finding S3 — CC echoing our OWN just-typed re-arm
+        delivery must never be misread as a hand-edit merely because a
+        SECOND template push landed before the confirming sweep ran."""
+        state = {}
+        tp = self._templates(TPL_FULL)
+        now = time.time()
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state,
+                    now=now)
+        tp2 = self._templates(TPL_FULL_V2)
+        first, _ = self._sweep(templates_path=tp2, state=state, now=now + 10,
+                               cap_seq=self._lit_seq(TPL_FULL_V2))
+        self.assertEqual(first.typed(), [TPL_FULL_V2])
+        v3 = TPL_FULL_V2 + " Also verify the deployed version twice."
+        tp3 = self._templates(v3)
+        # CC echoes our delivery (payload becomes TPL_FULL_V2) WHILE v3 has
+        # already landed, before we ever confirmed TPL_FULL_V2
+        tmux, logs = self._sweep(TPL_FULL_V2[len("/goal "):], templates_path=tp3,
+                                 state=state, now=now + 40,
+                                 cap_seq=self._lit_seq(v3))
+        self.assertFalse(any("hand-edited" in ln for ln in logs), logs)
+        self.assertEqual(tmux.typed(), [v3], logs)
+
+
 class TestGoalDriftRefusals(GoalDriftBase):
     def _drifted(self):
         """A tracked session whose template has since changed."""

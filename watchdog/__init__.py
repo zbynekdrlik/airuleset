@@ -8866,15 +8866,47 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     section comment. Runs only for a pane whose goal is provably ARMED.
     Mutates `rec` (the caller persists it); returns log lines.
 
-    Two states only, and the second is entered by OBSERVATION, never by
-    resemblance:
-      * the payload matches a CURRENT template  -> record the variant, clear
-        any drift bookkeeping, do nothing;
-      * it does not, and this session was recorded matching variant `tvar`
-        earlier -> the template has since changed under a live loop, so
-        re-arm it with that variant's current text.
-    Anything else (a goal that never matched anything) is the user's own and
-    is left alone, with the reason logged ONCE — never every 60 s."""
+    Four states, and the second and third are entered by OBSERVATION of the
+    PAYLOAD itself, never by resemblance to a template or by the mere fact
+    that `tvar` happens to be set (#186):
+      * the payload matches a CURRENT template  -> record the variant AND
+        the hash of that exact text (`armed_hash` — the only positive proof
+        this session's live text IS the template, at THIS instant), clear
+        any drift bookkeeping, do nothing. This is also the ONLY place a
+        session becomes eligible for a future re-arm at all.
+      * it does not match any CURRENT template, `tvar` is set, AND the
+        payload's own hash is UNCHANGED since `armed_hash` was last
+        recorded -> the armed text has not moved; the only thing that could
+        have changed is the shipped template itself -> genuine drift under a
+        live loop, re-arm with that variant's current text.
+      * it does not match any CURRENT template, but the payload IS exactly
+        what WE ourselves last delivered (`dq` outstanding, its hash equals
+        `dhash`) -> CC echoing our own re-arm landing, even though the
+        template moved again before we could confirm it. Adopt it as the
+        new confirmed baseline and re-evaluate against whatever is CURRENT
+        now (#186-review finding S3) — never mistaken for a hand-edit.
+      * it does not match, `tvar` is set, but the payload's hash has CHANGED
+        since `armed_hash` (or `armed_hash` was never recorded at all —
+        state persisted before this fix ever ran, provably NOT the same as
+        an observed edit) -> the armed text itself moved since we last
+        positively confirmed it was the template. There is no way to tell
+        "the user hand-edited it" (#186's own live incident — the machinery
+        must never fight a deliberate override, same family as never
+        auto-downtiering the user's own `/model` choice) apart from a
+        multi-step drift this job never observed directly — and per this
+        job's own governing rule ("proof comes from observation, never
+        resemblance"), an unconfirmed guess is treated exactly like a goal
+        that never matched at all: `tvar` is downgraded to untracked, so the
+        SAME once-per-episode `untracked` handling below applies. This
+        downgrade is the one state mutation in this function gated on
+        `not dry_run` — unlike a passive refresh, it is a one-way door.
+    Anything else (a goal that never matched anything, or no longer counts
+    as having matched one) is the user's own and is left alone, with the
+    reason logged ONCE — never every 60 s (a genuinely LEGACY downgrade,
+    `armed_hash` never recorded, additionally gets a one-shot Discord ping,
+    since this branch now short-circuits before ever reaching the pre-fix
+    GAVE UP ping such a session used to get; an OBSERVED hand-edit stays
+    deliberately quiet)."""
     logs = []
     payload = rec.get("payload") or ""
     if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
@@ -8888,6 +8920,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
             rec.update({"tvar": cur, "dhash": None, "dn": 0, "dpinged": False,
                         "dq": None})
         rec["untracked_logged"] = False
+        rec["armed_hash"] = goal_template_hash(line)
         return logs
     tvar = rec.get("tvar")
     if tvar is None or tvar >= len(templates):
@@ -8898,6 +8931,83 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
             rec["untracked_logged"] = True
             logs.append("skip untracked (goal-drift) %s -> not the autopilot "
                         "template, leaving it alone" % loc)
+        return logs
+    payload_hash = goal_template_hash(line)
+    if rec.get("dq") and rec.get("dhash") == payload_hash:
+        # #186-review finding (S3) — the payload NOW equals what WE
+        # ourselves last typed (`dhash`, the hash of the delivery target),
+        # with a delivery genuinely still outstanding (`dq`): this is CC
+        # echoing OUR OWN re-arm landing, never a hand-edit, even though the
+        # shipped template may have moved AGAIN before this confirming
+        # sweep ran (so it no longer matches any CURRENT template either).
+        # Adopt it as the new confirmed baseline and fall through into the
+        # ordinary drift machinery below, which re-evaluates against
+        # whatever is current NOW — never gated on `dry_run` for the same
+        # reason the `cur is not None` branch above isn't: this is a
+        # passive, idempotent observation refresh, not a destructive one.
+        rec["armed_hash"] = payload_hash
+        rec["dq"] = None
+        logs.append("CONFIRMED (goal-drift) %s -> re-armed text landed" % loc)
+    elif rec.get("armed_hash") != payload_hash:
+        # #186 — the armed text itself changed since the last CONFIRMED
+        # match (or was never confirmed at all under this fix: `armed_hash`
+        # ABSENT, provably a session whose bookkeeping predates this fix —
+        # never the same thing as an OBSERVED hand-edit, which leaves
+        # `armed_hash` present but different). Either way, treated as a
+        # hand-edit: downgrade to untracked so this — and every future —
+        # sweep funnels through the SAME safe, once-logged "leave it alone"
+        # path above, never a guessed revert. Drift bookkeeping in flight
+        # for the OLD (now-stale) assumption is cleared too, so a later
+        # genuine re-match starts clean.
+        #
+        # #186-review finding 1 — a LEGACY record (armed_hash absent) is
+        # unmeasurable either way, and downgrading it silently would remove
+        # the ONLY signal a genuinely-stuck legacy drift loop used to get
+        # (the pre-existing GAVE UP ping after GOAL_DRIFT_MAX_ATTEMPTS,
+        # never reached now that this branch exits before ever attempting
+        # delivery). One-shot, loud, never silent — distinct from a
+        # genuinely OBSERVED hand-edit, which stays deliberately quiet
+        # (never pester the user for their own deliberate edit).
+        #
+        # #186-review finding — none of this mutates `rec` under
+        # `dry_run`: unlike the passive refresh above, downgrading `tvar`
+        # is a ONE-WAY door (the only way back is an exact CURRENT-template
+        # match) and `untracked_logged` is a genuine one-shot flag, exactly
+        # the `dark_pinged` class `#238-review 🟡F4` already fixed once in
+        # this same file — a manual `--dry-run` diagnostic sweep must never
+        # permanently disable healing for a real session.
+        legacy = rec.get("armed_hash") is None
+        if dry_run:
+            logs.append("READY (goal-drift) %s -> %s, would leave it alone"
+                        % (loc, "legacy/unconfirmed state" if legacy
+                           else "hand-edited text"))
+            return logs
+        rec["tvar"] = None
+        rec.update({"dhash": None, "dn": 0, "dpinged": False, "dq": None})
+        if not rec.get("untracked_logged"):
+            rec["untracked_logged"] = True
+            if legacy and not rec.get("legacy_pinged"):
+                rec["legacy_pinged"] = True
+                if send_fn is not None:
+                    from notify import stream_redirect  # #212
+                    send_fn(
+                        "⚠️ **%s** — `/goal` slučka má armovaný text, ktorý sa "
+                        "nezhoduje so žiadnou aktuálnou šablónou, a watchdog si "
+                        "nevie byť istý, či ide o tvoju vlastnú úpravu, alebo o "
+                        "stav spred opravy #186 — preto ho NEPREPÍŠE, len ho "
+                        "prestane sledovať (%s). Skontroluj si ho prosím ručne; "
+                        "ak má opäť bežať aktuálna šablóna, spusti `/autopilot` "
+                        "znova." % (project_label(cwd), loc),
+                        owner=stream_redirect(pane_owner(pid, run)) or None,
+                        dedup_key="goallegacy:%s" % sid,
+                        dry_run=dry_run)
+            logs.append(
+                "skip hand-edited (goal-drift) %s -> %s" % (
+                    loc,
+                    "legacy state, unconfirmed either way -- pinged once"
+                    if legacy else
+                    "armed text no longer matches the last confirmed "
+                    "template, leaving the user's edit alone"))
         return logs
     target = templates[tvar]
     th = goal_template_hash(target)
