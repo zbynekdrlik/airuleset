@@ -823,6 +823,53 @@ class TestScansControlFlowNotRawText(_Base):
                              "run in the same command must still be "
                              "treated as a real invocation")
 
+    def test_ssh_dash_t_remote_invocation_still_fires(self):
+        # Adversarial-review finding (post-#280, F1) -- a REGRESSION the
+        # `_blank_gh_text_flag_values` unconditional pass introduced:
+        # `-t`/`-m` mean something ENTIRELY different to ssh than to git/gh
+        # (`ssh -t '<cmd>'` EXECUTES its argument REMOTELY -- exactly the
+        # lib_poll_payload.py GITGH/MSGFLAG split this hook's own comment
+        # claims to mirror). Blanking `-t`'s value unconditionally silently
+        # swallowed a genuine invocation, reverting to the WORSE failure
+        # direction for this gate (a missing marker blocks a compliant
+        # worker's commit).
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-95",
+        }])
+        cmd = 'ssh host -t "gh issue comment 41 --body x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41),
+                             "an ssh -t remote invocation must still be "
+                             "detected -- -t is not a gh/git flag here")
+
+    def test_a_body_value_describing_a_heredoc_recipe_does_not_swallow_a_sibling(self):
+        # Adversarial-review finding (post-#280, F2) -- a REGRESSION
+        # `_control_flow_text`'s ORIGINAL pass order introduced: running
+        # lib_poll_payload.strip() BEFORE blanking --body/-F values let a
+        # `--body` argument whose PROSE happens to describe a heredoc
+        # recipe (`cat > body.md <<EOF`, exactly what a design comment in
+        # THIS repo routinely writes) be misread as a REAL heredoc trigger
+        # -- its own `is_live()` heredoc-inertness reasoning then swallowed
+        # a genuine SIBLING invocation appearing later in the command as
+        # if it were that fake heredoc's own body. Blanking the quoted
+        # flag values FIRST removes the fake trigger before heredoc
+        # detection ever runs.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/42#issuecomment-96",
+        }])
+        cmd = ('gh issue comment 41 --body '
+               '"Approach: write it with cat > body.md << EOF, then post"\n'
+               'gh issue comment 42 --body "second"')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(42),
+                             "issue #42 must still be classified -- a "
+                             "sibling --body VALUE merely describing a "
+                             "heredoc recipe must not swallow it")
+
 
 if __name__ == "__main__":
     main()
