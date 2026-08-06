@@ -458,6 +458,49 @@ class ValueFileInfixVsConfigExtension(unittest.TestCase):
     def test_the_real_store_value_file_by_absolute_path_still_blocks(self):
         self.assertBlocked("cat %s/DB_PASS.secret" % STORE)
 
+    # --- a listed extension used as a MIDDLE component, not the terminal one
+    # (adversarial review finding F1) — a copy/archive of a real value file
+    # renamed through an allow-listed extension must NOT slip the net just
+    # because a further suffix follows it.
+    def test_a_listed_extension_followed_by_a_further_suffix_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret.json.gz")
+
+    def test_a_listed_extension_followed_by_an_archive_extension_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret.env.bak")
+
+    def test_a_listed_extension_followed_by_a_second_config_extension_still_blocks(self):
+        self.assertBlocked("cat DB_PASS.secret.json.bak")
+
+    # --- the allow-list is a WHOLE-EXTENSION match: it must be the FINAL
+    # extension, not merely present somewhere in the trailing suffix chain
+    # (a real config's own backup, `config.secret.json.bak`, is the honest
+    # cost of closing the above — it now stays blocked too, and that trade
+    # is documented in the hook's header).
+    def test_a_backup_of_an_otherwise_allowed_config_now_blocks_too(self):
+        self.assertBlocked("cat config.secret.json.bak")
+
+    # --- rule B also gates Read/Grep/Glob (#153), not just Bash (review F6):
+    # the config-ext allow-list must apply identically on that surface.
+    def test_read_tool_on_a_config_ext_infix_name_is_allowed(self):
+        r = run_payload({"tool_name": "Read",
+                         "tool_input": {"file_path": "/tmp/deploy.secret.env"}})
+        self.assertEqual(r.returncode, 0,
+                         "expected ALLOW for Read on deploy.secret.env\nstderr=%s"
+                         % r.stderr)
+
+    def test_glob_tool_on_a_config_ext_infix_pattern_is_allowed(self):
+        r = run_payload({"tool_name": "Glob",
+                         "tool_input": {"pattern": "**/*.secret.json"}})
+        self.assertEqual(r.returncode, 0,
+                         "expected ALLOW for Glob on *.secret.json\nstderr=%s"
+                         % r.stderr)
+
+    def test_read_tool_on_the_real_store_file_still_blocks(self):
+        r = run_payload({"tool_name": "Read",
+                         "tool_input": {"file_path": "%s/DB_PASS.secret" % ABS}})
+        self.assertEqual(r.returncode, 2,
+                         "expected BLOCK for Read on the real store file")
+
 
 class Allows(unittest.TestCase):
     def assertAllowed(self, cmd, **kw):
