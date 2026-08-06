@@ -353,6 +353,99 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertIn('"gk-request"', src)
         self.assertIn("cmd_gk_request", src)
 
+    def test_issue_mode_also_applies_origin_stream_label(self):
+        # #191 Part C: a registered sub-dev stream's gk-request ALSO applies
+        # its own stream:<user> label at hand-off time -- the origin marker
+        # cmd_tickets_status's re-attribution step (_stream_label_ever_
+        # applied) reads later, even after a subsequent relabel removes it.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        # Patch `_current_user` (exists both pre- and post-fix) rather than
+        # the not-yet-existing `_own_stream_label` -- this drives the SAME
+        # real entry point pre-fix, so a red run fails on genuine missing
+        # behaviour (no origin-label calls) rather than on an AttributeError
+        # from mocking an attribute the pre-fix module never had.
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="simap"):
+            airuleset.cmd_gk_request(
+                self._args(issue=2081, comment="obnov docker sock prístup"))
+        flat = json.dumps(calls)
+        self.assertIn("label", flat)
+        self.assertIn("create", flat)           # gh label create --force
+        self.assertIn("stream:simap", flat)
+        add_label_calls = [c for c in calls if "--add-label" in c]
+        self.assertTrue(
+            any("stream:simap" in c for c in add_label_calls),
+            add_label_calls)
+
+    def test_create_mode_also_applies_origin_stream_label(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return m.Mock(returncode=0,
+                          stdout="https://github.com/o/r/issues/40\n",
+                          stderr="")
+
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="simap"):
+            rc = airuleset.cmd_gk_request(
+                self._args(title="Adopt the pipeline", body="detail"))
+        self.assertIn(rc, (0, None))
+        create = [c for c in calls if "issue" in c and "create" in c][0]
+        self.assertIn("needs-gatekeeper", create)
+        self.assertIn("stream:simap", create)
+
+    def test_origin_label_skipped_when_not_a_registered_stream(self):
+        # A full-authority box (dev1/gatekeeper) must never stamp a
+        # meaningless origin label -- `_current_user` here resolves to
+        # whatever box actually runs this test, never a registered stream,
+        # so no `gh label create` call should be attempted at all.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            airuleset.cmd_gk_request(
+                self._args(issue=99, comment="akcia"))
+        flat = json.dumps(calls)
+        self.assertNotIn("label create", flat)
+        self.assertNotIn("stream:", flat)
+
+    def test_origin_label_create_failure_is_logged_not_fatal(self):
+        # The needs-gatekeeper hand-off (gk-request's PRIMARY job) must
+        # never be blocked by the best-effort origin-label enrichment
+        # failing -- and the --add-label attempt must never even fire once
+        # the ensure-step reports the label unusable.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "label" in argv and "create" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="simap"):
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=5, comment="akcia"))
+        self.assertIn(rc, (0, None))
+        add_label_calls = [c for c in calls if "--add-label" in c]
+        self.assertFalse(
+            any("stream:simap" in c for c in add_label_calls),
+            add_label_calls)
+        # needs-gatekeeper itself still went through
+        self.assertTrue(any("needs-gatekeeper" in c for c in add_label_calls))
+
 
 class TestProtocolDocs(unittest.TestCase):
     def test_autopilot_skill_documents_the_channel(self):
