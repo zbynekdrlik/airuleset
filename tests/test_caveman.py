@@ -258,6 +258,16 @@ class TestCavemanShimBehavior(TestCase):
         self.assertIn("5h 5%", r.stdout)
         self.assertIn("wk 60%", r.stdout)
 
+    def test_model_segment_renders_through_the_real_shim(self):
+        # Adversarial review MINOR-2: the old assertIn("model_segment",
+        # CAVEMAN_SHIM_CONTENT) test has no teeth -- replacing the actual
+        # append call with a no-op still matches the substring. Render the
+        # REAL shim as a subprocess (the pattern the ticket segment above
+        # already uses) and assert the tier word is genuinely in stdout.
+        r = self._run({"model": {"id": "claude-opus-5"}})
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("opus", r.stdout)
+
 
 class TestCavemanShimAccountSegments(TestCase):
     """End-to-end: the 'sub <D.M.>(<Nd>)' renewal + account-email segments
@@ -380,6 +390,19 @@ class TestCavemanShimTickets(TestCase):
         # the raw constant keeps the placeholder + the segment wiring
         self.assertIn("{{REPO_DIR}}", airuleset.CAVEMAN_SHIM_CONTENT)
         self.assertIn("tickets_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_render_substitutes_managed_model(self):
+        # Adversarial review MINOR-1: baking MANAGED_MODEL into the shim at
+        # RENDER time (same shape as {{REPO_DIR}} above, and the launch
+        # script's own {{MANAGED_MODEL}} substitution) means the rendered
+        # shim never pays a per-prompt `import airuleset` -- it passes the
+        # literal value straight to model_segment(..., managed_model=...).
+        c = airuleset.render_caveman_shim()
+        self.assertNotIn("{{MANAGED_MODEL}}", c)
+        self.assertIn(airuleset.MANAGED_MODEL, c)
+        # the raw constant keeps the placeholder
+        self.assertIn("{{MANAGED_MODEL}}", airuleset.CAVEMAN_SHIM_CONTENT)
+        self.assertIn("model_segment", airuleset.CAVEMAN_SHIM_CONTENT)
 
     def test_install_write_site_uses_render(self):
         # the write must go through render_caveman_shim() — a raw-constant write

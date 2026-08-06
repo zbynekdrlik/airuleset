@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1000,6 +1001,56 @@ class ModelSegment(unittest.TestCase):
 
     def test_shim_renders_the_model_segment(self):
         self.assertIn("model_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_non_string_model_id_does_not_crash(self):
+        # Adversarial review MAJOR-1: a truthy non-string `id` (int/float/
+        # list/dict/bool) reached burn.tier()'s `.lower()` uncaught -- a
+        # crash here, being first in the shim's shared try block, silently
+        # deleted 5 unrelated working segments (sub/tickets/questions/ctx/
+        # account-email). model_id must be coerced to str before tiering.
+        for hostile_id in (123, 4.5, [1, 2], {"nested": "opus"}, True):
+            seg = statusbar.model_segment({"model": {"id": hostile_id}},
+                                           managed_model="claude-opus-5[1m]")
+            self.assertIsInstance(seg, str)
+
+    def test_non_string_display_name_does_not_crash(self):
+        seg = statusbar.model_segment({"model": {"display_name": 9}},
+                                       managed_model="claude-opus-5[1m]")
+        self.assertIsInstance(seg, str)
+
+    def test_unrecognized_managed_model_never_false_alarms(self):
+        # Adversarial review MAJOR-2: burn.tier() returns "other" for an
+        # unrecognized MANAGED_MODEL (a future alias, or any string with no
+        # tier word). The session's own "other" tier already renders "" --
+        # but the MANAGED side let "other" stand in as a real tier and
+        # compared it, permanently mismatching (a manufactured false alarm)
+        # even though the comparison is genuinely unresolvable. Not firing
+        # today (MANAGED_MODEL="claude-opus-5[1m]" tiers to "opus"), but a
+        # regression waiting for the next MANAGED_MODEL value.
+        for unrecognized in ("default", "gpt-5", "claude-5-titan"):
+            seg = statusbar.model_segment(
+                {"model": {"id": "claude-opus-5"}}, managed_model=unrecognized)
+            self.assertIn("\033[38;5;40m", seg,
+                           "managed_model=%r must never manufacture a "
+                           "mismatch" % unrecognized)
+
+    def test_managed_model_lazy_import_failure_falls_back_to_no_alarm(self):
+        # Adversarial review MINOR-3: _managed_model()'s try/except had zero
+        # coverage -- the import always succeeds in the test environment.
+        # Force the failure and confirm the fail-safe path still holds.
+        import builtins
+        real_import = builtins.__import__
+
+        def _hostile_import(name, *a, **kw):
+            if name == "airuleset":
+                raise ImportError("simulated: airuleset unimportable")
+            return real_import(name, *a, **kw)
+
+        with unittest.mock.patch("builtins.__import__", side_effect=_hostile_import):
+            self.assertIsNone(statusbar._managed_model())
+            seg = statusbar.model_segment({"model": {"id": "claude-sonnet-5"}})
+        self.assertIn("\033[38;5;40m", seg)
+        self.assertIn("sonnet", seg)
 
 
 class FmtTokens(unittest.TestCase):
