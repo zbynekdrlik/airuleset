@@ -3977,4 +3977,3 @@ step. Review findings + fixes posted as durable comments on both issues.
 Worked in an isolated worktree (this repo's own supervisor integrates +
 pushes + deploys + fires the per-ticket Discord cards; no PR, no CI, direct
 push to main per this repo's own two-branch-minus-PR model).
->>>>>>> worktree-agent-a1babf242831a44d1
