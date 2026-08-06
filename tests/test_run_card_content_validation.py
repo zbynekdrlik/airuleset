@@ -220,12 +220,114 @@ class TestDryRunStillRefusesButNeverLogs(_RunCard):
         self.assertEqual(calls, [], "dry-run must write no durable state")
 
     def test_a_real_refusal_is_logged_durably(self):
+        # Assert the kwargs, not just "something was called" -- the outer
+        # `except Exception` handler in `_notify_run_card` ALSO calls
+        # log_delivery, so a mutant where `_run_card_refuse` raised before
+        # ever logging would still pass a bare `assertTrue(calls)` (round-2
+        # adversarial review finding).
         args = _run_card_args(achieved=None, dry_run=False)
         calls = []
         with m.patch("notify.log_delivery", side_effect=lambda *a, **k:
                      calls.append((a, k))):
             self._send(args)
         self.assertTrue(calls, "a real (non-dry-run) refusal must be logged")
+        _args, kwargs = calls[0]
+        self.assertEqual(kwargs.get("kind"), "run-card")
+        self.assertIn("achieved", kwargs.get("reason", "").lower())
+
+    def test_a_refusal_never_logs_the_raw_content(self):
+        # #157's own lesson, applied one layer up: a guard's own AUDIT LOG
+        # is a second place the thing it protects can come to rest -- the
+        # durable log gets a short CLASSIFICATION, never the raw --goal/
+        # --achieved text (round-2 adversarial review finding 6). Whatever
+        # gets refused is, by construction, always a denylisted/contentless
+        # value -- so the regression is "does the LOG line quote it back",
+        # not "could the refused value itself be sensitive".
+        args = _run_card_args(achieved="zmergnutý")
+        calls = []
+        with m.patch("notify.log_delivery", side_effect=lambda *a, **k:
+                     calls.append((a, k))):
+            self._send(args)
+        self.assertTrue(calls)
+        self.assertNotIn("zmergnutý", calls[0][1].get("reason", ""))
+
+
+class TestAdversarialContentShapes(_RunCard):
+    """Round-2 adversarial review of #272's own first cut: every one of
+    these live-reproduced against the FIRST (pre-review) implementation as
+    a card that composed and "sent" successfully despite being just as
+    contentless as the reported bug — a trailing period, a dropped
+    diacritic, an extra space before a comma, "##457"/"#457.", pure
+    punctuation, a placeholder word, or an emoji."""
+
+    def test_trailing_punctuation_on_the_leaked_phrase_is_still_refused(self):
+        for bad in ("PR zmergnutý, deploy beží.", "hotovo.", "Done.", "done!"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(achieved=bad)
+                body, _err, code = self._send(args)
+                self.assertIsNone(body, bad)
+                self.assertEqual(code, 1, bad)
+
+    def test_a_missing_diacritic_is_still_refused(self):
+        # "hotove" (no diacritic) must refuse exactly like "hotové" does --
+        # the pre-review denylist listed "dokoncene" but not "hotove",
+        # which was an inconsistency, not a deliberate choice.
+        for bad in ("hotove", "zmergnuty", "dokoncene"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(achieved=bad)
+                _body, _err, code = self._send(args)
+                self.assertEqual(code, 1, bad)
+
+    def test_extra_whitespace_around_punctuation_is_still_refused(self):
+        args = _run_card_args(achieved="PR zmergnutý , deploy beží")
+        _body, _err, code = self._send(args)
+        self.assertEqual(code, 1)
+
+    def test_ok_ano_yes_family_is_refused(self):
+        for bad in ("OK", "ok", "áno", "ano", "yes", "y"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(achieved=bad)
+                _body, _err, code = self._send(args)
+                self.assertEqual(code, 1, bad)
+
+    def test_pure_punctuation_or_symbol_achieved_is_refused(self):
+        for bad in ("-", ".", "n/a", "tbd", "TODO", "✅"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(achieved=bad)
+                _body, _err, code = self._send(args)
+                self.assertEqual(code, 1, bad)
+
+    def test_punctuation_only_or_placeholder_goal_is_refused(self):
+        for bad in (".", "-", "...", "?", "n/a", "None", "null", "[]", "{}",
+                   "TODO", "tbd", "xxx", "🎉"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(goal=bad)
+                body, err, code = self._send(
+                    args, gh=_fake_gh(title="TODO"))
+                # the title itself is ALSO a placeholder here, so this must
+                # refuse rather than silently enrich with junk
+                self.assertIsNone(body, bad)
+                self.assertEqual(code, 1, bad)
+                self.assertIn("goal", err.lower())
+
+    def test_near_miss_bare_refs_are_still_bare(self):
+        # "##457"/"#457."/"#457," carry no more meaning than a bare "#457"
+        # -- they must be treated the SAME way: enriched from a usable title.
+        for bad in ("##457", "#457.", "#457,"):
+            with self.subTest(bad=bad):
+                args = _run_card_args(goal=bad)
+                body, err, code = self._send(
+                    args, gh=_fake_gh(title="Oprava tunela"))
+                self.assertIsNone(code, err)
+                self.assertIn("Cieľ:** Oprava tunela", body)
+
+    def test_a_real_word_that_is_not_on_any_denylist_still_sends(self):
+        # Positive control: the classifier must not become so aggressive it
+        # starts refusing genuinely short-but-real content.
+        args = _run_card_args(achieved="Oprava nasadená")
+        body, err, code = self._send(args)
+        self.assertIsNone(code, err)
+        self.assertIn("Oprava nasadená", body)
 
 
 if __name__ == "__main__":

@@ -3933,62 +3933,116 @@ def _notify_backfill_digest(args, send):
 # ✅ Dosiahnuté is empty/generic filler, is undecodable from a phone and must
 # never reach Discord silently (the codex-bridge #457-#460 report: worker
 # calls that reached `--goal "#457"` / an omitted `--achieved`). A GOAL that
-# merely looks omitted (bare, blank, or a bare "#N"/"N" ticket reference) is
-# auto-enriched from the already-fetched issue title when the title itself
-# is usable; an ACHIEVED that is empty or normalizes to a known-generic
-# filler phrase has nothing to enrich it FROM (it is worker-authored
-# content, not something `gh` can supply) and is always a hard refusal.
-_RUN_CARD_BARE_REF_RE = re.compile(r"^#?\d+$")
+# merely looks omitted is auto-enriched from the already-fetched issue title
+# when the title itself is usable; an ACHIEVED that is empty or generic
+# filler has nothing to enrich it FROM (it is worker-authored content, not
+# something `gh` can supply) and is always a hard refusal.
+#
+# Round-2 adversarial review (#272): the FIRST cut only rejected a bare
+# numeric ref like "457"/"#457" and an achieved value that matched a
+# denylist EXACTLY after casefold+whitespace-collapse — both were defeated
+# live by trivial variants: a trailing period, a missing diacritic, an
+# extra space before a comma, "##457"/"#457.", or plain junk like ".", "-",
+# "n/a", "None", "TODO", a bare emoji. The classifier below is shape-based
+# instead of a literal-match enumeration: "is bare" means "contains not one
+# single letter anywhere" (so ANY digits/punctuation/symbol/emoji-only
+# string is caught regardless of exact spelling) OR "normalizes to a known
+# placeholder word" (n/a, none, todo, ok, hotovo, …) — normalization folds
+# diacritics (NFKD, drop combining marks — this also fixes an NFD-decomposed
+# input the plain casefold() never caught), casefolds, and replaces EVERY
+# punctuation run (not just leading/trailing) with a space before collapsing
+# whitespace, so spacing/punctuation variants of the same phrase converge to
+# one key. The known-generic PHRASES are listed with their real diacritics
+# and normalized ONCE at import time — this is what makes "hotovo" and
+# "hotové" (two genuinely different Slovak words) both land correctly
+# without hand-duplicating an ASCII-folded copy of every entry.
+_RUN_CARD_ALNUM_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+_RUN_CARD_PUNCT_RE = re.compile(r"[.,;:!?\-_()\[\]{}'\"/\\*+~`#]+")
 
-_RUN_CARD_GENERIC_ACHIEVED = frozenset({
-    "pr zmergnutý, deploy beží",
-    "pr zmergnutý",
-    "zmergnuté",
-    "zmergnutý",
-    "deploy beží",
-    "hotovo",
-    "hotové",
-    "done",
-    "merged",
-    "dokončené",
-    "dokoncene",
-})
+
+def _run_card_norm(raw):
+    """Shape-normalize for content-equality checks: fold diacritics away
+    (NFKD, drop combining marks), casefold, replace every punctuation RUN
+    (anywhere, not just at the edges) with one space, collapse whitespace."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(raw))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = _RUN_CARD_PUNCT_RE.sub(" ", s.casefold())
+    return " ".join(s.split())
+
+
+def _run_card_has_no_letters(s):
+    """True when `s` carries zero alphabetic characters anywhere — a bare
+    ticket ref ("457", "#457", "##457", "#457."), pure punctuation
+    (".", "-", "..."), or a symbol/emoji-only string ("✅") all land here,
+    regardless of exact spelling/formatting."""
+    return not _RUN_CARD_ALNUM_RE.search(s)
+
+
+_RUN_CARD_GOAL_PLACEHOLDERS = frozenset(
+    _run_card_norm(p) for p in (
+        "n/a", "na", "none", "null", "nil", "todo", "tbd", "tba", "xxx",
+    ))
+
+_RUN_CARD_GENERIC_ACHIEVED = frozenset(
+    _run_card_norm(p) for p in (
+        "PR zmergnutý, deploy beží", "PR zmergnutý", "zmergnuté",
+        "zmergnutý", "deploy beží", "hotovo", "hotové", "done", "merged",
+        "dokončené", "ok", "áno", "ano", "yes", "y",
+        "n/a", "na", "none", "null", "nil", "tbd", "tba", "todo", "xxx",
+    ))
 
 
 def _run_card_goal_is_bare(goal_raw):
     """True when `goal_raw` carries no plain-language meaning: absent,
-    blank/whitespace-only, or a bare ticket reference like "457"/"#457"."""
+    blank/whitespace-only, contains no letter at all (a bare ticket ref /
+    pure punctuation / a symbol), or normalizes to a known placeholder
+    word ("n/a", "TODO", …)."""
     if goal_raw is None:
         return True
     s = str(goal_raw).strip()
-    return (not s) or bool(_RUN_CARD_BARE_REF_RE.match(s))
+    if not s or _run_card_has_no_letters(s):
+        return True
+    return _run_card_norm(s) in _RUN_CARD_GOAL_PLACEHOLDERS
 
 
 def _run_card_achieved_is_bad(achieved_raw):
-    """True when `achieved_raw` is empty/whitespace, or normalizes to one of
-    the known generic filler phrases (incl. the hardcoded default this fix
-    removes below)."""
+    """True when `achieved_raw` is empty/whitespace, contains no letter at
+    all, or normalizes to one of the known generic filler phrases (incl.
+    the hardcoded default this fix removes below)."""
     if achieved_raw is None:
         return True
     s = str(achieved_raw).strip()
-    if not s:
+    if not s or _run_card_has_no_letters(s):
         return True
-    norm = " ".join(s.casefold().split())
-    return norm in _RUN_CARD_GENERIC_ACHIEVED
+    return _run_card_norm(s) in _RUN_CARD_GENERIC_ACHIEVED
 
 
-def _run_card_refuse(repo, issue, dry_run, reason):
+def _run_card_refuse(name, issue, dry_run, log_reason, stderr_detail):
     """A #272 content-validation refusal: never send a contentless card, but
     never crash the worker's turn either — exit non-zero with the reason on
     stderr, the SAME shape a genuine delivery failure already uses (#135),
     so a Bash caller sees it. Logged durably UNLESS --dry-run (dry-run's
     contract is preview-only, no state written — the same split the
-    pre-existing view_ok diagnostic in `_notify_run_card` already uses)."""
-    key = "%s#%s" % (repo, issue)
+    pre-existing view_ok diagnostic in `_notify_run_card` already uses).
+    NOTE: --dry-run still exits non-zero + prints to stderr — a PREVIEW
+    that would be refused for real ought to say so — it is only the
+    DURABLE log write that dry-run skips, unlike the view_ok diagnostic a
+    few lines up which suppresses both.
+
+    `log_reason` is a short CLASSIFICATION only (never the raw --goal/
+    --achieved text) — the durable log is a second place worker-authored
+    content could come to rest (#157's own lesson), and the classification
+    alone is enough to diagnose a refusal. `stderr_detail` MAY include the
+    raw value — the command line is already in the transcript, so this is
+    not a new exposure. `name` is the bare repo-name key (`repo.rstrip("/")
+    .split("/")[-1]`), matching the SAME key every other run-card log line
+    already uses (never the full "owner/repo" form)."""
+    key = "%s#%s" % (name, issue)
     if not dry_run:
         from notify import log_delivery
-        log_delivery("refused", kind="run-card", key=key, reason=reason)
-    print("notify --run-card: REFUSED (%s) — %s" % (key, reason),
+        log_delivery("refused", kind="run-card", key=key, reason=log_reason)
+    print("notify --run-card: REFUSED (%s) — %s" % (key, stderr_detail),
           file=sys.stderr)
     sys.exit(1)
 
@@ -4092,14 +4146,20 @@ def _notify_run_card(args, compose_autopilot_card, send):
                 remaining = None
             scope_label = "core"
 
+        # Dedup / log key = the bare repo NAME (the LAST path segment of
+        # `--repo`) — computed here (moved up from just before the send()
+        # call) so a #272 content-validation refusal uses the SAME key
+        # every other run-card log line already does, never the full
+        # "owner/repo" form (round-2 adversarial review finding).
+        name = str(repo).rstrip("/").split("/")[-1]
         raw_goal = getattr(args, "goal", None)
         raw_achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
         dry_run = getattr(args, "dry_run", False)
         # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable).
-        # #272: a GOAL that merely LOOKS omitted (bare/blank/whitespace/a bare
-        # "#N" ticket reference) is auto-enriched from the fetched issue title
-        # — extending the pre-existing "goal genuinely omitted" fallback — but
-        # only when that title itself carries real content; otherwise refuse.
+        # #272: a GOAL that merely LOOKS omitted is auto-enriched from the
+        # fetched issue title — extending the pre-existing "goal genuinely
+        # omitted" fallback — but only when that title itself carries real
+        # content; otherwise refuse.
         if _run_card_goal_is_bare(raw_goal):
             if not _run_card_goal_is_bare(title):
                 goal = title
@@ -4108,10 +4168,13 @@ def _notify_run_card(args, compose_autopilot_card, send):
                       file=sys.stderr)
             else:
                 _run_card_refuse(
-                    repo, issue, dry_run,
-                    "goal %r is contentless and no usable issue title was "
-                    "available to enrich it — pass a real --goal (plain "
-                    "Slovak, what the ticket wants)" % raw_goal)
+                    name, issue, dry_run,
+                    log_reason="goal is contentless (no usable title to "
+                              "enrich from)",
+                    stderr_detail="goal %r is contentless and no usable "
+                                  "issue title was available to enrich it "
+                                  "— pass a real --goal (plain Slovak, "
+                                  "what the ticket wants)" % raw_goal)
         else:
             goal = raw_goal
         # ✅ Dosiahnuté has nothing to enrich it FROM (it is worker-authored
@@ -4120,10 +4183,11 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # generic default (#272).
         if _run_card_achieved_is_bad(raw_achieved):
             _run_card_refuse(
-                repo, issue, dry_run,
-                "achieved %r is missing or generic — pass a real --achieved "
-                "describing what actually landed and was verified"
-                % raw_achieved)
+                name, issue, dry_run,
+                log_reason="achieved is missing or generic",
+                stderr_detail="achieved %r is missing or generic — pass a "
+                              "real --achieved describing what actually "
+                              "landed and was verified" % raw_achieved)
         achieved = raw_achieved
         # --pr is the full PR URL → a clickable "kód (PR)" link (the number was
         # dropped, the link kept). --url = "where to see it live" link(s).
@@ -4140,8 +4204,8 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # fresh worker each turn (SendMessage is gated), so the same issue can be
         # carded more than once; keying on repo-name#issue collapses those to one.
         # Use only the repo's last path segment so a bare name ("odoo-erp") and the
-        # full "owner/odoo-erp" collapse to one key.
-        name = str(repo).rstrip("/").split("/")[-1]
+        # full "owner/odoo-erp" collapse to one key. (`name` computed earlier, above
+        # the goal/achieved validation block, so a refusal shares this same key.)
         dedup = getattr(args, "dedup_key", None) or ("%s#%s" % (name, issue))
         # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
         # the detached spawn (its stdout is /dev/null).

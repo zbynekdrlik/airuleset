@@ -149,7 +149,7 @@ class TestForkNoMergeHandoffCard(TestCase):
                        record_question=False, edit_question=False, channel_id=False,
                        owner=False, mirror_owners=False, body=None, run=None,
                        repo="kvaskodev/odoo-erp", issue=1408, pr=None,
-                       achieved="hotové", result=None, goal="cieľ", version=None,
+                       achieved="Fix nasadený a overený", result=None, goal="cieľ", version=None,
                        merge_sha=None, url=None, review="ok", handoff=True,
                        dedup_key=None, dry_run=False)
         captured = {}
@@ -336,7 +336,7 @@ class TestRunCardRemainingScopedToStream(TestCase):
                     record_question=False, edit_question=False, channel_id=False,
                     owner=False, mirror_owners=False, body=None, run=None,
                     repo="kvaskodev/odoo-erp", issue=1408, pr=None,
-                    achieved="hotové", result=None, goal="cieľ", version=None,
+                    achieved="Fix nasadený a overený", result=None, goal="cieľ", version=None,
                     merge_sha=None, url=None, review="ok", handoff=True,
                     dedup_key=None, dry_run=False)
         base.update(over)
@@ -655,7 +655,7 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
                     record_question=False, edit_question=False, channel_id=False,
                     owner=False, mirror_owners=False, body=None, run=None,
                     repo="o/r", issue=5, pr=None,
-                    achieved="hotové", result=None, goal="cieľ", version=None,
+                    achieved="Fix nasadený a overený", result=None, goal="cieľ", version=None,
                     merge_sha=None, url=None, review="ok", handoff=False,
                     dedup_key=None, dry_run=False)
         base.update(over)
@@ -1786,7 +1786,7 @@ class TestRunCardResolvesIdentityAgainstTheRepoRoot(TestCase):
                     record_question=False, edit_question=False,
                     channel_id=False, owner=False, mirror_owners=False,
                     body=None, run=None, repo="kvaskodev/odoo-erp", issue=1408,
-                    pr=None, achieved="hotové", result=None, goal="cieľ",
+                    pr=None, achieved="Fix nasadený a overený", result=None, goal="cieľ",
                     version=None, merge_sha=None, url=None, review="ok",
                     handoff=True, dedup_key=None, dry_run=False)
         base.update(over)
