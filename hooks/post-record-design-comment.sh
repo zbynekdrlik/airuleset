@@ -107,25 +107,50 @@ def _log_exception(where, exc):
 
 
 # Free-text flags gh/git themselves consume as literal data -- their VALUE
-# is NEVER separately executed by anything, sudo-prefixed or not, unlike
-# lib_poll_payload.py's own `-m`/`-c`-style values which sometimes ARE
-# forwarded to and executed by a preceding interpreter (its whole reason
-# for exempting a segment that names one). Blanking these unconditionally
-# is the second pass below, chained after the reused heredoc-aware strip.
+# is NEVER separately executed by anything, sudo/env-prefixed or not. But
+# an UNCONDITIONAL blank is NOT safe on its own (#280 follow-up, F1):
+# `-t`/`-m` mean something ENTIRELY different when they belong to some
+# OTHER command sharing the same segment -- `ssh host -t "<remote gh
+# call>"` -- -t is ssh's OWN flag, and its value is code that actually
+# runs remotely, not a git/gh flag argument at all. Blanking it
+# unconditionally swallows the whole remote invocation, hiding the
+# `gh issue comment` call it carries.
+#
+# The fix: a flag only counts as gh/git's OWN when a `git`/`gh` command
+# word has ALREADY opened the SAME segment (reusing lib_poll_payload's own
+# SEP/GITGH building blocks) -- true for `gh issue comment ... --body
+# "..."` and for `sudo gh issue comment ... --body "..."` (sudo doesn't
+# consume the following args as its own flags, it just re-execs gh with
+# them, so "gh " still precedes --body in the segment), false for `ssh
+# host -t "..."` (the segment before -t is "ssh host ", no "gh "/"git "
+# yet). This is DELIBERATELY not lib_poll_payload's own INTERP-exemption
+# shape -- exempting a segment naming sudo/env/ssh would reopen the
+# earlier #280 -R-in-quoted-body leak for the sudo-prefixed shape (see
+# TestEnvVarPrefixedGhCallIsRecognized). GITGH-precedes is the correct,
+# narrower discriminator for this hook's domain.
 _TEXT_FLAG_VALUE_RE = re.compile(
     r"(?:^|\s)(?:--body|--body-file|--notes|--notes-file|-b|-F|"
     r"-m|--message|--title|-t)(?:=|\s+)(['\"])(.*?)\1", re.S)
 
 
-def _blank_gh_text_flag_values(text):
-    """Blank the quoted VALUE of every gh/git free-text flag, UNCONDITIONALLY
-    -- see `_TEXT_FLAG_VALUE_RE`'s own comment for why this hook needs no
-    interpreter-prefix exemption. Positional (offset-based, reverse order),
+def _blank_gh_text_flag_values(text, lib_poll_payload):
+    """Blank the quoted VALUE of every gh/git free-text flag -- scoped to
+    the flag's OWN command segment (SEP-bounded, reusing lib_poll_payload's
+    own separator tuple) and requiring a `git`/`gh` command word to have
+    ALREADY opened that segment before the flag (reusing lib_poll_payload's
+    own GITGH regex) -- see `_TEXT_FLAG_VALUE_RE`'s own comment for why
+    this is neither fully unconditional nor lib_poll_payload's own
+    INTERP-exemption shape. Positional (offset-based, reverse order),
     never by value -- the same discipline lib_poll_payload.py's own
     `flag_spans`/`strip` already use, for the same reason (a value-based
     `str.replace` can delete unrelated live text sharing the same bytes)."""
     out = text
     for m in reversed(list(_TEXT_FLAG_VALUE_RE.finditer(text))):
+        head = text[:m.start()]
+        cut = max([head.rfind(s) for s in lib_poll_payload.SEP] + [-1])
+        seg = text[cut + 1:m.start()]
+        if not lib_poll_payload.GITGH.search(seg):
+            continue
         if m.group(2).strip():
             out = out[:m.start(2)] + " " + out[m.end(2):]
     return out
@@ -150,6 +175,15 @@ def _control_flow_text(text, repo_root):
     misread as a real invocation/flag. Scanning THIS text instead fixes
     both without touching the distinct-repo ambiguity refusal below.
 
+    #280 follow-up (adversarial-review F1/F2) -- flag-VALUE blanking now
+    runs FIRST, the heredoc-aware strip SECOND (the reverse of the
+    original order): a --body VALUE whose prose merely mentions a
+    heredoc recipe (`cat > body.md << EOF`) was otherwise misread by the
+    heredoc detector as a REAL trigger, swallowing everything after it
+    (including a sibling `gh issue comment` invocation) as if it were
+    that fake heredoc's own body. Blanking the quoted value first removes
+    the fake trigger before heredoc detection ever runs.
+
     Falls back to `text` UNCHANGED on any import/processing failure --
     this must never crash or disable the whole hook."""
     try:
@@ -157,11 +191,14 @@ def _control_flow_text(text, repo_root):
         if hooks_dir not in sys.path:
             sys.path.insert(0, hooks_dir)
         import lib_poll_payload
-        text = lib_poll_payload.strip(text)
+    except Exception:
+        return text
+    try:
+        text = _blank_gh_text_flag_values(text, lib_poll_payload)
     except Exception:
         pass
     try:
-        return _blank_gh_text_flag_values(text)
+        return lib_poll_payload.strip(text)
     except Exception:
         return text
 
