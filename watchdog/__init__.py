@@ -11394,15 +11394,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the SAME variant it already ran (the authority profile is never
           re-resolved), so a goal the user wrote is untouchable by
           construction rather than by threshold (`_goal_template_drift`).
-          A FOURTH, always-on shape (#161): a genuine, stopped
-          `❓ NEEDS YOU` block whose ping was CONFIRMED delivered
-          (`discord-questions.json`'s own `ts`) more than
-          `GOAL_QUESTION_TIMEOUT_S` (~30 min) ago with no reply gets ONE
-          `question-timeout:` nudge — never bare "continue" (which would
-          just re-print the same question, the camera-box wall) —
-          instructing the session to park that ticket and work others
-          (`_goal_question_park_nudge`); bounded to one nudge per distinct
-          outstanding question, never a guess when no delivery is on record.
+          A FOURTH, always-on shape (#161): a genuine, TRAILING
+          `❓ NEEDS YOU` status line (never a mere mention of those words
+          elsewhere in the turn) whose CONFIRMED-delivered ping
+          (`discord-questions.json`'s own `ts`, matched to THIS block by
+          timestamp proximity — a stale, unrelated sibling question can
+          never stand in) is more than `GOAL_QUESTION_TIMEOUT_S` (~30 min)
+          old with no reply gets ONE `question-timeout:` nudge — never
+          bare "continue" (which would just re-print the same question,
+          the camera-box wall) — instructing the session to park that
+          ticket and work others (`_goal_question_park_nudge`); the
+          "already nudged" state is persisted BEFORE the keystroke send
+          (never after), bounded to one nudge per distinct outstanding
+          question, never a guess when no delivery is on record.
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
