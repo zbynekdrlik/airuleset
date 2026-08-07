@@ -7623,12 +7623,20 @@ def cmd_core_quals(args):
              lives in the data the worker reads, not in a prose clause it may
              never have loaded.
     --extra <qual>: ANDs one extra search qualifier onto every per-qual query
-             (e.g. `label:prio:bounce` for the bounce-lane seed), mirroring
-             `slice-quals`. Without it the full-authority bounce seed went
-             through a raw `gh issue list`, so the single highest-priority
-             SELECTION path was the one path with neither this command's guard
-             nor its ownership column — while the oldest open `prio:bounce`
-             ticket on odoo-erp is #2150, `stream:david`.
+             (e.g. `label:prio:bounce` for the bounce-lane seed) AND unions in
+             the BARE `extra` query alone (#307: `prio:bounce` is no longer
+             one of MAINTAINER_ACTION_LABELS, so the per-qual AND can no
+             longer find a ticket carrying ONLY `extra` — the common bounce
+             shape) — this no longer mirrors `slice-quals`'s pure-AND
+             contract; a caller passing `--extra` gets base∧extra (every
+             non-skip, non-autopilot-skip ticket matching `extra`, a
+             SUPERSET of obligation∧extra), each row still marked
+             `action-only`/`implement`. Without it the full-authority bounce
+             seed went through a raw `gh issue list`, so the single
+             highest-priority SELECTION path was the one path with neither
+             this command's guard nor its ownership column — while the
+             oldest open `prio:bounce` ticket on odoo-erp is #2150,
+             `stream:david`.
     No flag: prints each qual whose union defines the obligation set.
 
     A gh query failure prints to stderr and exits non-zero — NEVER prints a
@@ -7662,6 +7670,13 @@ def cmd_core_quals(args):
         return
 
     extra = getattr(args, "extra", None)
+    if isinstance(extra, str):
+        # A whitespace-only --extra is truthy but carries no real qualifier —
+        # left unstripped it still passes `if extra:` below and the new
+        # bare-extra branch would union in a BARE "-label:autopilot-skip"
+        # query, the exact whole-repo never-stops shape #181 rejected
+        # (adversarial review of #307).
+        extra = extra.strip() or None
     base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
     search_quals = quals
     if extra:

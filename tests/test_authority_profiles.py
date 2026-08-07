@@ -958,6 +958,17 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
                                 extra="label:prio:bounce")
         self.assertIn("-label:autopilot-skip label:prio:bounce", searches)
 
+    def test_whitespace_only_extra_never_leaks_the_bare_whole_repo_query(self):
+        """Adversarial review of #307: `extra=" "` is truthy, so an
+        unstripped check would still take the bare-extra branch and union in
+        a plain `-label:autopilot-skip` query -- the exact whole-repo
+        never-stops shape #181 rejected."""
+        _, searches = self._run(count=False, list=True, extra="   ")
+        bare = [s for s in searches if s.strip() == "-label:autopilot-skip"]
+        self.assertEqual(
+            bare, [],
+            "a whitespace-only --extra leaked the bare whole-repo query")
+
     def test_reduced_authority_box_refuses_instead_of_answering(self):
         """I-3: C1's fix applied in the mirror direction. `slice-quals`
         correctly refuses on a full box; `core-quals` answered on ANY box, so

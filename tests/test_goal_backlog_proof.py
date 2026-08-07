@@ -385,8 +385,18 @@ class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
     def test_the_full_template_scopes_the_proof_to_the_obligation_set(self):
         line = goal_lines()[FULL]
         self.assertIn("OBLIGED to action", line)
-        for label in ("needs-gatekeeper", "prio:bounce"):
-            self.assertIn(label, line)
+        self.assertIn("needs-gatekeeper", line)
+        # #307 (2026-08-07): `prio:bounce` is no longer part of the
+        # OBLIGATION-SET clause itself -- a bare bounce ticket is the
+        # sub-dev's own work, not this box's. `prio:bounce` still appears
+        # LATER in the same line, in the UNRELATED bounce-lane SEED sentence
+        # ("Bounce lane: open tickets labeled prio:bounce jump the queue"),
+        # so scope the negative check to the obligation-set clause window
+        # alone.
+        obligation_clause = line[line.index("BACKLOG EMPTY"):
+                                  line.index("is resolved")]
+        self.assertNotIn("prio:bounce", obligation_clause)
+        self.assertIn("Bounce lane: open tickets labeled prio:bounce", line)
 
     def test_the_full_template_says_a_stream_ticket_is_actioned_not_implemented(self):
         # Counting a stream ticket must not turn into WORKING it — that is
@@ -394,12 +404,17 @@ class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
         line = goal_lines()[FULL]
         self.assertIn("NOT mine to implement", line)
 
-    def test_the_full_template_finally_carries_a_review_watch_clause(self):
-        # It was the only one of the three without one, so nothing kept the
-        # gatekeeper's loop alive while the other side held the ball
-        # (cross-stream protocol rule 4).
+    def test_the_full_template_no_longer_needs_its_own_review_watch_clause(self):
+        # #307 (2026-08-07): the FULL obligation set now holds ONLY hand-offs
+        # this box can act on directly (needs-gatekeeper/ready-for-review) —
+        # nothing left in it is ever "waiting on the other side" any more, so
+        # the FULL loop's own /goal has no state that needs a review-watch
+        # hold of its own. `/process-subdev`'s SEPARATE per-stream loop
+        # (unaffected by this ticket) is what stays alive through a bounce's
+        # whole lifecycle and picks up the re-hand-off — see cross-stream
+        # rule 4.
         line = goal_lines()[FULL]
-        self.assertIn("REVIEW-WATCH", line)
+        self.assertNotIn("REVIEW-WATCH", line)
 
     def test_the_backlog_scope_bullet_no_longer_contradicts_the_proof(self):
         # `autopilot-skip is the ONLY exclusion` read as a whole-repo
@@ -412,10 +427,11 @@ class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
 
     def test_cross_stream_rule_four_records_the_mechanical_hold(self):
         t = read(SKILL)
-        i = t.index("Neither side ever \"finishes\" while the other")
-        window = t[i:i + 900]
+        i = t.index("is now MECHANICAL,")
+        window = " ".join(t[i:i + 900].split())   # markdown line-wraps -> spaces
         self.assertIn("core-quals", window)
         self.assertIn("needs-gatekeeper", window)
+        self.assertIn("not a prose guarantee", window)
 
 
 class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
