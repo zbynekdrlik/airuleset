@@ -188,7 +188,7 @@ The agent itself cannot type `/goal` into its own input — print the ONE line m
 **AUTHORITY: full** (default — merge to main + deploy):
 
 ```
-/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` unless `question-timeout:` (30m) arrives — park it, work elsewhere (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, prio:bounce, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: a real one SHOWS command output in this turn; a claimed one asserts it. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows, a merged PR and a verified deploy. IF I CANNOT TELL — no `🏁` line, no pasted output, unreadable or possibly stale output, any doubt — (B) does NOT hold and the answer is CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both commands, paste each and its output verbatim, then write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code; when the only open items await the OTHER side, that is REVIEW-WATCH: stay alive, re-check hourly holding the turn OPEN with a FOREGROUND sleep-poll, end ⏳ WORKING — never park silently or end the loop. Also stop when I must approve a genuinely-irreversible action or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the backlog: never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK the moment it comes up (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + a `needs-answer` comment on the issue, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only when nothing else is workable. NEVER bury a question, NEVER stop blaming my silence. During 00:00–06:00 Europe/Bratislava defer a question ONLY while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds from the OLDEST open prio:bounce ticket first (a running batch is never preempted); an injected nudge naming a ticket gets a one-line ACK + the prio:bounce label, taken next turn — never worked inline. Count a ticket done ONLY after verifying it from primary sources — `gh pr view` (closingIssuesReferences, merged), `gh run list` (main green), `gh issue view` (closed), the deployed version read from the live target — never from the worker's claim alone; verify the LAST ticket as strictly as the first. After every merge, END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — which means CONTINUE and NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (holds briefly until it lands, #225) as your own last tool call, THEN do NOT dispatch the next issue in the same turn; the ARMED GOAL fires the NEXT TURN and picks it up (this turn boundary is what lets the context compact).
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` unless `question-timeout:` (30m) arrives — park it, work elsewhere (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: a real one SHOWS command output in this turn; a claimed one asserts it. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows, a merged PR and a verified deploy. IF I CANNOT TELL — no `🏁` line, no pasted output, unreadable or possibly stale output, any doubt — (B) does NOT hold and the answer is CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both commands, paste each and its output verbatim, then write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code; when the only open items await the OTHER side, that is REVIEW-WATCH: stay alive, re-check hourly holding the turn OPEN with a FOREGROUND sleep-poll, end ⏳ WORKING — never park silently or end the loop. Also stop when I must approve a genuinely-irreversible action or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the backlog: never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK the moment it comes up (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + a `needs-answer` comment on the issue, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only when nothing else is workable. NEVER bury a question, NEVER stop blaming my silence. During 00:00–06:00 Europe/Bratislava defer a question ONLY while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds from the OLDEST open prio:bounce ticket first (a running batch is never preempted); an injected nudge naming a ticket gets a one-line ACK + the prio:bounce label, taken next turn — never worked inline. Count a ticket done ONLY after verifying it from primary sources — `gh pr view` (closingIssuesReferences, merged), `gh run list` (main green), `gh issue view` (closed), the deployed version read from the live target — never from the worker's claim alone; verify the LAST ticket as strictly as the first. After every merge, END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — which means CONTINUE and NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (holds briefly until it lands, #225) as your own last tool call, THEN do NOT dispatch the next issue in the same turn; the ARMED GOAL fires the NEXT TURN and picks it up (this turn boundary is what lets the context compact).
 ```
 
 **AUTHORITY: branch-merge** (montalu / marek shape — own PR merged into the project's INTEGRATION branch only, never staging/main, never deploy):
@@ -233,14 +233,25 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   LABELLED units — the earlier figures here and in `docs/autopilot-log.md` looked contradictory
   because two of them were different QUANTITIES: `13` was obligation-minus-core, `54` was the
   obligation total): **83 open non-skip / 44 core / 56 obligation**, the 56 being the 44 unioned
-  with 7 `needs-gatekeeper`, 11 `prio:bounce` and 0 `ready-for-review`. #2396 and #2377 carry
-  `stream:montalu` **and** `needs-gatekeeper`, so a core-only count cannot see them. So `core-quals` counts
-  the **obligation set**: the core slice UNIONED with every open ticket labelled
-  `needs-gatekeeper` / `prio:bounce` / `ready-for-review`, whatever stream owns it. A stream
-  ticket the sub-dev is actively working carries none of those and still does not block this box,
-  so this is not a revert to whole-repo. This is also what makes cross-stream rule 4 ("neither
-  side ever finishes while the other holds its ball") MECHANICAL on the gatekeeper's side rather
-  than a prose guarantee.
+  with 7 `needs-gatekeeper`, 11 `prio:bounce` and 0 `ready-for-review` — that was the round-4
+  formula. **#307 (2026-08-07) corrected it: `prio:bounce` is NOT unioned in any more.** It means
+  the gatekeeper returned the ticket to the SUB-DEV — the sub-dev acts next, not this box, so a
+  bare open `prio:bounce` with no `needs-gatekeeper`/`ready-for-review` alongside it is the
+  sub-dev's own work and does not block the obligation set (a ticket carrying BOTH still counts,
+  via the `ready-for-review` qual). The 11 in the round-4 measurement above were entirely
+  `stream:david`'s own work — counting them inflated a real `core-quals --count` on the same repo
+  from 63 to 77 a few days later, and a full-authority `/goal` SELECTING from that inflated set
+  could start IMPLEMENTING a sub-dev's bounce fix, violating the standing rule that the gatekeeper
+  never patches a sub-dev's branch. #2396 and #2377 carry `stream:montalu` **and**
+  `needs-gatekeeper`, so a core-only count cannot see them. So `core-quals` now counts the
+  **obligation set**: the core slice UNIONED with every open ticket labelled `needs-gatekeeper` /
+  `ready-for-review`, whatever stream owns it. A stream ticket the sub-dev is actively working
+  (including a bare `prio:bounce`) carries none of those and still does not block this box, so
+  this is not a revert to whole-repo. This is also what makes cross-stream rule 4 ("neither side
+  ever finishes while the other holds its ball") MECHANICAL on the gatekeeper's side rather than a
+  prose guarantee, for a HAND-OFF awaiting review — a bounce still being fixed is the sub-dev's
+  ball alone, and the gatekeeper's loop may legitimately stop while it is worked, resuming once
+  `ready-for-review` reappears.
 - **`core-quals --count` is deliberately NOT the number the footer renders as `Issues N core`.**
   The two answer different questions — display vs obligation — exactly as `slice-quals --count`
   and the footer's `gk` partition do on a reduced-authority box (#181 I3, round 2). The hidden
@@ -682,36 +693,44 @@ re-review and no pickup).
    queue at the NEXT batch seed (Step 3.1) — never preempts a running batch. High-priority work is
    inserted by labeling, never by interrupting. **`prio:bounce` is a PROTOCOL label, never a generic
    "priority" marker** — it means exactly one thing: the gatekeeper returned this ticket to the
-   **sub-dev** with findings that need a fix. The sub-dev fixes it; while it is open the
-   full-authority loop **HOLDS** in review-watch (stay alive, re-check hourly, never end the loop),
-   so `core-quals --count` legitimately never reaching 0 in that state is CORRECT and is **not the
-   never-stops failure** #181 rejected. Never add it to a ticket outside this flow to mean "do this first"
-   (the restreamer #337 incident, 2026-07-26: the label alone on an unrelated repo's own ticket
-   fired a confusing cross-project nudge — the api-watchdog's bounce backstop (job 8) now also
-   scopes to repos that actually participate in this flow, but the label itself must still never be
-   repurposed).
+   **sub-dev** with findings that need a fix. The sub-dev fixes it and re-hands-off via
+   `ready-for-review`; **while THAT hand-off is open the full-authority loop HOLDS** in
+   review-watch (stay alive, re-check hourly, never end the loop), so `core-quals --count`
+   legitimately never reaching 0 in that state is CORRECT and is **not the never-stops failure**
+   #181 rejected. A BARE open `prio:bounce` with no hand-off alongside it is the sub-dev's own work
+   in progress and does NOT hold the gatekeeper's loop (#307, 2026-08-07: `core-quals` no longer
+   unions the bare label in — it belongs to the SUB-DEV, not the gatekeeper). Never add it to a
+   ticket outside this flow to mean "do this first" (the restreamer #337 incident, 2026-07-26: the
+   label alone on an unrelated repo's own ticket fired a confusing cross-project nudge — the
+   api-watchdog's bounce backstop (job 8) now also scopes to repos that actually participate in
+   this flow, but the label itself must still never be repurposed).
 3. **Label lifecycle — who removes `prio:bounce`:** the sub-dev's worker clears it at its
    done-point (merge / re-ready hand-off comment), best-effort — but david's **read-only role cannot remove labels**, so the REPO automation (the `subdev-handoff-label.yml` workflow) must
    auto-remove `prio:bounce` when the re-ready comment lands, and the gatekeeper clears any
    leftover at re-review. A stale `prio:bounce` after a re-ready comment is a repo-automation gap,
-   not a sub-dev failure. **Until it is cleared, the full-authority loop HOLDS** — review-watch,
-   never end the loop — which is why `core-quals` counts the label and why a count that cannot
-   reach 0 while a sub-dev bounce is open is CORRECT, **not the never-stops failure** (#181 round 4
-   reconciled this with rule 2 and with airuleset.py's own `MAINTAINER_ACTION_LABELS` comment,
-   which had described the re-review as the gatekeeper's ball to pick up NOW).
+   not a sub-dev failure. **Until the re-ready `ready-for-review` HAND-OFF is cleared, the
+   full-authority loop HOLDS** — review-watch, never end the loop — which is why `core-quals`
+   counts `ready-for-review` and why a count that cannot reach 0 while a re-handed-off sub-dev
+   ticket is open is CORRECT, **not the never-stops failure** (#181 round 4 reconciled this with
+   rule 2 and with airuleset.py's own `MAINTAINER_ACTION_LABELS` comment, which had described the
+   re-review as the gatekeeper's ball to pick up NOW). `prio:bounce` ITSELF is no longer part of
+   that count (#307, 2026-08-07) — while the sub-dev is still fixing it (no `ready-for-review` yet),
+   that is the SUB-DEV's ball alone and the gatekeeper's loop may correctly stop.
 4. **The ping-pong ends only when the ticket is CLOSED (fork streams) / the slice RELEASED to
    main (branch-merge streams) — so BOTH loops stay alive until then.** The sub-dev loop holds in
    hourly REVIEW-WATCH after hand-off (its /goal templates above); the **gatekeeper's own loop
-   must equally hold** while any bounced ticket awaits a sub-dev fix or a re-handed-off ticket
-   awaits its re-review — a `/process-subdev` run that ends with bounces outstanding must arm its
-   own review-watch continuation, not terminate. Neither side ever "finishes" while the other
-   holds its ball. **On the gatekeeper's side this is now MECHANICAL, not a prose guarantee**
-   (#181 round 3): `airuleset.py core-quals` — the FULL `/goal` template's own stop-proof and
-   backlog listing — counts every open `needs-gatekeeper` / `prio:bounce` / `ready-for-review`
-   ticket regardless of its `stream:<user>` label, so (B) cannot reach 0 while any of them is
-   open. The pre-round-2 whole-repo proof upheld this only as a side effect of being whole-repo;
-   round 2's core-only proof dropped it, and a gatekeeper could have stopped with the sub-dev's
-   ball in its own court.
+   must equally hold** while a re-handed-off ticket (`ready-for-review`) awaits its re-review — a
+   `/process-subdev` run that ends with a hand-off outstanding must arm its own review-watch
+   continuation, not terminate. Neither side ever "finishes" while the other holds ITS ball — and
+   while the sub-dev is still fixing a bare `prio:bounce` (no hand-off yet), that is the SUB-DEV's
+   ball alone: the gatekeeper's loop has nothing to do and may correctly stop, resuming once
+   `ready-for-review` reappears (#307, 2026-08-07 — see rules 2/3). **On the gatekeeper's side this
+   is now MECHANICAL, not a prose guarantee** (#181 round 3): `airuleset.py core-quals` — the FULL
+   `/goal` template's own stop-proof and backlog listing — counts every open `needs-gatekeeper` /
+   `ready-for-review` ticket regardless of its `stream:<user>` label, so (B) cannot reach 0 while
+   any of them is open. The pre-round-2 whole-repo proof upheld this only as a side effect of being
+   whole-repo; round 2's core-only proof dropped it, and a gatekeeper could have stopped with a
+   re-handed-off ticket's ball in its own court.
 5. **Machine-local backstop:** the api-watchdog (job 8) independently sweeps every ~30 min — an
    idle claude pane in a repo with open `prio:bounce` gets a nudge (the nudge-ack above handles
    it, loop or no loop); a repo with NO live session pings the owner's Discord once. The

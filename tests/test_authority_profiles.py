@@ -1764,10 +1764,17 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
 
     On odoo-erp the obligation set is 55 rows, and the FULL template's own
     bounce-lane instruction seeds every new batch from the OLDEST open
-    `prio:bounce` ticket — which is #2150, `stream:david`. Nothing but a prose
-    clause stood between that instruction and the gatekeeper writing code on a
-    sub-dev's ticket, and prose in exactly this position is what this ticket
-    has been about for four rounds."""
+    `prio:bounce` ticket via `core-quals --list --extra "label:prio:bounce"` —
+    which is #2150, `stream:david`. Nothing but a prose clause stood between
+    that instruction and the gatekeeper writing code on a sub-dev's ticket,
+    and prose in exactly this position is what this ticket has been about for
+    four rounds.
+
+    #307 (2026-08-07): `prio:bounce` is no longer part of the PLAIN obligation
+    set (a bare bounce ticket is the sub-dev's own work) — #2150 now surfaces
+    ONLY through the `--extra "label:prio:bounce"` bounce-lane seed path,
+    exactly how the FULL template actually invokes it, still marked
+    `action-only` there."""
 
     def test_the_union_queries_actually_fetch_the_labels(self):
         gh, seen = _labelled_rows_gh()
@@ -1780,10 +1787,12 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             "labels are never fetched, so no row can carry a discriminator: %r"
             % (json_fields,))
 
-    def test_a_stream_owned_row_is_marked_action_only(self):
+    def test_a_bounce_stream_row_is_marked_action_only_via_the_seed(self):
+        # The REAL invocation (SKILL.md Step 3.1) always passes `--extra
+        # "label:prio:bounce"` for the seed — never a bare `--list`.
         gh, _ = _labelled_rows_gh()
-        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
-                             count=False, list=True)
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh, count=False,
+                             list=True, extra="label:prio:bounce")
         self.assertIsNone(exc)
         row = [ln for ln in out.splitlines() if ln.startswith("2150\t")]
         self.assertTrue(row, out)
@@ -1791,6 +1800,16 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             "action-only", row[0],
             "the oldest open prio:bounce ticket is stream:david's — the seed "
             "instruction points straight at it and the row says nothing")
+
+    def test_a_bare_bounce_ticket_is_absent_from_the_plain_obligation_list(self):
+        """#307: WITHOUT `--extra`, #2150 (bare prio:bounce, no
+        needs-gatekeeper/ready-for-review) must NOT appear at all — it is the
+        sub-dev's own work, not this box's obligation."""
+        gh, _ = _labelled_rows_gh()
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
+                             count=False, list=True)
+        self.assertIsNone(exc)
+        self.assertNotIn("2150\t", out)
 
     def test_a_core_row_is_marked_implement(self):
         gh, _ = _labelled_rows_gh()

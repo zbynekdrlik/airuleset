@@ -6890,23 +6890,32 @@ def _slice_quals(user, cwd=None):
 # `needs-gatekeeper` = a stream→supervisor action request (cross-stream
 # protocol rule 7 — by definition nobody else can do it).
 #
-# `prio:bounce` = the gatekeeper returned this ticket to the SUB-DEV with
-# findings that need a fix. The sub-dev fixes it; the sub-dev's own worker (or
-# the repo automation, since a read-role stream cannot remove labels) clears
-# the label at its done-point, and the gatekeeper clears any leftover at
-# re-review. While it is open the full-authority loop HOLDS — review-watch,
-# stay alive, re-check hourly, never end the loop (rule 4: "neither side ever
-# finishes while the other holds its ball") — so `core-quals --count`
-# legitimately never reaching 0 in that state is CORRECT, and is NOT the
-# never-stops failure the original ticket rejected. (#181 round 4: this
-# comment used to say the RE-REVIEW is this box's ball, which reads as "the
-# gatekeeper does the work now" and contradicted both cross-stream rules 2/3
-# and the branch-merge template, whose (B) makes "no open prio:bounce for my
-# stream" the SUB-DEV's own stop condition.)
-#
 # `ready-for-review` = a hand-off awaiting this box's review / merge / close
-# (rule 4 again, and the fork-no-merge template's "CLOSED by the maintainer").
-MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "prio:bounce", "ready-for-review")
+# (rule 4, and the fork-no-merge template's "CLOSED by the maintainer") —
+# while it is open the full-authority loop HOLDS: review-watch, stay alive,
+# re-check hourly, never end the loop ("neither side ever finishes while the
+# other holds its ball") — so `core-quals --count` legitimately never
+# reaching 0 while a hand-off sits open is CORRECT, and is NOT the
+# never-stops failure the original ticket rejected.
+#
+# `prio:bounce` is DELIBERATELY NOT one of these labels (#307, 2026-08-07). It
+# means the gatekeeper returned this ticket to the SUB-DEV with findings that
+# need a fix — the SUB-DEV acts next, not this box, so a BARE open
+# `prio:bounce` (no `ready-for-review`/`needs-gatekeeper` alongside it) is the
+# sub-dev's own work: it does not block this box's obligation set, and
+# letting the count reach 0 while the sub-dev fixes it is CORRECT, not a
+# regression of the never-stops failure. Live evidence (odoo-erp,
+# 2026-08-07): `core-quals --count` was inflated 63 -> 77 by 14 open
+# `prio:bounce` tickets that belonged entirely to `stream:david` — and a
+# full-authority `/goal` SELECTING from that inflated set could start
+# IMPLEMENTING a sub-dev's bounce fix, violating the standing rule that the
+# gatekeeper never patches a sub-dev's branch. A ticket carrying BOTH
+# `prio:bounce` AND `ready-for-review` still counts — the hand-off is the
+# live signal, matched by the `ready-for-review` qual above regardless of
+# `prio:bounce`. The sub-dev's own `slice-quals` still includes its own
+# `prio:bounce` tickets unaffected (they always also carry `stream:<user>`,
+# which `_slice_quals()` already queries) — the two sides stay complementary.
+MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "ready-for-review")
 
 
 def _obligation_quals():
@@ -6919,11 +6928,21 @@ def _obligation_quals():
     *obligation* partition — "which tickets must I finish before I may stop" —
     and those are not the same set. Measured on zbynekdrlik/odoo-erp
     2026-07-30: 83 open non-skip, 40 in the core partition, and 13 tickets
-    outside it that only this box can move (#2396 and #2377 are
-    `stream:montalu` + `needs-gatekeeper`, plus 11 open `prio:bounce`). The
-    gatekeeper would close its 40, the proof would print 0, the loop would
-    stop — leaving 13 tickets blocked on the very box that just stopped. That
-    is #181 verbatim at a new address.
+    outside it that only this box could move at the time (#2396 and #2377
+    are `stream:montalu` + `needs-gatekeeper`, plus 11 open `prio:bounce`).
+    The gatekeeper would close its 40, the proof would print 0, the loop
+    would stop — leaving those tickets blocked on the very box that just
+    stopped. That is #181 verbatim at a new address.
+
+    #307 (2026-08-07) correction: `prio:bounce` is NOT one of
+    MAINTAINER_ACTION_LABELS any more — see that tuple's own comment. All 11
+    open `prio:bounce` tickets in the round-3 measurement above belonged
+    entirely to `stream:david`, the sub-dev's own work; counting them
+    inflated a real `core-quals --count` on the SAME repo from 63 to 77 a
+    few days later, and let the obligation SELECTION path (`--list`) surface
+    a ticket a full-authority `/goal` worker must never implement. The union
+    below now excludes `prio:bounce` — only `needs-gatekeeper` and
+    `ready-for-review` remain.
 
     This is NOT a revert to the whole-repo count the original ticket rejected
     (that was the never-stops failure): a stream ticket the sub-dev is
@@ -7644,7 +7663,22 @@ def cmd_core_quals(args):
 
     extra = getattr(args, "extra", None)
     base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
-    seen, failed = _union_open_issues(quals, base, cwd=root)
+    search_quals = quals
+    if extra:
+        # #307: `prio:bounce` is no longer one of MAINTAINER_ACTION_LABELS,
+        # so a per-qual AND (base + each obligation qual) can never find a
+        # ticket that carries ONLY `extra` (e.g. a bare `prio:bounce`, no
+        # core membership, no `needs-gatekeeper`, no `ready-for-review`) —
+        # the common real shape the bounce-lane SEED (Step 3.1) depends on.
+        # The old code found it BY ACCIDENT (prio:bounce AND'd with itself
+        # degenerates to itself); this restores that coverage explicitly, by
+        # unioning in the BARE `extra` query (qual="" -> search=base alone)
+        # alongside the per-qual AND queries. Safe only because `extra` is
+        # non-empty here — with no `extra` this branch never runs, so the
+        # plain obligation proof never gets the bare whole-repo query #181
+        # rejected.
+        search_quals = quals + [""]
+    seen, failed = _union_open_issues(search_quals, base, cwd=root)
     if failed:
         print("core-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
