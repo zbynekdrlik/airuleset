@@ -78,6 +78,49 @@ MANAGED_EFFORT_LEVEL = "high"
 # is a SEPARATE decision for a later step, not bundled into this one.
 MANAGED_MODEL = "claude-opus-5[1m]"
 
+# Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
+# own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
+# builds up to 2.1.223 it is a CUMULATIVE per-session spawn cap, not a
+# concurrency limit — every dispatch across the whole life of a session
+# (workers, reviewers, ticket-validators, verifiers, TURBO parallel lanes)
+# counts against it. A long-running `/goal`-armed autopilot session burns
+# through 200 dispatches inside a single day and then loses the `Agent` tool
+# entirely ("Subagent spawn limit reached (200 of 200 agents spawned)") —
+# hit live on gatekeeper 2026-08-07 during a critical delivery push. Raised
+# fleet-wide (no full-authority-only carve-out — the cap is authority-
+# independent: reduced-authority sub-dev streams run equally long /goal
+# loops and can hit it too). Confirmed the key is real (not guessed): the
+# installed CC binary's own settings-`env` allowlist string table carries it
+# in the same Set as `BASH_DEFAULT_TIMEOUT_MS`/`CLAUDE_CODE_MAX_RETRIES`/etc
+# — a genuine, documented settings.json `env`-block key. Value is a STRING,
+# like every other key in that block (env vars are always strings).
+#
+# VERSION-SCOPED, not universally effective (adversarial-review binary
+# forensics, #288/#290): confirmed the cumulative-cap CHECK genuinely reads
+# this env var on 2.1.222/2.1.223 — but Anthropic REMOVED the whole
+# cumulative-cap mechanism in 2.1.224 (occurrence count of the enforcement
+# code drops from 8 to 3, all 3 being the now-unread allowlist entry and its
+# V8-snapshot copies; "Subagent spawn limit reached" / "agents spawned" both
+# drop to 0 hits). The key is still ALLOWLISTED on 2.1.224+ (harmless to
+# set, never an error) but nothing reads it any more — the only remaining
+# launch-time bound there is `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`
+# (concurrency, default 20 — a DIFFERENT variable). So this constant is a
+# genuine, effective fix for any session on <=2.1.223 and a harmless no-op
+# on 2.1.224+ — never a downside either way. Whether/how to react to
+# upstream removing the mechanism entirely is tracked as its own decision,
+# #290 — do not "fix" this constant based on that ticket alone without
+# reading it first.
+#
+# Also note: this raises the deliberate trade explicitly, not silently —
+# nothing else in this repo bounds a session's total subagent-dispatch
+# count (the concurrency cap and per-repo cost dashboards are separate,
+# unrelated instruments), so on <=2.1.223 this removes the only de-facto
+# cumulative circuit-breaker in exchange for headroom against premature
+# exhaustion. Deliberately accepted — the failure mode this fixes (losing
+# the Agent tool mid-run) is worse than a runaway session eventually costing
+# more, and the concurrency cap still bounds instantaneous load either way.
+MANAGED_MAX_SUBAGENTS_PER_SESSION = "1000"
+
 # REVERTED (2026-07-25 correction batch, same day it was added): a managed
 # `MANAGED_AUTOCOMPACT_WINDOW = 300000` ("krok 1c") briefly capped the
 # auto-compact threshold. The user's call, which overrides that decision:
@@ -1960,6 +2003,16 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       an already-deployed settings.json from the reverted feature would
       otherwise keep carrying it forward untouched on every future install.
 
+    - `env["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = MANAGED_MAX_SUBAGENTS_PER_SESSION`
+      (#288) raises the default 200-cumulative-spawn-per-session cap so a
+      long-running /goal-armed autopilot session doesn't lose the Agent
+      tool mid-day. Same unconditional-managed-default treatment as every
+      other key above, applied fleet-wide (see MANAGED_MAX_SUBAGENTS_PER_SESSION's
+      own comment for why no per-authority carve-out). Merges into any
+      existing `env` sub-object rather than overwriting it, so a future
+      feature that also needs an `env` key does not silently clobber this
+      one (or vice versa).
+
     Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
@@ -1975,6 +2028,18 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result["model"] = MANAGED_MODEL
     result["promptSuggestionEnabled"] = False
     result.pop("autoCompactWindow", None)
+    # A malformed/legacy `env` (a string/int/list rather than an object) must
+    # be SELF-HEALED to a fresh dict, never crashed on — `dict(existing or
+    # {})` raises on a non-dict-but-truthy value, which would escape
+    # cmd_install (no enclosing try/except around this step) and, worse,
+    # escape cmd_push's local-install call mid-deploy (it catches only
+    # SystemExit, per #273 — so an ordinary exception here would run AFTER
+    # `git push` to GitHub but BEFORE the remote-deploy loop, leaving main
+    # updated and every remote host untouched). Adversarial-review finding,
+    # #288.
+    existing_env = result.get("env")
+    result["env"] = dict(existing_env) if isinstance(existing_env, dict) else {}
+    result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = MANAGED_MAX_SUBAGENTS_PER_SESSION
     return result
 
 
