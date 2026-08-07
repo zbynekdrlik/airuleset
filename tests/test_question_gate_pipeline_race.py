@@ -88,17 +88,37 @@ class TestLargeCorrectQuestionIsNotFalselyBlocked(_HookCase):
             "pravidiel):** Pracujem na tickete #45 (opravuje sa, ako sa "
             "kladú nezodpovedané otázky) a potrebujem rozhodnutie: má "
             "tento konkrétny beh použiť ultracode na paralelizáciu "
-            "práce?\n")
-    TAIL = ("\n"
-            "• Použiť ultracode (odporúčam) — spustí sa paralelný "
+            "práce?\n\n")
+    TAIL = ("• Použiť ultracode (odporúčam) — spustí sa paralelný "
             "workflow, rýchlejšie\n"
             "• Zostať pri sekvenčnom postupe — pomalšie, ale jednoduchšie "
             "na sledovanie\n"
             "\n"
             "❓ NEEDS YOU: mám zapnúť ultracode pre tento beh?\n")
 
-    def _msg(self, filler=""):
-        return self.HEAD + filler + self.TAIL
+    def _padding_options(self, nbytes=_FILLER_BYTES, nlines=30):
+        """EXTRA, genuinely valid bullet-option lines — FEW but LONG, never
+        many short ones. Two independent size limits are in play, and this
+        padding must clear the pipe buffer without tripping either of the
+        OTHER ones: (a) Check 3's briefing-length computation excludes a
+        bullet line the moment its own awk hits the first one, so a bullet
+        never counts as "briefing" regardless of length; (b) the BLOCK
+        extraction's own head-anchored search only looks back 40 LINES from
+        the marker (`hooks/stop-check-question-quality.sh`'s `for (i = m;
+        i >= 1 && i > m - 40; …)`) — MANY short padding lines would push the
+        real head past that window and make the paragraph-pull fallback
+        (capped at 3 pulls / 600cp) exhaust its own budget on the padding
+        alone, silently dropping the head from $BLOCK before Check 1 even
+        runs — a genuine, pre-existing extraction-heuristic edge case, not
+        the SIGPIPE bug this test targets. Staying at `nlines` comfortably
+        under 40, with each line long enough to reach `nbytes` in total,
+        avoids that confound entirely."""
+        per_line = max(1, nbytes // nlines)
+        line_tpl = "• filler option %d — " + ("x" * per_line) + "\n"
+        return "".join(line_tpl % i for i in range(nlines))
+
+    def _msg(self, extra_options=""):
+        return self.HEAD + extra_options + self.TAIL
 
     def test_small_question_is_clean(self):
         """Control: the same question below the pipe buffer has always
@@ -109,10 +129,11 @@ class TestLargeCorrectQuestionIsNotFalselyBlocked(_HookCase):
 
     def test_large_question_is_still_clean(self):
         """The question is byte-for-byte correct; only its SIZE changed
-        (a large briefing paragraph is realistic — see Check 3's own
-        camera-box precedent). Any violation here is manufactured by the
-        pipeline, not by the message."""
-        r = self._run(self._msg(_filler()))
+        (many valid extra options — see Check 3's own camera-box
+        precedent for why a long OPTIONS list is realistic and never
+        counted as the briefing). Any violation here is manufactured by
+        the pipeline, not by the message."""
+        r = self._run(self._msg(self._padding_options()))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(
             self._blocked(r),
