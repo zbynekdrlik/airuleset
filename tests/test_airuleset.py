@@ -3238,6 +3238,61 @@ class TestManagedModelDefault(TestCase):
         self.assertEqual(once["model"], twice["model"])
 
 
+class TestManagedSubagentCapDefault(TestCase):
+    """apply_managed_settings_defaults also sets the native settings.json
+    `env` block's `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` (#288): the default
+    200 is a CUMULATIVE per-session spawn cap, not a concurrency limit, and a
+    long-running /goal-armed autopilot session (workers, reviewers,
+    validators, ticket-validators, verifiers, TURBO parallel lanes) burns
+    through it inside a day — hit live on gatekeeper 2026-08-07 ('Subagent
+    spawn limit reached (200 of 200 agents spawned)'), losing the Agent tool
+    mid-run. Same unconditional-managed-default treatment as
+    effortLevel/disableAgentView/tui/model/promptSuggestionEnabled — applied
+    fleet-wide (no full-authority-only carve-out: the cap is a per-session
+    subagent-spawn ceiling, not a merge-authority concern, and reduced-
+    authority sub-dev streams run equally long /goal loops)."""
+
+    def test_sets_max_subagents_per_session_in_env_block(self):
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(
+            out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"],
+            airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
+
+    def test_value_is_a_thousand_as_a_string(self):
+        # settings.json `env` values are environment-variable strings, like
+        # every other documented key in that block (e.g. BASH_DEFAULT_TIMEOUT_MS) —
+        # never a raw JSON number.
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"], "1000")
+        self.assertIsInstance(out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"], str)
+
+    def test_preserves_other_env_keys(self):
+        out = airuleset.apply_managed_settings_defaults(
+            {"env": {"BASH_DEFAULT_TIMEOUT_MS": "120000"}})
+        self.assertEqual(out["env"]["BASH_DEFAULT_TIMEOUT_MS"], "120000")
+        self.assertEqual(
+            out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"],
+            airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
+
+    def test_overrides_a_lower_existing_value(self):
+        out = airuleset.apply_managed_settings_defaults(
+            {"env": {"CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION": "50"}})
+        self.assertEqual(
+            out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"],
+            airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
+
+    def test_idempotent(self):
+        once = airuleset.apply_managed_settings_defaults({})
+        twice = airuleset.apply_managed_settings_defaults(once)
+        self.assertEqual(once["env"], twice["env"])
+
+    def test_does_not_mutate_the_input_env_dict(self):
+        src_env = {"BASH_DEFAULT_TIMEOUT_MS": "120000"}
+        src = {"env": src_env}
+        airuleset.apply_managed_settings_defaults(src)
+        self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", src_env)
+
+
 class TestUltracodeLauncher(TestCase):
     """apply_ultracode_launcher manages the managed claude launcher (#77):
     a thin ~/.bashrc block of one-line functions that just exec a SCRIPT
