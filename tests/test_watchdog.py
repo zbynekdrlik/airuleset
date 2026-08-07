@@ -80,6 +80,17 @@ def _assistant_tooluse(name="Read"):
                         "content": [{"type": "tool_use", "name": name, "input": {}}]}}
 
 
+def _user_toolresult():
+    """A `tool_result`-carrying "user" entry — pairs with `_assistant_tooluse()`
+    to represent a tool call that actually RETURNED, i.e. genuine progress
+    (#287's `_subagent_transcript_unsalvageable` bar is 0 COMPLETED tool
+    calls, not 0 issued ones — an issued tool_use with no matching
+    tool_result is exactly as un-investigable as none at all)."""
+    return {"type": "user",
+            "message": {"role": "user",
+                        "content": [{"type": "tool_result", "content": "ok"}]}}
+
+
 def _system():
     return {"type": "system", "content": ""}
 
@@ -1969,6 +1980,163 @@ class RunOnceSubagentVisibility(unittest.TestCase):
         logs, sent, pings = self._run(proj, now, state_path, self.IDLE_CAP)
         self.assertEqual(sent, [], "must NOT nudge for a subagent file past the age ceiling")
         self.assertFalse(any("subagent-apierr" in ln for ln in logs), logs)
+
+    # --- #287: nudge repeats forever on an already-triaged dead subagent -------
+
+    def test_subagent_apierror_unsalvageable_transcript_nudges_at_most_once(self):
+        # (#287) A subagent transcript that never issued a single tool_use
+        # call and ends on a bare api-error has NOTHING left to
+        # investigate — exactly the odoo-erp#3036 shape (4 lines total, the
+        # dispatch's own tool_use never landed, last line a bare
+        # `API Error: 529 Overloaded`; _assistant_apierror() with no
+        # preceding tool_use fixture is that shape). Such a transcript is
+        # nudged AT MOST ONCE, ever — never the full nudge x3 + escalate
+        # cycle a genuinely-recoverable stall earns, and never a repeated
+        # identical nudge on later sweeps.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")],
+            [_assistant_apierror()],
+            sup_age=10, sub_age=400)
+        state_path = Path(tmp) / "state.json"
+        logs1, sent1, pings1 = self._run(proj, now, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1),
+                        "expected the one allowed nudge, got: %r" % logs1)
+        literal_nudges1 = [a for a in sent1 if "-l" in a]
+        self.assertEqual(len(literal_nudges1), 1, sent1)
+
+        # a LATER sweep (well within SUBAGENT_MAX_AGE_SECONDS, comfortably
+        # past RETRY_INTERVAL_SECONDS since the first nudge) must NOT type a
+        # second keystroke — at most a passive escalate PING (decide_working's
+        # own one-shot give-up), never a repeat of the typed `stuck-check:`
+        # nudge, which is what actually costs the session a paid turn.
+        now2 = now + 600
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertEqual(sent2, [], "must NOT send a second keystroke nudge — "
+                                    "already-nudged/unsalvageable: %r" % logs2)
+        self.assertTrue(any(ln.startswith("subagent-apierr-escalate") for ln in logs2),
+                        "expected decide_working's one-shot give-up to fire "
+                        "here (max_nudges capped at 1): %r" % logs2)
+        self.assertEqual(len(pings2), 1, "the escalate ping fires exactly once: %r" % pings2)
+        # (#287 adversarial-review MINOR) The unsalvageable escalate must NOT
+        # claim "session nereaguje na nudge" (not responding) -- it fires
+        # after just ONE nudge, often the very next sweep, with no time to
+        # respond and often nothing to respond about.
+        self.assertNotIn("nereaguje na nudge", pings2[0][0])
+
+        # a THIRD sweep still must not repeat either — neither the typed
+        # nudge NOR the escalate ping (decide_working's own `escalated` flag
+        # makes every later evaluation a permanent noop).
+        now3 = now2 + 600
+        logs3, sent3, pings3 = self._run(proj, now3, state_path, self.IDLE_CAP)
+        self.assertEqual(sent3, [], "must stay permanently silent (keystrokes) "
+                                    "after the single unsalvageable nudge: %r" % logs3)
+        self.assertEqual(pings3, [], "the one-shot escalate ping must not repeat "
+                                     "either: %r" % pings3)
+
+    def test_subagent_apierror_nudge_state_survives_supervisor_marker_gap(self):
+        # (#287, corrected root cause) The per-worker nudge/escalate dedup
+        # state used for a SALVAGEABLE dying subagent (decide_working's own
+        # 3-nudge cycle) must NOT be wiped just because the SUPERVISOR's own
+        # marker briefly reads something other than `⏳ WORKING` — a busy
+        # /goal loop working OTHER tickets routinely produces `✅ DONE`/`❓`
+        # turns for minutes at a stretch between `⏳` sightings, far longer
+        # than the generic episode-cleanup's WAIT_CLEAR_SECONDS (90s).
+        # Before this fix, that gap alone reset the nudge counter to zero on
+        # every re-sighting, so a genuinely-recoverable worker's nudge#1
+        # fired again and again instead of ever accumulating toward its own
+        # 3-nudge escalation — the exact "identical nudge delivered
+        # forever" shape #287 reports. (#287's OWN stated cause —
+        # decide_working's `responded=True` exponential-backoff branch —
+        # does NOT apply here: `_nudge_dying_subagent` never passes
+        # `responded=` at all, so that branch is structurally UNREACHABLE
+        # for this wkey; this test reproduces the REAL mechanism instead —
+        # verified against the current source before writing this fix.)
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        now1 = time.time()
+        tpath = proj / enc / (self.SID + ".jsonl")
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        spath = subdir / (self.WORKER + ".jsonl")
+        # a SALVAGEABLE worker — it made real progress (a tool call that
+        # actually RETURNED, i.e. a genuine tool_use/tool_result pair) before
+        # dying, so it earns the FULL nudge/nudge/nudge/escalate cycle, not
+        # the (separately-tested) unsalvageable at-most-once path. A bare
+        # ISSUED tool_use with no tool_result would NOT qualify here —
+        # `_subagent_transcript_unsalvageable`'s bar is 0 COMPLETED tool
+        # calls, matching the ticket's own stated incident shape.
+        _write_jsonl(spath, [_assistant_tooluse(), _user_toolresult(), _assistant_apierror()])
+        death_mtime = now1 - 400        # > GRACE_SECONDS (300)
+        os.utime(spath, (death_mtime, death_mtime))
+        state_path = Path(tmp) / "state.json"
+
+        # sweep 1: supervisor is `⏳ WORKING` -> nudge #1.
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now1, now1))
+        logs1, sent1, pings1 = self._run(proj, now1, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1), logs1)
+
+        # sweep 2: the supervisor moved on to OTHER work for well over
+        # WAIT_CLEAR_SECONDS — the marker gate is closed this whole sweep,
+        # so the wkey's last_seen is NOT refreshed; this sweep's own
+        # end-of-poll cleanup pass is what decides whether the state
+        # survives the gap.
+        now2 = now1 + wd.WAIT_CLEAR_SECONDS + 30
+        _write_jsonl(tpath, [_assistant("✅ DONE: iný ticket hotový.")])
+        os.utime(tpath, (now2, now2))
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertEqual(sent2, [], "supervisor is DONE, not ⏳ — must not type "
+                                    "anything this sweep: %r" % logs2)
+
+        # sweep 3: the supervisor is back on `⏳ WORKING` (a later ticket's
+        # own background dispatch) — with enough elapsed since nudge#1 for a
+        # SECOND nudge to be due (interval=RETRY_INTERVAL_SECONDS).
+        now3 = now1 + wd.RETRY_INTERVAL_SECONDS + 20
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now3, now3))
+        logs3, sent3, pings3 = self._run(proj, now3, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#2") for ln in logs3),
+                        "state must have SURVIVED the supervisor's marker gap and "
+                        "accumulated to nudge#2, not reset to nudge#1 again: %r" % logs3)
+        self.assertFalse(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs3),
+                         "a repeated nudge#1 here means the dedup state was wiped "
+                         "and the SAME nudge fired again from scratch: %r" % logs3)
+
+
+class SubagentTranscriptUnsalvageable(unittest.TestCase):
+    """(#287, adversarial-review MAJOR finding) The classifier's bar is
+    "0 COMPLETED tool calls" — matching the reporting incident's own stated
+    shape verbatim (odoo-erp#3036: "1 tool_use — the dispatch itself, 0
+    completed tool calls") — not "0 tool_use ever ISSUED", which would
+    wrongly classify that exact incident's own worker as salvageable."""
+
+    def _classify(self, entries):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "sub.jsonl"
+            _write_jsonl(p, entries)
+            return wd._subagent_transcript_unsalvageable(p)
+
+    def test_the_real_incidents_own_shape_is_unsalvageable(self):
+        # one ISSUED tool_use, never returned (no tool_result before the
+        # fatal error) — the odoo-erp#3036 shape verbatim.
+        self.assertTrue(self._classify([_assistant_tooluse(), _assistant_apierror()]))
+
+    def test_zero_tool_use_at_all_is_unsalvageable(self):
+        self.assertTrue(self._classify([_assistant_apierror()]))
+
+    def test_a_genuinely_completed_tool_call_is_salvageable(self):
+        # a real tool_use/tool_result PAIR — actual progress was made.
+        self.assertFalse(self._classify(
+            [_assistant_tooluse(), _user_toolresult(), _assistant_apierror()]))
+
+    def test_a_normal_non_error_ending_is_never_unsalvageable(self):
+        self.assertFalse(self._classify([_assistant_tooluse(), _assistant("Hotovo.")]))
+
+    def test_empty_transcript_fails_safe_salvageable(self):
+        self.assertFalse(self._classify([]))
 
 
 class ForeignTmuxUsersNowEmpty(unittest.TestCase):
