@@ -154,9 +154,20 @@ class TestCrossStreamProtocolCanonical(TestCase):
         self.assertIn("read-only role cannot remove labels", t)
 
     def test_both_loops_hold_alive(self):
+        # #307 (2026-08-07): rule 4 now names TWO deliberately-different-scope
+        # gatekeeper-side mechanisms instead of one blanket "both loops always
+        # hold together" claim -- `/process-subdev`'s own per-stream loop
+        # holds through the WHOLE bounce lifecycle (unchanged by this
+        # ticket), while the FULL `/autopilot` loop's own stop-proof holds
+        # only while a hand-off it can act on directly is open. Normalize
+        # markdown line-wraps before checking, so a re-wrap of the prose
+        # cannot silently defeat the lock.
         t = read(self.SKILL)
-        self.assertIn("BOTH loops stay alive", t)
-        self.assertIn("gatekeeper's own loop", t)
+        i = t.index("TWO gatekeeper-side mechanisms")
+        window = " ".join(t[i:i + 1400].split())
+        self.assertIn("TWO gatekeeper-side mechanisms", window)
+        self.assertIn("/process-subdev`'s own", window)
+        self.assertIn("stop-proof (`core-quals`)", window)
 
 
 if __name__ == "__main__":

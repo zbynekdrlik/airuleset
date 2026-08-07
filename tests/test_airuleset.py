@@ -10354,10 +10354,11 @@ class TestStatuslineVocabularyModule(TestCase):
     def test_module_documents_the_shortened_render_forms(self):
         # #223 -- every label was abbreviated on the actual footer; the doc
         # must name the CURRENT rendered forms, not just the spoken/historical
-        # ones the test above already locks.
+        # ones the test above already locks. #307 replaced `I D/T` with
+        # `run N done`, distinct from the live `I N` form on purpose.
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("`I N`", "`I D/T`", "`· skip K`", "`· gkq N`",
-                       "`Q N`", "sub <D.M.>"):
+        for phrase in ("`I N`", "`run N done`", "`run D/T`", "`· skip K`",
+                       "`· gkq N`", "`Q N`", "sub <D.M.>"):
             self.assertIn(phrase, t, phrase)
 
     def test_module_names_the_backing_caches(self):

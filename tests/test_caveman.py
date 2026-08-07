@@ -441,7 +441,10 @@ class TestCavemanShimTickets(TestCase):
                 capture_output=True, text=True,
                 env={**_os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn("I 3/17", r.stdout)
+            # #307: the run-progress badge is `run N done`, distinct from the
+            # `I N` live-count form it now shows alongside.
+            self.assertIn("run 3 done", r.stdout)
+            self.assertIn("I 14", r.stdout)
 
 
 class TestCavemanNewCacheLayout(TestCase):

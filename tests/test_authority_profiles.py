@@ -507,6 +507,72 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
         self.assertNotIn("0", buf.getvalue())
 
 
+class TestSliceQualsIncludesOwnBounceTickets(TestCase):
+    """#307's symmetric check: `core-quals` DROPS `prio:bounce` from the
+    full-authority obligation set (it is the SUB-DEV's own work, not this
+    box's), but `slice-quals` on the sub-dev's OWN box must still INCLUDE its
+    own `prio:bounce` tickets — that is the stream's priority lane (Step 3.1
+    seeds from it), and the two sides must stay complementary rather than
+    both claiming or both dropping the same ticket.
+
+    No code change was needed for this half: a bounce ticket always ALSO
+    carries `stream:<user>` per the cross-stream protocol, and
+    `_slice_quals()` never excluded that label — this locks the invariant so
+    a future change to `_slice_quals()` cannot silently drop it."""
+
+    def test_own_account_stream_slice_still_finds_its_own_bounce_ticket(self):
+        # Own-account stream (david/kvaskodev): assignee ∪ author ∪
+        # stream:<user> — a bounce ticket carrying ONLY stream:david (not
+        # assigned/authored) must still be found via the stream-label qual.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:david" in j:
+                return ('[{"number": 42, "title": "bounced", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "prio:bounce"}, '
+                        '{"name": "stream:david"}]}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "1")
+
+    def test_shared_account_stream_slice_still_finds_its_own_bounce_ticket(self):
+        # Shared-account stream (montalu/marek/simap): the slice is
+        # `label:stream:<user>` ALONE — a bounce ticket must still surface
+        # through that one qual.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 99, "title": "bounced", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "prio:bounce"}, '
+                        '{"name": "stream:montalu"}]}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "1")
+
+
 class TestSliceQualsRefusesRatherThanGuessing(TestCase):
     """Round-2 adversarial review of 49cd3d4..2612400: the #181 round-1 fix
     RELOCATED the false-empty-0 failure instead of removing it (C1, C2 —
@@ -781,16 +847,24 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
 
     Live on zbynekdrlik/odoo-erp 2026-07-30: 83 open non-skip, 40 in the core
     partition, 5 open `needs-gatekeeper` of which #2396 and #2377 carry
-    `stream:montalu` and are therefore INVISIBLE to a core-only count — plus
-    11 open `prio:bounce`. The gatekeeper closes its 40, the proof prints 0,
-    the loop stops, and 13 tickets stay blocked on the very box that stopped.
-    That is #181 verbatim at a new address."""
+    `stream:montalu` and are therefore INVISIBLE to a core-only count. The
+    gatekeeper closes its 40, the proof prints 0, the loop stops, and those
+    tickets stay blocked on the very box that stopped. That is #181 verbatim
+    at a new address.
+
+    #307 (2026-08-07) correction: `prio:bounce` is NOT one of
+    MAINTAINER_ACTION_LABELS any more — it means the gatekeeper returned the
+    ticket to the SUB-DEV, who acts next, not this box. A bare open
+    `prio:bounce` (no `needs-gatekeeper`/`ready-for-review` alongside it) is
+    the sub-dev's own work and must NOT be counted; a ticket carrying BOTH
+    still counts via the `ready-for-review` qual (the hand-off is the live
+    signal)."""
 
     POPULATIONS = {
         "-label:stream:": {1, 2},                 # the core partition
         "label:needs-gatekeeper": {2396, 2377},   # stream-labelled, only I can act
-        "label:prio:bounce": {5},                 # my ball per cross-stream rule 4
-        "label:ready-for-review": set(),          # a hand-off awaiting my review
+        "label:prio:bounce": {5},                 # #307: sub-dev's ball, never queried
+        "label:ready-for-review": {8},            # a hand-off awaiting my review
     }
 
     def _run(self, populations=None, **flags):
@@ -811,14 +885,44 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
 
     def test_a_stream_ticket_only_this_box_can_action_is_counted(self):
         out, _ = self._run()
-        # {1, 2} ∪ {2396, 2377} ∪ {5} — five, not the core partition's two.
+        # {1, 2} ∪ {2396, 2377} ∪ {8} — five tickets; #5 (bare prio:bounce)
+        # is deliberately NOT one of them (#307).
         self.assertEqual(out.strip(), "5")
 
     def test_the_listing_names_the_tickets_only_this_box_can_unblock(self):
         out, _ = self._run(count=False, list=True)
         self.assertIn("2396", out)
         self.assertIn("2377", out)
-        self.assertIn("5\t", out)
+        self.assertIn("8\t", out)
+
+    def test_a_bare_bounce_ticket_is_not_this_boxs_obligation(self):
+        """#307: `prio:bounce` alone means the SUB-DEV acts next, not the
+        gatekeeper — a bare bounce ticket (no `needs-gatekeeper`/
+        `ready-for-review` alongside it) must not appear in the obligation
+        listing OR count."""
+        out, _ = self._run(count=False, list=True)
+        self.assertNotIn("5\t", out)
+        count_out, _ = self._run()
+        self.assertNotEqual(count_out.strip(), "6")   # would be 6 if #5 leaked in
+
+    def test_a_ticket_carrying_both_bounce_and_handoff_still_counts(self):
+        """A ticket carrying BOTH `prio:bounce` AND `ready-for-review` still
+        counts — the hand-off is the live signal (#307)."""
+        out, _ = self._run({
+            "-label:stream:": set(),
+            "label:needs-gatekeeper": set(),
+            "label:prio:bounce": {6},
+            "label:ready-for-review": {6},
+        })
+        self.assertEqual(out.strip(), "1")
+
+    def test_prio_bounce_is_never_queried_by_the_plain_obligation_set(self):
+        """#307: unlike `needs-gatekeeper`/`ready-for-review`, `prio:bounce`
+        is no longer one of MAINTAINER_ACTION_LABELS — the plain (no
+        `--extra`) proof must never query it at all."""
+        _, searches = self._run()
+        joined = " | ".join(searches)
+        self.assertNotIn("label:prio:bounce", joined)
 
     def test_a_stream_ticket_the_subdev_is_working_still_does_not_block_me(self):
         """NOT a revert to the whole-repo count — that is the never-stops
@@ -840,8 +944,30 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
     def test_every_maintainer_action_label_is_actually_queried(self):
         _, searches = self._run()
         joined = " | ".join(searches)
-        for label in ("needs-gatekeeper", "prio:bounce", "ready-for-review"):
+        for label in ("needs-gatekeeper", "ready-for-review"):
             self.assertIn("label:" + label, joined)
+
+    def test_extra_filter_also_runs_a_bare_query_for_the_bounce_seed(self):
+        """#307: with `prio:bounce` dropped from MAINTAINER_ACTION_LABELS, a
+        per-qual AND (base + each obligation qual) can never find a ticket
+        that is ONLY bounce-labelled — the common real case the bounce-lane
+        SEED (Step 3.1, `core-quals --list --extra "label:prio:bounce"`)
+        depends on. `--extra` must ALSO issue the BARE base query (no extra
+        AND) so that coverage survives the correction."""
+        _, searches = self._run(count=False, list=True,
+                                extra="label:prio:bounce")
+        self.assertIn("-label:autopilot-skip label:prio:bounce", searches)
+
+    def test_whitespace_only_extra_never_leaks_the_bare_whole_repo_query(self):
+        """Adversarial review of #307: `extra=" "` is truthy, so an
+        unstripped check would still take the bare-extra branch and union in
+        a plain `-label:autopilot-skip` query -- the exact whole-repo
+        never-stops shape #181 rejected."""
+        _, searches = self._run(count=False, list=True, extra="   ")
+        bare = [s for s in searches if s.strip() == "-label:autopilot-skip"]
+        self.assertEqual(
+            bare, [],
+            "a whitespace-only --extra leaked the bare whole-repo query")
 
     def test_reduced_authority_box_refuses_instead_of_answering(self):
         """I-3: C1's fix applied in the mirror direction. `slice-quals`
@@ -909,7 +1035,10 @@ class TestObligationVsDisplayPartition(TestCase):
         rather than merely when a constant is missing. The two live tickets
         that proved the CRITICAL — odoo-erp #2396/#2377 — carry
         `stream:montalu` AND `needs-gatekeeper`, actionable ONLY by the box
-        whose loop would otherwise stop."""
+        whose loop would otherwise stop.
+
+        #307: `prio:bounce` is deliberately NOT declared any more — a bare
+        bounce ticket is the sub-dev's own work, not this box's obligation."""
         import contextlib
         import io
         import unittest.mock as mk
@@ -922,8 +1051,9 @@ class TestObligationVsDisplayPartition(TestCase):
                         mk.Mock(count=False, list=False, extra=None))
         printed = buf.getvalue()
         self.assertIn(airuleset._core_search_excl(), printed)
-        for label in ("needs-gatekeeper", "prio:bounce", "ready-for-review"):
+        for label in ("needs-gatekeeper", "ready-for-review"):
             self.assertIn("label:" + label, printed)
+        self.assertNotIn("label:prio:bounce", printed)
 
 
 class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
@@ -1645,10 +1775,17 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
 
     On odoo-erp the obligation set is 55 rows, and the FULL template's own
     bounce-lane instruction seeds every new batch from the OLDEST open
-    `prio:bounce` ticket — which is #2150, `stream:david`. Nothing but a prose
-    clause stood between that instruction and the gatekeeper writing code on a
-    sub-dev's ticket, and prose in exactly this position is what this ticket
-    has been about for four rounds."""
+    `prio:bounce` ticket via `core-quals --list --extra "label:prio:bounce"` —
+    which is #2150, `stream:david`. Nothing but a prose clause stood between
+    that instruction and the gatekeeper writing code on a sub-dev's ticket,
+    and prose in exactly this position is what this ticket has been about for
+    four rounds.
+
+    #307 (2026-08-07): `prio:bounce` is no longer part of the PLAIN obligation
+    set (a bare bounce ticket is the sub-dev's own work) — #2150 now surfaces
+    ONLY through the `--extra "label:prio:bounce"` bounce-lane seed path,
+    exactly how the FULL template actually invokes it, still marked
+    `action-only` there."""
 
     def test_the_union_queries_actually_fetch_the_labels(self):
         gh, seen = _labelled_rows_gh()
@@ -1661,10 +1798,12 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             "labels are never fetched, so no row can carry a discriminator: %r"
             % (json_fields,))
 
-    def test_a_stream_owned_row_is_marked_action_only(self):
+    def test_a_bounce_stream_row_is_marked_action_only_via_the_seed(self):
+        # The REAL invocation (SKILL.md Step 3.1) always passes `--extra
+        # "label:prio:bounce"` for the seed — never a bare `--list`.
         gh, _ = _labelled_rows_gh()
-        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
-                             count=False, list=True)
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh, count=False,
+                             list=True, extra="label:prio:bounce")
         self.assertIsNone(exc)
         row = [ln for ln in out.splitlines() if ln.startswith("2150\t")]
         self.assertTrue(row, out)
@@ -1672,6 +1811,16 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             "action-only", row[0],
             "the oldest open prio:bounce ticket is stream:david's — the seed "
             "instruction points straight at it and the row says nothing")
+
+    def test_a_bare_bounce_ticket_is_absent_from_the_plain_obligation_list(self):
+        """#307: WITHOUT `--extra`, #2150 (bare prio:bounce, no
+        needs-gatekeeper/ready-for-review) must NOT appear at all — it is the
+        sub-dev's own work, not this box's obligation."""
+        gh, _ = _labelled_rows_gh()
+        out, _, exc = _drive(airuleset.cmd_core_quals, gh,
+                             count=False, list=True)
+        self.assertIsNone(exc)
+        self.assertNotIn("2150\t", out)
 
     def test_a_core_row_is_marked_implement(self):
         gh, _ = _labelled_rows_gh()

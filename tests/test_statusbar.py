@@ -65,9 +65,16 @@ class TicketsSegment(unittest.TestCase):
         self.assertIn("I 14", self._seg())
 
     def test_autopilot_progress_wins_when_fresh(self):
+        # #307: the run-progress badge is `run <done> done`, textually
+        # distinct from the bare `I N` live-count form so a run can never be
+        # misread as the live backlog -- followed by the SAME live `I N`
+        # count the idle render would show (open=14, live).
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14)
-        self.assertIn("I 3/17", self._seg())
+        seg = self._seg()
+        self.assertIn("run 3 done", seg)
+        self.assertIn("I 14", seg)
+        self.assertNotIn("I 3", seg)   # never a combined ratio using "I"
 
     def test_stale_progress_falls_back_to_open_count(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
@@ -79,7 +86,8 @@ class TicketsSegment(unittest.TestCase):
         _seed_cache(self.home, self.cwd, open_n=0, name="demo")
         _seed_progress(self.home, "demo", done=17, remaining=0)
         seg = self._seg()
-        self.assertIn("I 17/17", seg)
+        self.assertIn("run 17 done", seg)
+        self.assertIn("I 0", seg)
         self.assertIn("38;5;40m", seg)          # green
 
     def test_unknown_repo_renders_nothing(self):
@@ -807,14 +815,15 @@ class SkippedBucket(unittest.TestCase):
             self.assertIn("skip 2", seg)
 
     def test_render_shows_skipped_during_autopilot_run(self):
-        # done/total mode must not hide the skip info — skips are exactly the
-        # tickets the run will NOT touch.
+        # run-progress mode must not hide the skip info — skips are exactly
+        # the tickets the run will NOT touch.
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
             _seed_progress(home, "demo", done=1, remaining=3)
             seg = self._seg(home, cwd)
-            self.assertIn("I 1/10", seg)   # remaining = LIVE open (9)
+            self.assertIn("run 1 done", seg)
+            self.assertIn("I 9", seg)   # live open count, not the stale 3
             self.assertIn("skip 2", seg)
 
     def test_refresh_counts_skipped_for_full_authority(self):
@@ -880,6 +889,55 @@ class SkippedBucket(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 3)
             self.assertEqual(cache["skipped"], 2)
+
+
+class RunModeShowsTheStreamSplit(unittest.TestCase):
+    """#307 Half B (the PRIMARY fix): the owner read a run's `I 41/103` as
+    "103 tickets on me" — it is really a progress ratio whose total also
+    accumulates historical growth, and it never showed the `core`/`streamy`
+    (or `gk`) split the idle render already computes from the SAME cache. An
+    active run must be UNMISTAKABLE for the live backlog (a distinct `run`
+    label, never `I`) and must show the SAME split idle mode shows, so it
+    never hides how many tickets sit on the other streams."""
+
+    def _seg(self, home, cwd):
+        return statusbar.tickets_segment(cwd, home=home, spawn=False)
+
+    def test_full_authority_run_shows_the_core_and_streamy_split(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=63, name="demo", scope="core")
+            (statusbar.cache_dir(home) /
+             (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(
+                {"open": 63, "name": "demo", "root": cwd,
+                 "ts": int(time.time()), "scope": "core", "streamy": 98}))
+            _seed_progress(home, "demo", done=41, remaining=62)
+            seg = self._seg(home, cwd)
+            self.assertIn("run 41 done", seg)
+            self.assertIn("I 63 core", seg)
+            self.assertIn("str 98", seg)
+
+    def test_reduced_authority_run_shows_the_gk_split(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=2, name="demo", gk=5, scope="mine")
+            _seed_progress(home, "demo", done=1, remaining=1)
+            seg = self._seg(home, cwd)
+            self.assertIn("run 1 done", seg)
+            self.assertIn("I 2", seg)
+            self.assertIn("gk 5", seg)
+
+    def test_run_label_is_never_the_bare_I_glyph(self):
+        # The whole point: a run's progress badge must be TEXTUALLY distinct
+        # from the live-count "I N" form, so the two can never be confused.
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=63, name="demo")
+            _seed_progress(home, "demo", done=41, remaining=62)
+            seg = self._seg(home, cwd)
+            self.assertNotIn("I 41", seg)
+            self.assertNotIn("I 41/103", seg)
+            self.assertIn("run 41 done", seg)
 
 
 class AutopilotProgressFeed(unittest.TestCase):
@@ -1000,8 +1058,9 @@ class SharedAccountSliceScoping(unittest.TestCase):
 class RunModeTracksLiveOpenCount(unittest.TestCase):
     """codex-bridge incident 2026-07-20: the session finished the whole backlog
     (0 open) but the footer kept 'Issues 1/2' for up to 6 h — the progress
-    file's `remaining` freezes at card time. Run-mode now takes remaining from
-    the LIVE open count (tickets cache, TTL 120 s) whenever it is known."""
+    file's `remaining` freezes at card time. Run-mode now takes the LIVE open
+    count (tickets cache, TTL 120 s) whenever it is known, and (#307) shows
+    it as its OWN `I N` number rather than folding it into a combined ratio."""
 
     def test_finished_backlog_shows_done_done_green(self):
         with TemporaryDirectory() as home:
@@ -1009,7 +1068,8 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=0, name="demo")
             _seed_progress(home, "demo", done=1, remaining=1)   # stale card
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("I 1/1", seg)
+            self.assertIn("run 1 done", seg)
+            self.assertIn("I 0", seg)
             self.assertIn("38;5;40m", seg)                      # green
 
     def test_new_tickets_mid_run_grow_the_total(self):
@@ -1018,7 +1078,8 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=5, name="demo")
             _seed_progress(home, "demo", done=2, remaining=1)   # stale low
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("I 2/7", seg)
+            self.assertIn("run 2 done", seg)
+            self.assertIn("I 5", seg)   # the LIVE count, not the stale 1
 
     def test_unknown_open_falls_back_to_card_remaining(self):
         with TemporaryDirectory() as home:
@@ -1026,7 +1087,10 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=None, name="demo")    # gh error
             _seed_progress(home, "demo", done=3, remaining=14)
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("I 3/17", seg)
+            # No live count is known -- fall back to the stale combined
+            # ratio (still labelled "run", never "I", so it stays distinct
+            # from the bare backlog form even in this degraded case).
+            self.assertIn("run 3/17", seg)
 
 
 class QuestionsSegment(unittest.TestCase):
