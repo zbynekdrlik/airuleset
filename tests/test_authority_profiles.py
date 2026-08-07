@@ -31,6 +31,9 @@ class TestAuthorityResolution(TestCase):
         # simap (airuleset#143): phase-1 demo stream that merges NOWHERE —
         # fork-no-merge is the existing lowest profile, already correct.
         self.assertEqual(airuleset.AUTHORITY_BY_USER["simap"], "fork-no-merge")
+        # miva1 (airuleset#300): phase-1 isolated stream, same shape as
+        # simap — merges nowhere, fork-no-merge already correct.
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "fork-no-merge")
 
     def test_montalu_family_streams_map_to_branch_merge(self):
         # airuleset#251: montalu2/3/4 are full parallel montalu streams
@@ -40,6 +43,10 @@ class TestAuthorityResolution(TestCase):
 
     def test_resolve_uses_the_map_for_simap(self):
         with m.patch.object(airuleset, "_current_user", return_value="simap"):
+            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    def test_resolve_uses_the_map_for_miva1(self):
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_resolve_defaults_to_full_for_unknown_user(self):
