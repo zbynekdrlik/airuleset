@@ -2018,6 +2018,11 @@ class RunOnceSubagentVisibility(unittest.TestCase):
                         "expected decide_working's one-shot give-up to fire "
                         "here (max_nudges capped at 1): %r" % logs2)
         self.assertEqual(len(pings2), 1, "the escalate ping fires exactly once: %r" % pings2)
+        # (#287 adversarial-review MINOR) The unsalvageable escalate must NOT
+        # claim "session nereaguje na nudge" (not responding) -- it fires
+        # after just ONE nudge, often the very next sweep, with no time to
+        # respond and often nothing to respond about.
+        self.assertNotIn("nereaguje na nudge", pings2[0][0])
 
         # a THIRD sweep still must not repeat either — neither the typed
         # nudge NOR the escalate ping (decide_working's own `escalated` flag

@@ -1986,7 +1986,8 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
     # (#287) A worker whose own transcript is provably unsalvageable earns
     # AT MOST ONE typed nudge, never the full retry cycle — see
     # _subagent_transcript_unsalvageable's own docstring.
-    effective_max_nudges = 1 if _subagent_transcript_unsalvageable(sub_path) else max_nudges
+    unsalvageable = _subagent_transcript_unsalvageable(sub_path)
+    effective_max_nudges = 1 if unsalvageable else max_nudges
     action, entry = decide_working(state, wkey, now, sub_idle,
                                    interval=interval, max_nudges=effective_max_nudges)
     state[wkey] = entry
@@ -1998,10 +1999,23 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
     elif action == "escalate":
         logs.append("subagent-%s-escalate %s [%s] — gave up after %d nudges"
                     % (dedup_prefix, project, wid, effective_max_nudges))
-        send_fn("\U0001f6d1 **%s** — background worker `%s` (%s) a session nereaguje na "
-                "nudge\n> Treba zásah." % (project, wid, kind),
-                owner=owner, dedup_key="subagent-%s-giveup:%s" % (dedup_prefix, wid),
-                dry_run=dry_run)
+        # (#287 adversarial-review MINOR) The unsalvageable path escalates
+        # after exactly ONE nudge, often within the very next sweep — "session
+        # nereaguje na nudge" (not responding) is the WRONG claim there (no
+        # time to respond, and often nothing TO respond to); it stays correct
+        # only for the genuine multi-nudge no-response cycle.
+        if unsalvageable:
+            send_fn("\U0001f6d1 **%s** — background worker `%s` (%s) transcript nemá čo "
+                    "ponúknuť na skúmanie (0 dokončených tool calls pred chybou)\n> "
+                    "Ďalšie skúmanie by neprinieslo nič nové — ak treba, over "
+                    "`subagents/%s.jsonl` ručne." % (project, wid, kind, wid),
+                    owner=owner, dedup_key="subagent-%s-giveup:%s" % (dedup_prefix, wid),
+                    dry_run=dry_run)
+        else:
+            send_fn("\U0001f6d1 **%s** — background worker `%s` (%s) a session nereaguje na "
+                    "nudge\n> Treba zásah." % (project, wid, kind),
+                    owner=owner, dedup_key="subagent-%s-giveup:%s" % (dedup_prefix, wid),
+                    dry_run=dry_run)
     else:
         logs.append("subagent-%s-%s %s [%s]" % (dedup_prefix, action, project, wid))
 
