@@ -3292,6 +3292,32 @@ class TestManagedSubagentCapDefault(TestCase):
         airuleset.apply_managed_settings_defaults(src)
         self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", src_env)
 
+    def test_a_non_dict_env_value_self_heals_instead_of_crashing(self):
+        # An adversarial-review finding (#288): `dict(existing or {})` crashes
+        # on a hand-corrupted/legacy settings.json whose `env` key is a
+        # string/int/list rather than an object — `dict("oops")` raises
+        # ValueError, escaping cmd_install's install step with no enclosing
+        # try/except, and (worse) cmd_push's local-install call catches only
+        # SystemExit, so this would land mid-way through a fleet deploy
+        # (main already pushed, zero remote hosts updated). A non-dict `env`
+        # is self-healed to a fresh dict rather than crashed on — same
+        # discipline as every other malformed-input path in this repo (never
+        # guess, never propagate an avoidable exception through a shared
+        # deploy pipeline).
+        for bad in ("oops", 5, ["a"], [["A", "B"]], True):
+            out = airuleset.apply_managed_settings_defaults({"env": bad})
+            self.assertEqual(
+                out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"],
+                airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
+
+    def test_none_env_still_works(self):
+        # An explicit JSON null for "env" (distinct from the key being
+        # absent) must keep working exactly like the absent-key case.
+        out = airuleset.apply_managed_settings_defaults({"env": None})
+        self.assertEqual(
+            out["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"],
+            airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
+
 
 class TestUltracodeLauncher(TestCase):
     """apply_ultracode_launcher manages the managed claude launcher (#77):
