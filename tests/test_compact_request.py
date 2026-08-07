@@ -1855,6 +1855,114 @@ class TestSubstantialityGateInJob14(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #301 (2026-08-07) — job 14's own #99/#48 gates never received `proven_boundary`
+# at all: #126 exempted a PROVEN boundary (origin in
+# `_COMPACT_PROVEN_BOUNDARY_ORIGINS` — `subagent-stop`/`self-callback`) from
+# BOTH substantiality heuristics in `deliver_compact_now` (the synchronous
+# path), but its own docstring says plainly "job 14's own separate copy of
+# these same two gates is untouched" — a KNOWN, deliberately-scoped-out parity
+# gap, not an oversight (#122's docstring: "#126 already scoped that parity
+# gap out explicitly ... this ticket does not fold it back in").
+#
+# Live evidence on gk + david@subdev (both boxes running #250's own grace
+# fix): `compact-decisions.log` shows the OVERWHELMING majority of RECORD
+# lines are `type=autopilot-worker` (origin=subagent-stop, #121's own proof
+# of a completed-ticket boundary) — and the very NEXT thing that happens to
+# most of them, once they fall through to job 14's poll, is
+# `skip no-work (compact-request)` / `DROP no-work` even though origin
+# already PROVES the boundary. On gk: `journalctl` job-14 tally over 3 days
+# showed `skip no-work` as the SECOND most common outcome (53 of 213), and
+# `compact-sync.log` shows a real multi-hour stretch (18h35m on
+# david@subdev, 2026-08-06T18:38:10 -> 2026-08-07T13:13:15) with ZERO
+# compact-request activity of any kind because every recorded request in
+# that window was PROVEN (origin=subagent-stop) yet still evaluated against
+# the unconditional #99 gate and dropped/lapsed.
+#
+# THE FIX: extend job 14's ALREADY-COMPUTED `proven_boundary` flag (it
+# already exists a few lines above, used for the `busy`/thin-context checks)
+# to also exempt the #99 no-work and #48 small-context gates — the EXACT
+# same exemption `deliver_compact_now` already applies, closing the parity
+# gap #122/#126 left open on purpose. `_compact_thin_context` stays
+# UNCONDITIONAL for both paths (per its own section comment — the live
+# incident it exists for WAS origin=subagent-stop); only #99/#48 gain the
+# exemption, mirroring `deliver_compact_now` exactly.
+# --------------------------------------------------------------------------- #
+
+class TestSubagentStopOriginExempt_FromSubstantialityGates_InJob14(unittest.TestCase):
+    """The polled path (job 14) must give a PROVEN boundary (origin in
+    `_COMPACT_PROVEN_BOUNDARY_ORIGINS`) the SAME exemption from #99/#48 that
+    `deliver_compact_now` already grants it (#126) — before this fix, job 14
+    silently dropped a proven boundary the synchronous path had already
+    deferred, reproducing the exact starvation #301 was filed to investigate."""
+    SID = "sess-subst-job14-proven"
+    CWD = "/home/x/subst-job14-proven-proj"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, substantial, ctx_tokens=300_000, origin="subagent-stop"):
+        base = self._dir()
+        proj = base / "projects"
+        reqpath = base / "compact-requests.json"
+        _write_ctx_transcript(proj, self.CWD, self.SID, ctx_tokens)
+        wd.record_compact_request(self.SID, self.CWD, path=reqpath, origin=origin)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        with m.patch.object(wd, "compact_boundary_substantial",
+                           return_value=substantial):
+            logs = wd.compact_ticket_boundary(
+                time.time(), tmux, {}, panes_by_sid, path=reqpath,
+                projects_dir=proj)
+        return tmux, logs, reqpath
+
+    # -- POSITIVE controls: a proven subagent-stop boundary now SENDS ---- #
+
+    def test_no_work_no_longer_vetoes_a_proven_boundary(self):
+        tmux, logs, reqpath = self._go(substantial=False, ctx_tokens=300_000)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertFalse(any("skip no-work" in ln for ln in logs), logs)
+
+    def test_small_context_no_longer_vetoes_a_proven_boundary(self):
+        tmux, logs, reqpath = self._go(substantial=True, ctx_tokens=1_000)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+        self.assertFalse(any("skip small-context" in ln for ln in logs), logs)
+
+    def test_both_gates_together_no_longer_veto_a_proven_boundary(self):
+        tmux, logs, reqpath = self._go(substantial=False, ctx_tokens=1_000)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+    def test_self_callback_origin_is_also_exempt(self):
+        tmux, logs, reqpath = self._go(substantial=False, ctx_tokens=300_000,
+                                       origin="self-callback")
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs), logs)
+
+    # -- NEGATIVE controls: a blank/plain origin keeps the OLD behavior -- #
+
+    def test_no_work_still_vetoes_a_plain_stop_hook_boundary(self):
+        tmux, logs, reqpath = self._go(substantial=False, ctx_tokens=300_000,
+                                       origin="")
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip no-work" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(reqpath))
+
+    def test_small_context_still_vetoes_a_plain_stop_hook_boundary(self):
+        tmux, logs, reqpath = self._go(substantial=True, ctx_tokens=1_000,
+                                       origin="")
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip small-context" in ln for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
 # 2d. airuleset.py compact-request CLI (the Stop hook's write path)
 # --------------------------------------------------------------------------- #
 
