@@ -3749,6 +3749,38 @@ class TestQuestionsThreadRouting(TestCase):
             "shared")
 
 
+class _FakeDiscordThreads:
+    """A minimal in-memory Discord thread-API double: GET on an anchor
+    channel resolves a fixed parent/guild; POST creates a thread and
+    remembers it; GET on the guild's active-threads listing returns
+    everything created SO FAR. Lets a test simulate TWO separate boxes
+    (two `provision_question_thread` calls with two different local .env
+    files) sharing the SAME real Discord server state — the exact shape
+    the #296 adversarial-review MAJOR finding (duplicate-thread creation)
+    needs to reproduce."""
+
+    def __init__(self, parent_id="parentchan", guild_id="g1"):
+        self.parent_id = parent_id
+        self.guild_id = guild_id
+        self.created = []
+        self._next = 1
+
+    def __call__(self, token, method, path, payload=None):
+        if method == "GET" and path.endswith("threads/archived/public"):
+            return {"threads": []}
+        if method == "GET" and path.startswith("channels/"):
+            return {"parent_id": self.parent_id, "guild_id": self.guild_id}
+        if method == "GET" and path == "guilds/%s/threads/active" % self.guild_id:
+            return {"threads": list(self.created)}
+        if method == "POST" and path == "channels/%s/threads" % self.parent_id:
+            tid = "thread%d" % self._next
+            self._next += 1
+            self.created.append({"id": tid, "parent_id": self.parent_id,
+                                 "name": payload["name"]})
+            return {"id": tid}
+        return None
+
+
 class TestCreateAndProvisionQuestionsThread(TestCase):
     """#296: a real `claude-<owner>-q` Discord thread does not exist by
     default — no code in this repo has ever created a Discord thread before
@@ -3756,8 +3788,8 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
     `create_owner_question_thread` spawns it as a SIBLING of the owner's
     EXISTING thread (same Discord parent channel, found via one GET) — the
     same mechanism a human used to set up a per-owner thread, just automated.
-    `provision_question_thread` is the idempotent create-and-persist action
-    behind `notify --provision-question-thread`."""
+    `provision_question_thread` is the idempotent find-then-create-and-persist
+    action behind `notify --provision-question-thread`."""
 
     def setUp(self):
         import notify
@@ -3892,6 +3924,158 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
                 "zbynek", env={}, env_path=p, http=lambda *a, **k: None)
             self.assertEqual(result, "")
             self.assertEqual(Path(p).read_text(), "X=1\n")   # untouched
+
+    # --- find_owner_question_thread (adversarial-review MAJOR fix) --------
+    def test_find_owner_question_thread_matches_active_thread(self):
+        def fake_http(token, method, path, payload=None):
+            if method == "GET" and path == "channels/zthread":
+                return {"parent_id": "parentchan", "guild_id": "g1"}
+            if method == "GET" and path == "guilds/g1/threads/active":
+                return {"threads": [
+                    {"id": "wrong", "parent_id": "parentchan",
+                     "name": "claude-zbynek"},
+                    {"id": "found123", "parent_id": "parentchan",
+                     "name": "claude-zbynek-q"}]}
+            return None
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(
+            self.notify.find_owner_question_thread(env, "zbynek",
+                                                    http=fake_http),
+            "found123")
+
+    def test_find_owner_question_thread_falls_back_to_archived(self):
+        def fake_http(token, method, path, payload=None):
+            if method == "GET" and path == "channels/zthread":
+                return {"parent_id": "parentchan", "guild_id": "g1"}
+            if method == "GET" and path == "guilds/g1/threads/active":
+                return {"threads": []}
+            if (method == "GET"
+                    and path == "channels/parentchan/threads/archived/public"):
+                return {"threads": [{"id": "archivedq",
+                                     "name": "claude-zbynek-q"}]}
+            return None
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(
+            self.notify.find_owner_question_thread(env, "zbynek",
+                                                    http=fake_http),
+            "archivedq")
+
+    def test_find_owner_question_thread_returns_empty_when_genuinely_absent(self):
+        def fake_http(token, method, path, payload=None):
+            if method == "GET" and path == "channels/zthread":
+                return {"parent_id": "parentchan", "guild_id": "g1"}
+            if method == "GET":
+                return {"threads": []}
+            return None
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(
+            self.notify.find_owner_question_thread(env, "zbynek",
+                                                    http=fake_http), "")
+
+    def test_find_owner_question_thread_no_token_or_owner_is_empty(self):
+        self.assertEqual(self.notify.find_owner_question_thread({}, "zbynek"), "")
+        self.assertEqual(self.notify.find_owner_question_thread(
+            {"DISCORD_BOT_TOKEN": "tok"}, ""), "")
+
+    def test_provision_question_thread_reuses_an_existing_thread_from_another_box(self):
+        # #296 adversarial-review MAJOR: the questions-thread id is BOX-LOCAL
+        # non-git config, so provisioning the SAME owner from a SECOND box
+        # (a separate local .env) must FIND the thread the first box already
+        # created on the real Discord server, never fork a duplicate.
+        backend = _FakeDiscordThreads()
+        with tempfile.TemporaryDirectory() as da, \
+                tempfile.TemporaryDirectory() as db:
+            pa = os.path.join(da, ".env")
+            pb = os.path.join(db, ".env")
+            Path(pa).write_text("DISCORD_BOT_TOKEN=tok\n")
+            Path(pb).write_text("DISCORD_BOT_TOKEN=tok\n")
+            env = {"DISCORD_BOT_TOKEN": "tok",
+                   "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+
+            first = self.notify.provision_question_thread(
+                "zbynek", env=dict(env), env_path=pa, http=backend)
+            self.assertTrue(first)
+            self.assertEqual(len(backend.created), 1)
+
+            second = self.notify.provision_question_thread(
+                "zbynek", env=dict(env), env_path=pb, http=backend)
+            self.assertEqual(
+                second, first,
+                "box B must FIND box A's thread, never create a second one")
+            self.assertEqual(len(backend.created), 1,
+                             "no duplicate thread was created")
+            self.assertIn(
+                "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=%s" % first,
+                Path(pb).read_text())
+
+    # --- anchor never falls back to the shared channel (THEORETICAL fix) --
+    def test_create_owner_question_thread_never_anchors_off_the_shared_channel(self):
+        calls = []
+
+        def fake_http(token, method, path, payload=None):
+            calls.append(path)
+            return None
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "sharedthread"}
+        self.assertEqual(
+            self.notify.create_owner_question_thread(env, "zbynek",
+                                                      http=fake_http),
+            "")
+        self.assertEqual(calls, [],
+                         "must refuse before ever querying the shared channel")
+
+    def test_find_owner_question_thread_never_anchors_off_the_shared_channel(self):
+        calls = []
+
+        def fake_http(token, method, path, payload=None):
+            calls.append(path)
+            return None
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ID": "sharedthread"}
+        self.assertEqual(
+            self.notify.find_owner_question_thread(env, "zbynek",
+                                                    http=fake_http),
+            "")
+        self.assertEqual(calls, [])
+
+    # --- _env_upsert hardening (MINOR fixes) -------------------------------
+    def test_env_upsert_tolerates_non_utf8_bytes_without_raising(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            with open(p, "wb") as fh:
+                fh.write(b"DISCORD_BOT_TOKEN=tok\n\xffBROKEN=1\n")
+            self.assertTrue(self.notify._env_upsert(p, "NEW_KEY", "v"))
+            out = Path(p).read_text(errors="replace")
+            self.assertIn("NEW_KEY=v", out)
+            self.assertIn("DISCORD_BOT_TOKEN=tok", out)
+
+    def test_env_upsert_writes_atomically_no_tmp_file_survives(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("X=1\n")
+            self.notify._env_upsert(p, "Y", "2")
+            self.assertFalse(
+                os.path.exists(p + ".tmp"),
+                "the atomic tmp file must not survive a successful write")
+
+    def test_env_upsert_writes_via_os_replace(self):
+        # A discriminating mutant check for atomicity (the "no .tmp
+        # survives" assertion above is TRUE for a plain non-atomic write
+        # too, so it alone proves nothing) — the write must go through
+        # os.replace(tmp, path), mirroring _save_questions()'s own
+        # established atomic-write shape in this same module.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("X=1\n")
+            with m.patch("notify.os.replace") as fake_replace:
+                self.notify._env_upsert(p, "Y", "2")
+            fake_replace.assert_called_once()
+            src, dst = fake_replace.call_args[0]
+            self.assertTrue(str(src).endswith(".tmp"), src)
+            self.assertEqual(dst, p)
 
 
 class TestTmuxHistoryLimit(TestCase):
@@ -6545,6 +6729,23 @@ class TestDiscordAutopilotNotify(TestCase):
                 airuleset.cmd_notify(args)
             self.assertEqual(cm.exception.code, 1)
 
+    def test_cli_provision_question_thread_normalizes_owner_name(self):
+        # Adversarial-review THEORETICAL finding: an un-normalized
+        # --owner-name typo (mixed case, a trailing space) must resolve to
+        # the SAME normalized key resolve_owner() itself would produce —
+        # otherwise it silently creates a real Discord thread and persists
+        # it under a DEAD .env key nothing ever reads.
+        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="Zbynek ")
+        with m.patch("notify.provision_question_thread",
+                     return_value="q1") as fake:
+            airuleset.cmd_notify(args)
+        fake.assert_called_once_with("zbynek")
+
     def test_cli_owner(self):
         # `notify --owner` lets the shell hook resolve ONCE and force the same owner
         # onto both --mention-prefix and --channel-id (so they can never disagree).
@@ -6639,6 +6840,41 @@ class TestDiscordAutopilotNotify(TestCase):
                        env={**base_env, "ND_EMOJI": "✅", "ND_TEXT": "t",
                             "ND_CWD": "/tmp"})
         self.assertEqual(_channel_kinds(), ["default"], log.read_text())
+
+    def test_send_hook_selects_questions_kind_for_mirror_targets_too(self):
+        # Coverage gap the adversarial review flagged: a mirrored persona
+        # (DISCORD_MIRROR_<OWNER>) must get its OWN --kind questions
+        # resolution too, not just the primary owner — emit_one() is called
+        # once per target with the SAME $KIND, so every --channel-id call
+        # this sweep makes (one per target: primary + each mirror) must
+        # show --kind questions for a ❓ ping.
+        home = tempfile.mkdtemp()
+        shimdir = tempfile.mkdtemp()
+        log = Path(home) / "py3.log"
+        real_py3 = sys.executable
+        shim = Path(shimdir) / "python3"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%%s\\n' \"$*\" >> %s\n"
+            "exec %s \"$@\"\n" % (str(log), real_py3))
+        shim.chmod(0o755)
+        d = Path(home) / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        (d / ".env").write_text("DISCORD_MIRROR_ZBYNEK=marek\n")
+        env = {**os.environ, "PATH": str(shimdir) + os.pathsep + os.environ["PATH"],
+              "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek",
+              "DISCORD_NOTIFY_DRYRUN": "1", "ND_EMOJI": "❓", "ND_TEXT": "t",
+              "ND_CWD": "/tmp"}
+        subprocess.run(["bash", str(self.SEND_HOOK)], input="", text=True,
+                       capture_output=True, env=env)
+        lines = log.read_text().splitlines() if log.exists() else []
+        calls = [ln for ln in lines if "--channel-id" in ln]
+        # primary (zbynek) + mirror (marek) = 2 --channel-id calls this sweep
+        self.assertEqual(len(calls), 2, log.read_text())
+        for ln in calls:
+            toks = ln.split()
+            self.assertIn("--kind", toks, ln)
+            self.assertEqual(toks[toks.index("--kind") + 1], "questions", ln)
 
 
 # A pane IDLE at a free `❯` prompt (turn ended, safe to type a nudge). The real prompt
