@@ -532,6 +532,26 @@ def newest_subagent_transcript(transcript_path):
 # `⏳ WORKING` on something else entirely.
 SUBAGENT_MAX_AGE_SECONDS = 2 * 3600
 
+# (#287) The per-worker nudge/escalate dedup state `_nudge_dying_subagent`
+# keeps at `state["subagent-<prefix>:<wid>"]` used to be aged out by the
+# generic episode-cleanup's WAIT_CLEAR_SECONDS (90s) -- the SAME short TTL
+# tuned for the SUPERVISOR's own transient wait/working episodes. That is
+# wrong for THIS state: `_nudge_dying_subagent` only ever runs while the
+# supervisor's own last marker reads `⏳ WORKING` (see the two call sites'
+# gates), which a busy /goal loop working OTHER tickets steps away from for
+# minutes at a stretch (a completed ticket's own `✅ DONE` turn, per
+# message-status-marker.md's per-ticket boundary). Every such gap exceeding
+# 90s silently wiped "already nudged N times" back to zero, so the SAME dead
+# worker's nudge#1 re-fired every time the gate reopened -- a full paid turn
+# each time, unbounded (the observed "identical nudge delivered forever").
+# Bound this state by the SAME ceiling that already decides whether to look
+# at the worker at ALL (SUBAGENT_MAX_AGE_SECONDS): `sub_idle` only grows, so
+# once the outer grace<=sub_idle<=SUBAGENT_MAX_AGE_SECONDS gate permanently
+# closes for a wid it can never reopen -- the entry is never needed again
+# once genuinely stale, and this TTL is comfortably longer than any
+# realistic gap between `⏳` sightings within the still-active window.
+SUBAGENT_NUDGE_STATE_TTL_SECONDS = SUBAGENT_MAX_AGE_SECONDS
+
 
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
@@ -1876,6 +1896,32 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None):
     send_continue(pane_id, text, run)
 
 
+def _subagent_transcript_unsalvageable(sub_path):
+    """(#287) True when a dying SUBAGENT's OWN transcript has genuinely NOTHING
+    left to investigate: it never issued a single `tool_use` call (never got
+    past its own dispatch) and its last real entry is a bare
+    `isApiErrorMessage` — the exact shape the reporting incident's own
+    diagnostic already confirmed by hand (odoo-erp#3036: 4 lines total, 1
+    tool_use — the dispatch itself, never a COMPLETED one; the transcript
+    ends on a bare `API Error: 529 Overloaded`). A session nudged about a
+    transcript in this shape can only ever re-derive the SAME "nothing to
+    salvage" conclusion, so `_nudge_dying_subagent` nudges it AT MOST ONCE
+    rather than the full nudge/nudge/nudge/escalate cycle a genuinely
+    recoverable stall earns.
+
+    Fails SAFE toward "salvageable" (False) on any read problem or on
+    finding even ONE issued `tool_use` — under-classifying only costs a few
+    extra (harmless, now BOUNDED by SUBAGENT_NUDGE_STATE_TTL_SECONDS)
+    nudges, never a silently-skipped genuinely-recoverable worker."""
+    if not transcript_last_error(sub_path):
+        return False                     # doesn't even end on an api-error
+    for entry in _iter_jsonl_tail(sub_path, max_lines=200):
+        if (isinstance(entry, dict) and entry.get("type") == "assistant"
+                and _entry_has_tool_use(entry)):
+            return False                 # made SOME progress -> could still be resumed
+    return True
+
+
 def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, owner,
                           now, sub_path, sub_idle, kind, dedup_prefix,
                           interval, max_nudges, dry_run):
@@ -1885,7 +1931,15 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
     `state` and `logs` in place. Same keystroke discipline as every other job: NEVER
     type into a copy-mode or busy (no free `❯`) pane — ping instead, mirroring job 4's
     busy-pane-wedged path — and reuse decide_working's nudge → retry → escalate
-    lifecycle for the idle-pane case, so a wedged supervisor still only pings once."""
+    lifecycle for the idle-pane case, so a wedged supervisor still only pings once.
+
+    (#287) When the worker's own transcript is PROVABLY unsalvageable
+    (`_subagent_transcript_unsalvageable`), `max_nudges` is capped at 1 —
+    decide_working then delivers exactly ONE typed nudge (the thing that
+    actually costs the session a paid turn) and escalates to a single
+    passive Discord ping on its next evaluation, before going permanently
+    silent — never the full multi-nudge cycle for a transcript with nothing
+    left to learn from a second look."""
     wid = sub_path.stem
     if pane_in_mode(pid, run):
         logs.append("skip in-mode (subagent-%s) %s" % (dedup_prefix, project or pid))
@@ -1907,8 +1961,12 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
             logs.append("skip busy-pane (subagent-%s) %s [%s]" % (dedup_prefix, project, wid))
         return
     wkey = "subagent-%s:%s" % (dedup_prefix, wid)
+    # (#287) A worker whose own transcript is provably unsalvageable earns
+    # AT MOST ONE typed nudge, never the full retry cycle — see
+    # _subagent_transcript_unsalvageable's own docstring.
+    effective_max_nudges = 1 if _subagent_transcript_unsalvageable(sub_path) else max_nudges
     action, entry = decide_working(state, wkey, now, sub_idle,
-                                   interval=interval, max_nudges=max_nudges)
+                                   interval=interval, max_nudges=effective_max_nudges)
     state[wkey] = entry
     if action == "nudge":
         n = len(entry["nudges"])
@@ -1917,7 +1975,7 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
             send_subagent_nudge(pid, wid, kind, run)
     elif action == "escalate":
         logs.append("subagent-%s-escalate %s [%s] — gave up after %d nudges"
-                    % (dedup_prefix, project, wid, max_nudges))
+                    % (dedup_prefix, project, wid, effective_max_nudges))
         send_fn("\U0001f6d1 **%s** — background worker `%s` (%s) a session nereaguje na "
                 "nudge\n> Treba zásah." % (project, wid, kind),
                 owner=owner, dedup_key="subagent-%s-giveup:%s" % (dedup_prefix, wid),
@@ -12260,11 +12318,36 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 prefix = "pwedge:"
             if k[len(prefix):] not in live_pane_ids:
                 del state[k]
+        elif (k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
+                or k.startswith("subagent-busypane:")):
+            # (#287) These track a SPECIFIC DEAD SUBAGENT's own triage state —
+            # unlike every other episode key in this loop, visibility into it
+            # depends on the SUPERVISOR's own marker happening to read
+            # `⏳ WORKING` at poll time (the outer
+            # `transcript_last_marker(tpath) == "⏳"` gate in
+            # `_nudge_dying_subagent`'s two call sites), which a busy /goal
+            # loop working OTHER tickets steps away from routinely (a
+            # completed ticket's own `✅ DONE` turn) for well over
+            # `wait_clear`'s 90s. The generic wait_clear-based branch below
+            # used to WIPE this state on every such gap, so a session
+            # alternating through several other tickets re-sent an
+            # already-nudged dead worker's nudge as a fresh "nudge#1" every
+            # time the gate reopened — the observed "same nudge delivered
+            # forever" (#287; the previously-diagnosed
+            # `decide_working(responded=True)` cause does NOT apply here —
+            # `_nudge_dying_subagent` never passes `responded=`, so that
+            # branch is unreachable for this wkey; verified against the
+            # current source before this fix, see the tracking issue).
+            # A dead worker's own status does not need re-confirming every
+            # 90s of supervisor busyness — bound it instead by the SAME
+            # ceiling the outer gate already uses to decide whether to even
+            # look at the worker (see SUBAGENT_NUDGE_STATE_TTL_SECONDS's own
+            # docstring for why this can never fire prematurely).
+            if int(now) - state[k].get("last_seen", 0) > SUBAGENT_NUDGE_STATE_TTL_SECONDS:
+                del state[k]
         elif (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
-                or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")
-                or k.startswith("subagent-apierr:") or k.startswith("subagent-textcall:")
-                or k.startswith("subagent-busypane:")):
+                or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly
