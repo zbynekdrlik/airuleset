@@ -1049,9 +1049,12 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
         TestSuppressionIsConditionalOnDelivery._n += 1
         self.sid = "test-supp-%d-%d" % (os.getpid(),
                                         TestSuppressionIsConditionalOnDelivery._n)
-        for p in ("/tmp/claude-discord-pending-%s" % self.sid,
-                  "/tmp/claude-discord-cardchk-%s" % self.sid):
-            self.addCleanup(lambda p=p: os.path.exists(p) and os.remove(p))
+        # (#293) sweep_session_files is shape-agnostic (globs "*<sid>*") --
+        # never hand-enumerate marker paths here again, or a FUTURE new
+        # marker silently reopens this same leak (2026-08-07: 207 real
+        # leftover lastq files from this class's own ❓ test, never cleaned
+        # by the old pending+cardchk-only list).
+        self.addCleanup(sweep_session_files, self.sid)
         self.pending = Path("/tmp/claude-discord-pending-%s" % self.sid)
 
     def mark(self, key, status="sent"):
