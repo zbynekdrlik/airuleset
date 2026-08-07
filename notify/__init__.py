@@ -37,27 +37,34 @@ _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
 
 # Stream personas whose tmux session name has NO Discord identity of its own
-# (airuleset#259, 2026-08-06): montalu/montalu2-4/simap route to zbynek's own
-# thread, david to its own. Checked in resolve_owner() ITSELF — never via a
-# bashrc AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT
-# hook invocation everywhere. A bashrc export only reaches shells started
-# AFTER the write; an adversarial review of the first version of this fix
+# (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap route to
+# zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
+# — airuleset#295, 2026-08-07: the user's own statement, independently
+# corroborated by odoo-erp#2961's 2026-08-05 ACCESS DECISION comment,
+# montalu4 is the ONLY montalu-family account marek's own SSH key was added
+# to — montalu/montalu2/montalu3 stay zbynek-only). david routes to its own
+# thread. Checked in resolve_owner() ITSELF — never via a bashrc
+# AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT hook
+# invocation everywhere. A bashrc export only reaches shells started AFTER
+# the write; an adversarial review of the first version of this fix
 # live-verified that simap's OWN already-running session kept misrouting
 # after the bashrc line was applied, because that session's process
 # environment predated the write and nothing short of restarting the live
 # session (never done to another user's session) would have picked it up.
-# `marek` is deliberately absent: its own tmux session name ("marek") already
-# has its own DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys,
-# so no override is needed. montalu/david ALSO still carry a redundant,
-# hand-added `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this
-# fix existed — harmless, since the env override is checked FIRST in
+# `marek` is deliberately absent as a MAP KEY: its own tmux session name
+# ("marek") already resolves directly and has its own
+# DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys, so no
+# override is needed FOR IT — it is still a valid map VALUE (montalu4's
+# redirect target). montalu/david ALSO still carry a redundant, hand-added
+# `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this fix
+# existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
     "david": "david",
     "montalu": "zbynek",
     "montalu2": "zbynek",
     "montalu3": "zbynek",
-    "montalu4": "zbynek",
+    "montalu4": "marek",
     "simap": "zbynek",
 }
 
@@ -220,7 +227,7 @@ def stream_redirect(raw_owner):
     return STREAM_NOTIFY_OWNER.get(raw_owner, raw_owner)
 
 
-def notification_channel(env=None, owner=None):
+def notification_channel(env=None, owner=None, kind="default"):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 
     Per-owner routing: each person gets their OWN thread so notifications don't
@@ -231,14 +238,223 @@ def notification_channel(env=None, owner=None):
     to the shared `DISCORD_NOTIFICATION_CHANNEL_ID` when the owner has no per-owner
     thread configured OR the owner can't be determined (no tmux). Returns "" when
     neither is set. A Discord thread IS a channel in the API, so the POST target is
-    identical — only the id differs."""
+    identical — only the id differs.
+
+    `kind="questions"` (#296) resolves the owner's SEPARATE questions thread
+    (`DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q`) FIRST — so a ❓ ping lands in its
+    own `claude-<owner>-q` thread instead of mixing with ✅/card/api-error pings
+    in the owner's normal thread. It then falls through to the EXACT SAME cascade
+    `kind="default"` already uses (the owner's normal thread, then the shared id)
+    whenever the questions thread isn't configured yet for that owner — so an
+    owner with no provisioned `-q` thread keeps their pre-#296 behaviour
+    (questions land in their normal thread) instead of silently losing them to
+    the shared channel. `kind="default"` (the parameter's default) is
+    byte-for-byte the pre-#296 behaviour — every EXISTING caller (`send()`, the
+    run-card, api-error) never passes `kind=` at all and is unaffected."""
     env = _read_env() if env is None else env
     owner = resolve_owner() if owner is None else owner
     if owner:
+        if kind == "questions":
+            perq = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
+                    or "").strip()
+            if perq:
+                return perq
         per = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
         if per:
             return per
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
+
+
+# --------------------------------------------------------------------------- #
+# #296 -- provisioning the per-owner QUESTIONS thread (claude-<owner>-q).
+#
+# No code in this repo has ever created a Discord thread before -- the
+# existing per-owner threads (claude-zbynek / claude-marek / claude-david)
+# were configured BY HAND into the .env. #296's own body allows the mechanism
+# to CREATE the thread ("vlákno sa vytvorí/nájde"), and the ticket's live
+# acceptance criterion needs a REAL thread to post a test ❓ into -- so this
+# ships a thin, explicit, ONE-TIME provisioning action
+# (`notify --provision-question-thread`), NOT wired into `push`/`install`
+# (creating a thread for every possible stream owner on every deploy was not
+# asked for). It anchors the new thread as a SIBLING of the owner's EXISTING
+# thread (same Discord parent channel, found via one GET), so it needs no
+# extra "which channel" configuration, and persists the id into the local
+# (non-git) .env so every later resolution is a pure, side-effect-free read.
+# --------------------------------------------------------------------------- #
+
+
+def _owner_anchor_channel(env, owner):
+    """The owner's OWN configured normal thread —
+    `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` ONLY, never the cascaded/shared
+    fallback `notification_channel()` would fall through to. Used to anchor
+    a NEW `-q` thread: falling back to the SHARED channel here would (in the
+    rare case that shared channel itself happens to be a thread) let one
+    owner's questions-thread creation silently anchor off infrastructure
+    meant for everyone, not this owner — and "no existing thread to anchor
+    off of" should mean exactly that, not "no shared fallback either"."""
+    if not owner:
+        return ""
+    return (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
+
+
+def _channel_parent_id(token, channel_id, http=None):
+    """The `parent_id` Discord reports for `channel_id` — populated both for
+    a genuine THREAD (its parent channel) and for a plain guild channel that
+    sits inside a CATEGORY (the category's id), so a non-null result alone
+    does NOT prove `channel_id` is a thread. `create_owner_question_thread`
+    relies on Discord itself rejecting a malformed thread-create POST
+    against a category id (it can never create a thread in the wrong
+    place), not on this function disambiguating the two shapes. None when
+    the lookup fails or the channel genuinely has no parent. Never raises."""
+    api = http or _discord_api
+    info = api(token, "GET", "channels/%s" % channel_id)
+    return info.get("parent_id") if isinstance(info, dict) else None
+
+
+def _threads_of(resp):
+    """The list of thread dicts in a Discord thread-listing response
+    (`{"threads": [...], ...}`), or [] for any unexpected shape — a failed
+    API call (`resp` not a dict), a missing/None/non-list `threads` key, or
+    non-dict entries inside it. Never raises."""
+    threads = resp.get("threads") if isinstance(resp, dict) else None
+    if not isinstance(threads, list):
+        return []
+    return [t for t in threads if isinstance(t, dict)]
+
+
+def find_owner_question_thread(env, owner, http=None):
+    """FIND an existing `claude-<owner>-q` thread — the "nájde" half of
+    #296's own "vytvorí/nájde" requirement (adversarial-review MAJOR
+    finding). Without this, provisioning the SAME owner from a SECOND box
+    (or after a lost/rebuilt LOCAL .env — the questions-thread id is
+    box-local, non-git config) never searched Discord for an
+    already-created thread and unconditionally POSTED a new one, silently
+    forking that owner's questions across two threads. Searches the
+    owner's anchor channel's ACTIVE guild threads first, then its ARCHIVED
+    PUBLIC threads (a week-idle `-q` thread auto-archives at the
+    10080-minute duration `create_owner_question_thread` itself sets).
+    Returns the existing thread id, or "" when genuinely absent / on any
+    lookup failure — never guesses, never raises."""
+    token = bot_token(env)
+    if not token or not owner:
+        return ""
+    parent_ch = _owner_anchor_channel(env, owner)
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    info = api(token, "GET", "channels/%s" % parent_ch)
+    if not isinstance(info, dict):
+        return ""
+    parent_id = info.get("parent_id")
+    guild_id = info.get("guild_id")
+    if not parent_id:
+        return ""
+    name = "claude-%s-q" % owner
+    if guild_id:
+        active = api(token, "GET", "guilds/%s/threads/active" % guild_id)
+        for t in _threads_of(active):
+            if t.get("parent_id") == parent_id and t.get("name") == name:
+                return t.get("id") or ""
+    archived = api(token, "GET",
+                   "channels/%s/threads/archived/public" % parent_id)
+    for t in _threads_of(archived):
+        if t.get("name") == name:
+            return t.get("id") or ""
+    return ""
+
+
+def create_owner_question_thread(env, owner, http=None):
+    """Create the QUESTIONS thread `claude-<owner>-q` — a sibling of the
+    owner's EXISTING normal thread (same PARENT channel), the SAME mechanism
+    the existing per-owner threads already use (a real Discord thread the
+    bot posts into), just extended to a second thread per owner. Returns the
+    new thread id, or "" on any failure (no token, no owner, the owner has
+    no existing thread to anchor off of, the parent lookup/create call
+    fails) — never raises. Does NOT persist the result, and does NOT search
+    for an existing thread first; see `provision_question_thread` for the
+    idempotent find-then-create-and-save action (`find_owner_question_thread`
+    is the "find" half)."""
+    token = bot_token(env)
+    if not token or not owner:
+        return ""
+    parent_ch = _owner_anchor_channel(env, owner)
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    parent_id = _channel_parent_id(token, parent_ch, http=api)
+    if not parent_id:
+        return ""
+    resp = api(token, "POST", "channels/%s/threads" % parent_id,
+              {"name": "claude-%s-q" % owner, "type": 11,
+               "auto_archive_duration": 10080})
+    return (resp.get("id") if isinstance(resp, dict) else "") or ""
+
+
+def _env_upsert(path, key, value):
+    """Append/replace ONE `KEY=value` line in the local .env at `path` —
+    creates the file (and its parent dir) if missing. Idempotent: replaces
+    an EXISTING `KEY=...` line in place rather than duplicating it. The read
+    tolerates non-UTF8 bytes the SAME way `_read_env()` already does
+    (`errors="replace"` — this file also holds `DISCORD_BOT_TOKEN`, so
+    falling back to an EMPTY line list on a decode wobble would silently
+    destroy every other key instead of just this one). The write is
+    ATOMIC (tmp file + `os.replace`, mirroring `_save_questions()` in this
+    same module) — a crash mid-write can never leave the token file half
+    truncated. Returns True on success, False on any I/O failure. Never
+    raises."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            lines = []
+        prefix = key + "="
+        found = False
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith(prefix):
+                lines[i] = "%s=%s\n" % (key, value)
+                found = True
+                break
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append("%s=%s\n" % (key, value))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def provision_question_thread(owner, env=None, env_path=None, http=None):
+    """Idempotently ENSURE `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` is
+    configured for `owner` (#296): returns the EXISTING id unchanged (zero
+    network calls) when already set; otherwise FINDS an existing
+    `claude-<owner>-q` thread on Discord itself (`find_owner_question_thread`
+    — the fix for the duplicate-thread-per-box finding above) before
+    falling back to creating one (`create_owner_question_thread`), then
+    appends the key to the local .env (`_env_upsert`). Returns the id on
+    success, "" on any failure — never raises. A one-time, explicit
+    provisioning action (CLI: `notify --provision-question-thread`), NOT
+    wired into every `push`/`install`."""
+    if not owner:
+        return ""
+    path = env_path if env_path is not None else _env_path()
+    env = _read_env() if env is None else env
+    existing = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
+                or "").strip()
+    if existing:
+        return existing
+    new_id = (find_owner_question_thread(env, owner, http=http)
+              or create_owner_question_thread(env, owner, http=http))
+    if not new_id:
+        return ""
+    _env_upsert(path, "DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q",
+               new_id)
+    return new_id
 
 
 def mention_prefix(env=None, owner=None):

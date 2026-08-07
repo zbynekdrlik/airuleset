@@ -223,6 +223,31 @@ class DeliverDiscordReplies(unittest.TestCase):
         self.assertIn("888001", notify.load_questions(self.qpath))
         self.assertIn("rep1", state["dreply_done"])
 
+    def test_delivers_from_a_channel_that_is_not_the_owners_normal_thread(self):
+        # #296: a ❓ ping now routes to a SEPARATE per-owner questions thread
+        # (claude-<owner>-q) — a DIFFERENT Discord channel id from the one
+        # this fixture's env configures as "the owner's normal thread"
+        # (DISCORD_NOTIFICATION_CHANNEL_ZBYNEK="777001", setUp above). Job 7
+        # must still find + deliver it: it fetches from EVERY channel that
+        # appears in the persisted question map, never a channel hardcoded
+        # to the owner's "primary" thread — this is what lets the reply
+        # pipeline keep working from the new thread with ZERO watchdog code
+        # changes. A regression here would mean some future edit accidentally
+        # scoped job 7 to a single, primary channel.
+        notify.record_question("888002", "999888777", "sid-abc",
+                               "/home/x/restreamer", now=time.time(),
+                               path=self.qpath)
+        state = {}
+        panes = {"sid-abc": ("%1", IDLE)}
+        q_msg = {"id": "repQ", "author": {"id": self.OWNER},
+                "message_reference": {"message_id": "888002"},
+                "content": "ano", "_channel": "999888777"}
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=True,
+            discord_fetch=self._fetch([q_msg]))
+        self.assertTrue(any("reply→" in ln for ln in logs), logs)
+        self.assertIn("repQ", state["dreply_done"])
+
     def test_types_the_answer_when_not_dry_run(self):
         notify.record_question("888001", "777001", "sid-abc", "/p",
                                now=time.time(), path=self.qpath)

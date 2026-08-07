@@ -4175,13 +4175,37 @@ def cmd_notify(args):
         return
 
     if getattr(args, "channel_id", False):
-        sys.stdout.write(notification_channel())
+        # #296: --kind questions resolves the owner's SEPARATE questions
+        # thread; omitted/--kind default is the pre-#296 behaviour unchanged.
+        sys.stdout.write(notification_channel(kind=getattr(args, "kind", None)
+                                              or "default"))
         return
 
     if getattr(args, "mirror_owners", False):
         # space-separated parallel/CC recipients for the current owner (shell path)
         sys.stdout.write(" ".join(mirror_owners()))
         return
+
+    if getattr(args, "provision_question_thread", False):
+        # #296: one-time setup — create (if missing) + persist the owner's
+        # questions thread claude-<owner>-q into the local .env.
+        # --owner-name is normalized THE SAME WAY resolve_owner() normalizes
+        # its own result (adversarial-review finding): an un-normalized typo
+        # like a trailing space would otherwise create a REAL Discord thread
+        # and persist it under a dead .env key
+        # ("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK _Q") that no reader ever
+        # resolves — a silent misprovision, not a loud refusal.
+        from notify import provision_question_thread, resolve_owner
+        owner_name = getattr(args, "owner_name", None)
+        owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+                if owner_name else resolve_owner())
+        tid = provision_question_thread(owner)
+        if tid:
+            sys.stdout.write(tid)
+            return
+        print("notify: could not provision the questions thread for owner=%r"
+             % owner, file=sys.stderr)
+        sys.exit(1)
 
     if getattr(args, "repo_name", False):
         # The GitHub repo NAME for a cwd, from its `origin` remote — never the
@@ -9072,6 +9096,19 @@ def main():
                           help="Print the space-separated parallel/CC recipients for the "
                                "current owner (DISCORD_MIRROR_<OWNER>) — the shell send path "
                                "posts a copy to each one's own thread + @mention")
+    p_notify.add_argument("--kind", choices=["default", "questions"],
+                          default="default",
+                          help="With --channel-id (#296): 'questions' resolves the "
+                               "owner's SEPARATE questions thread "
+                               "(DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q) instead of "
+                               "their normal thread. Default: 'default' (unchanged "
+                               "pre-#296 behaviour)")
+    p_notify.add_argument("--provision-question-thread",
+                          dest="provision_question_thread", action="store_true",
+                          help="One-time setup (#296): create (if missing) + persist "
+                               "the owner's questions thread claude-<owner>-q into "
+                               "the local .env; prints the thread id. Owner from "
+                               "--owner-name or the resolved tmux owner")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")
