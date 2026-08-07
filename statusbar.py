@@ -81,14 +81,39 @@ def _spawn_refresh(cwd, home=None):
         pass
 
 
+def _stream_split_sfx(cache):
+    """The '· gk N' (sub-dev: own tickets already handed off to the
+    gatekeeper) or '· str N' (full-authority: open non-skip tickets EXCLUDED
+    from the core slice because a sub-dev stream owns them, #164) suffix —
+    the identity split idle mode already computes from the SAME cache
+    fields. Factored out (#307) so the ACTIVE-RUN render can show the exact
+    same split instead of hiding it behind a combined progress ratio."""
+    gk = cache.get("gk")
+    if isinstance(gk, int):
+        return " \033[38;5;245m· gk %d\033[0m" % gk
+    if cache.get("scope") == "core":
+        streamy = cache.get("streamy")
+        if isinstance(streamy, int):
+            return " \033[38;5;245m· str %d\033[0m" % streamy
+    return ""
+
+
 def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
     (label shortened 'Issues' -> 'I', #223):
 
-      - 'I D/T' during an ACTIVE autopilot run for this repo (D tickets carded
-        this run, T = D + the remaining backlog from the last card; green when
-        the backlog is empty),
-      - 'I N' otherwise (open non-autopilot-skip GitHub issues),
+      - 'run N done' + the SAME live 'I N [core]' (+ '· str M' / '· gk M')
+        form idle mode renders, during an ACTIVE autopilot run for this repo
+        (N = tickets carded this run; green once the LIVE backlog is empty).
+        `run` is a DISTINCT label from `I` on purpose (#307): a run's own
+        counter used to render as a combined 'I D/T' ratio — textually and
+        visually identical to the bare live-count form below, and it never
+        showed the core/streamy split — which is how a real 'I 41/103' got
+        misread as "103 tickets on me" instead of a progress ratio. Falls
+        back to the OLD combined 'run D/T' ratio only while the live open
+        count is not yet known (a fresh cache, or a `gh` error).
+      - 'I N' otherwise (open non-autopilot-skip GitHub issues), with the
+        SAME '· str M' / '· gk M' split.
       - ''  when unknown (not a git/GitHub repo, gh unavailable, no cache yet).
 
     Reads caches only; a stale/missing tickets cache triggers a detached
@@ -119,49 +144,52 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     if isinstance(gk_req, int) and gk_req > 0:
         skip_sfx += " \033[38;5;208m· gkq %d\033[0m" % gk_req
 
-    # Active autopilot run for this repo → done/total from the last run-card.
+    open_n = cache.get("open")
+    split_sfx = _stream_split_sfx(cache)
+
+    # Active autopilot run for this repo → the `run N done` progress badge.
     name = cache.get("name") or ""
     if name:
         prog = _load(progress_dir(home) / (name + ".json"))
         if prog and now - (prog.get("ts") or 0) <= AUTOPILOT_RUN_WINDOW_S:
             done, remaining = prog.get("done"), prog.get("remaining")
             if isinstance(done, int) and isinstance(remaining, int):
-                # The card's `remaining` freezes at card time and can sit stale
-                # for the whole 6 h run window ('Issues 1/2' shown after the
-                # backlog emptied — 2026-07-20). The tickets cache's open count
-                # (TTL 120 s) is the LIVE truth — prefer it when known, in both
-                # directions (closed outside cards / new tickets filed mid-run).
-                if isinstance(cache.get("open"), int):
-                    remaining = cache["open"]
-                color = 40 if remaining == 0 else 75    # green when backlog empty
-                return "\033[38;5;%dmI %d/%d\033[0m%s" % (
+                if isinstance(open_n, int):
+                    # The LIVE open count (tickets cache, TTL 120 s) is known
+                    # — show it as its OWN 'I N [core]' number (#307), never
+                    # folded into a ratio: `done` is a historical run counter,
+                    # `open_n` is "how many are mine right now" — conflating
+                    # them into one total is the exact confusion reported.
+                    color = 40 if open_n == 0 else 75
+                    live = "%d core" % open_n if cache.get("scope") == "core" \
+                        else "%d" % open_n
+                    return ("\033[38;5;%dmrun %d done\033[0m "
+                            "\033[38;5;75mI %s\033[0m%s%s"
+                            % (color, done, live, split_sfx, skip_sfx))
+                # No live count yet (fresh cache / gh error) — fall back to
+                # the old combined ratio, still labelled 'run', never 'I'.
+                color = 40 if remaining == 0 else 75
+                return "\033[38;5;%dmrun %d/%d\033[0m%s" % (
                     color, done, done + remaining, skip_sfx)
 
-    open_n = cache.get("open")
     if isinstance(open_n, int):
         # Sub-dev slice split (scope=mine): "I <active> · gk <handed-off>" — the
         # gk bucket is own tickets labeled ready-for-review, i.e. parked with the
         # gatekeeper. Rendered ALWAYS when the cache carries gk, INCLUDING gk 0: a
         # hidden zero bucket looks exactly like a broken counter (the user panicked
         # when the gatekeeper returned tickets and "gk" vanished — 2026-07-11).
-        gk = cache.get("gk")
-        if isinstance(gk, int):
-            return ("\033[38;5;75mI %d\033[0m \033[38;5;245m· gk %d\033[0m%s"
-                    % (open_n, gk, skip_sfx))
+        if isinstance(cache.get("gk"), int):
+            return "\033[38;5;75mI %d\033[0m%s%s" % (open_n, split_sfx, skip_sfx)
         # Full-authority (scope=core): self-describe the population (#164) —
         # a bare "I 28" hid the 45 sub-dev-owned tickets excluded from
         # it, which looks exactly like a broken counter (the same reasoning
         # that already keeps `gk` visible at 0, just for a bigger number).
-        # Rendered whenever the cache actually carries a streamy count
-        # (label shortened 'streamy' -> 'str', #223); falls back to the
-        # plain form on a stale/older cache.
+        # split_sfx renders whenever the cache actually carries a streamy
+        # count (label shortened 'streamy' -> 'str', #223); falls back to
+        # the plain form on a stale/older cache.
         if cache.get("scope") == "core":
-            streamy = cache.get("streamy")
-            if isinstance(streamy, int):
-                return ("\033[38;5;75mI %d core\033[0m "
-                        "\033[38;5;245m· str %d\033[0m%s"
-                        % (open_n, streamy, skip_sfx))
-            return "\033[38;5;75mI %d core\033[0m%s" % (open_n, skip_sfx)
+            return "\033[38;5;75mI %d core\033[0m%s%s" % (
+                open_n, split_sfx, skip_sfx)
         return "\033[38;5;75mI %d\033[0m%s" % (open_n, skip_sfx)
     return ""
 
