@@ -969,6 +969,7 @@ CLAUDE_HISTORY_SCRIPT_CONTENT = r'''#!/usr/bin/env python3
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1057,10 +1058,14 @@ _WRAPPER_NOISE_PREFIXES = (
 
 def merge_turns(records):
     """Collapse consecutive same-role transcript lines into readable turns:
-    {"role": "user"|"assistant", "text": str, "tools": [str, ...]}. A
-    real assistant API response is written as SEVERAL jsonl lines (one per
-    content block) -- this is display grouping, not the #131 request-level
-    token dedup (a different, unrelated concern)."""
+    {"role": "user"|"assistant", "text": str, "tools": [str, ...],
+    "ts": str|None}. A real assistant API response is written as SEVERAL
+    jsonl lines (one per content block) -- this is display grouping, not
+    the #131 request-level token dedup (a different, unrelated concern).
+    "ts" (#294) is the ISO timestamp of the record that STARTED the turn --
+    captured once, at turn creation, never overwritten by later merged
+    lines -- or None when the source record carries no "timestamp" field
+    (synthetic test fixtures only; a real transcript always has one)."""
     turns = []
     pending = None
 
@@ -1070,7 +1075,7 @@ def merge_turns(records):
         text = "\n".join(t for t in pending["texts"] if t).strip()
         if text or pending["tools"]:
             turns.append({"role": pending["role"], "text": text,
-                          "tools": pending["tools"]})
+                          "tools": pending["tools"], "ts": pending["ts"]})
 
     for rec in records:
         if not isinstance(rec, dict):
@@ -1088,7 +1093,8 @@ def merge_turns(records):
                 pending["texts"].append(text)
                 continue
             flush()
-            pending = {"role": "user", "texts": [text], "tools": []}
+            pending = {"role": "user", "texts": [text], "tools": [],
+                       "ts": rec.get("timestamp")}
         elif rtype == "assistant":
             msg = rec.get("message")
             content = msg.get("content") if isinstance(msg, dict) else None
@@ -1120,23 +1126,74 @@ def merge_turns(records):
                 pending["tools"].extend(tools)
                 continue
             flush()
-            pending = {"role": "assistant", "texts": texts, "tools": tools}
+            pending = {"role": "assistant", "texts": texts, "tools": tools,
+                       "ts": rec.get("timestamp")}
         # system / attachment / other entry types: not displayed turns.
     flush()
     return turns
 
 
-def render(turns, last=None):
+# #294: restrained, muted palette reused verbatim from statusbar.py's own
+# established convention (bare "\033[2m" for dim/secondary text, "\033[38;
+# 5;<N>m" 256-color codes for accents) rather than inventing a new scheme --
+# see the design comment on issue #294 for the full reasoning (why 75/108,
+# why body text stays uncolored, why headers are wrapped whole-line).
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[2m"
+_ANSI_USER_HDR = "\033[1;38;5;75m"
+_ANSI_CLAUDE_HDR = "\033[1;38;5;108m"
+
+_TIMESTAMP_RX = re.compile(r"T(\d{2}:\d{2}:\d{2})")
+
+
+def _turn_time_suffix(ts):
+    """HH:MM:SSZ extracted from a transcript record's ISO "timestamp" field,
+    prefixed with a space for direct header-line concatenation -- or "" when
+    ts is missing/malformed (never crashes, never prints a "None" literal;
+    #294 design comment). The trailing "Z" (#294 adversarial review, MINOR)
+    marks the time as UTC explicitly -- a real transcript timestamp always
+    is ("...Z" suffix), and a bare "HH:MM:SS" with no marker reads as
+    ambiguous local-vs-UTC time; a real timezone CONVERSION was rejected as
+    unnecessary complexity for a "decent" (per the ticket's own Slovak
+    wording) timestamp display."""
+    if not isinstance(ts, str):
+        return ""
+    m = _TIMESTAMP_RX.search(ts)
+    return " %sZ" % m.group(1) if m else ""
+
+
+def render(turns, last=None, use_color=False):
+    """#294: colors ADD to the existing plain layout, they never replace
+    it -- the "===== USER =====" / "===== CLAUDE =====" header (the clear
+    turn separator that pre-dates #294) is wrapped whole-line in the role
+    color rather than restructured, tool-call lines and the optional
+    timestamp suffix are dimmed, and body TEXT stays uncolored in both
+    modes. ANSI codes are non-alphanumeric prefixes/suffixes only -- they
+    never splice into the middle of a plain-text substring a caller might
+    grep for, so every pre-#294 plain-text assertion still holds even when
+    use_color=True."""
     if last is not None:
         turns = turns[-last:]
     lines = []
     for t in turns:
         label = "USER" if t["role"] == "user" else "CLAUDE"
-        lines.append("===== %s =====" % label)
+        header = "===== %s =====" % label
+        if use_color:
+            hdr_color = _ANSI_USER_HDR if t["role"] == "user" else _ANSI_CLAUDE_HDR
+            line = hdr_color + header + _ANSI_RESET
+            ts_suffix = _turn_time_suffix(t.get("ts"))
+            if ts_suffix:
+                line += _ANSI_DIM + ts_suffix + _ANSI_RESET
+        else:
+            line = header
+        lines.append(line)
         if t["text"]:
             lines.append(t["text"])
         for tool in t["tools"]:
-            lines.append("  -> %s" % tool)
+            tool_line = "  -> %s" % tool
+            if use_color:
+                tool_line = _ANSI_DIM + tool_line + _ANSI_RESET
+            lines.append(tool_line)
         lines.append("")
     return "\n".join(lines)
 
@@ -1159,12 +1216,31 @@ def main(argv=None):
                      help="show the whole session (overrides --last)")
     ap.add_argument("--list", action="store_true",
                      help="list available transcripts for this project and exit")
+    color_group = ap.add_mutually_exclusive_group()
+    color_group.add_argument("--color", action="store_true",
+                              help="force ANSI colors ON even when stdout is "
+                                   "piped (e.g. into a pager) -- TTY "
+                                   "auto-detection cannot see through a pipe")
+    color_group.add_argument("--plain", action="store_true",
+                              help="force ANSI colors OFF even on a real "
+                                   "terminal (default: colors auto-detect "
+                                   "off when piped, on on a real terminal)")
     args = ap.parse_args(argv)
     # #267 F4: `--last 0`/negative would print "showing last N" then
     # actually show something else entirely (Python slice semantics:
     # turns[-0:] is every turn, turns[-3:] drops the wrong end) -- the
     # printed header must never contradict what's actually rendered.
     args.last = max(1, args.last)
+    # #294: --color/--plain force the decision explicitly; absent either
+    # flag, auto-detect off a real TTY -- a piped subprocess.run(capture_
+    # output=True) stdout is never a tty, so every pre-#294 test (and a
+    # plain `claude-history | cat`) stays ANSI-free with zero new logic.
+    if args.color:
+        use_color = True
+    elif args.plain:
+        use_color = False
+    else:
+        use_color = sys.stdout.isatty()
 
     projects_dir = Path.home() / ".claude" / "projects"
 
@@ -1211,7 +1287,7 @@ def main(argv=None):
     else:
         print("# %d turn(s) total -- showing last %d" % (len(turns), args.last))
     print("")
-    print(render(turns, None if args.full else args.last))
+    print(render(turns, None if args.full else args.last, use_color=use_color))
     return 0
 
 
@@ -1252,7 +1328,7 @@ def render_claude_history_script():
 CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
 CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) -- claude-history popup companion (#289).
-# Invoked from the managed tmux S-F1 / prefix-h display-popup bind
+# Invoked from the managed tmux S-F1 / S-DC / prefix-h display-popup bind
 # (TMUX_POPUP_BIND_ARGVS in airuleset.py). FAILS LOUDLY, never silently:
 # claude-history's own stderr message is shown and the popup waits for a
 # keypress before closing, rather than handing `less` empty stdin (which
@@ -1268,7 +1344,11 @@ set -euo pipefail
 # is buffered into THIS one shell variable before `less` ever sees a
 # byte -- a latency/memory cost on a very large transcript, never a
 # correctness one (the content is always shown complete and in order).
-CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full 2>&1) || CH_RC=$?
+# #294: --color forces ANSI on -- claude-history's own stdout here is a
+# PIPE (captured via $(...)), so its TTY auto-detection can never see the
+# real terminal at the far end of `less`; without --color this popup would
+# always render plain text no matter how the fix above chose to default.
+CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --color 2>&1) || CH_RC=$?
 CH_RC="${CH_RC:-0}"
 
 if [ "$CH_RC" -ne 0 ]; then
@@ -1284,7 +1364,14 @@ elif ! command -v less >/dev/null 2>&1; then
   printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CH_OUT"
   read -n 1 -r -s _dummy || true
 else
-  printf '%s\n' "$CH_OUT" | less +G
+  # #294: -R makes `less` render raw ANSI color bytes as color instead of
+  # visibly escaping them; +G (jump to end) and less's own default
+  # incremental search are both unaffected by -R -- it only changes how
+  # `less` interprets raw ANSI escapes, nothing about navigation/search.
+  # `less`'s own documented "acts like cat when its output isn't a
+  # terminal" fallback (already relied on by the real-execution tests
+  # below) means -R is a no-op for a captured/non-interactive `less`.
+  printf '%s\n' "$CH_OUT" | less -R +G
 fi
 '''
 
@@ -1737,6 +1824,63 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # S-PageUp/PageDown binds, so both popup binds are live-applied the same
 # way, never conf-only.
 TMUX_POPUP_KEY = "S-F1"
+
+# #294 addendum (mid-run, real user-blocking report): the user connects
+# from a Windows notebook over ssh (Windows Terminal or PuTTY, exact
+# client unknown) and reported Shift+F1 "nefunguje vobec". Their own
+# S-PageUp/S-PageDown bind (above, #267) DOES traverse their real client+
+# ssh path today (they scroll copy-mode with it) -- the ONE proven fact
+# available -- so this addendum picks a SECOND root-table key from the
+# SAME proven wire-format family rather than guessing blind.
+#
+# RESEARCH (WebSearch/WebFetch, since no real Windows Terminal/PuTTY is
+# available to run here -- see the design comment on issue #294 for
+# sources): PuTTY's F1-F12 "Function keys and keypad" mode is a SEPARATE,
+# user-configurable setting from its Home/End/PageUp/PageDown handling --
+# xterm mode DOES encode a Shift modifier for F-keys (CSI <n>;2<letter>),
+# but the encoding is mode-dependent and historically finicky, which is
+# exactly the kind of client-configuration variance that could explain
+# "nefunguje vobec" even on a genuinely deployed binding. S-F1 is kept
+# (unchanged) since it costs nothing and works for many xterm-family
+# clients -- this addendum ADDS a second, more robust key rather than
+# replacing it.
+#
+# CANDIDATES CONSIDERED AND REJECTED:
+#   - Shift+Insert: ruled out outright -- BOTH PuTTY (its own documented
+#     paste-key list: mouse paste, Ctrl+Insert, Shift+Insert, Ctrl+Shift+
+#     C, Ctrl+Shift+V) and Windows Terminal (its official default
+#     actions.json: `{"keys": "shift+insert", "id":
+#     "Terminal.PasteFromClipboard"}`) intercept it CLIENT-SIDE for paste
+#     -- the keystroke would never even reach ssh/tmux.
+#   - Shift+Home / Shift+End: ruled out -- empirically verified LIVE
+#     against this box's own real tmux 3.7b binary (isolated `-L` socket,
+#     no real server touched) that tmux's OWN key table only recognizes
+#     the LETTER-terminated modified form (`\x1b[1;2H` / `\x1b[1;2F`) for
+#     S-Home/S-End, NOT the tilde-modifier form (`\x1b[1;2~` /
+#     `\x1b[4;2~`) -- while PuTTY's own documented Home/End behavior is
+#     TILDE-based (`ESC[1~` / `ESC[4~` unmodified), a real mismatch risk
+#     no live PuTTY was available to rule out.
+#   - Any Ctrl+Shift combo: excluded per the addendum's own instruction
+#     (Windows Terminal owns many of these as tab/pane-management
+#     defaults, e.g. Ctrl+Shift+C/V/T/W/F, Ctrl+Shift+<digit>).
+#   - Ctrl+PageUp/PageDown: excluded per the addendum's own instruction
+#     (tab-switching semantics in some Windows terminal clients).
+#
+# CHOSEN: Shift+Delete (`S-DC` in tmux's own key-name table). Delete is
+# CODE 3 in the same uniform VT220 "6-key editing keypad" numeric family
+# PageUp (5) and PageDown (6) belong to -- every xterm-descended terminal
+# (PuTTY's xterm mode included) encodes this whole family with the
+# IDENTICAL `CSI <code>;2~` template, so if a client's real path already
+# encodes Shift+PageUp/PageDown correctly (PROVEN for this user, above),
+# it is very likely to encode Shift+Delete the same way -- unlike the
+# Home/End "letter vs tilde" ambiguity above, there is no competing
+# encoding form for this family at all. Confirmed NOT reserved as a
+# clipboard shortcut in EITHER client's own documented/default keybinding
+# list (searched specifically for `shift+delete`/`shift+del` in both --
+# absent from both). Confirmed LIVE against this box's own real tmux
+# 3.7b: `bind-key -n S-DC ...` fires correctly on the real byte sequence
+# `\x1b[3;2~`.
+TMUX_POPUP_KEY_ALT = "S-DC"
 TMUX_POPUP_PREFIX_KEY = "h"
 
 
@@ -1765,6 +1909,10 @@ def _tmux_popup_bind_argv(key, in_prefix_table):
 
 TMUX_POPUP_BIND_ARGVS = [
     _tmux_popup_bind_argv(TMUX_POPUP_KEY, in_prefix_table=False),
+    # #294 addendum: a second root-table key -- see the module comment
+    # above TMUX_POPUP_KEY_ALT for the Windows-ssh-client research and
+    # live evidence behind this specific choice.
+    _tmux_popup_bind_argv(TMUX_POPUP_KEY_ALT, in_prefix_table=False),
     _tmux_popup_bind_argv(TMUX_POPUP_PREFIX_KEY, in_prefix_table=True),
 ]
 
@@ -1920,11 +2068,13 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     picks up the keyboard scrollback shortcut immediately, with no
     restart and no keystroke sent to any pane.
 
-    #289: the two `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
+    #289: the `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
     fallback -- see the module comment above `TMUX_POPUP_KEY`) are live-
     applied the SAME way, for the SAME reason -- a `bind-key` call is a
     pure key-table registration, independent of and no riskier than the
-    scrollback keybinds it sits alongside.
+    scrollback keybinds it sits alongside. #294 addendum: a second
+    root-table key, S-DC (see the module comment above
+    `TMUX_POPUP_KEY_ALT`), was added between them -- now three entries.
 
     `run` defaults to a real `tmux` invocation and is injectable so tests
     never touch a real tmux server. A missing server / a nonzero exit

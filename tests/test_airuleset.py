@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -3677,8 +3678,12 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down", text)
         # #289: the one-keystroke claude-history popup (root S-F1 + prefix-h
         # fallback), invoking the popup script by its own absolute path.
+        # #294 addendum: root S-DC (Shift+Delete) added as a second root-
+        # table key, provably reaching a Windows ssh client's terminal
+        # (see the module comment on TMUX_POPUP_KEY_ALT for the evidence).
         popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
         self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key -n S-DC display-popup", text)
         self.assertIn("bind-key h display-popup", text)
         self.assertIn(popup_script, text)
         self.assertIn('-d "#{pane_current_path}"', text)
@@ -3755,6 +3760,8 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
             f'bind-key -n S-F1 display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
+            f'bind-key -n S-DC display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
+            f'-T claude-history {popup_script}\n'
             f'bind-key h display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
             f"{airuleset.TMUX_MARK_END}"
@@ -3804,13 +3811,16 @@ class TestTmuxHistoryLimit(TestCase):
         # it immediately self-heals any ALREADY-existing detached grouped
         # pile-up on the very next push, with no new attach/detach cycle
         # needed -- verified live against a real tmux 3.7b server (see the
-        # design comment on #254). #289: the two claude-history popup
+        # design comment on #254). #289: the claude-history popup
         # `bind-key` calls (S-F1 root + prefix-h) are ALSO live-applied,
-        # same safety class -- total is now 7 calls.
+        # same safety class. #294 addendum: a THIRD popup bind, root
+        # S-DC (Shift+Delete -- see the module comment on
+        # TMUX_POPUP_KEY_ALT), was added between them -- total is now
+        # 8 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
         self.assertEqual(calls[2], ["tmux", "bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
@@ -3820,6 +3830,7 @@ class TestTmuxHistoryLimit(TestCase):
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[5], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
         self.assertEqual(calls[6], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[1])
+        self.assertEqual(calls[7], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[2])
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
@@ -3835,7 +3846,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -3862,7 +3873,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -4290,10 +4301,31 @@ class TestTmuxPopupBind(TestCase):
     exist there -- confirmed live via a real Shift+F1 keypress through a
     genuinely attached pty client (capture-pane cannot see a popup's
     content at all; it's a client-side overlay, never part of any pane's
-    own buffer -- verification had to read the raw pty stream instead)."""
+    own buffer -- verification had to read the raw pty stream instead).
+
+    #294 addendum: a SECOND root-table key, S-DC (Shift+Delete), was
+    added between S-F1 and the prefix-h fallback -- see the module
+    comment on TMUX_POPUP_KEY_ALT for the Windows-ssh-client (PuTTY /
+    Windows Terminal) research + empirical tmux-decode evidence behind
+    that specific choice. TMUX_POPUP_BIND_ARGVS order is now
+    [S-F1, S-DC, prefix-h]."""
 
     def test_key_choice_is_shift_f1_root_table(self):
         self.assertEqual(airuleset.TMUX_POPUP_KEY, "S-F1")
+
+    def test_alt_key_choice_is_shift_delete_root_table(self):
+        # #294 addendum: chosen because it reuses the EXACT SAME wire-
+        # format family (CSI <code>;2~) as the already-proven-working
+        # S-PageUp/S-PageDown scrollback binds (the user's own confirmed-
+        # working keys) -- Home/Insert/Delete/End/PgUp/PgDn are one
+        # uniform VT220 editing-keypad numeric-code family every
+        # xterm-descended terminal (incl. Windows Terminal and PuTTY's
+        # xterm mode) encodes identically. Confirmed NOT reserved as a
+        # clipboard shortcut in either client (unlike Shift+Insert, which
+        # BOTH PuTTY's own documented paste-key list and Windows
+        # Terminal's official default actions.json bind to
+        # Terminal.PasteFromClipboard -- ruled out for that reason).
+        self.assertEqual(airuleset.TMUX_POPUP_KEY_ALT, "S-DC")
 
     def test_prefix_fallback_is_h(self):
         self.assertEqual(airuleset.TMUX_POPUP_PREFIX_KEY, "h")
@@ -4302,8 +4334,12 @@ class TestTmuxPopupBind(TestCase):
         argv = airuleset.TMUX_POPUP_BIND_ARGVS[0]
         self.assertEqual(argv[:3], ["bind-key", "-n", "S-F1"])
 
-    def test_prefix_table_bind_has_no_dash_n(self):
+    def test_alt_root_table_bind_uses_dash_n(self):
         argv = airuleset.TMUX_POPUP_BIND_ARGVS[1]
+        self.assertEqual(argv[:3], ["bind-key", "-n", "S-DC"])
+
+    def test_prefix_table_bind_has_no_dash_n(self):
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[2]
         self.assertEqual(argv[:2], ["bind-key", "h"])
         self.assertNotIn("-n", argv)
 
@@ -4349,9 +4385,10 @@ class TestTmuxPopupBind(TestCase):
             self.assertIn("-E", argv)
             self.assertNotIn("-EE", argv)
 
-    def test_rendered_conf_line_contains_both_binds(self):
+    def test_rendered_conf_line_contains_all_three_binds(self):
         text = airuleset.render_tmux_history_block()
         self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key -n S-DC display-popup", text)
         self.assertIn("bind-key h display-popup", text)
         self.assertIn(str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST), text)
 
@@ -4365,7 +4402,7 @@ class TestTmuxPopupBind(TestCase):
         # is a tmux FORMAT string, not a shell variable.
         text = airuleset.render_tmux_history_block()
         popup_lines = [ln for ln in text.splitlines() if "display-popup" in ln]
-        self.assertEqual(len(popup_lines), 2)
+        self.assertEqual(len(popup_lines), 3)
         for line in popup_lines:
             self.assertNotIn("$", line)
 
@@ -4393,9 +4430,21 @@ class TestClaudeHistoryPopupScript(TestCase):
         # line consisting of exactly `CH_RC=$?` with no `||` before it.
         self.assertNotIn("CH_RC=$?", [ln.strip() for ln in content.splitlines()])
 
-    def test_pipes_success_output_into_less_plus_g(self):
+    def test_pipes_success_output_into_less_dash_r_plus_g(self):
+        # #294: -R added so `less` renders raw ANSI color bytes as color
+        # instead of visibly escaping them; +G (jump to end) and less's
+        # own default incremental search are both unaffected by -R.
         content = airuleset.render_claude_history_popup_script()
-        self.assertIn("| less +G", content)
+        self.assertIn("| less -R +G", content)
+
+    def test_invokes_claude_history_with_color_forced_on(self):
+        # #294: claude-history's own stdout is a PIPE here (captured into
+        # CH_OUT via $(...)), so its own TTY auto-detection can never see
+        # the real terminal at the far end of `less` -- --color forces
+        # ANSI on regardless.
+        content = airuleset.render_claude_history_popup_script()
+        assign_line = next(ln for ln in content.splitlines() if "CH_OUT=$(" in ln)
+        self.assertIn("--color", assign_line, assign_line)
 
     def test_failure_branch_waits_for_a_keypress_before_closing(self):
         # No silent instant-close: on a nonzero exit, the script prints
@@ -4442,6 +4491,11 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("REAL-EXEC-SUCCESS-MARKER", r.stdout)
         self.assertEqual(r.stderr, "")
+        # #294: --color threads all the way through the real pipeline --
+        # `less` acting cat-like against a non-tty output (documented
+        # above) passes the bytes through unmodified, so the ANSI colors
+        # claude-history emitted under --color survive into r.stdout.
+        self.assertIn("\x1b[", r.stdout)
 
     def test_real_execution_failure_path_fails_loudly_never_silently(self):
         # No transcript exists for this cwd -- claude-history exits
@@ -5388,6 +5442,177 @@ class TestClaudeHistoryScript(TestCase):
         r = self._run("--transcript", str(p))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("direct read", r.stdout)
+
+    # --- #294: ANSI colors + structure ------------------------------------
+    # Every check below runs the ACTUAL rendered script content as a real
+    # subprocess (same discipline as the rest of this class) -- a
+    # reimplementation of the color logic in the test itself would prove
+    # nothing about the shipped script.
+
+    @staticmethod
+    def _strip_ansi(s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _run_pty(self, *args):
+        # A REAL pty slave as the child's stdout -- os.isatty() on it
+        # returns True, exactly like a genuine terminal -- so this proves
+        # the TTY-auto-detection half (`sys.stdout.isatty()`), which a
+        # subprocess.run(capture_output=True) pipe (used by self._run)
+        # structurally cannot: a pipe is never a tty.
+        import pty
+        run_env = {**os.environ, "HOME": str(self.home)}
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, str(self.script), *args],
+            stdout=slave_fd, stderr=subprocess.DEVNULL, env=run_env)
+        os.close(slave_fd)
+        try:
+            proc.wait(timeout=15)
+            chunks = []
+            while True:
+                try:
+                    chunk = os.read(master_fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks).decode(errors="replace")
+        finally:
+            os.close(master_fd)
+
+    def test_default_piped_output_has_zero_ansi_escapes(self):
+        # The exact acceptance line from #294: "claude-history | cat ostáva
+        # čistý text bez ANSI kódov" -- subprocess-captured stdout (used by
+        # self._run) is never a tty, and no --color flag is given here, so
+        # this is the auto-detected-off path.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\x1b[", r.stdout)
+
+    def test_color_flag_forces_ansi_even_when_piped(self):
+        # The popup's own use case: claude-history's stdout is a PIPE
+        # (captured into a bash variable, then piped into `less`), so TTY
+        # auto-detection alone can never turn colors on for it -- --color
+        # forces it regardless of what's attached to stdout.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("\x1b[", r.stdout)
+        # ANSI codes wrap around the existing plain text, never splice into
+        # the middle of it -- every plain substring stays intact.
+        self.assertIn("===== USER =====", r.stdout)
+        self.assertIn("===== CLAUDE =====", r.stdout)
+        self.assertIn("hi", r.stdout)
+        self.assertIn("hello", r.stdout)
+
+    def test_plain_flag_forces_off(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--plain")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\x1b[", r.stdout)
+
+    def test_color_uses_a_different_code_for_user_and_claude_headers(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        user_code = re.search(r"\x1b\[[0-9;]*m", user_line)
+        claude_code = re.search(r"\x1b\[[0-9;]*m", claude_line)
+        self.assertIsNotNone(user_code, user_line)
+        self.assertIsNotNone(claude_code, claude_line)
+        self.assertNotEqual(user_code.group(0), claude_code.group(0))
+
+    def test_color_assigns_the_specific_established_palette_to_each_role(self):
+        # #294 adversarial review (MINOR/THEORETICAL): the sibling test
+        # above only proves the two header colors DIFFER, so a mutant
+        # swapping which constant goes to which role (or substituting an
+        # unrelated pair of colors entirely) would pass it unnoticed.
+        # Pin the EXACT codes the design comment specifies: 75 for USER
+        # (matches statusbar.py's existing "Issues" segment blue, reused
+        # for consistency) and 108 for CLAUDE (a muted sage/olive green).
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        self.assertIn("\x1b[1;38;5;75m", user_line, user_line)
+        self.assertIn("\x1b[1;38;5;108m", claude_line, claude_line)
+
+    def test_tool_call_lines_are_dimmed_in_color_mode(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("list files"),
+            self._assistant(self._text_block("checking"),
+                             self._tool_block("Bash", command="ls -la")),
+        ])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool_line = next(ln for ln in r.stdout.splitlines() if "Bash: ls -la" in ln)
+        self.assertIn("\x1b[2m", tool_line)
+
+    def test_timestamp_shown_dimmed_when_present_omitted_when_absent(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = self.projects_dir / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "timestamp": "2026-08-07T12:34:56.000Z",
+             "message": {"role": "user", "content": "with a timestamp"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "no timestamp on me"}]}},
+        ]
+        (proj_dir / "s1.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        self.assertIn("12:34:56", user_line)
+        self.assertIn("\x1b[2m", user_line)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        # No timestamp on the assistant record -> nothing extra beyond the
+        # (color-wrapped) header itself once ANSI is stripped back out.
+        self.assertEqual(self._strip_ansi(claude_line), "===== CLAUDE =====")
+        # #294 adversarial review (MINOR): a bare "HH:MM:SS" with no marker
+        # reads as ambiguous local-vs-UTC time -- real transcript
+        # timestamps are always UTC ("...Z" suffix), so the rendered
+        # suffix carries an explicit "Z" too.
+        self.assertIn("12:34:56Z", self._strip_ansi(user_line))
+
+    def test_colors_on_by_default_on_a_real_terminal(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        out = self._run_pty("--cwd", str(cwd))
+        self.assertIn("\x1b[", out)
+
+    def test_plain_flag_forces_off_even_on_a_real_terminal(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        out = self._run_pty("--cwd", str(cwd), "--plain")
+        self.assertNotIn("\x1b[", out)
 
 
 class TestDiscordAutopilotNotify(TestCase):
