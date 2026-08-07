@@ -37,6 +37,8 @@ from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import watchdog as wd                                     # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = "skills/autopilot/SKILL.md"
 
@@ -447,6 +449,47 @@ class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
         self.assertEqual(len(goal_lines()), 3)
 
 
+class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
+    """#161 — condition (A)'s "NEVER continue me past an unanswered
+    `❓ NEEDS YOU`" is no longer an UNCONDITIONAL permanent stop: a
+    `question-timeout:` nudge (watchdog job 20, `_goal_question_park_nudge`,
+    ~30 min unanswered) is the ONE sanctioned exception, and every template
+    must say so — never re-print the question, never bare "continue".
+
+    Kept as its OWN class (never folded into the cap-only test above) so a
+    future edit that shrinks a template back under budget by silently
+    dropping this clause fails LOUDLY here, not just on the cap."""
+
+    def test_every_template_declares_the_escape_hatch(self):
+        for i, line in enumerate(goal_lines()):
+            self.assertIn("question-timeout:", line,
+                          "template %d missing the #161 escape hatch" % i)
+
+    def test_the_escape_hatch_still_forbids_a_bare_continue(self):
+        for line in goal_lines():
+            self.assertIn("NEVER continue me past an unanswered", line)
+
+    def test_with_the_escape_hatch_every_template_still_fits_the_cap(self):
+        # the companion check to TheTemplatesMustFitClaudeCodesGoalCap —
+        # named here so a future reader sees WHY this specific addition is
+        # measured, not just that some generic cap exists.
+        over = [(i, len(line)) for i, line in enumerate(goal_lines())
+                if len(line) > 4000]
+        self.assertEqual(over, [])
+
+    def test_the_stated_minutes_matches_the_real_constant(self):
+        # #161-review MINOR m4: the templates hardcode the literal "(30m)"
+        # while the code reads GOAL_QUESTION_TIMEOUT_S — nothing tied the
+        # two before this test, so tuning the constant would silently make
+        # every template lie about how long the wait actually is.
+        minutes = wd.GOAL_QUESTION_TIMEOUT_S // 60
+        needle = "(%dm)" % minutes
+        for i, line in enumerate(goal_lines()):
+            self.assertIn(needle, line,
+                          "template %d states a stale minute count "
+                          "(expected %r)" % (i, needle))
+
+
 if __name__ == "__main__":
     main()
 
@@ -539,3 +582,77 @@ class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):
     def test_the_two_reduced_authority_templates_deliberately_do_not(self):
         for idx in (BRANCH_MERGE, FORK_NO_MERGE):
             self.assertNotIn(self.REARM_HINT, goal_lines()[idx])
+
+
+# --------------------------------------------------------------------------- #
+# #161 — condition (A), decided the way the shipped template instructs
+# (mirrors `backlog_empty_holds` above for condition (B)): a PURE function
+# over the transcript's own shape, independent of any LLM's actual
+# judgement, so "ask-and-continue never stops the loop" and "a new user
+# message after a block always releases it" are PROVEN, not asserted in
+# prose. `NEEDS_YOU_LAST_LINE_RX` is the SAME shape `watchdog.
+# transcript_last_marker_line`'s `_MARKER_RX` recognises for the `❓`
+# marker — restated here (never imported) so this file stays a spec of the
+# TEMPLATE's own wording, not a test of watchdog internals (that is
+# tests/test_goal_rearm.py's job).
+# --------------------------------------------------------------------------- #
+
+NEEDS_YOU_LAST_LINE_RX = re.compile(r"^[*_>~-]*\s*❓\s*NEEDS YOU:")
+
+
+def condition_a_holds(last_assistant_text, user_message_after=False):
+    """(A) BLOCKED ON MY ANSWER, decided exactly as every template states
+    it: the latest assistant message ends with a line starting
+    `❓ NEEDS YOU:`, AND there is NO user message after it. `False`
+    whenever either half fails — there is no ambiguous third answer for
+    this clause, same as (B)."""
+    lines = [ln for ln in (last_assistant_text or "").splitlines()
+             if ln.strip()]
+    if not lines:
+        return False
+    return bool(NEEDS_YOU_LAST_LINE_RX.match(lines[-1].strip())) \
+        and not user_message_after
+
+
+class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
+    """The two claims #161's acceptance rests on, proven from the
+    template's OWN literal wording rather than from watching an LLM
+    decide:
+      * ask-and-continue (`❓ ASKED` ... `⏳ WORKING`) never satisfies (A)
+        — the loop was never going to stop on it in the first place;
+      * ONCE (A) genuinely holds, ANY new user-role transcript entry after
+        the `❓ NEEDS YOU` line releases it — a real answer and the #161
+        `question-timeout:` nudge are the SAME shape to this clause, which
+        is exactly why the watchdog needs no separate loop-continuation
+        machinery of its own (see the design comment on issue #161)."""
+
+    def test_every_template_states_this_exact_clause(self):
+        # the decision function above must not drift from what is shipped
+        for line in goal_lines():
+            self.assertIn(
+                "the latest assistant message ends with a line starting "
+                "`❓ NEEDS YOU:` and there is NO user message after it",
+                line)
+
+    def test_a_genuine_block_with_no_reply_holds(self):
+        self.assertTrue(condition_a_holds(
+            "**Otázka — projekt demo:** kontext.\n"
+            "❓ NEEDS YOU: pokračovať teraz?"))
+
+    def test_a_reply_after_it_releases_the_block(self):
+        # covers BOTH a genuine user answer and the #161 watchdog nudge —
+        # to this clause they are the identical shape: "a user message
+        # after it".
+        self.assertFalse(condition_a_holds(
+            "❓ NEEDS YOU: pokračovať teraz?", user_message_after=True))
+
+    def test_ask_and_continue_never_holds(self):
+        self.assertFalse(condition_a_holds(
+            "❓ ASKED: ktorý dizajn?\n\n"
+            "⏳ WORKING: medzitým pokračujem na inom tickete"))
+
+    def test_an_ordinary_done_turn_never_holds(self):
+        self.assertFalse(condition_a_holds(PER_TICKET_DONE_TURN))
+
+    def test_empty_turn_never_holds(self):
+        self.assertFalse(condition_a_holds(""))

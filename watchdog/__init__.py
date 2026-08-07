@@ -8823,6 +8823,217 @@ GOAL_STALL_IDLE_S = 15 * 60         # transcript stale this long while ARMED
 GOAL_STALL_INTERVAL_S = 15 * 60     # min spacing between nudges
 GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
 
+# #161 — the user's own directive (2026-07-29): a `❓ NEEDS YOU` block should
+# wait for an answer at most ~30 minutes; past it, the loop is told to park
+# that ticket and move to other backlog work rather than sit stopped
+# forever. `_goal_stall_nudge` above still REFUSES to nudge past a `❓`
+# marker at all (its own pinned invariant, unchanged) — this is a wholly
+# separate, independently-gated sub-branch of the SAME job (never a new
+# watchdog job, per the repo FREEZE).
+GOAL_QUESTION_TIMEOUT_S = 30 * 60   # measured from DELIVERY (discord-
+                                    # questions.json's own `ts`), never from
+                                    # when the question was merely drafted —
+                                    # a ping that never sent must never start
+                                    # this clock (the issue's own design note)
+# #161-review MAJOR M1 — a matching-session map entry alone is not enough:
+# the map can carry an OLDER, unrelated question for the same session (a
+# stale ASKED entry that outran pruning, or the wrong sibling of a genuine
+# multi-question history). The delivered ping this function trusts must
+# have been posted for THIS SPECIFIC block — proven by proximity: a real
+# delivery lands within seconds of the assistant entry that raised it
+# (the Stop hook fires immediately), so a map entry whose `ts` is not
+# CLOSE to the transcript's own `❓ NEEDS YOU` entry timestamp is not about
+# the current block and must be refused, never adopted as a stand-in.
+GOAL_QUESTION_MATCH_SLOP_S = 30      # delivery slightly BEFORE the entry's
+                                     # own timestamp — clock skew only
+GOAL_QUESTION_MATCH_WINDOW_S = 600   # delivery AFTER the entry — generous
+                                     # for hook retry/backoff latency
+GOAL_QUESTION_PARK_TEXT = (
+    "question-timeout: 30 min bez odpovede na poslednu otazku. Zaparkuj "
+    "TENTO tiket (needs-answer komentar + label na tikete, otazku nechaj "
+    "sledovanu) a pokracuj na iny tiket z backlogu; k tomuto sa vrat, ked "
+    "prijde odpoved (Discord reply sa dorucuje priamo do tejto session)."
+)
+
+
+def _needs_you_block_ts(tpath):
+    """`(marker_line, entry_ts)` for the session's last REAL assistant
+    message, ONLY when it is a genuine, TRAILING `❓ NEEDS YOU:` status
+    line — never merely a message that MENTIONS those words somewhere in
+    its body (#161-review MAJOR M1, scenario A: a completion report or a
+    `/goal` template discussion naming "NEEDS YOU" in prose is not a
+    block). Mirrors `transcript_last_marker_line`'s own walk/skip
+    semantics (synthetic/tool-only sentinels skipped, an api-error entry
+    refuses) rather than calling it, because this ALSO needs the entry's
+    own `timestamp` for the delivery-proximity check below — one walk,
+    not two. `(None, None)` when the last real turn is not a trailing
+    NEEDS YOU line, or its timestamp cannot be parsed (never guess)."""
+    from datetime import datetime
+    for entry in reversed(_iter_jsonl_tail(tpath)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return None, None
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
+        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        line = ""
+        for ln in reversed(nonblank[-3:]):
+            if _MARKER_RX.match(ln):
+                line = ln
+                break
+        if "❓" not in line or "NEEDS YOU" not in line:
+            return None, None
+        try:
+            ts = datetime.fromisoformat(
+                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None, None
+        return line, ts
+    return None, None
+
+
+def _goal_question_delivered_ts(sid, questions_path=None, logs=None):
+    """Epoch seconds the NEWEST `❓` ping for session `sid` was DELIVERED,
+    read from `discord-questions.json` (`notify.record_question` stamps
+    `ts` only on a CONFIRMED 2xx POST — never a draft/compose time). `None`
+    when no delivery is on record for this session at all (Discord
+    unconfigured, the send failed, or the question was already answered/
+    pruned) — #161's own design note: a ping that never reached the user
+    must never start the 30-minute clock, so an unresolvable lookup is a
+    refusal, never a guess. A degraded lookup (the `notify` module itself
+    unimportable/unreadable — a mid-push checkout window, since the timer
+    runs the working tree live) appends ONE line to `logs` (when given)
+    rather than failing silently forever (#161-review MINOR m1).
+
+    #161-review MAJOR M1 (scenario B): several entries can match the same
+    session (a multi-question history, or a stale sibling that outran
+    pruning) — this returns only the NEWEST such `ts`; it is the CALLER's
+    job (`_goal_question_park_nudge`'s proximity check against the
+    transcript's own entry timestamp) to confirm that newest entry is
+    actually ABOUT the current block, not merely the same session. Do not
+    trust this function's return value alone as "the current question".
+
+    `questions_path` is the test seam (mirrors `backlog_fetch`/
+    `templates_path` elsewhere in this file) — production always resolves
+    the real `~/.claude/discord-questions.json` via
+    `notify.load_questions()`'s own default."""
+    try:
+        from notify import load_questions
+    except Exception as e:
+        if logs is not None:
+            logs.append("goal-question-timeout unmeasurable (notify import "
+                        "failed, %r)" % (e,))
+        return None
+    try:
+        qmap = (load_questions(path=questions_path) if questions_path
+                else load_questions())
+    except Exception as e:
+        if logs is not None:
+            logs.append("goal-question-timeout unmeasurable (load_questions "
+                        "failed, %r)" % (e,))
+        return None
+    if not isinstance(qmap, dict):
+        return None
+    best = None
+    for rec in qmap.values():
+        if not isinstance(rec, dict) or str(rec.get("session") or "") != sid:
+            continue
+        try:
+            ts = float(rec.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if best is None or ts > best:
+            best = ts
+    return best
+
+
+def _goal_question_park_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
+                              loc, send_fn, dry_run, handled, projects_dir,
+                              questions_path=None, persist=None):
+    """#161 — the BOUNDED-WAIT escape hatch for a genuine, stopped
+    `❓ NEEDS YOU` block. Mutates `rec`; returns log lines. `persist`
+    (optional, mirrors jobs 8/11/27/28's SAME shape): called immediately
+    after `rec['qparked_ts']` is set and BEFORE the keystroke send — a
+    process killed between the two must never lose the "already parked"
+    memory and re-send (#161-review MAJOR M2), the same order those jobs'
+    own `seen[label] = {...}; persist()` comment already documents. Never
+    wired = the pre-#161-review behaviour (persisted only at `run_once`'s
+    trailing `save_state`, like before this fix).
+
+    Structurally different from `_goal_stall_nudge`'s "continue" nudge on
+    purpose: typing bare "continue" here would make the SAME model, still
+    holding the SAME missing answer, regenerate the SAME question — the
+    exact camera-box chat wall (2026-07-05) this file already refuses to
+    resurrect. `GOAL_QUESTION_PARK_TEXT` is a STRUCTURALLY DIFFERENT
+    instruction (park this ticket, switch to another) — never the question
+    itself, so it can never be mistaken for a re-print of it.
+
+    Every refusal here is deliberate, never an oversight:
+      * not a genuine, TRAILING `❓ NEEDS YOU:` status line at all
+        (`_needs_you_block_ts`) — a message that merely MENTIONS those
+        words, or an `❓ ASKED` turn (which already ends `⏳ WORKING`), is
+        never this branch;
+      * no CONFIRMED delivery on record for this session
+        (`_goal_question_delivered_ts` returns `None`) — never guess a
+        start time;
+      * the newest delivered entry for this session is not CLOSE to the
+        transcript's own block timestamp (`GOAL_QUESTION_MATCH_SLOP_S` /
+        `_WINDOW_S`) — a stale sibling question must never stand in for
+        this one (#161-review M1 scenario B);
+      * under `GOAL_QUESTION_TIMEOUT_S` since delivery — too soon;
+      * THIS exact outstanding question (keyed on its own delivered `ts`,
+        `rec['qparked_ts']`) was already nudged once — bounded to ONE
+        attempt per episode; a NEW question later (a different `ts`) gets
+        its own fresh one;
+      * a background worker is in flight, the pane is compacting, or a
+        `/compact` claim is outstanding for this sid — the same battery
+        `_goal_stall_nudge` already applies;
+      * the pane is not genuinely idle at a bare input prompt (busy, a
+        foreign draft, scrolled) — never type over any of those."""
+    logs = []
+    marker_line, entry_ts = _needs_you_block_ts(tpath)
+    if marker_line is None:
+        return logs                        # not a genuine trailing NEEDS YOU block
+    delivered = _goal_question_delivered_ts(sid, questions_path, logs=logs)
+    if delivered is None:
+        return logs                        # never confirmed delivered — never guess
+    if not (entry_ts - GOAL_QUESTION_MATCH_SLOP_S
+            <= delivered <= entry_ts + GOAL_QUESTION_MATCH_WINDOW_S):
+        return logs                        # newest entry isn't about THIS block
+    waited = now - delivered
+    if waited < GOAL_QUESTION_TIMEOUT_S:
+        return logs
+    if rec.get("qparked_ts") == delivered:
+        return logs                        # this exact question already parked once
+    if handled is not None and sid in handled:
+        return logs
+    if _pane_has_bg_agent(captured) or _pane_compacting(captured):
+        return logs
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        return logs
+    kind, draft = _classify_boundary(captured)
+    if kind != "input" or draft:
+        if rec.get("qskip_logged") != delivered:
+            rec["qskip_logged"] = delivered
+            logs.append("skip %s (goal-question-timeout) %s"
+                        % (draft and "draft" or kind, loc))
+        return logs
+    if not pane_at_idle_prompt(captured):
+        return logs
+    if dry_run:
+        logs.append("READY (goal-question-timeout) %s waited=%dm"
+                    % (loc, waited // 60))
+        return logs
+    rec["qparked_ts"] = delivered
+    if persist is not None:
+        persist()
+    send_continue(pid, GOAL_QUESTION_PARK_TEXT, run)
+    logs.append("goal-question-timeout %s waited=%dm -> parked, moving to "
+                "other tickets" % (loc, waited // 60))
+    return logs
+
 
 def goal_templates_path():
     """`~/.claude/skills/autopilot/SKILL.md` — the INSTALLED autopilot skill,
@@ -9543,7 +9754,8 @@ def _goal_dark_died_by_outage(tpath):
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
                sleep_fn=None, templates_path=None, backlog_fetch=None,
-               time_fn=None, sweep_deadline=None):
+               time_fn=None, sweep_deadline=None, questions_path=None,
+               persist=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
@@ -9575,7 +9787,20 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
     exactly (checked strictly BETWEEN panes, before a pane's own work
     starts, never nested inside one pane's delivery) — a deferred pane's
     state is untouched, so it is retried next sweep exactly like an
-    untouched pane always would be."""
+    untouched pane always would be.
+
+    `questions_path` (optional, #161): the test seam for
+    `_goal_question_park_nudge`'s delivered-ping lookup — production leaves
+    it `None`, which resolves the REAL `~/.claude/discord-questions.json`
+    via `notify.load_questions()`'s own default (no wiring needed in
+    `airuleset.py`, unlike `backlog_fetch`/`templates_path`: the real path
+    already matches this box's own `HOME` with no subprocess involved).
+
+    `persist` (optional, #161-review MAJOR M2): threaded ONLY into
+    `_goal_question_park_nudge`, called immediately after `rec['qparked_ts']`
+    is set and before the keystroke send — never wired = the state is
+    persisted only at `run_once`'s own trailing `save_state`, exactly the
+    pre-review behaviour."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     templates = load_goal_templates(templates_path)
@@ -9650,6 +9875,14 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured,
                                       tpath, tmtime, loc, send_fn, dry_run,
                                       handled, projects_dir)
+            # …or is it genuinely STOPPED on an unanswered `❓ NEEDS YOU`
+            # past the bounded wait? (#161 — independent of the stall
+            # nudge above, which correctly never touches a `❓` marker)
+            logs += _goal_question_park_nudge(now, run, rec, sid, cwd, pid,
+                                              captured, tpath, loc, send_fn,
+                                              dry_run, handled, projects_dir,
+                                              questions_path=questions_path,
+                                              persist=persist)
             # …and is it firing the CURRENT template? (the third shape, #64)
             if templates:
                 logs += _goal_template_drift(now, run, rec, sid, cwd, pid,
@@ -11255,6 +11488,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the SAME variant it already ran (the authority profile is never
           re-resolved), so a goal the user wrote is untouchable by
           construction rather than by threshold (`_goal_template_drift`).
+          A FOURTH, always-on shape (#161): a genuine, TRAILING
+          `❓ NEEDS YOU` status line (never a mere mention of those words
+          elsewhere in the turn) whose CONFIRMED-delivered ping
+          (`discord-questions.json`'s own `ts`, matched to THIS block by
+          timestamp proximity — a stale, unrelated sibling question can
+          never stand in) is more than `GOAL_QUESTION_TIMEOUT_S` (~30 min)
+          old with no reply gets ONE `question-timeout:` nudge — never
+          bare "continue" (which would just re-print the same question,
+          the camera-box wall) — instructing the session to park that
+          ticket and work others (`_goal_question_park_nudge`); the
+          "already nudged" state is persisted BEFORE the keystroke send
+          (never after), bounded to one nudge per distinct outstanding
+          question, never a guess when no delivery is on record.
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -12623,7 +12869,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                sleep_fn=sleep_fn,
                                templates_path=goal_templates_path,
                                backlog_fetch=backlog_fetch,
-                               time_fn=time_fn, sweep_deadline=tail_deadline)
+                               time_fn=time_fn, sweep_deadline=tail_deadline,
+                               persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 
