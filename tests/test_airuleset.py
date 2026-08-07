@@ -3590,6 +3590,10 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # "zbynek" as the RED half of that fix's regression test.
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david"], "david")
+        # miva1 (airuleset#300): phase-1 isolated stream, same shape as
+        # simap -- its own tmux session name carries no Discord identity of
+        # its own, so it redirects straight to zbynek's own thread.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["miva1"], "zbynek")
         # marek is deliberately absent: its own tmux session name already
         # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
         self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
@@ -3606,6 +3610,11 @@ class TestStreamNotifyOwnerRouting(TestCase):
         with m.patch.dict(os.environ, {}, clear=True), \
                 m.patch.object(self.notify, "_current_user", return_value="david"):
             self.assertEqual(self.notify.resolve_owner(), "david")
+
+    def test_miva1_resolves_to_zbynek_with_no_tmux_and_no_env_override(self):
+        with m.patch.dict(os.environ, {}, clear=True), \
+                m.patch.object(self.notify, "_current_user", return_value="miva1"):
+            self.assertEqual(self.notify.resolve_owner(), "zbynek")
 
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
@@ -3635,6 +3644,7 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # montalu4 → marek (airuleset#295) — see the sibling assertion above.
         self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
         self.assertEqual(self.notify.stream_redirect("simap"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david is self-mapped — the redirect is a documented no-op for it.
         self.assertEqual(self.notify.stream_redirect("david"), "david")
 
@@ -8769,9 +8779,9 @@ class TestRemoteHosts(TestCase):
     box, and every managed user is present exactly once."""
 
     GK_HOST = "100.90.94.41"
-    # simap shares marek/david's identity requirement (airuleset#143 — same
-    # operator keys as marek, registered on the same subdev box).
-    SUBDEV_USERS = {"marek", "david", "simap"}
+    # simap/miva1 share marek/david's identity requirement (airuleset#143/
+    # #300 — same operator keys as marek, registered on the same subdev box).
+    SUBDEV_USERS = {"marek", "david", "simap", "miva1"}
 
     def _subdev_entries(self):
         return [r for r in airuleset.REMOTE_HOSTS
@@ -8783,7 +8793,7 @@ class TestRemoteHosts(TestCase):
         for expected in ("dev2", "gatekeeper", "montalu@subdev",
                          "marek@subdev", "david@subdev", "simap@subdev",
                          "montalu2@subdev", "montalu3@subdev",
-                         "montalu4@subdev"):
+                         "montalu4@subdev", "miva1@subdev"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
@@ -8836,6 +8846,20 @@ class TestRemoteHosts(TestCase):
         self.assertEqual(s["host"], "100.118.174.27")
         self.assertEqual(s["user"], "simap")
         self.assertEqual(s.get("identity"),
+                         "~/.secrets/gatekeeper_access_ed25519")
+
+    def test_miva1_subdev_target_shape(self):
+        # miva1 (airuleset#300): 5th sub-dev stream, phase-1 isolated -- same
+        # shape as simap: built by gatekeeper on the SAME subdev box as
+        # marek/david/simap, sharing the operator gatekeeper_access identity
+        # requirement, never montalu's default-key path.
+        entries = [r for r in airuleset.REMOTE_HOSTS
+                   if r["name"] == "miva1@subdev"]
+        self.assertEqual(len(entries), 1, "miva1@subdev target missing")
+        mv = entries[0]
+        self.assertEqual(mv["host"], "100.118.174.27")
+        self.assertEqual(mv["user"], "miva1")
+        self.assertEqual(mv.get("identity"),
                          "~/.secrets/gatekeeper_access_ed25519")
 
     def test_subdev_users_share_one_host_and_identity(self):
@@ -9729,6 +9753,22 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run('ssh -i ~/.ssh/id_rsa simap@subdev "ls"')
         self.assertEqual(r.returncode, 2, r.stdout)
 
+    def test_blocks_miva1_without_identity(self):
+        # miva1 (airuleset#300) shares marek/david/simap's identity
+        # requirement. Asserts the SPECIFIC reason (not just "miva1"
+        # anywhere in stderr) -- an unauthorized-user-shaped message would
+        # also contain "miva1" and pass this test for the wrong reason if
+        # the allow-list entry (check_target's `user in (...)` tuple) were
+        # ever removed by mistake.
+        r = self._run('ssh miva1@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("without -i", r.stderr)
+        self.assertIn("miva1", r.stderr)
+
+    def test_blocks_miva1_with_wrong_identity(self):
+        r = self._run('ssh -i ~/.ssh/id_rsa miva1@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
     def test_blocks_scp_wrong_user(self):
         r = self._run("scp file.txt newlevel@subdev:/tmp/")
         self.assertEqual(r.returncode, 2, r.stdout)
@@ -9772,6 +9812,11 @@ class TestBlockSubdevSshMisuseHook(TestCase):
     def test_allows_simap_with_gatekeeper_identity(self):
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 simap@subdev "ls"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_miva1_with_gatekeeper_identity(self):
+        r = self._run(
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 miva1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_fused_identity_flag(self):

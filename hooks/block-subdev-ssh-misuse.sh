@@ -16,12 +16,12 @@ set -euo pipefail
 # addresses (MagicDNS name, public FQDN, tailscale IP, public IP).
 #
 # ALLOW-list — mirrors airuleset.py's REMOTE_HOSTS for montalu (+ its family
-# montalu2/3/4, airuleset#251)/marek/david/simap (the single source of truth
-# for THOSE seven identities), PLUS one identity REMOTE_HOSTS structurally
-# cannot express (#68): REMOTE_HOSTS is dev1's own OUTBOUND push-target
-# list, but the gatekeeper VPS reaches subdev INBOUND from ITS OWN box as
-# root, via a locally-deployed ~/.ssh/config `Host subdev` stanza — not
-# something dev1 ever pushes to.
+# montalu2/3/4, airuleset#251)/marek/david/simap/miva1 (airuleset#300 — the
+# single source of truth for THOSE eight identities), PLUS one identity
+# REMOTE_HOSTS structurally cannot express (#68): REMOTE_HOSTS is dev1's own
+# OUTBOUND push-target list, but the gatekeeper VPS reaches subdev INBOUND
+# from ITS OWN box as root, via a locally-deployed ~/.ssh/config `Host
+# subdev` stanza — not something dev1 ever pushes to.
 #   - montalu[234]@<subdev> — no identity requirement (default key AND the
 #                          sshpass -p path are both legitimate per
 #                          REMOTE_HOSTS — the montalu family has no
@@ -34,6 +34,10 @@ set -euo pipefail
 #                          SAME operator keys as marek, so it shares marek's
 #                          identity requirement, not montalu's default-key
 #                          path).
+#   - miva1@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519
+#                          (airuleset#300 — phase-1 isolated, same shape as
+#                          simap, so it shares the identical identity
+#                          requirement, not montalu's default-key path).
 #   - root@<subdev>      — ONLY with -i .../subdev_admin (#68, gatekeeper
 #                          VPS's own admin identity) — explicit on the
 #                          command line, OR implicit via a bare `ssh subdev`
@@ -43,9 +47,9 @@ set -euo pipefail
 # BLOCK everything else, in particular:
 #   - no user at all UNLESS the local ~/.ssh/config resolves it to the
 #     sanctioned root+subdev_admin case above.
-#   - any user other than montalu[234]/marek/david/simap/root (newlevel,
-#     gatekeeper,...).
-#   - marek/david/simap WITHOUT the gatekeeper_access_ed25519 identity.
+#   - any user other than montalu[234]/marek/david/simap/miva1/root
+#     (newlevel, gatekeeper,...).
+#   - marek/david/simap/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
 #   - root WITHOUT the subdev_admin identity.
 #
 # A non-subdev target (dev2, gatekeeper, anything else) is completely
@@ -343,7 +347,8 @@ def check_target(user, host, tokens, label):
                                  .rstrip("/")) == SUBDEV_ADMIN_KEY_BASENAME):
             return None
         return ("%s to subdev with NO user specified (implicit current "
-                "shell user) — must be montalu[234] / marek / david / simap"
+                "shell user) — must be montalu[234] / marek / david / "
+                "simap / miva1"
                 % label)
     if user == "root":
         # #68: the gatekeeper VPS's own sanctioned root@subdev identity.
@@ -353,7 +358,7 @@ def check_target(user, host, tokens, label):
                 % (label, SUBDEV_ADMIN_KEY_BASENAME))
     if user in ("montalu", "montalu2", "montalu3", "montalu4"):
         return None
-    if user in ("marek", "david", "simap"):
+    if user in ("marek", "david", "simap", "miva1"):
         if has_gatekeeper_key(tokens):
             return None
         return ("%s as %s@subdev without -i .../%s"
@@ -434,6 +439,7 @@ if [ "$RC" -eq 2 ]; then
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
+    echo "    miva1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    root@subdev   -i ~/.ssh/subdev_admin (gatekeeper VPS only," >&2
     echo "                  explicit or via its own ~/.ssh/config Host subdev)" >&2
     echo "" >&2
