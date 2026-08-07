@@ -1,5 +1,6 @@
 """Tests for airuleset CLI."""
 
+import glob
 import json
 import os
 import shutil
@@ -9,13 +10,17 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from unittest import TestCase
+from unittest import TestCase, TestResult
 from unittest import mock as m
 
 # Add repo root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Add this file's own directory so sibling test-support modules import as
+# top-level names (mirrors test_ask_before_assuming_dropped_rows.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
+from _hook_state_cleanup import sweep_session_files  # noqa: E402
 
 
 def _path_without_python3():
@@ -1047,6 +1052,64 @@ class TestGoalArmedSuppressesIdlePing(TestCase):
         r = self._stop(sid, "❓ NEEDS YOU: schváliš merge PR #5?",
                        pane_capture="◎ /goal\n")
         self.assertEqual(r.returncode, 0)
+
+
+class TestNotifyMarkerCleanupCoversEveryShape(TestCase):
+    """(#293) TestDiscordNotifyHooks._sid / TestGoalArmedSuppressesIdlePing._sid
+    each hand-enumerated the exact /tmp marker shapes notify-discord-pending.sh
+    can create instead of using tests/_hook_state_cleanup.py's
+    sweep_session_files (built for precisely this class of bug, #202) — when
+    #161 added a NEW marker (CARDCHK, the delivery-conditional-suppression
+    checkpoint written on EVERY ✅ DONE turn) neither hand-written list was
+    updated. Live proof on this box (measured 2026-08-07, spanning several
+    days of unittest runs on a shared machine): 2061 leftover
+    /tmp/claude-discord-cardchk-test-dn-* files, 681 test-ga-* ones, plus 430
+    /tmp/claude-discord-lastq-test-ga-* (TestGoalArmedSuppressesIdlePing never
+    cleaned lastq at all — only ❓ turns write it, and its own
+    test_question_still_pings_regardless_of_an_armed_goal sends one).
+
+    This drives ONE real turn from each class end-to-end and asserts NO
+    /tmp/claude-discord-* marker of ANY shape survives its teardown — the
+    sweep-based fix is shape-agnostic by design, so a FUTURE new marker can
+    never silently reopen this the same way CARDCHK did."""
+
+    def _run_and_capture_sid(self, cls, method_name):
+        captured = {}
+        orig_sid = cls._sid
+
+        def spy(self_inner):
+            result = orig_sid(self_inner)
+            captured["sid"] = result[0] if isinstance(result, tuple) else result
+            return result
+
+        with m.patch.object(cls, "_sid", spy):
+            case = cls(method_name)
+            result = TestResult()
+            case.run(result)
+        self.assertTrue(result.wasSuccessful(),
+                        (result.failures, result.errors))
+        self.assertIn("sid", captured, "the test never called _sid() at all")
+        return captured["sid"]
+
+    def test_discord_notify_hooks_sid_leaves_no_marker_after_a_done_turn(self):
+        sid = self._run_and_capture_sid(
+            TestDiscordNotifyHooks, "test_done_multiline_report_records")
+        leftover = glob.glob("/tmp/claude-discord-*-" + sid)
+        self.assertEqual(leftover, [], leftover)
+
+    def test_goal_armed_sid_leaves_no_marker_after_a_question_turn(self):
+        sid = self._run_and_capture_sid(
+            TestGoalArmedSuppressesIdlePing,
+            "test_question_still_pings_regardless_of_an_armed_goal")
+        leftover = glob.glob("/tmp/claude-discord-*-" + sid)
+        self.assertEqual(leftover, [], leftover)
+
+    def test_goal_armed_sid_leaves_no_marker_after_a_done_turn(self):
+        sid = self._run_and_capture_sid(
+            TestGoalArmedSuppressesIdlePing,
+            "test_no_armed_goal_still_queues_the_ping")
+        leftover = glob.glob("/tmp/claude-discord-*-" + sid)
+        self.assertEqual(leftover, [], leftover)
 
 
 class TestBashHookStdinContract(TestCase):
