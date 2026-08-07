@@ -405,16 +405,21 @@ Each loop turn:
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
    solo later.
 
-   > **Re-dispatch fresh — NEVER reach for `SendMessage` to "continue" a worker.** `SendMessage`
-   > (the documented subagent-continuation tool) is gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
-   > and is **NOT exposed by default**, so a call returns "no such tool" and you cold-start anyway.
-   > Do **not** narrate "SendMessage isn't available here, dispatching a fresh worker" — just dispatch
-   > the fresh background `autopilot-worker` for the issue and let it RESUME from durable state: the
-   > existing `dev` branch, the open PR, and the issue's current state. It continues from there instead
-   > of redoing version-bump→RED. The per-ticket Discord card is deduped on repo-name#issue, so a
-   > fresh worker re-dispatched for the same issue does NOT double-post its card. A worker ending
-   > mid-issue (turn boundary, error, your answer to its question) is recovered by ONE fresh dispatch
-   > with the resume context in the prompt — never by a continuation tool, never by restarting from scratch.
+   > **Prefer durable-state resumption over `SendMessage` for a worker that has already ended.**
+   > `SendMessage` (the subagent-continuation tool, loadable via `ToolSearch` on current builds, no
+   > `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` flag required — airuleset #299) can genuinely redirect a
+   > STILL-RUNNING or RESUMABLE background worker mid-task (even one that stopped on a transient API
+   > error), but it goes nowhere against one that has genuinely ended and cannot resume — and you
+   > cannot always tell which case you're in from the outside. When in doubt, a worker that stopped
+   > invoking you is presumed dead, not paused. Do **not** narrate SendMessage mechanics
+   > either way ("SendMessage isn't available here, dispatching a fresh worker", "SendMessage worked,
+   > redirecting it") — just dispatch a fresh background `autopilot-worker` for the issue and let it
+   > RESUME from durable state: the existing `dev` branch, the open PR, and the issue's current state.
+   > It continues from there instead of redoing version-bump→RED. The per-ticket Discord card is
+   > deduped on repo-name#issue, so a fresh worker re-dispatched for the same issue does NOT
+   > double-post its card. A worker ending mid-issue (turn boundary, error, your answer to its
+   > question) is recovered by ONE fresh dispatch with the resume context in the prompt — silently,
+   > never by narrating the tooling, never by restarting from scratch.
 
    > **Multi-stage / long pipelines (e.g. a 3-branch `develop→staging→main` flow) — YOU own the CI
    > waits, not the worker.** A single worker cannot safely hold an hour-plus of successive CI waits:
