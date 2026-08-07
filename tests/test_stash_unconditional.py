@@ -92,7 +92,7 @@ class FakePane:
 
     def __init__(self, draft="", ghost="", stash=None,
                  ghost_survives_ctrl_s=True, lose_next_ctrl_s=False,
-                 lag_captures=0, busy=False):
+                 lag_captures=0, busy=False, swallow_enters=0):
         self.draft = draft
         self.ghost = ghost
         self.stash = stash
@@ -100,6 +100,13 @@ class FakePane:
         self.lose_next_ctrl_s = lose_next_ctrl_s
         self.lag_captures = lag_captures
         self.busy = busy
+        # #306 -- the #36 agent-strip-selector class of bug: Enter is
+        # swallowed (neither submits nor clears the box) instead of being
+        # dropped/lost outright. `deliver_with_stash` sends ONE corrective
+        # Escape+Enter retry on a swallowed submit, so a value of 2 here
+        # models BOTH the original Enter and that one retry being swallowed
+        # -- the "swallowed-submit-not-recovered" terminal outcome.
+        self.swallow_enters = swallow_enters
         self.submitted = []
         self.sent = []
         self._lagged = None
@@ -150,6 +157,9 @@ class FakePane:
                 self.stash = None
             self._dismiss_ghost()
         elif k == "Enter":
+            if self.swallow_enters > 0:
+                self.swallow_enters -= 1
+                return                          # neither submits nor clears
             if self.draft:
                 self.submitted.append(self.draft)
                 self.draft = ""
@@ -370,3 +380,73 @@ class TheOnlyDeclineIsNamedDistinctly(unittest.TestCase):
         deliver(busy, logs=b_logs)
         self.assertEqual(o_logs, ["stash-abort: slot occupied"])
         self.assertNotEqual(o_logs, b_logs)
+
+
+class SwallowedSubmitRecoversTheBoxAndReleasesTheSlot(unittest.TestCase):
+    """#306 — david@subdev live regression. Before this fix,
+    `deliver_with_stash`'s "swallowed-submit-not-recovered" path (our own
+    type-verify succeeded, but neither the Enter nor the one corrective
+    Escape+Enter retry ever cleared the box) returned `False` with ZERO
+    recovery attempted: our own typed text was left glued in the box
+    ("poslal text a neodentroval"), and — whenever the outcome that got us
+    here was a genuine PARK (our own `C-s` earlier in this same call really
+    did stash the pane's prior content) — that parked draft stayed stuck in
+    CC's single, silently-overwriting stash slot forever, since nothing
+    else in this codebase ever pops it back. Every LATER caller of
+    `deliver_with_stash` then saw `STASH_MARKER` in its very first capture
+    and aborted with "slot occupied", which is exactly the ~2h wedge the
+    ticket's journal evidence shows.
+
+    The fix reuses the SAME recovery the PARKED/NOOP verify-failure branch
+    already has (backspace our own typed text — provably safe, since by
+    construction the box's ENTIRE content at this point is exactly `text`
+    — then, only once bare is confirmed, pop the parked draft back with one
+    corrective `C-s`). Delivery still genuinely failed (`False`), but the
+    pane ends the call either fully delivered or fully restored — never
+    stuck in between."""
+
+    def test_parked_draft_survives_a_permanently_swallowed_submit(self):
+        # Our own C-s parks DRAFT; our own type-verify then succeeds (the
+        # box was bare, so `text` lands cleanly) — but BOTH the Enter and
+        # the one corrective Escape+Enter retry are swallowed.
+        pane = FakePane(draft=DRAFT, swallow_enters=2)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertEqual(pane.draft, DRAFT,
+                         "the user's original draft must survive "
+                         "byte-identical, popped back out of the slot: %r"
+                         % logs)
+        self.assertIsNone(pane.stash,
+                          "the stash slot must be RELEASED, not left "
+                          "occupied forever — this is the ~2h wedge #306 "
+                          "reports: %r" % logs)
+        self.assertTrue(any("swallowed-submit-not-recovered" in ln
+                            for ln in logs), logs)
+
+    def test_bare_box_survives_a_permanently_swallowed_submit(self):
+        # Nothing was parked (the box was already bare, NOOP outcome) — so
+        # there is no draft to restore, but our own typed text must still
+        # not be left glued in the box.
+        pane = FakePane(draft="", ghost="", swallow_enters=2)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertEqual(pane.draft, "",
+                         "our own text must be backspaced out, never left "
+                         "sitting in the box: %r" % logs)
+        self.assertIsNone(pane.stash, logs)
+
+    def test_never_a_rapid_double_escape_during_the_recovery(self):
+        # The recovery path must not violate the #35 "never two consecutive
+        # Escapes" rule either — a rapid double-Escape permanently deletes
+        # a draft.
+        pane = FakePane(draft=DRAFT, swallow_enters=2)
+        deliver(pane)
+        keys = pane.keystrokes()
+        for a, b in zip(keys, keys[1:]):
+            self.assertFalse(a == "Escape" and b == "Escape",
+                             "a rapid double-Escape permanently deletes a "
+                             "draft: %r" % pane.sent)

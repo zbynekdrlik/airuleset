@@ -975,6 +975,81 @@ class TestLongPasteVerification(GoalRearmBase):
         self.assertIn("Enter", tmux.keys())
 
 
+class _SendVerifiedSwallowFake:
+    """A STATEFUL bare-box pane for `_send_goal_verified` (never a scripted
+    cap_seq — the poll loops inside `_await_typed` need an unbounded number
+    of captures). Models the #36 agent-strip class of bug: Enter neither
+    submits nor clears the box until `swallow_enters` is exhausted."""
+
+    def __init__(self, swallow_enters=0):
+        self.box = ""
+        self.swallow_enters = swallow_enters
+        self.sent = []
+
+    def _render(self):
+        if self.box:
+            return CONV + FOOTER_DARK.replace("❯ \n", "❯ " + self.box + "\n")
+        return CONV + FOOTER_DARK
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            return self._render()
+        if "display-message" in j:
+            return "sess:0.0"
+        if argv[:2] == ["tmux", "send-keys"]:
+            if "-l" in argv:
+                self.box += argv[-1]
+            else:
+                for k in argv[4:]:
+                    if k == "Enter":
+                        if self.swallow_enters > 0:
+                            self.swallow_enters -= 1
+                        elif self.box:
+                            self.box = ""
+                    elif k == "BSpace":
+                        self.box = self.box[:-1]
+        return ""
+
+    def keys(self):
+        return [a[-1] for a in self.sent
+                if "send-keys" in " ".join(a) and "-l" not in a]
+
+
+class SendGoalVerifiedSwallowedSubmitLeavesBoxRecoverable(unittest.TestCase):
+    """#306 sibling gap: `_send_goal_verified` (job 20's own no-draft
+    primitive — its docstring calls it "the same protocol `deliver_with_stash`
+    uses for its own type/submit steps, minus the stash") had the identical
+    zero-recovery gap on its swallowed-submit path — on
+    `if _await_typed(pid, text, run, sleep_fn, want=False): return False`
+    it simply returned, leaving our typed `/goal …` text glued in the box.
+    There is no draft to protect here (the box was verified bare before
+    typing), so the fix only needs the backspace half of
+    `deliver_with_stash`'s recovery."""
+
+    def test_permanently_swallowed_submit_backspaces_our_own_text(self):
+        text = "/goal " + PAYLOAD
+        # 2 Enters get sent by `_send_goal_verified` on a fully-swallowed
+        # submit (the original + one corrective retry) -- swallow both.
+        tmux = _SendVerifiedSwallowFake(swallow_enters=2)
+        ok = wd._send_goal_verified("%1", text, tmux, sleep_fn=lambda s: None)
+        self.assertFalse(ok, tmux.sent)
+        self.assertEqual(tmux.box, "",
+                         "our own text must be backspaced out, never left "
+                         "sitting in the box: %r" % tmux.sent)
+
+    def test_never_a_rapid_double_escape_during_the_recovery(self):
+        text = "/goal " + PAYLOAD
+        tmux = _SendVerifiedSwallowFake(swallow_enters=2)
+        wd._send_goal_verified("%1", text, tmux, sleep_fn=lambda s: None)
+        keys = tmux.keys()
+        for a, b in zip(keys, keys[1:]):
+            self.assertFalse(a == "Escape" and b == "Escape",
+                             "a rapid double-Escape permanently deletes a "
+                             "draft: %r" % tmux.sent)
+
+
 class TestGoalLoopStallNudge(GoalRearmBase):
     """The SECOND shape the same job must cover — and the one the 2026-07-26
     forensics actually points at.
