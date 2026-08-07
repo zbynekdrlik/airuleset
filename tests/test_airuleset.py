@@ -3696,6 +3696,204 @@ class TestPaneOwnerAlwaysRedirected(TestCase):
                          + "; ".join(offending))
 
 
+class TestQuestionsThreadRouting(TestCase):
+    """#296: a ❓ question ping routes to a SEPARATE per-owner thread
+    (claude-<owner>-q) so it never mixes with ✅/card/api-error pings in the
+    owner's normal thread — extends notification_channel()'s EXISTING
+    per-owner cascade with a second, PARALLEL namespace (kind="questions"),
+    never a new mechanism. kind="default" (the parameter's default) stays
+    byte-for-byte the pre-#296 behaviour for every EXISTING caller (send(),
+    the run-card, api-error) — none of them pass `kind=` at all."""
+
+    def setUp(self):
+        import notify
+        self.notify = notify
+
+    def test_questions_kind_prefers_the_q_channel(self):
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "zqthread"}
+        self.assertEqual(
+            self.notify.notification_channel(env=env, owner="zbynek",
+                                              kind="questions"),
+            "zqthread")
+        # the DEFAULT kind must still resolve the NORMAL thread, unaffected —
+        # ✅/card/api-error pings must never read the _Q value.
+        self.assertEqual(
+            self.notify.notification_channel(env=env, owner="zbynek"),
+            "zthread")
+
+    def test_questions_kind_falls_back_to_the_normal_thread_when_unconfigured(self):
+        # An owner with no _Q thread provisioned yet keeps PRE-#296 behaviour:
+        # questions land in their EXISTING thread, never silently drop to the
+        # shared channel just because the new namespace isn't set up yet.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_MAREK": "mthread"}
+        self.assertEqual(
+            self.notify.notification_channel(env=env, owner="marek",
+                                              kind="questions"),
+            "mthread")
+
+    def test_questions_kind_falls_back_to_shared_with_no_normal_thread_either(self):
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared"}
+        self.assertEqual(
+            self.notify.notification_channel(env=env, owner="nobody",
+                                              kind="questions"),
+            "shared")
+
+    def test_questions_kind_empty_owner_falls_back_to_shared(self):
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "shared",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "zqthread"}
+        self.assertEqual(
+            self.notify.notification_channel(env=env, owner="", kind="questions"),
+            "shared")
+
+
+class TestCreateAndProvisionQuestionsThread(TestCase):
+    """#296: a real `claude-<owner>-q` Discord thread does not exist by
+    default — no code in this repo has ever created a Discord thread before
+    (the existing per-owner threads were configured by hand into the .env).
+    `create_owner_question_thread` spawns it as a SIBLING of the owner's
+    EXISTING thread (same Discord parent channel, found via one GET) — the
+    same mechanism a human used to set up a per-owner thread, just automated.
+    `provision_question_thread` is the idempotent create-and-persist action
+    behind `notify --provision-question-thread`."""
+
+    def setUp(self):
+        import notify
+        self.notify = notify
+
+    def test_create_owner_question_thread_anchors_off_the_existing_thread(self):
+        calls = []
+
+        def fake_http(token, method, path, payload=None):
+            calls.append((method, path, payload))
+            if method == "GET":
+                self.assertEqual(path, "channels/zthread")
+                return {"parent_id": "parentchan"}
+            if method == "POST":
+                self.assertEqual(path, "channels/parentchan/threads")
+                self.assertEqual(payload["name"], "claude-zbynek-q")
+                self.assertEqual(payload["type"], 11)   # PUBLIC_THREAD
+                return {"id": "newqthread"}
+            return None
+
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        tid = self.notify.create_owner_question_thread(env, "zbynek",
+                                                        http=fake_http)
+        self.assertEqual(tid, "newqthread")
+        self.assertEqual([c[0] for c in calls], ["GET", "POST"])
+
+    def test_create_owner_question_thread_no_token_returns_empty(self):
+        self.assertEqual(
+            self.notify.create_owner_question_thread({}, "zbynek"), "")
+
+    def test_create_owner_question_thread_no_owner_returns_empty(self):
+        self.assertEqual(
+            self.notify.create_owner_question_thread(
+                {"DISCORD_BOT_TOKEN": "tok"}, ""), "")
+
+    def test_create_owner_question_thread_no_existing_thread_returns_empty(self):
+        # no per-owner or shared channel configured at all -> nothing to
+        # anchor the new thread off of.
+        env = {"DISCORD_BOT_TOKEN": "tok"}
+        self.assertEqual(
+            self.notify.create_owner_question_thread(
+                env, "zbynek", http=lambda *a, **k: None),
+            "")
+
+    def test_create_owner_question_thread_failed_parent_lookup_returns_empty(self):
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(
+            self.notify.create_owner_question_thread(
+                env, "zbynek", http=lambda *a, **k: None),
+            "")
+
+    def test_create_owner_question_thread_failed_post_returns_empty(self):
+        def fake_http(token, method, path, payload=None):
+            if method == "GET":
+                return {"parent_id": "parentchan"}
+            return None    # the thread-create POST failed
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        self.assertEqual(
+            self.notify.create_owner_question_thread(
+                env, "zbynek", http=fake_http),
+            "")
+
+    def test_env_upsert_appends_new_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n")
+            self.assertTrue(self.notify._env_upsert(
+                p, "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q", "newid"))
+            content = Path(p).read_text()
+            self.assertIn("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=newid", content)
+            self.assertIn("DISCORD_BOT_TOKEN=tok", content)   # untouched
+
+    def test_env_upsert_replaces_existing_key_without_duplicating(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text(
+                "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=old\nOTHER=1\n")
+            self.notify._env_upsert(
+                p, "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q", "new")
+            lines = Path(p).read_text().splitlines()
+            self.assertEqual(
+                lines.count("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=new"), 1)
+            self.assertNotIn("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=old", lines)
+            self.assertIn("OTHER=1", lines)
+
+    def test_env_upsert_creates_missing_file_and_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "sub", "dir", ".env")
+            self.assertTrue(self.notify._env_upsert(p, "K", "v"))
+            self.assertIn("K=v", Path(p).read_text())
+
+    def test_provision_question_thread_is_idempotent(self):
+        # already configured -> return it, ZERO network calls at all.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "already"}
+        calls = []
+        result = self.notify.provision_question_thread(
+            "zbynek", env=env,
+            http=lambda *a, **k: calls.append(a) or None)
+        self.assertEqual(result, "already")
+        self.assertEqual(calls, [])
+
+    def test_provision_question_thread_creates_and_persists(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n"
+                               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread\n")
+            env = {"DISCORD_BOT_TOKEN": "tok",
+                   "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+
+            def fake_http(token, method, path, payload=None):
+                if method == "GET":
+                    return {"parent_id": "parentchan"}
+                return {"id": "brandnewq"}
+
+            result = self.notify.provision_question_thread(
+                "zbynek", env=env, env_path=p, http=fake_http)
+            self.assertEqual(result, "brandnewq")
+            self.assertIn("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=brandnewq",
+                          Path(p).read_text())
+
+    def test_provision_question_thread_no_owner_is_a_noop(self):
+        self.assertEqual(self.notify.provision_question_thread(""), "")
+
+    def test_provision_question_thread_failed_creation_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("X=1\n")
+            result = self.notify.provision_question_thread(
+                "zbynek", env={}, env_path=p, http=lambda *a, **k: None)
+            self.assertEqual(result, "")
+            self.assertEqual(Path(p).read_text(), "X=1\n")   # untouched
+
+
 class TestTmuxHistoryLimit(TestCase):
     """apply_tmux_history_limit ensures ~/.tmux.conf carries the managed
     tmux block: history-limit 50000 (#235: tmux's built-in default of 2000
@@ -5925,7 +6123,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # this test.
         args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
-                       backfill_digest=False,
+                       backfill_digest=False, provision_question_thread=False,
                       record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                       body=None, run=None, repo="o/x", issue=5,
@@ -5976,7 +6174,7 @@ class TestDiscordAutopilotNotify(TestCase):
         def mk(repo):
             return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
-                       backfill_digest=False,
+                       backfill_digest=False, provision_question_thread=False,
                           record_question=False, edit_question=False,
                       channel_id=False, owner=False, mirror_owners=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
@@ -6273,6 +6471,80 @@ class TestDiscordAutopilotNotify(TestCase):
                             "--channel-id"], capture_output=True, text=True, env=env)
         self.assertEqual(r.stdout, "shared999")
 
+    def test_cli_channel_id_kind_questions(self):
+        # #296: --kind questions resolves the owner's SEPARATE questions
+        # thread first, falling back to the SAME cascade --channel-id
+        # already used before this flag existed.
+        home = tempfile.mkdtemp()
+        d = Path(home) / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True)
+        (d / ".env").write_text(
+            "DISCORD_NOTIFICATION_CHANNEL_ID=shared999\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread111\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=zqthread\n"
+            "DISCORD_NOTIFICATION_CHANNEL_MAREK=mthread222\n")
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--channel-id", "--kind", "questions"],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "zqthread")
+        # --kind omitted (the pre-#296 shape) is completely unaffected.
+        r2 = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--channel-id"], capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r2.stdout, "zthread111")
+        # marek has no _Q thread configured yet -> falls back to HIS normal
+        # thread (never the shared channel just because _Q is unconfigured).
+        env_marek = {**os.environ, "HOME": home,
+                    "AIRULESET_NOTIFY_OWNER": "marek"}
+        r3 = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--channel-id", "--kind", "questions"],
+                           capture_output=True, text=True, env=env_marek)
+        self.assertEqual(r3.stdout, "mthread222")
+
+    def test_cli_provision_question_thread_success(self):
+        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="zbynek")
+        import io
+        import contextlib
+        with m.patch("notify.provision_question_thread",
+                     return_value="newqid") as fake:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_notify(args)
+        self.assertEqual(buf.getvalue(), "newqid")
+        fake.assert_called_once_with("zbynek")
+
+    def test_cli_provision_question_thread_defaults_to_resolved_owner(self):
+        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name=None)
+        with m.patch("notify.resolve_owner", return_value="marek"), \
+                m.patch("notify.provision_question_thread",
+                       return_value="q2") as fake:
+            airuleset.cmd_notify(args)
+        fake.assert_called_once_with("marek")
+
+    def test_cli_provision_question_thread_failure_exits_nonzero(self):
+        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="zbynek")
+        with m.patch("notify.provision_question_thread", return_value=""):
+            with self.assertRaises(SystemExit) as cm:
+                airuleset.cmd_notify(args)
+            self.assertEqual(cm.exception.code, 1)
+
     def test_cli_owner(self):
         # `notify --owner` lets the shell hook resolve ONCE and force the same owner
         # onto both --mention-prefix and --channel-id (so they can never disagree).
@@ -6318,6 +6590,55 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("notify-discord-send.sh", self.IDLE_HOOK.read_text())
         pending = (airuleset.REPO_DIR / "hooks" / "notify-discord-pending.sh").read_text()
         self.assertIn("notify-discord-send.sh", pending)
+        # #296: the --channel-id call threads a --kind so a ❓ can resolve a
+        # SEPARATE questions thread from a ✅/card/api-error ping.
+        self.assertIn("--kind", src)
+
+    def test_send_hook_selects_questions_channel_only_for_question_emoji(self):
+        # #296 end-to-end: ND_EMOJI="❓" must resolve --channel-id via
+        # --kind questions; every other emoji (✅, and anything future) keeps
+        # --kind default — the owner's EXISTING claude-<owner> thread. A real
+        # python3 SHIM on PATH logs every invocation's argv then execs the
+        # REAL python3 with the SAME args, so this exercises the actual
+        # airuleset.py CLI resolution (not a guess about what it would do),
+        # with zero network I/O (--channel-id/--mention-prefix/--owner are
+        # pure reads; DISCORD_NOTIFY_DRYRUN=1 keeps the curl paths inert too).
+        home = tempfile.mkdtemp()
+        shimdir = tempfile.mkdtemp()
+        log = Path(home) / "py3.log"
+        real_py3 = sys.executable
+        shim = Path(shimdir) / "python3"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%%s\\n' \"$*\" >> %s\n"
+            "exec %s \"$@\"\n" % (str(log), real_py3))
+        shim.chmod(0o755)
+        base_env = {**os.environ, "PATH": str(shimdir) + os.pathsep + os.environ["PATH"],
+                   "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek",
+                   "DISCORD_NOTIFY_DRYRUN": "1"}
+
+        def _channel_kinds():
+            lines = log.read_text().splitlines() if log.exists() else []
+            calls = [ln for ln in lines if "--channel-id" in ln]
+            kinds = []
+            for ln in calls:
+                toks = ln.split()
+                kinds.append(toks[toks.index("--kind") + 1]
+                             if "--kind" in toks else None)
+            return kinds
+
+        subprocess.run(["bash", str(self.SEND_HOOK)], input="", text=True,
+                       capture_output=True,
+                       env={**base_env, "ND_EMOJI": "❓", "ND_TEXT": "t",
+                            "ND_CWD": "/tmp"})
+        self.assertEqual(_channel_kinds(), ["questions"], log.read_text())
+
+        log.unlink()
+        subprocess.run(["bash", str(self.SEND_HOOK)], input="", text=True,
+                       capture_output=True,
+                       env={**base_env, "ND_EMOJI": "✅", "ND_TEXT": "t",
+                            "ND_CWD": "/tmp"})
+        self.assertEqual(_channel_kinds(), ["default"], log.read_text())
 
 
 # A pane IDLE at a free `❯` prompt (turn ended, safe to type a nudge). The real prompt
