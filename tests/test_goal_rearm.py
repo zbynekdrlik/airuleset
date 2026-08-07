@@ -1114,6 +1114,18 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
                    "ts": ts, "question": question}}))
         return str(p)
 
+    def _empty_questions_path(self):
+        # An ISOLATED, genuinely empty map — never `None` alone, which in
+        # PRODUCTION means "fall through to the real ~/.claude/discord-
+        # questions.json" (the correct default there) but in a test would
+        # silently read whatever this developer's OWN real box happens to
+        # hold. Every test in this class must stay hermetic regardless of
+        # which sentinel it passes.
+        p = Path(self.tmp.name) / "discord-questions-empty.json"
+        if not p.exists():
+            p.write_text("{}")
+        return str(p)
+
     def _sweep(self, now=None, waited=None, captured=PANE_LIT, state=None,
               questions_path="unset", sid=SID, extra_entries=None):
         now = now or time.time()
@@ -1127,8 +1139,9 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
         mt = now - 60
         os.utime(p, (mt, mt))
         if questions_path == "unset":
-            questions_path = (self._questions_path(sid, now - waited)
-                              if waited is not None else None)
+            questions_path = self._questions_path(sid, now - waited)
+        elif questions_path is None:
+            questions_path = self._empty_questions_path()
         tmux = FakeTmux(captured)
         logs = wd.goal_rearm(now, tmux, state if state is not None else {},
                              send_fn=self._send, projects_dir=self.tmp.name,
