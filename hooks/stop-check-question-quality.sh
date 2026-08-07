@@ -44,9 +44,11 @@ set -euo pipefail
 # violations.sh` mechanism #190/#194 already fixed once, reproduced live
 # here: `test_verbatim_repeat_of_the_same_blocked_question_still_passes`
 # flaking under full-suite load, 1-in-500-to-8000 CPU-saturated runs, rc=141
-# captured directly). A here-string is materialized via a temp file BEFORE
-# the command ever runs — there is no live writer process to SIGPIPE, so the
-# race cannot exist structurally, regardless of which check fires early. The
+# captured directly). A here-string has no live WRITER PROCESS the reader
+# can SIGPIPE — bash materializes it as a temp file on older builds, or an
+# already-fully-written anonymous pipe under capacity on bash 5.1+; either
+# way the whole document exists before the reader's first read, so the race
+# cannot exist structurally, regardless of which check fires early. The
 # ONE exception is the BLOCK-extraction `awk` below (the paragraph-pull that
 # builds `$BLOCK` itself): its only `exit` calls live inside `END { … }`,
 # which by definition never runs until awk has already consumed all of

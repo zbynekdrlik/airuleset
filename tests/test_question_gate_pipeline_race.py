@@ -229,12 +229,26 @@ class TestLargeBadQuestionStillGetsBlocked(_HookCase):
 # mechanism, one level up for the awk form: the program calls `exit` itself
 # instead of the caller passing `-q`/`-m1`).
 #
-# KNOWN, DELIBERATE RESIDUAL (adversarial review, matches an already-
-# accepted #190 gap in the sibling lock): `[^|]*` between the feeder and the
-# pipe stops at the FIRST literal `|` — a feeder whose OWN argument string
-# contains a `|` character (`printf 'a|b' | grep -q …`) can defeat this
-# scan. No such shape exists in this hook today; a real occurrence would
-# need its own fix, not a blanket unquoted-pipe scanner here.
+# KNOWN, DELIBERATE RESIDUALS (adversarial review, matches an already-
+# accepted #190 gap in the sibling lock) — none of these shapes exists in
+# this hook today; a real occurrence would need its own fix, not a blanket
+# rewrite of these preventive detectors:
+# - `[^|]*` between the feeder and the pipe stops at the FIRST literal `|`
+#   — a feeder whose OWN argument string contains a `|` character
+#   (`printf 'a|b' | grep -q …`) can defeat this scan.
+# - `_FEEDER` only knows `echo|printf|cat` as a WRITER — a second grep/jq
+#   as the feeder (`grep X <<<"$V" | grep -q Y`) is invisible to it.
+# - An env-var prefix on the grep side (`printf ... | LC_ALL=C grep -q`)
+#   evades the per-line scan even though the multi-line awk scan already
+#   tolerates the identical prefix — notable because the hook's OWN
+#   BLOCK-extraction awk already uses `LC_ALL=C`, so the spelling is
+#   plausible in a future edit.
+# - `_EARLY_EXIT_GREP_FLAG` misses a COMBINED short flag (`grep -qm1`) —
+#   the `q`-class alternative disallows a trailing digit, and the `-m`
+#   alternative requires it to start the token.
+# - `_FEEDER_AWK_PROGRAM_RX`'s `-v` group matches at most ONE `-v k=v`
+#   before `awk`'s quoted program — a second `-v` (`awk -v a=1 -v b=2 '…'`)
+#   defeats the match.
 _FEEDER = _re.compile(r"\b(?:echo|printf|cat)\b[^|]*\|\s*(grep|awk)\b")
 
 _QUOTED = _re.compile(r"'[^']*'|\"[^\"]*\"")
