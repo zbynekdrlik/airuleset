@@ -1205,6 +1205,83 @@ def drop_question(message_id, path=None):
     return False
 
 
+# --- sent-card map (message id -> repo/issue) — airuleset#297/#298 -------
+# The per-ticket completion CARD's own message id, mapped to which repo/issue
+# it is for. Recorded at SEND time (never parsed back out of the card's
+# rendered text, which shows a display-qualified repo name via
+# `stream_qualified()` — e.g. "odoo-erp-david" — not the real `owner/repo`
+# a `gh -R` call needs). Backs TWO features that both need "which repo/issue
+# is this Discord message about": a ❓/❔ reaction on the card asks the
+# sending stream about it (#297), and a REPLY on the card reopens the ticket
+# with the remark (#298). Same numeric-snowflake validation, TTL and cap
+# shape as the outstanding-question map above — a card can be replied to
+# long after it was sent, so its TTL is generous (30 days).
+_CARDS_REL = "discord-cards.json"
+_CARDS_TTL_S = 30 * 24 * 3600
+_CARDS_MAX = 300
+
+
+def _cards_path():
+    return os.path.join(_claude_dir(), _CARDS_REL)
+
+
+def load_cards(path=None):
+    """The message-id -> {repo, issue, channel, ts} map. {} on any error."""
+    path = path or _cards_path()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cards(d, path=None):
+    path = path or _cards_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as h:
+            json.dump(d, h)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def record_card_message(message_id, channel, repo, issue, now=None, path=None):
+    """Record that Discord message `message_id` (in `channel`) is the
+    per-ticket completion CARD for `repo`#`issue` — `repo` is the exact
+    `--repo owner/name` value the worker passed (never a display string),
+    so a later `gh -R` call targets the real repo. `message_id`/`channel`
+    must be NUMERIC Discord snowflakes — the same guard `record_question`
+    already applies, for the identical reason (a Mock repr / mangled shell
+    var must never pollute the live map, 2026-07-04 incident). Prunes
+    stale + over-cap entries in the same write. Returns True on success.
+    Fail-safe (never raises)."""
+    message_id = str(message_id or "").strip()
+    channel = str(channel or "").strip()
+    repo = str(repo or "").strip()
+    if not message_id.isdigit() or not channel.isdigit() or not repo:
+        return False
+    try:
+        issue = int(issue)
+    except (TypeError, ValueError):
+        return False
+    now = time.time() if now is None else now
+    d = load_cards(path)
+    d[message_id] = {"channel": channel, "repo": repo, "issue": issue,
+                     "ts": int(now)}
+    for mid in [m for m, v in d.items()
+                if now - (v.get("ts") or 0) > _CARDS_TTL_S]:
+        d.pop(mid, None)
+    if len(d) > _CARDS_MAX:
+        for mid, _v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0
+                              )[:len(d) - _CARDS_MAX]:
+            d.pop(mid, None)
+    return _save_cards(d, path)
+
+
 _EDIT_WINDOW_S = 15 * 60              # a reword edits the ping only this soon after it
 
 
@@ -1306,10 +1383,16 @@ SUPPRESS_EMBEDS = 1 << 2
 
 
 def _post_discord(token, channel, content):
-    """POST one message to one Discord channel/thread. Returns True on success.
-    Discord REQUIRES a User-Agent — Cloudflare 403s the default "Python-urllib/*"
-    ("error code: 1010"); a DiscordBot UA (per spec) gets through (the same reason
-    the curl-based hook works). Never raises."""
+    """POST one message to one Discord channel/thread. Returns the SENT
+    message's Discord id (a string) on success — the field
+    `record_card_message` (#298) needs to map a card back to its repo/issue
+    later — or a bare `True` when the response body doesn't parse to an id
+    (an empty/malformed body; a test double that models success without a
+    real payload). Falsy (False) only on a genuine failure. A caller that
+    only checks truthiness (every pre-#298 caller) is unaffected either way.
+    Discord REQUIRES a User-Agent — Cloudflare 403s the default
+    "Python-urllib/*" ("error code: 1010"); a DiscordBot UA (per spec) gets
+    through (the same reason the curl-based hook works). Never raises."""
     try:
         req = urllib.request.Request(
             "https://discord.com/api/v10/channels/%s/messages" % channel,
@@ -1319,18 +1402,30 @@ def _post_discord(token, channel, content):
             headers={"Authorization": "Bot " + token,
                      "Content-Type": "application/json",
                      "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
-        urllib.request.urlopen(req, timeout=6).read()
-        return True
+        body = urllib.request.urlopen(req, timeout=6).read()
+        try:
+            data = json.loads(body) if body else {}
+        except ValueError:
+            data = {}
+        mid = data.get("id") if isinstance(data, dict) else None
+        return mid or True
     except Exception:
         return False
 
 
-def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
+def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
+        return_message_id=False):
     """Prepend the owner @mention to `body` and POST it to the Discord notification
     channel — AND, in parallel, to every mirror owner's own thread with their own
     @mention (DISCORD_MIRROR_<OWNER>, e.g. david → also zbynek). Deduped on
     `dedup_key`. Returns a short status string ('sent' / 'dedup' / 'dry-run' /
-    'no-config' / 'error') reflecting the PRIMARY send. Never raises."""
+    'no-config' / 'error') reflecting the PRIMARY send. Never raises.
+
+    `return_message_id=True` (#298) returns `(status, message_id)` instead —
+    `message_id` is the PRIMARY send's Discord message id (a string) when
+    `status == "sent"` and `_post_discord` returned a real id, else None. Every
+    EXISTING caller passes nothing here and keeps the plain-string contract
+    unchanged."""
     env = _read_env() if env is None else env
     # Resolve the owner ONCE so the @mention and the per-owner thread target agree
     # (a tmux re-query between them could otherwise disagree).
@@ -1360,7 +1455,7 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     if dry_run:
         print("\n".join((mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT]
                          for t, _ch in targets))
-        return "dry-run"
+        return ("dry-run", None) if return_message_id else "dry-run"
 
     # Claim FIRST so a racing duplicate can't double-post; RELEASE only when the
     # primary provably never sent (no token / no channel), so a transient failure
@@ -1371,7 +1466,7 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         # skipped here", and a dedup skip is exactly the kind of attempt that
         # used to leave zero trace on an otherwise perfectly healthy box.
         log_delivery("dedup", kind="python", key=dedup_key, reason="already-claimed")
-        return "dedup"
+        return ("dedup", None) if return_message_id else "dedup"
 
     token = env.get("DISCORD_BOT_TOKEN", "")
     primary_owner, primary_channel = targets[0]
@@ -1379,13 +1474,19 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
         _dedup_release(dedup_key)
         log_delivery("no-config", kind="python", key=dedup_key,
                      reason="no-token" if not token else "no-channel")
-        return "no-config"
+        return ("no-config", None) if return_message_id else "no-config"
 
     # Primary send determines the return status; mirror sends are best-effort (a
     # mirror failure never fails the whole notification, never releases the dedup).
-    status = "sent" if _post_discord(
+    primary_result = _post_discord(
         token, primary_channel,
-        (mention_prefix(env, primary_owner) + (body or ""))[:_MAX_CONTENT]) else "error"
+        (mention_prefix(env, primary_owner) + (body or ""))[:_MAX_CONTENT])
+    status = "sent" if primary_result else "error"
+    # `_post_discord` returns the real Discord message id (a string) on a
+    # genuine POST, or a bare truthy/falsy sentinel from a test double that
+    # doesn't model one — only a real string is ever handed to a caller, so
+    # a mocked `True` can never masquerade as a snowflake (#297/#298).
+    message_id = primary_result if isinstance(primary_result, str) else None
     for t, ch in targets[1:]:
         _post_discord(token, ch, (mention_prefix(env, t) + (body or ""))[:_MAX_CONTENT])
     # Record the OUTCOME on the claim (#135) and log EVERY attempt, not only
@@ -1395,4 +1496,4 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False):
     _dedup_mark_status(dedup_key, status)
     log_delivery(status, kind="python", key=dedup_key,
                  reason="" if status == "sent" else "post-failed")
-    return status
+    return (status, message_id) if return_message_id else status

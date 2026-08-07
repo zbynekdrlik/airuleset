@@ -5418,9 +5418,21 @@ def _notify_run_card(args, compose_autopilot_card, send):
         dedup = getattr(args, "dedup_key", None) or ("%s#%s" % (name, issue))
         # Print the outcome (sent/dedup/dry-run/error) for visibility; harmless in
         # the detached spawn (its stdout is /dev/null).
-        status = send(body, dedup_key=dedup, dry_run=getattr(args, "dry_run", False))
+        # return_message_id=True (#298): capture the sent card's OWN Discord
+        # message id so a later Discord reply/reaction on it can be routed
+        # back to this repo#issue (job 7 poll-pass extension). A pre-#298
+        # test double for `send` may still return a bare status STRING (the
+        # old contract) rather than the opt-in tuple -- tolerate both so no
+        # existing mock needs updating.
+        result = send(body, dedup_key=dedup,
+                      dry_run=getattr(args, "dry_run", False),
+                      return_message_id=True)
+        status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
         if status == "sent":
+            if message_id:
+                from notify import notification_channel, record_card_message
+                record_card_message(message_id, notification_channel(), repo, issue)
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             # On a full-authority box a STREAM ticket's card must NOT advance

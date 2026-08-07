@@ -3165,14 +3165,279 @@ def _box_holds_our_own_text(captured, text):
     return bool(head_txt) and text.startswith(head_txt) and text.endswith(tail)
 
 
+# --------------------------------------------------------------------------- #
+# #297/#298 -- extending job 7's poll pass with two more Discord signals a
+# session can react to: a REPLY on a completion CARD (#298 -- reopen the
+# ticket with the remark) and a ❓/❔ REACTION on any TRACKED bot message
+# (#297 -- ask the sending stream about it). Both reuse the SAME
+# `fetch(ch, token)` poll loop and the SAME `known_owner_ids` security
+# boundary the ❓-reply flow already established; neither is a new job (the
+# FREEZE only permits extending job 7's existing mechanism).
+# --------------------------------------------------------------------------- #
+
+BOUNCE_REMARK_LABEL = "prio:bounce"
+
+
+def _repo_live_pane(repo_name, cwd_by_sid, panes_by_sid, run=None):
+    """(sid, pid, cwd) of a live `claude` pane whose cwd's repo NAME matches
+    `repo_name` (bare, case-sensitive as `gh`/`repo_name_for` render it), or
+    None. Resolved via `repo_name_for` (a single local `git remote get-url`)
+    — the SAME repo identity job 24/25 already key on, never the directory
+    basename. Shared by #297's flag-delivery fallback and #298's
+    post-reopen nudge, so both features agree on what 'a live session of
+    that repo' means."""
+    from notify import repo_name_for
+    target = str(repo_name or "").strip()
+    if not target:
+        return None
+    for sid, cwd in cwd_by_sid.items():
+        if sid not in panes_by_sid:
+            continue
+        if repo_name_for(cwd, run=run) == target:
+            return sid, panes_by_sid[sid][0], cwd
+    return None
+
+
+def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None):
+    """Best-effort: type `text` into a live pane at TRUE REST — job 8's own
+    at-rest discipline (`_safe_to_bounce_nudge`), reused verbatim so a
+    genuinely mid-work pane is NEVER interrupted (never a new mechanism, the
+    exact same check `bounce_backstop` already relies on). A pane holding a
+    foreign draft is stashed around (issue #35); a busy/copy-mode/live-work
+    pane gets NOTHING this sweep. Returns True when delivered (or, in
+    dry-run, would have been)."""
+    captured = capture_pane(pid, run)
+    if pane_in_mode(pid, run):
+        return False
+    if not _safe_to_bounce_nudge(captured, cwd, projects_dir):
+        return False
+    if not pane_at_idle_prompt(captured):
+        return _try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
+    if not dry_run:
+        send_continue(pid, text, run)
+    return True
+
+
+# --- #298: reply on a completion CARD -> reopen the ticket ----------------
+
+def parse_discord_card_reply(msg, allowed_ids, cardmap):
+    """Validate ONE Discord message as a reply to a TRACKED completion card.
+
+    Returns {reply_id, referenced, repo, issue, text, channel} when `msg` is
+    a reply BY an allowed owner TO a message id in `cardmap` with usable
+    text; else None. Mirrors `parse_discord_reply`'s exact security shape
+    (SAME `allowed_ids` boundary) — the only difference is WHICH map the
+    referenced id is looked up in."""
+    if not isinstance(msg, dict):
+        return None
+    reply_id = str(msg.get("id") or "").strip()
+    author = msg.get("author") or {}
+    author_id = str(author.get("id") or "").strip()
+    ref = (msg.get("message_reference") or {}).get("message_id")
+    ref = str(ref or "").strip()
+    if not reply_id or not author_id or not ref:
+        return None
+    if author_id not in allowed_ids:             # SECURITY: only a known owner
+        return None
+    c = cardmap.get(ref)
+    if not isinstance(c, dict):
+        return None
+    repo = str(c.get("repo") or "").strip()
+    issue = c.get("issue")
+    if not repo or issue is None:
+        return None
+    text = clean_reply_text(msg.get("content"))
+    if not text:
+        return None
+    return {"reply_id": reply_id, "referenced": ref, "repo": repo,
+            "issue": issue, "text": text, "channel": str(c.get("channel") or "")}
+
+
+def _card_remark_comment_body(text):
+    return ("**Pripomienka z Discordu k done karte:**\n\n%s\n\n"
+            "(Ticket bol automaticky znovu otvorený — dokonči ho podľa "
+            "tejto pripomienky.)" % text)
+
+
+def compose_card_reopen_nudge(issue):
+    return ("Discord pripomienka: ticket #%s bol znovu otvorený s "
+            "pripomienkou od užívateľa (je v poslednom komentári na "
+            "tickete) — prečítaj si ju a dokonči ticket podľa nej."
+            % issue)
+
+
+def _gh_call(argv, input_text=None, timeout=25):
+    """One `gh` subprocess call. Returns (ok, stdout) — ok=False on any
+    failure/exception, stdout="" then. Auth via `_gh_env()`, the SAME
+    fallback the ticket-fallback comment (`_gh_comment`) already uses."""
+    import subprocess
+    try:
+        r = subprocess.run(argv, env=_gh_env(), input=input_text,
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout or "")
+    except Exception:
+        return False, ""
+
+
+def _card_reopen_flow(repo, issue, remark_text, gh_fn=None):
+    """The #298 durable hand-off on `repo`#`issue`: reopen (best-effort —
+    `gh issue reopen` on an already-open issue is idempotent, so a SECOND
+    reply on the same card never double-reopens), comment the user's remark
+    VERBATIM via stdin (never shell-interpolated), and apply
+    `prio:bounce` — creating the label first ONLY when it is genuinely
+    absent from `repo` (a read-only `gh label list --search` check FIRST,
+    `gh label create` never `--force`'d — the #191-established discipline
+    against clobbering an existing label's own colour/description on a
+    shared repo).
+
+    Returns True only when the COMMENT (the durable record of the remark)
+    succeeded — reopen/label are best-effort on top of that; a repo whose
+    label-list read itself fails still gets the `--add-label` attempt (gh's
+    own error there is harmless — never blocks the comment, which already
+    landed)."""
+    call = gh_fn or _gh_call
+    call(["gh", "issue", "reopen", str(issue), "-R", repo])
+    ok, _out = call(["gh", "issue", "comment", str(issue), "-R", repo, "-F", "-"],
+                    input_text=_card_remark_comment_body(remark_text))
+    if not ok:
+        return False
+    list_ok, list_out = call(["gh", "label", "list", "-R", repo, "--search",
+                              BOUNCE_REMARK_LABEL, "--json", "name"])
+    have_label = False
+    if list_ok:
+        try:
+            have_label = BOUNCE_REMARK_LABEL in [
+                x.get("name") for x in json.loads(list_out or "[]")]
+        except Exception:
+            have_label = False
+    if not have_label:
+        call(["gh", "label", "create", BOUNCE_REMARK_LABEL, "-R", repo,
+             "--color", "D93F0B", "--description",
+             "Bounce lane — jumps the autopilot queue, seeds next batch"])
+    call(["gh", "issue", "edit", str(issue), "-R", repo, "--add-label",
+         BOUNCE_REMARK_LABEL])
+    return True
+
+
+# --- #297: ❓/❔ reaction on a TRACKED bot message -> ask the session -------
+
+_FLAG_EMOJI = ("❓", "❔")
+
+
+def _flagged_emoji(msg):
+    """The ❓/❔ emoji NAME on `msg` with a nonzero reaction count, or "".
+    Discord's own message object already carries a `reactions` COUNT
+    summary on every channel fetch — no extra call is needed to DETECT a
+    flag; verifying WHO reacted (`fetch_reaction_users`) is a separate call,
+    spent only on a message this job actually TRACKS (see `_flag_target`)."""
+    if not isinstance(msg, dict):
+        return ""
+    for r in (msg.get("reactions") or []):
+        if not isinstance(r, dict):
+            continue
+        name = ((r.get("emoji") or {}).get("name") or "")
+        if name in _FLAG_EMOJI and (r.get("count") or 0) > 0:
+            return name
+    return ""
+
+
+def _flag_target(msg_id, qmap, cardmap):
+    """What a flagged message id resolves to for #297 — a tracked ❓
+    question (exact asking session known) or a tracked completion card
+    (repo known). None when `msg_id` is untracked by either map (the
+    message is not one job 7 can act on — silently not actionable, never a
+    guess)."""
+    q = qmap.get(msg_id)
+    if isinstance(q, dict):
+        return {"kind": "question", "session": str(q.get("session") or ""),
+                "cwd": str(q.get("cwd") or "")}
+    c = cardmap.get(msg_id)
+    if isinstance(c, dict):
+        return {"kind": "card", "repo": str(c.get("repo") or ""),
+                "issue": c.get("issue")}
+    return None
+
+
+def _flag_delivery_target(target, panes_by_sid, cwd_by_sid, run=None):
+    """(sid, pid, cwd) of the pane to deliver a #297 flag-prompt into, or
+    None. Prefers the EXACT asking session while it is still alive
+    (question kind); otherwise falls back to the nearest live pane whose
+    repo matches — the ticket's own explicit fallback clause, and the SAME
+    resolution `_repo_live_pane` gives #298's post-reopen nudge."""
+    from notify import repo_name_for
+    if target.get("kind") == "question":
+        sess = target.get("session") or ""
+        pane = panes_by_sid.get(sess)
+        if pane:
+            return sess, pane[0], target.get("cwd", "")
+        cwd = target.get("cwd") or ""
+        repo = repo_name_for(cwd, run=run) if cwd else ""
+    else:
+        repo = str(target.get("repo") or "").rstrip("/").split("/")[-1]
+    if not repo:
+        return None
+    return _repo_live_pane(repo, cwd_by_sid, panes_by_sid, run=run)
+
+
+_FLAG_PROMPT_TEMPLATE = (
+    "Užívateľ označil túto tvoju Discord správu ikonkou ❓ ("
+    "\"niečo sa mi na nej nezdá\"). Označená správa: «%s» — polož mu k tomu "
+    "štruktúrovanú otázku (per user-questions-slovak.md: úvod čo/prečo, "
+    "možnosti, jasné rozhodnutie), zisti čo konkrétne mu na nej nesedí, a "
+    "konaj podľa jeho odpovede."
+)
+
+
+def compose_flag_prompt(flagged_text):
+    text = clean_reply_text(flagged_text)[:900] or "(bez textu)"
+    return _FLAG_PROMPT_TEMPLATE % text
+
+
+def fetch_reaction_users(channel, message_id, emoji, token):
+    """GET the users who reacted with `emoji` to `message_id` in `channel`.
+    [] on any error/missing input — fail-safe, mirrors `fetch_channel_messages`
+    (never breaks the poll)."""
+    if not channel or not message_id or not token:
+        return []
+    try:
+        from urllib.parse import quote
+        raw = _discord_get(
+            "https://discord.com/api/v10/channels/%s/messages/%s/reactions/%s"
+            % (channel, message_id, quote(emoji)), token)
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _reacted_by_owner(users, allowed_ids):
+    """True if any user in `users` (a `fetch_reaction_users` result) is a
+    KNOWN OWNER of this machine — the SAME security boundary
+    `known_owner_ids` already enforces for replies."""
+    for u in users or []:
+        if not isinstance(u, dict):
+            continue
+        uid = str(u.get("id") or "").strip()
+        if uid in allowed_ids:
+            return True
+    return False
+
+
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             discord_fetch=None, env=None, gh_comment=None,
                             hosted_users=None, foreign_questions=None,
-                            foreign_drop=None):
-    """Route owner Discord replies into the sessions that asked (job 7).
+                            foreign_drop=None, cwd_by_sid=None,
+                            projects_dir=PROJECTS_DIR, reaction_fetch=None,
+                            card_gh_fn=None):
+    """Route owner Discord replies into the sessions that asked (job 7) — AND
+    (#297/#298) a ❓/❔ REACTION on a tracked bot message, and a REPLY on a
+    tracked completion CARD.
 
     `panes_by_sid`: {session_id: (pane_id, captured_pane)} for the live `claude`
-    panes this cycle (collected in run_once). `discord_fetch(channel, token)`:
+    panes this cycle (collected in run_once). `cwd_by_sid`: {session_id: cwd} —
+    needed to resolve "the nearest live session of repo X" for #297's fallback
+    and #298's post-reopen nudge (`{}` when omitted — both features then simply
+    find nothing live, same as an empty box). `discord_fetch(channel, token)`:
     returns recent messages (injectable for tests). Delivers each matching reply
     ONCE (dedup on reply id + the question is dropped on delivery), only into an
     IDLE-input pane, and reacts ✅ on success. Returns log lines. Never raises.
@@ -3188,12 +3453,20 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
       gh comment on the #N parsed from the stored question text — the DURABLE
       lane (the loop's question tracking lives on the ticket anyway); then
       ✅-reacted + dropped like a normal delivery. No #N / gh failure → the
-      keystroke path keeps retrying as before."""
+      keystroke path keeps retrying as before.
+
+    `card_gh_fn` (#298, deliberately a DIFFERENT name from the ticket-fallback
+    `gh_comment`/its local `gh_fn` below — the two are unrelated gh call sites
+    and sharing a name would silently shadow one of them): injectable
+    `(argv, input_text=None) -> (ok, stdout)` for the card-reopen flow's `gh`
+    calls; defaults to a real subprocess (`_gh_call`)."""
     from notify import (bot_token, known_owner_ids, load_questions, drop_question,
-                        _read_env)
+                        _read_env, load_cards)
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
+    cardmap = load_cards()
+    cwd_by_sid = cwd_by_sid or {}
     # Merge HOSTED users' question maps (2026-07-21: montalu's claude used to
     # run in THIS tmux, its ❓ map living under /home/montalu — the session was
     # invisible to both watchdogs; historical since the 2026-07-24 subdev
@@ -3209,7 +3482,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if qid not in qmap and isinstance(rec, dict):
                 qmap[qid] = rec
                 q_owner[qid] = fu
-    if not qmap and not state.get("dreply_pointer"):
+    if (not qmap and not cardmap and not state.get("dreply_pointer")):
         return logs
     token = bot_token(env)
     allowed = known_owner_ids(env)
@@ -3217,6 +3490,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
         return logs
     fetch = discord_fetch or fetch_channel_messages
     gh_fn = gh_comment or _gh_comment
+    react_fetch = reaction_fetch or fetch_reaction_users
+    card_gh = card_gh_fn or _gh_call
 
     done = state.get("dreply_done")
     done = list(done) if isinstance(done, list) else []
@@ -3226,7 +3501,14 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     acked = state.get("dreply_acked")
     acked = list(acked) if isinstance(acked, list) else []
     acked_set = set(acked)
+    card_done = state.get("dcard_done")
+    card_done = list(card_done) if isinstance(card_done, list) else []
+    card_done_set = set(card_done)
+    react_done = state.get("dreact_done")
+    react_done = list(react_done) if isinstance(react_done, list) else []
+    react_done_set = set(react_done)
     channels = {str(v.get("channel") or "") for v in qmap.values()}
+    channels |= {str(v.get("channel") or "") for v in cardmap.values()}
     channels.discard("")
 
     def _ack(r):
@@ -3290,6 +3572,73 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
 
     for ch in sorted(channels):
         for msg in fetch(ch, token):
+            # (#297) ❓/❔ REACTION on a TRACKED bot message -> ask the
+            # sending stream about it. Independent of the reply-shaped
+            # checks below — a message can be a reply AND separately
+            # flagged. Cheap in the common (untracked) case: the reaction
+            # COUNT is already on `msg` from the channel fetch, so
+            # `_flag_target` (a dict lookup, no network) runs BEFORE the
+            # one extra call (`react_fetch`) that verifies WHO reacted.
+            mid = str(msg.get("id") or "").strip()
+            emoji = _flagged_emoji(msg)
+            if mid and emoji and mid not in react_done_set:
+                target = _flag_target(mid, qmap, cardmap)
+                if target is not None:
+                    users = react_fetch(ch, mid, emoji, token)
+                    if _reacted_by_owner(users, allowed):
+                        deliver = _flag_delivery_target(
+                            target, panes_by_sid, cwd_by_sid, run=run)
+                        if deliver is not None:
+                            d_sid, d_pid, d_cwd = deliver
+                            prompt = compose_flag_prompt(msg.get("content"))
+                            ok = _nudge_repo_pane(d_pid, d_cwd, run, prompt,
+                                                  dry_run, projects_dir,
+                                                  logs=logs)
+                            if ok:
+                                react_done_set.add(mid)
+                                react_done.append(mid)
+                                logs.append("flag-react→%s [%s]"
+                                            % (project_label(d_cwd),
+                                               d_sid[:12] if d_sid else "-"))
+                            else:
+                                logs.append("flag-react pending (busy) %s"
+                                            % mid[-8:])
+                        else:
+                            logs.append("flag-react pending (no live "
+                                        "session) %s" % mid[-8:])
+
+            # (#298) REPLY on a tracked completion CARD -> reopen the
+            # ticket with the remark. `parse_discord_card_reply` returns
+            # None for a reply whose referenced id is NOT a card (incl.
+            # every ❓-ping reply the block below already owns), so this
+            # never competes with the existing reply flow.
+            cr = parse_discord_card_reply(msg, allowed, cardmap)
+            if cr and cr["reply_id"] not in card_done_set:
+                if dry_run:
+                    reopened = True
+                else:
+                    reopened = _card_reopen_flow(cr["repo"], cr["issue"],
+                                                 cr["text"], gh_fn=card_gh)
+                if reopened:
+                    card_done_set.add(cr["reply_id"])
+                    card_done.append(cr["reply_id"])
+                    logs.append("card-reopen #%s (%s)"
+                                % (cr["issue"], cr["repo"]))
+                    if not dry_run:
+                        _react_ok(cr["channel"] or ch, cr["reply_id"], token)
+                    bare = cr["repo"].rstrip("/").split("/")[-1]
+                    ctarget = _repo_live_pane(bare, cwd_by_sid, panes_by_sid,
+                                              run=run)
+                    if ctarget is not None:
+                        c_sid, c_pid, c_cwd = ctarget
+                        _nudge_repo_pane(
+                            c_pid, c_cwd, run,
+                            compose_card_reopen_nudge(cr["issue"]),
+                            dry_run, projects_dir, logs=logs)
+                else:
+                    logs.append("card-reopen failed #%s (%s)"
+                                % (cr["issue"], cr["repo"]))
+
             r = parse_discord_reply(msg, allowed, qmap, bot_id="")
             if not r or r["reply_id"] in done_set:
                 continue
@@ -3408,6 +3757,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     state["dreply_acked"] = acked[-_DREPLY_DONE_CAP:]
     state["dreply_blocked"] = {k: v for k, v in blocked.items()
                                if now - v < 86400}
+    state["dcard_done"] = card_done[-_DREPLY_DONE_CAP:]
+    state["dreact_done"] = react_done[-_DREPLY_DONE_CAP:]
     return logs
 
 
@@ -11386,7 +11737,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           it (never before the reset — `continue` pre-reset just re-hits the limit);
       (7) (only when `discord_fetch` is given) a session's ❓ ping was ANSWERED by
           the owner REPLYING in Discord → type the answer into that exact session's
-          idle pane (deliver_discord_replies), react ✅ on success;
+          idle pane (deliver_discord_replies), react ✅ on success. The SAME poll
+          pass also carries two more owner-driven signals (#297/#298 — extensions
+          of this job, never new ones, per the supervision-machinery FREEZE): a
+          ❓/❔ REACTION on a bot message this job already TRACKS (an outstanding
+          question, or a completion card via the new `discord-cards.json` map
+          `notify.record_card_message` writes at send time) nudges the exact
+          asking session — or, when it is no longer live, the nearest live pane
+          whose repo matches (`_repo_live_pane`) — to ask the user a structured
+          question quoting the flagged message; and a REPLY on a completion card
+          reopens the card's `repo`#`issue` (idempotent), comments the remark
+          verbatim, applies `prio:bounce` (creating the label only if genuinely
+          absent, never `--force`), and best-effort nudges a live idle pane of
+          that repo. Both dedup on their own bounded state lists
+          (`dreact_done`/`dcard_done`, mirroring `dreply_done`) and never guess a
+          delivery target — an untracked flagged message, or one with no live
+          session/repo pane anywhere, is silently skipped and retried next sweep;
+
       (8) (only when `bounce_fetch` is given) BOUNCE BACKSTOP — open `prio:bounce`
           (gatekeeper-returned) tickets for a repo this box touches → nudge the
           repo's IDLE claude pane (busy pane = the label alone queues them; never
@@ -12724,13 +13091,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     except Exception:
         pass
 
-    # --- (7) ROUTE DISCORD REPLIES → the asking session (only when a fetcher is
-    # wired). Best-effort: a Discord/network hiccup must never break the tmux jobs.
+    # --- (7) ROUTE DISCORD REPLIES → the asking session, a ❓/❔ REACTION on a
+    # tracked bot message (#297), and a REPLY on a completion card (#298) —
+    # only when a fetcher is wired. Best-effort: a Discord/network hiccup must
+    # never break the tmux jobs. `cwd_by_sid` (#297/#298): resolves "the
+    # nearest live session of repo X" for the flag-fallback / post-reopen
+    # nudge — already built above for job 24's own repo read.
     if discord_fetch is not None:
         try:
             logs += deliver_discord_replies(now, run, state, panes_by_sid,
                                             dry_run=dry_run, discord_fetch=discord_fetch,
-                                            hosted_users=hosted_users)
+                                            hosted_users=hosted_users,
+                                            cwd_by_sid=cwd_by_sid,
+                                            projects_dir=projects_dir)
         except Exception as e:
             logs.append("discord-reply error: %r" % (e,))
 
