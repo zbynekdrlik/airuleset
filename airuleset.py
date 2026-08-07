@@ -5424,15 +5424,22 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # test double for `send` may still return a bare status STRING (the
         # old contract) rather than the opt-in tuple -- tolerate both so no
         # existing mock needs updating.
-        result = send(body, dedup_key=dedup,
+        # MINOR-6 (#297/#298 review): resolve the owner ONCE and pass it to
+        # both calls explicitly, rather than letting `send()` resolve it
+        # internally and `notification_channel()` re-resolve it a second
+        # time right after -- the two calls must always agree on WHICH
+        # owner's thread the card actually posted to.
+        from notify import notification_channel, record_card_message, resolve_owner
+        owner = resolve_owner()
+        result = send(body, owner=owner, dedup_key=dedup,
                       dry_run=getattr(args, "dry_run", False),
                       return_message_id=True)
         status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
         if status == "sent":
             if message_id:
-                from notify import notification_channel, record_card_message
-                record_card_message(message_id, notification_channel(), repo, issue)
+                record_card_message(message_id, notification_channel(owner=owner),
+                                     repo, issue)
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             # On a full-authority box a STREAM ticket's card must NOT advance

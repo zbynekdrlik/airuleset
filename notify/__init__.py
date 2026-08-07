@@ -1181,14 +1181,21 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
                      "question": q}
-    # prune stale
+    # prune stale — a malformed/legacy entry (not a dict) is immediately
+    # prunable rather than crashing the write (mirrors the identical fix in
+    # `record_card_message`, #297/#298 review MINOR-7 — same pre-existing
+    # exposure, same-file, fixed in the same pass rather than filed
+    # separately).
     for mid in [m for m, v in d.items()
-                if now - (v.get("ts") or 0) > _QUESTIONS_TTL_S]:
+                if not isinstance(v, dict)
+                or now - (v.get("ts") or 0) > _QUESTIONS_TTL_S]:
         d.pop(mid, None)
     # hard cap — keep the newest by ts
     if len(d) > _QUESTIONS_MAX:
-        for mid, _v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0
-                              )[:len(d) - _QUESTIONS_MAX]:
+        for mid, _v in sorted(
+                d.items(),
+                key=lambda kv: kv[1].get("ts") or 0 if isinstance(kv[1], dict) else 0
+        )[:len(d) - _QUESTIONS_MAX]:
             d.pop(mid, None)
     return _save_questions(d, path)
 
@@ -1272,12 +1279,19 @@ def record_card_message(message_id, channel, repo, issue, now=None, path=None):
     d = load_cards(path)
     d[message_id] = {"channel": channel, "repo": repo, "issue": issue,
                      "ts": int(now)}
+    # MINOR-7 (#297/#298 review): a malformed/legacy entry (not a dict) must
+    # be treated as immediately prunable, never crash the whole write on the
+    # very next call — mirrors the isinstance(row, dict) discipline used
+    # elsewhere for any dict crossing a legacy-file boundary.
     for mid in [m for m, v in d.items()
-                if now - (v.get("ts") or 0) > _CARDS_TTL_S]:
+                if not isinstance(v, dict)
+                or now - (v.get("ts") or 0) > _CARDS_TTL_S]:
         d.pop(mid, None)
     if len(d) > _CARDS_MAX:
-        for mid, _v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0
-                              )[:len(d) - _CARDS_MAX]:
+        for mid, _v in sorted(
+                d.items(),
+                key=lambda kv: kv[1].get("ts") or 0 if isinstance(kv[1], dict) else 0
+        )[:len(d) - _CARDS_MAX]:
             d.pop(mid, None)
     return _save_cards(d, path)
 

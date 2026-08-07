@@ -2039,18 +2039,26 @@ _DREPLY_DONE_CAP = 200               # bounded dedup set of delivered reply ids
 _MENTION_TOKEN_RX = re.compile(r"<@[!&]?\d+>")
 
 
+_CONTROL_CHAR_RX = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
+
+
 def clean_reply_text(raw, bot_id=""):
     """Turn a Discord reply's raw content into a single-line prompt safe to type.
 
     Strips @mention tokens (`<@id>` / `<@!id>` / `<@&role>` — a reply that pings
-    the bot must not type the ping), collapses ALL whitespace (incl. newlines — a
-    stray newline would submit the prompt early / split it), and caps the length.
-    Returns "" when nothing usable remains (→ the caller ignores the reply)."""
+    the bot must not type the ping), strips C0/C1 control characters (THEORETICAL-13,
+    #297/#298 review — `\\s+` alone leaves ESC/BEL/NUL etc. untouched, and this text
+    is later typed via `send-keys -l` into a real pane; a raw ESC byte risks the
+    terminal reading it as the start of an escape sequence rather than literal
+    text), collapses ALL whitespace (incl. newlines — a stray newline would submit
+    the prompt early / split it), and caps the length. Returns "" when nothing
+    usable remains (→ the caller ignores the reply)."""
     if not raw:
         return ""
     s = _MENTION_TOKEN_RX.sub(" ", str(raw))
     if bot_id:
         s = s.replace("<@%s>" % bot_id, " ").replace("<@!%s>" % bot_id, " ")
+    s = _CONTROL_CHAR_RX.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s[:DISCORD_REPLY_MAX_CHARS]
 
@@ -3294,7 +3302,17 @@ def _card_reopen_flow(repo, issue, remark_text, gh_fn=None):
     succeeded — reopen/label are best-effort on top of that; a repo whose
     label-list read itself fails still gets the `--add-label` attempt (gh's
     own error there is harmless — never blocks the comment, which already
-    landed)."""
+    landed).
+
+    MINOR-11 (#297/#298 review): `prio:bounce` is applied on EVERY `repo`
+    here, unconditional on `_repo_in_cross_stream_flow()` — deliberately,
+    since a #298 card-reopen is a plain user priority marker on THIS one
+    ticket, not a cross-stream gatekeeper<->sub-dev hand-off signal. On a
+    repo NOT enrolled in `_CROSS_STREAM_REPOS` the label carries no
+    automated meaning at all (job 8's `bounce_backstop` only ever queries
+    enrolled repos, per its own established discipline against reading a
+    bare `prio:bounce` on an unrelated repo as a protocol artifact) — it is
+    just a normal, human-visible priority tag here."""
     call = gh_fn or _gh_call
     call(["gh", "issue", "reopen", str(issue), "-R", repo])
     ok, _out = call(["gh", "issue", "comment", str(issue), "-R", repo, "-F", "-"],
@@ -3359,24 +3377,60 @@ def _flag_target(msg_id, qmap, cardmap):
 
 
 def _flag_delivery_target(target, panes_by_sid, cwd_by_sid, run=None):
-    """(sid, pid, cwd) of the pane to deliver a #297 flag-prompt into, or
-    None. Prefers the EXACT asking session while it is still alive
+    """(sid, pid, cwd, exact) of the pane to deliver a #297 flag-prompt
+    into, or None. Prefers the EXACT asking session while it is still alive
     (question kind); otherwise falls back to the nearest live pane whose
     repo matches — the ticket's own explicit fallback clause, and the SAME
-    resolution `_repo_live_pane` gives #298's post-reopen nudge."""
+    resolution `_repo_live_pane` gives #298's post-reopen nudge.
+
+    `exact` (adversarial-review MAJOR-1) tells the caller WHICH delivery
+    gate to use: True only for the exact-asking-session branch, where the
+    flagged message IS the very ❓ that session's transcript is sitting on
+    — job 7's own idle/draft gate must apply there (never job 8's
+    at-rest discipline, which REFUSES a session whose last marker is ❓,
+    which would make the dominant #297 use case never deliver at all).
+    False for every repo-fallback / card-kind resolution, where the target
+    pane may be doing something UNRELATED and the stronger at-rest check is
+    correct."""
     from notify import repo_name_for
     if target.get("kind") == "question":
         sess = target.get("session") or ""
         pane = panes_by_sid.get(sess)
         if pane:
-            return sess, pane[0], target.get("cwd", "")
+            return sess, pane[0], target.get("cwd", ""), True
         cwd = target.get("cwd") or ""
         repo = repo_name_for(cwd, run=run) if cwd else ""
     else:
         repo = str(target.get("repo") or "").rstrip("/").split("/")[-1]
     if not repo:
         return None
-    return _repo_live_pane(repo, cwd_by_sid, panes_by_sid, run=run)
+    found = _repo_live_pane(repo, cwd_by_sid, panes_by_sid, run=run)
+    return (found[0], found[1], found[2], False) if found else None
+
+
+def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None):
+    """Deliver a #297 flag-prompt into the EXACT session that is (or was)
+    asking the flagged question — job 7's OWN idle/draft delivery gate
+    (`pane_at_idle_prompt`/`deliver_with_stash` via `_try_stash_nudge`),
+    never `_nudge_repo_pane`'s job-8-style `_safe_to_bounce_nudge` check.
+
+    Adversarial-review MAJOR-1: that stronger gate refuses ANY session
+    whose transcript's last marker is ❓ ("never interject before the user
+    answers") — but a tracked outstanding question's asking session is, BY
+    CONSTRUCTION, sitting at exactly that marker (it is what fired the ❓
+    ping being flagged). This is job 7's OWN everyday operating condition
+    for delivering a REPLY, so the same gate is correct here too — a
+    genuinely BUSY (mid-turn / dialog / copy-mode) pane still gets
+    nothing, via `pane_in_mode`/`pane_at_idle_prompt` exactly as job 7's
+    reply flow already enforces."""
+    captured = capture_pane(pid, run)
+    if pane_in_mode(pid, run):
+        return False
+    if not pane_at_idle_prompt(captured):
+        return _try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
+    if not dry_run:
+        send_continue(pid, text, run)
+    return True
 
 
 _FLAG_PROMPT_TEMPLATE = (
@@ -3428,7 +3482,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             hosted_users=None, foreign_questions=None,
                             foreign_drop=None, cwd_by_sid=None,
                             projects_dir=PROJECTS_DIR, reaction_fetch=None,
-                            card_gh_fn=None):
+                            card_gh_fn=None, persist=None):
     """Route owner Discord replies into the sessions that asked (job 7) — AND
     (#297/#298) a ❓/❔ REACTION on a tracked bot message, and a REPLY on a
     tracked completion CARD.
@@ -3459,9 +3513,17 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     `gh_comment`/its local `gh_fn` below — the two are unrelated gh call sites
     and sharing a name would silently shadow one of them): injectable
     `(argv, input_text=None) -> (ok, stdout)` for the card-reopen flow's `gh`
-    calls; defaults to a real subprocess (`_gh_call`)."""
+    calls; defaults to a real subprocess (`_gh_call`).
+
+    `persist` (#297/#298 review MAJOR-4): the caller's save-state closure,
+    called immediately after EACH successful card-reopen or flag-react
+    dedup-marks — mirrors jobs 8/11's "dedup memory BEFORE the next item"
+    shape, so a mid-sweep kill between two fetched messages never loses the
+    marker for a mutation that already landed (a real `gh` reopen/comment or
+    a real keystroke delivery). Defaults to a no-op; `run_once`'s own trailing
+    `save_state()` still covers the ordinary case."""
     from notify import (bot_token, known_owner_ids, load_questions, drop_question,
-                        _read_env, load_cards)
+                        _read_env, load_cards, forget_marker)
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
@@ -3492,6 +3554,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     gh_fn = gh_comment or _gh_comment
     react_fetch = reaction_fetch or fetch_reaction_users
     card_gh = card_gh_fn or _gh_call
+    persist = persist or (lambda: None)
 
     done = state.get("dreply_done")
     done = list(done) if isinstance(done, list) else []
@@ -3507,8 +3570,12 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     react_done = state.get("dreact_done")
     react_done = list(react_done) if isinstance(react_done, list) else []
     react_done_set = set(react_done)
-    channels = {str(v.get("channel") or "") for v in qmap.values()}
-    channels |= {str(v.get("channel") or "") for v in cardmap.values()}
+    # MINOR-7 (#297/#298 review): a malformed/legacy qmap/cardmap entry (not
+    # a dict) must not crash the channel-set build — skip it, never guess.
+    channels = {str(v.get("channel") or "") for v in qmap.values()
+                if isinstance(v, dict)}
+    channels |= {str(v.get("channel") or "") for v in cardmap.values()
+                if isinstance(v, dict)}
     channels.discard("")
 
     def _ack(r):
@@ -3589,15 +3656,31 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                         deliver = _flag_delivery_target(
                             target, panes_by_sid, cwd_by_sid, run=run)
                         if deliver is not None:
-                            d_sid, d_pid, d_cwd = deliver
+                            d_sid, d_pid, d_cwd, d_exact = deliver
                             prompt = compose_flag_prompt(msg.get("content"))
-                            ok = _nudge_repo_pane(d_pid, d_cwd, run, prompt,
-                                                  dry_run, projects_dir,
-                                                  logs=logs)
-                            if ok:
+                            # MAJOR-1 (adversarial review): the EXACT
+                            # asking session's own ❓ marker must never
+                            # block delivery of the flag ABOUT that very
+                            # question — job 7's own idle/draft gate, not
+                            # job 8's at-rest discipline, which refuses
+                            # any ❓-marker session outright.
+                            if d_exact:
+                                ok = _deliver_flag_prompt_to_exact_session(
+                                    d_pid, run, prompt, dry_run, logs=logs)
+                            else:
+                                ok = _nudge_repo_pane(d_pid, d_cwd, run, prompt,
+                                                      dry_run, projects_dir,
+                                                      logs=logs)
+                            if ok and not dry_run:
                                 react_done_set.add(mid)
                                 react_done.append(mid)
+                                state["dreact_done"] = react_done[-_DREPLY_DONE_CAP:]
+                                persist()
                                 logs.append("flag-react→%s [%s]"
+                                            % (project_label(d_cwd),
+                                               d_sid[:12] if d_sid else "-"))
+                            elif ok:
+                                logs.append("flag-react (dry-run)→%s [%s]"
                                             % (project_label(d_cwd),
                                                d_sid[:12] if d_sid else "-"))
                             else:
@@ -3619,14 +3702,25 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 else:
                     reopened = _card_reopen_flow(cr["repo"], cr["issue"],
                                                  cr["text"], gh_fn=card_gh)
-                if reopened:
+                if reopened and not dry_run:
                     card_done_set.add(cr["reply_id"])
                     card_done.append(cr["reply_id"])
+                    state["dcard_done"] = card_done[-_DREPLY_DONE_CAP:]
+                    persist()
                     logs.append("card-reopen #%s (%s)"
                                 % (cr["issue"], cr["repo"]))
-                    if not dry_run:
-                        _react_ok(cr["channel"] or ch, cr["reply_id"], token)
+                    # MINOR-9: prefer the FETCHING channel `ch` (this is the
+                    # channel the reply was actually read from) — `cr["channel"]`
+                    # is only a best-effort fallback for a card record from
+                    # before that field existed.
+                    _react_ok(ch or cr["channel"], cr["reply_id"], token)
                     bare = cr["repo"].rstrip("/").split("/")[-1]
+                    # MAJOR-5: the ticket's own run-card dedup marker (written
+                    # at card-send time) would otherwise block a FRESH card
+                    # once the worker re-fixes and re-closes this issue —
+                    # release it now that the user has flagged the old one
+                    # as needing another look.
+                    forget_marker("%s#%s" % (bare, cr["issue"]))
                     ctarget = _repo_live_pane(bare, cwd_by_sid, panes_by_sid,
                                               run=run)
                     if ctarget is not None:
@@ -3635,6 +3729,9 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             c_pid, c_cwd, run,
                             compose_card_reopen_nudge(cr["issue"]),
                             dry_run, projects_dir, logs=logs)
+                elif reopened:
+                    logs.append("card-reopen (dry-run) #%s (%s)"
+                                % (cr["issue"], cr["repo"]))
                 else:
                     logs.append("card-reopen failed #%s (%s)"
                                 % (cr["issue"], cr["repo"]))
@@ -13103,7 +13200,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             dry_run=dry_run, discord_fetch=discord_fetch,
                                             hosted_users=hosted_users,
                                             cwd_by_sid=cwd_by_sid,
-                                            projects_dir=projects_dir)
+                                            projects_dir=projects_dir,
+                                            persist=lambda: save_state(state_path, state))
         except Exception as e:
             logs.append("discord-reply error: %r" % (e,))
 
