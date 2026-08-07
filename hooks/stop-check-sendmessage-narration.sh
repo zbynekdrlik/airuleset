@@ -2,13 +2,19 @@
 set -euo pipefail
 
 # Hook: Stop
-# Enforces subagent-continuation.md: NEVER narrate that SendMessage is
-# unavailable, and never frame a fresh dispatch as a fallback for a failed
-# continuation. SendMessage (continue a subagent) is gated behind
-# CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 and is off by default — so the model
-# keeps writing "SendMessage to that worker isn't available here, so I'm
-# dispatching a fresh worker" (the user has flagged this repeatedly). Just
-# dispatch the fresh worker silently with full context embedded.
+# Enforces subagent-continuation.md's narrower, mechanically-detectable slice:
+# NEVER narrate SendMessage (un)availability and never frame a fresh dispatch
+# as a "fallback" for a failed continuation. SendMessage is a real, loadable
+# tool on current Claude Code (no CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS flag
+# required — airuleset #299) but it only ever reaches a STILL-RUNNING/
+# resumable agent; a dead agent's SendMessage goes nowhere, so a fresh
+# dispatch from durable state stays the fallback there. Narrating
+# "SendMessage isn't available here, so I'm dispatching a fresh worker" (or
+# any rewording) is banned (the user has flagged this repeatedly) — just
+# dispatch the fresh worker silently. The module ALSO bans narrating a
+# SUCCESSFUL SendMessage redirect ("SendMessage worked, redirecting the
+# running agent") — this hook's VIOLATION regex below does not (yet) detect
+# that direction; it is prose-only until a follow-up widens detection.
 #
 # Blocks via {"decision":"block"} with a per-session retry cap. ESCAPE skips the
 # block when the message is META (discussing/prohibiting the rule — editing the
@@ -45,7 +51,7 @@ fi
 
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
-    REASON="You narrated that SendMessage is unavailable and framed a fresh subagent dispatch as a fallback (subagent-continuation.md — the user has flagged this repeatedly). SendMessage (continue a spawned subagent) is gated behind CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 and is OFF by default, so it never works — treat EVERY dispatch as one-shot. Rewrite the message: DROP the 'SendMessage isn't available here, so I'm dispatching a fresh worker' narration entirely. Just dispatch the fresh worker with ALL needed context (the finding, the decision, the skill to enforce, the prior state) embedded in its prompt, and have it resume from durable state (git branch / open PR / gh / files / board). Do not mention SendMessage or the continuation fallback at all."
+    REASON="You narrated that SendMessage is unavailable and framed a fresh subagent dispatch as a fallback (subagent-continuation.md — the user has flagged this repeatedly). SendMessage IS a real, loadable tool on current Claude Code (no AGENT_TEAMS flag required — see #299), but it only ever reaches a still-running/resumable agent — a dead agent's SendMessage goes nowhere, so a fresh dispatch stays correct here too. Rewrite the message: DROP the 'SendMessage isn't available here, so I'm dispatching a fresh worker' narration entirely. Just dispatch the fresh worker with ALL needed context (the finding, the decision, the skill to enforce, the prior state) embedded in its prompt, and have it resume from durable state (git branch / open PR / gh / files / board). Do not mention SendMessage or the continuation fallback at all."
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
 fi

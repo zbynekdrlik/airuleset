@@ -5410,8 +5410,8 @@ def _notify_run_card(args, compose_autopilot_card, send):
             done=None, remaining=remaining, urls=getattr(args, "url", None),
             handoff=getattr(args, "handoff", False), scope_label=scope_label)
         # Dedup on the REPO-NAME#ISSUE — the stable unit. /autopilot re-dispatches a
-        # fresh worker each turn (SendMessage is gated), so the same issue can be
-        # carded more than once; keying on repo-name#issue collapses those to one.
+        # fresh worker each turn a stopped worker is presumed dead, so the same issue
+        # can be carded more than once; keying on repo-name#issue collapses those to one.
         # Use only the repo's last path segment so a bare name ("odoo-erp") and the
         # full "owner/odoo-erp" collapse to one key. (`name` computed earlier, above
         # the goal/achieved validation block, so a refusal shares this same key.)

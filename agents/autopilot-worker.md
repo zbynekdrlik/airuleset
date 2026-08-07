@@ -202,8 +202,9 @@ one session) and releases it after verifying your evidence block. You never call
 yourself — just do your work; the lock is the supervisor's concern.
 
 1. `git fetch origin`; confirm you are on `dev` with a clean tree. **RESUME, don't restart:** you may
-   be a RE-DISPATCH of an earlier worker on this same issue (the supervisor cold-starts a fresh worker
-   because `SendMessage` continuation isn't available by default — that's expected, not an error).
+   be a RE-DISPATCH of an earlier worker on this same issue (a worker that stopped invoking the
+   supervisor is presumed DEAD and the supervisor cold-starts a fresh one from durable state —
+   that's expected, not an error; `subagent-continuation.md`).
    Before doing anything, check for work already in flight for the named issue(s): an open PR
    (`gh pr list --head dev --json number,title,body` — its body may already `Closes` some members)
    and commits already on `dev` since `main` (`git log origin/main..dev --oneline`). If the version is
