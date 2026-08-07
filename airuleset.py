@@ -4189,8 +4189,16 @@ def cmd_notify(args):
     if getattr(args, "provision_question_thread", False):
         # #296: one-time setup — create (if missing) + persist the owner's
         # questions thread claude-<owner>-q into the local .env.
+        # --owner-name is normalized THE SAME WAY resolve_owner() normalizes
+        # its own result (adversarial-review finding): an un-normalized typo
+        # like a trailing space would otherwise create a REAL Discord thread
+        # and persist it under a dead .env key
+        # ("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK _Q") that no reader ever
+        # resolves — a silent misprovision, not a loud refusal.
         from notify import provision_question_thread, resolve_owner
-        owner = getattr(args, "owner_name", None) or resolve_owner()
+        owner_name = getattr(args, "owner_name", None)
+        owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+                if owner_name else resolve_owner())
         tid = provision_question_thread(owner)
         if tid:
             sys.stdout.write(tid)

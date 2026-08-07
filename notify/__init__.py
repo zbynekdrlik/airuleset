@@ -283,12 +283,84 @@ def notification_channel(env=None, owner=None, kind="default"):
 # --------------------------------------------------------------------------- #
 
 
+def _owner_anchor_channel(env, owner):
+    """The owner's OWN configured normal thread —
+    `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` ONLY, never the cascaded/shared
+    fallback `notification_channel()` would fall through to. Used to anchor
+    a NEW `-q` thread: falling back to the SHARED channel here would (in the
+    rare case that shared channel itself happens to be a thread) let one
+    owner's questions-thread creation silently anchor off infrastructure
+    meant for everyone, not this owner — and "no existing thread to anchor
+    off of" should mean exactly that, not "no shared fallback either"."""
+    if not owner:
+        return ""
+    return (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
+
+
 def _channel_parent_id(token, channel_id, http=None):
-    """The PARENT channel id of a Discord THREAD `channel_id` — None when it
-    isn't a thread, or the lookup fails. Never raises."""
+    """The `parent_id` Discord reports for `channel_id` — populated both for
+    a genuine THREAD (its parent channel) and for a plain guild channel that
+    sits inside a CATEGORY (the category's id), so a non-null result alone
+    does NOT prove `channel_id` is a thread. `create_owner_question_thread`
+    relies on Discord itself rejecting a malformed thread-create POST
+    against a category id (it can never create a thread in the wrong
+    place), not on this function disambiguating the two shapes. None when
+    the lookup fails or the channel genuinely has no parent. Never raises."""
     api = http or _discord_api
     info = api(token, "GET", "channels/%s" % channel_id)
     return info.get("parent_id") if isinstance(info, dict) else None
+
+
+def _threads_of(resp):
+    """The list of thread dicts in a Discord thread-listing response
+    (`{"threads": [...], ...}`), or [] for any unexpected shape — a failed
+    API call (`resp` not a dict), a missing/None/non-list `threads` key, or
+    non-dict entries inside it. Never raises."""
+    threads = resp.get("threads") if isinstance(resp, dict) else None
+    if not isinstance(threads, list):
+        return []
+    return [t for t in threads if isinstance(t, dict)]
+
+
+def find_owner_question_thread(env, owner, http=None):
+    """FIND an existing `claude-<owner>-q` thread — the "nájde" half of
+    #296's own "vytvorí/nájde" requirement (adversarial-review MAJOR
+    finding). Without this, provisioning the SAME owner from a SECOND box
+    (or after a lost/rebuilt LOCAL .env — the questions-thread id is
+    box-local, non-git config) never searched Discord for an
+    already-created thread and unconditionally POSTED a new one, silently
+    forking that owner's questions across two threads. Searches the
+    owner's anchor channel's ACTIVE guild threads first, then its ARCHIVED
+    PUBLIC threads (a week-idle `-q` thread auto-archives at the
+    10080-minute duration `create_owner_question_thread` itself sets).
+    Returns the existing thread id, or "" when genuinely absent / on any
+    lookup failure — never guesses, never raises."""
+    token = bot_token(env)
+    if not token or not owner:
+        return ""
+    parent_ch = _owner_anchor_channel(env, owner)
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    info = api(token, "GET", "channels/%s" % parent_ch)
+    if not isinstance(info, dict):
+        return ""
+    parent_id = info.get("parent_id")
+    guild_id = info.get("guild_id")
+    if not parent_id:
+        return ""
+    name = "claude-%s-q" % owner
+    if guild_id:
+        active = api(token, "GET", "guilds/%s/threads/active" % guild_id)
+        for t in _threads_of(active):
+            if t.get("parent_id") == parent_id and t.get("name") == name:
+                return t.get("id") or ""
+    archived = api(token, "GET",
+                   "channels/%s/threads/archived/public" % parent_id)
+    for t in _threads_of(archived):
+        if t.get("name") == name:
+            return t.get("id") or ""
+    return ""
 
 
 def create_owner_question_thread(env, owner, http=None):
@@ -298,12 +370,14 @@ def create_owner_question_thread(env, owner, http=None):
     bot posts into), just extended to a second thread per owner. Returns the
     new thread id, or "" on any failure (no token, no owner, the owner has
     no existing thread to anchor off of, the parent lookup/create call
-    fails) — never raises. Does NOT persist the result; see
-    `provision_question_thread` for the idempotent create-and-save action."""
+    fails) — never raises. Does NOT persist the result, and does NOT search
+    for an existing thread first; see `provision_question_thread` for the
+    idempotent find-then-create-and-save action (`find_owner_question_thread`
+    is the "find" half)."""
     token = bot_token(env)
     if not token or not owner:
         return ""
-    parent_ch = notification_channel(env, owner)        # kind="default"
+    parent_ch = _owner_anchor_channel(env, owner)
     if not parent_ch:
         return ""
     api = http or _discord_api
@@ -319,12 +393,19 @@ def create_owner_question_thread(env, owner, http=None):
 def _env_upsert(path, key, value):
     """Append/replace ONE `KEY=value` line in the local .env at `path` —
     creates the file (and its parent dir) if missing. Idempotent: replaces
-    an EXISTING `KEY=...` line in place rather than duplicating it. Returns
-    True on success, False on any I/O failure. Never raises."""
+    an EXISTING `KEY=...` line in place rather than duplicating it. The read
+    tolerates non-UTF8 bytes the SAME way `_read_env()` already does
+    (`errors="replace"` — this file also holds `DISCORD_BOT_TOKEN`, so
+    falling back to an EMPTY line list on a decode wobble would silently
+    destroy every other key instead of just this one). The write is
+    ATOMIC (tmp file + `os.replace`, mirroring `_save_questions()` in this
+    same module) — a crash mid-write can never leave the token file half
+    truncated. Returns True on success, False on any I/O failure. Never
+    raises."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
-            with open(path, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
         except OSError:
             lines = []
@@ -339,8 +420,10 @@ def _env_upsert(path, key, value):
             if lines and not lines[-1].endswith("\n"):
                 lines[-1] += "\n"
             lines.append("%s=%s\n" % (key, value))
-        with open(path, "w", encoding="utf-8") as fh:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.writelines(lines)
+        os.replace(tmp, path)
         return True
     except OSError:
         return False
@@ -349,12 +432,14 @@ def _env_upsert(path, key, value):
 def provision_question_thread(owner, env=None, env_path=None, http=None):
     """Idempotently ENSURE `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` is
     configured for `owner` (#296): returns the EXISTING id unchanged (zero
-    network calls) when already set; otherwise creates the thread
-    (`create_owner_question_thread`) and appends the key to the local .env
-    (`_env_upsert`). Returns the id on success, "" on any failure — never
-    raises. A one-time, explicit provisioning action (CLI:
-    `notify --provision-question-thread`), NOT wired into every
-    `push`/`install`."""
+    network calls) when already set; otherwise FINDS an existing
+    `claude-<owner>-q` thread on Discord itself (`find_owner_question_thread`
+    — the fix for the duplicate-thread-per-box finding above) before
+    falling back to creating one (`create_owner_question_thread`), then
+    appends the key to the local .env (`_env_upsert`). Returns the id on
+    success, "" on any failure — never raises. A one-time, explicit
+    provisioning action (CLI: `notify --provision-question-thread`), NOT
+    wired into every `push`/`install`."""
     if not owner:
         return ""
     path = env_path if env_path is not None else _env_path()
@@ -363,7 +448,8 @@ def provision_question_thread(owner, env=None, env_path=None, http=None):
                 or "").strip()
     if existing:
         return existing
-    new_id = create_owner_question_thread(env, owner, http=http)
+    new_id = (find_owner_question_thread(env, owner, http=http)
+              or create_owner_question_thread(env, owner, http=http))
     if not new_id:
         return ""
     _env_upsert(path, "DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q",
