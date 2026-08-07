@@ -37,8 +37,8 @@ _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
 
 # Stream personas whose tmux session name has NO Discord identity of its own
-# (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap route to
-# zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
+# (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
+# route to zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
 # — airuleset#295, 2026-08-07: the user's own statement, independently
 # corroborated by odoo-erp#2961's 2026-08-05 ACCESS DECISION comment,
 # montalu4 is the ONLY montalu-family account marek's own SSH key was added
@@ -66,6 +66,15 @@ STREAM_NOTIFY_OWNER = {
     "montalu3": "zbynek",
     "montalu4": "marek",
     "simap": "zbynek",
+    # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
+    # as simap/montalu -- its own tmux session name carries no Discord
+    # identity of its own, so it redirects outright to zbynek's own thread.
+    # DISCORD_MIRROR_MIVA1 was considered and rejected here (see #300's own
+    # design comment): that mechanism lives entirely in a LOCAL, non-git
+    # per-box .env this repo's code cannot provision or deploy, whereas this
+    # redirect satisfies the ticket's stated requirement fully and deploys
+    # automatically on the next push/install.
+    "miva1": "zbynek",
 }
 
 

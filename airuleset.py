@@ -5636,6 +5636,22 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
+    {
+        # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
+        # VPS as marek/david/simap (airuleset#300; tracking ticket for the
+        # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
+        # user + own SSH keypair, read-only GitHub deploy key, `develop`
+        # checkout, empty tmux session -- but no airuleset config until this
+        # entry lands. Registered with the SAME operator gatekeeper_access
+        # identity requirement as marek/david/simap (never montalu's
+        # default-key path), matching this ticket's own "same phase-1
+        # isolated shape as simap" framing.
+        "name": "miva1@subdev",
+        "host": "100.118.174.27",
+        "user": "miva1",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
 ]
 
 
@@ -6578,6 +6594,9 @@ AUTHORITY_BY_USER = {
     "montalu2": "branch-merge",
     "montalu3": "branch-merge",
     "montalu4": "branch-merge",
+    # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
+    # as simap -- merges nowhere, fork-no-merge is already correct.
+    "miva1": "fork-no-merge",
 }
 
 
