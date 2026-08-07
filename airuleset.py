@@ -1186,6 +1186,60 @@ def render_claude_history_script():
     return CLAUDE_HISTORY_SCRIPT_CONTENT
 
 
+# #289: the popup's own logic lives in a SEPARATE SCRIPT FILE, invoked BY
+# PATH from the tmux bind-key command line -- never inlined as a shell
+# one-liner embedded in the conf. Verified live, tmux 3.7b: tmux's OWN
+# conf-file DOUBLE-QUOTE parser expands `$VAR` at CONF-PARSE/bind time
+# (using tmux's OWN process environment), not at shell-run time -- so
+# `$CH_OUT`/`$CH_RC`/`$?` referenced inline in a double-quoted popup
+# command silently blanked to EMPTY STRING before the shell ever ran
+# (confirmed via `list-keys`: the bound command showed `if [ "" -ne 0 ]`
+# where `"$CH_RC"` should have been). Single-quoted tmux strings do NOT
+# expand `$VAR` (also verified live) but tmux's own single-quote parsing
+# supports no escapes at all -- embedding a literal `'` (this command's
+# own `printf '%s...'` calls need several) would require the POSIX
+# quote-splice idiom (`'...'\''...'`, confirmed tmux honours it too) on
+# EVERY embedded quote, which is exactly the class of hand-spliced-quoting
+# bug this repo's own playbook already warns is fragile and easy to get
+# wrong. A script file invoked by its own ABSOLUTE PATH sidesteps the
+# whole landmine: the ONLY thing the tmux bind-key line needs to resolve
+# is the path itself, baked in at Python RENDER time (this box's own
+# `Path.home()`, correct for the user `install`/`push` runs as) -- no
+# `$VAR` of any kind needs to survive the conf-parser at all.
+CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
+CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
+# airuleset-managed (do NOT edit) -- claude-history popup companion (#289).
+# Invoked from the managed tmux S-F1 / prefix-h display-popup bind
+# (TMUX_POPUP_BIND_ARGVS in airuleset.py). FAILS LOUDLY, never silently:
+# claude-history's own stderr message is shown and the popup waits for a
+# keypress before closing, rather than handing `less` empty stdin (which
+# can close instantly with nothing to read).
+set -euo pipefail
+
+# `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script BEFORE
+# the next line ever runs (a failing command substitution used in a plain
+# assignment is an unhandled failure under -e) -- the `|| CH_RC=$?` form
+# is the established fix: it captures the real exit code without tripping
+# -e, and CH_RC stays unset (defaulted to 0 below) on the success path.
+CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full 2>&1) || CH_RC=$?
+CH_RC="${CH_RC:-0}"
+
+if [ "$CH_RC" -ne 0 ]; then
+  printf '%s\n\nclaude-history: press any key to close.\n' "$CH_OUT"
+  read -n 1 -r -s _dummy || true
+else
+  printf '%s\n' "$CH_OUT" | less +G
+fi
+'''
+
+
+def render_claude_history_popup_script():
+    """The popup-script content -- no template substitution needed, same
+    "always render through a function" discipline as the sibling scripts
+    above."""
+    return CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT
+
+
 # .bashrc holds ONLY thin one-line functions -- no flag literal survives here,
 # so nothing flag-shaped can ever be frozen in a shell's memory again.
 ULTRACODE_BASHRC_BLOCK = (
@@ -1201,11 +1255,15 @@ ULTRACODE_BASHRC_BLOCK = (
 
 
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
-                              history_script_path: Path = None) -> bool:
+                              history_script_path: Path = None,
+                              popup_script_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
-    parallel marker-block machinery).
+    parallel marker-block machinery) AND the claude-history POPUP
+    companion script (#289 -- see the module comment above
+    CLAUDE_HISTORY_POPUP_SCRIPT_DEST for why this is its OWN script file
+    rather than an inline shell command in the tmux bind-key line).
 
     The SCRIPT (script_path, default CLAUDE_LAUNCH_SCRIPT_DEST) is written and
     chmod +x UNCONDITIONALLY on every call — like the caveman shim, it must
@@ -1214,8 +1272,10 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     actual logic, so a `push` changes launch behavior in every already-running
     shell immediately, with no `source ~/.bashrc` and no restart. The
     claude-history script (history_script_path, default
-    CLAUDE_HISTORY_SCRIPT_DEST) gets the IDENTICAL unconditional write +
-    chmod +x + missing-after-write RuntimeError treatment.
+    CLAUDE_HISTORY_SCRIPT_DEST) and the claude-history POPUP script
+    (popup_script_path, default CLAUDE_HISTORY_POPUP_SCRIPT_DEST) both get
+    the IDENTICAL unconditional write + chmod +x + missing-after-write
+    RuntimeError treatment.
 
     The ~/.bashrc block is idempotent (replaces the marked block if present,
     else appends it) and holds ONLY thin wrapper functions with no flag
@@ -1224,6 +1284,7 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     bpath = bashrc_path or BASHRC
     spath = script_path or CLAUDE_LAUNCH_SCRIPT_DEST
     hpath = history_script_path or CLAUDE_HISTORY_SCRIPT_DEST
+    ppath = popup_script_path or CLAUDE_HISTORY_POPUP_SCRIPT_DEST
 
     spath.parent.mkdir(parents=True, exist_ok=True)
     spath.write_text(render_claude_launch_script())
@@ -1236,6 +1297,12 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     os.chmod(str(hpath), 0o755)
     if not hpath.exists():
         raise RuntimeError(f"claude-history script missing right after write: {hpath}")
+
+    ppath.parent.mkdir(parents=True, exist_ok=True)
+    ppath.write_text(render_claude_history_popup_script())
+    os.chmod(str(ppath), 0o755)
+    if not ppath.exists():
+        raise RuntimeError(f"claude-history popup script missing right after write: {ppath}")
 
     existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
@@ -1541,16 +1608,137 @@ TMUX_SCROLLBACK_KEYBINDS = [
 ]
 
 
+# #289: a one-keystroke POPUP over `claude-history` (#267's companion --
+# reads the session TRANSCRIPT, immune to the tmux frame-stacking defect
+# S-PageUp above merely scrolls INTO). Root problem this closes: #267
+# shipped claude-history but gave the user no discoverable path to it from
+# a running session; #289 was reopened because nobody ever typed the bare
+# command.
+#
+# KEY CHOICE (engineer's call, ask-before-assuming.md -- an internal/
+# diagnostic element's placement has no user stake): Shift+F1 (`S-F1`),
+# root table, no prefix. Neither stock tmux nor this repo's own managed
+# conf binds F1/S-F1 anywhere (verified live, `-f /dev/null` throwaway
+# socket for the stock case, the real `~/.tmux.conf` for the managed
+# case -- both `list-keys -T root | grep -i F1` empty). F-keys carry no
+# printable-character meaning, so Claude Code's own text-input handling
+# has nothing to intercept; Shift (not bare F1) avoids the narrower risk
+# of a terminal EMULATOR reserving bare F1 for its own "help" binding.
+# `prefix + h` (mnemonic: history) is the documented fallback -- also
+# unbound in stock tmux's prefix table (verified the same way) -- for an
+# ssh client/terminal that eats Shift+F-keys.
+#
+# MECHANISM: `display-popup`'s own SHELL-COMMAND argument is NOT format-
+# expanded by tmux (verified live, tmux 3.7b: a literal `#{pane_id}`
+# inside the command string reaches the shell UNSUBSTITUTED). `-d`
+# (start-directory) IS format-expanded (verified live the same way) --
+# so `-d '#{pane_current_path}'` puts the popup's shell in the
+# ORIGINATING PANE's own cwd, and claude-history's own `--cwd` default
+# (`os.getcwd()`) then resolves the right project with no `--pane`
+# argument needed at all. The popup invokes the POPUP SCRIPT
+# (CLAUDE_HISTORY_POPUP_SCRIPT_DEST, an absolute path baked in at Python
+# render time) directly -- never the `claude-history` bashrc FUNCTION,
+# since `display-popup` runs its shell-command non-interactively and
+# `~/.bashrc` (where the function lives) is never sourced.
+#
+# ADVERSARIAL-REVIEW-CLASS FINDING (self-caught via live verification,
+# #289): the shell-command argument was ORIGINALLY inlined directly on
+# this bind-key line (a `CH_OUT=$(...); CH_RC=$?; if [ "$CH_RC" -ne 0 ]
+# ...` one-liner) -- and it silently produced `if [ "" -ne 0 ]` at
+# runtime (confirmed via `list-keys` on the ACTUAL bound command, and via
+# a real S-F1 keypress through a genuinely attached pty client reading
+# the raw popup overlay bytes -- `capture-pane` does NOT see a popup's
+# content at all, since it is a client-side rendering overlay, never part
+# of any pane's own buffer). Root cause: tmux's OWN conf-file DOUBLE-QUOTE
+# parser EXPANDS `$VAR` at CONF-PARSE/bind time (using tmux's own process
+# environment), not at shell-run time -- `$CH_OUT`/`$CH_RC`/`$?` don't
+# exist in THAT environment, so they were silently blanked to empty
+# string before the shell that eventually ran the command ever saw them.
+# Single-quoted tmux strings do NOT expand `$VAR` (also verified live),
+# but tmux's own single-quote parsing supports no escapes at all, so
+# embedding this command's own several `printf '%s...'` single quotes
+# would need the POSIX quote-splice idiom on every one of them (tmux DOES
+# honour `'...'\''...'`, verified live) -- fragile, easy to get wrong, and
+# exactly the class of hand-spliced-quoting bug this repo's own playbook
+# already flags. Moving the logic into its OWN script file, invoked by
+# absolute path, sidesteps the whole landmine: the only thing the
+# bind-key line needs to resolve is the path itself, which needs no `$VAR`
+# to survive tmux's conf parser at all. See CLAUDE_HISTORY_POPUP_SCRIPT_DEST.
+#
+# FAIL LOUDLY, NEVER SILENTLY: claude-history exits nonzero with a clear
+# stderr message when no transcript exists for the resolved cwd (#267's
+# own behavior, unchanged). A bare `claude-history | less` would then
+# hand `less` empty stdin, which can close instantly with nothing to
+# read -- the exact "no silent instant-close" failure this ticket's own
+# acceptance forbids. The popup script captures claude-history's output +
+# exit code explicitly and, on failure, prints the error and waits for a
+# keypress instead of piping into `less` at all.
+#
+# LIVE-APPLY SAFETY: a `bind-key` call is a pure key-table registration
+# (see the #267 comment above `TMUX_SCROLLBACK_KEYBINDS` for the full
+# argument -- no window geometry read or written, nothing already
+# rendered by the CC TUI touched) -- identical safety class to the
+# S-PageUp/PageDown binds, so both popup binds are live-applied the same
+# way, never conf-only.
+TMUX_POPUP_KEY = "S-F1"
+TMUX_POPUP_PREFIX_KEY = "h"
+
+
+def _tmux_popup_bind_argv(key, in_prefix_table):
+    """The `bind-key ... display-popup ...` argv for `key` -- `-n` (root
+    table, no prefix) when `in_prefix_table` is False, omitted (default
+    "prefix" table) otherwise. Shared verbatim between the live-apply
+    subprocess call (a plain argv list, no shell involved -- each element
+    is already exactly one tmux token) and the rendered conf line (which
+    needs REAL quoting, see `_tmux_conf_quote` -- unlike
+    TMUX_SCROLLBACK_KEYBINDS, several of these tokens contain spaces).
+    The invoked command is the POPUP SCRIPT's own ABSOLUTE PATH (baked in
+    at Python render time -- see the module comment above TMUX_POPUP_KEY
+    for why this, not an inline shell command, is the safe shape)."""
+    argv = ["bind-key"]
+    if not in_prefix_table:
+        argv.append("-n")
+    argv += [key, "display-popup", "-E", "-w", "90%", "-h", "90%",
+             "-d", "#{pane_current_path}", "-T", "claude-history",
+             str(CLAUDE_HISTORY_POPUP_SCRIPT_DEST)]
+    return argv
+
+
+TMUX_POPUP_BIND_ARGVS = [
+    _tmux_popup_bind_argv(TMUX_POPUP_KEY, in_prefix_table=False),
+    _tmux_popup_bind_argv(TMUX_POPUP_PREFIX_KEY, in_prefix_table=True),
+]
+
+
+def _tmux_conf_quote(word):
+    """Quote a single conf-line WORD (argv element) for tmux's OWN config
+    parser. tmux's double-quote parsing supports `#{...}` format expansion
+    and passes `$VAR` straight through untouched -- shell expansion
+    happens later, when the popup's own shell actually runs the resulting
+    command -- so a shell-command STRING containing `$VAR` references is
+    safe to wrap in tmux double quotes unmodified. Only escapes what tmux
+    itself needs escaped (`\\` and `"`); single quotes need no escaping
+    inside a tmux double-quoted string."""
+    if word and not re.search(r'[\s"\\;#]', word):
+        return word
+    escaped = word.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
+
+
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE,
                                destroy_unattached=TMUX_DESTROY_UNATTACHED):
     keybind_lines = "\n".join(" ".join(argv) for argv in TMUX_SCROLLBACK_KEYBINDS)
+    popup_lines = "\n".join(
+        " ".join(_tmux_conf_quote(tok) for tok in argv)
+        for argv in TMUX_POPUP_BIND_ARGVS)
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
         f"set-option -g destroy-unattached {destroy_unattached}\n"
         f"set-option -g default-size {default_size}\n"
         f"{keybind_lines}\n"
+        f"{popup_lines}\n"
         f"{TMUX_MARK_END}"
     )
 
@@ -1654,6 +1842,12 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     picks up the keyboard scrollback shortcut immediately, with no
     restart and no keystroke sent to any pane.
 
+    #289: the two `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
+    fallback -- see the module comment above `TMUX_POPUP_KEY`) are live-
+    applied the SAME way, for the SAME reason -- a `bind-key` call is a
+    pure key-table registration, independent of and no riskier than the
+    scrollback keybinds it sits alongside.
+
     `run` defaults to a real `tmux` invocation and is injectable so tests
     never touch a real tmux server. A missing server / a nonzero exit
     (which `subprocess.run` does NOT raise on without `check=True` -- a
@@ -1688,6 +1882,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         ["tmux", "set-option", "-g", "destroy-unattached", str(destroy_unattached)],
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
+    live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
     for argv in live_argvs:
         try:
             result = runner(argv)
@@ -2257,8 +2452,15 @@ def cmd_diff(args):
 #
 # node/npx (#158): the managed Playwright plugin's MCP server needs a real
 # node/npx runtime, never tracked here before.
+#
+# less (#289): the claude-history popup (TMUX_POPUP_BIND_ARGVS) pipes into
+# `less +G` for paging -- verified present on every box checked so far
+# (dev1's own `dpkg -l` shows it as an ordinary Ubuntu base-image package,
+# not a nice-to-have), but never TRACKED here before, so a box that somehow
+# lacks it would silently break the popup with zero warning. This is the
+# sanctioned mechanism (autonomous-verification.md) for closing that gap.
 RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop",
-                 "node", "npx")
+                 "node", "npx", "less")
 
 # The apt PACKAGE name differs from the BINARY name for node/npx (#158):
 # Debian/Ubuntu's real "node" package is an unrelated amateur packet-radio
