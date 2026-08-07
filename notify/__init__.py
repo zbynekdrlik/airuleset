@@ -227,7 +227,7 @@ def stream_redirect(raw_owner):
     return STREAM_NOTIFY_OWNER.get(raw_owner, raw_owner)
 
 
-def notification_channel(env=None, owner=None):
+def notification_channel(env=None, owner=None, kind="default"):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 
     Per-owner routing: each person gets their OWN thread so notifications don't
@@ -238,14 +238,137 @@ def notification_channel(env=None, owner=None):
     to the shared `DISCORD_NOTIFICATION_CHANNEL_ID` when the owner has no per-owner
     thread configured OR the owner can't be determined (no tmux). Returns "" when
     neither is set. A Discord thread IS a channel in the API, so the POST target is
-    identical — only the id differs."""
+    identical — only the id differs.
+
+    `kind="questions"` (#296) resolves the owner's SEPARATE questions thread
+    (`DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q`) FIRST — so a ❓ ping lands in its
+    own `claude-<owner>-q` thread instead of mixing with ✅/card/api-error pings
+    in the owner's normal thread. It then falls through to the EXACT SAME cascade
+    `kind="default"` already uses (the owner's normal thread, then the shared id)
+    whenever the questions thread isn't configured yet for that owner — so an
+    owner with no provisioned `-q` thread keeps their pre-#296 behaviour
+    (questions land in their normal thread) instead of silently losing them to
+    the shared channel. `kind="default"` (the parameter's default) is
+    byte-for-byte the pre-#296 behaviour — every EXISTING caller (`send()`, the
+    run-card, api-error) never passes `kind=` at all and is unaffected."""
     env = _read_env() if env is None else env
     owner = resolve_owner() if owner is None else owner
     if owner:
+        if kind == "questions":
+            perq = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
+                    or "").strip()
+            if perq:
+                return perq
         per = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
         if per:
             return per
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
+
+
+# --------------------------------------------------------------------------- #
+# #296 -- provisioning the per-owner QUESTIONS thread (claude-<owner>-q).
+#
+# No code in this repo has ever created a Discord thread before -- the
+# existing per-owner threads (claude-zbynek / claude-marek / claude-david)
+# were configured BY HAND into the .env. #296's own body allows the mechanism
+# to CREATE the thread ("vlákno sa vytvorí/nájde"), and the ticket's live
+# acceptance criterion needs a REAL thread to post a test ❓ into -- so this
+# ships a thin, explicit, ONE-TIME provisioning action
+# (`notify --provision-question-thread`), NOT wired into `push`/`install`
+# (creating a thread for every possible stream owner on every deploy was not
+# asked for). It anchors the new thread as a SIBLING of the owner's EXISTING
+# thread (same Discord parent channel, found via one GET), so it needs no
+# extra "which channel" configuration, and persists the id into the local
+# (non-git) .env so every later resolution is a pure, side-effect-free read.
+# --------------------------------------------------------------------------- #
+
+
+def _channel_parent_id(token, channel_id, http=None):
+    """The PARENT channel id of a Discord THREAD `channel_id` — None when it
+    isn't a thread, or the lookup fails. Never raises."""
+    api = http or _discord_api
+    info = api(token, "GET", "channels/%s" % channel_id)
+    return info.get("parent_id") if isinstance(info, dict) else None
+
+
+def create_owner_question_thread(env, owner, http=None):
+    """Create the QUESTIONS thread `claude-<owner>-q` — a sibling of the
+    owner's EXISTING normal thread (same PARENT channel), the SAME mechanism
+    the existing per-owner threads already use (a real Discord thread the
+    bot posts into), just extended to a second thread per owner. Returns the
+    new thread id, or "" on any failure (no token, no owner, the owner has
+    no existing thread to anchor off of, the parent lookup/create call
+    fails) — never raises. Does NOT persist the result; see
+    `provision_question_thread` for the idempotent create-and-save action."""
+    token = bot_token(env)
+    if not token or not owner:
+        return ""
+    parent_ch = notification_channel(env, owner)        # kind="default"
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    parent_id = _channel_parent_id(token, parent_ch, http=api)
+    if not parent_id:
+        return ""
+    resp = api(token, "POST", "channels/%s/threads" % parent_id,
+              {"name": "claude-%s-q" % owner, "type": 11,
+               "auto_archive_duration": 10080})
+    return (resp.get("id") if isinstance(resp, dict) else "") or ""
+
+
+def _env_upsert(path, key, value):
+    """Append/replace ONE `KEY=value` line in the local .env at `path` —
+    creates the file (and its parent dir) if missing. Idempotent: replaces
+    an EXISTING `KEY=...` line in place rather than duplicating it. Returns
+    True on success, False on any I/O failure. Never raises."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            lines = []
+        prefix = key + "="
+        found = False
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith(prefix):
+                lines[i] = "%s=%s\n" % (key, value)
+                found = True
+                break
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append("%s=%s\n" % (key, value))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        return True
+    except OSError:
+        return False
+
+
+def provision_question_thread(owner, env=None, env_path=None, http=None):
+    """Idempotently ENSURE `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` is
+    configured for `owner` (#296): returns the EXISTING id unchanged (zero
+    network calls) when already set; otherwise creates the thread
+    (`create_owner_question_thread`) and appends the key to the local .env
+    (`_env_upsert`). Returns the id on success, "" on any failure — never
+    raises. A one-time, explicit provisioning action (CLI:
+    `notify --provision-question-thread`), NOT wired into every
+    `push`/`install`."""
+    if not owner:
+        return ""
+    path = env_path if env_path is not None else _env_path()
+    env = _read_env() if env is None else env
+    existing = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
+                or "").strip()
+    if existing:
+        return existing
+    new_id = create_owner_question_thread(env, owner, http=http)
+    if not new_id:
+        return ""
+    _env_upsert(path, "DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q",
+               new_id)
+    return new_id
 
 
 def mention_prefix(env=None, owner=None):

@@ -37,6 +37,13 @@ DELIVERY_FAILED=0
 [ -n "$EMOJI" ] || exit 0
 [ -n "$TEXT" ]  || exit 0
 
+# #296: a ❓ question ping routes to the owner's SEPARATE questions thread
+# (claude-<owner>-q); every other emoji (✅, and anything future) stays on
+# the existing claude-<owner> thread — resolved via --kind on the SAME
+# --channel-id call below, never a second channel-resolution mechanism.
+KIND="default"
+[ "$EMOJI" = "❓" ] && KIND="questions"
+
 # Project name for the header: git toplevel basename, else cwd basename.
 PROJECT=""
 if [ -n "$CWD" ]; then
@@ -137,7 +144,7 @@ emit_one() {
     local T="$1"
     local MENTION CH CONTENT
     MENTION=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
-    CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id 2>/dev/null | tr -d '\r\n' || echo "")
+    CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" 2>/dev/null | tr -d '\r\n' || echo "")
     # Skip a target whose (non-empty) thread was already emitted to — no double-post.
     if [ -n "$CH" ]; then
         case "$POSTED_CHANNELS" in *" $CH "*) return 0;; esac
