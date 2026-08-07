@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -944,6 +945,212 @@ class ToolsOtherThanBash(unittest.TestCase):
         self.assertIn("tool=Read", body)
         self.assertIn("DB_PASS.secret", body)
         self.assertIn("sha256=", body)
+
+
+class PerformanceIsBoundedFarBelowTheHarnessTimeout(unittest.TestCase):
+    """#162 — a hook that TIMES OUT (settings/hooks.json: timeout=5) is treated
+    by Claude Code as a non-blocking error, so the guarded command runs. The
+    architectural gap (a harness-level kill mid-python3-start) cannot be closed
+    from inside the script — but reachable trigger REGEXES can be, and round 1
+    of this ticket closed the then-DOMINANT one: VALUE_FILE_RE (`hooks/block-
+    vault-store-read.sh`, see its own comment right above its definition) had a
+    stem class overlapping the literal it searches for (`.secret` starts with
+    characters the stem class itself accepts), so `.search()`/`.finditer()`
+    over a long run with no `.secret` anywhere forced a full greedy-then-
+    backtrack sweep at every start offset — O(n^2). Measured on dev1 before the
+    fix: 50 KB -> 10,497 ms, 100 KB -> 54,643 ms, both far past the 5,000 ms
+    budget, from an entirely ordinary long argument (a base64 blob, an
+    embedded file body) with no glob, no exploit shape, nothing hidden.
+
+    A round-2 adversarial review found the IDENTICAL shape, unbounded, in two
+    more of this file's own regexes (BRACE_RE, RECURSIVE_RE — see
+    BraceAndRecursiveRegexesAreAlsoBounded below) and found BRACE_RE reachable
+    at a MUCH smaller size (4KB). Both are now bounded the same way.
+
+    This test uses a 50KB payload (not the ticket's original 18KB) for a wide
+    margin in BOTH directions — an earlier 18KB/1.5s version had only a 2.3%
+    RED margin on this box (an adversarial review finding, #162 round 2):
+    pre-fix ~10.5s vs the bound below is a wide RED margin, and post-fix this
+    payload normally completes in well under 500ms. BOUND_S is deliberately
+    set close to (but under) the hook's own 5s harness timeout rather than
+    the sub-second figure post-fix normally shows — this dev1 box routinely
+    runs many concurrent Claude sessions, and a tight bound flaked under
+    real, observed heavy load (a genuine >20 load average on 4 cores) even
+    though the regex fix itself was correctly applied; the WIDE bound still
+    catches the real O(n^2) blowup (>2x the bound even under that same
+    load) while not flaking on ordinary system contention.
+    """
+
+    BOUND_S = 4.5
+
+    def test_a_long_literal_argument_completes_well_under_the_timeout(self):
+        cmd = "cat " + "x" * 50000
+        start = time.perf_counter()
+        r = run(cmd)
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, self.BOUND_S,
+            "hook took %.3fs on a 50KB literal argument — this alone is close "
+            "to (or past) the 5s harness timeout on a real box under load, "
+            "which is the #162 fail-open this test exists to prevent"
+            % elapsed)
+        # And the verdict must still be correct — a long literal with no store
+        # reference anywhere is genuinely allowed, not accidentally blocked.
+        self.assertEqual(r.returncode, 0)
+
+
+class BraceAndRecursiveRegexesAreAlsoBounded(unittest.TestCase):
+    """#162 round 2 — an adversarial review of round 1's VALUE_FILE_RE fix found
+    the IDENTICAL overlapping-class-vs-literal-suffix ReDoS shape, still
+    unbounded, in two more of this hook's own regexes: BRACE_RE
+    (`expand_braces`) and RECURSIVE_RE (`sweeps_the_parent`). Both `[^{}]*`/
+    `[A-Za-z]*` groups accept the literal character(s) the pattern must find
+    next (`,`/`}` for BRACE_RE, `r`/`R` for RECURSIVE_RE), so a long run with
+    no match anywhere forces the same full greedy-then-backtrack sweep.
+
+    BRACE_RE was found MORE reachable than VALUE_FILE_RE's own gap, not less:
+    `expand_braces` runs on every token of every command (not gated behind an
+    earlier miss), so a 4KB unclosed brace alone already exceeded the 5s
+    budget — an order of magnitude smaller than VALUE_FILE_RE's 50KB trigger.
+    RECURSIVE_RE needs a bare `.claude`/glob-of-it already present in the
+    command (gated behind CLAUDE_ROOT_RE/globbed_parent_ref), so its
+    reachability is lower, but the underlying regex defect is identical.
+
+    Measured on dev1 before this round's fix (`{0,254}`/`{0,254}` per side):
+    a 24KB unclosed brace -> 4.05-7.03s, a 24KB `grep -rrr...= ~/.claude` ->
+    10.4-14.0s, both closing on the 5s harness timeout on their own. Post-fix
+    both normally complete in well under 300ms; BOUND_S is set close to (but
+    under) the hook's own 5s timeout rather than that sub-second figure for
+    the same real-load reason PerformanceIsBoundedFarBelowTheHarnessTimeout
+    (above) states — this box routinely runs many concurrent Claude
+    sessions, and a tight bound flaked under genuinely observed heavy load.
+    """
+
+    BOUND_S = 4.5
+
+    def test_an_unclosed_brace_completes_well_under_the_timeout(self):
+        # `expand_braces` sees this as ONE token (no whitespace) via
+        # TOKEN_RE — a long run of comma-separated non-brace text with no
+        # closing `}` anywhere, the exact BRACE_RE overlap shape.
+        cmd = "echo {" + "c," * 12000  # 24006 chars
+        start = time.perf_counter()
+        r = run(cmd)
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, self.BOUND_S,
+            "hook took %.3fs on a 24KB unclosed-brace argument — the #162 "
+            "round-2 BRACE_RE ReDoS gap this test exists to prevent"
+            % elapsed)
+        # No real store reference anywhere — genuinely allowed.
+        self.assertEqual(r.returncode, 0)
+
+    def test_a_long_recursive_flag_run_completes_well_under_the_timeout(self):
+        # RECURSIVE_RE only runs once CLAUDE_ROOT_RE has already matched a
+        # bare `.claude` in the command — this reproduces that gate plus a
+        # long run of `r` characters with NO reachable whitespace boundary
+        # (an `=` immediately follows, not a space), the exact shape that
+        # forces exhaustive double-backtracking pre-fix: for EVERY position
+        # where `[rR]` could match inside the run, the trailing `[A-Za-z]*`
+        # also backtracks fully before the whole alternative fails — O(n^2).
+        # The verdict is "not a recognised recursive flag" (rc=0) BOTH
+        # before and after the fix; only the TIME changes, exactly like the
+        # sibling VALUE_FILE_RE/BRACE_RE performance tests in this file.
+        cmd = "grep -" + "r" * 24000 + "= " + "~" + "/" + "." + "claude"
+        start = time.perf_counter()
+        r = run(cmd)
+        elapsed = time.perf_counter() - start
+        self.assertLess(
+            elapsed, self.BOUND_S,
+            "hook took %.3fs on a 24KB recursive-flag argument — the #162 "
+            "round-2 RECURSIVE_RE ReDoS gap this test exists to prevent"
+            % elapsed)
+        self.assertEqual(r.returncode, 0)
+
+
+class RecursiveFlagBoundHasOneNarrowDocumentedResidual(unittest.TestCase):
+    """#162 round 2 — RECURSIVE_RE's two `{0,254}` bounds create the SAME
+    class of narrow reachability residual VALUE_FILE_RE's stem bound has
+    (see ValueFileStemBoundHasOneNarrowDocumentedResidual above), found
+    while writing this round's own regression tests rather than by the
+    dispatched review: a homogeneous run of `r`/`R` characters immediately
+    followed by whitespace matches only up to 509 total characters after
+    the leading `-` (254 + the required `[rR]` + 254) — the unbounded
+    original had no such ceiling and matched a run of ANY length. Past 509,
+    `sweeps_the_parent`'s ONLY recursive-flag detector for a head outside
+    BULK_HEADS/TREE_WALK_HEADS stops firing, so a deliberately-obfuscated
+    flag cluster of 510+ repeated `r` characters (`cp -rrrr...(510 r's)
+    ~/.claude/x /tmp` — syntactically a normal, if absurd, combined
+    short-flag cluster to most CLI tools) evades the recursive-sweep check
+    entirely. Accepted as a KNOWN GAPS residual rather than widened further:
+    no real flag cluster typed by reflex (or even deliberately, short of
+    this exact obfuscation) is remotely 509 characters long, and rule A
+    still catches any command whose value/store path is named literally
+    inside such a sweep. These tests lock the exact boundary.
+    """
+
+    def _cmd(self, r_count):
+        return "grep -" + "r" * r_count + " " + "~" + "/" + "." + "claude"
+
+    def test_a_509_character_recursive_flag_still_blocks(self):
+        r = run(self._cmd(509))
+        self.assertEqual(r.returncode, 2,
+                         "a 509-char -r run is within the {0,254}x2 bound "
+                         "and must still be blocked as a recursive sweep")
+
+    def test_a_510_character_recursive_flag_is_the_documented_residual(self):
+        r = run(self._cmd(510))
+        self.assertEqual(r.returncode, 0,
+                         "a 510-char -r run is one past the reachability "
+                         "ceiling and is the documented #162 round-2 "
+                         "residual — must stay unblocked unless the bound "
+                         "is deliberately widened")
+
+
+class ValueFileStemBoundHasOneNarrowDocumentedResidual(unittest.TestCase):
+    """#162 round 2 — VALUE_FILE_RE's stem quantifier is bounded to `{0,253}`
+    (1 required leading char + 253 more = 254 total stem chars max before the
+    literal `.secret`). An adversarial review found and reproduced the ONE
+    real behavioural difference from the unbounded original: a stem whose
+    final 254 characters before `.secret` contain NO alnum/underscore
+    character at all has nowhere for the required leading `[A-Za-z0-9_]` to
+    anchor within the bounded window, so the match does NOT fire — the
+    unbounded original always found an earlier alnum character no matter how
+    far back it sat. This is documented as an accepted, narrow KNOWN GAP (see
+    the hook's own header comment) rather than fixed further, because no stem
+    shaped this way can ever name a real value file anyway (it already
+    exceeds Linux's own NAME_MAX). These tests lock the EXACT boundary so a
+    future retuning of the bound is a deliberate, visible change.
+    """
+
+    def _cmd(self, dash_count):
+        # "a" (the one alnum lead) + N dashes + ".secret" -> stem length is
+        # dash_count + 1.
+        return "cat a" + "-" * dash_count + "." + "secret"
+
+    def test_a_stem_of_exactly_254_characters_still_blocks(self):
+        # 253 dashes + the leading "a" = 254 total stem chars -- exactly at
+        # the bound ({0,253} allows up to 253 MORE after the required lead).
+        r = run(self._cmd(253))
+        self.assertEqual(r.returncode, 2,
+                         "a 254-char stem is within the {0,253} bound and "
+                         "must still be blocked")
+
+    def test_a_stem_of_255_characters_is_the_documented_residual(self):
+        # 254 dashes + the leading "a" = 255 total stem chars -- one past
+        # the bound, and every character after the lead is non-alnum, so no
+        # later start position can anchor either. This is the exact,
+        # accepted KNOWN GAPS residual, locked here so it stays deliberate.
+        r = run(self._cmd(254))
+        self.assertEqual(r.returncode, 0,
+                         "a 255-char all-non-alnum-tail stem is the "
+                         "documented #162 round-2 residual and must stay "
+                         "unblocked unless the bound is deliberately widened")
+
+    def test_a_stem_of_300_characters_is_the_same_documented_residual(self):
+        # The adversarial review's own reproduction size, well past the
+        # boundary -- confirms the residual isn't a one-character fluke.
+        r = run(self._cmd(300))
+        self.assertEqual(r.returncode, 0)
 
 
 class Registered(unittest.TestCase):

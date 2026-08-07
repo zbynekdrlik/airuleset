@@ -204,10 +204,64 @@ set -euo pipefail
 #     boundary this hook's whole design already stakes its claim on.
 #   - Fail-closed is bounded by the harness: a hook that TIMES OUT (5s) is
 #     treated as an error and does not block, so a pathologically slow python3
-#     start fails open. Not agent-controllable, but real. Measured on dev1 the
-#     whole hook runs in a median 33ms (min 29, max 41) against that 5000ms
-#     budget, and the gap is not closeable from inside a hook — it is tracked
-#     as its own ticket (#162) rather than as a bullet in a decision ticket.
+#     start fails open. This gap is TRACKED as its own ticket (#162), across
+#     two rounds. Round 1 found and closed the then-DOMINANT reachable
+#     trigger: an O(n^2) regex sweep (VALUE_FILE_RE, see its own comment
+#     above) that a 50KB ordinary long argument — no glob, no exploit shape
+#     — drove past the 5s budget on its own. A fresh-context adversarial
+#     review of round 1 then found the IDENTICAL overlapping-class-vs-
+#     literal-suffix shape, unbounded, in two more of this file's own
+#     regexes — BRACE_RE (`expand_braces` below) and RECURSIVE_RE
+#     (`sweeps_the_parent` below) — and proved BRACE_RE was reachable at a
+#     MUCH smaller size (a 4KB unclosed brace already blew the budget end
+#     to end, since `expand_braces` runs on every token of every command,
+#     not only the ones VALUE_FILE_RE/CLAUDE_ROOT_RE miss) and amplified by
+#     the function's own recursion. Round 2 bounded both the same way (see
+#     their own comments). Measured on dev1 post-round-2: the whole hook
+#     runs in single-digit-to-low-double-digit ms for an ordinary command.
+#     The worst adversarial constructions found — many repeated near-miss
+#     segments, sized to the ~128KB argv ceiling this hook's own E2BIG
+#     fail-closed path already caps commands at — are NOT sub-second (an
+#     earlier draft of this comment claimed "well under a second" for
+#     VALUE_FILE_RE alone and an adversarial review measured that false at
+#     100-120KB): BRACE_RE's and RECURSIVE_RE's own worst cases at the true
+#     ~128KB ceiling measured ~1.0-1.3s each, and VALUE_FILE_RE's own
+#     worst case (a single stem-legal run with no `.secret` in reach) up to
+#     ~2.3s — all comfortably, but not overwhelmingly, under the 5000ms
+#     budget (2-5x margin, not the 100x+ margin an ordinary command gets).
+#     What remains, and genuinely is not
+#     agent-controllable: a pathologically slow python3 interpreter START
+#     under extreme system load (swap, CPU starvation). That residual is
+#     real — but this file's own round-1-to-round-2 history is precisely
+#     why "now the WHOLE of the exposure" is a claim that needs re-earning
+#     by a fresh review each time, not asserting from inside the diff that
+#     makes it: every regex in this file has now been checked once for this
+#     specific shape, and the two found were fixed, but that is a snapshot
+#     of what is KNOWN, not a proof that no reachable trigger remains.
+#   - VALUE_FILE_RE's stem bound ({0,253}, #162 round 2) has ONE narrow false
+#     negative, found by adversarial review and reproduced against the real
+#     hook: a `<stem>.secret` reference whose stem's final 254 characters
+#     before `.secret` contain NO alnum/underscore character at all (e.g.
+#     300 dashes then `.secret`) is NOT matched, because the required
+#     leading `[A-Za-z0-9_]` has nowhere to anchor within the bounded
+#     window — the unbounded original always found an earlier alnum char no
+#     matter how far back. Accepted rather than fixed further: no stem
+#     shaped this way can name a real value file anyway (it already exceeds
+#     Linux's own NAME_MAX), so nothing a real file on disk could be called
+#     goes unblocked by it. See VALUE_FILE_RE's own comment for the exact
+#     bound and reasoning.
+#   - RECURSIVE_RE's two `{0,254}` bounds (#162 round 2) have the SAME class
+#     of narrow residual, found while writing this round's own regression
+#     tests: a homogeneous run of `r`/`R` characters immediately followed by
+#     whitespace matches only up to 509 total characters after the leading
+#     `-` (254 + the required `[rR]` + 254) — the unbounded original had no
+#     such ceiling. Past 509, `sweeps_the_parent`'s recursive-flag detector
+#     stops firing for a head outside BULK_HEADS/TREE_WALK_HEADS, so a
+#     deliberately-obfuscated flag cluster of 510+ repeated `r` characters
+#     evades the recursive-sweep check. Accepted rather than widened: no
+#     real flag cluster typed by reflex — or even deliberately, short of
+#     this exact obfuscation — is remotely that long. See RECURSIVE_RE's
+#     own comment for the exact bound.
 #   - Fail-closed covers a payload that is PRESENT and unparseable, never an
 #     EMPTY one: no payload at all still exits 0. See the comment at the read
 #     loop for why that specific row was left open rather than closed.
@@ -358,16 +412,59 @@ STORE_DIR_RE = re.compile(r"\.claude/+secrets(?![A-Za-z0-9_-])")
 # another `.`) is never mistaken for the end of the name. The honest cost:
 # a real config's own future backup, `config.secret.json.bak`, is now
 # blocked too (a KNOWN GAPS bullet documents this trade explicitly).
+#
+# The stem's quantifier is BOUNDED (#162), not `*` (unbounded). `.secret`
+# starts with characters the stem class ([A-Za-z0-9_.-]) itself accepts, so
+# an unbounded stem forces a full greedy-then-backtrack sweep at every start
+# offset whenever a segment has a long run of stem-legal characters with no
+# `.secret` anywhere -- O(n^2), measured at 10.5s for a 50KB ordinary
+# argument (a base64 blob, an embedded file body -- no glob, no exploit
+# shape) against this hook's own 5s harness timeout. `{0,253}` bounds the
+# stem to at most 254 characters immediately before the literal `.secret`
+# (1 required leading char + 253 more) -- close to, but deliberately more
+# generous than, Linux's own NAME_MAX (255 bytes/component): a real
+# terminal `<NAME>.secret` FILE's full name, suffix included, tops out at
+# 255 bytes, so its stem alone can be at most 248 -- the extra headroom up
+# to 254 only ever admits a HANDFUL of stem lengths (249-254) that could
+# never belong to a real file on disk, and erring generous there means
+# erring toward BLOCKING, never toward a gap.
+#
+# The one genuine behavioural difference from the unbounded original,
+# found by an adversarial review of this fix (#162 round 2) and reproduced
+# against the real hook: a stem whose final 254 characters before `.secret`
+# contain NO alnum/underscore character at all (e.g. 300 dashes) has
+# nowhere for the required leading `[A-Za-z0-9_]` to anchor within the
+# bounded window, so the match does NOT fire -- unlike the unbounded
+# original, which always found an earlier alnum character no matter how
+# far back it sat. This is real and NARROW (a KNOWN GAPS bullet documents
+# it), not the "match still fires regardless of stem length" claim an
+# earlier draft of this comment made. Its security impact is negligible:
+# no stem shaped this way can ever name a real value file either (it
+# already exceeds NAME_MAX), and the bounded window still catches every
+# alnum-leading run genuinely within reach, so no real `<NAME>.secret`
+# reference goes unblocked by this.
 _VALUE_FILE_CONFIG_EXT = r"(?:json|yaml|yml|env|toml|ini)"
 VALUE_FILE_RE = re.compile(
-    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|[*?\]}])\.secret"
+    r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,253}|[*?\]}])\.secret"
     r"(?!\." + _VALUE_FILE_CONFIG_EXT + r"(?![A-Za-z0-9_.-]))"
     r"(?![A-Za-z0-9_-])")
 # C. the store's PARENT swept recursively or archived (review F2). Anchored on
 # `.claude` NOT followed by a deeper path component, so `~/.claude/projects`
 # — the transcript greps this repo's own work runs constantly — is untouched.
 CLAUDE_ROOT_RE = re.compile(r"\.claude/?(?![A-Za-z0-9_./-])")
-RECURSIVE_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$)")
+# The two `[A-Za-z]*` runs are BOUNDED to `{0,254}` each (#162 round 2) —
+# the same overlapping-class-vs-required-char shape as VALUE_FILE_RE and
+# BRACE_RE above: `[A-Za-z]*` accepts the `r`/`R` the pattern must find
+# next, so a long run of only letters with no r/R anywhere forces the same
+# greedy-then-backtrack sweep. Reachability here is LOWER than BRACE_RE's —
+# `sweeps_the_parent` only reaches `RECURSIVE_RE.search` after the segment
+# has already matched `CLAUDE_ROOT_RE`/`globbed_parent_ref` (a bare
+# `.claude`/glob-of-it must already be present) — but the defect is
+# identical and was found by the same adversarial review. 254 keeps every
+# real short-flag cluster (`-r`, `-avz`, `--recursive`) matching unchanged;
+# no legitimate flag cluster is remotely that long.
+RECURSIVE_RE = re.compile(
+    r"(?:^|\s)(?:-[A-Za-z]{0,254}[rR][A-Za-z]{0,254}|--recursive)(?=\s|$)")
 BULK_HEADS = {"tar", "zip", "rsync", "cpio", "pax", "7z", "scp"}
 # Heads that walk a tree BY CONSTRUCTION, so there is no `-r` flag to detect —
 # but ONLY when they also carry an action that reads or mutates what they find.
@@ -449,7 +546,27 @@ def cd_target(segment, head):
     return None
 
 
-BRACE_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+# The two `[^{}]*` groups are BOUNDED to `{0,254}` each (#162 round 2), for
+# the identical reason VALUE_FILE_RE's stem quantifier was bounded above:
+# `[^{}]*` accepts the literal `,` it must find next, so an unbounded pair
+# forces a full greedy-then-backtrack sweep whenever a `{` opens with no
+# matching `,...}` anywhere in reach. This was found MORE reachable than
+# VALUE_FILE_RE's own gap, not less: `expand_braces` runs on every token of
+# every command via `path_candidates`/`globbed_store_ref` (not gated behind
+# an earlier miss), and its own recursion (below) can re-run the search on
+# the SAME pathological content across multiple `_depth` levels. Measured
+# before the bound: a single 4KB unclosed brace already exceeded the 5s
+# harness budget end to end through the real hook — an order of magnitude
+# smaller than the 50KB that triggered VALUE_FILE_RE's own gap. 254 per
+# side keeps every realistic brace alternative (a path segment, a filename)
+# matching exactly as before — no real alternative inside `~/.claude/
+# {secrets,x}/*`-shaped globbing is remotely that long — while capping the
+# worst adversarial construction (many repeated near-miss segments, sized
+# to this hook's own ~128KB argv ceiling) at ~1.3s: bounded and comfortably
+# inside the 5s harness budget, but NOT sub-second — see the KNOWN GAPS
+# timeout bullet above for the honest measured numbers across all three
+# regexes this round bounded.
+BRACE_RE = re.compile(r"\{([^{}]{0,254},[^{}]{0,254})\}")
 BRACE_CAP = 64
 
 
