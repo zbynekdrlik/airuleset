@@ -429,7 +429,16 @@ class TestCmdGkRequest(unittest.TestCase):
             return m.Mock(returncode=0, stdout="", stderr="")
 
         with m.patch("subprocess.run", side_effect=run):
-            airuleset.cmd_gk_request(self._args(issue=7, comment="akcia"))
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=7, comment="akcia"))
+        # #283 adversarial review, MINOR: label denied but the retitle
+        # fallback SUCCEEDED is a genuinely visible, successful escalation
+        # -- must return 0, never the loud-failure rc=1. A mutant that
+        # drops the `retitled` clause from the failure guard (leaving only
+        # `not labeled and not already_prefixed`) survived every
+        # pre-existing test in this file because none of them asserted
+        # the return code for this exact combination.
+        self.assertEqual(rc, 0)
         comments = [argv for argv in calls if "comment" in argv]
         self.assertTrue(comments)
         self.assertIn("GATEKEEPER-ACTION:", json.dumps(comments))
