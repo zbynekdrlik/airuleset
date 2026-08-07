@@ -1328,7 +1328,7 @@ def render_claude_history_script():
 CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
 CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) -- claude-history popup companion (#289).
-# Invoked from the managed tmux S-F1 / prefix-h display-popup bind
+# Invoked from the managed tmux S-F1 / S-DC / prefix-h display-popup bind
 # (TMUX_POPUP_BIND_ARGVS in airuleset.py). FAILS LOUDLY, never silently:
 # claude-history's own stderr message is shown and the popup waits for a
 # keypress before closing, rather than handing `less` empty stdin (which
@@ -1824,6 +1824,63 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # S-PageUp/PageDown binds, so both popup binds are live-applied the same
 # way, never conf-only.
 TMUX_POPUP_KEY = "S-F1"
+
+# #294 addendum (mid-run, real user-blocking report): the user connects
+# from a Windows notebook over ssh (Windows Terminal or PuTTY, exact
+# client unknown) and reported Shift+F1 "nefunguje vobec". Their own
+# S-PageUp/S-PageDown bind (above, #267) DOES traverse their real client+
+# ssh path today (they scroll copy-mode with it) -- the ONE proven fact
+# available -- so this addendum picks a SECOND root-table key from the
+# SAME proven wire-format family rather than guessing blind.
+#
+# RESEARCH (WebSearch/WebFetch, since no real Windows Terminal/PuTTY is
+# available to run here -- see the design comment on issue #294 for
+# sources): PuTTY's F1-F12 "Function keys and keypad" mode is a SEPARATE,
+# user-configurable setting from its Home/End/PageUp/PageDown handling --
+# xterm mode DOES encode a Shift modifier for F-keys (CSI <n>;2<letter>),
+# but the encoding is mode-dependent and historically finicky, which is
+# exactly the kind of client-configuration variance that could explain
+# "nefunguje vobec" even on a genuinely deployed binding. S-F1 is kept
+# (unchanged) since it costs nothing and works for many xterm-family
+# clients -- this addendum ADDS a second, more robust key rather than
+# replacing it.
+#
+# CANDIDATES CONSIDERED AND REJECTED:
+#   - Shift+Insert: ruled out outright -- BOTH PuTTY (its own documented
+#     paste-key list: mouse paste, Ctrl+Insert, Shift+Insert, Ctrl+Shift+
+#     C, Ctrl+Shift+V) and Windows Terminal (its official default
+#     actions.json: `{"keys": "shift+insert", "id":
+#     "Terminal.PasteFromClipboard"}`) intercept it CLIENT-SIDE for paste
+#     -- the keystroke would never even reach ssh/tmux.
+#   - Shift+Home / Shift+End: ruled out -- empirically verified LIVE
+#     against this box's own real tmux 3.7b binary (isolated `-L` socket,
+#     no real server touched) that tmux's OWN key table only recognizes
+#     the LETTER-terminated modified form (`\x1b[1;2H` / `\x1b[1;2F`) for
+#     S-Home/S-End, NOT the tilde-modifier form (`\x1b[1;2~` /
+#     `\x1b[4;2~`) -- while PuTTY's own documented Home/End behavior is
+#     TILDE-based (`ESC[1~` / `ESC[4~` unmodified), a real mismatch risk
+#     no live PuTTY was available to rule out.
+#   - Any Ctrl+Shift combo: excluded per the addendum's own instruction
+#     (Windows Terminal owns many of these as tab/pane-management
+#     defaults, e.g. Ctrl+Shift+C/V/T/W/F, Ctrl+Shift+<digit>).
+#   - Ctrl+PageUp/PageDown: excluded per the addendum's own instruction
+#     (tab-switching semantics in some Windows terminal clients).
+#
+# CHOSEN: Shift+Delete (`S-DC` in tmux's own key-name table). Delete is
+# CODE 3 in the same uniform VT220 "6-key editing keypad" numeric family
+# PageUp (5) and PageDown (6) belong to -- every xterm-descended terminal
+# (PuTTY's xterm mode included) encodes this whole family with the
+# IDENTICAL `CSI <code>;2~` template, so if a client's real path already
+# encodes Shift+PageUp/PageDown correctly (PROVEN for this user, above),
+# it is very likely to encode Shift+Delete the same way -- unlike the
+# Home/End "letter vs tilde" ambiguity above, there is no competing
+# encoding form for this family at all. Confirmed NOT reserved as a
+# clipboard shortcut in EITHER client's own documented/default keybinding
+# list (searched specifically for `shift+delete`/`shift+del` in both --
+# absent from both). Confirmed LIVE against this box's own real tmux
+# 3.7b: `bind-key -n S-DC ...` fires correctly on the real byte sequence
+# `\x1b[3;2~`.
+TMUX_POPUP_KEY_ALT = "S-DC"
 TMUX_POPUP_PREFIX_KEY = "h"
 
 
@@ -1852,6 +1909,10 @@ def _tmux_popup_bind_argv(key, in_prefix_table):
 
 TMUX_POPUP_BIND_ARGVS = [
     _tmux_popup_bind_argv(TMUX_POPUP_KEY, in_prefix_table=False),
+    # #294 addendum: a second root-table key -- see the module comment
+    # above TMUX_POPUP_KEY_ALT for the Windows-ssh-client research and
+    # live evidence behind this specific choice.
+    _tmux_popup_bind_argv(TMUX_POPUP_KEY_ALT, in_prefix_table=False),
     _tmux_popup_bind_argv(TMUX_POPUP_PREFIX_KEY, in_prefix_table=True),
 ]
 
@@ -2007,11 +2068,13 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     picks up the keyboard scrollback shortcut immediately, with no
     restart and no keystroke sent to any pane.
 
-    #289: the two `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
+    #289: the `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
     fallback -- see the module comment above `TMUX_POPUP_KEY`) are live-
     applied the SAME way, for the SAME reason -- a `bind-key` call is a
     pure key-table registration, independent of and no riskier than the
-    scrollback keybinds it sits alongside.
+    scrollback keybinds it sits alongside. #294 addendum: a second
+    root-table key, S-DC (see the module comment above
+    `TMUX_POPUP_KEY_ALT`), was added between them -- now three entries.
 
     `run` defaults to a real `tmux` invocation and is injectable so tests
     never touch a real tmux server. A missing server / a nonzero exit
