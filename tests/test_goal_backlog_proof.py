@@ -447,6 +447,35 @@ class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
         self.assertEqual(len(goal_lines()), 3)
 
 
+class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
+    """#161 — condition (A)'s "NEVER continue me past an unanswered
+    `❓ NEEDS YOU`" is no longer an UNCONDITIONAL permanent stop: a
+    `question-timeout:` nudge (watchdog job 20, `_goal_question_park_nudge`,
+    ~30 min unanswered) is the ONE sanctioned exception, and every template
+    must say so — never re-print the question, never bare "continue".
+
+    Kept as its OWN class (never folded into the cap-only test above) so a
+    future edit that shrinks a template back under budget by silently
+    dropping this clause fails LOUDLY here, not just on the cap."""
+
+    def test_every_template_declares_the_escape_hatch(self):
+        for i, line in enumerate(goal_lines()):
+            self.assertIn("question-timeout:", line,
+                          "template %d missing the #161 escape hatch" % i)
+
+    def test_the_escape_hatch_still_forbids_a_bare_continue(self):
+        for line in goal_lines():
+            self.assertIn("NEVER continue me past an unanswered", line)
+
+    def test_with_the_escape_hatch_every_template_still_fits_the_cap(self):
+        # the companion check to TheTemplatesMustFitClaudeCodesGoalCap —
+        # named here so a future reader sees WHY this specific addition is
+        # measured, not just that some generic cap exists.
+        over = [(i, len(line)) for i, line in enumerate(goal_lines())
+                if len(line) > 4000]
+        self.assertEqual(over, [])
+
+
 if __name__ == "__main__":
     main()
 
