@@ -6373,6 +6373,60 @@ class TestDiscordAutopilotNotify(TestCase):
                 airuleset.cmd_notify(mk("odoo-erp"))  # re-dispatch, bare repo
         self.assertEqual(keys, ["odoo-erp#606", "odoo-erp#606"])  # identical key both times
 
+    def test_run_card_records_the_card_map_on_send(self):
+        # #298: capture the sent card's OWN message id -> repo/issue, so a
+        # later Discord reply on it can reopen the ticket with the remark.
+        import unittest.mock as m
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
+                       backfill_digest=False, provision_question_thread=False,
+                      record_question=False, edit_question=False,
+                      channel_id=False, owner=False, mirror_owners=False,
+                      body=None, run=None, repo="zbynekdrlik/airuleset", issue=42,
+                      pr=None, achieved="oprava retry logiky", result=None,
+                      goal="Retry logika sa neopakuje", version="v1.2.3",
+                      merge_sha=None, url=None, review="ok",
+                      handoff=False, dedup_key=None, dry_run=False)
+        recorded = {}
+
+        def fake_send(body, **k):
+            self.assertTrue(k.get("return_message_id"))
+            return "sent", "555666777"
+
+        def fake_record(message_id, channel, repo, issue, **k):
+            recorded["args"] = (message_id, channel, repo, issue)
+            return True
+
+        with m.patch.object(airuleset, "_gh_out",
+                            side_effect=lambda *a, **k: "T" if "view" in a else "7"):
+            with m.patch("notify.send", side_effect=fake_send):
+                with m.patch("notify.notification_channel", return_value="777001"):
+                    with m.patch("notify.record_card_message",
+                                 side_effect=fake_record):
+                        airuleset.cmd_notify(args)
+        self.assertEqual(recorded["args"],
+                         ("555666777", "777001", "zbynekdrlik/airuleset", 42))
+
+    def test_run_card_tolerates_a_bare_string_send_mock(self):
+        # A test double for notify.send from BEFORE #298 may still return a
+        # bare status STRING (the old contract) rather than the opt-in
+        # (status, message_id) tuple -- must not crash.
+        import unittest.mock as m
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+                       repo_name=False, newest_card=False,
+                       backfill_digest=False, provision_question_thread=False,
+                      record_question=False, edit_question=False,
+                      channel_id=False, owner=False, mirror_owners=False,
+                      body=None, run=None, repo="o/x", issue=5,
+                      pr=None, achieved="a", result=None,
+                      goal="g", version="v1", merge_sha=None,
+                      url=None, review="ok",
+                      handoff=False, dedup_key=None, dry_run=False)
+        with m.patch.object(airuleset, "_gh_out",
+                            side_effect=lambda *a, **k: "T" if "view" in a else "1"):
+            with m.patch("notify.send", return_value="sent"):
+                airuleset.cmd_notify(args)   # must not raise
+
     def test_send_error_keeps_dedup_claim(self):
         # A POST error must NOT release the claim (a timeout can fire after Discord
         # accepted the message → releasing would duplicate). Retry stays deduped.

@@ -958,3 +958,494 @@ class InputDeadPing(unittest.TestCase):
         self._wedged_cycle(state)
         self.assertFalse([p for p in self.pings
                           if "vstup" in p[0].lower()])
+
+
+# --------------------------------------------------------------------------- #
+# #298 -- Discord reply on a per-ticket DONE card -> reopen the ticket with
+# the remark. The send-time card map (repo/issue <- message id) notify.py
+# needs to recover it later.
+# --------------------------------------------------------------------------- #
+class CardMap(unittest.TestCase):
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "discord-cards.json")
+
+    def test_record_and_load(self):
+        p = self._p()
+        self.assertTrue(notify.record_card_message(
+            "111", "900", "zbynekdrlik/airuleset", 42, now=1000, path=p))
+        c = notify.load_cards(p)
+        self.assertEqual(c["111"]["repo"], "zbynekdrlik/airuleset")
+        self.assertEqual(c["111"]["issue"], 42)
+        self.assertEqual(c["111"]["channel"], "900")
+        self.assertEqual(c["111"]["ts"], 1000)
+
+    def test_missing_fields_are_rejected(self):
+        p = self._p()
+        self.assertFalse(notify.record_card_message("", "900", "o/r", 1, path=p))
+        self.assertFalse(notify.record_card_message("111", "900", "", 1, path=p))
+        self.assertFalse(notify.record_card_message("111", "900", "o/r", None, path=p))
+        # non-numeric ids refused, mirroring record_question's own guard
+        self.assertFalse(notify.record_card_message("<Mock id=1>", "900", "o/r",
+                                                    1, path=p))
+        self.assertFalse(notify.record_card_message("111", "thread-z", "o/r",
+                                                    1, path=p))
+        self.assertEqual(notify.load_cards(p), {})
+
+    def test_stale_entries_pruned_on_write(self):
+        p = self._p()
+        notify.record_card_message("100", "900", "o/r", 1, now=0, path=p)
+        notify.record_card_message("200", "900", "o/r", 2,
+                                   now=notify._CARDS_TTL_S + 100, path=p)
+        c = notify.load_cards(p)
+        self.assertNotIn("100", c)
+        self.assertIn("200", c)
+
+    def test_hard_cap_keeps_newest(self):
+        p = self._p()
+        for i in range(notify._CARDS_MAX + 5):
+            notify.record_card_message("6%04d" % i, "900", "o/r", i, now=i, path=p)
+        c = notify.load_cards(p)
+        self.assertLessEqual(len(c), notify._CARDS_MAX)
+        self.assertIn("6%04d" % (notify._CARDS_MAX + 4), c)
+        self.assertNotIn("60000", c)
+
+    def test_load_bad_file_is_empty(self):
+        p = self._p()
+        Path(p).write_text("not json")
+        self.assertEqual(notify.load_cards(p), {})
+
+
+class PostDiscordReturnsMessageId(unittest.TestCase):
+    """_post_discord now returns the Discord message id on a real POST
+    (#298 needs it to record the card map) — while staying TRUTHY for a
+    caller that only checks success (an empty-body test double, a bare
+    True/False mock elsewhere in this test suite)."""
+
+    def test_returns_the_real_message_id(self):
+        import unittest.mock as m
+
+        def fake_urlopen(req, timeout=0):
+            return m.Mock(read=lambda: b'{"id": "555666777"}')
+
+        with m.patch.object(notify.urllib.request, "urlopen", fake_urlopen):
+            got = notify._post_discord("tok", "123", "hi")
+        self.assertEqual(got, "555666777")
+
+    def test_empty_body_stays_truthy(self):
+        import unittest.mock as m
+
+        def fake_urlopen(req, timeout=0):
+            return m.Mock(read=lambda: b"")
+
+        with m.patch.object(notify.urllib.request, "urlopen", fake_urlopen):
+            got = notify._post_discord("tok", "123", "hi")
+        self.assertTrue(got)
+        self.assertIsInstance(got, bool)   # never a fake "id" for an unreadable body
+
+    def test_failure_is_falsy(self):
+        import unittest.mock as m
+
+        def fake_urlopen(req, timeout=0):
+            raise OSError("boom")
+
+        with m.patch.object(notify.urllib.request, "urlopen", fake_urlopen):
+            got = notify._post_discord("tok", "123", "hi")
+        self.assertFalse(got)
+
+
+class SendReturnMessageId(unittest.TestCase):
+    def setUp(self):
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "999"}
+        p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_default_stays_a_bare_string(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", return_value="123456"):
+            got = notify.send("hi")
+        self.assertEqual(got, "sent")
+
+    def test_opt_in_returns_status_and_id(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", return_value="123456"):
+            got = notify.send("hi", return_message_id=True)
+        self.assertEqual(got, ("sent", "123456"))
+
+    def test_a_mocked_bare_true_never_masquerades_as_an_id(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", return_value=True):
+            status, mid = notify.send("hi", return_message_id=True)
+        self.assertEqual(status, "sent")
+        self.assertIsNone(mid)
+
+    def test_no_config_returns_a_none_id_pair(self):
+        self.env.pop("DISCORD_NOTIFICATION_CHANNEL_ID")
+        got = notify.send("hi", return_message_id=True)
+        self.assertEqual(got, ("no-config", None))
+
+    def test_dry_run_returns_a_none_id_pair(self):
+        got = notify.send("hi", dry_run=True, return_message_id=True)
+        self.assertEqual(got, ("dry-run", None))
+
+
+class ParseDiscordCardReply(unittest.TestCase):
+    OWNER = "773451844110385193"
+    CARDMAP = {"card1": {"repo": "zbynekdrlik/airuleset", "issue": 42,
+                         "channel": "777001", "ts": 1000}}
+
+    def _msg(self, **over):
+        m = {"id": "rep1", "author": {"id": self.OWNER},
+             "message_reference": {"message_id": "card1"},
+             "content": "toto este chyba retry logika"}
+        m.update(over)
+        return m
+
+    def test_valid_card_reply(self):
+        r = wd.parse_discord_card_reply(self._msg(), {self.OWNER}, self.CARDMAP)
+        self.assertEqual(r["repo"], "zbynekdrlik/airuleset")
+        self.assertEqual(r["issue"], 42)
+        self.assertEqual(r["text"], "toto este chyba retry logika")
+        self.assertEqual(r["reply_id"], "rep1")
+
+    def test_non_owner_rejected(self):
+        self.assertIsNone(wd.parse_discord_card_reply(
+            self._msg(author={"id": "666"}), {self.OWNER}, self.CARDMAP))
+
+    def test_not_a_reply_rejected(self):
+        m = self._msg()
+        del m["message_reference"]
+        self.assertIsNone(wd.parse_discord_card_reply(m, {self.OWNER}, self.CARDMAP))
+
+    def test_reply_to_untracked_message_rejected(self):
+        self.assertIsNone(wd.parse_discord_card_reply(
+            self._msg(message_reference={"message_id": "unknown"}),
+            {self.OWNER}, self.CARDMAP))
+
+    def test_empty_content_rejected(self):
+        self.assertIsNone(wd.parse_discord_card_reply(
+            self._msg(content="<@1>"), {self.OWNER}, self.CARDMAP))
+
+    def test_garbage_message_rejected(self):
+        self.assertIsNone(wd.parse_discord_card_reply(None, {self.OWNER}, self.CARDMAP))
+        self.assertIsNone(wd.parse_discord_card_reply("x", {self.OWNER}, self.CARDMAP))
+
+
+class RepoLivePane(unittest.TestCase):
+    def test_finds_matching_repo(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "repo_name_for",
+                            lambda cwd, run=None: "airuleset" if "one" in cwd
+                            else "other"):
+            got = wd._repo_live_pane(
+                "airuleset",
+                {"sid-1": "/home/x/one", "sid-2": "/home/x/two"},
+                {"sid-1": ("%1", "cap1"), "sid-2": ("%2", "cap2")})
+        self.assertEqual(got, ("sid-1", "%1", "/home/x/one"))
+
+    def test_no_match_returns_none(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "other"):
+            got = wd._repo_live_pane("airuleset", {"sid-1": "/x"},
+                                     {"sid-1": ("%1", "cap1")})
+        self.assertIsNone(got)
+
+    def test_empty_name_returns_none(self):
+        self.assertIsNone(wd._repo_live_pane("", {}, {}))
+
+    def test_a_cwd_with_no_live_pane_is_never_matched(self):
+        # cwd_by_sid can carry a sid that just dropped out of panes_by_sid
+        # this sweep — must not crash / must not match.
+        import unittest.mock as m
+        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"):
+            got = wd._repo_live_pane("airuleset", {"sid-gone": "/x"}, {})
+        self.assertIsNone(got)
+
+
+class FlagDeliveryTarget(unittest.TestCase):
+    def test_question_kind_prefers_the_live_asking_session(self):
+        target = {"kind": "question", "session": "sid-abc", "cwd": "/x"}
+        panes = {"sid-abc": ("%1", "cap")}
+        got = wd._flag_delivery_target(target, panes, {"sid-abc": "/x"})
+        self.assertEqual(got, ("sid-abc", "%1", "/x"))
+
+    def test_question_kind_falls_back_to_repo_when_session_is_dead(self):
+        import unittest.mock as m
+        target = {"kind": "question", "session": "sid-dead", "cwd": "/repo/one"}
+        with m.patch.object(notify, "repo_name_for",
+                            lambda cwd, run=None: "one" if "one" in cwd else "?"):
+            got = wd._flag_delivery_target(
+                target, {"sid-live": ("%2", "cap")}, {"sid-live": "/repo/one"})
+        self.assertEqual(got, ("sid-live", "%2", "/repo/one"))
+
+    def test_card_kind_resolves_via_repo(self):
+        import unittest.mock as m
+        target = {"kind": "card", "repo": "zbynekdrlik/airuleset", "issue": 42}
+        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"):
+            got = wd._flag_delivery_target(
+                target, {"sid-live": ("%3", "cap")}, {"sid-live": "/x"})
+        self.assertEqual(got, ("sid-live", "%3", "/x"))
+
+    def test_nothing_live_returns_none(self):
+        target = {"kind": "card", "repo": "o/r", "issue": 1}
+        got = wd._flag_delivery_target(target, {}, {})
+        self.assertIsNone(got)
+
+
+class ComposeFlagPrompt(unittest.TestCase):
+    def test_quotes_the_flagged_message_and_names_the_protocol(self):
+        p = wd.compose_flag_prompt("<@123> pozor toto je zle")
+        self.assertIn("pozor toto je zle", p)
+        self.assertNotIn("<@123>", p)
+        self.assertIn("❓", p)
+        self.assertNotIn("\n", p)   # single line — send_continue types+Enter
+
+    def test_empty_text_still_composes(self):
+        p = wd.compose_flag_prompt("")
+        self.assertTrue(p)
+
+
+class FlaggedEmoji(unittest.TestCase):
+    def test_question_mark_detected(self):
+        msg = {"reactions": [{"emoji": {"name": "❓"}, "count": 1}]}
+        self.assertEqual(wd._flagged_emoji(msg), "❓")
+
+    def test_white_question_mark_detected(self):
+        msg = {"reactions": [{"emoji": {"name": "❔"}, "count": 2}]}
+        self.assertEqual(wd._flagged_emoji(msg), "❔")
+
+    def test_zero_count_not_flagged(self):
+        msg = {"reactions": [{"emoji": {"name": "❓"}, "count": 0}]}
+        self.assertEqual(wd._flagged_emoji(msg), "")
+
+    def test_other_emoji_not_flagged(self):
+        msg = {"reactions": [{"emoji": {"name": "👍"}, "count": 5}]}
+        self.assertEqual(wd._flagged_emoji(msg), "")
+
+    def test_no_reactions_field(self):
+        self.assertEqual(wd._flagged_emoji({}), "")
+        self.assertEqual(wd._flagged_emoji({"reactions": None}), "")
+        self.assertEqual(wd._flagged_emoji("x"), "")
+
+
+class FlagTarget(unittest.TestCase):
+    QMAP = {"q1": {"session": "sid-abc", "cwd": "/x"}}
+    CARDMAP = {"c1": {"repo": "o/r", "issue": 5}}
+
+    def test_resolves_question(self):
+        t = wd._flag_target("q1", self.QMAP, self.CARDMAP)
+        self.assertEqual(t, {"kind": "question", "session": "sid-abc", "cwd": "/x"})
+
+    def test_resolves_card(self):
+        t = wd._flag_target("c1", self.QMAP, self.CARDMAP)
+        self.assertEqual(t, {"kind": "card", "repo": "o/r", "issue": 5})
+
+    def test_untracked_message_is_none(self):
+        self.assertIsNone(wd._flag_target("nope", self.QMAP, self.CARDMAP))
+
+
+class FetchReactionUsers(unittest.TestCase):
+    def test_empty_args_return_empty(self):
+        self.assertEqual(wd.fetch_reaction_users("", "1", "❓", "tok"), [])
+        self.assertEqual(wd.fetch_reaction_users("ch", "", "❓", "tok"), [])
+        self.assertEqual(wd.fetch_reaction_users("ch", "1", "❓", ""), [])
+
+    def test_parses_user_list(self):
+        import unittest.mock as m
+        with m.patch.object(wd, "_discord_get",
+                            lambda url, token, timeout=6: b'[{"id":"1"},{"id":"2"}]'):
+            got = wd.fetch_reaction_users("ch", "1", "❓", "tok")
+        self.assertEqual(got, [{"id": "1"}, {"id": "2"}])
+
+    def test_network_error_is_empty(self):
+        import unittest.mock as m
+        with m.patch.object(wd, "_discord_get", side_effect=OSError("x")):
+            self.assertEqual(wd.fetch_reaction_users("ch", "1", "❓", "tok"), [])
+
+
+class ReactedByOwner(unittest.TestCase):
+    def test_owner_present(self):
+        self.assertTrue(wd._reacted_by_owner([{"id": "1"}, {"id": "2"}], {"2"}))
+
+    def test_owner_absent(self):
+        self.assertFalse(wd._reacted_by_owner([{"id": "1"}], {"2"}))
+
+    def test_empty_or_garbage(self):
+        self.assertFalse(wd._reacted_by_owner([], {"2"}))
+        self.assertFalse(wd._reacted_by_owner(None, {"2"}))
+        self.assertFalse(wd._reacted_by_owner(["x"], {"2"}))
+
+
+class CardReopenFlow(unittest.TestCase):
+    def _fake_gh(self, calls, label_exists=True, comment_ok=True):
+        def gh(argv, input_text=None):
+            calls.append((list(argv), input_text))
+            if argv[:3] == ["gh", "label", "list"]:
+                return (True, '[{"name":"prio:bounce"}]' if label_exists else "[]")
+            if argv[:3] == ["gh", "issue", "comment"]:
+                return (comment_ok, "")
+            return (True, "")
+        return gh
+
+    def test_happy_path_reopens_comments_and_labels(self):
+        calls = []
+        gh = self._fake_gh(calls)
+        ok = wd._card_reopen_flow("o/r", 42, "toto este chyba", gh_fn=gh)
+        self.assertTrue(ok)
+        kinds = [c[0][:3] for c in calls]
+        self.assertIn(["gh", "issue", "reopen"], kinds)
+        self.assertIn(["gh", "issue", "comment"], kinds)
+        self.assertIn(["gh", "issue", "edit"], kinds)
+        comment_call = [c for c in calls if c[0][:3] == ["gh", "issue", "comment"]][0]
+        self.assertIn("toto este chyba", comment_call[1])
+        reopen_call = [c for c in calls if c[0][:3] == ["gh", "issue", "reopen"]][0]
+        self.assertEqual(reopen_call[0], ["gh", "issue", "reopen", "42", "-R", "o/r"])
+
+    def test_missing_label_is_created_never_forced(self):
+        calls = []
+        gh = self._fake_gh(calls, label_exists=False)
+        wd._card_reopen_flow("o/r", 42, "x", gh_fn=gh)
+        create_calls = [c for c in calls if c[0][:3] == ["gh", "label", "create"]]
+        self.assertEqual(len(create_calls), 1)
+        self.assertNotIn("--force", create_calls[0][0])
+
+    def test_existing_label_is_never_recreated(self):
+        calls = []
+        gh = self._fake_gh(calls, label_exists=True)
+        wd._card_reopen_flow("o/r", 42, "x", gh_fn=gh)
+        create_calls = [c for c in calls if c[0][:3] == ["gh", "label", "create"]]
+        self.assertEqual(len(create_calls), 0)
+
+    def test_comment_failure_reports_false(self):
+        calls = []
+        gh = self._fake_gh(calls, comment_ok=False)
+        ok = wd._card_reopen_flow("o/r", 42, "x", gh_fn=gh)
+        self.assertFalse(ok)
+
+
+IDLE_298 = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+
+
+class DeliverDiscordRepliesCardReopen(unittest.TestCase):
+    OWNER = "773451844110385193"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER,
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.gh_calls = []
+        self.sent = []
+
+    def _run(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "pane_in_mode" in j:
+            return "0"
+        # _nudge_repo_pane re-captures FRESH immediately before the send
+        # (#176's own "never trust a stale capture" lesson) rather than
+        # reusing panes_by_sid's earlier-in-the-sweep capture — so a fake
+        # `capture-pane` reply is needed for the nudge test to see an idle
+        # box at all.
+        if "capture-pane" in j:
+            return IDLE_298
+        return ""
+
+    def _gh(self, argv, input_text=None):
+        self.gh_calls.append((list(argv), input_text))
+        if argv[:3] == ["gh", "label", "list"]:
+            return (True, '[{"name":"prio:bounce"}]')
+        return (True, "")
+
+    def test_reply_on_card_reopens_and_comments(self):
+        notify.record_card_message("888005", "777001", "zbynekdrlik/airuleset",
+                                   42, now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"},
+              "content": "toto este nefunguje"}
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertTrue(any("card-reopen" in ln for ln in logs), logs)
+        self.assertIn("rep1", state.get("dcard_done", []))
+        comment_calls = [c for c in self.gh_calls if c[0][:3] == ["gh", "issue", "comment"]]
+        self.assertEqual(len(comment_calls), 1)
+        self.assertIn("toto este nefunguje", comment_calls[0][1])
+        self.assertIn(["gh", "issue", "reopen", "42", "-R", "zbynekdrlik/airuleset"],
+                      [c[0] for c in self.gh_calls])
+
+    def test_second_reply_on_same_card_gets_a_new_comment_no_dup_reopen(self):
+        notify.record_card_message("888005", "777001", "o/r", 7,
+                                   now=time.time(), path=self.cpath)
+        state = {"dcard_done": ["rep1"]}
+        msg2 = {"id": "rep2", "author": {"id": self.OWNER},
+               "message_reference": {"message_id": "888005"},
+               "content": "dalsia poznamka"}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [msg2], card_gh_fn=self._gh)
+        self.assertIn("rep2", state.get("dcard_done", []))
+        comment_calls = [c for c in self.gh_calls if c[0][:3] == ["gh", "issue", "comment"]]
+        self.assertEqual(len(comment_calls), 1)   # rep1 already handled
+
+    def test_dry_run_makes_no_real_gh_calls(self):
+        notify.record_card_message("888005", "777001", "o/r", 7,
+                                   now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=True,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertEqual(self.gh_calls, [])
+
+    def test_non_owner_reply_on_card_ignored(self):
+        notify.record_card_message("888005", "777001", "o/r", 7,
+                                   now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": "666"},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertEqual(self.gh_calls, [])
+        self.assertNotIn("rep1", state.get("dcard_done", []))
+
+    def test_reopened_card_nudges_a_live_idle_pane_of_that_repo(self):
+        import unittest.mock as m
+        notify.record_card_message("888005", "777001", "zbynekdrlik/airuleset",
+                                   9, now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {}
+        cwd_by_sid = {"sid-live": "/home/x/airuleset"}
+        panes = {"sid-live": ("%1", IDLE_298)}
+        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"):
+            wd.deliver_discord_replies(
+                time.time(), self._run, state, panes, dry_run=False,
+                discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh,
+                cwd_by_sid=cwd_by_sid)
+        literal = [a for a in self.sent if "-l" in a]
+        self.assertTrue(any("9" in a[-1] for a in literal), self.sent)
+
+    def test_no_cards_no_questions_is_a_noop(self):
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, {}, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [{"id": "x"}], card_gh_fn=self._gh)
+        self.assertEqual(logs, [])
+        self.assertEqual(self.gh_calls, [])
