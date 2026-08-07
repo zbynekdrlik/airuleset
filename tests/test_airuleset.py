@@ -3678,8 +3678,12 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down", text)
         # #289: the one-keystroke claude-history popup (root S-F1 + prefix-h
         # fallback), invoking the popup script by its own absolute path.
+        # #294 addendum: root S-DC (Shift+Delete) added as a second root-
+        # table key, provably reaching a Windows ssh client's terminal
+        # (see the module comment on TMUX_POPUP_KEY_ALT for the evidence).
         popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
         self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key -n S-DC display-popup", text)
         self.assertIn("bind-key h display-popup", text)
         self.assertIn(popup_script, text)
         self.assertIn('-d "#{pane_current_path}"', text)
@@ -3756,6 +3760,8 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
             f'bind-key -n S-F1 display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
+            f'bind-key -n S-DC display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
+            f'-T claude-history {popup_script}\n'
             f'bind-key h display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
             f"{airuleset.TMUX_MARK_END}"
@@ -3805,13 +3811,16 @@ class TestTmuxHistoryLimit(TestCase):
         # it immediately self-heals any ALREADY-existing detached grouped
         # pile-up on the very next push, with no new attach/detach cycle
         # needed -- verified live against a real tmux 3.7b server (see the
-        # design comment on #254). #289: the two claude-history popup
+        # design comment on #254). #289: the claude-history popup
         # `bind-key` calls (S-F1 root + prefix-h) are ALSO live-applied,
-        # same safety class -- total is now 7 calls.
+        # same safety class. #294 addendum: a THIRD popup bind, root
+        # S-DC (Shift+Delete -- see the module comment on
+        # TMUX_POPUP_KEY_ALT), was added between them -- total is now
+        # 8 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
         self.assertEqual(calls[2], ["tmux", "bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
@@ -3821,6 +3830,7 @@ class TestTmuxHistoryLimit(TestCase):
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[5], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
         self.assertEqual(calls[6], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[1])
+        self.assertEqual(calls[7], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[2])
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
@@ -3836,7 +3846,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -3863,7 +3873,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 8)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -4291,10 +4301,31 @@ class TestTmuxPopupBind(TestCase):
     exist there -- confirmed live via a real Shift+F1 keypress through a
     genuinely attached pty client (capture-pane cannot see a popup's
     content at all; it's a client-side overlay, never part of any pane's
-    own buffer -- verification had to read the raw pty stream instead)."""
+    own buffer -- verification had to read the raw pty stream instead).
+
+    #294 addendum: a SECOND root-table key, S-DC (Shift+Delete), was
+    added between S-F1 and the prefix-h fallback -- see the module
+    comment on TMUX_POPUP_KEY_ALT for the Windows-ssh-client (PuTTY /
+    Windows Terminal) research + empirical tmux-decode evidence behind
+    that specific choice. TMUX_POPUP_BIND_ARGVS order is now
+    [S-F1, S-DC, prefix-h]."""
 
     def test_key_choice_is_shift_f1_root_table(self):
         self.assertEqual(airuleset.TMUX_POPUP_KEY, "S-F1")
+
+    def test_alt_key_choice_is_shift_delete_root_table(self):
+        # #294 addendum: chosen because it reuses the EXACT SAME wire-
+        # format family (CSI <code>;2~) as the already-proven-working
+        # S-PageUp/S-PageDown scrollback binds (the user's own confirmed-
+        # working keys) -- Home/Insert/Delete/End/PgUp/PgDn are one
+        # uniform VT220 editing-keypad numeric-code family every
+        # xterm-descended terminal (incl. Windows Terminal and PuTTY's
+        # xterm mode) encodes identically. Confirmed NOT reserved as a
+        # clipboard shortcut in either client (unlike Shift+Insert, which
+        # BOTH PuTTY's own documented paste-key list and Windows
+        # Terminal's official default actions.json bind to
+        # Terminal.PasteFromClipboard -- ruled out for that reason).
+        self.assertEqual(airuleset.TMUX_POPUP_KEY_ALT, "S-DC")
 
     def test_prefix_fallback_is_h(self):
         self.assertEqual(airuleset.TMUX_POPUP_PREFIX_KEY, "h")
@@ -4303,8 +4334,12 @@ class TestTmuxPopupBind(TestCase):
         argv = airuleset.TMUX_POPUP_BIND_ARGVS[0]
         self.assertEqual(argv[:3], ["bind-key", "-n", "S-F1"])
 
-    def test_prefix_table_bind_has_no_dash_n(self):
+    def test_alt_root_table_bind_uses_dash_n(self):
         argv = airuleset.TMUX_POPUP_BIND_ARGVS[1]
+        self.assertEqual(argv[:3], ["bind-key", "-n", "S-DC"])
+
+    def test_prefix_table_bind_has_no_dash_n(self):
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[2]
         self.assertEqual(argv[:2], ["bind-key", "h"])
         self.assertNotIn("-n", argv)
 
@@ -4350,9 +4385,10 @@ class TestTmuxPopupBind(TestCase):
             self.assertIn("-E", argv)
             self.assertNotIn("-EE", argv)
 
-    def test_rendered_conf_line_contains_both_binds(self):
+    def test_rendered_conf_line_contains_all_three_binds(self):
         text = airuleset.render_tmux_history_block()
         self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key -n S-DC display-popup", text)
         self.assertIn("bind-key h display-popup", text)
         self.assertIn(str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST), text)
 
@@ -4366,7 +4402,7 @@ class TestTmuxPopupBind(TestCase):
         # is a tmux FORMAT string, not a shell variable.
         text = airuleset.render_tmux_history_block()
         popup_lines = [ln for ln in text.splitlines() if "display-popup" in ln]
-        self.assertEqual(len(popup_lines), 2)
+        self.assertEqual(len(popup_lines), 3)
         for line in popup_lines:
             self.assertNotIn("$", line)
 
