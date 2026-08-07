@@ -347,7 +347,8 @@ def check_target(user, host, tokens, label):
                                  .rstrip("/")) == SUBDEV_ADMIN_KEY_BASENAME):
             return None
         return ("%s to subdev with NO user specified (implicit current "
-                "shell user) — must be montalu[234] / marek / david / simap"
+                "shell user) — must be montalu[234] / marek / david / "
+                "simap / miva1"
                 % label)
     if user == "root":
         # #68: the gatekeeper VPS's own sanctioned root@subdev identity.

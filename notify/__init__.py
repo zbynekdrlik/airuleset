@@ -72,8 +72,13 @@ STREAM_NOTIFY_OWNER = {
     # DISCORD_MIRROR_MIVA1 was considered and rejected here (see #300's own
     # design comment): that mechanism lives entirely in a LOCAL, non-git
     # per-box .env this repo's code cannot provision or deploy, whereas this
-    # redirect satisfies the ticket's stated requirement fully and deploys
-    # automatically on the next push/install.
+    # redirect is the code-side ROUTING DECISION and needs no such file to
+    # BE correct. It is NOT sufficient on its own for a real ping to land,
+    # though -- like every other stream persona, miva1's own box still needs
+    # its LOCAL ~/.claude/channels/discord/.env hand-wired (bot token +
+    # DISCORD_NOTIFICATION_CHANNEL_ZBYNEK) before any notify call there does
+    # anything but fail-safe silently; check_discord_notify_config() already
+    # surfaces that gap loudly at install time, same as for every stream.
     "miva1": "zbynek",
 }
 

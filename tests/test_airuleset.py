@@ -9755,9 +9755,14 @@ class TestBlockSubdevSshMisuseHook(TestCase):
 
     def test_blocks_miva1_without_identity(self):
         # miva1 (airuleset#300) shares marek/david/simap's identity
-        # requirement.
+        # requirement. Asserts the SPECIFIC reason (not just "miva1"
+        # anywhere in stderr) -- an unauthorized-user-shaped message would
+        # also contain "miva1" and pass this test for the wrong reason if
+        # the allow-list entry (check_target's `user in (...)` tuple) were
+        # ever removed by mistake.
         r = self._run('ssh miva1@subdev "ls"')
         self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("without -i", r.stderr)
         self.assertIn("miva1", r.stderr)
 
     def test_blocks_miva1_with_wrong_identity(self):

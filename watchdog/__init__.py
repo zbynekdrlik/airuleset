@@ -3885,6 +3885,17 @@ BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this of
 # member) — need their own bounce-quals scoping like montalu itself, or a
 # pane in one of their homes falls through to the full-authority
 # exclude-all-reduced-streams branch instead of its own stream:<user> label.
+#
+# simap and miva1 (airuleset#143 / #300) are NOT in this tuple -- an
+# omission carried over unrevisited from #143, never a documented decision.
+# Consequence, scoped to _CROSS_STREAM_REPOS (odoo-erp): _gkreq_supervisor_root
+# would (wrongly) treat a pane under /home/simap/ or /home/miva1/ as a
+# FULL-authority supervisor root, so job 11 could nudge that stream's OWN
+# pane to work a needs-gatekeeper ticket it filed itself -- backwards, the
+# same failure _gkreq_supervisor_root's own docstring says to avoid. Neither
+# stream has ever produced that failure in production (this repo's own FREEZE:
+# "the same defect exists in N more places" is not fixed pre-emptively) --
+# if it ever does, start here.
 _REDUCED_STREAM_USERS = ("david", "marek", "montalu",
                          "montalu2", "montalu3", "montalu4")
 
