@@ -34,6 +34,26 @@ set -euo pipefail
 # extraction: contiguous paragraph ending at the marker; a bare short marker
 # pulls in the one paragraph above). HARD-blocks via {"decision":"block"}
 # with a per-session retry cap so it can never loop forever.
+#
+# #292 — every `grep -q`/`grep -m1` decision below reads from a HERE-STRING
+# (`<<<"$var"`), never from a `printf … | grep -q` PIPE. `grep -q` exits at
+# its FIRST match without draining the rest of stdin; if it is fed by a pipe,
+# the still-writing `printf` can take SIGPIPE, and `set -o pipefail` then
+# reports the WRITER's 141 as the whole pipeline's exit status — flipping a
+# genuine match into an apparent "no match" (the exact `stop-check-prose-
+# violations.sh` mechanism #190/#194 already fixed once, reproduced live
+# here: `test_verbatim_repeat_of_the_same_blocked_question_still_passes`
+# flaking under full-suite load, 1-in-500-to-8000 CPU-saturated runs, rc=141
+# captured directly). A here-string has no live WRITER PROCESS the reader
+# can SIGPIPE — bash materializes it as a temp file on older builds, or an
+# already-fully-written anonymous pipe under capacity on bash 5.1+; either
+# way the whole document exists before the reader's first read, so the race
+# cannot exist structurally, regardless of which check fires early. The
+# ONE exception is the BLOCK-extraction `awk` below (the paragraph-pull that
+# builds `$BLOCK` itself): its only `exit` calls live inside `END { … }`,
+# which by definition never runs until awk has already consumed all of
+# stdin — genuinely safe, left as a pipe on purpose (`tests/
+# test_question_gate_pipeline_race.py` locks this distinction explicitly).
 
 command -v jq &>/dev/null || exit 0
 
@@ -49,7 +69,7 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 # the away-user Slovak template has no audience here. Enforcing it looped the
 # Stop hook and killed the gk session (2026-07-20). 'ž' via ALTERNATION, never
 # a bracket class (grep splits multibyte chars inside []).
-if printf '%s\n' "$MSG" | grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal'; then
+if grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal' <<<"$MSG"; then
     exit 0
 fi
 
@@ -66,11 +86,11 @@ ASKED_RX='❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:'
 # hook's dedup key source) — used for the verbatim-repeat bypass below.
 N=""
 MARKER_RAW=""
-if printf '%s\n' "$MSG" | grep -qiE "$ASKED_RX"; then
+if grep -qiE "$ASKED_RX" <<<"$MSG"; then
     N=$(printf '%s\n' "$MSG" | grep -inE "$ASKED_RX" | tail -1 | cut -d: -f1)
     MARKER_RAW=$(printf '%s\n' "$MSG" | grep -iE "$ASKED_RX" | tail -1 \
         | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
-elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓'; then
+elif grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓' <<<"$LAST_LINE"; then
     N=$(printf '%s\n' "$MSG" | grep -nvE '^[[:space:]]*$' | tail -1 | cut -d: -f1)
     MARKER_RAW=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
 fi
@@ -179,7 +199,7 @@ VIOLATION=""
 # Check 1 — the briefing line. The block must open the question with
 # '**Otázka — projekt <meno> (<čo to je>):** …' so a phone reader with zero
 # terminal context understands WHAT project and WHAT is going on.
-if ! printf '%s' "$BLOCK" | grep -qiE '^[[:space:]]*\**[[:space:]]*Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt'; then
+if ! grep -qiE '^[[:space:]]*\**[[:space:]]*Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$BLOCK"; then
     VIOLATION="briefing"
 fi
 
@@ -188,10 +208,10 @@ fi
 # STEP descriptions with a single final '?' stay allowed.
 if [ -z "$VIOLATION" ]; then
     QMARKS=$(printf '%s' "$BLOCK" | tr -cd '?' | wc -c)
-    if printf '%s' "$BLOCK" | grep -qiE 'ktor[éú]ko[ľl]vek[[:space:]]+z'; then
+    if grep -qiE 'ktor[éú]ko[ľl]vek[[:space:]]+z' <<<"$BLOCK"; then
         VIOLATION="pile"
-    elif printf '%s' "$BLOCK" | grep -q '(1)' \
-            && printf '%s' "$BLOCK" | grep -q '(2)' \
+    elif grep -q '(1)' <<<"$BLOCK" \
+            && grep -q '(2)' <<<"$BLOCK" \
             && [ "$QMARKS" -ge 2 ]; then
         VIOLATION="pile"
     fi
@@ -208,10 +228,10 @@ fi
 # block→rewrite→block live in camera-box (2026-07-05, the user's "velke
 # zhorsenie" report).
 if [ -z "$VIOLATION" ]; then
-    BRIEF=$(printf '%s\n' "$BLOCK" | awk '
+    BRIEF=$(awk '
         /^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])/ { exit }
         /^[[:space:]]*[*_>~-]*[[:space:]]*❓/ { exit }
-        { print }')
+        { print }' <<<"$BLOCK")
     BRIEF_LEN=$(printf '%s' "$BRIEF" | jq -Rrs 'rtrimstr("\n") | length')
     if [ "${BRIEF_LEN:-0}" -gt 600 ]; then
         VIOLATION="briefwall"
@@ -223,7 +243,7 @@ fi
 # offers candidate answers plus "• iné — napíš vlastnú odpoveď". Same
 # alternation-not-bracket rule as Check 3 (locale-independent multibyte `•`).
 if [ -z "$VIOLATION" ]; then
-    if ! printf '%s\n' "$BLOCK" | grep -qE '^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])'; then
+    if ! grep -qE '^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])' <<<"$BLOCK"; then
         VIOLATION="options"
     fi
 fi
@@ -236,13 +256,13 @@ fi
 # the full question after an intervening conversation. Banned Slovak
 # referencing phrases (user-questions-slovak.md), all rewordings apply.
 if [ -z "$VIOLATION" ]; then
-    if printf '%s' "$BLOCK" | grep -qiE \
+    if grep -qiE \
         '(p[ýy]tal[a]?[[:space:]]+som[[:space:]]+sa[[:space:]]+(sk[ôo]r|u[žz]|vy[šs][šs]ie))'\
 '|(ako[[:space:]]+som[[:space:]]+(sa[[:space:]]+)?(u[žz][[:space:]]+)?(p[ýy]tal|spom[íi]nal|p[íi]sal|uviedol))'\
 '|(vr[áa][ťt].{0,12}(sa[[:space:]]+)?k[[:space:]].{0,20}ot[áa]zke)'\
 '|(st[áa]le[[:space:]]+[čc]ak[áa]m[[:space:]]+na[[:space:]]+odpove[ďd])'\
 '|(ot[áa]zka.{0,40}st[áa]le[[:space:]]+plat[íi])'\
-'|(jedin[éy][[:space:]]+otvoren[ée][[:space:]]+rozhodnutie[[:space:]]+je)'; then
+'|(jedin[éy][[:space:]]+otvoren[ée][[:space:]]+rozhodnutie[[:space:]]+je)' <<<"$BLOCK"; then
         VIOLATION="reference"
     fi
 fi
