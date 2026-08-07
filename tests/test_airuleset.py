@@ -5501,6 +5501,25 @@ class TestClaudeHistoryScript(TestCase):
         self.assertIsNotNone(claude_code, claude_line)
         self.assertNotEqual(user_code.group(0), claude_code.group(0))
 
+    def test_color_assigns_the_specific_established_palette_to_each_role(self):
+        # #294 adversarial review (MINOR/THEORETICAL): the sibling test
+        # above only proves the two header colors DIFFER, so a mutant
+        # swapping which constant goes to which role (or substituting an
+        # unrelated pair of colors entirely) would pass it unnoticed.
+        # Pin the EXACT codes the design comment specifies: 75 for USER
+        # (matches statusbar.py's existing "Issues" segment blue, reused
+        # for consistency) and 108 for CLAUDE (a muted sage/olive green).
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        self.assertIn("\x1b[1;38;5;75m", user_line, user_line)
+        self.assertIn("\x1b[1;38;5;108m", claude_line, claude_line)
+
     def test_tool_call_lines_are_dimmed_in_color_mode(self):
         cwd = self.home / "proj"
         cwd.mkdir()
@@ -5537,6 +5556,11 @@ class TestClaudeHistoryScript(TestCase):
         # No timestamp on the assistant record -> nothing extra beyond the
         # (color-wrapped) header itself once ANSI is stripped back out.
         self.assertEqual(self._strip_ansi(claude_line), "===== CLAUDE =====")
+        # #294 adversarial review (MINOR): a bare "HH:MM:SS" with no marker
+        # reads as ambiguous local-vs-UTC time -- real transcript
+        # timestamps are always UTC ("...Z" suffix), so the rendered
+        # suffix carries an explicit "Z" too.
+        self.assertIn("12:34:56Z", self._strip_ansi(user_line))
 
     def test_colors_on_by_default_on_a_real_terminal(self):
         cwd = self.home / "proj"
