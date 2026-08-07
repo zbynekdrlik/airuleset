@@ -110,6 +110,12 @@ class RuntimeDepsCheck(unittest.TestCase):
         self.assertIn("node", airuleset.RUNTIME_DEPS)
         self.assertIn("npx", airuleset.RUNTIME_DEPS)
 
+    def test_less_is_a_tracked_dependency(self):
+        # #289: the claude-history popup script pipes into `less +G` for
+        # paging — never tracked here before, so a box that somehow lacked
+        # it would silently break the popup with zero warning.
+        self.assertIn("less", airuleset.RUNTIME_DEPS)
+
     def test_node_install_uses_the_nodejs_apt_package(self):
         # Debian/Ubuntu's real "node" apt package is an UNRELATED amateur
         # packet-radio program — installing it would never provide the

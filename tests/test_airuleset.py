@@ -3336,13 +3336,14 @@ class TestUltracodeLauncher(TestCase):
         p = Path(d) / ".bashrc"
         s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
         h = Path(d) / ".claude" / "airuleset-claude-history.py"
+        pp = Path(d) / ".claude" / "airuleset-claude-history-popup.sh"
         if content is not None:
             p.write_text(content)
-        return p, s, h
+        return p, s, h, pp
 
     def test_appends_to_existing_bashrc_preserving_content(self):
-        p, s, h = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
-        changed = airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp("export PATH=$PATH:/x\nalias ll='ls -la'\n")
+        changed = airuleset.apply_ultracode_launcher(p, s, h, pp)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn("export PATH=$PATH:/x", text)           # preserved
@@ -3352,17 +3353,17 @@ class TestUltracodeLauncher(TestCase):
         self.assertIn(airuleset.ULTRACODE_MARK_END, text)
 
     def test_idempotent_bashrc_no_change_second_run(self):
-        p, s, h = self._tmp("# my rc\n")
-        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h))
-        self.assertFalse(airuleset.apply_ultracode_launcher(p, s, h))  # bashrc no-op
+        p, s, h, pp = self._tmp("# my rc\n")
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h, pp))
+        self.assertFalse(airuleset.apply_ultracode_launcher(p, s, h, pp))  # bashrc no-op
 
     def test_replaces_block_in_place_no_duplicate(self):
-        p, s, h = self._tmp("# rc\n")
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp("# rc\n")
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         # tamper inside the block, re-run -> block restored, exactly ONE block
         text = p.read_text().replace("claude-ultracode()", "BROKEN")
         p.write_text(text)
-        airuleset.apply_ultracode_launcher(p, s, h)
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         out = p.read_text()
         self.assertEqual(out.count(airuleset.ULTRACODE_MARK_START), 1)
         self.assertNotIn("BROKEN", out)
@@ -3374,12 +3375,13 @@ class TestUltracodeLauncher(TestCase):
         p = Path(d) / ".bashrc"
         s = Path(d) / ".claude" / "airuleset-claude-launch.sh"
         h = Path(d) / ".claude" / "airuleset-claude-history.py"
-        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h))
+        pp = Path(d) / ".claude" / "airuleset-claude-history-popup.sh"
+        self.assertTrue(airuleset.apply_ultracode_launcher(p, s, h, pp))
         self.assertIn("claude()", p.read_text())
 
     def test_function_not_alias_and_has_plain_escape(self):
-        p, s, h = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         text = p.read_text()
         self.assertIn("claude() {", text)
         self.assertNotIn("alias claude=", text)
@@ -3395,8 +3397,8 @@ class TestUltracodeLauncher(TestCase):
         # only a call into the managed script. This is what makes a `push`
         # take effect in an already-running shell: nothing flag-shaped is
         # frozen in that shell's memory anymore.
-        p, s, h = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         block = p.read_text().split(airuleset.ULTRACODE_MARK_START)[1]
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
         for literal in ("--settings", "--model", "--dangerously-skip-permissions",
@@ -3416,15 +3418,15 @@ class TestUltracodeLauncher(TestCase):
                        history_line)
 
     def test_writes_executable_script_at_script_path(self):
-        p, s, h = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         self.assertTrue(s.exists())
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertTrue(os.access(s, os.X_OK))
 
     def test_writes_executable_history_script_at_history_script_path(self):
-        p, s, h = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         self.assertTrue(h.exists())
         self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
         self.assertTrue(os.access(h, os.X_OK))
@@ -3434,11 +3436,11 @@ class TestUltracodeLauncher(TestCase):
         # script is ALWAYS (re)written -- so tampering with it (or a stale
         # copy from a rollback) is self-healed on the very next install/push,
         # the same unconditional-rewrite guarantee the caveman shim gives.
-        p, s, h = self._tmp()
-        airuleset.apply_ultracode_launcher(p, s, h)
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         s.write_text("BROKEN")
         h.write_text("BROKEN")
-        airuleset.apply_ultracode_launcher(p, s, h)
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
 
@@ -3673,6 +3675,14 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode S-PageDown send-keys -X page-down", text)
         self.assertIn(
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down", text)
+        # #289: the one-keystroke claude-history popup (root S-F1 + prefix-h
+        # fallback), invoking the popup script by its own absolute path.
+        popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
+        self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key h display-popup", text)
+        self.assertIn(popup_script, text)
+        self.assertIn('-d "#{pane_current_path}"', text)
+        self.assertIn("-T claude-history", text)
 
     def test_appends_to_existing_conf_preserving_content_byte_for_byte(self):
         original = "set -g mouse on\nset -g status-bg colour234\n"
@@ -3733,6 +3743,7 @@ class TestTmuxHistoryLimit(TestCase):
         # itself) so this also locks the exact line ORDER and content, not
         # just placement -- a self-referential expected string would pass
         # even if the two set-option lines were emitted out of order.
+        popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
         expected = (
             "set -g mouse on\n\n"
             f"{airuleset.TMUX_MARK_START}\n"
@@ -3742,6 +3753,10 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -n S-PageUp copy-mode -eu\n"
             "bind-key -T copy-mode S-PageDown send-keys -X page-down\n"
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
+            f'bind-key -n S-F1 display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
+            f'-T claude-history {popup_script}\n'
+            f'bind-key h display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
+            f'-T claude-history {popup_script}\n'
             f"{airuleset.TMUX_MARK_END}"
             "\n\nset -g status-bg colour234\n"
         )
@@ -3789,11 +3804,13 @@ class TestTmuxHistoryLimit(TestCase):
         # it immediately self-heals any ALREADY-existing detached grouped
         # pile-up on the very next push, with no new attach/detach cycle
         # needed -- verified live against a real tmux 3.7b server (see the
-        # design comment on #254). Total is now 5 calls.
+        # design comment on #254). #289: the two claude-history popup
+        # `bind-key` calls (S-F1 root + prefix-h) are ALSO live-applied,
+        # same safety class -- total is now 7 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
         self.assertEqual(calls[2], ["tmux", "bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
@@ -3801,6 +3818,8 @@ class TestTmuxHistoryLimit(TestCase):
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[4], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
+        self.assertEqual(calls[5], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
+        self.assertEqual(calls[6], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[1])
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
@@ -3816,7 +3835,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -3843,7 +3862,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -4140,8 +4159,13 @@ class TestTmuxScrollbackKeybinds(TestCase):
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         # calls[0] is history-limit, calls[1] is #254's destroy-unattached
         # -- both plain set-option calls, neither part of the keybind list.
-        keybind_calls = calls[2:]
-        self.assertEqual(len(keybind_calls), len(airuleset.TMUX_SCROLLBACK_KEYBINDS))
+        # #289: the popup binds (TMUX_POPUP_BIND_ARGVS) are live-applied
+        # AFTER the scrollback keybinds -- slice to exactly the scrollback
+        # portion so this test stays scoped to TMUX_SCROLLBACK_KEYBINDS
+        # alone (TestTmuxPopupBind below locks the popup portion).
+        n = len(airuleset.TMUX_SCROLLBACK_KEYBINDS)
+        keybind_calls = calls[2:2 + n]
+        self.assertEqual(len(keybind_calls), n)
         for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
             self.assertEqual(call, ["tmux"] + argv)
 
@@ -4175,6 +4199,354 @@ class TestTmuxScrollbackKeybinds(TestCase):
         for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS:
             for token in argv:
                 self.assertNotIn(" ", token, argv)
+
+
+class TestTmuxConfQuote(TestCase):
+    """`_tmux_conf_quote` renders a single conf-line WORD for tmux's own
+    config parser -- unlike TMUX_SCROLLBACK_KEYBINDS' bare `" ".join`
+    (locked as safe by TestTmuxScrollbackKeybinds' own
+    test_no_argv_element_contains_whitespace above), the popup bind's argv
+    contains `#{pane_current_path}`, whose literal `#` would start a tmux
+    COMMENT if left unquoted at line-start -- quoting here is load-bearing
+    for THAT character (see `test_format_string_token_is_quoted` below),
+    not for embedded whitespace: none of TMUX_POPUP_BIND_ARGVS' own tokens
+    actually contain a space (#289 adversarial-review M4)."""
+
+    def test_simple_token_is_left_unquoted(self):
+        for word in ("bind-key", "-n", "S-F1", "display-popup", "-E",
+                     "90%", "claude-history"):
+            self.assertEqual(airuleset._tmux_conf_quote(word), word)
+
+    def test_token_with_whitespace_is_double_quoted(self):
+        self.assertEqual(airuleset._tmux_conf_quote("a b"), '"a b"')
+
+    def test_token_with_semicolon_is_quoted(self):
+        # A bare `;` is a tmux command separator outside quotes.
+        self.assertEqual(airuleset._tmux_conf_quote("a;b"), '"a;b"')
+
+    def test_embedded_double_quote_is_escaped(self):
+        self.assertEqual(airuleset._tmux_conf_quote('a "b" c'), '"a \\"b\\" c"')
+
+    def test_embedded_backslash_is_escaped(self):
+        self.assertEqual(airuleset._tmux_conf_quote("a\\b c"), '"a\\\\b c"')
+
+    def test_bare_backslash_with_no_space_is_still_quoted_and_escaped(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M3): the sibling test above
+        # (`test_embedded_backslash_is_escaped`) always pairs its
+        # backslash with a space in the SAME fixture, so a mutant dropping
+        # `\\` from the trigger regex's character class still survives --
+        # the space alone is enough to trigger quoting, and the escape
+        # then happens regardless of whether `\\` is actually IN the
+        # trigger class. This fixture isolates the backslash as the ONLY
+        # thing that could possibly trigger quoting.
+        self.assertEqual(airuleset._tmux_conf_quote("a\\b"), '"a\\\\b"')
+
+    def test_format_string_token_is_quoted(self):
+        # `#{pane_current_path}` contains no whitespace/quote/semicolon/
+        # backslash/hash-at-start... but DOES contain a literal '#' which
+        # would start a tmux COMMENT if it were the first char of an
+        # unquoted word at line start; mid-word it's harmless, but this
+        # function conservatively quotes anything containing '#' too.
+        self.assertEqual(airuleset._tmux_conf_quote("#{pane_current_path}"),
+                          '"#{pane_current_path}"')
+
+    def test_token_with_single_quote_is_double_quoted(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M2): an UNQUOTED `'` mid-word
+        # starts real single-quote mode in tmux's own conf-parser grammar
+        # too (not just at the start of a bare word) -- left unquoted, a
+        # word containing one can swallow the rest of the conf file as
+        # single-quoted text. A single quote needs no ESCAPING inside a
+        # tmux double-quoted string (verified live), but it DOES need to
+        # TRIGGER quoting when the word is otherwise bare.
+        self.assertEqual(airuleset._tmux_conf_quote("a'b"), '"a\'b"')
+
+    def test_dollar_sign_is_refused_not_silently_mis_rendered(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M1): tmux's own conf-parser
+        # expands $VAR at conf-parse/bind time -- both quoted and
+        # unquoted -- so no quoting form here can protect a literal '$'.
+        # The function refuses rather than silently rendering something
+        # that will be corrupted at bind time (the exact class of bug
+        # this ticket self-found and fixed for the popup's own command).
+        with self.assertRaises(ValueError):
+            airuleset._tmux_conf_quote("$HOME")
+
+    def test_empty_string_is_quoted_not_dropped(self):
+        # An empty token must still render as SOMETHING (a real tmux word
+        # boundary), never silently vanish from the joined conf line.
+        self.assertEqual(airuleset._tmux_conf_quote(""), '""')
+
+
+class TestTmuxPopupBind(TestCase):
+    """#289: a one-keystroke POPUP (S-F1 root-table, prefix-h fallback)
+    over `claude-history` (#267's companion) -- the discoverability gap
+    the ticket was reopened over (claude-history existed but nobody knew
+    to type it). See the module comment above TMUX_POPUP_KEY in
+    airuleset.py for the full design rationale, including the live-
+    verified reason the invoked command is a SEPARATE SCRIPT FILE
+    (CLAUDE_HISTORY_POPUP_SCRIPT_DEST) rather than an inline shell
+    command: tmux's own conf-file DOUBLE-QUOTE parser expands `$VAR` at
+    bind time using tmux's OWN process environment, silently blanking
+    any shell-runtime variable (`$CH_OUT`/`$CH_RC`/`$?`) that doesn't
+    exist there -- confirmed live via a real Shift+F1 keypress through a
+    genuinely attached pty client (capture-pane cannot see a popup's
+    content at all; it's a client-side overlay, never part of any pane's
+    own buffer -- verification had to read the raw pty stream instead)."""
+
+    def test_key_choice_is_shift_f1_root_table(self):
+        self.assertEqual(airuleset.TMUX_POPUP_KEY, "S-F1")
+
+    def test_prefix_fallback_is_h(self):
+        self.assertEqual(airuleset.TMUX_POPUP_PREFIX_KEY, "h")
+
+    def test_root_table_bind_uses_dash_n(self):
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[0]
+        self.assertEqual(argv[:3], ["bind-key", "-n", "S-F1"])
+
+    def test_prefix_table_bind_has_no_dash_n(self):
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[1]
+        self.assertEqual(argv[:2], ["bind-key", "h"])
+        self.assertNotIn("-n", argv)
+
+    def test_both_binds_invoke_display_popup_with_the_same_command(self):
+        for argv in airuleset.TMUX_POPUP_BIND_ARGVS:
+            self.assertIn("display-popup", argv)
+            self.assertIn(str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST), argv)
+
+    def test_popup_invokes_the_script_by_its_own_absolute_path(self):
+        # NEVER an inline shell command (the landmine this ticket's own
+        # live verification found) and NEVER the `claude-history` bashrc
+        # FUNCTION (display-popup runs non-interactively -- ~/.bashrc is
+        # never sourced).
+        for argv in airuleset.TMUX_POPUP_BIND_ARGVS:
+            cmd = argv[-1]
+            self.assertEqual(cmd, str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST))
+            self.assertTrue(Path(cmd).is_absolute())
+            self.assertNotIn("$", cmd)
+            self.assertNotIn(";", cmd)
+
+    def test_popup_sizes_generously_and_titles_itself(self):
+        for argv in airuleset.TMUX_POPUP_BIND_ARGVS:
+            self.assertIn("-w", argv)
+            self.assertIn("90%", argv)
+            self.assertIn("-h", argv)
+            self.assertIn("-T", argv)
+            self.assertIn("claude-history", argv)
+
+    def test_popup_starts_in_the_originating_panes_own_cwd(self):
+        # `-d '#{pane_current_path}'` -- format-EXPANDED by tmux (unlike
+        # the shell-command argument, verified live) -- so claude-history's
+        # own `--cwd` default (os.getcwd()) resolves the right project
+        # with no `--pane` argument needed.
+        for argv in airuleset.TMUX_POPUP_BIND_ARGVS:
+            self.assertIn("-d", argv)
+            self.assertIn("#{pane_current_path}", argv)
+
+    def test_popup_closes_on_the_scripts_own_exit(self):
+        # Plain `-E` (not `-EE`): the script itself already waits for a
+        # keypress on its OWN failure branch before exiting, so tmux can
+        # close the popup unconditionally once the script returns.
+        for argv in airuleset.TMUX_POPUP_BIND_ARGVS:
+            self.assertIn("-E", argv)
+            self.assertNotIn("-EE", argv)
+
+    def test_rendered_conf_line_contains_both_binds(self):
+        text = airuleset.render_tmux_history_block()
+        self.assertIn("bind-key -n S-F1 display-popup", text)
+        self.assertIn("bind-key h display-popup", text)
+        self.assertIn(str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST), text)
+
+    def test_no_dollar_sign_survives_into_the_rendered_conf_line(self):
+        # ADVERSARIAL-REVIEW-CLASS FINDING (self-caught, #289): an earlier
+        # design embedded `$CH_OUT`/`$CH_RC`/`$?` directly in the popup's
+        # shell-command argument -- tmux's OWN conf-parser silently
+        # expanded/blanked them at bind time (verified live). The fixed
+        # design's rendered conf line must carry NO `$` at all -- the
+        # script path is a plain absolute path, and `#{pane_current_path}`
+        # is a tmux FORMAT string, not a shell variable.
+        text = airuleset.render_tmux_history_block()
+        popup_lines = [ln for ln in text.splitlines() if "display-popup" in ln]
+        self.assertEqual(len(popup_lines), 2)
+        for line in popup_lines:
+            self.assertNotIn("$", line)
+
+
+class TestClaudeHistoryPopupScript(TestCase):
+    """CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT -- the standalone script the
+    popup bind invokes by path (see TestTmuxPopupBind above for why it
+    is a separate file, never an inline shell command)."""
+
+    def test_starts_with_bash_shebang_and_set_euo_pipefail(self):
+        content = airuleset.render_claude_history_popup_script()
+        self.assertTrue(content.startswith("#!/usr/bin/env bash"))
+        self.assertIn("set -euo pipefail", content)
+
+    def test_captures_exit_code_without_the_set_e_assignment_trap(self):
+        # `set -e` + `VAR=$(failing_cmd)` exits the script BEFORE the next
+        # line ever runs (this repo's own documented gotcha) -- the fix is
+        # `VAR=$(cmd) || RC=$?` on ONE line, never a bare `VAR=$(cmd)`
+        # followed by a SEPARATE, unguarded `RC=$?` line (which `set -e`
+        # would never even reach on a real failure).
+        content = airuleset.render_claude_history_popup_script()
+        assign_line = next(ln for ln in content.splitlines() if "CH_OUT=$(" in ln)
+        self.assertIn("|| CH_RC=$?", assign_line, assign_line)
+        # The bare (dangerous) shape would be its OWN separate statement
+        # line consisting of exactly `CH_RC=$?` with no `||` before it.
+        self.assertNotIn("CH_RC=$?", [ln.strip() for ln in content.splitlines()])
+
+    def test_pipes_success_output_into_less_plus_g(self):
+        content = airuleset.render_claude_history_popup_script()
+        self.assertIn("| less +G", content)
+
+    def test_failure_branch_waits_for_a_keypress_before_closing(self):
+        # No silent instant-close: on a nonzero exit, the script prints
+        # the error and waits for input rather than handing `less` an
+        # empty pipe.
+        content = airuleset.render_claude_history_popup_script()
+        self.assertIn("press any key to close", content)
+        self.assertIn("read -n 1", content)
+
+    def _deploy(self, home):
+        claude_dir = home / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        hscript = claude_dir / airuleset.CLAUDE_HISTORY_SCRIPT_DEST.name
+        hscript.write_text(airuleset.render_claude_history_script())
+        os.chmod(hscript, 0o755)
+        pscript = claude_dir / airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST.name
+        pscript.write_text(airuleset.render_claude_history_popup_script())
+        os.chmod(pscript, 0o755)
+        return pscript
+
+    def test_real_execution_success_path_shows_the_transcript(self):
+        # Genuine `bash` execution (not a mock) against a real deployed
+        # claude-history script + a real seeded transcript -- `less`
+        # degrades to cat-like behavior when its stdout is not a tty
+        # (verified live: no hang, exits 0), so this is a real, fast,
+        # non-interactive proof of the SUCCESS path.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "REAL-EXEC-SUCCESS-MARKER"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        env = {**os.environ, "HOME": str(home)}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("REAL-EXEC-SUCCESS-MARKER", r.stdout)
+        self.assertEqual(r.stderr, "")
+
+    def test_real_execution_failure_path_fails_loudly_never_silently(self):
+        # No transcript exists for this cwd -- claude-history exits
+        # nonzero with a clear stderr message; the popup script must
+        # SHOW that message and wait for a keypress, never hand `less`
+        # empty stdin and instant-close.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        env = {**os.environ, "HOME": str(home)}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)  # the || true guard absorbs read's EOF
+        self.assertIn("no Claude Code session transcript found", r.stdout)
+        self.assertIn("press any key to close", r.stdout)
+        self.assertNotIn("integer expression expected", r.stdout + r.stderr)
+
+    def test_real_execution_missing_less_shows_transcript_then_waits(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M5): a box genuinely missing
+        # `less` must fail LOUDLY (show the transcript + wait for a
+        # keypress) rather than handing a nonexistent command the
+        # successfully-read output and instant-closing silently.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "MISSING-LESS-MARKER"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        # A PATH containing ONLY a symlink to the real python3 -- no
+        # `less` anywhere on it -- reproduces "less is not installed"
+        # without touching the box's own real less binary.
+        narrow_bin = Path(tempfile.mkdtemp())
+        for tool in ("python3", "bash"):
+            real_tool = shutil.which(tool)
+            os.symlink(real_tool, narrow_bin / tool)
+        env = {"HOME": str(home), "PATH": str(narrow_bin)}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)  # the || true guard absorbs read's EOF
+        self.assertIn("MISSING-LESS-MARKER", r.stdout)
+        self.assertIn('"less" is not installed', r.stdout)
+        self.assertIn("press any key to close", r.stdout)
+
+
+class TestApplyUltracodeLauncherDeploysPopupScript(TestCase):
+    """apply_ultracode_launcher (#289 extension) must deploy the popup
+    script with the SAME unconditional-write + chmod +x + missing-after-
+    write-RuntimeError treatment as the sibling launch/history scripts
+    (#77/#267) -- see TestUltracodeLauncher above for those siblings'
+    own dedicated locks; this class covers only the NEW popup-script
+    behavior to avoid duplicating that whole class."""
+
+    def _tmp(self):
+        d = Path(tempfile.mkdtemp())
+        return (d / ".bashrc", d / ".claude" / "airuleset-claude-launch.sh",
+                d / ".claude" / "airuleset-claude-history.py",
+                d / ".claude" / "airuleset-claude-history-popup.sh")
+
+    def test_popup_script_is_written_and_executable(self):
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
+        self.assertTrue(pp.exists())
+        self.assertEqual(pp.read_text(), airuleset.render_claude_history_popup_script())
+        self.assertTrue(os.access(pp, os.X_OK))
+
+    def test_popup_script_rewritten_unconditionally_every_call(self):
+        p, s, h, pp = self._tmp()
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
+        pp.write_text("BROKEN")
+        airuleset.apply_ultracode_launcher(p, s, h, pp)
+        self.assertEqual(pp.read_text(), airuleset.render_claude_history_popup_script())
+
+    def test_missing_popup_script_after_write_raises(self):
+        # Simulate a write that silently didn't land (write_text is a
+        # no-op for `pp` only) -- os.chmod is ALSO no-op'd, since the real
+        # code calls it before the existence check and chmod on a
+        # genuinely-missing path would raise its OWN (unrelated)
+        # FileNotFoundError first, masking the RuntimeError under test.
+        p, s, h, pp = self._tmp()
+        real_write_text = Path.write_text
+        real_chmod = os.chmod
+
+        def _write_boom(self, *a, **kw):
+            if self == pp:
+                return  # simulate a write that silently didn't land
+            return real_write_text(self, *a, **kw)
+
+        def _chmod_noop(path, mode):
+            if str(path) == str(pp):
+                return
+            return real_chmod(path, mode)
+
+        with m.patch.object(Path, "write_text", _write_boom), \
+                m.patch.object(os, "chmod", _chmod_noop):
+            with self.assertRaises(RuntimeError):
+                airuleset.apply_ultracode_launcher(p, s, h, pp)
 
 
 class _FakeCP:
@@ -4562,7 +4934,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         bashrc = Path(home) / ".bashrc"
         script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
         history_script = Path(home) / ".claude" / "airuleset-claude-history.py"
-        airuleset.apply_ultracode_launcher(bashrc, script, history_script)
+        popup_script = Path(home) / ".claude" / "airuleset-claude-history-popup.sh"
+        airuleset.apply_ultracode_launcher(bashrc, script, history_script, popup_script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir(exist_ok=True)
         stub = stub_dir / "claude"
@@ -4735,7 +5108,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         bashrc = Path(home) / ".bashrc"
         script = Path(home) / ".claude" / "airuleset-claude-launch.sh"
         history_script = Path(home) / ".claude" / "airuleset-claude-history.py"
-        airuleset.apply_ultracode_launcher(bashrc, script, history_script)
+        popup_script = Path(home) / ".claude" / "airuleset-claude-history-popup.sh"
+        airuleset.apply_ultracode_launcher(bashrc, script, history_script, popup_script)
         stub_dir = Path(home) / "bin"
         stub_dir.mkdir()
         stub = stub_dir / "claude"
