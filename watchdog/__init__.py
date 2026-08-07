@@ -8729,6 +8729,132 @@ GOAL_STALL_IDLE_S = 15 * 60         # transcript stale this long while ARMED
 GOAL_STALL_INTERVAL_S = 15 * 60     # min spacing between nudges
 GOAL_STALL_MAX_NUDGES = 3           # then ONE ping, then silence
 
+# #161 — the user's own directive (2026-07-29): a `❓ NEEDS YOU` block should
+# wait for an answer at most ~30 minutes; past it, the loop is told to park
+# that ticket and move to other backlog work rather than sit stopped
+# forever. `_goal_stall_nudge` above still REFUSES to nudge past a `❓`
+# marker at all (its own pinned invariant, unchanged) — this is a wholly
+# separate, independently-gated sub-branch of the SAME job (never a new
+# watchdog job, per the repo FREEZE).
+GOAL_QUESTION_TIMEOUT_S = 30 * 60   # measured from DELIVERY (discord-
+                                    # questions.json's own `ts`), never from
+                                    # when the question was merely drafted —
+                                    # a ping that never sent must never start
+                                    # this clock (the issue's own design note)
+GOAL_QUESTION_PARK_TEXT = (
+    "question-timeout: 30 min bez odpovede na poslednu otazku. Zaparkuj "
+    "TENTO tiket (needs-answer komentar + label na tikete, otazku nechaj "
+    "sledovanu) a pokracuj na iny tiket z backlogu; k tomuto sa vrat, ked "
+    "prijde odpoved (Discord reply sa dorucuje priamo do tejto session)."
+)
+
+
+def _goal_question_delivered_ts(sid, questions_path=None):
+    """Epoch seconds the CURRENT outstanding `❓` ping for session `sid` was
+    DELIVERED, read from `discord-questions.json` (`notify.record_question`
+    stamps `ts` only on a CONFIRMED 2xx POST — never a draft/compose time).
+    `None` when no delivery is on record for this session at all (Discord
+    unconfigured, the send failed, or the question was already answered/
+    pruned) — #161's own design note: a ping that never reached the user
+    must never start the 30-minute clock, so an unresolvable lookup is a
+    refusal, never a guess.
+
+    Several entries can in principle match the same session (a rare
+    multi-question history that outran pruning); the newest `ts` is the
+    CURRENT outstanding question. `questions_path` is the test seam
+    (mirrors `backlog_fetch`/`templates_path` elsewhere in this file) —
+    production always resolves the real `~/.claude/discord-questions.json`
+    via `notify.load_questions()`'s own default."""
+    try:
+        from notify import load_questions
+    except Exception:
+        return None
+    try:
+        qmap = (load_questions(path=questions_path) if questions_path
+                else load_questions())
+    except Exception:
+        return None
+    if not isinstance(qmap, dict):
+        return None
+    best = None
+    for rec in qmap.values():
+        if not isinstance(rec, dict) or str(rec.get("session") or "") != sid:
+            continue
+        try:
+            ts = float(rec.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if best is None or ts > best:
+            best = ts
+    return best
+
+
+def _goal_question_park_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
+                              loc, send_fn, dry_run, handled, projects_dir,
+                              questions_path=None):
+    """#161 — the BOUNDED-WAIT escape hatch for a genuine, stopped
+    `❓ NEEDS YOU` block. Mutates `rec` (the caller persists it); returns
+    log lines.
+
+    Structurally different from `_goal_stall_nudge`'s "continue" nudge on
+    purpose: typing bare "continue" here would make the SAME model, still
+    holding the SAME missing answer, regenerate the SAME question — the
+    exact camera-box chat wall (2026-07-05) this file already refuses to
+    resurrect. `GOAL_QUESTION_PARK_TEXT` is a STRUCTURALLY DIFFERENT
+    instruction (park this ticket, switch to another) — never the question
+    itself, so it can never be mistaken for a re-print of it.
+
+    Every refusal here is deliberate, never an oversight:
+      * not a genuine stopped `❓ NEEDS YOU` block at all (`_session_is_waiting`,
+        the same test job 10 reuses) — an `❓ ASKED` turn already ends `⏳
+        WORKING` and is never this branch;
+      * no CONFIRMED delivery on record for this session
+        (`_goal_question_delivered_ts` returns `None`) — never guess a
+        start time;
+      * under `GOAL_QUESTION_TIMEOUT_S` since delivery — too soon;
+      * THIS exact outstanding question (keyed on its own delivered `ts`,
+        `rec['qparked_ts']`) was already nudged once — bounded to ONE
+        attempt per episode; a NEW question later (a different `ts`) gets
+        its own fresh one;
+      * a background worker is in flight, the pane is compacting, or a
+        `/compact` claim is outstanding for this sid — the same battery
+        `_goal_stall_nudge` already applies;
+      * the pane is not genuinely idle at a bare input prompt (busy, a
+        foreign draft, scrolled) — never type over any of those."""
+    logs = []
+    if not _session_is_waiting(tpath):
+        return logs                        # not a genuine NEEDS YOU block
+    delivered = _goal_question_delivered_ts(sid, questions_path)
+    if delivered is None:
+        return logs                        # never confirmed delivered — never guess
+    waited = now - delivered
+    if waited < GOAL_QUESTION_TIMEOUT_S:
+        return logs
+    if rec.get("qparked_ts") == delivered:
+        return logs                        # this exact question already parked once
+    if handled is not None and sid in handled:
+        return logs
+    if _pane_has_bg_agent(captured) or _pane_compacting(captured):
+        return logs
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        return logs
+    kind, draft = _classify_boundary(captured)
+    if kind != "input" or draft:
+        logs.append("skip %s (goal-question-timeout) %s"
+                    % (draft and "draft" or kind, loc))
+        return logs
+    if not pane_at_idle_prompt(captured):
+        return logs
+    if dry_run:
+        logs.append("READY (goal-question-timeout) %s waited=%dm"
+                    % (loc, waited // 60))
+        return logs
+    send_continue(pid, GOAL_QUESTION_PARK_TEXT, run)
+    rec["qparked_ts"] = delivered
+    logs.append("goal-question-timeout %s waited=%dm -> parked, moving to "
+                "other tickets" % (loc, waited // 60))
+    return logs
+
 
 def goal_templates_path():
     """`~/.claude/skills/autopilot/SKILL.md` — the INSTALLED autopilot skill,
@@ -9449,7 +9575,7 @@ def _goal_dark_died_by_outage(tpath):
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
                sleep_fn=None, templates_path=None, backlog_fetch=None,
-               time_fn=None, sweep_deadline=None):
+               time_fn=None, sweep_deadline=None, questions_path=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
@@ -9481,7 +9607,14 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
     exactly (checked strictly BETWEEN panes, before a pane's own work
     starts, never nested inside one pane's delivery) — a deferred pane's
     state is untouched, so it is retried next sweep exactly like an
-    untouched pane always would be."""
+    untouched pane always would be.
+
+    `questions_path` (optional, #161): the test seam for
+    `_goal_question_park_nudge`'s delivered-ping lookup — production leaves
+    it `None`, which resolves the REAL `~/.claude/discord-questions.json`
+    via `notify.load_questions()`'s own default (no wiring needed in
+    `airuleset.py`, unlike `backlog_fetch`/`templates_path`: the real path
+    already matches this box's own `HOME` with no subprocess involved)."""
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     templates = load_goal_templates(templates_path)
@@ -9556,6 +9689,13 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured,
                                       tpath, tmtime, loc, send_fn, dry_run,
                                       handled, projects_dir)
+            # …or is it genuinely STOPPED on an unanswered `❓ NEEDS YOU`
+            # past the bounded wait? (#161 — independent of the stall
+            # nudge above, which correctly never touches a `❓` marker)
+            logs += _goal_question_park_nudge(now, run, rec, sid, cwd, pid,
+                                              captured, tpath, loc, send_fn,
+                                              dry_run, handled, projects_dir,
+                                              questions_path=questions_path)
             # …and is it firing the CURRENT template? (the third shape, #64)
             if templates:
                 logs += _goal_template_drift(now, run, rec, sid, cwd, pid,
@@ -11161,6 +11301,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the SAME variant it already ran (the authority profile is never
           re-resolved), so a goal the user wrote is untouchable by
           construction rather than by threshold (`_goal_template_drift`).
+          A FOURTH, always-on shape (#161): a genuine, stopped
+          `❓ NEEDS YOU` block whose ping was CONFIRMED delivered
+          (`discord-questions.json`'s own `ts`) more than
+          `GOAL_QUESTION_TIMEOUT_S` (~30 min) ago with no reply gets ONE
+          `question-timeout:` nudge — never bare "continue" (which would
+          just re-print the same question, the camera-box wall) —
+          instructing the session to park that ticket and work others
+          (`_goal_question_park_nudge`); bounded to one nudge per distinct
+          outstanding question, never a guess when no delivery is on record.
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
