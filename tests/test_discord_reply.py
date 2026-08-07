@@ -83,6 +83,21 @@ class QuestionMap(unittest.TestCase):
         Path(p).write_text("not json")
         self.assertEqual(notify.load_questions(p), {})
 
+    def test_malformed_legacy_entry_never_crashes_the_prune(self):
+        # MINOR-7 sibling fix (#297/#298 review): the identical isinstance
+        # guard applied to record_card_message's prune loop, mirrored here.
+        import json as _json
+        p = self._p()
+        with open(p, "w", encoding="utf-8") as fh:
+            _json.dump({"555": "not-a-dict", "666": None, "777": [1, 2]}, fh)
+        self.assertTrue(notify.record_question(
+            "888", "900", "sid-x", "/x", now=1000, path=p))
+        q = notify.load_questions(p)
+        self.assertIn("888", q)
+        self.assertNotIn("555", q)
+        self.assertNotIn("666", q)
+        self.assertNotIn("777", q)
+
     def test_known_owner_ids_from_env(self):
         env = {"DISCORD_MENTION_ZBYNEK": "773451844110385193",
                "DISCORD_MENTION_MAREK": "<@771300000000000000>",
@@ -181,12 +196,14 @@ class DeliverDiscordReplies(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "discord-questions.json")
+        self.cpath = str(Path(self.tmp.name) / "discord-cards.json")
         # point notify's question map + env at hermetic fixtures
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER,
                     "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
         for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
                          ("_read_env", lambda: dict(self.env))]:
             p = m.patch.object(notify, tgt, val)
             p.start()
@@ -609,10 +626,12 @@ class TicketFallbackDelivery(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER}
         for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
                          ("_read_env", lambda: dict(self.env))]:
             p = m.patch.object(notify, tgt, val)
             p.start()
@@ -704,10 +723,12 @@ class WedgeSelfHeal(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER}
         for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
                          ("_read_env", lambda: dict(self.env))]:
             p = m.patch.object(notify, tgt, val)
             p.start()
@@ -910,10 +931,12 @@ class InputDeadPing(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER}
         for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
                          ("_read_env", lambda: dict(self.env))]:
             p = m.patch.object(notify, tgt, val)
             p.start()
@@ -1015,6 +1038,22 @@ class CardMap(unittest.TestCase):
         p = self._p()
         Path(p).write_text("not json")
         self.assertEqual(notify.load_cards(p), {})
+
+    def test_malformed_legacy_entry_never_crashes_the_prune(self):
+        # MINOR-7 (#297/#298 review): a non-dict value (a bare scalar/list
+        # crossing a legacy-file boundary) must not crash record_card_message
+        # via a bare .get() — it is treated as immediately prunable instead.
+        import json as _json
+        p = self._p()
+        with open(p, "w", encoding="utf-8") as fh:
+            _json.dump({"555": "not-a-dict", "666": None, "777": [1, 2]}, fh)
+        self.assertTrue(notify.record_card_message(
+            "888", "900", "o/r", 1, now=1000, path=p))
+        c = notify.load_cards(p)
+        self.assertIn("888", c)
+        self.assertNotIn("555", c)
+        self.assertNotIn("666", c)
+        self.assertNotIn("777", c)
 
 
 class PostDiscordReturnsMessageId(unittest.TestCase):
@@ -1171,7 +1210,10 @@ class FlagDeliveryTarget(unittest.TestCase):
         target = {"kind": "question", "session": "sid-abc", "cwd": "/x"}
         panes = {"sid-abc": ("%1", "cap")}
         got = wd._flag_delivery_target(target, panes, {"sid-abc": "/x"})
-        self.assertEqual(got, ("sid-abc", "%1", "/x"))
+        # MAJOR-1 (#297/#298 review): the exact-asking-session branch carries
+        # `exact=True` — its own idle/draft gate, never job 8's stronger
+        # at-rest discipline.
+        self.assertEqual(got, ("sid-abc", "%1", "/x", True))
 
     def test_question_kind_falls_back_to_repo_when_session_is_dead(self):
         import unittest.mock as m
@@ -1180,7 +1222,7 @@ class FlagDeliveryTarget(unittest.TestCase):
                             lambda cwd, run=None: "one" if "one" in cwd else "?"):
             got = wd._flag_delivery_target(
                 target, {"sid-live": ("%2", "cap")}, {"sid-live": "/repo/one"})
-        self.assertEqual(got, ("sid-live", "%2", "/repo/one"))
+        self.assertEqual(got, ("sid-live", "%2", "/repo/one", False))
 
     def test_card_kind_resolves_via_repo(self):
         import unittest.mock as m
@@ -1188,7 +1230,7 @@ class FlagDeliveryTarget(unittest.TestCase):
         with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"):
             got = wd._flag_delivery_target(
                 target, {"sid-live": ("%3", "cap")}, {"sid-live": "/x"})
-        self.assertEqual(got, ("sid-live", "%3", "/x"))
+        self.assertEqual(got, ("sid-live", "%3", "/x", False))
 
     def test_nothing_live_returns_none(self):
         target = {"kind": "card", "repo": "o/r", "issue": 1}
@@ -1449,3 +1491,139 @@ class DeliverDiscordRepliesCardReopen(unittest.TestCase):
             discord_fetch=lambda ch, t: [{"id": "x"}], card_gh_fn=self._gh)
         self.assertEqual(logs, [])
         self.assertEqual(self.gh_calls, [])
+
+    def test_dry_run_does_not_mark_the_reply_done(self):
+        # MAJOR-2 (#297/#298 review): a dry-run "reopen" must NEVER consume
+        # the dedup slot, or the real reply is silently swallowed on the
+        # first genuinely-live sweep.
+        notify.record_card_message("888005", "777001", "o/r", 7,
+                                   now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=True,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertNotIn("rep1", state.get("dcard_done", []))
+
+    def test_card_reply_already_done_makes_no_new_gh_calls_on_refetch(self):
+        # MAJOR-3 (#297/#298 review): a SECOND sweep that re-fetches an
+        # ALREADY-`dcard_done` reply (Discord's own channel history keeps
+        # returning old messages every poll) must make zero new gh calls.
+        notify.record_card_message("888005", "777001", "o/r", 7,
+                                   now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {"dcard_done": ["rep1"]}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertEqual(self.gh_calls, [])
+
+    def test_reopen_forgets_the_run_card_dedup_marker(self):
+        # MAJOR-5 (#297/#298 review): a successful reopen must release the
+        # ticket's own run-card dedup marker, so a fresh fix's completion
+        # card can send again rather than being suppressed forever by the
+        # FIRST (now-flagged) card's dedup claim. Isolate `_claude_dir` —
+        # this drives the REAL dedup store, and the playbook's own
+        # established rule requires it for any test reaching a notify
+        # send/marker path.
+        import unittest.mock as m
+        import notify as ntfy
+        dedup_dir = TemporaryDirectory()
+        self.addCleanup(dedup_dir.cleanup)
+        p = m.patch.object(ntfy, "_claude_dir", lambda: dedup_dir.name)
+        p.start()
+        self.addCleanup(p.stop)
+        key = "airuleset#42"
+        ntfy._dedup_claim(key)
+        ntfy._dedup_mark_status(key, "sent")
+        self.assertTrue(ntfy.marker_delivered(key))
+        notify.record_card_message("888005", "777001", "zbynekdrlik/airuleset",
+                                   42, now=time.time(), path=self.cpath)
+        msg = {"id": "rep1", "author": {"id": self.OWNER},
+              "message_reference": {"message_id": "888005"}, "content": "x"}
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh)
+        self.assertFalse(ntfy.marker_delivered(key))
+
+
+class DeliverDiscordRepliesFlagReact(unittest.TestCase):
+    """(#297) A ❓/❔ reaction on a TRACKED message — non-owner rejection,
+    second-sweep dedup, and the untracked-message fast path (MAJOR-3, the
+    adversarial review's own requested mutation-proof regression tests)."""
+    OWNER = "773451844110385193"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER,
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.react_calls = []
+        self.sent = []
+
+    def _run(self, argv, timeout=8):
+        self.sent.append(argv)
+        return ""
+
+    def _flagged_msg(self, mid="888010"):
+        return {"id": mid,
+               "reactions": [{"emoji": {"name": "❓"}, "count": 1}]}
+
+    def _react_fetch(self, users):
+        def f(ch, mid, emoji, token):
+            self.react_calls.append(mid)
+            return users
+        return f
+
+    def test_reaction_from_non_owner_is_ignored(self):
+        notify.record_card_message("888010", "777001", "zbynekdrlik/airuleset",
+                                   9, now=time.time(), path=self.cpath)
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._flagged_msg()],
+            reaction_fetch=self._react_fetch([{"id": "999999999999999999"}]))
+        self.assertTrue(self.react_calls)          # the call WAS made
+        self.assertFalse(any("flag-react" in ln for ln in logs), logs)
+        self.assertNotIn("888010", state.get("dreact_done", []))
+
+    def test_second_sweep_of_an_already_flagged_message_calls_reaction_fetch_zero_times(self):
+        notify.record_card_message("888010", "777001", "zbynekdrlik/airuleset",
+                                   9, now=time.time(), path=self.cpath)
+        state = {"dreact_done": ["888010"]}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._flagged_msg()],
+            reaction_fetch=self._react_fetch([{"id": self.OWNER}]))
+        self.assertEqual(self.react_calls, [])
+
+    def test_untracked_flagged_message_never_calls_reaction_fetch(self):
+        # `888010` is flagged (nonzero ❓ count) but NEVER recorded in either
+        # the question map or the card map — `_flag_target` returns None,
+        # and the whole point of #297's design is that the extra
+        # `reaction_fetch` call is spent ONLY on a tracked message. A
+        # DIFFERENT card (a different numeric id) is seeded so the
+        # function's own "nothing tracked at all -> return early" guard is
+        # not what's keeping the count at zero — this genuinely exercises
+        # the per-message `_flag_target` lookup inside the fetch loop.
+        notify.record_card_message("888020", "777001", "o/r", 1,
+                                   now=time.time(), path=self.cpath)
+        state = {}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, {}, dry_run=False,
+            discord_fetch=lambda ch, t: [self._flagged_msg()],
+            reaction_fetch=self._react_fetch([{"id": self.OWNER}]))
+        self.assertEqual(self.react_calls, [])
