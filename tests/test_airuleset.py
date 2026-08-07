@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -4393,9 +4394,21 @@ class TestClaudeHistoryPopupScript(TestCase):
         # line consisting of exactly `CH_RC=$?` with no `||` before it.
         self.assertNotIn("CH_RC=$?", [ln.strip() for ln in content.splitlines()])
 
-    def test_pipes_success_output_into_less_plus_g(self):
+    def test_pipes_success_output_into_less_dash_r_plus_g(self):
+        # #294: -R added so `less` renders raw ANSI color bytes as color
+        # instead of visibly escaping them; +G (jump to end) and less's
+        # own default incremental search are both unaffected by -R.
         content = airuleset.render_claude_history_popup_script()
-        self.assertIn("| less +G", content)
+        self.assertIn("| less -R +G", content)
+
+    def test_invokes_claude_history_with_color_forced_on(self):
+        # #294: claude-history's own stdout is a PIPE here (captured into
+        # CH_OUT via $(...)), so its own TTY auto-detection can never see
+        # the real terminal at the far end of `less` -- --color forces
+        # ANSI on regardless.
+        content = airuleset.render_claude_history_popup_script()
+        assign_line = next(ln for ln in content.splitlines() if "CH_OUT=$(" in ln)
+        self.assertIn("--color", assign_line, assign_line)
 
     def test_failure_branch_waits_for_a_keypress_before_closing(self):
         # No silent instant-close: on a nonzero exit, the script prints
@@ -4442,6 +4455,11 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("REAL-EXEC-SUCCESS-MARKER", r.stdout)
         self.assertEqual(r.stderr, "")
+        # #294: --color threads all the way through the real pipeline --
+        # `less` acting cat-like against a non-tty output (documented
+        # above) passes the bytes through unmodified, so the ANSI colors
+        # claude-history emitted under --color survive into r.stdout.
+        self.assertIn("\x1b[", r.stdout)
 
     def test_real_execution_failure_path_fails_loudly_never_silently(self):
         # No transcript exists for this cwd -- claude-history exits
@@ -5388,6 +5406,153 @@ class TestClaudeHistoryScript(TestCase):
         r = self._run("--transcript", str(p))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("direct read", r.stdout)
+
+    # --- #294: ANSI colors + structure ------------------------------------
+    # Every check below runs the ACTUAL rendered script content as a real
+    # subprocess (same discipline as the rest of this class) -- a
+    # reimplementation of the color logic in the test itself would prove
+    # nothing about the shipped script.
+
+    @staticmethod
+    def _strip_ansi(s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def _run_pty(self, *args):
+        # A REAL pty slave as the child's stdout -- os.isatty() on it
+        # returns True, exactly like a genuine terminal -- so this proves
+        # the TTY-auto-detection half (`sys.stdout.isatty()`), which a
+        # subprocess.run(capture_output=True) pipe (used by self._run)
+        # structurally cannot: a pipe is never a tty.
+        import pty
+        run_env = {**os.environ, "HOME": str(self.home)}
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, str(self.script), *args],
+            stdout=slave_fd, stderr=subprocess.DEVNULL, env=run_env)
+        os.close(slave_fd)
+        try:
+            proc.wait(timeout=15)
+            chunks = []
+            while True:
+                try:
+                    chunk = os.read(master_fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks).decode(errors="replace")
+        finally:
+            os.close(master_fd)
+
+    def test_default_piped_output_has_zero_ansi_escapes(self):
+        # The exact acceptance line from #294: "claude-history | cat ostáva
+        # čistý text bez ANSI kódov" -- subprocess-captured stdout (used by
+        # self._run) is never a tty, and no --color flag is given here, so
+        # this is the auto-detected-off path.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\x1b[", r.stdout)
+
+    def test_color_flag_forces_ansi_even_when_piped(self):
+        # The popup's own use case: claude-history's stdout is a PIPE
+        # (captured into a bash variable, then piped into `less`), so TTY
+        # auto-detection alone can never turn colors on for it -- --color
+        # forces it regardless of what's attached to stdout.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("\x1b[", r.stdout)
+        # ANSI codes wrap around the existing plain text, never splice into
+        # the middle of it -- every plain substring stays intact.
+        self.assertIn("===== USER =====", r.stdout)
+        self.assertIn("===== CLAUDE =====", r.stdout)
+        self.assertIn("hi", r.stdout)
+        self.assertIn("hello", r.stdout)
+
+    def test_plain_flag_forces_off(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--plain")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\x1b[", r.stdout)
+
+    def test_color_uses_a_different_code_for_user_and_claude_headers(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        user_code = re.search(r"\x1b\[[0-9;]*m", user_line)
+        claude_code = re.search(r"\x1b\[[0-9;]*m", claude_line)
+        self.assertIsNotNone(user_code, user_line)
+        self.assertIsNotNone(claude_code, claude_line)
+        self.assertNotEqual(user_code.group(0), claude_code.group(0))
+
+    def test_tool_call_lines_are_dimmed_in_color_mode(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("list files"),
+            self._assistant(self._text_block("checking"),
+                             self._tool_block("Bash", command="ls -la")),
+        ])
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool_line = next(ln for ln in r.stdout.splitlines() if "Bash: ls -la" in ln)
+        self.assertIn("\x1b[2m", tool_line)
+
+    def test_timestamp_shown_dimmed_when_present_omitted_when_absent(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = self.projects_dir / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "timestamp": "2026-08-07T12:34:56.000Z",
+             "message": {"role": "user", "content": "with a timestamp"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "no timestamp on me"}]}},
+        ]
+        (proj_dir / "s1.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        r = self._run("--cwd", str(cwd), "--color")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        user_line = next(ln for ln in r.stdout.splitlines() if "USER" in ln)
+        self.assertIn("12:34:56", user_line)
+        self.assertIn("\x1b[2m", user_line)
+        claude_line = next(ln for ln in r.stdout.splitlines() if "CLAUDE" in ln)
+        # No timestamp on the assistant record -> nothing extra beyond the
+        # (color-wrapped) header itself once ANSI is stripped back out.
+        self.assertEqual(self._strip_ansi(claude_line), "===== CLAUDE =====")
+
+    def test_colors_on_by_default_on_a_real_terminal(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        out = self._run_pty("--cwd", str(cwd))
+        self.assertIn("\x1b[", out)
+
+    def test_plain_flag_forces_off_even_on_a_real_terminal(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("hi"),
+                                      self._assistant(self._text_block("hello"))])
+        out = self._run_pty("--cwd", str(cwd), "--plain")
+        self.assertNotIn("\x1b[", out)
 
 
 class TestDiscordAutopilotNotify(TestCase):
