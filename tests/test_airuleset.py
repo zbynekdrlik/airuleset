@@ -333,12 +333,13 @@ class TestDiscordNotifyHooks(TestCase):
     _n = 0
 
     def _sid(self):
+        # (#293) sweep_session_files is shape-agnostic (globs "*<sid>*") --
+        # never hand-enumerate marker paths here again, or a FUTURE new
+        # marker (like CARDCHK was) silently reopens this same leak.
         TestDiscordNotifyHooks._n += 1
         sid = f"test-dn-{os.getpid()}-{TestDiscordNotifyHooks._n}"
         p = f"/tmp/claude-discord-pending-{sid}"
-        q = f"/tmp/claude-discord-lastq-{sid}"
-        self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
-        self.addCleanup(lambda: os.path.exists(q) and os.remove(q))
+        self.addCleanup(sweep_session_files, sid)
         return sid, p
 
     def _user_prompt(self, sid):
@@ -1001,10 +1002,15 @@ class TestGoalArmedSuppressesIdlePing(TestCase):
     _n = 0
 
     def _sid(self):
+        # (#293) sweep_session_files is shape-agnostic (globs "*<sid>*") --
+        # this used to hand-enumerate ONLY the pending marker, so it never
+        # cleaned lastq (written by the ❓ test in this class) or cardchk
+        # (written by every ✅ turn) -- 430 + 681 real leftover files on
+        # this box. Never hand-enumerate marker paths here again.
         TestGoalArmedSuppressesIdlePing._n += 1
         sid = "test-ga-%d-%d" % (os.getpid(), TestGoalArmedSuppressesIdlePing._n)
         p = f"/tmp/claude-discord-pending-{sid}"
-        self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
+        self.addCleanup(sweep_session_files, sid)
         return sid, p
 
     def _stop(self, sid, msg, pane_capture=None, cwd=""):
