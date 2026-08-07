@@ -1127,19 +1127,30 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
         return str(p)
 
     def _sweep(self, now=None, waited=None, captured=PANE_LIT, state=None,
-              questions_path="unset", sid=SID, extra_entries=None):
+              questions_path="unset", sid=SID, extra_entries=None,
+              entry_ts=None, assistant_text=None):
+        # `entry_ts` is the transcript's own assistant-entry timestamp — the
+        # moment the ❓ NEEDS YOU block was WRITTEN. #161-review MAJOR M1
+        # (scenario B) requires the delivered ping to be CLOSE to this
+        # timestamp (a real Stop-hook delivery lands within seconds of it),
+        # so it must track `delivered`, never a value merely close to `now`
+        # (the two drift apart by exactly `waited`, which is often 30+
+        # minutes — the fixture bug the review caught live).
         now = now or time.time()
         waited = wd.GOAL_QUESTION_TIMEOUT_S + 60 if waited is None else waited
+        delivered = now - waited
+        if entry_ts is None:
+            entry_ts = delivered - 2
+        text = QUESTION_TURN if assistant_text is None else assistant_text
         entries = [marker_entry("set", PAYLOAD),
-                  {"type": "assistant",
-                   "timestamp": "2026-07-26T15:00:00.000Z",
-                   "message": {"content": QUESTION_TURN}}]
+                  {"type": "assistant", "timestamp": _iso(entry_ts),
+                   "message": {"content": text}}]
         p = self._write(entries + (extra_entries or []))
         self._wrote = True
         mt = now - 60
         os.utime(p, (mt, mt))
         if questions_path == "unset":
-            questions_path = self._questions_path(sid, now - waited)
+            questions_path = self._questions_path(sid, delivered)
         elif questions_path is None:
             questions_path = self._empty_questions_path()
         tmux = FakeTmux(captured)
@@ -1155,6 +1166,74 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
         self.assertTrue(typed, tmux.sent)
         self.assertIn(wd.GOAL_QUESTION_PARK_TEXT, typed)
         self.assertTrue(any("goal-question-timeout" in ln for ln in logs), logs)
+
+    def test_a_mere_mention_of_needs_you_is_never_a_genuine_block(self):
+        # #161-review MAJOR M1 scenario A: a completion report merely
+        # NAMING "NEEDS YOU" in prose (discussing this very mechanism, or
+        # any other text) — not a trailing status line — must never be
+        # misread as a genuine, stopped block.
+        report = ("## ✅ Work Complete\n\n"
+                  "Implemented the ❓ NEEDS YOU timeout backstop.\n\n"
+                  "✅ DONE: #161 hotové")
+        tmux, _ = self._sweep(assistant_text=report)
+        self.assertNotIn(wd.GOAL_QUESTION_PARK_TEXT, tmux.typed())
+
+    def test_a_stale_sibling_question_never_starts_the_clock(self):
+        # #161-review MAJOR M1 scenario B: an OLDER, unrelated question for
+        # the SAME session (a stale sibling that outran pruning) must
+        # never stand in for the CURRENT block's own — never delivered —
+        # ping. The stale entry is hours away from the transcript's own
+        # block timestamp, well outside GOAL_QUESTION_MATCH_WINDOW_S.
+        now = time.time()
+        entry_ts = now - 60                  # the CURRENT block, written just now
+        stale_ts = now - 6 * 3600            # a sibling delivered 6h ago
+        qpath = self._questions_path(SID, stale_ts, question="iny stary dopyt")
+        tmux, _ = self._sweep(now=now, entry_ts=entry_ts,
+                              questions_path=qpath)
+        self.assertNotIn(wd.GOAL_QUESTION_PARK_TEXT, tmux.typed())
+
+    def test_a_delivery_shortly_before_the_block_was_written_still_matches(self):
+        # the proximity window tolerates a SMALL amount of clock skew —
+        # delivery landing a few seconds BEFORE the entry's own timestamp
+        # must still match (GOAL_QUESTION_MATCH_SLOP_S).
+        now = time.time()
+        entry_ts = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
+        delivered = entry_ts - (wd.GOAL_QUESTION_MATCH_SLOP_S - 5)
+        qpath = self._questions_path(SID, delivered)
+        tmux, _ = self._sweep(now=now, entry_ts=entry_ts,
+                              questions_path=qpath)
+        self.assertIn(wd.GOAL_QUESTION_PARK_TEXT, tmux.typed())
+
+    def test_persist_fires_before_the_keystroke_send(self):
+        # #161-review MAJOR M2: a process killed between the state
+        # mutation and the keystroke send must never lose the "already
+        # parked" memory and re-send on the next sweep — persist() must
+        # fire FIRST, mirroring jobs 8/11's own established shape
+        # (test_bounce_backstop.py::TestStatePersistedBeforeTyping).
+        order = []
+        now = time.time()
+        delivered = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
+        entries = [marker_entry("set", PAYLOAD),
+                  {"type": "assistant", "timestamp": _iso(delivered - 2),
+                   "message": {"content": QUESTION_TURN}}]
+        p = self._write(entries)
+        self._wrote = True
+        os.utime(p, (now - 60, now - 60))
+        qpath = self._questions_path(SID, delivered)
+        real_tmux = FakeTmux(PANE_LIT)
+        real_call = real_tmux.__call__
+
+        def spy(argv, timeout=8):
+            if "-l" in argv:
+                order.append("send")
+            return real_call(argv, timeout)
+        wd.goal_rearm(now, spy, {}, send_fn=self._send,
+                     projects_dir=self.tmp.name, sleep_fn=lambda s: None,
+                     questions_path=qpath,
+                     persist=lambda: order.append("persist"))
+        self.assertIn("persist", order)
+        self.assertIn("send", order)
+        self.assertLess(order.index("persist"), order.index("send"))
 
     def test_the_nudge_never_repeats_the_question_text(self):
         # the whole point: this must NEVER be the camera-box wall shape —
@@ -1183,23 +1262,27 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
 
     def test_the_same_question_is_never_parked_twice(self):
         state = {}
-        ts = time.time() - wd.GOAL_QUESTION_TIMEOUT_S - 60
+        now = time.time()
+        ts = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
         qpath = self._questions_path(SID, ts)
-        t1, _ = self._sweep(state=state, questions_path=qpath)
+        t1, _ = self._sweep(state=state, questions_path=qpath, now=now,
+                            entry_ts=ts - 2)
         self.assertIn(wd.GOAL_QUESTION_PARK_TEXT, t1.typed())
         t2, _ = self._sweep(state=state, questions_path=qpath,
-                            now=time.time() + 600)
+                            now=now + 600, entry_ts=ts - 2)
         self.assertNotIn(wd.GOAL_QUESTION_PARK_TEXT, t2.typed(),
                          "the SAME outstanding question must not be re-nudged")
 
     def test_a_new_question_after_the_first_gets_its_own_fresh_episode(self):
         state = {}
-        first_ts = time.time() - wd.GOAL_QUESTION_TIMEOUT_S - 3600
-        t1, _ = self._sweep(state=state,
+        now1 = time.time()
+        first_ts = now1 - wd.GOAL_QUESTION_TIMEOUT_S - 3600
+        t1, _ = self._sweep(state=state, now=now1, entry_ts=first_ts - 2,
                             questions_path=self._questions_path(SID, first_ts))
         self.assertIn(wd.GOAL_QUESTION_PARK_TEXT, t1.typed())
-        second_ts = time.time() - wd.GOAL_QUESTION_TIMEOUT_S - 60
-        t2, _ = self._sweep(state=state,
+        now2 = time.time()
+        second_ts = now2 - wd.GOAL_QUESTION_TIMEOUT_S - 60
+        t2, _ = self._sweep(state=state, now=now2, entry_ts=second_ts - 2,
                             questions_path=self._questions_path(SID, second_ts))
         self.assertIn(wd.GOAL_QUESTION_PARK_TEXT, t2.typed(),
                       "a NEW outstanding question gets its own fresh nudge")
@@ -1216,15 +1299,14 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
 
     def test_dry_run_never_types(self):
         now = time.time()
-        waited = wd.GOAL_QUESTION_TIMEOUT_S + 60
+        delivered = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
         entries = [marker_entry("set", PAYLOAD),
-                  {"type": "assistant",
-                   "timestamp": "2026-07-26T15:00:00.000Z",
+                  {"type": "assistant", "timestamp": _iso(delivered - 2),
                    "message": {"content": QUESTION_TURN}}]
         p = self._write(entries)
         self._wrote = True
         os.utime(p, (now - 60, now - 60))
-        qpath = self._questions_path(SID, now - waited)
+        qpath = self._questions_path(SID, delivered)
         tmux = FakeTmux(PANE_LIT)
         logs = wd.goal_rearm(now, tmux, {}, send_fn=self._send,
                              projects_dir=self.tmp.name,
@@ -1237,15 +1319,15 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
         # ask-and-continue: the turn ends ⏳ WORKING, never ❓ — job 4's
         # domain, never a genuine stopped block.
         now = time.time()
+        delivered = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
         entries = [marker_entry("set", PAYLOAD),
-                  {"type": "assistant",
-                   "timestamp": "2026-07-26T15:00:00.000Z",
+                  {"type": "assistant", "timestamp": _iso(delivered - 2),
                    "message": {"content": "❓ ASKED: ktorý dizajn?\n\n"
                               "⏳ WORKING: medzitým iný tiket"}}]
         p = self._write(entries)
         self._wrote = True
         os.utime(p, (now - 60, now - 60))
-        qpath = self._questions_path(SID, now - wd.GOAL_QUESTION_TIMEOUT_S - 60)
+        qpath = self._questions_path(SID, delivered)
         tmux = FakeTmux(PANE_LIT)
         wd.goal_rearm(now, tmux, {}, send_fn=self._send,
                       projects_dir=self.tmp.name,
