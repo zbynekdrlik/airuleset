@@ -62,7 +62,19 @@ _PANE_DESTROYING_SUBCOMMANDS = ("kill-session", "kill-pane", "kill-window",
 # of what #132 actually forbids. Keep this list to files that make the
 # identical isolated-`-L`-socket argument in their own code/comments --
 # never widen it to a whole directory.
-_ISOLATED_EXPERIMENT_HARNESSES = ("scripts/measure_scrollback_holes.py",)
+#
+# #289: `scripts/measure_scrollback_events.py` extends the SAME harness
+# (its own module docstring says so verbatim: "mirrors
+# measure_scrollback_holes.py's harness exactly: isolated CLAUDE_CONFIG_DIR,
+# isolated disposable tmux `-L` socket") -- every `tmux` call, kill-server
+# included, is routed through `msh.tmux(sock, ...)`, which always prepends
+# `-L sock` where `sock` is a fresh `uuid.uuid4()` generated per run, never
+# derived from any real session identifier. Same structural argument as
+# the #267 entry above, same narrow scope.
+_ISOLATED_EXPERIMENT_HARNESSES = (
+    "scripts/measure_scrollback_holes.py",
+    "scripts/measure_scrollback_events.py",
+)
 
 
 def _code_files():

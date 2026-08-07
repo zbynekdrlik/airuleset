@@ -4124,9 +4124,12 @@ class TestTmuxConfQuote(TestCase):
     """`_tmux_conf_quote` renders a single conf-line WORD for tmux's own
     config parser -- unlike TMUX_SCROLLBACK_KEYBINDS' bare `" ".join`
     (locked as safe by TestTmuxScrollbackKeybinds' own
-    test_no_argv_element_contains_whitespace above), the popup bind's
-    argv genuinely needs multi-word tokens (`90%`, `#{pane_current_path}`)
-    to survive as ONE tmux word."""
+    test_no_argv_element_contains_whitespace above), the popup bind's argv
+    contains `#{pane_current_path}`, whose literal `#` would start a tmux
+    COMMENT if left unquoted at line-start -- quoting here is load-bearing
+    for THAT character (see `test_format_string_token_is_quoted` below),
+    not for embedded whitespace: none of TMUX_POPUP_BIND_ARGVS' own tokens
+    actually contain a space (#289 adversarial-review M4)."""
 
     def test_simple_token_is_left_unquoted(self):
         for word in ("bind-key", "-n", "S-F1", "display-popup", "-E",
@@ -4146,6 +4149,17 @@ class TestTmuxConfQuote(TestCase):
     def test_embedded_backslash_is_escaped(self):
         self.assertEqual(airuleset._tmux_conf_quote("a\\b c"), '"a\\\\b c"')
 
+    def test_bare_backslash_with_no_space_is_still_quoted_and_escaped(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M3): the sibling test above
+        # (`test_embedded_backslash_is_escaped`) always pairs its
+        # backslash with a space in the SAME fixture, so a mutant dropping
+        # `\\` from the trigger regex's character class still survives --
+        # the space alone is enough to trigger quoting, and the escape
+        # then happens regardless of whether `\\` is actually IN the
+        # trigger class. This fixture isolates the backslash as the ONLY
+        # thing that could possibly trigger quoting.
+        self.assertEqual(airuleset._tmux_conf_quote("a\\b"), '"a\\\\b"')
+
     def test_format_string_token_is_quoted(self):
         # `#{pane_current_path}` contains no whitespace/quote/semicolon/
         # backslash/hash-at-start... but DOES contain a literal '#' which
@@ -4154,6 +4168,26 @@ class TestTmuxConfQuote(TestCase):
         # function conservatively quotes anything containing '#' too.
         self.assertEqual(airuleset._tmux_conf_quote("#{pane_current_path}"),
                           '"#{pane_current_path}"')
+
+    def test_token_with_single_quote_is_double_quoted(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M2): an UNQUOTED `'` mid-word
+        # starts real single-quote mode in tmux's own conf-parser grammar
+        # too (not just at the start of a bare word) -- left unquoted, a
+        # word containing one can swallow the rest of the conf file as
+        # single-quoted text. A single quote needs no ESCAPING inside a
+        # tmux double-quoted string (verified live), but it DOES need to
+        # TRIGGER quoting when the word is otherwise bare.
+        self.assertEqual(airuleset._tmux_conf_quote("a'b"), '"a\'b"')
+
+    def test_dollar_sign_is_refused_not_silently_mis_rendered(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M1): tmux's own conf-parser
+        # expands $VAR at conf-parse/bind time -- both quoted and
+        # unquoted -- so no quoting form here can protect a literal '$'.
+        # The function refuses rather than silently rendering something
+        # that will be corrupted at bind time (the exact class of bug
+        # this ticket self-found and fixed for the popup's own command).
+        with self.assertRaises(ValueError):
+            airuleset._tmux_conf_quote("$HOME")
 
     def test_empty_string_is_quoted_not_dropped(self):
         # An empty token must still render as SOMETHING (a real tmux word
@@ -4344,6 +4378,40 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertIn("no Claude Code session transcript found", r.stdout)
         self.assertIn("press any key to close", r.stdout)
         self.assertNotIn("integer expression expected", r.stdout + r.stderr)
+
+    def test_real_execution_missing_less_shows_transcript_then_waits(self):
+        # ADVERSARIAL-REVIEW FINDING (#289, M5): a box genuinely missing
+        # `less` must fail LOUDLY (show the transcript + wait for a
+        # keypress) rather than handing a nonexistent command the
+        # successfully-read output and instant-closing silently.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "MISSING-LESS-MARKER"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        # A PATH containing ONLY a symlink to the real python3 -- no
+        # `less` anywhere on it -- reproduces "less is not installed"
+        # without touching the box's own real less binary.
+        narrow_bin = Path(tempfile.mkdtemp())
+        for tool in ("python3", "bash"):
+            real_tool = shutil.which(tool)
+            os.symlink(real_tool, narrow_bin / tool)
+        env = {"HOME": str(home), "PATH": str(narrow_bin)}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)  # the || true guard absorbs read's EOF
+        self.assertIn("MISSING-LESS-MARKER", r.stdout)
+        self.assertIn('"less" is not installed', r.stdout)
+        self.assertIn("press any key to close", r.stdout)
 
 
 class TestApplyUltracodeLauncherDeploysPopupScript(TestCase):

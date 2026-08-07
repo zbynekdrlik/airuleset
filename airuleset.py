@@ -1221,11 +1221,24 @@ set -euo pipefail
 # assignment is an unhandled failure under -e) -- the `|| CH_RC=$?` form
 # is the established fix: it captures the real exit code without tripping
 # -e, and CH_RC stays unset (defaulted to 0 below) on the success path.
+# ACCEPTED TRADE-OFF (#289 adversarial review, M6): the whole transcript
+# is buffered into THIS one shell variable before `less` ever sees a
+# byte -- a latency/memory cost on a very large transcript, never a
+# correctness one (the content is always shown complete and in order).
 CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full 2>&1) || CH_RC=$?
 CH_RC="${CH_RC:-0}"
 
 if [ "$CH_RC" -ne 0 ]; then
   printf '%s\n\nclaude-history: press any key to close.\n' "$CH_OUT"
+  read -n 1 -r -s _dummy || true
+elif ! command -v less >/dev/null 2>&1; then
+  # ADVERSARIAL-REVIEW FINDING (#289, M5): a box genuinely missing `less`
+  # would otherwise hand the successfully-read transcript to a nonexistent
+  # command, closing instantly with no visible cause -- the exact silent
+  # instant-close this script's own header promises never to do. `less`
+  # is tracked in RUNTIME_DEPS and installed fleet-wide, but this is the
+  # box's own last-resort guard should it still be missing somehow.
+  printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CH_OUT"
   read -n 1 -r -s _dummy || true
 else
   printf '%s\n' "$CH_OUT" | less +G
@@ -1691,7 +1704,10 @@ def _tmux_popup_bind_argv(key, in_prefix_table):
     subprocess call (a plain argv list, no shell involved -- each element
     is already exactly one tmux token) and the rendered conf line (which
     needs REAL quoting, see `_tmux_conf_quote` -- unlike
-    TMUX_SCROLLBACK_KEYBINDS, several of these tokens contain spaces).
+    TMUX_SCROLLBACK_KEYBINDS, none of THESE tokens contain spaces, but
+    `#{pane_current_path}` contains a literal `#`, which would start a
+    tmux COMMENT if left unquoted at the start of a conf line -- the
+    quoting here is load-bearing for THAT character, not for whitespace).
     The invoked command is the POPUP SCRIPT's own ABSOLUTE PATH (baked in
     at Python render time -- see the module comment above TMUX_POPUP_KEY
     for why this, not an inline shell command, is the safe shape)."""
@@ -1712,14 +1728,33 @@ TMUX_POPUP_BIND_ARGVS = [
 
 def _tmux_conf_quote(word):
     """Quote a single conf-line WORD (argv element) for tmux's OWN config
-    parser. tmux's double-quote parsing supports `#{...}` format expansion
-    and passes `$VAR` straight through untouched -- shell expansion
-    happens later, when the popup's own shell actually runs the resulting
-    command -- so a shell-command STRING containing `$VAR` references is
-    safe to wrap in tmux double quotes unmodified. Only escapes what tmux
-    itself needs escaped (`\\` and `"`); single quotes need no escaping
-    inside a tmux double-quoted string."""
-    if word and not re.search(r'[\s"\\;#]', word):
+    parser. `#{...}` format expansion works the same way quoted or bare.
+    ADVERSARIAL-REVIEW FINDING (#289, M1): a literal `$VAR` is EXPANDED by
+    tmux's OWN conf-parser at conf-parse/bind time -- using tmux's OWN
+    process environment, NOT the shell's -- both INSIDE a tmux double-
+    quoted string AND when left bare/unquoted (verified live; this is the
+    exact landmine the module comment above TMUX_POPUP_KEY documents this
+    ticket self-finding and fixing by moving shell logic into its own
+    script file). No quoting form in THIS function protects a literal `$`
+    from that expansion, so a word containing one is REFUSED outright
+    rather than silently mis-rendered -- a future conf-line author needing
+    a real shell-runtime variable must move it into a separate script file
+    invoked by absolute path instead (see CLAUDE_HISTORY_POPUP_SCRIPT_DEST).
+    For every other case this only escapes what tmux itself needs escaped
+    (`\\` and `"`); single quotes need no escaping inside a tmux double-
+    quoted string, but DO need quoting when they appear in an otherwise-
+    bare word (an unquoted `'` starts real single-quote mode in tmux's own
+    grammar too, per M2)."""
+    if "$" in word:
+        raise ValueError(
+            "_tmux_conf_quote: refusing to render literal '$' in %r -- "
+            "tmux's own conf-parser expands $VAR at conf-parse/bind time "
+            "(both quoted and unquoted, verified live) and no quoting form "
+            "here protects a literal '$' from that. Move logic needing a "
+            "real shell-runtime variable into its own script file, invoked "
+            "by absolute path, instead." % (word,)
+        )
+    if word and not re.search(r'[\s"\\;#\']', word):
         return word
     escaped = word.replace("\\", "\\\\").replace('"', '\\"')
     return '"' + escaped + '"'
