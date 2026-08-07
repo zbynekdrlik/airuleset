@@ -1297,6 +1297,28 @@ class TestGoalQuestionTimeoutPark(GoalRearmBase):
         tmux, _ = self._sweep(captured=draft)
         self.assertNotIn(wd.GOAL_QUESTION_PARK_TEXT, tmux.typed())
 
+    def test_the_skip_draft_log_line_is_deduped_per_episode(self):
+        # #161-review MINOR m3: an unresolvable draft blocking the park
+        # (or any busy/scrolled state hitting the same "skip" branch) must
+        # not print a fresh log line every single sweep for the SAME
+        # outstanding question — one line per episode is enough.
+        draft = CONV + FOOTER_LIT.replace("❯ \n", "❯ rozpísaný draft\n")
+        state = {}
+        now = time.time()
+        delivered = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
+        _t1, logs1 = self._sweep(captured=draft, state=state, now=now,
+                                 entry_ts=delivered - 2,
+                                 questions_path=self._questions_path(
+                                     SID, delivered))
+        self.assertTrue(any("goal-question-timeout" in ln for ln in logs1),
+                        logs1)
+        _t2, logs2 = self._sweep(captured=draft, state=state,
+                                 now=now + 60, entry_ts=delivered - 2,
+                                 questions_path=self._questions_path(
+                                     SID, delivered))
+        self.assertFalse(
+            any("goal-question-timeout" in ln for ln in logs2), logs2)
+
     def test_dry_run_never_types(self):
         now = time.time()
         delivered = now - wd.GOAL_QUESTION_TIMEOUT_S - 60
