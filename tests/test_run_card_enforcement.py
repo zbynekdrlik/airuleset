@@ -42,6 +42,7 @@ template (both would be invisible to a test written against the docs):
     #133, an issue that was never closed at all.
 """
 
+import glob
 import json
 import os
 import shutil
@@ -54,9 +55,13 @@ from pathlib import Path
 from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Add this file's own directory so sibling test-support modules import as
+# top-level names (mirrors test_ask_before_assuming_dropped_rows.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import notify                                            # noqa: E402
 import watchdog as wd                                    # noqa: E402
+from _hook_state_cleanup import sweep_session_files       # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE = ROOT / "hooks" / "subagent-stop-check-run-card.sh"
@@ -1044,9 +1049,12 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
         TestSuppressionIsConditionalOnDelivery._n += 1
         self.sid = "test-supp-%d-%d" % (os.getpid(),
                                         TestSuppressionIsConditionalOnDelivery._n)
-        for p in ("/tmp/claude-discord-pending-%s" % self.sid,
-                  "/tmp/claude-discord-cardchk-%s" % self.sid):
-            self.addCleanup(lambda p=p: os.path.exists(p) and os.remove(p))
+        # (#293) sweep_session_files is shape-agnostic (globs "*<sid>*") --
+        # never hand-enumerate marker paths here again, or a FUTURE new
+        # marker silently reopens this same leak (2026-08-07: 207 real
+        # leftover lastq files from this class's own ❓ test, never cleaned
+        # by the old pending+cardchk-only list).
+        self.addCleanup(sweep_session_files, self.sid)
         self.pending = Path("/tmp/claude-discord-pending-%s" % self.sid)
 
     def mark(self, key, status="sent"):
@@ -1110,6 +1118,29 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
         r = self.stop("❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertEqual(r.returncode, 0)
         self.assertNotIn("cardchk-abort", r.stderr)
+
+
+class TestSuppressionSetupCleansEveryMarkerShape(unittest.TestCase):
+    """(#293 adversarial review, finding 3) TestSuppressionIsConditionalOnDelivery
+    .setUp hand-enumerated only pending + cardchk cleanup — its own
+    test_a_question_still_pings_regardless sends a ❓, which writes LASTQ
+    (hooks/notify-discord-pending.sh), never cleaned. Live proof on this box
+    (measured 2026-08-07): 207 leftover
+    /tmp/claude-discord-lastq-test-supp-* files, still growing on every
+    unittest run touching this file. Same class of bug as #293's own fix
+    (test_airuleset.py's _sid helpers) — reused here via
+    tests/_hook_state_cleanup.py::sweep_session_files, shape-agnostic by
+    construction so a future new marker can never reopen this again."""
+
+    def test_no_marker_of_any_shape_survives_the_question_test(self):
+        case = TestSuppressionIsConditionalOnDelivery(
+            "test_a_question_still_pings_regardless")
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertTrue(result.wasSuccessful(),
+                        (result.failures, result.errors))
+        leftover = glob.glob("/tmp/claude-discord-*-" + case.sid)
+        self.assertEqual(leftover, [], leftover)
 
 
 # --------------------------------------------------------------------------- #

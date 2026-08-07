@@ -112,9 +112,15 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
         return p
 
     def _run(self, now, tmux):
-        return wd.run_once(now=now, run=tmux, send_fn=self._send,
+        # #293 finding A: pending_prefix MUST be scoped to this test's own
+        # scratch dir -- job 5 (deliver_pending_done) is unconditional and
+        # otherwise sweeps the REAL /tmp/claude-discord-pending-* glob,
+        # which this live box's own concurrent sessions genuinely write to.
+        return wd.run_once(now=now, dry_run=False, run=tmux,
+                           send_fn=self._send,
                            projects_dir=self.projects,
-                           state_path=self.state_path)
+                           state_path=self.state_path,
+                           pending_prefix=str(Path(self.tmp.name) / "pending-"))
 
     def test_a_stable_draft_over_a_stale_real_turn_pings_despite_fresh_mtime(self):
         now = time.time()
@@ -166,6 +172,42 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
             len(self.pings), 1,
             "a future/corrupt real-turn timestamp must not make job 10 "
             "wait LONGER than the raw file mtime ever did")
+
+    def test_run_once_never_touches_the_real_discord_pending_glob(self):
+        # #293 finding A (adversarial review): `_run` never passed
+        # `pending_prefix=` to `wd.run_once`, so job 5 (deliver_pending_done,
+        # unconditional, no gating flag) swept the REAL
+        # /tmp/claude-discord-pending-* glob -- the same box's OWN live
+        # sessions write real ✅-pending files there via
+        # notify-discord-pending.sh. Any such file aged past
+        # PENDING_DONE_GRACE with no matching transcript in THIS test's
+        # scratch projects_dir reads as an orphan, gets "trusted" as ✅, and
+        # is delivered into self.pings AND unlinked (dry_run=False) --
+        # exactly the reported "2 != 1" symptom, PLUS a real production
+        # side effect: this test run could eat a live user's real phone
+        # ping before the real watchdog (job 5, systemd, every 60s) ever
+        # sees it. Every sibling wedge test in tests/test_prompt_wedge.py
+        # already scopes `pending_prefix` to a tmp dir; this file was the
+        # one outlier (#177, the newest of the pwedge test files).
+        decoy = Path(wd.PENDING_PREFIX + ("test-pwedge-decoy-%d" % os.getpid()))
+        self.addCleanup(lambda: decoy.exists() and decoy.unlink())
+        decoy.write_text("✅ nasadené v1.2.3, CI zelené")
+        stale = time.time() - wd.PENDING_DONE_GRACE - 60
+        os.utime(decoy, (stale, stale))
+
+        now = time.time()
+        self._write_transcript(now, real_turn_age_s=wd.PWEDGE_MIN_IDLE_S + 300)
+        tmux = _Tmux("%1\tclaude\t" + CWD + "\n", WEDGE_PANE)
+        self._run(now, tmux)
+        self._run(now + 70, tmux)
+        self.assertEqual(
+            len(self.pings), 1,
+            "a real /tmp/claude-discord-pending-* file leaked into this "
+            "test's own run_once() call and got counted -- #293 finding A")
+        self.assertTrue(
+            decoy.exists(),
+            "job 5 must never delete a real production pending file just "
+            "because this test's own run_once() call happened to sweep it")
 
 
 if __name__ == "__main__":
