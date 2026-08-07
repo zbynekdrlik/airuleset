@@ -6800,35 +6800,64 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # boundary for this repo? A positively-confirmed zero drops the
         # request outright, regardless of context size. Unmeasurable falls
         # through unchanged to the #48 context gate below.
-        substantial = compact_boundary_substantial(cwd, sid, projects_dir=pdir,
-                                                    git_run=git_run)
-        if substantial is False:
-            logs.append("skip no-work (compact-request) %s" % loc)
-            if not dry_run:
-                reqs.pop(sid, None)
-                changed = True
-                if mhash:
-                    mark_compact_delivered(sid, mhash, path=delivered_path)
-            continue
-        # #48 — read the FRESHEST context right before deciding anything else
-        # (it may have grown since the Stop hook recorded the request); a
-        # session with no resolvable transcript is unmeasurable, so it does
-        # NOT block the send (see the docstring above). Measured before the
-        # draft branch (#67) so a trivial-context draft-holding session is
-        # simply dropped, never stash-attempted for nothing.
-        ctx = None
-        tpath = _transcript_for_session(pdir, sid, cwd)
-        if tpath is not None:
-            ctx = transcript_current_context(tpath)
-            if ctx < min_context:
-                logs.append("skip small-context (compact-request) %s ctx=%d"
-                            % (loc, ctx))
+        #
+        # #301 — SKIPPED ENTIRELY for a `proven_boundary` request, mirroring
+        # `deliver_compact_now`'s own #126 exemption exactly: `origin in
+        # _COMPACT_PROVEN_BOUNDARY_ORIGINS` already PROVES a completed-ticket
+        # boundary (an autopilot-worker's own SubagentStop with zero other
+        # live tasks, or a session's own `compact-request --self` call) —
+        # both #99's "zero commits" proxy and #48's "context too small" proxy
+        # exist only to GUESS whether an anonymous Stop-hook turn was a real
+        # boundary, a question `origin` already answers directly. #122/#126
+        # deliberately scoped this parity gap OUT of job 14 at the time ("job
+        # 14's own separate copy of these same two gates is untouched ...
+        # this ticket does not fold it back in") — live evidence on gk and
+        # david@subdev (#301) shows PROVEN requests that fail to deliver
+        # synchronously (very common: `deferred=live-tasks`, often still
+        # inside #250's own grace window) falling through to this poll and
+        # getting dropped here anyway, exactly as if they were anonymous
+        # turns, producing multi-hour compaction-free stretches despite
+        # continuous completed-ticket activity.
+        if not proven_boundary:
+            substantial = compact_boundary_substantial(cwd, sid, projects_dir=pdir,
+                                                        git_run=git_run)
+            if substantial is False:
+                logs.append("skip no-work (compact-request) %s" % loc)
                 if not dry_run:
                     reqs.pop(sid, None)
                     changed = True
                     if mhash:
                         mark_compact_delivered(sid, mhash, path=delivered_path)
                 continue
+        # #48 — read the FRESHEST context right before deciding anything else
+        # (it may have grown since the Stop hook recorded the request); a
+        # session with no resolvable transcript is unmeasurable, so it does
+        # NOT block the send (see the docstring above). Measured before the
+        # draft branch (#67) so a trivial-context draft-holding session is
+        # simply dropped, never stash-attempted for nothing.
+        #
+        # #301 — the BLOCKING check is SKIPPED ENTIRELY for a
+        # `proven_boundary` request, same reasoning and same exemption set
+        # as the #99 gate immediately above. `ctx` itself is still read
+        # best-effort either way (unconditionally initialized to `None`
+        # first) — it is consumed further below ONLY as an informational
+        # `ctx=ctx` value for `_compact_stash_attempt`'s own diagnostic ping
+        # text, never as a gate, so leaving it `None` for a proven boundary
+        # that skips the read is harmless and correct.
+        ctx = None
+        if not proven_boundary:
+            tpath = _transcript_for_session(pdir, sid, cwd)
+            if tpath is not None:
+                ctx = transcript_current_context(tpath)
+                if ctx < min_context:
+                    logs.append("skip small-context (compact-request) %s ctx=%d"
+                                % (loc, ctx))
+                    if not dry_run:
+                        reqs.pop(sid, None)
+                        changed = True
+                        if mhash:
+                            mark_compact_delivered(sid, mhash, path=delivered_path)
+                    continue
         if _pane_has_queued_compact(captured):
             # #84 — an unexecuted `/compact` is already queued in this pane;
             # it is what will satisfy THIS boundary request, so drop the
