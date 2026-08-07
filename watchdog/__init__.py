@@ -550,6 +550,15 @@ SUBAGENT_MAX_AGE_SECONDS = 2 * 3600
 # closes for a wid it can never reopen -- the entry is never needed again
 # once genuinely stale, and this TTL is comfortably longer than any
 # realistic gap between `⏳` sightings within the still-active window.
+#
+# Residual (adversarial-review finding, THEORETICAL, no live trigger named):
+# `wid` is the dispatched agent's own transcript filename stem, assigned
+# fresh per dispatch and never observed reused -- but IF something ever
+# reused the identical wid for a genuinely NEW dispatch within this TTL
+# window (a same-file "follow up on the worker" path, say), the OLD
+# worker's already-`escalated` entry would keep the new death's nudge
+# suppressed until the TTL expires. Not reachable via any dispatch path
+# this repo has today; worth re-checking if that ever changes.
 SUBAGENT_NUDGE_STATE_TTL_SECONDS = SUBAGENT_MAX_AGE_SECONDS
 
 
@@ -1898,27 +1907,40 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None):
 
 def _subagent_transcript_unsalvageable(sub_path):
     """(#287) True when a dying SUBAGENT's OWN transcript has genuinely NOTHING
-    left to investigate: it never issued a single `tool_use` call (never got
-    past its own dispatch) and its last real entry is a bare
-    `isApiErrorMessage` — the exact shape the reporting incident's own
-    diagnostic already confirmed by hand (odoo-erp#3036: 4 lines total, 1
-    tool_use — the dispatch itself, never a COMPLETED one; the transcript
-    ends on a bare `API Error: 529 Overloaded`). A session nudged about a
-    transcript in this shape can only ever re-derive the SAME "nothing to
-    salvage" conclusion, so `_nudge_dying_subagent` nudges it AT MOST ONCE
-    rather than the full nudge/nudge/nudge/escalate cycle a genuinely
-    recoverable stall earns.
+    left to investigate: no `tool_use` it ever issued actually COMPLETED
+    (returned a `tool_result`), and its last real entry is a bare
+    `isApiErrorMessage`. Matches the reporting incident's OWN stated bar
+    verbatim (odoo-erp#3036: "4 lines total... 1 tool_use — the dispatch
+    itself, **0 completed tool calls**") — not "zero tool_use ever ISSUED",
+    which is stricter than what the incident actually reports and would
+    wrongly classify its own worker (1 issued-but-never-returned tool_use)
+    as salvageable (adversarial-review finding, #287). An issued tool_use
+    with no observed tool_result is exactly as un-investigable as no
+    tool_use at all — the supervisor has no evidence it ever produced
+    anything, so a session nudged about either shape can only ever
+    re-derive the SAME "nothing to salvage" conclusion. `_nudge_dying_
+    subagent` nudges such a worker AT MOST ONCE rather than the full
+    nudge/nudge/nudge/escalate cycle a genuinely recoverable stall earns.
 
     Fails SAFE toward "salvageable" (False) on any read problem or on
-    finding even ONE issued `tool_use` — under-classifying only costs a few
-    extra (harmless, now BOUNDED by SUBAGENT_NUDGE_STATE_TTL_SECONDS)
-    nudges, never a silently-skipped genuinely-recoverable worker."""
+    finding even ONE returned `tool_result` — under-classifying only costs
+    a few extra (harmless, now BOUNDED by SUBAGENT_NUDGE_STATE_TTL_SECONDS)
+    nudges, never a silently-skipped genuinely-recoverable worker. The scan
+    is bounded to the last `max_lines` entries — a real completed tool_use
+    sitting further back than that (an unusually long-lived worker that
+    only went quiet for its own final stretch) could still be missed and
+    the worker over-classified as unsalvageable; the harm stays bounded to
+    one nudge instead of three, never a silently-dropped one."""
     if not transcript_last_error(sub_path):
         return False                     # doesn't even end on an api-error
-    for entry in _iter_jsonl_tail(sub_path, max_lines=200):
-        if (isinstance(entry, dict) and entry.get("type") == "assistant"
-                and _entry_has_tool_use(entry)):
-            return False                 # made SOME progress -> could still be resumed
+    for entry in _iter_jsonl_tail(sub_path, max_lines=500):
+        if not isinstance(entry, dict) or entry.get("type") != "user":
+            continue
+        msg = entry.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False                 # a tool call actually RETURNED -> real progress
     return True
 
 
