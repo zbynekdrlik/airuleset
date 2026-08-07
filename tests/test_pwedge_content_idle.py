@@ -112,9 +112,15 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
         return p
 
     def _run(self, now, tmux):
-        return wd.run_once(now=now, run=tmux, send_fn=self._send,
+        # #293 finding A: pending_prefix MUST be scoped to this test's own
+        # scratch dir -- job 5 (deliver_pending_done) is unconditional and
+        # otherwise sweeps the REAL /tmp/claude-discord-pending-* glob,
+        # which this live box's own concurrent sessions genuinely write to.
+        return wd.run_once(now=now, dry_run=False, run=tmux,
+                           send_fn=self._send,
                            projects_dir=self.projects,
-                           state_path=self.state_path)
+                           state_path=self.state_path,
+                           pending_prefix=str(Path(self.tmp.name) / "pending-"))
 
     def test_a_stable_draft_over_a_stale_real_turn_pings_despite_fresh_mtime(self):
         now = time.time()
