@@ -429,7 +429,16 @@ class TestCmdGkRequest(unittest.TestCase):
             return m.Mock(returncode=0, stdout="", stderr="")
 
         with m.patch("subprocess.run", side_effect=run):
-            airuleset.cmd_gk_request(self._args(issue=7, comment="akcia"))
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=7, comment="akcia"))
+        # #283 adversarial review, MINOR: label denied but the retitle
+        # fallback SUCCEEDED is a genuinely visible, successful escalation
+        # -- must return 0, never the loud-failure rc=1. A mutant that
+        # drops the `retitled` clause from the failure guard (leaving only
+        # `not labeled and not already_prefixed`) survived every
+        # pre-existing test in this file because none of them asserted
+        # the return code for this exact combination.
+        self.assertEqual(rc, 0)
         comments = [argv for argv in calls if "comment" in argv]
         self.assertTrue(comments)
         self.assertIn("GATEKEEPER-ACTION:", json.dumps(comments))
@@ -461,6 +470,83 @@ class TestCmdGkRequest(unittest.TestCase):
         edits = [argv for argv in calls
                  if "edit" in argv and "--title" in argv]
         self.assertFalse(edits, "already-prefixed title must not be retitled")
+
+    def test_issue_mode_neither_label_nor_retitle_succeeds_fails_loudly(self):
+        # #283: mirrors #221's create-mode hardening for the --issue
+        # (mark-existing-ticket) branch — label denied AND the retitle
+        # edit also denied must NEVER report success while the escalation
+        # is invisible to job 11's needs-gatekeeper/in:title queries
+        # (script-failure-policy: fail loudly, never guess).
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "view" in argv:
+                return m.Mock(returncode=0, stdout="Stary titulok\n",
+                              stderr="")
+            if "edit" in argv and "--title" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=9, comment="akcia"))
+        self.assertEqual(rc, 1)
+        # the comment itself must still have been posted (it's the retitle
+        # that failed, not the comment) -- the failure is about visibility,
+        # not about the comment call
+        self.assertTrue(any("comment" in c for c in calls), calls)
+
+    def test_issue_mode_view_fallback_failure_fails_loudly(self):
+        # #283: the retitle fallback's OWN `gh issue view` read can fail
+        # (network hiccup, permissions) -- when it does, we cannot tell
+        # whether the title already carries the GATEKEEPER-ACTION marker,
+        # so a denied label plus an unreadable title must ALSO fail loudly
+        # rather than silently assuming the escalation is fine.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "view" in argv:
+                return m.Mock(returncode=1, stdout="",
+                              stderr="could not view issue")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=10, comment="akcia"))
+        self.assertEqual(rc, 1)
+        # never attempted a retitle against an unread title
+        self.assertFalse(
+            any("edit" in c and "--title" in c for c in calls), calls)
+
+    def test_issue_mode_already_prefixed_title_still_returns_success(self):
+        # #283 regression guard: the existing already-prefixed boundary
+        # case (test_issue_mode_already_prefixed_title_not_retitled) must
+        # keep returning 0 -- the escalation IS already visible via the
+        # title, even though no retitle *call* was made, so the new
+        # loud-failure gate must not treat "retitled == False" alone as
+        # a failure signal.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "--add-label" in argv:
+                return m.Mock(returncode=1, stdout="", stderr="403")
+            if "view" in argv:
+                return m.Mock(returncode=0,
+                              stdout="GATEKEEPER-ACTION: uz oznacene\n",
+                              stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch("subprocess.run", side_effect=run):
+            rc = airuleset.cmd_gk_request(
+                self._args(issue=11, comment="akcia"))
+        self.assertEqual(rc, 0)
 
     def test_registered_in_cli(self):
         src = Path(airuleset.__file__).read_text()

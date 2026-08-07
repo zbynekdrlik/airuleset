@@ -4265,6 +4265,12 @@ def cmd_gk_request(args):
                   % (issue, c.stderr.strip()))
             return 1
         retitled = False
+        # #283: distinct from `retitled` -- the escalation can ALSO already
+        # be discoverable by job 11's `in:title` query without us having
+        # made an edit call at all (the title already carries the marker).
+        # Both together answer "is this escalation visible to the
+        # supervisor by SOME title-based path" -- neither alone does.
+        already_prefixed = False
         if not labeled:
             # a comment-only marker is INVISIBLE to job 11's queries (label +
             # in:title) — best-effort retitle so the request stays
@@ -4272,17 +4278,30 @@ def cmd_gk_request(args):
             v = _gh(["gh", "issue", "view", str(issue),
                      "--json", "title", "-q", ".title"] + R)
             old = (v.stdout or "").strip()
-            if v.returncode == 0 and old \
-                    and not old.startswith("GATEKEEPER-ACTION:"):
-                retitled = _gh(["gh", "issue", "edit", str(issue), "--title",
-                                "GATEKEEPER-ACTION: " + old] + R
-                               ).returncode == 0
+            if v.returncode == 0 and old:
+                if old.startswith("GATEKEEPER-ACTION:"):
+                    already_prefixed = True
+                else:
+                    retitled = _gh(["gh", "issue", "edit", str(issue),
+                                    "--title", "GATEKEEPER-ACTION: " + old
+                                    ] + R).returncode == 0
+            # v failed, or `old` came back empty: we cannot tell whether
+            # the title already carries the marker, and no retitle was
+            # even attempted -- neither `retitled` nor `already_prefixed`
+            # is set, so the loud-failure check below correctly refuses
+            # rather than guessing the escalation is fine.
+        if not labeled and not retitled and not already_prefixed:
+            print("gk-request FAILED: #%s commented but neither the "
+                  "needs-gatekeeper label nor the GATEKEEPER-ACTION title "
+                  "prefix could be applied (or verified) — escalation "
+                  "would be invisible to the supervisor; consider filing "
+                  "a NEW ticket via gk-request --title instead" % issue)
+            return 1
         print("gk-request: #%s commented (label %s)"
               % (issue, "added" if labeled
-                 else ("DENIED — retitled with GATEKEEPER-ACTION" if retitled
-                       else "DENIED and retitle failed — auto-delivery NOT "
-                            "guaranteed; prefer a NEW ticket via gk-request "
-                            "--title")))
+                 else ("DENIED — title already carries GATEKEEPER-ACTION"
+                       if already_prefixed
+                       else "DENIED — retitled with GATEKEEPER-ACTION")))
         return 0
 
     title = getattr(args, "title", None)
