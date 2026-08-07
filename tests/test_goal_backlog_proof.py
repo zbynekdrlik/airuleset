@@ -37,6 +37,8 @@ from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import watchdog as wd                                     # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = "skills/autopilot/SKILL.md"
 
@@ -474,6 +476,18 @@ class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
         over = [(i, len(line)) for i, line in enumerate(goal_lines())
                 if len(line) > 4000]
         self.assertEqual(over, [])
+
+    def test_the_stated_minutes_matches_the_real_constant(self):
+        # #161-review MINOR m4: the templates hardcode the literal "(30m)"
+        # while the code reads GOAL_QUESTION_TIMEOUT_S — nothing tied the
+        # two before this test, so tuning the constant would silently make
+        # every template lie about how long the wait actually is.
+        minutes = wd.GOAL_QUESTION_TIMEOUT_S // 60
+        needle = "(%dm)" % minutes
+        for i, line in enumerate(goal_lines()):
+            self.assertIn(needle, line,
+                          "template %d states a stale minute count "
+                          "(expected %r)" % (i, needle))
 
 
 if __name__ == "__main__":

@@ -14,9 +14,15 @@ over the hook's own bytes, never executed). This file runs the REAL Stop
 hook as a real subprocess, with a faked `curl` standing in for Discord (never
 touches the network), against a real temp `HOME`, and asserts the FULL
 chain: the hook runs -> `discord-questions.json` gets a real entry ->
-`statusbar.questions_segment` renders it non-empty. Nothing here needed a
-code change — every link in this chain was already correct; this is the
-missing proof, not a fix.
+`statusbar.questions_segment` renders it non-empty. The production hook
+chain itself needed no fix — every link was already correct.
+
+The FIRST version of this file did need one, though (#161-review CRITICAL
+C1, self-inflicted): `hooks/notify-discord-pending.sh` writes per-session
+dedup markers under the REAL `/tmp` (never under the isolated `HOME`),
+keyed only on the session id — fixed literal ids left those markers behind
+after the first run and silently deduped every later run on this exact
+box. See `QuestionFooterEndToEnd._sid`.
 """
 
 import json
@@ -25,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -54,7 +61,22 @@ def _path_with_fake_curl(http_code="200", msg_id="999000111"):
 class QuestionFooterEndToEnd(unittest.TestCase):
     """Every test writes into an isolated tmp `HOME` — never the real one
     (the live api-watchdog + this developer's own real Discord config share
-    this box)."""
+    this box).
+
+    #161-review CRITICAL C1: `hooks/notify-discord-pending.sh` also writes
+    PER-SESSION dedup/state markers directly under the REAL `/tmp` (never
+    under the isolated `HOME` — `/tmp/claude-discord-{lastq,pending,
+    cardchk}-<sid>`), keyed only on the session id. A fixed literal session
+    id per test (`"sid-e2e-needs-you"`, …) left those markers behind after
+    the FIRST run, silently deduping (no POST at all) on every later run —
+    a genuine hook failure this file's own author hit live minutes after
+    first shipping it. `_sid()` mirrors the established fix for the exact
+    same class of bug elsewhere in this suite
+    (`tests/test_airuleset.py::TestDiscordNotifyHooks._sid`): a fresh,
+    counter-suffixed id per call, with `addCleanup` removing every marker
+    shape the hook can create for it."""
+
+    _n = 0
 
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-q-e2e-home-"))
@@ -66,6 +88,14 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         (d / ".env").write_text(
             "DISCORD_BOT_TOKEN=xxtokenxx\n"
             "DISCORD_NOTIFICATION_CHANNEL_ID=123456789\n")
+
+    def _sid(self, label):
+        QuestionFooterEndToEnd._n += 1
+        sid = "e2e-%s-%d-%d" % (label, os.getpid(), QuestionFooterEndToEnd._n)
+        for prefix in ("lastq", "pending", "cardchk", "send"):
+            p = "/tmp/claude-discord-%s-%s" % (prefix, sid)
+            self.addCleanup(lambda p=p: os.path.exists(p) and os.remove(p))
+        return sid
 
     def _fire(self, sid, msg, msg_id="999000111"):
         curl_dir, path = _path_with_fake_curl(msg_id=msg_id)
@@ -86,7 +116,9 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         return json.loads(p.read_text())
 
     def test_needs_you_confirmed_send_records_the_question(self):
-        r = self._fire("sid-e2e-needs-you",
+        sid = self._sid("needs-you")
+        before = time.time()
+        r = self._fire(sid,
                        "**Otázka — projekt demo:** kontext.\n"
                        "• Áno (odporúčam) — pokračuje\n"
                        "❓ NEEDS YOU: pokračovať?",
@@ -94,35 +126,41 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         qmap = self._questions_map()
         self.assertIn("777001", qmap, qmap)
-        self.assertEqual(qmap["777001"]["session"], "sid-e2e-needs-you")
+        self.assertEqual(qmap["777001"]["session"], sid)
         self.assertEqual(qmap["777001"]["cwd"], str(self.cwd))
+        # #161-review MINOR m5: the recorded `ts` is the field the #161
+        # part-3 timeout mechanism actually load-bears on — assert it is
+        # present and genuinely recent, not merely that SOME entry exists.
+        self.assertGreaterEqual(qmap["777001"]["ts"], before - 1)
+        self.assertLessEqual(qmap["777001"]["ts"], time.time() + 1)
 
     def test_asked_confirmed_send_ALSO_records_the_question(self):
         # ask-and-continue: the turn ends ⏳ WORKING, not ❓ — the ping still
         # fires IMMEDIATELY (message-status-marker.md) and must be recorded
         # exactly like a NEEDS YOU block.
-        r = self._fire("sid-e2e-asked",
+        sid = self._sid("asked")
+        r = self._fire(sid,
                        "❓ ASKED: ktorý dizajn?\n\n"
                        "⏳ WORKING: medzitým pokračujem na inom tickete",
                        msg_id="777002")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         qmap = self._questions_map()
         self.assertIn("777002", qmap, qmap)
-        self.assertEqual(qmap["777002"]["session"], "sid-e2e-asked")
+        self.assertEqual(qmap["777002"]["session"], sid)
 
     def test_the_recorded_question_then_renders_in_the_footer(self):
         # The FULL chain, not just the write: after a real confirmed ❓ POST,
         # statusbar.questions_segment (the shim's own `Q N` badge) must
         # render it non-empty for this exact project — the missing half of
         # the proof #161 asked for.
-        self._fire("sid-e2e-footer",
-                  "❓ NEEDS YOU: nasadiť teraz?", msg_id="777003")
+        sid = self._sid("footer")
+        self._fire(sid, "❓ NEEDS YOU: nasadiť teraz?", msg_id="777003")
         seg = statusbar.questions_segment(str(self.cwd), home=self.home)
         self.assertIn("Q 1", seg, seg)
 
     def test_a_different_project_shows_up_as_elsewhere(self):
-        self._fire("sid-e2e-inde", "❓ NEEDS YOU: nasadiť teraz?",
-                  msg_id="777004")
+        sid = self._sid("inde")
+        self._fire(sid, "❓ NEEDS YOU: nasadiť teraz?", msg_id="777004")
         other_cwd = tempfile.mkdtemp(prefix="airuleset-q-e2e-other-")
         try:
             seg = statusbar.questions_segment(other_cwd, home=self.home)
@@ -134,10 +172,11 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         # a DENIED (non-2xx) send must NEVER record a question — the map
         # only ever holds a CONFIRMED delivery (review finding, 2026-07-04:
         # a transient failure must stay retryable, never silently "pinged").
+        sid = self._sid("fail")
         curl_dir, path = _path_with_fake_curl(http_code="500",
                                               msg_id="777005")
         self.addCleanup(shutil.rmtree, curl_dir, True)
-        payload = json.dumps({"session_id": "sid-e2e-fail",
+        payload = json.dumps({"session_id": sid,
                               "last_assistant_message":
                               "❓ NEEDS YOU: nasadiť teraz?",
                               "cwd": str(self.cwd)})
