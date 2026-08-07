@@ -3582,7 +3582,13 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
+        # montalu4 is Marek's OWN dev stream (airuleset#295 — the user's own
+        # statement, independently corroborated by odoo-erp#2961's
+        # 2026-08-05 ACCESS DECISION comment: montalu4 is the ONLY
+        # montalu-family account marek's SSH key was added to). Routing it
+        # to zbynek was the #295 bug — this assertion was INVERTED from
+        # "zbynek" as the RED half of that fix's regression test.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david"], "david")
         # marek is deliberately absent: its own tmux session name already
         # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
@@ -3626,7 +3632,8 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("montalu"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu2"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
-        self.assertEqual(self.notify.stream_redirect("montalu4"), "zbynek")
+        # montalu4 → marek (airuleset#295) — see the sibling assertion above.
+        self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
         self.assertEqual(self.notify.stream_redirect("simap"), "zbynek")
         # david is self-mapped — the redirect is a documented no-op for it.
         self.assertEqual(self.notify.stream_redirect("david"), "david")
