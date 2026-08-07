@@ -326,11 +326,12 @@ def changes_path():
     return burn_history_dir() / "changes.jsonl"
 
 
-def hourly_snapshot(now, root=None, host=None, user=None, days=2):
+def hourly_snapshot(now, root=None, host=None, user=None, days=2,
+                    usage_cache_path=None):
     """Aggregate the PREVIOUS full hour (the hour immediately before the one
     `now` falls in) into the single-JSON-line shape `snapshots.jsonl` wants:
     `{"ts", "host", "user", "window_h": 1, "usd", "msgs", "avg_ctx",
-    "scope": "agents", "by_model": {<model>: <usd>, ...}}`.
+    "scope": "agents", "account_email", "by_model": {<model>: <usd>, ...}}`.
 
     Reuses `scan()`'s per-line parser (no second transcript parser) — this
     just picks the ONE hour bucket out of its `by_hour` / `by_hour_model`
@@ -346,7 +347,22 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
     has NO `scope` key at all — `_window_stats()`/`compare_changes()` and
     `hourly_burn_alert()` both only compare rows that carry the SAME scope,
     so a before/after that straddles the deploy boundary never reads as a
-    false regression or a false spike."""
+    false regression or a false spike.
+
+    `"account_email"` (#269) is the SAME field `watchdog.write_usage_cache()`
+    already writes into `~/.claude/airuleset-usage-cache.json` (the field
+    `statusbar.account_email_segment` renders) — read here via
+    `load_usage_cache(usage_cache_path)` so fleet reporting can map a box to
+    the Anthropic subscription account it is spending against.
+    `usage_cache_path` defaults to the module's own `usage_cache_path()`
+    (the real local cache) and is only overridden in tests; "" on any
+    missing/unreadable/malformed cache — never blocks or crashes, mirroring
+    `write_usage_cache()`'s own degrade-to-"" convention for this exact
+    field. "Malformed" explicitly includes a cache file that parses as
+    valid JSON but is NOT an object (e.g. a bare string/number/list) —
+    `load_usage_cache()` only returns `None` on an unparseable file, so a
+    JSON-valid-but-wrong-shape cache is caught HERE with its own
+    `isinstance` check, never passed through to `.get()`."""
     root = root or os.path.expanduser("~/.claude/projects")
     data = scan(root, days=days, now=now)
     end = now.astimezone().replace(minute=0, second=0, microsecond=0)
@@ -359,6 +375,9 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
     msgs = row["msgs"]
     avg_ctx = int(round((row["cache_r"] + row["cache_w"]) / msgs)) if msgs else 0
     tools = data.get("by_hour_main_tools", {}).get(hour_key) or {}
+    usage_cache = load_usage_cache(usage_cache_path)
+    if not isinstance(usage_cache, dict):
+        usage_cache = None
     return {
         "ts": start.isoformat(),
         "host": host or os.uname().nodename,
@@ -375,6 +394,7 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2):
         # hand-run script over a 23MB transcript.
         "main_bash": int(tools.get("bash", 0)),
         "main_agent": int(tools.get("agent", 0)),
+        "account_email": (usage_cache or {}).get("account_email") or "",
     }
 
 
@@ -695,7 +715,10 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
         main_agent = int(row.get("main_agent", 0) or 0)
         per_host[name] = {"usd": round(usd, 4), "msgs": msgs, "avg_ctx": avg_ctx,
                           "main_bash": main_bash, "main_agent": main_agent,
-                          "by_model": row.get("by_model") or {}}
+                          "by_model": row.get("by_model") or {},
+                          # #269: box->account mapping — piggybacks on the
+                          # SAME collection round-trip, no new ssh reads.
+                          "account_email": row.get("account_email") or ""}
         total_usd += usd
         total_msgs += msgs
         weighted_ctx_sum += avg_ctx * msgs
@@ -744,6 +767,68 @@ def weekly_budget(cache, now=None):
     return {"weekly_pct": pct, "resets_at": resets_at,
             "remaining_days": round(remaining_days, 2),
             "budget_pct_per_day": round(budget, 2) if budget is not None else None}
+
+
+def group_fleet_by_account(per_host, cache=None):
+    """#269 — box->Anthropic-account mapping + subtotal, over a `per_host`
+    dict (the shape `merge_fleet_row()` writes, typically the LATEST
+    `fleet.jsonl` row's `per_host` — mirroring how `fleet_trend()`/
+    `fleet_sustainability()` already key off "latest"). Returns a list of
+    `{"account", "hosts", "total_usd", "weekly_pct", "resets_at"}` dicts:
+
+    - Grouped by `account_email` (#212's field, carried through by
+      `merge_fleet_row()` since #269) — boxes sharing the same account are
+      grouped together and their `usd` subtotaled.
+    - A host row that is `error`/`stale`/missing/not-a-dict contributes
+      NOTHING (mirrors `merge_fleet_row()`'s own contributor exclusion from
+      every total — a box that couldn't be reached must not silently
+      subtract from, or falsely pad, an account's real subtotal).
+    - Real accounts are sorted ALPHABETICALLY for a stable, deterministic
+      order; any host whose `account_email` is blank (missing, unreadable
+      local cache, or a pre-#269 row) is collected into a single trailing
+      "unknown" bucket (`"account": None`) — placed LAST, never merged into
+      a real account by guessing, and never dropped.
+    - `weekly_pct`/`resets_at` are populated ONLY for the ONE account
+      matching `cache.get("account_email")` (the box actually RUNNING the
+      report — the only account this feature can see a real weekly-usage
+      window for, since the fleet ssh collection only ever tails a remote's
+      `snapshots.jsonl` $/msgs row, never a remote's OWN usage cache — see
+      #269's design comment for why that is a deliberately deferred,
+      separately-scoped follow-up rather than guessed here). Every other
+      account's window is left `None` — rendered as "?" by `render_fleet()`,
+      never fabricated.
+
+    Never raises: an empty/None `per_host` returns `[]`. Also never raises on
+    a malformed field crossing this legacy-file/ssh-tailed boundary — a
+    non-string `account_email` (a corrupted local cache, a hand-edited
+    `fleet.jsonl`) is treated exactly like a missing one (unknown bucket),
+    never sorted/hashed as-is (the account key must be `str` or `None` for
+    both `sorted()` and the dict grouping to stay safe)."""
+    groups = {}
+    for host, v in (per_host or {}).items():
+        if not v or not isinstance(v, dict) or v.get("error"):
+            continue
+        acct = v.get("account_email")
+        acct = acct if isinstance(acct, str) and acct else None
+        g = groups.setdefault(acct, {"hosts": [], "total_usd": 0.0})
+        g["hosts"].append(host)
+        g["total_usd"] += v.get("usd", 0.0) or 0.0
+    cache = cache if isinstance(cache, dict) else None
+    wk = shared_weekly_window(cache) if cache else None
+    my_account = (cache or {}).get("account_email") or None
+    out = []
+    for acct in sorted(k for k in groups if k is not None):
+        g = groups[acct]
+        weekly_pct, resets_at = (wk if (wk and acct == my_account) else (None, None))
+        out.append({"account": acct, "hosts": sorted(g["hosts"]),
+                    "total_usd": round(g["total_usd"], 4),
+                    "weekly_pct": weekly_pct, "resets_at": resets_at})
+    if None in groups:
+        g = groups[None]
+        out.append({"account": None, "hosts": sorted(g["hosts"]),
+                    "total_usd": round(g["total_usd"], 4),
+                    "weekly_pct": None, "resets_at": None})
+    return out
 
 
 def _valid_host_set(row):
@@ -944,7 +1029,15 @@ def render_fleet(rows, hours=24, cache=None, now=None):
     `airuleset._fleet_remote_row`'s hour-match check) — distinct from both
     `ERR` (a hard collection failure: ssh unreachable, bad JSON) and
     `$0.00` (a real, verified zero-usage sample); conflating "no data yet"
-    with "spent nothing" was the false -39.8% trend the ticket reported."""
+    with "spent nothing" was the false -39.8% trend the ticket reported.
+
+    Also prints an "ucty" (accounts) section (#269): the LATEST hour's
+    `per_host` grouped by Anthropic subscription account via
+    `group_fleet_by_account()` — box list + $ subtotal per account, real
+    `%`/reset only for the account matching `cache`'s own (the box running
+    this report), an honest "% neznamy" for every other account (see
+    `group_fleet_by_account()`'s own docstring for why), and any host with
+    no known account_email in its own trailing "neznamy ucet" bucket."""
     if not rows:
         return ("airuleset burn --fleet -- zatial nie su zaznamenane ziadne "
                 "fleet snapshoty. Bezi len na koordinatorovi (dev1) — pockaj "
@@ -969,6 +1062,23 @@ def render_fleet(rows, hours=24, cache=None, now=None):
         lines.append("  %s  total=$%.2f  msgs=%d  ctx=%s  [%s]%s"
                      % (r.get("ts", "?"), r.get("total_usd", 0.0), r.get("total_msgs", 0),
                         _fmt_int(r.get("weighted_avg_ctx", 0)), ", ".join(parts), note))
+    latest_per_host = (shown[-1].get("per_host") or {}) if shown else {}
+    acct_groups = group_fleet_by_account(latest_per_host, cache)
+    lines.append("")
+    lines.append("  ucty (box -> Anthropic ucet, poslednej hodiny):")
+    if not acct_groups:
+        lines.append("    (ziadne dostupne data o uctoch pre tuto hodinu)")
+    for g in acct_groups:
+        label = g["account"] or "neznamy ucet"
+        if g["weekly_pct"] is not None:
+            window = ("  (tyzdenny limit %s%%, reset %s)"
+                      % (g["weekly_pct"], g["resets_at"] or "?"))
+        elif g["account"] is None:
+            window = ""
+        else:
+            window = "  (% neznamy — cudzi ucet, bez lokalneho cache)"
+        lines.append("    %s: %s  celkovo=$%.2f%s"
+                     % (label, ", ".join(g["hosts"]), g["total_usd"], window))
     trend = fleet_trend(rows)
     if trend:
         lines.append("")

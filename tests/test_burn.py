@@ -307,6 +307,20 @@ class TestScanHourlyBuckets(unittest.TestCase):
 
 
 class TestHourlySnapshot(unittest.TestCase):
+    # #269 review finding m3: hourly_snapshot() now reads the local usage
+    # cache for account_email -- isolate every test in this class from this
+    # box's own REAL ~/.claude/airuleset-usage-cache.json by default (a test
+    # that needs a SPECIFIC cache passes its own usage_cache_path= directly,
+    # which wins over this class-wide default).
+    def setUp(self):
+        tmp_dir = TemporaryDirectory()
+        self.addCleanup(tmp_dir.cleanup)
+        patcher = m.patch.object(
+            burn, "usage_cache_path",
+            return_value=Path(tmp_dir.name) / "no-usage-cache.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_covers_previous_full_hour_only(self):
         with TemporaryDirectory() as tmp:
             now = datetime.datetime(2026, 7, 25, 14, 5, 0, tzinfo=datetime.timezone.utc)
@@ -359,6 +373,52 @@ class TestHourlySnapshot(unittest.TestCase):
             now = datetime.datetime.now(datetime.timezone.utc)
             row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z")
             self.assertEqual(row["scope"], "agents")
+
+    def test_row_carries_account_email_from_the_usage_cache(self):
+        # #269: the row must carry the SAME account_email field #212 already
+        # writes into ~/.claude/airuleset-usage-cache.json — this is what
+        # lets fleet reporting map a box to a subscription account.
+        with TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "usage-cache.json")
+            with open(cache_path, "w") as f:
+                json.dump({"account_email": "z@example.com"}, f)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z",
+                                       usage_cache_path=cache_path)
+            self.assertEqual(row["account_email"], "z@example.com")
+
+    def test_missing_usage_cache_yields_blank_account_email_not_a_crash(self):
+        # A box whose local usage cache is missing/unreadable must never
+        # block or crash the hourly snapshot -- write_usage_cache()'s own
+        # account_email write already degrades to "" the same way.
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z",
+                                       usage_cache_path="/nonexistent/usage-cache.json")
+            self.assertEqual(row["account_email"], "")
+
+    def test_hourly_snapshot_never_crashes_on_a_malformed_usage_cache(self):
+        # #269 review finding m2: a cache file that parses as VALID JSON but
+        # is not an object (e.g. a bare string) must not crash the snapshot
+        # -- load_usage_cache() only returns None on unparseable JSON, so a
+        # JSON-valid-but-wrong-shape cache reaches hourly_snapshot() itself
+        # and must be caught THERE.
+        with TemporaryDirectory() as tmp:
+            cache_path = os.path.join(tmp, "malformed-cache.json")
+            with open(cache_path, "w") as f:
+                json.dump("just-a-string-not-an-object", f)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z",
+                                       usage_cache_path=cache_path)
+            self.assertEqual(row["account_email"], "")
+
+    def test_class_default_isolation_never_leaks_the_real_local_cache(self):
+        # Proves setUp's isolation genuinely takes effect for a call that
+        # passes NO usage_cache_path at all (the class-wide default path).
+        with TemporaryDirectory() as tmp:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = burn.hourly_snapshot(now, root=tmp, host="dev1", user="z")
+            self.assertEqual(row["account_email"], "")
 
 
 class TestDispatchRatioMeasurement80(unittest.TestCase):
@@ -775,6 +835,172 @@ class TestFleetMerge(unittest.TestCase):
         # "unanimous" over an empty set must not be misread as "tagged".
         merged = burn.merge_fleet_row("t", {"gk": {"error": "ssh timeout"}})
         self.assertNotIn("scope", merged)
+
+    def test_account_email_is_carried_through_to_per_host(self):
+        # #269: hourly_snapshot() now stamps account_email onto its own row
+        # (piggybacking on the SAME ssh tail merge_fleet_row already
+        # receives) -- the whitelist must carry it through, not drop it.
+        row = dict(_host_row(1.0, 10, 100000))
+        row["account_email"] = "z@example.com"
+        merged = burn.merge_fleet_row("t", {"dev1": row})
+        self.assertEqual(merged["per_host"]["dev1"]["account_email"], "z@example.com")
+
+    def test_missing_account_email_becomes_blank_not_a_crash(self):
+        # A pre-#269 host row (no account_email key at all) must not crash
+        # the merge -- blank string, same as a read failure, never a guess.
+        merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
+        self.assertEqual(merged["per_host"]["dev1"]["account_email"], "")
+
+
+class TestGroupFleetByAccount(unittest.TestCase):
+    """#269: box->account mapping + subtotal for `airuleset.py burn --fleet`."""
+
+    def _row(self, usd, account_email, error=False, stale=False):
+        if error:
+            e = {"error": "ssh timeout"}
+            if stale:
+                e["stale"] = True
+            return e
+        r = dict(_host_row(usd, 10, 100000))
+        r["account_email"] = account_email
+        return r
+
+    def test_boxes_with_the_same_account_are_grouped_and_subtotaled(self):
+        per_host = {
+            "dev1": self._row(1.0, "z@example.com"),
+            "dev2": self._row(2.0, "z@example.com"),
+            "gk": self._row(5.0, "other@example.com"),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        by_account = {g["account"]: g for g in groups}
+        self.assertEqual(sorted(by_account["z@example.com"]["hosts"]), ["dev1", "dev2"])
+        self.assertEqual(by_account["z@example.com"]["total_usd"], 3.0)
+        self.assertEqual(by_account["other@example.com"]["hosts"], ["gk"])
+        self.assertEqual(by_account["other@example.com"]["total_usd"], 5.0)
+
+    def test_unknown_account_bucket_collects_blank_account_email_hosts(self):
+        per_host = {
+            "dev1": self._row(1.0, "z@example.com"),
+            "old-box": self._row(2.0, ""),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        by_account = {g["account"]: g for g in groups}
+        self.assertIn(None, by_account)
+        self.assertEqual(by_account[None]["hosts"], ["old-box"])
+        self.assertEqual(by_account[None]["total_usd"], 2.0)
+
+    def test_error_and_stale_hosts_contribute_nothing(self):
+        per_host = {
+            "dev1": self._row(1.0, "z@example.com"),
+            "gk": self._row(0, "z@example.com", error=True),
+            "montalu": self._row(0, "z@example.com", error=True, stale=True),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertEqual(g["hosts"], ["dev1"])
+        self.assertEqual(g["total_usd"], 1.0)
+
+    def test_accounts_are_sorted_alphabetically_stable_ordering(self):
+        per_host = {
+            "c-box": self._row(1.0, "charlie@example.com"),
+            "a-box": self._row(1.0, "alpha@example.com"),
+            "b-box": self._row(1.0, "bravo@example.com"),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        accounts = [g["account"] for g in groups]
+        self.assertEqual(accounts, ["alpha@example.com", "bravo@example.com",
+                                    "charlie@example.com"])
+
+    def test_unknown_bucket_is_always_last(self):
+        per_host = {
+            "old-box": self._row(1.0, ""),
+            "z-box": self._row(1.0, "zzz@example.com"),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        accounts = [g["account"] for g in groups]
+        self.assertEqual(accounts, ["zzz@example.com", None])
+
+    def test_multiple_real_accounts_plus_unknown_bucket_together(self):
+        # #269 review finding t4: no prior fixture combined MORE THAN TWO
+        # real accounts WITH an unknown bucket in one call.
+        per_host = {
+            "c-box": self._row(1.0, "charlie@example.com"),
+            "old-box": self._row(1.0, ""),
+            "a-box": self._row(1.0, "alpha@example.com"),
+            "b-box": self._row(1.0, "bravo@example.com"),
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        accounts = [g["account"] for g in groups]
+        self.assertEqual(accounts, ["alpha@example.com", "bravo@example.com",
+                                    "charlie@example.com", None])
+
+    def test_weekly_pct_and_resets_at_populated_only_for_the_reporting_boxs_own_account(self):
+        per_host = {
+            "dev1": self._row(1.0, "z@example.com"),
+            "gk": self._row(2.0, "other@example.com"),
+        }
+        cache = {"account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 42, "model": None,
+             "resets_at": "2026-08-10T00:00:00+00:00"},
+        ]}
+        groups = burn.group_fleet_by_account(per_host, cache=cache)
+        by_account = {g["account"]: g for g in groups}
+        self.assertEqual(by_account["z@example.com"]["weekly_pct"], 42)
+        self.assertEqual(by_account["z@example.com"]["resets_at"],
+                         "2026-08-10T00:00:00+00:00")
+        self.assertIsNone(by_account["other@example.com"]["weekly_pct"])
+        self.assertIsNone(by_account["other@example.com"]["resets_at"])
+
+    def test_no_cache_never_populates_any_window(self):
+        per_host = {"dev1": self._row(1.0, "z@example.com")}
+        groups = burn.group_fleet_by_account(per_host, cache=None)
+        self.assertIsNone(groups[0]["weekly_pct"])
+
+    def test_unknown_bucket_never_leaks_the_local_boxs_window_even_when_its_own_account_email_is_blank(self):
+        # #269 review finding m4: the unknown/blank-account bucket must NEVER
+        # get weekly_pct/resets_at, even when the reporting box's OWN cache
+        # has account_email == "" (so `my_account` is also None) -- a naive
+        # implementation reusing "wk if wk and acct == my_account" for the
+        # None bucket would wrongly evaluate None == None and leak the local
+        # box's real weekly window onto a group of hosts that may not even
+        # share that account.
+        per_host = {"old-box": self._row(1.0, "")}
+        cache = {"account_email": "", "windows": [
+            {"group": "weekly", "percent": 77, "model": None,
+             "resets_at": "2026-08-01T00:00:00+00:00"},
+        ]}
+        groups = burn.group_fleet_by_account(per_host, cache=cache)
+        self.assertIsNone(groups[0]["account"])
+        self.assertIsNone(groups[0]["weekly_pct"])
+        self.assertIsNone(groups[0]["resets_at"])
+
+    def test_non_string_account_email_never_crashes_the_sort(self):
+        # #269 review finding m1: a corrupted local cache or a hand-edited
+        # fleet.jsonl can carry a non-string account_email crossing this
+        # legacy-file/ssh-tailed boundary (#55's isinstance-validation
+        # rule). Must land in the unknown bucket, never raise on sort/hash.
+        per_host = {
+            "dev1": self._row(1.0, "z@example.com"),
+            "bad-box": {**_host_row(2.0, 10, 100000), "account_email": 5},
+            "worse-box": {**_host_row(3.0, 10, 100000), "account_email": ["x"]},
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        by_account = {g["account"]: g for g in groups}
+        self.assertIn(None, by_account)
+        self.assertEqual(sorted(by_account[None]["hosts"]), ["bad-box", "worse-box"])
+        self.assertEqual(by_account["z@example.com"]["hosts"], ["dev1"])
+
+    def test_non_dict_cache_never_crashes(self):
+        # A caller passing a malformed cache (e.g. the raw non-dict shape
+        # #269 review finding m2 also covers for hourly_snapshot) must not
+        # crash group_fleet_by_account either.
+        per_host = {"dev1": self._row(1.0, "z@example.com")}
+        groups = burn.group_fleet_by_account(per_host, cache="not-a-dict")
+        self.assertIsNone(groups[0]["weekly_pct"])
+
+    def test_empty_per_host_yields_no_groups_not_a_crash(self):
+        self.assertEqual(burn.group_fleet_by_account({}), [])
+        self.assertEqual(burn.group_fleet_by_account(None), [])
 
 
 class TestFleetPathAndIO(unittest.TestCase):
@@ -1362,6 +1588,68 @@ class TestRenderFleet(unittest.TestCase):
         ]
         out = burn.render_fleet(rows)
         self.assertIn("neporovnat", out)
+
+    def test_renders_grouped_by_account_section(self):
+        # #269: box->account grouping + subtotal, alongside the existing
+        # per-host $ line. Assert the ACCOUNT SECTION's own subtotal text
+        # ("celkovo=$4.00") and joined host list, not just substrings that
+        # happen to also appear in the pre-existing per-hour $ line.
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 4.0, "total_msgs": 40,
+                "weighted_avg_ctx": 250000, "per_host": {
+                    "dev1": {**_host_row(1.0, 10, 100000), "account_email": "z@example.com"},
+                    "dev2": {**_host_row(3.0, 30, 300000), "account_email": "z@example.com"},
+                }}]
+        out = burn.render_fleet(rows)
+        flat = out.replace("ú", "u").replace("č", "c")
+        self.assertIn("ucty", flat)
+        self.assertIn("z@example.com: dev1, dev2  celkovo=$4.00", out)
+
+    def test_renders_the_reporting_boxs_own_window_when_the_cache_is_passed(self):
+        # #269 review finding M1 (mutant: group_fleet_by_account() called
+        # with NO cache argument would still pass every OTHER render test,
+        # since none of them assert the window text is actually present).
+        rows = [{"ts": "t", "total_usd": 1.0, "total_msgs": 10, "weighted_avg_ctx": 1000,
+                "per_host": {
+                    "dev1": {**_host_row(1.0, 10, 1000), "account_email": "z@example.com"},
+                    "gk": {**_host_row(2.0, 10, 1000), "account_email": "other@example.com"},
+                }}]
+        cache = {"account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 42, "model": None,
+             "resets_at": "2026-08-10T00:00:00+00:00"},
+        ]}
+        out = burn.render_fleet(rows, cache=cache)
+        self.assertIn("tyzdenny limit 42%", out)
+        self.assertIn("2026-08-10T00:00:00+00:00", out)
+        self.assertIn("% neznamy", out)
+
+    def test_uses_the_latest_hour_not_the_first_for_the_account_grouping(self):
+        # #269 review finding M1 (mutant: shown[0] instead of shown[-1] --
+        # every other fixture is a single-row list, so this invariant is
+        # otherwise unpinned).
+        rows = [
+            {"ts": "t0", "total_usd": 1.0, "total_msgs": 1, "weighted_avg_ctx": 1,
+             "per_host": {"old-box": {**_host_row(1.0, 1, 1), "account_email": "old@x.com"}}},
+            {"ts": "t1", "total_usd": 1.0, "total_msgs": 1, "weighted_avg_ctx": 1,
+             "per_host": {"new-box": {**_host_row(1.0, 1, 1), "account_email": "new@x.com"}}},
+        ]
+        out = burn.render_fleet(rows)
+        section = out.split("ucty")[-1]
+        self.assertIn("new@x.com", section)
+        self.assertNotIn("old@x.com", section)
+
+    def test_unknown_account_hosts_render_in_their_own_bucket(self):
+        rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 1.0, "total_msgs": 10,
+                "weighted_avg_ctx": 100000, "per_host": {
+                    "old-box": _host_row(1.0, 10, 100000),
+                }}]
+        out = burn.render_fleet(rows)
+        self.assertIn("neznamy ucet: old-box  celkovo=$1.00", out)
+
+    def test_no_per_host_data_does_not_crash_the_account_section(self):
+        rows = [{"ts": "t", "total_usd": 0.0, "total_msgs": 0,
+                "weighted_avg_ctx": 0, "per_host": {}}]
+        out = burn.render_fleet(rows)
+        self.assertIsInstance(out, str)
 
 
 class TestCmdBurnFleet(unittest.TestCase):

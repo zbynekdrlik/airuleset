@@ -19,6 +19,7 @@ import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import burn
 import watchdog as wd
 
 
@@ -2228,6 +2229,21 @@ class TestReconcileCandidatePanes(unittest.TestCase):
 
 
 class TestBurnSnapshotJob(unittest.TestCase):
+    # #269 review finding m3: burn_snapshot_job -> hourly_snapshot() now
+    # reads the LOCAL usage cache for account_email; with no isolation these
+    # tests would read this box's own REAL ~/.claude/airuleset-usage-
+    # cache.json (machine-dependent, and the exact real-file coupling this
+    # repo's own compact_claims_path/notify._claude_dir precedent forbids).
+    # Patching burn.usage_cache_path (the function load_usage_cache() falls
+    # back to when no explicit path is given) isolates every test in this
+    # class with zero call-site changes.
+    def setUp(self):
+        patcher = unittest.mock.patch.object(
+            burn, "usage_cache_path",
+            return_value=Path(tempfile_mkdtemp_cleanup(self)) / "no-usage-cache.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_writes_once_and_updates_state_guard(self):
         tmp = tempfile_mkdtemp_cleanup(self)
         transcripts = Path(tmp) / "projects"
@@ -2303,6 +2319,20 @@ class TestBurnSnapshotJob(unittest.TestCase):
         wd.burn_snapshot_job(time.time(), state, snapshot_path=snap_path,
                              transcripts_root=str(transcripts), host="dev1")
         self.assertTrue(snap_path.exists())
+
+    def test_account_email_is_isolated_from_the_real_local_cache(self):
+        # Proves the setUp isolation genuinely takes effect (not just "tests
+        # still pass") -- without it this row would carry whatever real
+        # account_email is in THIS box's own ~/.claude/airuleset-usage-
+        # cache.json, which is non-deterministic across boxes/developers.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        transcripts = Path(tmp) / "projects"
+        transcripts.mkdir()
+        snap_path = Path(tmp) / "snapshots.jsonl"
+        wd.burn_snapshot_job(time.time(), {}, snapshot_path=snap_path,
+                             transcripts_root=str(transcripts), host="dev1")
+        row = json.loads(snap_path.read_text().strip().splitlines()[0])
+        self.assertEqual(row["account_email"], "")
 
     def test_failure_never_raises(self):
         # a totally unwritable snapshot path must not blow up the job — the
