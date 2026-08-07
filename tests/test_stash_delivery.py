@@ -276,13 +276,26 @@ class DeliverWithStashSwallowedSubmit(unittest.TestCase):
         assert_no_double_escape(run.sent)
 
     def test_still_stuck_after_corrective_returns_false(self):
+        # #306 — a permanently-swallowed submit now RECOVERS (backspaces our
+        # own text and, since a draft was genuinely parked here, pops it
+        # back) before returning False, so two more scripted captures cover
+        # that recovery's own two `capture-pane` calls: one confirming the
+        # backspace brought the box back to bare, one confirming the pop
+        # restored the draft.
         run = _Recorder([STASHED_BARE, TYPED_BOUNDARY, TYPED_BOUNDARY,
-                         TYPED_BOUNDARY])
+                         TYPED_BOUNDARY, BARE_AFTER_SUBMIT, DRAFT_IDLE])
         logs = []
         ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs)
         self.assertFalse(ok, run.sent)
         assert_no_double_escape(run.sent)
         self.assertTrue(logs)
+        self.assertTrue(any("swallowed-submit-not-recovered" in ln
+                            for ln in logs), logs)
+        # the box must end the call CONSISTENT: never our own garbled text
+        # left in place with the slot silently occupied forever (#306's
+        # ~2h david@subdev wedge) — the draft is back, popped from the slot.
+        self.assertTrue(any("parked draft popped back" in ln for ln in logs),
+                        logs)
 
 
 class DeliverDiscordRepliesStashIntegration(unittest.TestCase):

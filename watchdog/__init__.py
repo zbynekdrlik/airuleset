@@ -2905,6 +2905,54 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
     return None
 
 
+def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix):
+    """Backspace exactly `text` and, only once bare is CONFIRMED, pop a
+    PARKED draft back with one corrective `C-s` -- the shared recovery
+    THREE call sites need (`deliver_with_stash`'s original #193
+    PARKED/NOOP verify-failure branch and its new #306
+    swallowed-submit-not-recovered branch, plus `_send_goal_verified`'s own
+    #306 swallowed-submit path, always with `parked=False`).
+
+    The precondition every caller has already proven before reaching here
+    -- the box's ENTIRE content is, by construction, exactly `text` and
+    nothing else -- holds for a DIFFERENT reason depending on the caller:
+    a settle poll verified the box BARE immediately before typing (the
+    PARKED/NOOP outcome, and `_send_goal_verified`'s own bare-box-only
+    entry gate), or `_typed_exclusively` already proved the box holds ONLY
+    `text` with nothing of a foreign draft's (the UNRESOLVED-exclusive
+    outcome -- `parked` is structurally False on that path, since only a
+    bare-box settle can ever set `STASH_PARKED`, so the dangerous `C-s`
+    pop below can never fire there; only the safe backspace half runs).
+    Either way, `_undo_typed_text` backspaces exactly `len(text)` and
+    itself re-verifies the box came back to bare before this function ever
+    considers popping anything.
+
+    `log_fn(reason)` receives exactly ONE reason string, built from
+    `prefix` (e.g. `"stash-abort"` for the original call site, so the
+    result is byte-identical to the pre-#306 wording; a fuller phrase like
+    `"stash-abort: swallowed-submit-not-recovered"` for the new ones)."""
+    undone = _undo_typed_text(pid, run, text)
+    if not parked:
+        log_fn("%s: typed-undone" % prefix if undone
+               else "%s: typed-NOT-undone" % prefix)
+        return
+    if not undone:
+        log_fn("%s: typed-NOT-undone, draft left parked" % prefix)
+        return
+    # ONLY now, with the box confirmed bare again, may the toggle pop the
+    # parked draft back. Firing it while our own text was still in the box
+    # would PARK that text instead — the slot is single with a SILENT
+    # overwrite — destroying the very draft this protocol exists to
+    # protect (#193).
+    run(["tmux", "send-keys", "-t", pid, "C-s"])
+    # Read the pop back rather than asserting it: a log line that claims a
+    # delivery it never checked is the #134 mistake.
+    log_fn("%s: typed-undone, parked draft popped back" % prefix
+           if _input_line_text(capture_pane(pid, run, lines=30))
+           else "%s: typed-undone, pop UNVERIFIED (draft still parked)"
+                % prefix)
+
+
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
@@ -3037,25 +3085,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
             # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
             # ago, so every character in it is ours and backspacing exactly
             # what we typed can reach nothing of the user's.
-            undone = _undo_typed_text(pid, run, text)
-            if not parked:
-                _log("stash-abort: typed-undone" if undone
-                     else "stash-abort: typed-NOT-undone")
-            elif undone:
-                # ONLY now, with the box confirmed bare again, may the toggle
-                # pop the parked draft back. Firing it while our own text was
-                # still in the box would PARK that text instead — the slot is
-                # single with a SILENT overwrite — destroying the very draft
-                # this protocol exists to protect (#193).
-                run(["tmux", "send-keys", "-t", pid, "C-s"])
-                # Read the pop back rather than asserting it: a log line that
-                # claims a delivery it never checked is the #134 mistake.
-                _log("stash-abort: typed-undone, parked draft popped back"
-                     if _input_line_text(capture_pane(pid, run, lines=30))
-                     else "stash-abort: typed-undone, pop UNVERIFIED "
-                          "(draft still parked)")
-            else:
-                _log("stash-abort: typed-NOT-undone, draft left parked")
+            _undo_and_release_slot(pid, run, text, parked, _log, "stash-abort")
         elif itext == pre_text + text or _typed_landed(text, itext):
             # We only ever type into a SINGLE-ROW unresolved box — the wrapped
             # shape is refused above — so `pre_text` is that box's COMPLETE
@@ -3086,7 +3116,18 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
         cap = capture_pane(pid, run, lines=30)
         itext3 = _input_line_text(cap)
         if _typed_landed(text, itext3):
-            _log("stash-abort: swallowed-submit-not-recovered")
+            # #306 — delivery is genuinely dead here, but by construction the
+            # box's ENTIRE content is exactly `text` (nothing else could be
+            # in it: PARKED/NOOP means it was verified bare before we typed;
+            # UNRESOLVED-exclusive means `_typed_exclusively` already proved
+            # the box holds ONLY `text`) — the same precondition the
+            # verify-failure recovery above already relies on. Recover the
+            # SAME way: backspace our own text and, if we parked something
+            # in THIS call, pop it back — never leave the pane stuck with
+            # our own garbled text AND the single stash slot silently
+            # occupied forever (the live david@subdev ~2h wedge).
+            _undo_and_release_slot(pid, run, text, parked, _log,
+                                   "stash-abort: swallowed-submit-not-recovered")
             return False
     _log("stash-delivered")
     return True
@@ -9834,6 +9875,10 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
     costs nothing (persist is a no-op on empty content); only a real race
     ever writes a file."""
     run = run or _default_run
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
     sleep_fn = sleep_fn or time.sleep
     cap = captured if captured is not None else capture_pane(pid, run, lines=40)
     if _input_line_text(cap) != "":
@@ -9859,6 +9904,15 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
         run(["tmux", "send-keys", "-t", pid, "Escape"])
         run(["tmux", "send-keys", "-t", pid, "Enter"])
         if _await_typed(pid, text, run, sleep_fn, want=False):
+            # #306 — the sibling gap `deliver_with_stash` had: this box was
+            # verified bare before we ever typed, so its ENTIRE content now
+            # is, by construction, exactly `text` — recover it (there is no
+            # draft to protect here, `parked` is always False on this
+            # bare-box-only primitive) rather than leaving our own typed
+            # `/goal …` glued in the box unrecovered.
+            _undo_and_release_slot(pid, run, text, False, _log,
+                                   "goal-verify-abort: "
+                                   "swallowed-submit-not-recovered")
             return False
     return True
 
