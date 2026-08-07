@@ -979,10 +979,18 @@ class _SendVerifiedSwallowFake:
     """A STATEFUL bare-box pane for `_send_goal_verified` (never a scripted
     cap_seq — the poll loops inside `_await_typed` need an unbounded number
     of captures). Models the #36 agent-strip class of bug: Enter neither
-    submits nor clears the box until `swallow_enters` is exhausted."""
+    submits nor clears the box until `swallow_enters` is exhausted.
+
+    ALSO models CC's single-slot prompt stash (`C-s` parks/pops, mirroring
+    `FakePane.key` in tests/test_stash_unconditional.py) — needed to give
+    `parked=False` (`_send_goal_verified` never parks anything; there is no
+    foreign draft to protect on this bare-box-only primitive) a mutation-
+    provable regression lock: a mutant hardcoding `parked=True` at that
+    call site would fire a real `C-s`, which this fake can now observe."""
 
     def __init__(self, swallow_enters=0):
         self.box = ""
+        self.stash = None
         self.swallow_enters = swallow_enters
         self.sent = []
 
@@ -1010,6 +1018,11 @@ class _SendVerifiedSwallowFake:
                             self.box = ""
                     elif k == "BSpace":
                         self.box = self.box[:-1]
+                    elif k == "C-s":
+                        if self.box and self.stash is None:
+                            self.stash, self.box = self.box, ""
+                        elif not self.box and self.stash is not None:
+                            self.box, self.stash = self.stash, None
         return ""
 
     def keys(self):
@@ -1038,6 +1051,18 @@ class SendGoalVerifiedSwallowedSubmitLeavesBoxRecoverable(unittest.TestCase):
         self.assertEqual(tmux.box, "",
                          "our own text must be backspaced out, never left "
                          "sitting in the box: %r" % tmux.sent)
+        # adversarial-review MINOR-1: this primitive never parks anything
+        # (there is no foreign draft to protect on a bare-box-only entry
+        # gate) -- `_undo_and_release_slot` must be called with
+        # `parked=False`, so it must NEVER fire a `C-s`. A mutant hard-
+        # coding `parked=True` at that call site is caught here, not by
+        # `tmux.box`/`tmux.stash` alone (a stray `C-s` against an empty
+        # box+empty slot is a state no-op in this fake, so only the
+        # KEYSTROKE itself is provable evidence of the wrong call).
+        self.assertNotIn("C-s", tmux.keys(),
+                         "this primitive must never touch the stash slot: %r"
+                         % tmux.sent)
+        self.assertIsNone(tmux.stash, tmux.sent)
 
     def test_never_a_rapid_double_escape_during_the_recovery(self):
         text = "/goal " + PAYLOAD

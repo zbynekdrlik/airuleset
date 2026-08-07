@@ -2907,20 +2907,30 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
 
 def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix):
     """Backspace exactly `text` and, only once bare is CONFIRMED, pop a
-    PARKED draft back with one corrective `C-s` -- the shared recovery both
-    of `deliver_with_stash`'s zero-keystrokes-left-behind paths need (#193's
-    original PARKED/NOOP verify-failure branch, and #306's
-    swallowed-submit-not-recovered branch). The precondition both callers
-    have already proven before reaching here: the box's ENTIRE content is,
-    by construction, exactly `text` and nothing else (a settle poll
-    verified the box BARE immediately before we typed, so every character
-    now in it is ours) -- `_undo_typed_text` backspaces exactly `len(text)`
-    and itself re-verifies the box came back to bare.
+    PARKED draft back with one corrective `C-s` -- the shared recovery
+    THREE call sites need (`deliver_with_stash`'s original #193
+    PARKED/NOOP verify-failure branch and its new #306
+    swallowed-submit-not-recovered branch, plus `_send_goal_verified`'s own
+    #306 swallowed-submit path, always with `parked=False`).
+
+    The precondition every caller has already proven before reaching here
+    -- the box's ENTIRE content is, by construction, exactly `text` and
+    nothing else -- holds for a DIFFERENT reason depending on the caller:
+    a settle poll verified the box BARE immediately before typing (the
+    PARKED/NOOP outcome, and `_send_goal_verified`'s own bare-box-only
+    entry gate), or `_typed_exclusively` already proved the box holds ONLY
+    `text` with nothing of a foreign draft's (the UNRESOLVED-exclusive
+    outcome -- `parked` is structurally False on that path, since only a
+    bare-box settle can ever set `STASH_PARKED`, so the dangerous `C-s`
+    pop below can never fire there; only the safe backspace half runs).
+    Either way, `_undo_typed_text` backspaces exactly `len(text)` and
+    itself re-verifies the box came back to bare before this function ever
+    considers popping anything.
 
     `log_fn(reason)` receives exactly ONE reason string, built from
     `prefix` (e.g. `"stash-abort"` for the original call site, so the
     result is byte-identical to the pre-#306 wording; a fuller phrase like
-    `"stash-abort: swallowed-submit-not-recovered"` for the new one)."""
+    `"stash-abort: swallowed-submit-not-recovered"` for the new ones)."""
     undone = _undo_typed_text(pid, run, text)
     if not parked:
         log_fn("%s: typed-undone" % prefix if undone
