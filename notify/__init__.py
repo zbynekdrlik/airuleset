@@ -37,27 +37,34 @@ _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
 
 # Stream personas whose tmux session name has NO Discord identity of its own
-# (airuleset#259, 2026-08-06): montalu/montalu2-4/simap route to zbynek's own
-# thread, david to its own. Checked in resolve_owner() ITSELF — never via a
-# bashrc AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT
-# hook invocation everywhere. A bashrc export only reaches shells started
-# AFTER the write; an adversarial review of the first version of this fix
+# (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap route to
+# zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
+# — airuleset#295, 2026-08-07: the user's own statement, independently
+# corroborated by odoo-erp#2961's 2026-08-05 ACCESS DECISION comment,
+# montalu4 is the ONLY montalu-family account marek's own SSH key was added
+# to — montalu/montalu2/montalu3 stay zbynek-only). david routes to its own
+# thread. Checked in resolve_owner() ITSELF — never via a bashrc
+# AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT hook
+# invocation everywhere. A bashrc export only reaches shells started AFTER
+# the write; an adversarial review of the first version of this fix
 # live-verified that simap's OWN already-running session kept misrouting
 # after the bashrc line was applied, because that session's process
 # environment predated the write and nothing short of restarting the live
 # session (never done to another user's session) would have picked it up.
-# `marek` is deliberately absent: its own tmux session name ("marek") already
-# has its own DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys,
-# so no override is needed. montalu/david ALSO still carry a redundant,
-# hand-added `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this
-# fix existed — harmless, since the env override is checked FIRST in
+# `marek` is deliberately absent as a MAP KEY: its own tmux session name
+# ("marek") already resolves directly and has its own
+# DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys, so no
+# override is needed FOR IT — it is still a valid map VALUE (montalu4's
+# redirect target). montalu/david ALSO still carry a redundant, hand-added
+# `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this fix
+# existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
     "david": "david",
     "montalu": "zbynek",
     "montalu2": "zbynek",
     "montalu3": "zbynek",
-    "montalu4": "zbynek",
+    "montalu4": "marek",
     "simap": "zbynek",
 }
 
