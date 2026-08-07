@@ -1879,8 +1879,9 @@ class TestSubstantialityGateInJob14(unittest.TestCase):
 # the unconditional #99 gate and dropped/lapsed.
 #
 # THE FIX: extend job 14's ALREADY-COMPUTED `proven_boundary` flag (it
-# already exists a few lines above, used for the `busy`/thin-context checks)
-# to also exempt the #99 no-work and #48 small-context gates — the EXACT
+# already exists a few lines above, used for the `kind == "busy"` check —
+# NOT for thin-context, which never consults it at all, see below) to also
+# exempt the #99 no-work and #48 small-context gates — the EXACT
 # same exemption `deliver_compact_now` already applies, closing the parity
 # gap #122/#126 left open on purpose. `_compact_thin_context` stays
 # UNCONDITIONAL for both paths (per its own section comment — the live

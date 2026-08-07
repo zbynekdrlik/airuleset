@@ -6838,12 +6838,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         #
         # #301 — the BLOCKING check is SKIPPED ENTIRELY for a
         # `proven_boundary` request, same reasoning and same exemption set
-        # as the #99 gate immediately above. `ctx` itself is still read
-        # best-effort either way (unconditionally initialized to `None`
-        # first) — it is consumed further below ONLY as an informational
-        # `ctx=ctx` value for `_compact_stash_attempt`'s own diagnostic ping
-        # text, never as a gate, so leaving it `None` for a proven boundary
-        # that skips the read is harmless and correct.
+        # as the #99 gate immediately above. `ctx` is unconditionally
+        # initialized to `None` first, but the TRANSCRIPT READ itself is
+        # skipped along with the rest of this block for a proven boundary —
+        # it is consumed further below ONLY as an informational `ctx=ctx`
+        # value for `_compact_stash_attempt`'s own diagnostic ping text,
+        # never as a gate, so a proven boundary simply loses that one
+        # cosmetic "(kontext N tokenov)" detail; nothing downstream treats
+        # `None` as anything other than "unknown, omit it" (#301-review).
         ctx = None
         if not proven_boundary:
             tpath = _transcript_for_session(pdir, sid, cwd)
