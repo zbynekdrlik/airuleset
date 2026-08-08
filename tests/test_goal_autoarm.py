@@ -147,7 +147,24 @@ class FakeTmux:
         return ""
 
     def typed(self):
-        return [a[-1] for a in self.sent if "-l" in a]
+        # #322 — `_type_literal` sends a long payload as SEVERAL consecutive
+        # `-l` calls (chunked) rather than one — join a consecutive RUN of
+        # them into a single logical "typed" entry (mirrors
+        # `test_goal_rearm.py`'s own `FakeTmux.typed()` fix) so every
+        # existing `tmux.typed()[0] == FULL_GOAL`-style assertion keeps
+        # working for both the short single-burst path and the long
+        # chunked one.
+        out = []
+        buf = []
+        for a in self.sent:
+            if "-l" in a:
+                buf.append(a[-1])
+            elif buf:
+                out.append("".join(buf))
+                buf = []
+        if buf:
+            out.append("".join(buf))
+        return out
 
 
 def go(captured, state=None, now=None, model_stash=False, projects_dir=None,
