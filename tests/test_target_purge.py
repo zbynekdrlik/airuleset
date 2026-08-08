@@ -369,6 +369,20 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         self.assertTrue(t.exists(), "dry-run must never actually delete")
 
     # --- symlink safety -----------------------------------------------
+    #
+    # Both tests below assert on the REASON string, not just "not purged" --
+    # `shutil.rmtree` itself refuses to operate on a path that is a symlink
+    # (raises "Cannot call rmtree on a symbolic link"), so a mutant that
+    # REMOVES the explicit `target_dir.is_symlink()` guard would still leave
+    # the files on disk (rmtree's own exception is caught by the per-
+    # candidate try/except and reported as `reason: "error: ..."`) --
+    # discovered live via mutation testing: a first-draft version of these
+    # tests asserted only `stale_file.exists()` and passed unchanged even
+    # with the guard deleted, for the WRONG reason. Asserting the exact
+    # "symlink target/ -- never followed" reason is what actually proves
+    # the explicit, intentional guard fired (fast, before wasting a
+    # tier-hook subprocess call and a directory walk) rather than merely
+    # riding rmtree's own incidental protection.
     def test_symlinked_target_dir_is_never_followed_or_deleted(self):
         repo = _mkrepo(self.root, "proj")
         real_elsewhere = self.root / "elsewhere" / "real-target"
@@ -379,8 +393,29 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         (repo / "target").symlink_to(real_elsewhere)
         results = self._purge(max_age_days=7, dry_run=False)
         self.assertFalse(results[0]["purged"])
+        self.assertIn("symlink target/", results[0]["reason"])
         self.assertTrue(real_elsewhere.exists())
         self.assertTrue(stale_file.exists(), "must never delete THROUGH a symlink")
+
+    def test_symlink_pointing_inside_the_repo_is_also_refused(self):
+        """A symlink whose target resolves INSIDE repo_root would pass the
+        SEPARATE escape-check (`resolved.relative_to(repo_root)`) cleanly --
+        only the explicit `is_symlink()` guard refuses it up front. Without
+        that guard, `shutil.rmtree` would still ultimately refuse (see the
+        class comment above), so this and the sibling test together prove
+        the EXPLICIT guard is what actually fires, not an accident of
+        rmtree's own behaviour."""
+        repo = _mkrepo(self.root, "proj")
+        real_inside = repo / "elsewhere-inside" / "real-target"
+        real_inside.mkdir(parents=True)
+        stale_file = real_inside / "f.bin"
+        stale_file.write_bytes(b"x")
+        os.utime(stale_file, (NOW - 999 * DAY, NOW - 999 * DAY))
+        (repo / "target").symlink_to(real_inside)
+        results = self._purge(max_age_days=7, dry_run=False)
+        self.assertFalse(results[0]["purged"])
+        self.assertIn("symlink target/", results[0]["reason"])
+        self.assertTrue(stale_file.exists(), "must never delete THROUGH a symlink, even one resolving inside the repo")
 
     def test_candidate_resolving_outside_repo_root_is_refused(self):
         """A target/ reached only via a symlinked ANCESTOR (not itself a
