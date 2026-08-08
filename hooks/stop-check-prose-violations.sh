@@ -519,7 +519,7 @@ fi
 #      block it; the real incident's own verb+noun sat directly on the
 #      marker line, so anchoring there closes the gap with no loss);
 #   2. the ❓ NEEDS YOU / ❓ ASKED marker this repo's own question
-#      convention always carries on a real question turn — QLINE
+#      convention always carries on a real question turn — QLINE_ALL
 #      non-empty IS this signal now, since (1) already requires it;
 #   3. no bullet-option lines present ANYWHERE in the message — the SAME
 #      shape stop-check-question-quality.sh's own Check 4 mandates on a
@@ -551,18 +551,50 @@ fi
 # matching NO_COMPANION_URL's own established scope above).
 SK_APPROVAL_RX="\b(schva[ľl]uje[sš]|schv[áa]li[sš]|ods[úu]hlas[íi][sš]|potvrd[íi][sš]|odobr[íi][sš])\b"
 SK_ARTIFACT_RX="\b([sš]pec(u|om|ifik[áa]ci[a-záäéíóôúýčďľňšťž]*)?|pl[áa]n(u|om)?|n[áa]vrh(u|om)?|dizajn(u|om)?|design)\b"
-# The ❓ marker's OWN line (last one, if several) — MSG_MENTION so a mere
-# quoted/backticked mention of the marker text is never read as a real
-# question turn. TWO here-strings, never a pipe (test_prose_gate_pipeline_
-# race.py's own structural lock forbids feeding grep from a process at
-# all, #190/#194) — `grep <pattern> <<<"$var"` has no writer PROCESS to
-# race, so no `set -o pipefail` guard is even needed on it; `|| QLINE_ALL=
-# ""` still guards the SECOND command (a genuine no-match there is grep's
-# own exit 1, which `$(...)` under `set -e` would otherwise abort on).
-QLINE_ALL=$(grep -iE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)[[:space:]]*\**[[:space:]]*:' <<<"$MSG_MENTION") || QLINE_ALL=""
-QLINE=$(tail -1 <<<"$QLINE_ALL") || QLINE=""
-HAS_SK_APPROVAL=$(msg_has "$QLINE" -qiE "${SK_APPROVAL_RX}.{0,40}${SK_ARTIFACT_RX}|${SK_ARTIFACT_RX}.{0,40}${SK_APPROVAL_RX}" && echo 1 || echo 0)
-if [ -n "$QLINE" ]; then HAS_QMARKER=1; else HAS_QMARKER=0; fi
+# EVERY ❓ marker line — MSG_MENTION so a mere quoted/backticked mention of
+# the marker text is never read as a real question turn. A here-string, never
+# a pipe (test_prose_gate_pipeline_race.py's own structural lock forbids
+# feeding grep from a process at all, #190/#194) — `grep <pattern> <<<"$var"`
+# has no writer PROCESS to race. #316-review MINOR: this used to keep only
+# the LAST marker line (`tail -1`) before scanning it for verb+noun — a
+# montalu2-shaped question BURIED under a later, unrelated ❓ line escaped
+# detection entirely. `grep -E` (no `-z`) matches per LINE, never across a
+# newline, so handing the WHOLE multi-line QLINE_ALL to msg_has below is
+# exactly equivalent to "does ANY marker line contain verb+noun" with zero
+# cross-line false-positive risk — no narrower `tail -1` selection needed.
+_QLINE_RC=0
+QLINE_ALL=$(grep -iE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)[[:space:]]*\**[[:space:]]*:' <<<"$MSG_MENTION") || _QLINE_RC=$?
+if [ "$_QLINE_RC" -ge 2 ]; then
+    # #316-review MINOR: this used to collapse a genuine grep ERROR into the
+    # same "" as a real no-match, with no record_undet call at all — the
+    # exact fabricated 141->0 verdict shape #194 removed, one level up (a
+    # SELECTOR, not a pattern). Per #194's own taxonomy an unanswerable
+    # SELECTOR must WIDEN the scope for the pattern that reads it, never
+    # shrink to "absent": fall back to the whole message (still able to
+    # fire) and assume a marker is present, rather than silently disarming
+    # this check for every message from here on.
+    record_undet "$_QLINE_RC" "marker-line grep (SK approval-pause, #316)"
+    QLINE_ALL="$MSG_MENTION"
+    HAS_QMARKER=1
+else
+    if [ -n "$QLINE_ALL" ]; then HAS_QMARKER=1; else HAS_QMARKER=0; fi
+fi
+# #316-review CRITICAL: SK_APPROVAL_RX/SK_ARTIFACT_RX embed diacritics inside
+# bracket classes (`[ľl]`, `[sš]`, `[áa]`, `[íi]`, `[úu]`) with `\b` anchors
+# immediately adjacent — both are locale-dependent under a bare C/POSIX
+# locale (no LANG/LC_ALL set), the exact gotcha stop-check-question-
+# quality.sh and notify-discord-pending.sh already document twice in this
+# repo. Reproduced live: under LC_ALL=C every diacritic verb spelling MISSES
+# (schvaľuješ/schváliš/odsúhlasíš/potvrdíš/odobríš all fail to match) and
+# rewriting the classes as plain alternation does NOT fix it either — `\b`
+# next to a multibyte character is itself locale-dependent, in both the
+# miss AND the false-positive direction. Forcing a UTF-8 locale on just this
+# ONE grep call is the actual, verified fix (C.UTF-8 is present on every
+# managed box's glibc); a plain `VAR=val funcname` prefix exports the
+# override for the whole function call, including the `grep` subprocess it
+# execs, and scopes to ONLY this command (never leaking into the following
+# `&& echo 1 || echo 0`).
+HAS_SK_APPROVAL=$(LC_ALL=C.UTF-8 msg_has "$QLINE_ALL" -qiE "${SK_APPROVAL_RX}.{0,40}${SK_ARTIFACT_RX}|${SK_ARTIFACT_RX}.{0,40}${SK_APPROVAL_RX}" && echo 1 || echo 0)
 # The exemption (real options offered) EXONERATES, so ask whether it is
 # MISSING — an unanswerable check must not grant the exemption (same
 # fail-closed shape as NO_COMPANION_URL above). MSG_MENTION, not raw MSG:

@@ -197,15 +197,87 @@ class TestGenuineDesignQuestionsStayWelcome(TestCase):
             "a negated ('ne'-prefixed) approval verb was wrongly blocked")
 
     def test_noun_substring_inside_a_longer_word_does_not_match(self):
-        """#316-review: 'n[áa]vrh' without boundary anchoring matched
-        inside 'navrhujem'/'navrhol' (unrelated verb forms), and
-        'design' inside 'designera'. Word-boundary anchoring on the
-        artifact pattern closes this."""
-        msg = "❓ NEEDS YOU: navrhujem fakturáciu pre designera, súhlasíš s prístupom?"
-        self.assertFalse(
+        """#316-review MAJOR (mutation-proven): the original fixture here
+        paired the substring-only noun with 'súhlasíš' -- a verb NOT in
+        SK_APPROVAL_RX's list -- so the test passed regardless of whether
+        the noun's own trailing \\b anchor existed at all (dropping it left
+        all 13 pre-existing tests green). Each case below pairs a REAL
+        approval verb with a noun that appears ONLY as a substring of a
+        longer, unrelated word, so a missing/broken \\b anchor is the only
+        thing that could make it wrongly block."""
+        for msg in (
+            "❓ NEEDS YOU: potvrdíš prístup pre designera?",
+            "❓ NEEDS YOU: potvrdíš, že navrhujem správne riešenie?",
+            "❓ NEEDS YOU: potvrdíš ten špeciálny režim?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(
+                    _blocked(_run(msg)),
+                    "a noun matching only as a substring of a longer word, "
+                    "paired with a real approval verb, was wrongly "
+                    "blocked: %r" % msg)
+
+    def test_a_quoted_example_bullet_does_not_grant_the_exemption(self):
+        """#316-review MINOR (mutation-proven): NO_OPTION_BULLETS must read
+        MSG_MENTION (mention-stripped), never raw MSG -- a bullet-shaped
+        line that exists ONLY inside a fenced-code example (not a real
+        option) must not exempt an otherwise-bare montalu2-shaped question.
+        Swapping the source back to raw MSG passed all 13 pre-existing
+        tests, since none of them put a bullet-shaped line inside a
+        quoted/fenced mention."""
+        msg = (
+            "Predtym sme pouzivali iny format zoznamu, priklad:\n"
+            "```\n"
+            "- stare rozhodnutie (uz sa nepouziva)\n"
+            "```\n\n"
+            "❓ NEEDS YOU: schvaľuješ zapísaný návrh?"
+        )
+        self.assertTrue(
             _blocked(_run(msg)),
-            "a noun matching only as a substring of a longer word was "
-            "wrongly blocked")
+            "a fenced-code-quoted bullet-shaped line wrongly granted the "
+            "option-bullets exemption to an otherwise-bare montalu2-shaped "
+            "question")
+
+    def test_a_buried_marker_line_still_blocks(self):
+        """#316-review MINOR: the marker-line extraction used to keep only
+        the LAST ❓ line (tail -1) before scanning for verb+noun -- a
+        montalu2-shaped question BURIED under a later, unrelated ❓ line
+        escaped detection entirely. Every marker line is now scanned."""
+        msg = (
+            "❓ NEEDS YOU: schvaľuješ zapísaný design spec?\n\n"
+            "❓ NEEDS YOU: nasadiť dnes večer?"
+        )
+        self.assertTrue(
+            _blocked(_run(msg)),
+            "a montalu2-shaped question buried under a LATER unrelated ❓ "
+            "line was not blocked -- only the last marker line was scanned")
+
+    def test_locale_does_not_disarm_the_check(self):
+        """#316-review CRITICAL (reproduced live): SK_APPROVAL_RX/
+        SK_ARTIFACT_RX embed diacritics inside bracket classes with \\b
+        anchors immediately adjacent -- both are locale-dependent under a
+        bare C/POSIX locale (no LANG/LC_ALL set). Under LC_ALL=C every
+        diacritic verb spelling MISSED entirely, silently making this whole
+        detector inert on any box with no locale configured -- exactly the
+        gotcha stop-check-question-quality.sh and notify-discord-pending.sh
+        already document twice in this repo. The fix forces LC_ALL=C.UTF-8
+        on just the one grep call that needs it."""
+        env = dict(os.environ)
+        env["LC_ALL"] = "C"
+        env["LANG"] = "C"
+        sid = "prosegate316-locale-%s" % uuid.uuid4().hex[:8]
+        payload = json.dumps(
+            {"session_id": sid, "last_assistant_message": MONTALU2_MSG})
+        p = subprocess.run(
+            ["bash", str(HOOK)], input=payload, capture_output=True,
+            text=True, timeout=300, env=env)
+        sweep_session_files(sid)
+        self.assertTrue(
+            _blocked(p),
+            "montalu2's exact question was NOT blocked under a bare "
+            "C/POSIX locale -- the hook's own multibyte matching is "
+            "locale-dependent. rc=%s stdout=%r stderr=%r"
+            % (p.returncode, p.stdout[:300], p.stderr.strip()[-300:]))
 
     def test_present_user_is_never_gated_by_this_check(self):
         """#316-review IMPORTANT: the exemption's whole safety argument
