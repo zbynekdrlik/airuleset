@@ -66,7 +66,16 @@
       typing over it when one is present, giving up with ONE ping if the resume
       never lands. State (`sesslimit:<sid>`) carries the parsed reset epoch,
       pinged/attempts/last_try/draft_hash/gave_up across polls; a genuinely new
-      limit window (5h → weekly) re-arms it.
+      limit window (5h → weekly) re-arms it. #336: the SAME `sesslimit:<sid>`
+      state is also seeded directly from job (1)'s own TRANSCRIPT-based
+      `is_usage_cap` detection (the error TEXT, parsed with
+      `parse_reset_epoch_from_error_text`) — never solely from the live pane —
+      so a limit hit that lands on a background Agent/subagent and never
+      renders the banner as this pane's own bottom-most content still parks a
+      resume time and auto-continues; resolution then re-derives from the
+      transcript too whenever the pane doesn't currently show the banner, and
+      every delivery attempt is gated on `session_user_stopped` (the user's
+      own `/exit` since the limit hit always wins, never auto-resumed).
   (7) DISCORD REPLY → THE ASKING SESSION: when a ❓ ping is delivered, the send path
       records the ping's Discord message id → the asking session
       (notify.record_question). The user ANSWERS by REPLYING to that ping in Discord;
@@ -1367,13 +1376,31 @@ def parse_reset_epoch(captured, now):
     output, or last episode's own banner) must never beat a fresher banner
     lower down; before this the parse searched globally while the detector
     that gates it was already deliberately bottom-scoped (the exact
-    stale-echo shape `pane_session_limited`'s own docstring documents)."""
+    stale-echo shape `pane_session_limited`'s own docstring documents).
+
+    #336: the box-scoping happens ONLY here — the actual clock/timezone/
+    date parse below is shared with `parse_reset_epoch_from_error_text`
+    (job 1's own PLAIN error-message text, which needs no pane/box scoping
+    at all) via `_reset_epoch_from_scanned_text`."""
     try:
         region = _above_input_box(captured)
         lines = [ln for ln in region.splitlines() if ln.strip()]
         if not lines:
             lines = [ln for ln in (captured or "").splitlines() if ln.strip()]
         scoped = "\n".join(lines[-10:])
+    except Exception:
+        return None
+    return _reset_epoch_from_scanned_text(scoped, now)
+
+
+def _reset_epoch_from_scanned_text(scoped, now):
+    """The shared clock/timezone/date-parsing core of `parse_reset_epoch` —
+    `scoped` is ALREADY the text to search (a pane's bottom-scoped region
+    for the pane-based caller, or a plain error-message string for
+    `parse_reset_epoch_from_error_text`). See `parse_reset_epoch`'s own
+    docstring for the full parsing contract; this function does not repeat
+    it. Fail-safe: any parse/tz error returns None."""
+    try:
         # The LAST match, not the first: `.search()` would still pick a
         # STALE echo sitting higher in the scoped window over a FRESHER
         # banner below it (#183 finding 3's exact reproduction — bottom
@@ -1450,6 +1477,91 @@ def parse_reset_epoch(captured, now):
         return ts
     except Exception:
         return None
+
+
+def parse_reset_epoch_from_error_text(text, now):
+    """Same clock/timezone/date-parsing as `parse_reset_epoch`, run directly
+    over a PLAIN error-message STRING (job 1's own `transcript_last_error()`
+    output) instead of a captured tmux pane — no box-scoping, no agent-strip
+    chrome to strip first, since the transcript's own `isApiErrorMessage`
+    text is already just the message.
+
+    #336: this is what lets a session-limit hit that NEVER renders its
+    banner on the live pane (a background Agent/subagent dying on the
+    account's 5h limit, whose failure only ever shows up in the parent
+    session's OWN next `isApiErrorMessage` entry, never as pane chrome —
+    the montalu2 incident) still get a resume time parked from the error
+    TEXT itself, instead of depending on job 6's live, continuously
+    re-scanned pane detection, which structurally cannot see an error that
+    was never rendered as the pane's bottom-most content in the first
+    place."""
+    return _reset_epoch_from_scanned_text(text or "", now)
+
+
+def session_user_stopped(tpath, since_ts=None):
+    """True if the user explicitly told THIS session to stop (`/exit`) at
+    or after `since_ts`. The narrow, session-limit-scoped counterpart of
+    #335's own (not-yet-landed at the time this was written) general
+    user-stop invariant, expected to be reconciled into #335's own
+    `_goal_user_exit_ts` once it ships — a one-point integration, not a
+    permanent second implementation; #336's own auto-resume mechanism does
+    not need to wait on that landing.
+
+    A session the user deliberately exited must NEVER be auto-resumed by
+    delivering `continue`, even once its parked reset time has passed and
+    even if the SAME transcript is later reattached (`claude -c`) — the
+    user's own explicit `/exit`, issued after the limit hit, is a stronger
+    signal than "the reset clock passed" and always wins.
+
+    Scans the transcript's recent tail for a top-level, plain-STRING
+    `/exit` command entry — Claude Code's own literal marker for the user's
+    `/exit` command, the same top-level shape #335's own design comment
+    names. Matched by PREFIX (`<command-name>/exit</command-name>`), never
+    strict equality: a real `/exit` entry's `message.content` is a
+    COMPOSITE string, e.g.
+    `"<command-name>/exit</command-name>\n            <command-message>exit`
+    `</command-message>\n            <command-args></command-args>"`
+    (verified against real Claude Code transcripts, #336's own adversarial
+    review, finding F1) — a strict-equality check against the bare marker
+    alone NEVER matches a real transcript, which made this whole predicate
+    inert against every genuine `/exit`. The closing `</command-name>` tag
+    is part of the required prefix, so a DIFFERENT command name that merely
+    starts with the same letters (never a real Claude Code shape, but
+    checked defensively) is still correctly refused. `timestamp` must be
+    `>= since_ts` (no lower bound at all when `since_ts` is None).
+
+    Fail-SAFE in the direction that never strands a healthy session: an
+    unreadable/missing transcript, or any parse error, returns False —
+    "can't tell" must never be read as "the user stopped it", or a merely-
+    unreadable transcript would strand a session that was never actually
+    exited."""
+    try:
+        from datetime import datetime
+        for entry in _iter_jsonl_tail(tpath, max_lines=400):
+            if not isinstance(entry, dict) or entry.get("type") != "user":
+                continue
+            msg = entry.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, str):
+                continue
+            if not content.lstrip().startswith("<command-name>/exit</command-name>"):
+                continue
+            if since_ts is None:
+                return True
+            try:
+                ts = datetime.fromisoformat(
+                    str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue          # unparseable timestamp — this is an ANY
+                                  # over the whole window (oldest-to-newest
+                                  # file order, not reversed), so a single
+                                  # bad timestamp just moves on to the next
+                                  # candidate entry, in either direction
+            if ts >= since_ts:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _human_clock(epoch, now=None):
@@ -13586,9 +13698,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # A TIME-BASED cap: `continue` BEFORE the reset just re-hits it (the
             # user's incident), so we ping ONCE with the reset time, do NOTHING
             # until the reset clock, then attempt an auto-resume AFTER it — never
-            # before. Read from the PANE (the banner is on screen, not reliably a
-            # transcript api-error). While a session is limited job 6 owns it
-            # (skips the api-error / nudge paths).
+            # before. Detected either from the PANE (the banner on screen) OR —
+            # #336 — from a `sesslimit:<key>` entry job 1's own TRANSCRIPT-based
+            # usage-cap detection already seeded (below, near job 1's own
+            # `is_usage_cap` branch): a session-limit hit that lands on a
+            # background Agent/subagent, rather than this session's own
+            # foreground turn, can settle at an ordinary idle prompt WITHOUT ever
+            # rendering the banner as the pane's bottom-most content — the real
+            # montalu2 incident — so `pane_session_limited` alone can never
+            # engage for that pane at all. While a session is limited job 6 owns
+            # it (skips the api-error / nudge paths).
             #
             # A single one-shot attempt was NOT enough (gk incident 2026-07-24):
             # the first post-reset poll can land mid-race — still busy, or with
@@ -13600,12 +13719,37 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # SESSLIMIT_MAX_TRIES, pings ONCE if it gives up, and — when a draft is
             # present and STABLE across sweeps — submits THAT draft instead of
             # typing "continue" over it. A bounced attempt (the limit somehow still
-            # active) just retries; a REAL resume makes the banner leave the bottom
-            # region so `pane_session_limited` goes False and this branch stops
-            # firing on its own (FIX B, above).
-            if pane_session_limited(captured):
-                skey = "sesslimit:" + key
-                s = state.get(skey)
+            # active) just retries.
+            #
+            # RESOLUTION (#336): a REAL resume used to be detected purely by the
+            # banner leaving the pane's bottom region (FIX B, original design) —
+            # correct for the pane-visible case, but a transcript-only episode
+            # NEVER had a banner to lose, so that signal alone would leak
+            # `sesslimit:<key>` state forever once widened to cover it. Whenever
+            # the pane does NOT currently show the banner, resolution is instead
+            # re-derived straight from the TRANSCRIPT's own current error state
+            # (`transcript_last_error` + `is_usage_cap`) — never the pane, and
+            # never the frozen tmux statusline (this repo's own documented
+            # "a pane's statusline is a frozen render" gotcha) — so both the
+            # pane-visible and transcript-only cases resolve on the SAME
+            # evidence a human would actually trust.
+            skey = "sesslimit:" + key
+            s = state.get(skey)
+            if s is not None:
+                # Job 6 legitimately owns this session's api-error tracking too
+                # while an episode is parked — protect job 1's OWN bare-UUID
+                # state entry from the end-of-sweep cleanup pass exactly like
+                # job 1's own `stalled.add(key)` does for itself below (mirrored
+                # placement, not a new mechanism).
+                stalled.add(key)
+                if not pane_session_limited(captured):
+                    cur_err = transcript_last_error(tpath)
+                    if not (cur_err and is_usage_cap(cur_err)):
+                        del state[skey]
+                        s = None
+                        logs.append("session-limit %s — resolved, tracking cleared"
+                                    % project)
+            if pane_session_limited(captured) or s is not None:
                 if s is None:
                     # Parse the reset clock ONCE at first detection and keep it stable for
                     # the whole episode — re-parsing after the reset would roll the same
@@ -13615,8 +13759,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                          "attempts": 0, "gave_up": False}
                     state[skey] = s
                 elif s.get("resets_at") is None:
-                    # an earlier poll couldn't read the clock — try again to refine it.
-                    s["resets_at"] = parse_reset_epoch(captured, now)
+                    # an earlier poll couldn't read the clock — try again to
+                    # refine it, from whichever surface THIS episode's own
+                    # evidence actually comes from (adversarial review, F3):
+                    # the PANE when it currently shows the banner, the
+                    # TRANSCRIPT's own error text otherwise. Refining a
+                    # transcript-only episode from the pane would read
+                    # whatever the session's own SUBSEQUENT, unrelated reply
+                    # happens to render near the bottom of the screen —
+                    # including a stray "resets 17:00"-shaped phrase — and
+                    # inject a bogus epoch, up to SESSLIMIT_MAX_TRIES
+                    # premature `continue`s.
+                    if pane_session_limited(captured):
+                        s["resets_at"] = parse_reset_epoch(captured, now)
+                    else:
+                        cur_err = transcript_last_error(tpath)
+                        if cur_err and is_usage_cap(cur_err):
+                            s["resets_at"] = parse_reset_epoch_from_error_text(
+                                cur_err, now)
                 s["last_seen"] = int(now)
                 ra = s.get("resets_at")
                 if not s.get("pinged"):
@@ -13640,6 +13800,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             owner=owner, dedup_key="sesslimit:%s:%s" % (key, ra or s["first_seen"]),
                             dry_run=dry_run)
                 elif ra and now >= ra:
+                    if session_user_stopped(tpath, since_ts=s.get("first_seen")):
+                        # #336: the user explicitly typed `/exit` for THIS
+                        # session at or after the limit hit — a stronger
+                        # signal than "the reset clock passed", and it
+                        # always wins. No keystroke, no ping (the user is
+                        # already handling it themselves) — just stop
+                        # tracking so a genuinely NEW limit hit later
+                        # re-parks cleanly.
+                        del state[skey]
+                        logs.append(
+                            "session-limit %s — user stopped (/exit) since "
+                            "the limit hit; never auto-resuming" % project)
+                        continue
                     attempts = s.get("attempts", 0)
                     if attempts >= SESSLIMIT_MAX_TRIES:
                         # Bounded — never retry forever. One give-up ping, then silence.
@@ -13861,11 +14034,55 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     # `continue` leaks into a capped session either way — only a
                     # redundant re-ping is possible (see decide()'s own docstring). No
                     # pane interaction at all here, so draft_pending is irrelevant.
+                    #
+                    # #336: this is job 6's OWN `sesslimit:<key>` tracking, seeded
+                    # straight from THIS detection (the transcript's own error TEXT)
+                    # — never from the pane, never from the frozen tmux statusline.
+                    # `decide()` only reaches `action == "nudge"` ONCE per distinct
+                    # err_hash (every later poll for the SAME error returns "wait",
+                    # dormant), so this seed fires exactly once per genuinely new
+                    # limit hit — a fresh error later (a real NEW hash) re-parks
+                    # cleanly through this same path. Job 6's own widened gate (see
+                    # its comment, above in this same loop) then manages the parked
+                    # episode exactly like a pane-visible one — ping/wait/bounded
+                    # retry-after-reset/give-up, respecting the user-stop invariant
+                    # — even though `pane_session_limited` may never once fire for
+                    # this pane (the montalu2 incident: a background Agent/subagent
+                    # died on the limit, and the top-level pane never rendered the
+                    # banner as its own bottom-most content at all).
+                    sk = "sesslimit:" + key
+                    if sk not in state:
+                        # `last_seen` set explicitly (unlike job 6's own creation
+                        # branch, which sets it right afterward, unconditionally,
+                        # a few lines below in THIS SAME function) — job 1's seed
+                        # is a standalone insert with no such follow-up statement,
+                        # and the end-of-sweep generic cleanup pass treats a
+                        # missing `last_seen` as epoch 0, i.e. "ancient", deleting
+                        # a freshly-seeded entry on the VERY SAME sweep it was
+                        # created.
+                        state[sk] = {"resets_at": parse_reset_epoch_from_error_text(err_text, now),
+                                    "pinged": True,      # the usage-cap ping just below covers it
+                                    "continued": False, "first_seen": int(now),
+                                    "last_seen": int(now),
+                                    "attempts": 0, "gave_up": False}
                     entry["nudges"], entry["escalated"], entry["dormant"] = [], True, True
                     state[key] = entry
                     logs.append("usage-cap %s — ping only, no continue" % project)
-                    send_fn(compose_api_error_alert(project, err_text)
-                            + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                    # #336 (adversarial review, messaging drift): the ping text
+                    # must reflect what job 6's own widened tracking actually
+                    # promises — a resume time it genuinely parsed means the
+                    # watchdog itself WILL deliver `continue` after the reset
+                    # (never "CC sa obnoví" on its own); a clock it could NOT
+                    # parse means the episode is only pinged, never auto-
+                    # resumed, and the user should intervene manually.
+                    if state.get(sk, {}).get("resets_at"):
+                        resume_note = ("\n> (usage cap — po resete pošlem `continue` "
+                                       "automaticky — nič nemusíš robiť)")
+                    else:
+                        resume_note = ("\n> (usage cap — `continue` teraz nepomôže a "
+                                       "čas resetu sa nepodarilo rozpoznať z chybovej "
+                                       "hlášky — obnov session prosím ručne po resete)")
+                    send_fn(compose_api_error_alert(project, err_text) + resume_note,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge":
                     n = len(entry["nudges"])

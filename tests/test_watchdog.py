@@ -1332,6 +1332,428 @@ class SessionLimitWiring(unittest.TestCase):
             "wall clock instead of run_once's own `now`): %r" % sent)
 
 
+class ParseResetEpochFromErrorText(unittest.TestCase):
+    """(#336) The SAME clock/timezone-parsing `parse_reset_epoch` runs on a
+    captured PANE, exposed directly over a plain error-message STRING (job
+    1's own `transcript_last_error()` output) -- no pane/box scoping needed,
+    since a transcript's `isApiErrorMessage` text is already just the
+    message, with no agent-strip/ANSI chrome to strip first. This is what
+    lets a session-limit hit that never renders its banner on the live pane
+    at all (a background Agent/subagent dying on the account's 5h limit,
+    #336's own montalu2 incident) still get a resume time parked from the
+    error TEXT itself."""
+
+    def test_matches_the_pane_based_parse_for_the_same_clock_text(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()
+        text = "You've hit your session limit · resets 6:10pm (Europe/Prague)"
+        pane_epoch = wd.parse_reset_epoch(text, now)
+        text_epoch = wd.parse_reset_epoch_from_error_text(text, now)
+        self.assertIsNotNone(text_epoch)
+        self.assertEqual(pane_epoch, text_epoch)
+
+    def test_the_montalu2_incidents_own_error_text(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Prague")
+        now = datetime(2026, 8, 8, 15, 0, tzinfo=tz).timestamp()
+        text = ('Agent "Implement Task 9: E2E + CHANGELOG + gates" failed: '
+                'Agent terminated early due to an API error: You\'ve hit '
+                'your session limit · resets 8pm (Europe/Prague)')
+        epoch = wd.parse_reset_epoch_from_error_text(text, now)
+        self.assertIsNotNone(epoch)
+        got = datetime.fromtimestamp(epoch, tz).strftime("%H:%M")
+        self.assertEqual(got, "20:00")
+
+    def test_missing_clock_returns_none(self):
+        self.assertIsNone(
+            wd.parse_reset_epoch_from_error_text("You've hit your session limit", 0))
+
+    def test_empty_or_missing_text_returns_none(self):
+        self.assertIsNone(wd.parse_reset_epoch_from_error_text("", 0))
+        self.assertIsNone(wd.parse_reset_epoch_from_error_text(None, 0))
+
+
+class SessionUserStoppedPredicate(unittest.TestCase):
+    """(#336) The narrow, session-limit-scoped counterpart of #335's own
+    (not-yet-landed) general user-stop invariant: a session the user
+    explicitly told to stop (`/exit`) since a limit episode began must
+    never be auto-resumed by delivering `continue`, even once the parked
+    reset time has passed."""
+
+    CWD = "/home/newlevel/devel/exit-test"
+    SID = "exit-test-sid"
+
+    def _tpath(self, entries):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, entries)
+        return tpath
+
+    def _exit_entry(self, ts_iso):
+        return {"type": "user", "timestamp": ts_iso,
+                "message": {"role": "user",
+                           "content": "<command-name>/exit</command-name>"}}
+
+    def test_no_exit_command_at_all_returns_false(self):
+        tpath = self._tpath([_assistant("pracujem…")])
+        self.assertFalse(wd.session_user_stopped(tpath))
+
+    def test_exit_command_present_returns_true(self):
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        tpath = self._tpath([_assistant("pracujem…"), self._exit_entry(ts)])
+        self.assertTrue(wd.session_user_stopped(tpath))
+
+    def test_exit_before_since_ts_is_not_counted(self):
+        from datetime import datetime, timezone
+        old_ts = datetime.fromtimestamp(1_000_000, timezone.utc).isoformat()
+        tpath = self._tpath([self._exit_entry(old_ts), _assistant("pracujem…")])
+        self.assertFalse(wd.session_user_stopped(tpath, since_ts=2_000_000))
+
+    def test_exit_after_since_ts_is_counted(self):
+        from datetime import datetime, timezone
+        newer_ts = datetime.fromtimestamp(3_000_000, timezone.utc).isoformat()
+        tpath = self._tpath([self._exit_entry(newer_ts)])
+        self.assertTrue(wd.session_user_stopped(tpath, since_ts=2_000_000))
+
+    def test_missing_transcript_fails_safe_to_false(self):
+        self.assertFalse(wd.session_user_stopped(
+            Path("/nonexistent/path/does-not-exist-336.jsonl")))
+
+    def test_other_slash_commands_are_not_mistaken_for_exit(self):
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        tpath = self._tpath([{"type": "user", "timestamp": ts,
+                              "message": {"role": "user",
+                                         "content": "<command-name>/compact</command-name>"}}])
+        self.assertFalse(wd.session_user_stopped(tpath))
+
+    def test_real_transcript_exit_marker_shape_is_detected(self):
+        # (adversarial review of this ticket's own fix, F1 — CRITICAL) Claude
+        # Code writes a real `/exit` entry as a COMPOSITE string, never the
+        # bare marker this predicate's own fixtures elsewhere in this file
+        # use — verified live against real transcripts on this box:
+        #   <command-name>/exit</command-name>\n            <command-message>
+        #   exit</command-message>\n            <command-args></command-args>
+        # A strict `content.strip() == "<command-name>/exit</command-name>"`
+        # equality check NEVER matches this real shape, so the whole
+        # user-stop safety gate was inert against every genuine `/exit` a
+        # user ever types — the exact harm class (auto-resuming a session
+        # the user explicitly stopped) this predicate exists to prevent.
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        real_exit_content = (
+            "<command-name>/exit</command-name>\n"
+            "            <command-message>exit</command-message>\n"
+            "            <command-args></command-args>")
+        tpath = self._tpath([{"type": "user", "timestamp": ts,
+                              "message": {"role": "user",
+                                         "content": real_exit_content}}])
+        self.assertTrue(wd.session_user_stopped(tpath),
+                        "must detect the REAL composite /exit shape, not "
+                        "only the bare marker no real transcript ever "
+                        "actually writes")
+
+    def test_exit_foo_lookalike_command_name_does_not_false_match(self):
+        # The fix for the finding above widens the match from strict
+        # equality to a PREFIX check -- must not become so loose that an
+        # unrelated command sharing the "/exit" substring false-matches.
+        # The closing tag is part of the required prefix, so a DIFFERENT
+        # command name (never a real Claude Code shape, but the fix must
+        # not accidentally accept it) is correctly refused.
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        tpath = self._tpath([{"type": "user", "timestamp": ts,
+                              "message": {"role": "user",
+                                         "content": "<command-name>/exit-foo</command-name>"}}])
+        self.assertFalse(wd.session_user_stopped(tpath))
+
+
+NO_BANNER_IDLE_PANE = "● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+
+
+def _assistant_usage_cap(text):
+    return {"type": "assistant", "isApiErrorMessage": True,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+class SessionLimitTranscriptSeeded(unittest.TestCase):
+    """(#336) A session-limit error that hits a BACKGROUND Agent/subagent —
+    or otherwise never renders Claude Code's banner as the pane's own
+    bottom-most content — must still auto-resume after its reset. Job 1's
+    OWN transcript-based detection (`isApiErrorMessage` + `is_usage_cap`)
+    now seeds job 6's `sesslimit:<key>` tracking straight from the ERROR
+    TEXT, so the resume no longer depends on `pane_session_limited` ever
+    becoming True on a pane that may never show the banner at all — the
+    real montalu2 incident: idle at a bare prompt, no banner visible,
+    nothing auto-resumed until a human typed `continue` by hand at 20:40,
+    forty minutes after the 20:00 reset."""
+
+    CWD = "/home/newlevel/devel/montalu2"
+    PANE = "%3"
+    SID = "9a8b7c6d-0000-4000-8000-0000000336aa"
+
+    def _harness(self, now, entries, capture=NO_BANNER_IDLE_PANE, state_path=None,
+                age_s=700):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, entries)
+        os.utime(tpath, (now - age_s, now - age_s))
+        if state_path is None:
+            state_path = Path(tmp.name) / "state.json"
+        sent, keys = [], []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "capture-pane" in j:
+                return capture
+            if "send-keys" in j:
+                keys.append(argv)
+                return ""
+            return ""
+
+        def fake_send(body, **k):
+            sent.append(body)
+
+        logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"),
+                           grace=300, interval=300, max_nudges=3)
+        return logs, sent, keys, state_path, tpath
+
+    def test_job1_seeds_sesslimit_state_from_transcript_alone(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        entries = [_assistant_usage_cap(
+            'Agent "Implement Task 9" failed: Agent terminated early due to '
+            "an API error: You've hit your session limit · resets 6:10pm "
+            "(Europe/Prague)")]
+        logs, sent, keys, sp, _ = self._harness(now, entries)
+        self.assertEqual(keys, [], "no continue may be sent before the reset")
+        self.assertEqual(len(sent), 1, "expected job 1's own single usage-cap ping")
+        st = json.loads(Path(sp).read_text())
+        self.assertIn("sesslimit:" + self.SID, st,
+                      "job 1 must park a resume time straight from the error "
+                      "TEXT -- the pane never shows the banner at all")
+        self.assertIsNotNone(st["sesslimit:" + self.SID]["resets_at"])
+
+    def test_auto_resumes_after_reset_even_though_the_pane_never_showed_the_banner(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now_before = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()
+        now_after = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()   # past 18:10
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        # first sweep: job 1 seeds the parked resume time (pane never shows the banner)
+        _, sent1, keys1, sp, _ = self._harness(now_before, entries)
+        # second sweep, well past the reset: job 6 must pick up the parked
+        # episode purely from state and deliver `continue`, with no pane
+        # banner ever involved.
+        _, sent2, keys2, _, _ = self._harness(now_after, entries, state_path=sp)
+        self.assertEqual(keys1, [], "no continue before the reset")
+        self.assertTrue(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys2),
+            "expected exactly one `continue` after reset, with the pane never "
+            "showing the banner at all: %r" % keys2)
+
+    def test_user_exit_since_the_limit_hit_blocks_auto_resume(self):
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()   # past 18:10
+        first_seen = now - 3600
+        exit_iso = datetime.fromtimestamp(now - 60, timezone.utc).isoformat()
+        entries = [_assistant_usage_cap(
+                       "You've hit your session limit · resets 6:10pm (Europe/Prague)"),
+                   {"type": "user", "timestamp": exit_iso,
+                    "message": {"role": "user",
+                               "content": "<command-name>/exit</command-name>"}}]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(first_seen), "last_seen": int(now - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        logs, sent, keys, _, _ = self._harness(now, entries, capture=SESSION_LIMIT_BANNER,
+                                               state_path=sp)
+        self.assertEqual(keys, [], "must NEVER auto-resume a session the user /exit'd "
+                                   "since the limit hit: %r" % keys)
+        st = json.loads(sp.read_text())
+        self.assertNotIn("sesslimit:" + self.SID, st,
+                         "tracking must be dropped once the user-stop invariant fires")
+
+    def test_resets_at_refines_from_transcript_not_pane_when_banner_absent(self):
+        # (adversarial review of this ticket's own fix, F3) An earlier poll
+        # could not parse a resume time (`resets_at is None`) -- the
+        # refinement attempt must read whichever surface THIS episode's own
+        # evidence actually comes from: the transcript for a transcript-only
+        # episode, never the live pane (which, for a transcript-only
+        # episode, never shows the banner at all -- refining from it would
+        # only ever find whatever the session's own SUBSEQUENT, unrelated
+        # reply happens to render near the bottom of the screen).
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": None, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        logs, sent, keys, _, _ = self._harness(now, entries, state_path=sp)
+        self.assertEqual(keys, [], "no continue before the (now-refined) reset")
+        st = json.loads(sp.read_text())
+        self.assertIsNotNone(
+            st["sesslimit:" + self.SID]["resets_at"],
+            "the refinement must have parsed the clock from the "
+            "TRANSCRIPT's own error text, since the pane (NO_BANNER_IDLE_PANE) "
+            "never carries a clock to find")
+
+    def test_still_erroring_without_a_banner_keeps_retrying_bounded(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 300, "pinged": True, "continued": True,
+            "attempts": 1, "last_try": now - 400,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        logs, sent, keys, _, _ = self._harness(now, entries, state_path=sp)
+        self.assertTrue(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys),
+            "still erroring (never resolved) and past the retry interval, "
+            "with no pane banner ever involved -- expected a SECOND retry: "
+            "%r" % keys)
+
+    def test_tracking_clears_once_the_transcript_shows_recovery(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 20, tzinfo=tz).timestamp()
+        entries = [_assistant_usage_cap(
+                       "You've hit your session limit · resets 6:10pm (Europe/Prague)"),
+                   _assistant("Hotovo, pokracujem.")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now - 600, "pinged": True, "continued": True,
+            "attempts": 1, "last_try": now - 120,
+            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        logs, sent, keys, _, _ = self._harness(now, entries, state_path=sp)
+        self.assertEqual(keys, [],
+                         "a genuinely recovered session must not get another `continue`")
+        st = json.loads(sp.read_text())
+        self.assertNotIn("sesslimit:" + self.SID, st,
+                         "tracking must clear the moment the transcript shows "
+                         "recovery, not leak forever (the pane never had a "
+                         "banner to lose in the first place)")
+
+    def test_job1_bare_uuid_tracking_survives_a_sweep_job6_owns(self):
+        # (adversarial review finding 6b) Job 6 owning a parked episode
+        # (via `continue` at the end of its own block) means job 1's code
+        # never runs for THIS session on THIS sweep -- without
+        # `stalled.add(key)`, the end-of-sweep generic cleanup pass would
+        # prune job 1's own bare-UUID dormant-tracking entry every single
+        # sweep job 6 manages, since it never gets a chance to protect
+        # itself via its OWN `stalled.add(key)` call (which only runs when
+        # job 1's own code path is reached).
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {
+            self.SID: {"hash": "deadbeef0000", "first_seen": int(now - 3600),
+                      "nudges": [], "escalated": True, "dormant": True},
+            "sesslimit:" + self.SID: {
+                "resets_at": now + 10000, "pinged": True, "continued": False,
+                "attempts": 0, "first_seen": int(now - 3600),
+                "last_seen": int(now - 60)},
+        }
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        self._harness(now, entries, state_path=sp)
+        st = json.loads(sp.read_text())
+        self.assertIn(self.SID, st,
+                     "job 6 owning this session's poll must not let job 1's "
+                     "own bare-UUID tracking entry get pruned by the "
+                     "end-of-sweep cleanup pass")
+
+    def test_transcript_only_episode_state_persists_across_multiple_sweeps(self):
+        # (adversarial review finding 6a) `last_seen` must be refreshed on
+        # EVERY sweep job 6 manages, even for a transcript-only episode
+        # that never shows the pane banner -- otherwise the end-of-sweep
+        # generic cleanup pass (wait_clear=90s) would prune the parked
+        # episode BETWEEN two SESSLIMIT_RETRY_S-spaced (300s) retry
+        # sweeps, silently collapsing the whole bounded-retry mechanism
+        # down to a single attempt.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now0 = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()   # past 18:10
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now0 - 300, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(now0 - 3600),
+            "last_seen": int(now0 - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        now = now0
+        for _ in range(3):
+            self._harness(now, entries, state_path=sp)
+            now += wd.SESSLIMIT_RETRY_S
+        st = json.loads(sp.read_text())
+        self.assertIn("sesslimit:" + self.SID, st,
+                     "tracking must survive across SESSLIMIT_RETRY_S-spaced "
+                     "sweeps -- last_seen must be refreshed every sweep, "
+                     "not just at creation")
+        self.assertEqual(
+            st["sesslimit:" + self.SID]["attempts"], 3,
+            "expected exactly 3 delivered retries across the 3 sweeps: %r"
+            % st["sesslimit:" + self.SID])
+
+
 class RunOnceLoopIsolation(unittest.TestCase):
     """(issue #3) One pane raising inside the per-transcript loop body — a
     corrupted transcript, an unexpected tmux-shim output shape, a raise inside a
