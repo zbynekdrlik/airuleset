@@ -136,8 +136,21 @@ class WrapTmux:
         if argv[:2] == ["tmux", "send-keys"]:
             if "-l" in argv:
                 text = argv[-1]
-                self.buf += (text if self.type_lands is None
-                             else text[:self.type_lands])
+                if self.type_lands is None:
+                    self.buf += text
+                else:
+                    # #322 -- `_type_literal` now CHUNKS a long payload into
+                    # several small `-l` bursts (never one big one), so the
+                    # cap must be a CUMULATIVE total-buffer limit, not a
+                    # per-call slice -- a per-call `text[:type_lands]` would
+                    # let every ≤120-char chunk land in full (since the
+                    # chunk size and this fixture's own historical 120-char
+                    # truncation value happen to coincide), silently
+                    # defeating the truncated-type simulation this fixture
+                    # exists to model.
+                    remaining = self.type_lands - len(self.buf)
+                    if remaining > 0:
+                        self.buf += text[:remaining]
             else:
                 for k in argv[4:]:
                     self._key(k)

@@ -163,7 +163,24 @@ class FakeTmux:
         return ""
 
     def typed(self):
-        return [a[-1] for a in self.sent if "-l" in a]
+        # #322 — `_type_literal` sends a long payload as SEVERAL consecutive
+        # `-l` calls (chunked) rather than one — join a consecutive RUN of
+        # them into a single logical "typed" entry (nothing else, no
+        # capture-pane/Enter/Escape, ever interrupts one delivery's own
+        # chunk burst) so every existing `tmux.typed()[0] == GOAL_LINE`-
+        # style assertion keeps working unchanged for both the short
+        # single-burst path and the long chunked one.
+        out = []
+        buf = []
+        for a in self.sent:
+            if "-l" in a:
+                buf.append(a[-1])
+            elif buf:
+                out.append("".join(buf))
+                buf = []
+        if buf:
+            out.append("".join(buf))
+        return out
 
     def keys(self):
         return [a[-1] for a in self.sent
@@ -673,6 +690,138 @@ class TestGoalRearmGiveUpHasAReachableExit(GoalRearmBase):
         late = gave_up_at + wd.GOAL_REARM_GIVEUP_RESET_S + 30
         self._give_up(state, late)
         self.assertEqual(len(self.pings), 2, self.pings)
+
+    def test_reset_is_bounded_per_streak(self):
+        # #322 REOPENED (adversarial-review MAJOR-1): an unbounded reset on
+        # a pane that is idle-but-permanently-broken (idleness is its
+        # STEADY STATE, so "idle + elapsed" alone degenerates into a bare
+        # 15-minute timer) retries every GOAL_REARM_GIVEUP_RESET_S forever
+        # until the blind 2h streak reset — measured live-replay: 10 pings
+        # / 152 multi-KB /goal submissions into a live pane over 3h. The
+        # bound converts that into "one extra try, then the SAME permanent
+        # skip", which this test proves directly: after
+        # GOAL_REARM_GIVEUP_MAX_RESETS resets are already spent, a THIRD
+        # give-up — still idle, still well past the reset window — must
+        # NOT reset again.
+        state = {}
+        now = time.time()
+        gave_up_at = self._give_up(state, now)          # give-up #1
+        late1 = gave_up_at + wd.GOAL_REARM_GIVEUP_RESET_S + 30
+        self._give_up(state, late1)                      # reset, then give-up #2
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec.get("giveup_resets"), wd.GOAL_REARM_GIVEUP_MAX_RESETS,
+                         rec)
+        self.assertEqual(len(self.pings), 2, self.pings)
+        late2 = (late1 + wd.GOAL_REARM_MAX_ATTEMPTS
+                * (wd.GOAL_REARM_CONFIRM_S + 30)
+                + wd.GOAL_REARM_GIVEUP_RESET_S + 30)
+        t, logs = self._go(PANE_DARK, state=state, now=late2)
+        self.assertFalse(t.typed(), "the reset budget is spent -- no more "
+                         "retries this streak: %r" % logs)
+        self.assertTrue(any("skip gave-up" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 2,
+                         "a third GAVE UP must not fire once the reset "
+                         "budget is exhausted -- the pane stays quiet "
+                         "until the natural streak reset: %r" % self.pings)
+
+    def test_dedup_key_is_stable_across_a_reset_within_the_same_streak(self):
+        # #322 REOPENED — the FIRST cut of this fix re-stamped `first` on
+        # every reset, and `first` is a component of the GAVE UP ping's own
+        # dedup_key (#160 defect 3's own deliberate design: `h` alone is
+        # STABLE across a reset, so folding in `first` is what makes each
+        # EPISODE distinct from a repeat). Re-stamping it therefore minted
+        # a genuinely NEW dedup key on every retry, so the notify layer's
+        # OWN dedup could never recognise a repeat give-up as a repeat.
+        # This directly proves the fix: a SECOND give-up within the SAME
+        # streak (after exactly one reset) must carry the IDENTICAL
+        # dedup_key as the first, so `notify.send`'s own dedup absorbs it.
+        state = {}
+        now = time.time()
+        gave_up_at = self._give_up(state, now)
+        late = gave_up_at + wd.GOAL_REARM_GIVEUP_RESET_S + 30
+        self._give_up(state, late)
+        self.assertEqual(len(self.pings), 2, self.pings)
+        key1 = self.pings[0][1].get("dedup_key")
+        key2 = self.pings[1][1].get("dedup_key")
+        self.assertIsNotNone(key1)
+        self.assertEqual(key1, key2,
+                         "a repeat give-up in the SAME streak must share "
+                         "the first give-up's dedup key, or the notify "
+                         "layer's own dedup can never absorb it: %r vs %r"
+                         % (key1, key2))
+
+    def test_dry_run_never_mutates_or_consumes_the_reset_budget(self):
+        # #322 REOPENED (adversarial-review MINOR-1) — mirrors the #186
+        # `dark_pinged` lesson: a `--dry-run` diagnostic sweep (this repo's
+        # own normal manual troubleshooting command) must never spend the
+        # one-way-door reset budget or clear the give-up suppression with
+        # nothing actually sent.
+        state = {}
+        now = time.time()
+        gave_up_at = self._give_up(state, now)
+        late = gave_up_at + wd.GOAL_REARM_GIVEUP_RESET_S + 30
+        t, logs = self._go(PANE_DARK, state=state, now=late, dry_run=True)
+        self.assertFalse(t.typed(), logs)
+        self.assertTrue(any("RESET" in ln.upper() for ln in logs), logs)
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertTrue(rec.get("pinged"), "a dry-run sweep must not clear "
+                        "the real give-up suppression: %r" % rec)
+        self.assertEqual(rec.get("n"), wd.GOAL_REARM_MAX_ATTEMPTS, rec)
+        self.assertEqual(rec.get("giveup_resets", 0), 0,
+                         "a dry-run sweep must not consume a reset: %r" % rec)
+        # a REAL sweep right after must still see the full, unspent budget
+        t2, logs2 = self._go(PANE_DARK, state=state, now=late + 1,
+                             cap_seq=self._typed_seq())
+        self.assertTrue(t2.typed(), logs2)
+
+    def test_a_corrupt_gaveup_at_never_crashes_and_never_resets(self):
+        # #322 REOPENED (adversarial-review T1) — a hand-edited/corrupted
+        # `~/.claude/api-watchdog-state.json` (this repo's state file has
+        # been manually pruned before, #232) could otherwise raise a
+        # TypeError on `now - gaveup_at` and kill job 20 for every pane,
+        # every sweep. The fail-safe direction is to never reset (never
+        # guess), never crash.
+        state = {}
+        now = time.time()
+        gave_up_at = self._give_up(state, now)
+        state["goal_rearm"][SID]["gaveup_at"] = "not-a-number"
+        # Well past GOAL_REARM_GIVEUP_RESET_S (so the corrupted value is
+        # what's actually under test), but comfortably short of
+        # GOAL_REARM_STREAK_S (2h) from the streak's own `first` timestamp
+        # (~`now`) -- crossing that would fire the UNRELATED natural
+        # streak-reset block instead and mask this test's own intent.
+        late = gave_up_at + 3 * wd.GOAL_REARM_GIVEUP_RESET_S
+        self.assertLess(late - now, wd.GOAL_REARM_STREAK_S,
+                        "test timing must stay inside the streak window")
+        t, logs = self._go(PANE_DARK, state=state, now=late)
+        self.assertFalse(t.typed(), logs)
+        self.assertTrue(any("skip gave-up" in ln for ln in logs), logs)
+
+    def test_a_new_streak_gets_a_fresh_reset_budget(self):
+        # the streak-reset block (payload hash changed, or GOAL_REARM_STREAK_S
+        # elapsed) must ALSO clear giveup_resets/gaveup_at -- otherwise a
+        # spent budget from an OLD streak would silently disable the reset
+        # for the rest of this session's life, even for a genuinely NEW
+        # problem.
+        state = {}
+        now = time.time()
+        gave_up_at = self._give_up(state, now)
+        late1 = gave_up_at + wd.GOAL_REARM_GIVEUP_RESET_S + 30
+        self._give_up(state, late1)               # spends the one reset
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec.get("giveup_resets"), wd.GOAL_REARM_GIVEUP_MAX_RESETS)
+        # a genuinely NEW streak, far past GOAL_REARM_STREAK_S later
+        much_later = late1 + wd.GOAL_REARM_STREAK_S + 3600
+        gave_up_at2 = self._give_up(state, much_later)
+        rec2 = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec2.get("giveup_resets"), 0,
+                         "a fresh streak must start with a fresh reset "
+                         "budget: %r" % rec2)
+        late2 = gave_up_at2 + wd.GOAL_REARM_GIVEUP_RESET_S + 30
+        t, logs = self._go(PANE_DARK, state=state, now=late2,
+                           cap_seq=self._typed_seq())
+        self.assertTrue(t.typed(), "the NEW streak's own reset must still "
+                        "be reachable: %r" % logs)
 
 
 class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
@@ -1488,6 +1637,93 @@ class TestSendGoalVerifiedPreSendRefusalsAreLogged(unittest.TestCase):
         self.assertTrue(logs, logs)
         self.assertIn(logs[-1], wd._GOAL_REARM_TRANSIENT_REASONS, logs)
         self.assertEqual(logs[-1], "goal-verify-abort: not-bare")
+
+
+PANE_COLLAPSED_PASTE = CONV + FOOTER_DARK.replace(
+    "❯ \n", "❯ paste again to expand\n")
+
+
+class TestTypeLiteralChunking(unittest.TestCase):
+    """#322 PRIMARY fix — a controlled live experiment (montalu2@subdev +
+    an isolated scratch session, CC 2.1.226) DISPROVED the earlier "busy
+    pane" hypothesis directly: a 23-char payload armed fine on a BUSY pane,
+    while the SAME real 3960-char branch-merge template failed on an IDLE
+    one, showing `paste again to expand` in the input row — CC treats one
+    long `send-keys -l` burst as an unexpanded terminal paste, never parsed
+    as a slash command. Typing the identical long payload in ~120-char
+    chunks with a short pause between each armed correctly every time."""
+
+    def _run(self, text):
+        sent = []
+        sleeps = []
+        wd._type_literal("%1", lambda argv, timeout=8: sent.append(argv),
+                         text, sleep_fn=lambda s: sleeps.append(s))
+        return sent, sleeps
+
+    def test_short_payload_is_a_single_unchanged_burst(self):
+        text = "x" * (wd.GOAL_TYPE_CHUNK_THRESHOLD - 1)
+        sent, sleeps = self._run(text)
+        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(sent[0][-1], text)
+        self.assertEqual(sleeps, [])
+
+    def test_long_payload_is_chunked_and_reassembles_byte_identically(self):
+        text = "y" * (wd.GOAL_TYPE_CHUNK_THRESHOLD * 4 + 17)
+        sent, sleeps = self._run(text)
+        self.assertGreater(len(sent), 1, sent)
+        self.assertEqual("".join(a[-1] for a in sent), text)
+        for a in sent:
+            self.assertLessEqual(len(a[-1]), wd.GOAL_TYPE_CHUNK_SIZE, sent)
+        self.assertEqual(len(sleeps), len(sent) - 1,
+                         "a pause between EACH chunk, none trailing: %r"
+                         % sleeps)
+
+    def test_threshold_boundary_chunks(self):
+        # AT the threshold, not just above it -- the real 3960-char
+        # incident payload is well past both, but the boundary itself is
+        # where an off-by-one in the comparison would hide.
+        text = "z" * wd.GOAL_TYPE_CHUNK_THRESHOLD
+        sent, _sleeps = self._run(text)
+        self.assertGreater(len(sent), 1, sent)
+
+
+class TestCollapsedPasteNeverSubmits(unittest.TestCase):
+    """#322 — CC's "paste again to expand" is never parsed as a slash
+    command; pressing Enter on it submits SOME content as an ordinary chat
+    message instead of arming the goal. Both delivery primitives must
+    refuse to submit it -- real keystrokes went out, so neither reason
+    belongs in the zero-keystroke transient-refusal set."""
+
+    def test_send_goal_verified_never_presses_enter_on_it(self):
+        # cap_seq[0] is the fresh re-capture right before typing (bare, so
+        # typing proceeds); every capture AFTER that (the type-verify poll,
+        # and this fix's own post-poll check) falls back to the STATIC
+        # collapsed-paste content.
+        tmux = FakeTmux(PANE_COLLAPSED_PASTE, cap_seq=[PANE_DARK])
+        logs = []
+        ok = wd._send_goal_verified("%1", "/goal " + PAYLOAD, tmux,
+                                    captured=PANE_DARK, sleep_fn=lambda s: None,
+                                    logs=logs)
+        self.assertFalse(ok)
+        self.assertNotIn("Enter", tmux.keys(),
+                         "never submit an unexpanded paste: %r" % tmux.sent)
+        self.assertTrue(logs, logs)
+        self.assertEqual(logs[-1], "goal-verify-abort: collapsed-paste")
+        # real keystrokes DID go out (chunked typing happened) -- this must
+        # NOT be exempted from the attempt-cap the way a pre-send refusal is
+        self.assertNotIn(logs[-1], wd._GOAL_REARM_TRANSIENT_REASONS, logs)
+
+    def test_deliver_with_stash_never_presses_enter_on_it(self):
+        tmux = FakeTmux(PANE_COLLAPSED_PASTE, cap_seq=[PANE_DARK])
+        logs = []
+        ok = wd.deliver_with_stash("%1", "/goal " + PAYLOAD, tmux,
+                                   captured=PANE_DARK, logs=logs,
+                                   sleep_fn=lambda s: None)
+        self.assertFalse(ok)
+        self.assertNotIn("Enter", tmux.keys(),
+                         "never submit an unexpanded paste: %r" % tmux.sent)
+        self.assertTrue(logs, logs)
+        self.assertEqual(logs[-1], "stash-abort: collapsed-paste")
 
 
 class TestGoalLoopStallNudge(GoalRearmBase):
