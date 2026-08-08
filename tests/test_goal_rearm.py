@@ -365,7 +365,7 @@ class GoalRearmBase(unittest.TestCase):
 
     def _go(self, captured, entries=None, state=None, now=None, cap_seq=(),
             handled=None, in_mode=False, dry_run=False, model_stash=False,
-            backlog_fetch=None):
+            backlog_fetch=None, progress_dir=None):
         # One `_go` call = ONE watchdog sweep. The transcript is written once
         # per test (appending it again would look like CC echoing a FRESH
         # `Goal set:` marker — a real signal this job keys on).
@@ -379,7 +379,8 @@ class GoalRearmBase(unittest.TestCase):
                              send_fn=self._send, dry_run=dry_run,
                              projects_dir=self.tmp.name, handled=handled,
                              sleep_fn=lambda s: None,
-                             backlog_fetch=backlog_fetch)
+                             backlog_fetch=backlog_fetch,
+                             progress_dir=progress_dir)
         return tmux, logs
 
     def _typed_seq(self, text=GOAL_LINE):
@@ -880,6 +881,171 @@ class TestGoalDarkDiedByOutage(unittest.TestCase):
         self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
                            "fixture must genuinely exceed the tail window")
         self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+
+class TestGoalRecoverUntracked(GoalRearmBase):
+    """#312 -- `goal_rearm`'s `rec.get("mark")` used to collapse TWO
+    structurally different states into one silent-forever `continue`:
+    `mark == "cleared"` (an explicit clear THIS job itself scanned, the
+    #170 class -- MUST stay untouchable) versus `mark is None` (this job
+    never tracked this session's goal history at all -- e.g. a
+    hand-adapted goal armed before this sid was first swept, or any other
+    gap in an earlier sweep's incremental tail-bootstrap). Only the second
+    is a genuine coverage gap. `_goal_recover_untracked` attempts a ONE-
+    SHOT full-file rescan for it, gated on live `autopilot-progress`
+    evidence (never an unconditional rescan -- deploy-day safety: measured
+    live on dev1, 14 of 21 currently-tracked sessions have no resolved
+    `mark` at all, several backing multi-hundred-MB transcripts) and on
+    the transcript having gone genuinely quiet (never while it was written
+    to moments ago -- a truncated `◎ /goal` footer glyph, live-confirmed
+    on a wide custom statusline, must not be misread as a dead goal).
+
+    NOT the #64 fleet-template-hash mechanism the ticket's own filed
+    hypothesis named -- `_goal_template_drift`'s `tvar` gates only the
+    SEPARATE stale-template re-sync sub-feature, reachable exclusively
+    from the ARMED branch, confirmed by code trace to play no part in
+    this dark-goal path at all."""
+
+    def _buried_marker_transcript(self, kind="set", ts=None):
+        p = self._write([marker_entry(kind, PAYLOAD, ts)])
+        with open(p, "a") as f:
+            filler = json.dumps({"type": "assistant",
+                                 "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
+                f.write(filler)
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
+        self._wrote = True
+        return p
+
+    def _future_now(self):
+        # far enough past the fixture's own (real, "just written") mtime
+        # to clear GOAL_ARMED_ACTIVITY_GRACE_S -- avoids mocking os.utime.
+        return time.time() + wd.GOAL_ARMED_ACTIVITY_GRACE_S + 3600
+
+    def _live_progress_dir(self, ts):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "demo.json").write_text(
+            json.dumps({"done": 3, "remaining": 2, "ts": ts}))
+        return d.name
+
+    def test_marker_buried_past_tail_is_recovered_with_live_progress(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        pd = self._live_progress_dir(future)
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, logs = self._go(PANE_DARK, cap_seq=self._typed_seq(),
+                                  now=future, progress_dir=pd)
+        self.assertIn(GOAL_LINE, tmux.typed(), logs)
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+
+    def test_no_progress_file_never_recovers(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, now=future,
+                                   progress_dir=empty_dir.name)
+        self.assertFalse(tmux.typed())
+
+    def test_stale_progress_file_never_recovers(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        pd = self._live_progress_dir(future - 7 * 3600)   # past the 6h window
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, now=future, progress_dir=pd)
+        self.assertFalse(tmux.typed())
+
+    def test_zero_remaining_never_recovers(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "demo.json").write_text(
+            json.dumps({"done": 5, "remaining": 0, "ts": future}))
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, now=future, progress_dir=d.name)
+        self.assertFalse(tmux.typed())
+
+    def test_unresolvable_repo_never_recovers(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        pd = self._live_progress_dir(future)
+        with m.patch("notify.repo_name_for", return_value=""):
+            tmux, _logs = self._go(PANE_DARK, now=future, progress_dir=pd)
+        self.assertFalse(tmux.typed())
+
+    def test_recent_transcript_activity_defers_recovery(self):
+        # #312-hardening -- a footer read of "not armed" can be a
+        # TRUNCATED render (a wide custom statusline cutting off the ◎
+        # glyph) rather than a genuinely dead goal; a transcript written
+        # to moments ago is independent evidence the session may still be
+        # alive -- recovery must defer to a later sweep, never act now.
+        self._buried_marker_transcript()
+        now = time.time()   # the fixture's OWN real, just-written mtime
+        pd = self._live_progress_dir(now)
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, logs = self._go(PANE_DARK, now=now, progress_dir=pd)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("maybe-truncated" in ln for ln in logs), logs)
+
+    def test_the_full_scan_never_repeats(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        pd = self._live_progress_dir(future)
+        calls = []
+        real_scan = wd.scan_goal_markers
+
+        def counting_scan(path, off=None, tail_bytes=wd.GOAL_MARK_TAIL_BYTES):
+            if off == 0:
+                calls.append(path)
+            return real_scan(path, off=off, tail_bytes=tail_bytes)
+
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"), \
+             m.patch.object(wd, "scan_goal_markers", counting_scan):
+            self._go(PANE_DARK, state=state, now=future,
+                     cap_seq=self._typed_seq(), progress_dir=pd)
+            self._go(PANE_DARK, state=state, now=future + 60,
+                     cap_seq=self._typed_seq(), progress_dir=pd)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_buried_but_since_cleared_goal_stays_untouched(self):
+        # the #170 guard survives the recovery scan -- a session whose
+        # LATEST buried marker is a deliberate clear is never re-armed,
+        # even once live progress evidence makes it eligible for the scan.
+        #
+        # Adversarial-review finding F4 (this ticket's own review, verified
+        # by mutation): the ORIGINAL fixture wrote the "cleared" marker
+        # AFTER the filler, i.e. right at EOF -- squarely INSIDE the
+        # ordinary tail-bootstrap window, so the REGULAR per-sweep scan
+        # (not this recovery path at all) already resolves `rec['mark'] ==
+        # "cleared"` on the very first sweep, and `_goal_recover_untracked`
+        # is never even called (instrumented proof: 0 calls). The test
+        # passed for the wrong reason -- mutating away the recovery path's
+        # own `mark.get("state") != "set"` guard left it green. Both
+        # markers must be BURIED past the tail window for this test to
+        # actually exercise the recovery scan's own #170 guard.
+        p = self._write([marker_entry("set", PAYLOAD,
+                                      _iso(time.time() - 7200))])
+        with open(p, "a") as f:
+            f.write(json.dumps(marker_entry("cleared", PAYLOAD)) + "\n")
+            filler = json.dumps({"type": "assistant",
+                                 "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
+                f.write(filler)
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
+        self._wrote = True
+        future = self._future_now()
+        pd = self._live_progress_dir(future)
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, now=future, progress_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a deliberately cleared goal must never be "
+                         "re-armed even after a full-file recovery scan")
 
 
 class TestLongPasteVerification(GoalRearmBase):
@@ -2115,6 +2281,14 @@ class TestRunOnceWiring(unittest.TestCase):
         calls = self._cycle(goal_rearm_enabled=True)
         self.assertIsNone(calls[0].get("templates_path"))
 
+    def test_progress_dir_reaches_the_job(self):
+        calls = self._cycle(goal_rearm_enabled=True, progress_dir="/tmp/x")
+        self.assertEqual(calls[0].get("progress_dir"), "/tmp/x")
+
+    def test_progress_dir_defaults_to_unwired(self):
+        calls = self._cycle(goal_rearm_enabled=True)
+        self.assertIsNone(calls[0].get("progress_dir"))
+
 
 class TestCmdWatchdogEnablesJob20(unittest.TestCase):
     """The production caller must actually turn it on — a job wired only in
@@ -2321,6 +2495,53 @@ class TestGoalAchievedBacklogVerification(GoalRearmBase):
                          "so the next sweep reads FRESH data, not the "
                          "stale True this very re-arm invalidated: %r"
                          % calls)
+
+    # ----------------------------------------------------------------- #
+    # #312 item 3 -- `claim_present=False` (no FRESH claim in the
+    # session's last turn) used to unconditionally trust "loop finished
+    # legitimately" even when the session's OWN tracked goal PAYLOAD
+    # (persisted independently of what the last turn said) is
+    # unambiguously backlog-shaped -- every shipped `/goal` template
+    # embeds the literal marker text verbatim in its own STOP CONDITIONS.
+    # Extended to fall through into the SAME cached live check instead of
+    # blindly skipping whenever the payload itself proves this loop DOES
+    # care about the backlog.
+    # ----------------------------------------------------------------- #
+
+    BACKLOG_PAYLOAD = ("STOP CONDITIONS: the loop is done once every open "
+                       "issue is closed -- prove it with the line "
+                       "🏁 BACKLOG EMPTY: 0 open, main green directly above "
+                       "the terminal ✅ DONE: marker.")
+
+    def test_no_fresh_claim_but_backlog_shaped_payload_still_verifies(self):
+        entries = [marker_entry("set", self.BACKLOG_PAYLOAD)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_no_fresh_claim_and_backlog_shaped_payload_verified_empty_skips(self):
+        entries = [marker_entry("set", self.BACKLOG_PAYLOAD)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: 0)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("verified empty" in ln for ln in logs), logs)
+
+    def test_no_fresh_claim_and_non_backlog_payload_stays_unaffected(self):
+        # a plain, non-batch /goal whose payload never mentions the
+        # backlog marker at all -- unchanged legacy behavior, never spends
+        # gh.
+        entries = [marker_entry("set", "Stop once the bug is fixed.")]
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 5)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(calls, [],
+                         "a non-backlog-shaped payload must never spend gh")
 
 
 class TestCachedBacklogOpen(unittest.TestCase):
