@@ -1369,29 +1369,95 @@ def render_claude_history_script():
 # `Path.home()`, correct for the user `install`/`push` runs as) -- no
 # `$VAR` of any kind needs to survive the conf-parser at all.
 CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
+# #327: PRIMARY source flipped from the transcript reconstruction to a
+# real `tmux capture-pane` -- see the module comment above TMUX_POPUP_KEY
+# (#289) for the mechanism this relies on: a BARE `tmux capture-pane`/
+# `display-message` call with NO explicit `-t`, issued from WITHIN THIS
+# popup's own shell, resolves against the ORIGINATING pane (the one the
+# popup key was pressed in) -- confirmed live TWICE, independently: once
+# via an isolated `-L` socket with a real attached pty client switched
+# across THREE windows (a decoy window's content never leaked into the
+# capture), and again via a fresh-context adversarial review's own,
+# stronger repro -- a genuine 2-SESSION/2-CLIENT server with the raw
+# popup-key bytes injected into each client's own pty, confirming the
+# resolution follows the PRESSING client correctly in both directions.
+# ADVERSARIAL-REVIEW FINDING (#327): the mechanism is `display-popup`
+# setting the popup job's own `$TMUX` to the PRESSING client's target
+# session -- never rely on `$TMUX_PANE` inside a popup as a shortcut for
+# this (its value is unreliable/environment-dependent, not a documented
+# tmux guarantee); the bare-target resolution above is the only proven
+# path. The ONE proven way to break this: adding `-c <client>` to
+# `display-popup`, or invoking this script via `run-shell` instead of as
+# the popup's own shell-command -- NEVER do either; both were shown live
+# to route the capture to the WRONG session's pane.
+# `-e` preserves the pane's own real SGR/ANSI
+# bytes (same colors CC's TUI actually painted); `-S -{{HISTORY_LIMIT}}`
+# matches TMUX_HISTORY_LIMIT (#235's own scrollback-retention mitigation)
+# so this reaches everything tmux's own history buffer could possibly
+# hold. This is a genuine CAPTURE (same wrapping, same colors, same
+# typography, zero custom structure) -- the ONLY thing that can satisfy
+# "vizuálna identita s tým, čo bolo na obrazovke" (#327's own wording);
+# a reconstruction, however undecorated, structurally cannot.
+#
+# claude-history (the transcript reconstruction, #267/#289/#294) is kept
+# as the FALLBACK for when capture-pane genuinely produces nothing (the
+# tmux call itself fails, or the pane's own scrollback is empty/blank) --
+# and per #327 that fallback now renders NEUTRAL by default: --plain is
+# passed explicitly (never the forced --color #289/#294 shipped), so
+# claude-history's own pre-existing --color/--plain flags remain the ONLY
+# opt-in path back to #294's colored rendering (typed by hand, never the
+# popup's own default).
 CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
-# airuleset-managed (do NOT edit) -- claude-history popup companion (#289).
-# Invoked from the managed tmux S-F1 / S-DC / prefix-h display-popup bind
+# airuleset-managed (do NOT edit) -- claude-history popup companion
+# (#289, primary source flipped to capture-pane by #327). Invoked from
+# the managed tmux S-F1 / S-DC / prefix-h display-popup bind
 # (TMUX_POPUP_BIND_ARGVS in airuleset.py). FAILS LOUDLY, never silently:
-# claude-history's own stderr message is shown and the popup waits for a
-# keypress before closing, rather than handing `less` empty stdin (which
-# can close instantly with nothing to read).
+# on total failure (both capture-pane AND the claude-history fallback)
+# the last error is shown and the popup waits for a keypress before
+# closing, rather than handing `less` empty stdin (which can close
+# instantly with nothing to read).
 set -euo pipefail
 
 # `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script BEFORE
 # the next line ever runs (a failing command substitution used in a plain
-# assignment is an unhandled failure under -e) -- the `|| CH_RC=$?` form
-# is the established fix: it captures the real exit code without tripping
-# -e, and CH_RC stays unset (defaulted to 0 below) on the success path.
-# ACCEPTED TRADE-OFF (#289 adversarial review, M6): the whole transcript
-# is buffered into THIS one shell variable before `less` ever sees a
-# byte -- a latency/memory cost on a very large transcript, never a
-# correctness one (the content is always shown complete and in order).
-# #294: --color forces ANSI on -- claude-history's own stdout here is a
-# PIPE (captured via $(...)), so its TTY auto-detection can never see the
-# real terminal at the far end of `less`; without --color this popup would
-# always render plain text no matter how the fix above chose to default.
-CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --color 2>&1) || CH_RC=$?
+# assignment is an unhandled failure under -e) -- the `|| CP_RC=$?` /
+# `|| CH_RC=$?` form is the established fix: it captures the real exit
+# code without tripping -e, and each RC stays unset (defaulted to 0
+# below) on its own success path.
+#
+# PRIMARY (#327): a real tmux capture -- see the module comment above
+# CLAUDE_HISTORY_POPUP_SCRIPT_DEST in airuleset.py for why NO explicit
+# -t is needed here (resolves against the ORIGINATING pane by design).
+CP_OUT=$(tmux capture-pane -e -p -S -{{HISTORY_LIMIT}} 2>&1) || CP_RC=$?
+CP_RC="${CP_RC:-0}"
+
+if [ "$CP_RC" -eq 0 ] && [ -n "$CP_OUT" ]; then
+  # #294: -R makes `less` render raw ANSI color bytes as color instead of
+  # visibly escaping them; +G (jump to end) and less's own default
+  # incremental search are both unaffected by -R. `less`'s own documented
+  # "acts like cat when its output isn't a terminal" fallback (relied on
+  # by the real-execution tests below) means -R is a no-op for a
+  # captured/non-interactive `less`.
+  if command -v less >/dev/null 2>&1; then
+    printf '%s\n' "$CP_OUT" | less -R +G
+  else
+    # ADVERSARIAL-REVIEW-CLASS FINDING (#289, M5), same guard reapplied
+    # to the new primary path: a box genuinely missing `less` must still
+    # SHOW the captured content and wait for a keypress, never instant-
+    # close by handing a nonexistent command a byte it can't render.
+    printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CP_OUT"
+    read -n 1 -r -s _dummy || true
+  fi
+  exit 0
+fi
+
+# FALLBACK (#267/#289, neutral-by-default per #327): capture-pane failed
+# or produced nothing -- fall back to the transcript reconstruction.
+# --plain is explicit and never --color: the popup's OWN default render
+# must be neutral (no custom bold/colors) per #327's own acceptance;
+# claude-history's pre-existing --color flag (run BY HAND, never from
+# here) is the only opt-in path left to #294's colored rendering.
+CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --plain 2>&1) || CH_RC=$?
 CH_RC="${CH_RC:-0}"
 
 if [ "$CH_RC" -ne 0 ]; then
@@ -1407,23 +1473,18 @@ elif ! command -v less >/dev/null 2>&1; then
   printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CH_OUT"
   read -n 1 -r -s _dummy || true
 else
-  # #294: -R makes `less` render raw ANSI color bytes as color instead of
-  # visibly escaping them; +G (jump to end) and less's own default
-  # incremental search are both unaffected by -R -- it only changes how
-  # `less` interprets raw ANSI escapes, nothing about navigation/search.
-  # `less`'s own documented "acts like cat when its output isn't a
-  # terminal" fallback (already relied on by the real-execution tests
-  # below) means -R is a no-op for a captured/non-interactive `less`.
   printf '%s\n' "$CH_OUT" | less -R +G
 fi
 '''
 
 
 def render_claude_history_popup_script():
-    """The popup-script content -- no template substitution needed, same
-    "always render through a function" discipline as the sibling scripts
+    """The popup-script content, with {{HISTORY_LIMIT}} substituted from
+    TMUX_HISTORY_LIMIT (#327) -- same "always render through a function,
+    never write the raw constant" discipline as the sibling scripts
     above."""
-    return CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT
+    return CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT.replace(
+        "{{HISTORY_LIMIT}}", str(TMUX_HISTORY_LIMIT))
 
 
 # .bashrc holds ONLY thin one-line functions -- no flag literal survives here,
