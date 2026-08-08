@@ -451,7 +451,7 @@ if [ -n "$badge" ]; then
   plain=${plain#[}; plain=${plain%]}
   [ -n "$plain" ] && cm=$(printf '\033[2m%s\033[0m' "$plain")
 fi
-meter=$(CTX_JSON="$in" python3 2>/dev/null <<'PY'
+meter=$(CTX_JSON="$in" CM_TAG="$cm" python3 2>/dev/null <<'PY'
 import os, json, time
 try:
     d = json.loads(os.environ.get("CTX_JSON") or "{}")
@@ -523,6 +523,12 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
 # Composed from local caches by statusbar.tickets_segment (a stale cache spawns a
 # DETACHED `airuleset.py tickets-status --refresh`; the render never waits on gh).
 # {{REPO_DIR}} is substituted at install time by render_caveman_shim().
+# `line` starts as just the segments gathered so far (rate limits + per-model
+# usage) -- if the statusbar-dependent block below fails entirely (a broken
+# {{REPO_DIR}} import, say), those still render instead of losing the WHOLE
+# line, matching this shim's pre-existing "never let one segment's failure
+# take down the others" contract.
+line = "  ".join(segs)
 try:
     import sys
     sys.path.insert(0, "{{REPO_DIR}}")
@@ -539,37 +545,46 @@ try:
     mdl = statusbar.model_segment(d, managed_model="{{MANAGED_MODEL}}")
     if mdl:
         segs.append(mdl)
-    # --- monthly subscription renewal: 'sub 12.8.(8d)' (#223) ---
-    sub = statusbar.subscription_segment()
-    if sub:
-        segs.append(sub)
     seg = statusbar.tickets_segment(cwd)
     if seg:
         segs.append(seg)
-    q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project · inde)
+    q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project only, #313 pt 5)
     if q:
         segs.append(q)
     # --- session context/cost: 'ctx 570K ~$0.57' (2026-07-25, #37; shortened #223) ---
-    cc = statusbar.context_cost_segment(d)
-    if cc:
-        segs.append(cc)
-    # --- which account is logged in on this box, #223 (faint, trails the meter) ---
+    cc_full = statusbar.context_cost_segment(d)
+    cc_short = statusbar.context_cost_segment(d, show_cost=False) if cc_full else ""
+    if cc_full:
+        segs.append(cc_full)
+    # --- account identity: email + monthly renewal, combined as ONE
+    # trailing unit (#313 pt 6 -- 'sub' moves NEXT TO the email, single
+    # space, email first: 'drlik.marek@gmail.com sub 12.8.(4d)' -- both are
+    # properties of the SAME oauthAccount, so they belong together instead
+    # of scattered across the line). ---
     acct = statusbar.account_email_segment()
-    if acct:
-        segs.append(acct)
+    sub = statusbar.subscription_segment()
+    identity = " ".join(p for p in (acct, sub) if p)
+    # --- caveman's own (already faint-toned) tag, composed in bash above ---
+    cm_tag = os.environ.get("CM_TAG") or ""
+    # --- width budget (#313 pt 4): fit inside the pane MINUS a reserve for
+    # Claude Code's own right-edge indicators (the armed-'/goal' glyph --
+    # live evidence: a 176-col row fully consumed truncated it clean off,
+    # twice misread as "the goal died"). Trims least-important segments
+    # FIRST -- the account identity block, then the caveman tag, then just
+    # the ctx segment's own '~$<cost>' suffix -- dynamically, before ever
+    # overflowing. An unmeasurable pane width (no TMUX_PANE, tmux missing,
+    # any failure) never trims -- a statusline segment must never guess. ---
+    width = statusbar.pane_width()
+    budget = (width - statusbar.STATUSLINE_RESERVE_COLS) if width else None
+    line = statusbar.fit_statusline(segs, identity, cm_tag, cc_full, cc_short, budget)
 except Exception:
     pass
-if not segs:
+if not line:
     raise SystemExit
-print("  ".join(segs))
+print(line)
 PY
 )
-# meter (ctx bar + usage limits) leads; faint caveman tag trails.
-out="$meter"
-if [ -n "$cm" ]; then
-  if [ -n "$out" ]; then out="$out  $cm"; else out="$cm"; fi
-fi
-printf '%s' "$out"
+printf '%s' "$meter"
 exit 0
 """
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
@@ -4408,6 +4423,13 @@ def _gh_env():
     return env
 
 
+# #313 pt 2: bound on the per-candidate READY-FOR-REVIEW comment fallback
+# check inside cmd_tickets_status's reduced-authority refresh -- mirrors the
+# existing GraphQL re-attribution bound (`to_check[:50]`) so one repo with an
+# unusually large "mine" slice can never blow the refresh's own budget.
+_HANDOFF_COMMENT_CHECK_LIMIT = 40
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -4559,6 +4581,44 @@ def cmd_tickets_status(args):
                         if owner == user:
                             mine.add(n_num)
                             handed[n_num] = True
+            # #313 pt 2: the `ready-for-review`/`needs-gatekeeper` LABEL alone
+            # is not a reliable hand-off signal -- a fork-no-merge
+            # collaborator's own `gh issue edit --add-label` 403s (no write
+            # access on the upstream fork), and the repo's own
+            # subdev-handoff-label workflow that is SUPPOSED to apply it
+            # instead can itself be broken (live-confirmed for #313:
+            # zbynekdrlik/odoo-erp#3239 carries only `stream:david`, no label
+            # at all, yet has real `READY-FOR-REVIEW:` comments -- tracked as
+            # odoo-erp#2584). The hand-off's PRIMARY signal is that comment
+            # (agents/autopilot-worker.md), which is always postable
+            # regardless of write access; a candidate the label missed is
+            # checked directly against its own comments -- an EXACT per-issue
+            # substring match in Python, never GitHub's tokenized full-text
+            # search (documented elsewhere in this repo to over-match on the
+            # bare words). Bounded so one large slice can never blow the
+            # refresh's own budget; this is a DISPLAY counter (unlike
+            # `core-quals`'s obligation set, which correctly REFUSES rather
+            # than risk over-counting a stop-proof), so a few extra
+            # comment-substring matches are harmless -- showing `gk 0` while
+            # tickets sit genuinely handed off is the actual harm.
+            if slug:
+                unhandled = [n_num for n_num in mine if not handed.get(n_num)]
+                for n_num in unhandled[:_HANDOFF_COMMENT_CHECK_LIMIT]:
+                    raw = _out(["gh", "api",
+                                "repos/%s/issues/%d/comments" % (slug, n_num)],
+                               root)
+                    try:
+                        comments = json.loads(raw)
+                    except (ValueError, TypeError):
+                        comments = []
+                    if not isinstance(comments, list):
+                        continue   # e.g. a bare int -- never a real answer
+                    for c in comments:
+                        body = c.get("body") if isinstance(c, dict) else None
+                        if isinstance(body, str) and \
+                                "ready-for-review" in body.lower():
+                            handed[n_num] = True
+                            break
             gk = sum(1 for n_num in mine if handed.get(n_num))
             entry["open"] = None if failed else len(mine) - gk
             entry["gk"] = None if failed else gk

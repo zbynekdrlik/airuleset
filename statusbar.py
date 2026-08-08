@@ -18,6 +18,7 @@ import calendar
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +33,16 @@ AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
 QUESTIONS_TTL_S = 24 * 3600         # mirror notify._QUESTIONS_TTL_S (map prune TTL)
 CTX_GREEN_MAX = 150_000             # context-cost segment colour thresholds
 CTX_YELLOW_MAX = 400_000            # (raw token count, not %)
+
+# #313 pt 4: headroom reserved for Claude Code's OWN right-edge indicators
+# (the armed-'/goal' glyph "◎ /goal" is the live-evidence one -- a 176-col
+# pane fully consumed by the statusline truncated it clean off the end of
+# the row, twice misread as "the goal died"). Picked generously rather than
+# measured to the pixel: under-reserving repeats that exact incident, while
+# over-reserving costs at most one segment trimmed a little early.
+STATUSLINE_RESERVE_COLS = 20
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _claude_dir(home=None):
@@ -87,13 +98,18 @@ def _stream_split_sfx(cache):
     from the core slice because a sub-dev stream owns them, #164) suffix —
     the identity split idle mode already computes from the SAME cache
     fields. Factored out (#307) so the ACTIVE-RUN render can show the exact
-    same split instead of hiding it behind a combined progress ratio."""
+    same split instead of hiding it behind a combined progress ratio.
+
+    #313 pt 3 REVERSES #164's "0 still renders" call: the user reads a bare
+    '· gk 0'/'· str 0' as noise on every repo where it is routinely zero.
+    Both now hide at 0, exactly like every other zero-value bucket on this
+    line (`skip`, `gkq`) already does — no special case any more."""
     gk = cache.get("gk")
-    if isinstance(gk, int):
+    if isinstance(gk, int) and gk > 0:
         return " \033[38;5;245m· gk %d\033[0m" % gk
     if cache.get("scope") == "core":
         streamy = cache.get("streamy")
-        if isinstance(streamy, int):
+        if isinstance(streamy, int) and streamy > 0:
             return " \033[38;5;245m· str %d\033[0m" % streamy
     return ""
 
@@ -102,16 +118,21 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
     (label shortened 'Issues' -> 'I', #223):
 
-      - 'run N done' + the SAME live 'I N [core]' (+ '· str M' / '· gk M')
-        form idle mode renders, during an ACTIVE autopilot run for this repo
-        (N = tickets carded this run; green once the LIVE backlog is empty).
-        `run` is a DISTINCT label from `I` on purpose (#307): a run's own
-        counter used to render as a combined 'I D/T' ratio — textually and
-        visually identical to the bare live-count form below, and it never
-        showed the core/streamy split — which is how a real 'I 41/103' got
-        misread as "103 tickets on me" instead of a progress ratio. Falls
-        back to the OLD combined 'run D/T' ratio only while the live open
-        count is not yet known (a fresh cache, or a `gh` error).
+      - 'run N/T' (N = done, T = done+remaining, THIS run) + the SAME live
+        'I N [core]' (+ '· str M' / '· gk M') form idle mode renders, during
+        an ACTIVE autopilot run for this repo (green once the LIVE backlog
+        is empty). `run` is a DISTINCT label from `I` on purpose (#307): a
+        run's own counter used to render as a combined 'I D/T' ratio —
+        textually and visually identical to the bare live-count form below,
+        and it never showed the core/streamy split — which is how a real
+        'I 41/103' got misread as "103 tickets on me" instead of a progress
+        ratio. #313 pt 1 brought the RATIO form back (the user rejected the
+        #307-era 'run N done' wording as strictly worse: "to bolo 7/14 ovela
+        lepsie a zrozumitelnejsie") while keeping the `run`-vs-`I` label
+        split #307 introduced it for — the word "done" is simply dropped and
+        the total renders instead. Falls back to the SAME 'run D/T' ratio
+        (unchanged) only while the live open count is not yet known (a fresh
+        cache, or a `gh` error).
       - 'I N' otherwise (open non-autopilot-skip GitHub issues), with the
         SAME '· str M' / '· gk M' split.
       - ''  when unknown (not a git/GitHub repo, gh unavailable, no cache yet).
@@ -160,14 +181,18 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
                     # folded into a ratio: `done` is a historical run counter,
                     # `open_n` is "how many are mine right now" — conflating
                     # them into one total is the exact confusion reported.
+                    # #313 pt 1: the 'run' segment ITSELF renders as a ratio
+                    # (done/total-this-run), just with the word "done" gone —
+                    # `run` stays textually distinct from `I` regardless.
                     color = 40 if open_n == 0 else 75
                     live = "%d core" % open_n if cache.get("scope") == "core" \
                         else "%d" % open_n
-                    return ("\033[38;5;%dmrun %d done\033[0m "
+                    return ("\033[38;5;%dmrun %d/%d\033[0m "
                             "\033[38;5;75mI %s\033[0m%s%s"
-                            % (color, done, live, split_sfx, skip_sfx))
+                            % (color, done, done + remaining, live,
+                               split_sfx, skip_sfx))
                 # No live count yet (fresh cache / gh error) — fall back to
-                # the old combined ratio, still labelled 'run', never 'I'.
+                # the combined ratio, still labelled 'run', never 'I'.
                 color = 40 if remaining == 0 else 75
                 return "\033[38;5;%dmrun %d/%d\033[0m%s" % (
                     color, done, done + remaining, skip_sfx)
@@ -240,7 +265,7 @@ def _tail_usage_from_transcript(path, max_bytes=200_000):
     return model, usage
 
 
-def context_cost_segment(payload):
+def context_cost_segment(payload, show_cost=True):
     """'ctx <size> ~$<cost>' — the CURRENT context size + its STEADY-STATE
     per-turn dollar cost (2026-07-25 cost-fix package, #37; pricing fixed
     same day; the ' · '/'/ťah' separator+suffix dropped, #223). Source:
@@ -251,6 +276,10 @@ def context_cost_segment(payload):
     cache_read + cache_creation tokens (the dominant, resent-every-turn
     cost) — colour-escalates on that RAW count: green <150K
     (CTX_GREEN_MAX), yellow 150-400K, red >400K (CTX_YELLOW_MAX).
+
+    `show_cost=False` renders just 'ctx <size>', dropping the '~$<cost>'
+    suffix — the width-budget trim's last-resort shortening (#313 pt 4,
+    `fit_statusline`), never used by a normal render.
 
     The cost estimate is deliberately `ctx * the model's cache-READ rate`,
     NOT `i*price0 + cw*price1 + cr*price2 + o*price3` (what this exact API
@@ -292,7 +321,9 @@ def context_cost_segment(payload):
         color = 220
     else:
         color = 196
-    return "\033[38;5;%dmctx %s ~$%.2f\033[0m" % (color, _fmt_tokens(ctx), usd)
+    if show_cost:
+        return "\033[38;5;%dmctx %s ~$%.2f\033[0m" % (color, _fmt_tokens(ctx), usd)
+    return "\033[38;5;%dmctx %s\033[0m" % (color, _fmt_tokens(ctx))
 
 
 def _managed_model():
@@ -369,11 +400,18 @@ def questions_segment(cwd, now=None, home=None):
     hluposti"; every map entry carries the asking session's cwd, so the badge
     must attribute questions to their stream):
 
-      - 'Q N'          — pending ❓ asked from THIS cwd (orange, label
-                          shortened 'otazky' -> 'Q', #223)
-      - 'Q N · inde M' — plus M pending in OTHER projects (grey)
-      - 'Q inde M'     — none here, M elsewhere (all grey)
-      - ''             — none anywhere (badge semantics, like `skipped`)
+      - 'Q N'  — pending ❓ asked from THIS cwd (orange, label shortened
+                 'otazky' -> 'Q', #223), hidden at 0 (badge semantics, like
+                 `skipped`).
+      - ''     — none here.
+
+    #313 pt 5 REMOVED the cross-project '· inde M' / 'Q inde M' forms
+    entirely (user: "na co ja potrebujem byt obtazovany ze niekde inde je
+    otazka, ved to si mam riesit tam kde je ta otazka a nie tu" — a pending
+    question anywhere already pings the phone via Discord regardless of
+    which project's footer happens to be on screen, so a second project's
+    footer repeating the count was pure noise, never actionable from there).
+    Only the LOCAL count is computed/rendered now.
 
     Source: ~/.claude/discord-questions.json — notify.record_question adds an
     entry per ❓ ping; the watchdog drops it when the user's reply is routed
@@ -389,27 +427,20 @@ def questions_segment(cwd, now=None, home=None):
     def _same_project(q):
         # either-direction containment: the session may run at the LAUNCH dir
         # (…/odoo) while its ❓ hook recorded a subdir (…/odoo/odoo-slovnormal)
-        # — same project tree = LOCAL, never 'inde' (montalu, 2026-07-22)
+        # — same project tree = LOCAL (there is no other bucket any more).
         q = str(q or "").rstrip("/")
         return bool(here and q) and (
             q == here or q.startswith(here + "/") or here.startswith(q + "/"))
 
-    local = other = 0
+    local = 0
     for v in d.values():
         if not (isinstance(v, dict)
                 and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S):
             continue
         if _same_project(v.get("cwd")):
             local += 1
-        else:
-            other += 1
-    if local and other:
-        return ("\033[38;5;214mQ %d\033[0m \033[38;5;245m· inde %d\033[0m"
-                % (local, other))
     if local:
         return "\033[38;5;214mQ %d\033[0m" % local
-    if other:
-        return "\033[38;5;245mQ inde %d\033[0m" % other
     return ""
 
 
@@ -483,9 +514,13 @@ def subscription_segment(home=None, now=None):
 
 def account_email_segment(home=None):
     """The Claude account's login email (~/.claude.json ->
-    oauthAccount.emailAddress, #223), rendered FAINT -- the point is
-    knowing WHICH account this box is logged in as, not drawing the eye.
-    Fails SILENTLY on any missing/malformed input."""
+    oauthAccount.emailAddress, #223) -- WHICH account this box is logged in
+    as. #313 pt 6 REVERSES the original "rendered FAINT" choice: the dim SGR
+    attribute (\\033[2m) renders as near-invisible on many real terminals
+    (user: "email je tak sivy ze je skoro necitatelny"). A plain 256-color
+    foreground (250 -- a light but solid grey) keeps the same "secondary
+    info, not shouting" intent while staying legible. Fails SILENTLY on any
+    missing/malformed input."""
     try:
         d = _claude_json(home)
         if not isinstance(d, dict):
@@ -493,6 +528,82 @@ def account_email_segment(home=None):
         email = (d.get("oauthAccount") or {}).get("emailAddress")
         if not email or not isinstance(email, str):
             return ""
-        return "\033[2m%s\033[0m" % email
+        return "\033[38;5;250m%s\033[0m" % email
     except Exception:
         return ""
+
+
+def visible_len(s):
+    """Character length ignoring ANSI SGR colour codes -- what a terminal
+    actually renders. Used by the width-budget trim (#313 pt 4)."""
+    return len(_ANSI_RE.sub("", s or ""))
+
+
+def pane_width(run=None):
+    """Live tmux pane width via `$TMUX_PANE` + `tmux display-message` -- the
+    width-budget trim's one live input (#313 pt 4). Returns None (never
+    trim) when TMUX_PANE is unset, tmux is unavailable, or the call fails
+    for any reason -- a statusline segment must never guess a width it
+    cannot actually measure.
+
+    `run` is an injectable subprocess.run-alike for tests: a test must NEVER
+    let this call the REAL tmux binary -- this very box's own real
+    $TMUX_PANE would make the query genuinely succeed, non-deterministically
+    sizing the render against whatever pane the TEST happened to be running
+    inside."""
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    runner = run or subprocess.run
+    try:
+        r = runner(["tmux", "display-message", "-p", "-t", pane,
+                    "#{pane_width}"], capture_output=True, text=True,
+                   timeout=2)
+    except Exception:
+        return None
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def fit_statusline(segs, identity, cm_tag, ctx_full, ctx_short, width):
+    """Join `segs` (never trimmed) with the trailing account-identity block
+    and the caveman tag, using the segment separator '  ' -- dropping the
+    LEAST important pieces first once the visible width would exceed
+    `width` (#313 pt 4):
+
+      1. the account-identity block (email + sub, #313 pt 6 groups them as
+         ONE unit -- "email+sub are first trim candidates when narrow").
+      2. the caveman tag.
+      3. last resort: swap the `ctx` segment's full text (`ctx_full`, with
+         its '~$<cost>' suffix) for the shorter `ctx_short` (just 'ctx
+         <size>').
+
+    `width=None` means the pane width could not be measured -- return the
+    full, untrimmed line; a statusline segment must never guess. `ctx_full`
+    must be one of the elements of `segs` (or absent) -- it is matched by
+    identity, never by position, so the caller doesn't need to track its
+    index."""
+    def _join(show_identity, show_cm, ctx_text):
+        parts = [ctx_text if s == ctx_full else s for s in segs]
+        if show_identity and identity:
+            parts.append(identity)
+        if show_cm and cm_tag:
+            parts.append(cm_tag)
+        return "  ".join(p for p in parts if p)
+
+    line = _join(True, True, ctx_full)
+    if width is None or visible_len(line) <= width:
+        return line
+    line = _join(False, True, ctx_full)          # drop identity first
+    if visible_len(line) <= width:
+        return line
+    line = _join(False, False, ctx_full)          # drop caveman tag next
+    if visible_len(line) <= width:
+        return line
+    if ctx_full and ctx_short:                    # last: shorten ctx
+        line = _join(False, False, ctx_short)
+    return line

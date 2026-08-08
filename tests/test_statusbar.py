@@ -1427,12 +1427,14 @@ class WidthBudget(unittest.TestCase):
             self.assertIsNone(statusbar.pane_width(run=fake_run))
 
     def test_pane_width_none_on_nonzero_exit_or_garbage_stdout(self):
+        def bad_rc(argv, **kw):
+            return unittest.mock.Mock(returncode=1, stdout="176\n")
+
+        def garbage(argv, **kw):
+            return unittest.mock.Mock(returncode=0, stdout="not-a-number\n")
+
         with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}):
-            bad_rc = lambda argv, **kw: unittest.mock.Mock(
-                returncode=1, stdout="176\n")
             self.assertIsNone(statusbar.pane_width(run=bad_rc))
-            garbage = lambda argv, **kw: unittest.mock.Mock(
-                returncode=0, stdout="not-a-number\n")
             self.assertIsNone(statusbar.pane_width(run=garbage))
 
     def test_fit_statusline_untrimmed_when_it_fits(self):
