@@ -3902,6 +3902,32 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), "", who)
 
+    def test_an_unmapped_user_with_inherited_tmux_resolves_to_that_panes_group(self):
+        # #334: documents the ACTUAL misroute mechanism behind the
+        # claude-david regression -- a headless caller (newlevel, unmapped)
+        # whose ANCESTOR shell happens to sit inside an unrelated tmux pane
+        # (group "david", live-reproduced on dev2 via `tmux list-sessions`)
+        # inherits $TMUX unconditionally (tmux propagates it to every child
+        # process, interactive or not) and resolves to THAT pane's group --
+        # zero relationship to who the write's real owner is. This is
+        # DELIBERATELY left unchanged (the rejected alternative in #334's
+        # design comment: no reliable signal distinguishes "genuinely
+        # interactive in this pane" from "inherited $TMUX from an ancestor",
+        # and narrowing the fallback would break the many legitimate hook
+        # callers that correctly rely on this exact inheritance today).
+        # Callers whose notification is NOT "about this pane" must pass an
+        # explicit --owner-name override instead (see cmd_notify's --body
+        # wiring below).
+        class _R:
+            def __init__(self, out):
+                self.stdout = out
+
+        with m.patch.dict(os.environ, {"TMUX": "/tmp/tmux-1000/default,1234,0"},
+                          clear=True), \
+                m.patch.object(self.notify, "_current_user", return_value="newlevel"), \
+                m.patch("notify.subprocess.run", return_value=_R("david-3")):
+            self.assertEqual(self.notify.resolve_owner(), "david")
+
     # --- stream_redirect() (airuleset#212): the SAME map, for a caller
     # resolving SOMEONE/SOMETHING ELSE's raw owner string (watchdog.pane_owner()
     # has no _current_user()/env context of its own to resolve against). ---
@@ -7102,6 +7128,40 @@ class TestDiscordAutopilotNotify(TestCase):
                             "--channel-id", "--kind", "questions"],
                            capture_output=True, text=True, env=env_marek)
         self.assertEqual(r3.stdout, "mthread222")
+
+    def test_cli_body_honors_owner_name_override(self):
+        # #334: an internal/headless caller (codex-bridge's ad-hoc-prod-write
+        # ping) must be able to PIN an explicit owner for a --body send,
+        # bypassing tmux auto-detection entirely -- the real fix for the
+        # claude-david misroute regression. Root cause: --owner-name already
+        # existed as a global CLI flag, but --body never consumed it, so
+        # EVERY --body caller was forced through resolve_owner()'s tmux
+        # fallback with no override available at all. Stripping
+        # AIRULESET_NOTIFY_OWNER/TMUX makes this deterministic regardless
+        # of whatever tmux state this box's own dev session happens to sit
+        # in (per the sibling documenting test above).
+        home = self._env_home()
+        env = {**os.environ, "HOME": home}
+        env.pop("AIRULESET_NOTIFY_OWNER", None)
+        env.pop("TMUX", None)
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--body", "test ping", "--owner-name", "marek",
+                            "--dry-run"], capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("<@444555666> test ping", r.stdout)   # marek's own mention
+        self.assertNotIn("<@111222333>", r.stdout)           # never zbynek's
+
+    def test_cli_body_without_owner_name_falls_back_to_resolve_owner(self):
+        # Non-regression: omitting --owner-name keeps today's EXACT
+        # behavior -- the fix is purely additive, never a default change.
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--body", "hello", "--dry-run"],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("<@111222333> hello", r.stdout)
 
     def test_cli_provision_question_thread_success(self):
         args = m.Mock(provision_question_thread=True, autopilot_done=False,
