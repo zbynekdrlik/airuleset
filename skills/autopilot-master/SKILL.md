@@ -53,7 +53,7 @@ Print the `/goal` line below in a code block, then the arm question, and STOP �
 start dispatching lanes yourself; Step 3 is the loop body the armed /goal runs each turn.
 
 ```
-/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision — nothing parked), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs the LANE SCHEDULER (first lane with workable items wins; the loop NEVER idles while ANY lane has work): LANE 1 REVIEW — any stream's ready-for-review hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, dispatch ONE background autopilot-worker per batch, serial per repo — never a second worker while one runs. LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; 00:00–06:00 Europe/Bratislava defer questions ONLY while other lanes are workable — a NECESSARY question is asked even at night as ❓ NEEDS YOU). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
+/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision — nothing parked), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs the LANE SCHEDULER (first lane with workable items wins; the loop NEVER idles while ANY lane has work): LANE 1 REVIEW — any stream's ready-for-review hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, dispatch a FLEET of PARALLEL isolation:worktree autopilot-workers per round (one per solo ticket or bundle-safe batch, capped 3-5), integrated SERIALLY (one merge at a time, one CI cycle per round, one PR per round where the repo flow has one) — never a second round on this repo while one is still in flight (falls back to the documented serial single-worker shape when worktree isolation is unavailable). LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; 00:00–06:00 Europe/Bratislava defer questions ONLY while other lanes are workable — a NECESSARY question is asked even at night as ❓ NEEDS YOU). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
 ```
 
 End the message with the arm question block (machine question — it neither pings
@@ -99,17 +99,24 @@ flowing. The loop **NEVER idles while ANY lane has work**.
     `❓ ASKED` (ask-and-continue), plain Slovak: okno je otvorené, deploy neprebehne,
     blokuje ho #X/#Y (s témou), fix beží — nechať dobehnúť (odporúčam) / zasiahnuť?
     The user must never wake up to a silently missed window.
-- **LANE 3 CORE** — open non-skip core-slice issues and no `autopilot-worker` for this
-  repo currently running? Assemble the next batch per the `autopilot` skill Step 3
-  (ticket-validator gate per member, bundling gate, ONE background `autopilot-worker`
-  dispatch — **serial per repo**, never a second worker while one runs; a running
-  worker does NOT block lanes 1/2/4, only re-dispatch on this lane). **Each merged
-  ticket fires its own run-card** (the `autopilot-worker` agent does this itself, per
-  `agents/autopilot-worker.md`, once per merged+deploy-verified issue) — never silent
-  (#47). A completed batch in this lane ends with a FULL completion report + `✅ DONE`
-  (never `⏳` — 2026-07-25 revision, `autopilot` skill Step 3 item 5); the MASTER
-  `/goal` still re-fires the next turn regardless, so the scheduler simply
-  re-evaluates all lanes fresh.
+- **LANE 3 CORE** — open non-skip core-slice issues and no `autopilot-worker` round
+  for this repo currently in flight? Assemble the next round per the `autopilot`
+  skill Step 3 (ticket-validator gate per member, bundling gate, a FLEET of PARALLEL
+  `isolation: "worktree"` `autopilot-worker`s per round — one per solo ticket or
+  bundle-safe batch, capped 3–5). The supervisor integrates the whole round
+  **SERIALLY** — one merge at a time, one CI cycle per round, and (per the
+  `autopilot` skill's own repo-flow policy, #317) ONE `dev`→`main` PR per round for a
+  PR-flow repo, or a direct `push` to `main` for a local-merge repo like this one —
+  never a second round on this repo while one is still in flight; falls back to the
+  documented serial single-worker shape when worktree isolation is unavailable OR
+  every remaining round candidate overlaps a batch already claimed this round. A
+  round in flight does NOT block lanes 1/2/4, only re-dispatch on this lane.
+  **Each merged ticket fires its own run-card** (the `autopilot-worker` agent does
+  this itself, per `agents/autopilot-worker.md`, once per merged+deploy-verified
+  issue) — never silent (#47). A completed round in this lane
+  ends with a FULL completion report + `✅ DONE` (never `⏳` — 2026-07-25 revision,
+  `autopilot` skill Step 3 item 5); the MASTER `/goal` still re-fires the next turn
+  regardless, so the scheduler simply re-evaluates all lanes fresh.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via
@@ -126,8 +133,10 @@ flowing. The loop **NEVER idles while ANY lane has work**.
   ticket, or the window opening immediately becomes the next pass's work. End held
   turns `⏳ WORKING`.
 
-**Collision guards:** one `autopilot-worker` per repo (LANE 3); one release in flight
-per instance (LANE 2); a review (LANE 1) and a running core worker coexist — the review
+**Collision guards:** one `autopilot-worker` round (a fleet of up to 3–5 parallel
+worktree-isolated workers, integrated serially) per repo (LANE 3) — never a second
+round dispatched while one is still in flight; one release in flight per
+instance (LANE 2); a review (LANE 1) and a running core round coexist — the review
 object is the pinned slice, per the parallel-run rule in `process-subdev`.
 
 **Single-lane commands stay:** `/process-subdev <stream>` and `/autopilot` remain valid
