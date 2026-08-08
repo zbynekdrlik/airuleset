@@ -4977,12 +4977,49 @@ class TestTmuxScrollbackKeybinds(TestCase):
     `TMUX_SCROLLBACK_KEYBINDS` is the single source of truth for the three
     `bind-key` argv lists, shared verbatim by both the rendered conf block
     and the live-apply calls (TestTmuxHistoryLimit above) -- this class
-    locks that sharing so the two can never silently drift apart."""
+    locks that sharing so the two can never silently drift apart.
+
+    #338: CC v2.1.226 shipped a NATIVE transcript viewer (Ctrl+O, reading
+    the session's own clean internal history rather than the leaky tmux
+    scrollback #267's own bind only ever scrolled INTO). The S-PageUp entry
+    is now CONDITIONAL: inside a pane whose `pane_current_command` is
+    literally `claude` it sends `C-o` (opens the native viewer -- PgUp/PgDn
+    already work natively once it's open, no further wiring needed);
+    everywhere else it falls through to the ORIGINAL, byte-identical
+    `copy-mode -eu`. This is done via tmux's own `if -F` (alias of
+    `if-shell -F`) conditional dispatch -- verified LIVE (not merely
+    read from docs) via a real attached pty client feeding the real xterm
+    CSI bytes for Shift+PageUp (`\\x1b[5;2~`) against two different real
+    panes bound to the SAME key: a pane whose `pane_current_command` was
+    `claude` (a real attached-pty fixture, `bash -c 'stty raw -echo; exec
+    -a claude cat > <file>'` -- `stty raw -echo` is load-bearing, since a
+    canonical-mode pty buffers a lone control byte with no trailing
+    newline and never delivers it) received exactly one byte `0x0f`
+    (Ctrl+O); a plain `sleep` pane on the SAME bind entered copy-mode
+    (`#{pane_in_mode}` flipped 0->1), unchanged. `tmux send-keys -t <pane>`
+    was deliberately never used to prove the BINDING itself -- it bypasses
+    key-table dispatch entirely and writes straight into the pty, which
+    proves nothing about whether a real keypress reaches the bound
+    command (only a genuinely attached client's own input does). Also
+    confirmed live: the rendered (`_tmux_conf_quote`d) conf line starts
+    cleanly from a COLD conf file, and live-applies cleanly against an
+    already-running server, on BOTH the fleet's real deployed
+    `/usr/bin/tmux` (3.4) and `/usr/local/bin/tmux` (3.7b) -- no
+    crash-at-parse-time hazard of the `window-size manual` (#241) kind.
+    `S-NPage` (Shift+PageDown) is deliberately left untouched -- it has no
+    existing root-table bind, and the native viewer's own PgDn already
+    works once it's open."""
 
     def test_rendered_block_lines_are_built_from_the_shared_constant(self):
+        # #338: the render path now applies `_tmux_conf_quote` per token
+        # (never a bare `" ".join`) -- required the moment ANY argv entry
+        # can contain a multi-word nested-command token (the new S-PageUp
+        # entry's `"send-keys C-o"` / `"copy-mode -eu"`), matching the
+        # quoting `popup_lines` (TMUX_POPUP_BIND_ARGVS) already uses.
         text = airuleset.render_tmux_history_block()
         for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS:
-            self.assertIn(" ".join(argv), text)
+            expected = " ".join(airuleset._tmux_conf_quote(tok) for tok in argv)
+            self.assertIn(expected, text)
 
     def test_live_apply_argvs_are_built_from_the_shared_constant(self):
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
@@ -4993,43 +5030,71 @@ class TestTmuxScrollbackKeybinds(TestCase):
         # #289: the popup binds (TMUX_POPUP_BIND_ARGVS) are live-applied
         # AFTER the scrollback keybinds -- slice to exactly the scrollback
         # portion so this test stays scoped to TMUX_SCROLLBACK_KEYBINDS
-        # alone (TestTmuxPopupBind below locks the popup portion).
+        # alone (TestTmuxPopupBind below locks the popup portion). Live
+        # apply passes real argv straight to subprocess -- no shell, no
+        # quoting -- so this stays a plain equality check even for #338's
+        # new multi-word-token entry.
         n = len(airuleset.TMUX_SCROLLBACK_KEYBINDS)
         keybind_calls = calls[2:2 + n]
         self.assertEqual(len(keybind_calls), n)
         for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
             self.assertEqual(call, ["tmux"] + argv)
 
-    def test_shift_pageup_enters_copy_mode_with_scroll_up(self):
-        # The exact bind this ticket's own live pty-client verification
-        # used: `-eu` (auto-exit at the bottom, scroll up one page on
-        # entry). Locking the literal flag spelling here means a future
-        # accidental `-e -u` split (two argv entries) or a dropped flag
-        # would be caught by this test even without a live tmux server.
+    def test_shift_pageup_dispatches_to_ctrl_o_in_claude_panes_else_copy_mode(self):
+        # #338 replaces the old unconditional bind (locked here through
+        # 8-8-2026) with a conditional `if -F` dispatch, live-verified (see
+        # the class docstring) to evaluate PER KEYPRESS against the
+        # CURRENT pane -- never once at conf-parse/bind time. The fallback
+        # command stays the exact, byte-identical `copy-mode -eu` #267
+        # shipped (auto-exit at the bottom, scroll up one page on entry),
+        # so every non-claude pane's behaviour is completely unchanged.
         argv = airuleset.TMUX_SCROLLBACK_KEYBINDS[0]
-        self.assertEqual(argv, ["bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
+        self.assertEqual(argv, [
+            "bind-key", "-n", "S-PageUp", "if", "-F",
+            "#{==:#{pane_current_command},claude}",
+            "send-keys C-o", "copy-mode -eu",
+        ])
 
     def test_shift_pagedown_is_bound_in_both_copy_mode_key_tables(self):
         # The managed conf pins neither `mode-keys` (vi vs emacs), so
         # Shift+PageDown must work regardless of which one a box/user ends
-        # up on -- bound in BOTH `copy-mode` and `copy-mode-vi`.
+        # up on -- bound in BOTH `copy-mode` and `copy-mode-vi`. #338's own
+        # S-PageUp entry uses `-n` (root table), not `-T`, so it is
+        # structurally excluded from this filter without any change here.
         tables = {argv[2] for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS
                   if argv[0] == "bind-key" and argv[1] == "-T"}
         self.assertEqual(tables, {"copy-mode", "copy-mode-vi"})
 
-    def test_no_argv_element_contains_whitespace(self):
-        # ADVERSARIAL-REVIEW FINDING (#267, MINOR -- F6): the rendered conf
-        # line is built with a bare `" ".join(argv)` -- the shared-constant
-        # guarantee only holds for TOKENS, not MEANING, if a future keybind
-        # ever needed a quoted multi-word argument (e.g. a `search-forward
-        # "foo bar"` command): the conf line would parse as extra words
-        # while the live-apply argv (passed straight to subprocess, no
-        # shell involved) would stay correct -- a silent divergence despite
-        # sharing one source. None of the CURRENT entries need this, so
-        # lock it structurally rather than leave it to be noticed later.
-        for argv in airuleset.TMUX_SCROLLBACK_KEYBINDS:
+    def test_no_argv_element_contains_whitespace_except_the_nested_commands(self):
+        # ADVERSARIAL-REVIEW FINDING (#267, MINOR -- F6) predicted exactly
+        # this: "if a future keybind ever needed a quoted multi-word
+        # argument ... lock it structurally rather than leave it to be
+        # noticed later." #338 is that future keybind -- its `if -F`
+        # dispatch needs TWO multi-word nested-command tokens
+        # (`"send-keys C-o"`, `"copy-mode -eu"`) as single tmux argv
+        # elements. The invariant survives, narrowed: every OTHER entry
+        # (S-PageDown x2) still carries zero whitespace, and the new
+        # entry's multi-word tokens are asserted PRESENT here (so a future
+        # accidental re-split into separate argv elements is caught) --
+        # their CORRECT quoting in the rendered conf line is locked
+        # separately by test_multiword_scrollback_tokens_are_conf_quoted.
+        s_pageup = airuleset.TMUX_SCROLLBACK_KEYBINDS[0]
+        others = airuleset.TMUX_SCROLLBACK_KEYBINDS[1:]
+        for argv in others:
             for token in argv:
                 self.assertNotIn(" ", token, argv)
+        multiword = [tok for tok in s_pageup if " " in tok]
+        self.assertEqual(multiword, ["send-keys C-o", "copy-mode -eu"])
+
+    def test_multiword_scrollback_tokens_are_conf_quoted(self):
+        # The two multi-word S-PageUp nested-command tokens must survive
+        # the conf render as SINGLE tmux words -- a bare, unquoted
+        # `send-keys C-o` in the rendered line would parse as FOUR separate
+        # tmux argv elements ("if", "-F", ..., "send-keys", "C-o", ...),
+        # silently corrupting the `if -F` command's own argument count.
+        text = airuleset.render_tmux_history_block()
+        self.assertIn('"send-keys C-o"', text)
+        self.assertIn('"copy-mode -eu"', text)
 
 
 class TestTmuxConfQuote(TestCase):
