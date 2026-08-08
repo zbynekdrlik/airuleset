@@ -7152,6 +7152,45 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("<@444555666> test ping", r.stdout)   # marek's own mention
         self.assertNotIn("<@111222333>", r.stdout)           # never zbynek's
 
+    def test_cli_body_owner_name_normalizes_denormalized_input(self):
+        # #334 adversarial-review MINOR-1: the normalization step is
+        # mutation-invisible when every test only ever passes an
+        # already-normalized value. A denormalized --owner-name (mixed
+        # case + trailing space, mirroring test_cli_provision_question_
+        # thread_normalizes_owner_name's own shape) must still resolve to
+        # marek's own mention -- not silently miss the env key and fall
+        # to the shared channel.
+        home = self._env_home()
+        env = {**os.environ, "HOME": home}
+        env.pop("AIRULESET_NOTIFY_OWNER", None)
+        env.pop("TMUX", None)
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--body", "test ping", "--owner-name", "Marek ",
+                            "--dry-run"], capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("<@444555666> test ping", r.stdout)
+
+    def test_cli_body_owner_name_that_normalizes_to_empty_is_refused(self):
+        # #334 adversarial-review MINOR-2: a NON-EMPTY --owner-name that
+        # normalizes to the empty string (e.g. punctuation-only) must be
+        # REFUSED loudly, never silently mangled into owner="" -- which
+        # would skip resolve_owner() entirely (owner="" is not None) and
+        # send mention-less to the shared channel, even overriding an
+        # otherwise-correct AIRULESET_NOTIFY_OWNER. Mirrors #198's
+        # "validate and refuse, never mangle" rule and matches
+        # --provision-question-thread's own loud-failure shape.
+        home = self._env_home()
+        env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "marek"}
+        env.pop("TMUX", None)
+        r = subprocess.run([sys.executable, str(self.AIRULESET), "notify",
+                            "--body", "test ping", "--owner-name", "!!!",
+                            "--dry-run"], capture_output=True, text=True,
+                           env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("owner-name", r.stderr.lower())
+
     def test_cli_body_without_owner_name_falls_back_to_resolve_owner(self):
         # Non-regression: omitting --owner-name keeps today's EXACT
         # behavior -- the fix is purely additive, never a default change.
