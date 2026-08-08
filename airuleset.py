@@ -4684,7 +4684,8 @@ def cmd_notify(args):
       --body "<markdown>"  send arbitrary markdown (the general primitive).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
-                        notification_channel, resolve_owner, send)
+                        notification_channel, resolve_owner, resolve_questions_channel,
+                        send)
 
     if getattr(args, "record_question", False):
         # Record a ❓ ping's Discord message id → the session that asked, so the
@@ -4730,8 +4731,17 @@ def cmd_notify(args):
     if getattr(args, "channel_id", False):
         # #296: --kind questions resolves the owner's SEPARATE questions
         # thread; omitted/--kind default is the pre-#296 behaviour unchanged.
-        sys.stdout.write(notification_channel(kind=getattr(args, "kind", None)
-                                              or "default"))
+        # #330: "questions" goes through resolve_questions_channel(), which
+        # additionally makes a not-yet-provisioned "-q" thread LOUD (a
+        # distinguishable delivery-log line, not an indistinguishable "sent")
+        # and SELF-HEALING (a guarded background provision attempt) instead
+        # of silently falling back forever — the exact gap that let
+        # gatekeeper's ❓ history route to the wrong thread with zero trace.
+        kind = getattr(args, "kind", None) or "default"
+        if kind == "questions":
+            sys.stdout.write(resolve_questions_channel())
+        else:
+            sys.stdout.write(notification_channel(kind=kind))
         return
 
     if getattr(args, "mirror_owners", False):
@@ -4748,14 +4758,29 @@ def cmd_notify(args):
         # and persist it under a dead .env key
         # ("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK _Q") that no reader ever
         # resolves — a silent misprovision, not a loud refusal.
-        from notify import provision_question_thread, resolve_owner
+        from notify import log_delivery, provision_question_thread, resolve_owner
         owner_name = getattr(args, "owner_name", None)
         owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
                 if owner_name else resolve_owner())
-        tid = provision_question_thread(owner)
+        # #330: --find-only is the AUTOMATIC self-heal's own mode (never
+        # auto-CREATE unattended) — omitted (the human-typed CLI default)
+        # keeps calling provision_question_thread(owner) with NO extra
+        # kwarg, so its call signature is byte-identical to before #330 for
+        # every EXISTING caller.
+        find_only = bool(getattr(args, "find_only", False))
+        tid = (provision_question_thread(owner, create=False) if find_only
+              else provision_question_thread(owner))
         if tid:
             sys.stdout.write(tid)
             return
+        # #330 F7: the automatic background self-heal runs fully detached
+        # (stdout/stderr both DEVNULL'd) — without this, its own failure
+        # was completely invisible, forever, even though `resolve_questions_
+        # channel`'s own "fallback" line already told the operator a self-heal
+        # WAS attempted. This closes the loop: did it work?
+        log_delivery("provision-failed", kind="questions", key=owner,
+                     reason=("find-only, none visible" if find_only
+                             else "find-and-create both failed"))
         print("notify: could not provision the questions thread for owner=%r"
              % owner, file=sys.stderr)
         sys.exit(1)
@@ -10008,6 +10033,13 @@ def main():
                                "the owner's questions thread claude-<owner>-q into "
                                "the local .env; prints the thread id. Owner from "
                                "--owner-name or the resolved tmux owner")
+    p_notify.add_argument("--find-only", dest="find_only", action="store_true",
+                          help="With --provision-question-thread (#330): only FIND "
+                               "an existing claude-<owner>-q thread, never CREATE "
+                               "one. The AUTOMATIC background self-heal's own mode "
+                               "(never wielded unattended) — the explicit, "
+                               "human-typed CLI action stays find-then-CREATE "
+                               "unless this flag is also given.")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")

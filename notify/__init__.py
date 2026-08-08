@@ -22,8 +22,11 @@ unknown owner, or a network error degrades to "no mention / no send", never rais
 """
 import os
 import re
+import sys
 import json
 import time
+import tempfile
+import contextlib
 import subprocess
 import urllib.request
 
@@ -279,6 +282,184 @@ def notification_channel(env=None, owner=None, kind="default"):
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
 
 
+# Min seconds between background provision-thread spawns, PER OWNER (#330) —
+# mirrors statusbar.SPAWN_GUARD_S's own marker-mtime shape, just a wider
+# window: provisioning is a one-time-until-persisted repair, not a routine
+# per-render refresh, so there is no benefit to retrying every few seconds.
+_QTHREAD_SPAWN_GUARD_S = 300
+
+
+def _qthread_spawn_guard_path(owner):
+    return os.path.join(_claude_dir(), "notify-qthread-spawn", owner)
+
+
+def _qthread_spawn_claim(guard):
+    """Atomically CLAIM `guard` for this call — True iff THIS call may
+    proceed to spawn. #330 adversarial-review F2 (MAJOR): the original
+    check-then-create was a plain `os.path.exists`+`getmtime` TEST followed
+    by a SEPARATE `open()` — a classic TOCTOU race. Measured live: 8
+    concurrent callers for the SAME owner produced 4-5 real spawns, not 1,
+    which both feeds F1 (many concurrent `_env_upsert` writers) and can
+    fork a SECOND real Discord thread — the exact duplicate-thread bug
+    #296's own find-before-create was built to prevent.
+
+    `O_CREAT|O_EXCL` is atomic at the OS level: of any number of racing
+    callers, AT MOST ONE can ever win a fresh path. On a STALE guard
+    (older than `_QTHREAD_SPAWN_GUARD_S` — a genuine retry window), this
+    reclaims it via unlink-then-recreate, itself gated by a SECOND
+    `O_CREAT|O_EXCL` — so at most one of any number of callers racing the
+    reclaim wins that too. Residual, accepted risk: a caller mid-reclaim
+    (between its own `unlink` and `open`) can theoretically overlap with a
+    caller that had not yet made its OWN first `open` attempt, admitting
+    two winners in that narrow window instead of one — low-consequence
+    now that F1 makes concurrent `_env_upsert` writers safe (worst case:
+    one harmless duplicate, idempotent `find`-before-`create`
+    provisioning attempt, never file corruption)."""
+    try:
+        os.makedirs(os.path.dirname(guard), exist_ok=True)
+    except OSError:
+        return False
+    try:
+        os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError as exc:
+        if not isinstance(exc, FileExistsError):
+            return False
+        # FileExistsError: a sibling call already holds the guard -- fall
+        # through to the staleness/reclaim check below instead of refusing
+        # outright (that is the whole reason a stale guard is reclaimable).
+    try:
+        if time.time() - os.path.getmtime(guard) < _QTHREAD_SPAWN_GUARD_S:
+            return False   # fresh: a sibling call already owns this window
+    except OSError:
+        return False       # can't even stat it -- treat as "someone else has it"
+    try:
+        os.unlink(guard)
+        os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError:
+        return False        # lost the reclaim race -- another caller wins
+
+
+def _spawn_provision_question_thread(owner):
+    """Kick a DETACHED, background `notify --provision-question-thread
+    --find-only` for `owner` (#330) — guarded by `_qthread_spawn_claim`
+    (mirrors `statusbar._spawn_refresh`'s own marker-mtime GUARD shape, now
+    made ATOMIC — no new mechanism) so a burst of ❓ deliveries for the
+    same not-yet-provisioned owner spawns at most one attempt per
+    `_QTHREAD_SPAWN_GUARD_S`. `--find-only` (#330 F3): the AUTOMATIC,
+    unattended self-heal must never auto-CREATE a brand-new Discord thread
+    — only pick up one a human (or another box) already made; the
+    explicit, human-typed CLI action keeps find-then-CREATE. Never raises:
+    a failure to even SPAWN the attempt just means the box stays on the
+    (already safe, already logged) fallback a little longer — never a
+    lost ping, since the delivery this rides alongside has ALREADY been
+    resolved by the caller using the same fallback channel it always
+    has."""
+    if not _qthread_spawn_claim(_qthread_spawn_guard_path(owner)):
+        return
+    # os.path.realpath (not abspath) mirrors statusbar._spawn_refresh's own
+    # Path(__file__).resolve() precedent verbatim — follows a symlink to
+    # this module, should one ever exist (#330 adversarial-review F8,
+    # THEORETICAL: unreached today, since notify/ is a real directory in
+    # every checkout and no install/push step symlinks it).
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "airuleset.py")
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "notify", "--provision-question-thread",
+             "--owner-name", owner, "--find-only"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        # Widened from OSError to Exception (#330 adversarial-review F8):
+        # Popen can also raise ValueError (an embedded NUL, a bad argument
+        # combination) or UnicodeEncodeError — THEORETICAL today (every
+        # real caller reaches `owner` via resolve_owner()'s own
+        # `[a-z0-9]`-only sanitizing regex before it ever gets here), but
+        # this is the ONE function that must NEVER raise into the live ❓
+        # delivery path it rides alongside, matching
+        # `statusbar._spawn_refresh`'s own `except Exception` precedent.
+        # Could not even LAUNCH the self-heal attempt — the fallback
+        # delivery this rides alongside already happened safely (see
+        # resolve_questions_channel); log the degraded state instead of
+        # guessing whether a retry helps.
+        log_delivery("spawn-error", kind="questions", key=owner, reason=repr(exc))
+
+
+def resolve_questions_channel(env=None, owner=None, spawn=None):
+    """The channel id a REAL ❓ delivery should POST to (#330) — the single
+    call site `--channel-id --kind questions` (and so
+    `hooks/notify-discord-send.sh`'s `emit_one()`, the ONLY path that ever
+    delivers a genuine question) should use, in place of calling
+    `notification_channel(kind="questions")` directly.
+
+    The RETURNED value is byte-identical to `notification_channel`'s own —
+    this never changes WHICH channel a fallback delivery lands in, only
+    whether the fallback is silent. When the owner's `-q` thread IS already
+    configured on this box (the fast, common path — dev1, and any box
+    someone has run `--provision-question-thread` on), this is a pure,
+    zero-network read with NO side effect at all, identical to before.
+
+    Only when the owner's `_Q` key is genuinely ABSENT locally does this
+    additionally (1) write a LOUD, DISTINGUISHABLE delivery-log line
+    (`status="fallback"`, `reason="q-thread-not-provisioned-on-this-host"`)
+    — so a silent fallback (100% of gatekeeper's ❓ history, live-confirmed
+    #330) is a `grep fallback notify-delivery.log` away instead of hiding
+    inside an identical `sent` line — and (2) kick a GUARDED, DETACHED
+    background attempt (`_spawn_provision_question_thread`, default; a test
+    double via `spawn=`) to provision it, so the NEXT ❓ for that owner on
+    that box self-heals with no manual per-box step ever needed again.
+
+    A fully SYNCHRONOUS provisioning attempt before falling back was
+    considered and rejected here: `find_owner_question_thread` /
+    `create_owner_question_thread` can need up to 3-5 sequential Discord
+    REST round-trips (`_discord_api`'s own per-call timeout is 6s) against a
+    Stop-hook budget of only 15s total for `notify-discord-pending.sh`
+    (`settings/hooks.json`) — a budget the EXISTING code already spends ~3s
+    of on its own pre-send settle sleep plus up to 5s on the real POST's own
+    `--max-time`. Blocking the in-flight delivery on that risks the Stop
+    hook itself timing out and the ❓ never reaching the user at all —
+    strictly worse than today's silent-but-safe fallback, for a device whose
+    entire purpose is guaranteeing a genuine question always reaches the
+    phone.
+
+    Gated on `bot_token(env)` being present (#330 round-2 adversarial
+    review MINOR 6): a box with NO Discord bot token at all is ALREADY
+    going to fail delivery for a more fundamental reason
+    (`notify-discord-send.sh`'s own pre-existing `no-token` check) — a
+    "fallback ... q-thread-not-provisioned" line on top of that points the
+    operator at the wrong repair (`check_discord_notify_config()`'s job,
+    not a `-q` thread), and the self-heal spawn would be doomed before its
+    first network call anyway."""
+    env = _read_env() if env is None else env
+    owner = resolve_owner() if owner is None else owner
+    chan = notification_channel(env=env, owner=owner, kind="questions")
+    # The whole log+spawn side effect is wrapped so a genuinely unexpected
+    # failure here can NEVER raise into the caller — this function sits on
+    # the live ❓ delivery's critical path, and `chan` above has ALREADY
+    # been resolved by the time this runs (#330 round-1 F8's own "must
+    # never raise into the live ❓ path" principle, applied structurally
+    # rather than by per-call inspection).
+    try:
+        if owner and bot_token(env):
+            configured = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()
+                                  + "_Q") or "").strip()
+            if not configured:
+                log_delivery("fallback", kind="questions", key=owner,
+                             reason="q-thread-not-provisioned-on-this-host")
+                (spawn if spawn is not None
+                 else _spawn_provision_question_thread)(owner)
+    except Exception as exc:
+        # stderr only — never log_delivery() itself here, to avoid a
+        # failure IN reporting the failure. `chan` is already resolved and
+        # returned below regardless; this side effect is purely diagnostic.
+        print("resolve_questions_channel: self-heal side effect failed: %r"
+             % exc, file=sys.stderr)
+    return chan
+
+
 # --------------------------------------------------------------------------- #
 # #296 -- provisioning the per-owner QUESTIONS thread (claude-<owner>-q).
 #
@@ -412,10 +593,20 @@ def _env_upsert(path, key, value):
     (`errors="replace"` — this file also holds `DISCORD_BOT_TOKEN`, so
     falling back to an EMPTY line list on a decode wobble would silently
     destroy every other key instead of just this one). The write is
-    ATOMIC (tmp file + `os.replace`, mirroring `_save_questions()` in this
-    same module) — a crash mid-write can never leave the token file half
-    truncated. Returns True on success, False on any I/O failure. Never
-    raises."""
+    ATOMIC (a per-call UNIQUE tmp file + `os.replace`, mirroring
+    `_save_questions()`'s own atomic shape in this same module) — a crash
+    mid-write can never leave the token file half truncated, and (#330
+    adversarial-review F1, CRITICAL) two CONCURRENT callers can never
+    interleave either: the original implementation shared ONE FIXED tmp
+    path (`path + ".tmp"`) across every caller, so a later writer's
+    `os.replace` could publish an EARLIER writer's still-being-written
+    (truncated/EMPTY) file, destroying every key including
+    `DISCORD_BOT_TOKEN` — measured live at ~3.2% per upsert under 2
+    concurrent writers. `tempfile.mkstemp`, in the SAME directory as
+    `path` (so `os.replace` stays an atomic same-filesystem rename), gives
+    every call a collision-proof name — no caller can ever observe or
+    publish another caller's in-progress write. Returns True on success,
+    False on any I/O failure. Never raises."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
@@ -434,16 +625,33 @@ def _env_upsert(path, key, value):
             if lines and not lines[-1].endswith("\n"):
                 lines[-1] += "\n"
             lines.append("%s=%s\n" % (key, value))
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(lines)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(path) or ".",
+            prefix=os.path.basename(path) + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+            os.replace(tmp, path)
+        except OSError:
+            # #330 round-2 adversarial review MINOR 3: the OLD fixed tmp
+            # name (`path + ".tmp"`) leaked at most ONE stray file on a
+            # failed write (silently overwritten by the next successful
+            # call); the per-call UNIQUE name this function now uses (the
+            # F1 fix) leaks a NEW orphaned file on every failure instead.
+            # Best-effort cleanup on the way out — the ORIGINAL failure is
+            # re-raised and handled (-> False) by the outer except below;
+            # a failure to even unlink the orphan is not worth its own
+            # report on top of that.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         return True
     except OSError:
         return False
 
 
-def provision_question_thread(owner, env=None, env_path=None, http=None):
+def provision_question_thread(owner, env=None, env_path=None, http=None,
+                              create=True):
     """Idempotently ENSURE `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` is
     configured for `owner` (#296): returns the EXISTING id unchanged (zero
     network calls) when already set; otherwise FINDS an existing
@@ -453,7 +661,17 @@ def provision_question_thread(owner, env=None, env_path=None, http=None):
     appends the key to the local .env (`_env_upsert`). Returns the id on
     success, "" on any failure — never raises. A one-time, explicit
     provisioning action (CLI: `notify --provision-question-thread`), NOT
-    wired into every `push`/`install`."""
+    wired into every `push`/`install`.
+
+    `create=False` (#330) limits this to the FIND half only — never POSTs
+    a new thread. This is what the AUTOMATIC background self-heal
+    (`_spawn_provision_question_thread`) passes, so an unattended,
+    detached, periodic retry can only ever pick up a `-q` thread a HUMAN
+    (or another box) already created, never spin one up on its own —
+    an unsupervised auto-CREATE risks a duplicate thread whenever a
+    transient network hiccup makes `find_owner_question_thread` return ""
+    even though the thread genuinely exists. The explicit CLI keeps
+    `create=True` (its pre-#330 default) completely unchanged."""
     if not owner:
         return ""
     path = env_path if env_path is not None else _env_path()
@@ -462,8 +680,9 @@ def provision_question_thread(owner, env=None, env_path=None, http=None):
                 or "").strip()
     if existing:
         return existing
-    new_id = (find_owner_question_thread(env, owner, http=http)
-              or create_owner_question_thread(env, owner, http=http))
+    new_id = find_owner_question_thread(env, owner, http=http)
+    if not new_id and create:
+        new_id = create_owner_question_thread(env, owner, http=http)
     if not new_id:
         return ""
     _env_upsert(path, "DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q",
