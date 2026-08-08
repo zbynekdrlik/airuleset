@@ -9,6 +9,7 @@ typed + submitted. Safety gates: bare empty prompt only (never over user
 text), never when a goal is already armed (`◎ /goal` in the statusline),
 never into a busy pane, one arm per pane per window (dedup)."""
 
+import os
 import re
 import sys
 import time
@@ -1130,6 +1131,138 @@ class TestGoalAutoarmVirginCandidate(unittest.TestCase):
                             templates_path=self.templates_path, dry_run=True)
         self.assertFalse(tmux.typed())
         self.assertTrue(any("READY" in ln for ln in logs), logs)
+
+    def test_two_panes_sharing_one_cwd_refuse_the_ambiguous_pairing(self):
+        # #320-review MAJOR-2 -- `find_active_transcript` resolves the
+        # NEWEST transcript for a cwd regardless of which pane actually
+        # hosts it; with two live panes sharing one cwd, arming EITHER one
+        # off that shared lookup can type into the WRONG pane. `go()`'s
+        # FakeTmux always reports exactly one pane, so this drives
+        # `goal_autoarm` directly with a REAL two-pane list-panes reply.
+        self._write([])
+
+        class TwoPaneTmux(FakeTmux):
+            def __call__(self, argv, timeout=8):
+                j = " ".join(argv)
+                if "list-panes" in j:
+                    return ("%1\tclaude\t" + VIRGIN_CWD + "\n"
+                            "%2\tclaude\t" + VIRGIN_CWD)
+                return super().__call__(argv, timeout)
+
+        tmux = TwoPaneTmux(NO_QUESTION_PANE)
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            logs = wd.goal_autoarm(time.time(), tmux, {},
+                                   projects_dir=self.tmp.name,
+                                   templates_path=self.templates_path)
+        self.assertFalse(tmux.typed(), logs)
+
+    def test_a_second_pane_in_a_different_cwd_still_arms_normally(self):
+        # the ambiguity guard must be scoped to the CWD, never trip on an
+        # unrelated pane elsewhere.
+        self._write([])
+
+        class TwoCwdTmux(FakeTmux):
+            def __call__(self, argv, timeout=8):
+                j = " ".join(argv)
+                if "list-panes" in j:
+                    return ("%1\tclaude\t" + VIRGIN_CWD + "\n"
+                            "%2\tclaude\t/home/x/devel/other")
+                return super().__call__(argv, timeout)
+
+        tmux = TwoCwdTmux(NO_QUESTION_PANE)
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            wd.goal_autoarm(time.time(), tmux, {}, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_a_copy_mode_pane_never_pays_the_full_file_scan(self):
+        # #320-review MAJOR-3 -- `pane_in_mode` must be checked BEFORE the
+        # expensive scan; a pane parked in copy-mode used to re-pay the
+        # WHOLE-transcript read every single sweep, forever, since neither
+        # cache is written on that return path.
+        self._write([])
+        calls = []
+        real = wd._goal_never_armed
+
+        def spy(tpath):
+            calls.append(tpath)
+            return real(tpath)
+
+        class InModeTmux(FakeTmux):
+            def __call__(self, argv, timeout=8):
+                j = " ".join(argv)
+                if "pane_in_mode" in j:
+                    return "1"
+                return super().__call__(argv, timeout)
+
+        tmux = InModeTmux(NO_QUESTION_PANE)
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"), \
+             m.patch.object(wd, "_goal_never_armed", side_effect=spy):
+            wd.goal_autoarm(time.time(), tmux, {}, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertEqual(calls, [], "a copy-mode candidate must never reach "
+                                    "the full-file scan")
+
+    def test_an_already_armed_footer_with_no_marker_is_never_pasted_over(self):
+        # #320-review MINOR-8 -- CC can arm WITHOUT writing any transcript
+        # marker (the same open mystery #320's own dev1 forensics surfaced,
+        # three times in one day); a session like that reads as
+        # transcript-virgin but is NOT actually goal-less.
+        self._write([])
+        armed_pane = NO_QUESTION_PANE.replace(
+            "  ctx ███░\n", "  ctx ███░  ◎ /goal active (1m)\n")
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(armed_pane, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_a_broken_authority_lookup_degrades_loudly_not_silently(self):
+        # #320-review MINOR-6 -- an authority/template mismatch must LOG
+        # its degraded mode (mirroring the `backlog_marker_gate` sibling
+        # import), never disable the whole path with zero journal trace.
+        self._write([])
+        with m.patch.object(airuleset, "resolve_authority",
+                           side_effect=RuntimeError("boom")):
+            tmux, logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("degraded" in ln for ln in logs), logs)
+
+
+class TestGoalNeverArmedReadFailure(unittest.TestCase):
+    """#320-review MAJOR-1 (fresh-context adversarial review, executed
+    proof) -- `scan_goal_markers` fails SAFE on a read error by returning
+    `(off, None)`, byte-identical to "read fine, genuinely found nothing"
+    -- so `_goal_never_armed` needs an INDEPENDENT readability check before
+    trusting a `mark is None` result as "virgin". Without it, a deleted or
+    permission-flipped transcript (including one that DOES carry a real
+    `Goal cleared:` marker the read simply could not reach) read as
+    virgin -- the #170-critical direction, wrong."""
+
+    def test_nonexistent_path_is_not_virgin(self):
+        self.assertFalse(wd._goal_never_armed("/nonexistent/path-320.jsonl"))
+
+    def test_unreadable_file_containing_a_real_cleared_marker_is_not_virgin(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file mode bits")
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = Path(tmp.name) / "sess.jsonl"
+        p.write_text(_json.dumps(goal_marker("cleared")) + "\n")
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o600)
+        self.assertFalse(wd._goal_never_armed(str(p)))
+
+    def test_a_genuinely_empty_readable_transcript_is_virgin(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = Path(tmp.name) / "sess.jsonl"
+        p.write_text("")
+        self.assertTrue(wd._goal_never_armed(str(p)))
 
 
 if __name__ == "__main__":
