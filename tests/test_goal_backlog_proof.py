@@ -41,6 +41,7 @@ import watchdog as wd                                     # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = "skills/autopilot/SKILL.md"
+SKILL_MASTER = "skills/autopilot-master/SKILL.md"
 
 
 def read(rel):
@@ -50,6 +51,10 @@ def read(rel):
 def goal_lines():
     lines = re.findall(r"^/goal STOP CONDITIONS.*$", read(SKILL), re.MULTILINE)
     return lines
+
+
+def master_goal_lines():
+    return re.findall(r"^/goal MASTER LOOP.*$", read(SKILL_MASTER), re.MULTILINE)
 
 
 # --------------------------------------------------------------------------- #
@@ -463,6 +468,36 @@ class TheTemplatesMustFitClaudeCodesGoalCap(TestCase):
     def test_there_are_still_three_templates_to_check(self):
         """Guards the assertion above against silently measuring nothing."""
         self.assertEqual(len(goal_lines()), 3)
+
+
+class TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo(TestCase):
+    """The #169 char-cap outage, one file over (#328).
+
+    `TheTemplatesMustFitClaudeCodesGoalCap` above locks `skills/autopilot/
+    SKILL.md`'s three worker-loop templates against Claude Code's 4000-char
+    `/goal` condition cap — but `skills/autopilot-master/SKILL.md` prints an
+    entirely separate `/goal MASTER LOOP` template that lock has never been
+    able to see (different file, different anchor phrase). #325 grew that
+    template by ~300 chars with nothing guarding it; this is that guard.
+
+    Same technique as the sibling lock: measure the REAL shipped text with
+    `len()`, never estimate, and pin the template COUNT alongside the length
+    so this can never pass by silently measuring an empty list.
+    """
+
+    CAP = 4000
+
+    def test_the_master_template_is_within_the_cap(self):
+        over = [(i, len(line)) for i, line in enumerate(master_goal_lines())
+                if len(line) > self.CAP]
+        self.assertEqual(
+            over, [],
+            "master template over Claude Code's %d-char /goal cap "
+            "(index, length): %r" % (self.CAP, over))
+
+    def test_there_is_still_exactly_one_master_template_to_check(self):
+        """Guards the assertion above against silently measuring nothing."""
+        self.assertEqual(len(master_goal_lines()), 1)
 
 
 class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
