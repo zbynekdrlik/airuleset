@@ -6643,6 +6643,25 @@ def _tmux_session_exists(name, run=None):
     return getattr(result, "returncode", 1) == 0
 
 
+def _tmux_session_pane_cwd(name, run=None):
+    """The pane cwd of the EXACT-match tmux session `name`, or None when it
+    can't be determined (tmux unreachable, no such pane, empty/failed
+    output) -- the caller must treat None as "inconclusive, stay quiet",
+    never as a mismatch. Read-only: `display-message -p` never mutates
+    anything, so this is safe to call even against a session
+    ensure_stream_tmux_session() will never touch (#308)."""
+    run = run or _default_tmux_run
+    try:
+        result = run(["tmux", "display-message", "-p", "-t", "=%s" % name,
+                      "#{pane_current_path}"])
+    except Exception:
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    out = (getattr(result, "stdout", "") or "").strip()
+    return out or None
+
+
 STREAM_TMUX_BOOTSTRAP_SENTINEL = CLAUDE_DIR / ".airuleset-stream-session-bootstrapped"
 
 
@@ -6705,6 +6724,23 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
               "decision may repeat on the next install" % (sentinel, e),
               file=sys.stderr)
     if exists:
+        # #308 (the miva1 incident): a session created by ANY path other
+        # than this function's own bootstrap (manual account provisioning,
+        # before the stream's registration) silently wins the first login
+        # with the WRONG cwd forever -- ssh auto-attach's `-A` ignores `-c`
+        # on attach, and this function deliberately never touches an
+        # already-existing session. Report the mismatch LOUDLY; never
+        # auto-kill, never re-cwd, never send keys -- that is the standing,
+        # repeatedly-angry user rule ("never touch a session the user
+        # deliberately stopped"). `actual is None` (tmux unreachable for
+        # JUST this probe, no matching pane) stays quiet -- an inconclusive
+        # read must never manufacture a false WARNING.
+        expected = _stream_session_cwd()
+        actual = _tmux_session_pane_cwd(user, run)
+        if actual is not None and actual != str(expected):
+            return ("WARNING: session '%s' already exists with cwd %s "
+                     "(expected %s): pre-registration session -- kill it "
+                     "manually and re-run push" % (user, actual, expected))
         return "session '%s' already exists -- left untouched" % user
     cwd = _stream_session_cwd()
     script = launch_script or CLAUDE_LAUNCH_SCRIPT_DEST
