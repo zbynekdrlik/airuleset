@@ -141,6 +141,7 @@ This module is PURE logic + thin tmux shims. The I/O (`run` = tmux exec, `send_f
 no network.
 """
 
+import collections
 import datetime
 import hashlib
 import json
@@ -5048,7 +5049,27 @@ def _goal_never_armed(tpath):
     happened", which an incremental/tail read cannot honestly answer (the
     same #173 lesson `_goal_dark_died_by_outage` already applies one level
     up). Unreadable or absent transcript is NOT virgin — unmeasurable must
-    never guess a session into being armed."""
+    never guess a session into being armed.
+
+    #320-review MAJOR-1 (fresh-context adversarial review, executed proof):
+    the docstring's own "unreadable is not virgin" claim was FALSE as
+    shipped — `scan_goal_markers` never raises on a read failure, it
+    fails safe by returning `(off, None)` (its OWN documented contract),
+    which is BYTE-IDENTICAL to "scanned cleanly, found nothing" — so a
+    disappeared/permission-denied transcript (including one that DOES
+    carry a real `Goal cleared:` marker the read simply couldn't reach)
+    read as `mark is None` -> virgin -> armed, the opposite of #170's
+    direction. An explicit open-for-real-bytes check BEFORE trusting the
+    scan's "no marker" answer is what actually distinguishes "read
+    genuinely failed" from "read succeeded, file genuinely has nothing"
+    — `scan_goal_markers` provides no such signal itself."""
+    try:
+        if not os.path.isfile(tpath):
+            return False
+        with open(tpath, "rb"):
+            pass
+    except OSError:
+        return False
     try:
         _off, mark = scan_goal_markers(tpath, off=0)
     except Exception:
@@ -5057,7 +5078,8 @@ def _goal_never_armed(tpath):
 
 
 def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
-                                   projects_dir, dry_run, sleep_fn, cap):
+                                   projects_dir, dry_run, sleep_fn, cap,
+                                   unique_cwd=True):
     """#320 shape 2 (montalu2) — `goal_autoarm`'s arm-question branch only
     ever fires for a session that PRINTS the `/autopilot` arm question; a
     session doing ORDINARY interactive work never does, so it never gets a
@@ -5073,17 +5095,46 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
     excluded from this path, forever, the moment that single fact is
     established.
 
+    #320-review MAJOR-2 (fresh-context adversarial review, reasoned trace):
+    `find_active_transcript(projects_dir, cwd)` resolves the NEWEST
+    transcript in the cwd's dir, regardless of which PANE actually hosts
+    it — with two live panes sharing one cwd (routine: a second window
+    opened in the same repo), the OLDER pane could get the NEWER pane's
+    virgin/non-virgin verdict typed into IT, including pasting a fresh
+    `/goal` into a session the user genuinely cleared (#170) while the
+    session the feature exists for never gets its one-shot at all. The
+    caller precomputes `unique_cwd` from ITS OWN full per-sweep pane list
+    (cheap, O(panes), no new tmux call) — pairing is refused outright the
+    moment it is ambiguous, never guessed at.
+
+    #320-review MAJOR-3 (fresh-context adversarial review, executed
+    proof): `pane_in_mode` (and the OTHER cheap dict-cache checks) must
+    run BEFORE the expensive full-file scan, not after — a pane parked in
+    copy-mode (routine: the user scrolled up and walked away) used to
+    re-pay the WHOLE-transcript scan every single sweep forever, since
+    neither cache gets written on that return path. Reordered so a
+    still-undecided candidate is refused on tmux-cheap grounds first;
+    the scan is reached only once every earlier, cheaper gate has passed.
+
     Cost discipline: every check before the (comparatively expensive)
     full-file marker scan reuses `cap`/`tail` the caller already captured
-    this sweep — no extra tmux round-trip is spent until a session is
-    already a live candidate. The scan itself is paid AT MOST ONCE per
-    session for its whole lifetime, either way it resolves: a confirmed
+    this sweep, except the one `pane_in_mode` tmux call immediately
+    before it (moved here specifically so a copy-mode pane never reaches
+    the scan at all). The scan itself is paid AT MOST ONCE per session
+    for its whole lifetime, either way it resolves: a confirmed
     non-virgin session is cached in `state['goalarm_hasgoal']` and never
     rescanned; a virgin session is armed and recorded in
     `state['goalarm_virgin_tried']`, one-shot, never retried automatically
     — if the arm itself silently fails to persist (the SAME open
     marker-writing mystery #320's own dev1 forensics surfaced), this job
     will not keep hammering the pane; that needs a human, not a loop.
+
+    #320-review MINOR-8: `pane_goal_armed(cap)` anything other than a
+    confirmed `False` (i.e. `True`, or `None` = undeterminable) refuses —
+    a session CC armed WITHOUT writing any transcript marker (the same
+    open mystery this ticket surfaced live, three times in one day on
+    dev1) is transcript-virgin but NOT actually goal-less; never guess
+    past an undeterminable footer either.
 
     No backlog pre-check: the armed goal's OWN stop condition re-verifies
     the backlog on its very first turn and self-terminates immediately if
@@ -5095,6 +5146,10 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         return logs
     kind, draft = _classify_boundary(cap)
     if kind != "input" or draft:
+        return logs
+    if pane_goal_armed(cap) is not False:
+        return logs
+    if not unique_cwd:
         return logs
     tr = find_active_transcript(projects_dir, cwd)
     if not tr:
@@ -5108,25 +5163,32 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         return logs
     if not templates:
         return logs
+    loc = os.path.basename(cwd.rstrip("/"))
     try:
         import airuleset
         authority = airuleset.resolve_authority(cwd)
         idx = airuleset.AUTHORITY_PROFILES.index(authority)
         full = templates[idx]
-    except Exception:
+    except Exception as e:
+        # #320-review MINOR-6 — the `backlog_marker_gate` sibling import a
+        # few hundred lines away logs its own degraded mode rather than
+        # swallowing it silently; this import deserves the same discipline
+        # (an authority/template-count mismatch must never disable this
+        # whole path fleet-wide with zero journal trace).
+        logs.append("goal-autoarm-virgin degraded (authority) %s (%s) -> %r"
+                    % (pid, loc, e))
+        return logs
+    if pane_in_mode(pid, run):
         return logs
     if not _goal_never_armed(tr[0]):
         hg[sid] = True
         return logs
-    loc = os.path.basename(cwd.rstrip("/"))
     ga = state.get("goalarm") or {}
     if dry_run:
         ga[pid] = int(now)
         state["goalarm"] = ga
         logs.append("goal-autoarm READY (virgin, %s) %s (%s)"
                     % (authority, pid, loc))
-        return logs
-    if pane_in_mode(pid, run):
         return logs
     fresh = run(["tmux", "capture-pane", "-p", "-J", "-t", pid]) or ""
     if _input_line_text(fresh) != "":
@@ -5173,6 +5235,13 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
     sleep_fn = sleep_fn or time.sleep
     templates = load_goal_templates(templates_path)
     panes = list_claude_panes(run)
+    # #320-review MAJOR-2 -- computed ONCE from this sweep's own full pane
+    # list (cheap, no new tmux call): a cwd shared by MORE THAN ONE live
+    # pane makes "the newest transcript in this cwd's dir" an ambiguous
+    # pairing for the virgin-candidate path below (which pane actually
+    # HOSTS that transcript is not otherwise knowable) -- refused outright
+    # rather than guessed.
+    cwd_counts = collections.Counter(c for _, c in panes)
     for idx, (pid, cwd) in enumerate(panes):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("goalarm-budget-exceeded — %d/%d panes handled "
@@ -5198,7 +5267,8 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             # for the full gate (never fights a #170 clear, never retried).
             logs += _goal_autoarm_virgin_candidate(
                 now, run, state, pid, cwd, templates, projects_dir,
-                dry_run, sleep_fn, cap)
+                dry_run, sleep_fn, cap,
+                unique_cwd=(cwd_counts[cwd] <= 1))
             continue
         # NB: an armed-goal indicator (◎ /goal) does NOT block — a resolved
         # /goal cycle re-prints the arm question while the OLD indicator is
