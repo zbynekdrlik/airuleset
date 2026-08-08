@@ -280,6 +280,15 @@ def resolve_body(tk, seg_line, is_api):
 
 CRITERION_RE = re.compile(r'(?m)^\s*Scope-gate:\s*(\S+)')
 
+# #311 point 3 -- Scope-gate verifiability, mechanical only where trivially
+# checkable. A body claiming `>300-loc` that ALSO states its own bare
+# number next to "loc"/"lines" is a self-contradiction when that number is
+# <=300 -- the exact "violation CONFESSED in the issue body itself" shape
+# #137 already established as this hook's founding evidence. No number
+# stated -> unaffected (cannot verify, trust the claim, matching the
+# hook's own documented limit).
+LOC_NUM_RE = re.compile(r'(\d+)\s*(?:loc|lines?)\b', re.I)
+
 # #311 -- chain-depth cap. A review-finding follow-up NAMES its own PARENT
 # issue as a "follow-up" -- confirmed to be the naming convention every real
 # chain member in the odoo-erp scope-gate.log corpus independently converged
@@ -351,8 +360,18 @@ for seg in split_top_level(skeleton):
         parent_text = _gh_view_text(parent, cwd)
         if parent_text is not None and _chain_parent(parent_text):
             chain_capped = True
+    # #311 point 3 -- a `>300-loc` claim whose own body confesses a
+    # <=300 number next to "loc"/"lines" is self-contradicting; checked
+    # ONLY for this one criterion, ONLY when a number is actually stated.
+    loc_mismatch = False
+    if crit and crit.lower() == ">300-loc" and body:
+        lm = LOC_NUM_RE.search(body)
+        if lm and int(lm.group(1)) <= 300:
+            loc_mismatch = True
     if chain_capped:
         results.append(("BLOCK", title, "chain-depth-cap"))
+    elif loc_mismatch:
+        results.append(("BLOCK", title, "loc-mismatch"))
     elif crit and crit.lower() in ALLOWED:
         results.append(("PASS", title, crit))
     else:
@@ -394,11 +413,13 @@ if [ "$RC" -eq 2 ]; then
     cat >&2 <<'MSG'
 🚫 BLOCKED: filing this issue.
 
-Either (a) no valid `Scope-gate:` line, or (b) this issue's own PARENT (the
+Either (a) no valid `Scope-gate:` line, (b) this issue's own PARENT (the
 "#N follow-up" it names) is ITSELF a review-finding follow-up -- a depth-2
 review-finding chain (#311: adversarial-review findings that keep spawning
 follow-up tickets of follow-up tickets, unbounded — a criterion honestly
-satisfied at each individual hop does not fix this).
+satisfied at each individual hop does not fix this) -- or (c) the body
+claims `Scope-gate: >300-loc` but its own text states a line count of 300
+or fewer, a self-contradicting claim (#311).
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this
