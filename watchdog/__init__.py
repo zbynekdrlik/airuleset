@@ -2397,7 +2397,17 @@ _MACHINE_PROMPT_PREFIXES = (
     "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:",
     "gk-request backstop:", "/goal ",
     "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
-    "<task-notification>", "<local-command", "<command-", "<system-reminder")
+    "<task-notification>", "<local-command", "<command-", "<system-reminder",
+    # #339 adversarial-review MINOR: a Stop-hook-rejected turn is ALSO
+    # machine-injected, not human-typed -- this repo's own
+    # `_STOP_FEEDBACK_PREFIX` (defined ~5000 lines below, next to job 20's
+    # compact-boundary code) carries the identical literal; duplicated
+    # here rather than reordering that far-away constant, and must be kept
+    # in sync if it ever changes. Without this entry, a Stop-hook rejection
+    # (a routine, real transcript entry -- #108/#109 measured thousands of
+    # them corpus-wide) counted as a genuine human prompt and could delay
+    # a genuinely-headless virgin arm by up to GOAL_AUTOARM_RECENT_HUMAN_S.
+    "Stop hook feedback:")
 
 
 def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
@@ -5276,17 +5286,34 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
        fall through to signal 2, never "safe to arm".
     2. `_last_human_prompt_ts(tpath)` -- the mandatory, always-available
        signal (no `/tmp` dependency, already used elsewhere in this file
-       for question-dedup pruning). It already excludes goal re-pokes,
-       hook feedback, AND job-7 Discord-reply deliveries via its own
-       `_MACHINE_PROMPT_PREFIXES` list ("Odpoveď z Discordu:" already
-       there) -- the ticket's own named edge case needed no
-       special-casing here at all.
+       for question-dedup pruning). It excludes goal re-pokes, Stop-hook
+       feedback, AND job-7 Discord-reply deliveries via its own
+       `_MACHINE_PROMPT_PREFIXES` list ("Odpoveď z Discordu:" and
+       "Stop hook feedback:" both there) -- the ticket's own named
+       job-7 edge case needed no special-casing here at all.
 
-    Both timestamps are clamped `0 <= now - ts < window_s` before counting
-    as "recent" -- a future-dated value (clock skew, a transcript synced
-    off another box) never reads as recent (mirrors the `min()` clamp
-    lesson from #177 in this same file). `window_s` defaults to
-    `GOAL_AUTOARM_RECENT_HUMAN_S`.
+    Both timestamps are clamped `-window_s <= now - ts < window_s`
+    ("recent" in EITHER direction, bounded) before counting as recent.
+
+    #339-review MAJOR (fresh-context adversarial review, live-reproduced
+    against the real function): the first shipped clamp was the
+    ASYMMETRIC `0 <= age < window_s` -- reasoning (wrongly) that a
+    future-dated value must be clock-skew and should never read as
+    recent, mirroring the #177 `min()` clamp lesson elsewhere in this
+    file. That lesson does NOT transfer here: `now` is captured ONCE at
+    the top of the whole sweep (`run_once`), while job 9 (and this
+    check) runs at the sweep's TAIL, so a human's FIRST prompt landing
+    AFTER `now` was captured but BEFORE this pane's own turn in the loop
+    produces a transcript/marker timestamp genuinely NEWER than `now` --
+    a negative `age` that the asymmetric clamp read as "not recent",
+    reproducing the EXACT #339 incident through a timing hole. The
+    symmetric bound absorbs that mid-sweep-drift case (a human prompt up
+    to `window_s` in the future still counts as recent) while still
+    refusing a GROSSLY future-dated value (clock skew, a transcript
+    synced off another box, anything beyond `window_s`) -- and being
+    generous on the future side costs nothing: it can only ever make this
+    function MORE cautious (refuse when uncertain), never arm when it
+    shouldn't. `window_s` defaults to `GOAL_AUTOARM_RECENT_HUMAN_S`.
 
     Evaluated and REJECTED (full reasoning on the #339 design comment):
     requiring ZERO human prompts in the WHOLE transcript before ever
@@ -5314,17 +5341,25 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
         mtime = None
     if mtime is not None:
         age = now - mtime
-        if 0 <= age < window_s:
-            return True, "presence marker %ds old" % int(age)
+        if -window_s <= age < window_s:
+            return True, "presence marker %s" % _human_age_desc(age)
     try:
         hts = _last_human_prompt_ts(tpath)
     except Exception:
         hts = None
     if hts is not None:
         age = now - hts
-        if 0 <= age < window_s:
-            return True, "transcript human prompt %ds old" % int(age)
+        if -window_s <= age < window_s:
+            return True, "transcript human prompt %s" % _human_age_desc(age)
     return False, ""
+
+
+def _human_age_desc(age):
+    """#339-review MAJOR -- a human-activity timestamp can legitimately land
+    slightly AFTER `now` (mid-sweep drift, see the caller's own docstring),
+    so the log line must read sensibly either way rather than printing a
+    confusing negative number."""
+    return "%ds old" % int(age) if age >= 0 else "%ds in the future" % int(-age)
 
 
 def _goal_never_armed(tpath):
