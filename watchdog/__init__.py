@@ -11775,11 +11775,13 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # violate the user-stop invariant just as directly as
                 # re-arming an explicit `/goal clear` would. Treat it
                 # EXACTLY like the sibling "skip stale-goal" branch: a
-                # bounded, ONE-SHOT ping (reusing the SAME `dark_pinged`
-                # bookkeeping -- this is the identical "dark past the cap,
-                # no positive signal to act automatically" state, just
-                # discovered via the achieved-marker path instead of the
-                # outage path), never an automatic re-arm. A FRESH achieved
+                # bounded, ONE-SHOT ping (its OWN dedicated bookkeeping,
+                # `stale_achieved_pinged` -- see the comment right below
+                # this one for why it is NOT `dark_pinged`) for the
+                # identical "dark past the cap, no positive signal to act
+                # automatically" state, just discovered via the
+                # achieved-marker path instead of the outage path, never
+                # an automatic re-arm. A FRESH achieved
                 # banner (`revived_from_dark_outage` False, i.e. `not
                 # dark_by_age` or `active_now`) is completely unaffected —
                 # #160's own "resume promptly once new work appears"
