@@ -2592,13 +2592,35 @@ def _type_literal(pid, run, text, sleep_fn=None):
     """Send `text` into the pane's input box literally — in ONE burst below
     `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
     or in small CHUNKS at/above it (#322) so CC never treats the whole
-    payload as one terminal-paste event."""
+    payload as one terminal-paste event.
+
+    #322 REOPENED (adversarial-review CRITICAL-1, both live-verified against
+    a real tmux 3.7b pane): `tmux send-keys -l <chunk>` parses `<chunk>` as a
+    getopt-style ARGUMENT — a chunk whose first character happens to be `-`
+    (e.g. a 120-char slice landing mid-word on "...`-self` (holds..." in a
+    real shipped template) is read as an unknown FLAG and the whole call
+    fails (`command send-keys: unknown flag -X`, rc 1). `_default_run`
+    silently swallows a non-zero-rc command as `""` (no exception, no log),
+    so the chunk is DROPPED with zero indication — every later chunk still
+    lands, so `_typed_landed`'s tail-based `endswith()` check is satisfied
+    by the (now internally corrupted) remainder, and a GOAL WITH A
+    120-CHARACTER HOLE IN THE MIDDLE gets armed. This is a materially WORSE
+    outcome than the paste-collapse bug this function exists to fix (which
+    armed nothing, rather than arming something silently wrong) — and the
+    same `-l` call is on `deliver_with_stash`'s only type path, so an
+    arbitrary Discord-reply `prompt` (job 7) can be mangled and SUBMITTED
+    the identical way. `--` (end-of-options) makes every following argument
+    literal regardless of a leading `-`; live-verified: `send-keys -l --
+    '-DASH-OK'` lands the literal text, `send-keys -l '-DASH-OK'` (no `--`)
+    fails exactly as above. Applied to BOTH the single-burst and the
+    chunked path — a single-burst payload can equally start with `-` (job
+    7's arbitrary `prompt` argument is not `/goal`-prefixed)."""
     sleep_fn = sleep_fn or time.sleep
     if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
-        run(["tmux", "send-keys", "-t", pid, "-l", text])
+        run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
         return
     for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
-        run(["tmux", "send-keys", "-t", pid, "-l",
+        run(["tmux", "send-keys", "-t", pid, "-l", "--",
             text[i:i + GOAL_TYPE_CHUNK_SIZE]])
         if i + GOAL_TYPE_CHUNK_SIZE < len(text):
             sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
@@ -9580,6 +9602,20 @@ GOAL_REARM_GIVEUP_MAX_RESETS = 1    # #322 REOPENED (adversarial-review
                                     # streak reset, is the only behavioural
                                     # difference from before this ticket for
                                     # a genuinely unrecoverable pane.
+GOAL_REARM_SLOT_STUCK_MAX = 3       # #322 REOPENED (2nd adversarial-review
+                                    # MAJOR-1) — bounds how many CONSECUTIVE
+                                    # "stash-abort: slot occupied" transient
+                                    # skips a session may accumulate before
+                                    # it counts as a real failure instead —
+                                    # a slot deliver_with_stash's own
+                                    # collapsed-paste early return stranded
+                                    # (never popped, zero further
+                                    # keystrokes) would otherwise refuse
+                                    # forever as "transient" and never let
+                                    # `n` reach `max_attempts`, so GAVE UP
+                                    # (and this round's own reachable
+                                    # give-up-reset) is never reached for
+                                    # that pane at all.
 
 # --- the SECOND shape (same job, opposite reading of the indicator) --------
 # The 2026-07-26 forensics (montalu + gatekeeper transcripts and journals,
@@ -11224,8 +11260,12 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # #322 — a genuinely NEW streak also gets a fresh give-up-reset
             # budget; otherwise a spent `giveup_resets` from a PRIOR streak
             # would silently disable the reset for a session's whole life.
+            # `slot_stuck_n` (2nd adversarial-review MAJOR-1) clears the
+            # same way — a stuck-slot streak from an OLD payload must never
+            # carry into a brand-new one's own consecutive count.
             rec.update({"hash": h, "n": 0, "first": now, "pinged": False,
-                       "gaveup_at": None, "giveup_resets": 0})
+                       "gaveup_at": None, "giveup_resets": 0,
+                       "slot_stuck_n": 0})
             _save()
         # --- a delivery is in flight: confirm / expire it -------------------
         q = rec.get("queued_at")
@@ -11343,6 +11383,17 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # genuine suppression with nothing actually sent.
             gaveup_at = rec.get("gaveup_at")
             resets_used = rec.get("giveup_resets", 0)
+            # #322 REOPENED (2nd adversarial review, MINOR-1): `.get(...,
+            # 0)` only supplies the default when the KEY is absent — a
+            # PRESENT-but-corrupt value (the same hand-edited/pruned state
+            # file class T1 guarded `gaveup_at` against, #232) reaches the
+            # `<` comparison below and raises `TypeError` uncaught, killing
+            # job 20 for every pane, every sweep. Symmetric guard, same
+            # fail-safe direction as `gaveup_at`'s own isinstance check:
+            # never guess, never crash — an unreadable value is simply
+            # never "ready".
+            if not isinstance(resets_used, int):
+                resets_used = GOAL_REARM_GIVEUP_MAX_RESETS  # treat as spent
             ready = (isinstance(gaveup_at, (int, float))
                     and (now - gaveup_at) >= GOAL_REARM_GIVEUP_RESET_S
                     and resets_used < GOAL_REARM_GIVEUP_MAX_RESETS
@@ -11405,9 +11456,48 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # it simply wasn't deliverable at THIS instant. Never count it
             # toward the permanent give-up cap — retried next sweep, same as
             # every other pre-send skip above, no different from "not-idle".
-            logs.append("SKIP-TRANSIENT (%s) %s -> %s, retrying next sweep"
-                        % (tag, loc, dlogs[-1]))
-            continue
+            #
+            # #322 REOPENED (2nd adversarial-review MAJOR-1) — "stash-abort:
+            # slot occupied" is a SPECIAL case of this. `deliver_with_stash`'s
+            # own collapsed-paste early return cannot safely pop a PARKED
+            # draft back (the box then holds an unproven collapsed-paste
+            # hint, not `text` — no safe backspace count exists), so it
+            # leaves the single stash slot occupied with ZERO further
+            # keystrokes. Every LATER sweep's own entry precondition then
+            # refuses with this SAME "slot occupied" reason — correctly
+            # transient for a genuinely FOREIGN occupant (self-resolves
+            # within a sweep or two once whoever else is done) but, for a
+            # slot WE stranded, would otherwise mean `n` never advances,
+            # GAVE UP never fires, and this round's own reachable
+            # give-up-reset is unreachable for this pane — silently,
+            # forever (the #134 "a suppression needs a reachable exit"
+            # lesson, one level down). Bound a CONSECUTIVE run of this ONE
+            # specific reason: past `GOAL_REARM_SLOT_STUCK_MAX`, stop
+            # treating it as transient so the pane still eventually counts
+            # a real failure and can reach GAVE UP — a genuinely transient
+            # foreign occupant never gets close to the bound.
+            if dlogs[-1] == "stash-abort: slot occupied":
+                stuck = rec.get("slot_stuck_n", 0) + 1
+                if stuck < GOAL_REARM_SLOT_STUCK_MAX:
+                    rec["slot_stuck_n"] = stuck
+                    _save()
+                    logs.append("SKIP-TRANSIENT (%s) %s -> %s (%d/%d), "
+                                "retrying next sweep"
+                                % (tag, loc, dlogs[-1], stuck,
+                                   GOAL_REARM_SLOT_STUCK_MAX))
+                    continue
+                rec["slot_stuck_n"] = 0
+                # falls through — counted as a real failure below, same as
+                # any other non-transient FAIL
+            else:
+                logs.append("SKIP-TRANSIENT (%s) %s -> %s, retrying next sweep"
+                            % (tag, loc, dlogs[-1]))
+                continue
+        elif rec.get("slot_stuck_n"):
+            # any outcome OTHER than a fresh "slot occupied" transient skip
+            # ends the consecutive streak — a genuinely resolved pane (ok)
+            # or a different failure must not inherit a stale stuck-count.
+            rec["slot_stuck_n"] = 0
         rec["n"] = rec.get("n", 0) + 1
         if ok:
             rec["queued_at"] = now
