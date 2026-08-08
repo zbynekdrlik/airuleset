@@ -181,18 +181,36 @@ class TestGenuineSlovakCoverageForRemainingThreeRows(TestCase):
     detectors in `hooks/stop-check-prose-violations.sh`:
 
     1. Slovak dispatch-now-or-hold (row 7): a Slovak "start" verb
-       (spustiť/rozbehnúť/začať) near a "now" word (hneď/teraz/ihneď),
-       "alebo"/"či", a Slovak "wait" verb (počkať/počkaj/čakať), and a
-       plán/kontrola/review word nearby.
+       (spustiť/rozbehnúť/začať, incl. 1st-person spustím/rozbehnem/
+       začnem) near a "now" word (hneď/teraz/ihneď), "alebo"/"či", a
+       Slovak "wait" verb (počkať/počkaj/počkám/počkáme/čakať/čakám/
+       čakáme), and a plán/kontrola/review word nearby — incl. their
+       genitive/instrumental/locative declensions (plánu/kontrolu).
     2. Slovak merge-despite / quality-bypass (rows 8+9): a Slovak "merge"
-       verb (zlúčiť/zmergovať/zmerguj) near "napriek" (despite).
+       STEM (zlúči/zmerg/mergn — covers zlúčiť/zlúčim, zmergovať/
+       zmergnúť/zmergnutie/zmerguj, mergnúť/mergnutie) near a "despite"
+       word (napriek/hoci/aj keď/i keď).
 
     Both mirror #316's own established pattern shape verbatim: bounded
     `.{0,N}` windows, `\\b` anchors on plain diacritic alternation (never
     embedded bracket classes), `LC_ALL=C.UTF-8` forced on the one grep
     call that needs it (see TestNewSlovakDetectorsSurviveABareLocale
     below — without the forcing, `\\b` next to a diacritic is itself
-    locale-dependent under a bare C/POSIX locale)."""
+    locale-dependent under a bare C/POSIX locale). Both also flatten
+    newlines to spaces before matching, so the MANDATED multi-line
+    bullet-option question template (user-questions-slovak.md) is not
+    missed just because grep is line-oriented.
+
+    #319-review (adversarial, both CRITICAL): the FIRST cut of both
+    detectors was proven only against fixtures that happened to use the
+    exact word-forms the regexes encoded (the infinitive verb, the bare
+    nominative noun, the single `-ova-` merge stem, the single word
+    "napriek") — while this repo's own real prose (completion-report.md,
+    the run-card phrases in airuleset.py, user-questions-slovak.md's own
+    model question "počkám") overwhelmingly uses the `-n-` merge stem, 1st
+    -person verb forms, and declined nouns. This is #319's OWN bug class
+    (coverage proven only against a convenient fixture) reproduced one
+    level down — fixed by widening both regexes, proven below."""
 
     DISPATCH_NOW_OR_HOLD_SK = (
         "Plán je uložený. Mám hneď rozbehnúť prácu na úlohách, "
@@ -222,6 +240,66 @@ class TestGenuineSlovakCoverageForRemainingThreeRows(TestCase):
             "#319: natural Slovak merge-despite (no loanword) must be "
             "blocked by stop-check-prose-violations.sh")
 
+    def test_merge_despite_native_n_stem_blocked(self):
+        # #319-review CRITICAL: "-ova-" (zmergovať) was covered; the
+        # native "-n-" stem this repo's own real prose actually uses
+        # (mergnúť/zmergnúť/zmergnutie) was not.
+        self.assertTrue(
+            _run_stop_prose("Mám to mergnúť napriek zlyhávajúcej kontrole?"))
+        self.assertTrue(
+            _run_stop_prose("Mám to zmergnúť napriek zlyhávajúcej kontrole?"))
+        self.assertTrue(
+            _run_stop_prose(
+                "Navrhujem zmergnutie napriek zlyhávajúcej kontrole."))
+
+    def test_dispatch_first_person_forms_blocked(self):
+        # #319-review CRITICAL: only the infinitive verb forms
+        # (spustiť/počkať) were covered — the 1st-person forms a real
+        # question naturally uses (spustím, rozbehnem, počkám) were not.
+        # user-questions-slovak.md's own model Slovak question literally
+        # uses "počkám".
+        self.assertTrue(_run_stop_prose(
+            "Spustím to teraz, alebo počkám na tvoju kontrolu plánu?"))
+        self.assertTrue(_run_stop_prose(
+            "Rozbehnem to hneď, alebo počkám, kým si prejdeš plán?"))
+        self.assertTrue(_run_stop_prose(
+            "Mám to hneď spustiť, alebo počkám na tvoju kontrolu plánu?"))
+
+    def test_dispatch_declined_plan_word_blocked(self):
+        # #319-review CRITICAL: only the bare nominative "plán"/"kontrolu"
+        # was covered — the genitive "plánu" a natural genitive
+        # construction produces ("kontrola plánu", "schválenie plánu")
+        # was not.
+        self.assertTrue(_run_stop_prose(
+            "Mám hneď spustiť prácu, alebo počkať na schválenie plánu?"))
+
+    def test_merge_despite_alternate_despite_word_blocked(self):
+        # #319-review MAJOR: "napriek" is only one of several equally
+        # common Slovak renderings of "despite" ("hoci", "aj keď", "i
+        # keď") — unlike English, where "despite" is a single lexeme.
+        self.assertTrue(
+            _run_stop_prose("Mám to zlúčiť, aj keď kontrola zlyháva?"))
+
+    def test_dispatch_mandated_multiline_bullet_template_blocked(self):
+        # #319-review MAJOR: grep is line-oriented (no `.` crosses a
+        # `\n`), so a hard-wrapped rendering of this banned intent — the
+        # SAME sentence broken mid-way onto a second line, exactly what a
+        # renderer or a copy-pasted multi-line question naturally
+        # produces — sailed through untouched, even though this banned
+        # shape has NO legitimate fork at all. #319-review-round-2
+        # (mutation-verified, see the ticket's review comment): an
+        # EARLIER draft of this fixture had its closing line already
+        # restate every required token on its own (a
+        # `❓ NEEDS YOU: spustiť hneď, alebo počkať na kontrolu plánu?`
+        # line) — that made the test mutation-BLIND to the flattening
+        # fix, since that one line alone already satisfies the whole
+        # chain regardless of whether newlines get flattened. This
+        # fixture deliberately keeps the required tokens split across
+        # the two lines, with neither line self-sufficient.
+        self.assertTrue(_run_stop_prose(
+            "Mám hneď spustiť prácu,\n"
+            "alebo počkať na kontrolu plánu?"))
+
 
 class TestNewSlovakDetectorsDoNotOverfire(TestCase):
     """#319 false-positive discipline: an unrelated, genuinely legitimate
@@ -229,18 +307,32 @@ class TestNewSlovakDetectorsDoNotOverfire(TestCase):
     detectors key on (spustiť/hneď/počkať, zlúčiť/napriek) in a DIFFERENT
     context — or a real design-fork question with bullet options — must
     stay welcome. Mirrors the false-positive controls posted on the
-    ticket's own design comment."""
+    ticket's own design comment.
+
+    #319-review MINOR (mutation-weakness finding): the first cut of this
+    list was mostly FAR misses — 4 of 5 phrases carried ZERO tokens the
+    regexes key on, so they would have passed against almost any regex
+    and locked no real boundary (one comment even misdescribed why a
+    phrase passed: "no 'or', no plan/review word nearby" for a phrase
+    that actually failed at the very FIRST token, since the pre-widening
+    verb regex did not yet cover that phrase's conjugation — findings the
+    widening above has since fixed). Replaced with TRUE near-misses, each
+    isolating exactly ONE still-required token so the boundary is
+    actually exercised."""
 
     NEGATIVE_PHRASES = [
-        # unrelated "started tests, will wait for results" — no "or",
-        # no plan/review word nearby.
-        "Spustil som testy a počkám na výsledky.",
-        # "napriek" present but no merge-verb nearby — an unrelated
-        # deploy-status statement, not a merge-despite-failure question.
+        # isolates the plan/review-word requirement: same now+dispatch+
+        # alebo+hold shape, but hardware/live-timing, not subagent/plan
+        # dispatch — no plán/kontrola/review word nearby.
+        "Mám hneď spustiť OBS, alebo počkať do konca prenosu?",
+        # isolates the hold-verb requirement: dispatch+now+alebo+planword
+        # all present, but the second branch is "send the plan" not
+        # "wait for review" — no wait-verb anywhere.
+        "Mám hneď spustiť prácu, alebo rovno poslať plán?",
+        # isolates the merge-verb requirement: "napriek" present, no
+        # merge-verb nearby — an unrelated deploy-status statement, not a
+        # merge-despite-failure question.
         "Nasadenie prebehlo úspešne napriek tomu, že testy boli pomalé.",
-        # same 4-token dispatch shape, but hardware/live-timing, not
-        # subagent/plan dispatch — no plán/kontrola/review word nearby.
-        "Mám hneď reštartovať OBS, alebo počkať do konca prenosu?",
         # an already-legitimate (English-pattern-adjacent) Slovak
         # question that must not newly trip either detector.
         "Vyzerá tento návrh dobre? Ak áno, zapíšem spec do "
@@ -322,14 +414,20 @@ class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
         "docs/.../spec.md a commitnem.",
         # row 10 — investigate or merge despite. #319: NOT "...alebo to
         # radšej zmergovať napriek tomu?" — that phrasing also happens to
-        # carry row 8/9's OWN banned shape (a Slovak merge-verb near
-        # "napriek") and is now correctly blocked by #319's new merge-
-        # despite detector too; this is a genuine, welcome overlap (the
-        # SAME banned intent), not a bug in that detector — but it makes
-        # THIS row's own phrasing a bad negative-control fixture. Picked a
-        # different, equally natural rendering of row 10's intent that
-        # does not carry rows 8/9's shape at all.
-        "Mám preskúmať problém s codecov, alebo to radšej preskočiť?",
+        # carry row 8/9's OWN banned shape (a Slovak merge-verb near a
+        # "despite" word) and is now correctly blocked by #319's new
+        # merge-despite detector too; this is a genuine, welcome overlap
+        # (the SAME banned intent), not a bug in that detector — but it
+        # makes THIS row's own phrasing a bad negative-control fixture.
+        # #319-review MINOR: the first replacement ("...alebo to radšej
+        # preskočiť?") changed row 10's fork from "investigate OR merge
+        # despite" to "investigate OR skip" — a different banned
+        # alternative, which drifted from row 10's own intent and made
+        # the control somewhat tautological. This rendering keeps row
+        # 10's real "investigate or merge despite" fork (just "zlúčiť"
+        # with no "despite" word nearby, so the new detector correctly
+        # stays silent) — a genuine near-miss for THIS row's own shape.
+        "Mám preskúmať problém s codecov, alebo to rovno zlúčiť?",
         # row 11 — functionally ready but unstable
         "PR je funkčne pripravený ale UNSTABLE — rozhodneš o mergnutí?",
         # row 12 — should I merge / approve merge

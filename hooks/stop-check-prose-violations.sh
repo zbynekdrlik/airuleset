@@ -520,16 +520,49 @@ fi
 # it is a sibling of (immediately above), not #316's different-shaped
 # exemption machinery. Four required tokens: a Slovak "start" verb near a
 # "now" word (either order), "alebo"/"či", a Slovak "wait" verb, and a
-# plán/kontrola/review word nearby the wait verb — proven against 5
-# negative-control fixtures (an unrelated "started tests, waiting for
-# results" sentence, a live-hardware-timing question with the SAME 4-token
-# shape but no plan/review word, an already-legitimate design question, a
-# genuine bulleted design fork, and the SAME "napriek" word used for an
-# unrelated deploy-status sentence) — see issue #319 comment.
-SK_DISPATCH_RX="(spusti[ťt]|rozbehn[úu][ťt]|zača[ťt])"
+# plán/kontrola/review word nearby the wait verb.
+#
+# #319-review CRITICAL (reproduced live, adversarial review): the first
+# cut only matched the infinitive verb forms from the worker's OWN
+# fixture ("spustiť"/"rozbehnúť"/"počkať") and the bare nominative
+# "plán"/"kontrolu" — every 1st-person conjugation this repo's own model
+# question (user-questions-slovak.md's "počkám") and every declined form
+# of plán/kontrola ("plánu", "kontroly") fell straight through, which is
+# #319's OWN bug class reproduced one level down (coverage proven only
+# against a convenient fixture). Widened to also match: 1st-person
+# dispatch verbs (spustím/rozbehnem/začnem), 1st-person wait verbs
+# (počkám/počkáme/čakám/čakáme), and the genitive/instrumental/locative
+# declensions of plán/kontrola a natural Slovak question actually
+# produces ("kontrolu plánu", "schválenie plánu").
+#
+# #319-review MAJOR (reproduced live): grep is LINE-oriented (no `.`
+# crosses a `\n`), so the MANDATED multi-line bullet-option question
+# shape (user-questions-slovak.md's own template, hook-enforced by
+# stop-check-question-quality.sh's Check 4) — where the two branches sit
+# on SEPARATE lines — sailed through untouched even though this banned
+# shape has NO legitimate fork at all. Flattened to a single line
+# (newlines -> spaces) before matching, purely for this check's own
+# bounded-window scan — a strict superset of the un-flattened match set,
+# since nothing that matched before stops matching after a `\n` becomes
+# one space.
+#
+# Proven against negative-control fixtures that each isolate exactly ONE
+# required token (an unrelated "started tests, waiting for results"
+# sentence with none of the tokens; a live-hardware-timing question with
+# the now+dispatch+alebo+hold shape but no plán/kontrola word nearby; an
+# already-legitimate design question; a genuine bulleted design fork with
+# real consequences) — see issue #319 comment.
+#
+# Accepted residuals (#319-review, not chased — narrow-on-purpose): the
+# "now" word "okamžite" (not in SK_NOW_RX); the "now" word omitted
+# entirely; the two branches stated in reversed order ("počkať... alebo
+# spustiť hneď..."); other dispatch-verb synonyms (púšťam/štartujem/
+# dispatchnem) or hold-verb synonyms not in the declared list.
+SK_DISPATCH_RX="(spust[ií][ťtm]|rozbehn[úu][ťt]|rozbehnem|za[čc]nem|zača[ťt])"
 SK_NOW_RX="(hne[ďd]|teraz|ihne[ďd])"
-SK_HOLD_RX="(poč(ka[ťt]|kaj)|čaka[ťt])"
-SK_PLANWORD_RX="(pl[áa]n|kontrol[uy]|review)"
+SK_HOLD_RX="(poč(ka[ťtm]|kaj|k[áa]m(e)?)|čaka[ťtm]|čak[áa]m(e)?)"
+SK_PLANWORD_RX="(pl[áa]n(u|om|e|y|ov)?|kontrol[uyae]|review)"
+SK_DISPATCH_FLAT=$(tr '\n' ' ' <<<"$MSG_NOGOAL_MENTION") || SK_DISPATCH_FLAT="$MSG_NOGOAL_MENTION"
 # #316-review CRITICAL (reproduced again here, live): `\b` immediately
 # adjacent to a diacritic is itself locale-dependent under a bare
 # C/POSIX locale (no LANG/LC_ALL set) — rewriting to plain alternation
@@ -537,9 +570,9 @@ SK_PLANWORD_RX="(pl[áa]n|kontrol[uy]|review)"
 # NOT fix it by itself. Forcing LC_ALL=C.UTF-8 on just this one grep call
 # is the verified fix (present on every managed box's glibc); a plain
 # `VAR=val funcname` prefix scopes the override to this command only.
-if LC_ALL=C.UTF-8 msg_has "$MSG_NOGOAL_MENTION" -qiE \
+if LC_ALL=C.UTF-8 msg_has "$SK_DISPATCH_FLAT" -qiE \
     "(\b${SK_NOW_RX}\b.{0,40}\b${SK_DISPATCH_RX}\b|\b${SK_DISPATCH_RX}\b.{0,40}\b${SK_NOW_RX}\b).{0,60}\b(alebo|či)\b.{0,60}\b${SK_HOLD_RX}\b.{0,40}\b${SK_PLANWORD_RX}\b"; then
-    echo "VIOLATION: Spýtal si sa po slovensky, či máš spustiť prácu/podúlohy hneď, alebo počkať na kontrolu plánu — presne trieda 'dispatch now or hold for review' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: vetva 'počkať na review' je zakázaná pre plány akejkoľvek veľkosti. Ak chce používateľ prerušiť, urobí to sám. Prepíš správu: vynechaj otázku, spusti hneď. See ask-before-assuming.md pre-answered table." >&2
+    echo "VIOLATION: Spýtal si sa po slovensky, či máš spustiť prácu/podúlohy hneď, alebo počkať na kontrolu plánu — presne trieda 'dispatch now or hold for review' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: vetva 'počkať na review' je zakázaná pre plány akejkoľvek veľkosti. Ak chce používateľ prerušiť, urobí to sám. Prepíš správu: vynechaj otázku, spusti hneď. (Ak si túto vetu iba CITUJEŠ alebo VYSVETĽUJEŠ — napr. pri opise tohto pravidla — obal ju do úvodzoviek alebo spätných apostrofov, inak ju gate prečíta ako reálnu otázku.) See ask-before-assuming.md pre-answered table." >&2
     add_hard "Pre-answered Slovak prose question: dispatch-now-or-hold-for-review (spustiť/rozbehnúť/začať + hneď/teraz/ihneď + alebo/či + počkať + plán/kontrolu/review)"
 fi
 
@@ -949,25 +982,56 @@ fi
 # tested a fixture that RETAINS the literal English loanword
 # "admin-merge"; a genuinely natural Slovak rendering, with the loanword
 # replaced by ordinary Slovak words, was NOT blocked by ANY hook (#319).
-# One required pair: a Slovak "merge" verb near "napriek" (despite),
+# One required pair: a Slovak "merge" verb near a Slovak "despite" word,
 # either order — narrow and high-signal on purpose (the SAME rigor level
 # as the English sibling immediately above, whose own "merge.*despite"
 # alternative is an equally bare 2-word requirement with no PR/CI-context
 # anchor — this is an accepted, already-shipped trade-off in this file,
-# not a NEW one). Proven against negative-control fixtures where "napriek"
-# appears without a nearby merge-verb (an unrelated deploy-status
-# sentence) — see issue #319 comment.
-SK_MERGE_RX="(zl[úu]či[ťt]|zmergova[ťt]|zmerguj)"
+# not a NEW one).
+#
+# #319-review CRITICAL (reproduced live, adversarial review): the first
+# cut's merge-verb regex only matched the `-ova-` stem
+# (zlúčiť/zmergovať/zmerguj) — the worker's OWN fixture happened to use
+# exactly that stem, but this repo's own real prose (completion-report.md,
+# the run-card phrases in airuleset.py, even this file's OWN sibling test
+# fixtures) overwhelmingly writes the native `-n-` stem instead
+# ("zmergnutý", "mergnutí") — #319's own bug class (coverage proven only
+# against a convenient fixture) reproduced one level down. Widened to a
+# STEM match (zlúči/zmerg/mergn, left `\b` only — these are prefixes that
+# continue with many suffixes: zlúčiť/zlúčim, zmergovať/zmergnúť/
+# zmergnutie/zmerguj, mergnúť/mergnutie) rather than enumerating every
+# conjugated form. Also widened "despite" beyond the single word "napriek"
+# — Slovak splits the English concept "despite" across several equally
+# common connectors ("hoci", "aj keď", "i keď"), unlike English's single
+# lexeme, so a one-word anchor covered only a narrow slice of real usage.
+#
+# #319-review MAJOR (reproduced live): same line-oriented grep limitation
+# as the dispatch-now-or-hold check above — flattened to a single line
+# (newlines -> spaces) for the SAME reason (a strict superset of the
+# un-flattened match set), so a multi-line rendering of this shape is not
+# missed either.
+#
+# Proven against negative-control fixtures where a "despite" word appears
+# without a nearby merge-verb (an unrelated deploy-status sentence), and
+# where a merge-verb appears without a nearby "despite" word — see issue
+# #319 comment. Accepted residual, same shape as the pre-existing English
+# "merge.*despite" alternative right above: an honest sentence NARRATING
+# or CITING this exact rule (e.g. "we must never merge X despite a
+# failing check") still trips the detector — quoting/backtick-wrapping
+# the citation is the established escape hatch (MSG_MENTION strips it).
+SK_MERGE_RX="\b(zl[úu]či|zmerg|mergn)"
+SK_DESPITE_RX="\b(napriek|hoci|aj ke[ďd]|i ke[ďd])\b"
+SK_MERGE_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || SK_MERGE_FLAT="$MSG_MENTION"
 # #316-review CRITICAL (reproduced again here, live): `\b` immediately
 # adjacent to a diacritic is itself locale-dependent under a bare
 # C/POSIX locale — forcing LC_ALL=C.UTF-8 on just this one grep call is
 # the verified fix, scoped to this command only via a plain
 # `VAR=val funcname` prefix. See the SAME finding on the Slovak
 # dispatch-now-or-hold check above for the full explanation.
-if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE \
-    "\b${SK_MERGE_RX}\b.{0,60}\bnapriek\b|\bnapriek\b.{0,60}\b${SK_MERGE_RX}\b"; then
-    echo "VIOLATION: Ponúkol si po slovensky quality-bypass skratku ('zlúčiť/zmergovať napriek zlyhaniu') — presne trieda 'merge despite the failing check' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: zlyhávajúca kontrola = over branch protection sa nedá obísť. Preskúmaj skutočnú príčinu a oprav ju. NIKDY nenavrhuj admin-merge ani obídenie kontroly. See autonomous-quality-discipline.md, ask-before-assuming.md." >&2
-    add_hard "Pre-answered Slovak prose question: quality-bypass shortcut / merge despite (zlúčiť/zmergovať + napriek) — fix the gate instead"
+if LC_ALL=C.UTF-8 msg_has "$SK_MERGE_FLAT" -qiE \
+    "${SK_MERGE_RX}.{0,60}${SK_DESPITE_RX}|${SK_DESPITE_RX}.{0,60}${SK_MERGE_RX}"; then
+    echo "VIOLATION: Ponúkol si po slovensky quality-bypass skratku ('zlúčiť/zmergovať/mergnúť napriek/hoci zlyhaniu') — presne trieda 'merge despite the failing check' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: zlyhávajúca kontrola = over branch protection sa nedá obísť. Preskúmaj skutočnú príčinu a oprav ju. NIKDY nenavrhuj admin-merge ani obídenie kontroly. (Ak túto vetu iba CITUJEŠ alebo VYSVETĽUJEŠ — napr. pri opise tohto pravidla — obal ju do úvodzoviek alebo spätných apostrofov, inak ju gate prečíta ako reálny návrh.) See autonomous-quality-discipline.md, ask-before-assuming.md." >&2
+    add_hard "Pre-answered Slovak prose question: quality-bypass shortcut / merge despite (zlúčiť/zmergovať/mergnúť + napriek/hoci/aj keď) — fix the gate instead"
 fi
 
 # SOFT — bare delegation phrases carry real non-bypass uses ("the cheaper
