@@ -3863,6 +3863,16 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # simap -- its own tmux session name carries no Discord identity of
         # its own, so it redirects straight to zbynek's own thread.
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["miva1"], "zbynek")
+        # david2/david3/david4 (airuleset#326): additional capacity for the
+        # SAME external developer as david -- redirect to david's own
+        # already-self-mapped thread (never a NEW DISCORD_MIRROR_DAVID2/3/4
+        # local .env key, which this repo's code cannot provision/deploy at
+        # all -- see #326's own design comment, mirroring the #300
+        # precedent). This also inherits david's own real
+        # DISCORD_MIRROR_DAVID=zbynek mirror for free once resolved.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david2"], "david")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david3"], "david")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david4"], "david")
         # marek is deliberately absent: its own tmux session name already
         # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
         self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
@@ -3884,6 +3894,13 @@ class TestStreamNotifyOwnerRouting(TestCase):
         with m.patch.dict(os.environ, {}, clear=True), \
                 m.patch.object(self.notify, "_current_user", return_value="miva1"):
             self.assertEqual(self.notify.resolve_owner(), "zbynek")
+
+    def test_david_family_resolves_to_david_with_no_tmux_and_no_env_override(self):
+        # airuleset#326: david2/david3/david4 redirect to david's own thread.
+        for who in ("david2", "david3", "david4"):
+            with m.patch.dict(os.environ, {}, clear=True), \
+                    m.patch.object(self.notify, "_current_user", return_value=who):
+                self.assertEqual(self.notify.resolve_owner(), "david", who)
 
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
@@ -3942,6 +3959,10 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david is self-mapped — the redirect is a documented no-op for it.
         self.assertEqual(self.notify.stream_redirect("david"), "david")
+        # david2/david3/david4 (airuleset#326) redirect to david's own thread.
+        self.assertEqual(self.notify.stream_redirect("david2"), "david")
+        self.assertEqual(self.notify.stream_redirect("david3"), "david")
+        self.assertEqual(self.notify.stream_redirect("david4"), "david")
 
     def test_stream_redirect_passes_through_unmapped_and_empty(self):
         self.assertEqual(self.notify.stream_redirect("marek"), "marek")
@@ -10144,7 +10165,11 @@ class TestRemoteHosts(TestCase):
     GK_HOST = "100.90.94.41"
     # simap/miva1 share marek/david's identity requirement (airuleset#143/
     # #300 — same operator keys as marek, registered on the same subdev box).
-    SUBDEV_USERS = {"marek", "david", "simap", "miva1"}
+    # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
+    # david streams — additional capacity for the same external developer,
+    # same subdev box, same gatekeeper_access identity requirement as david.
+    SUBDEV_USERS = {"marek", "david", "simap", "miva1",
+                    "david2", "david3", "david4"}
 
     def _subdev_entries(self):
         return [r for r in airuleset.REMOTE_HOSTS
@@ -10156,7 +10181,8 @@ class TestRemoteHosts(TestCase):
         for expected in ("dev2", "gatekeeper", "montalu@subdev",
                          "marek@subdev", "david@subdev", "simap@subdev",
                          "montalu2@subdev", "montalu3@subdev",
-                         "montalu4@subdev", "miva1@subdev"):
+                         "montalu4@subdev", "miva1@subdev",
+                         "david2@subdev", "david3@subdev", "david4@subdev"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
@@ -10224,6 +10250,23 @@ class TestRemoteHosts(TestCase):
         self.assertEqual(mv["user"], "miva1")
         self.assertEqual(mv.get("identity"),
                          "~/.secrets/gatekeeper_access_ed25519")
+
+    def test_david_family_subdev_target_shape(self):
+        # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE
+        # parallel david streams -- additional capacity for the same
+        # external developer (slovnormal odoo dev, no sudo, no prod keys),
+        # built by gatekeeper on the SAME subdev box as david itself,
+        # sharing david's own gatekeeper_access identity requirement, never
+        # montalu's default-key path.
+        for user in ("david2", "david3", "david4"):
+            name = "%s@subdev" % user
+            entries = [r for r in airuleset.REMOTE_HOSTS if r["name"] == name]
+            self.assertEqual(len(entries), 1, "%s target missing" % name)
+            e = entries[0]
+            self.assertEqual(e["host"], "100.118.174.27")
+            self.assertEqual(e["user"], user)
+            self.assertEqual(e.get("identity"),
+                             "~/.secrets/gatekeeper_access_ed25519")
 
     def test_subdev_users_share_one_host_and_identity(self):
         entries = self._subdev_entries()
@@ -11132,6 +11175,21 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run('ssh -i ~/.ssh/id_rsa miva1@subdev "ls"')
         self.assertEqual(r.returncode, 2, r.stdout)
 
+    def test_blocks_david_family_without_identity(self):
+        # david2/david3/david4 (airuleset#326) share david's own identity
+        # requirement. Asserts the SPECIFIC reason (not just the username
+        # anywhere in stderr), same discipline as the miva1 test above.
+        for user in ("david2", "david3", "david4"):
+            r = self._run('ssh %s@subdev "ls"' % user)
+            self.assertEqual(r.returncode, 2, user + " " + r.stdout)
+            self.assertIn("without -i", r.stderr)
+            self.assertIn(user, r.stderr)
+
+    def test_blocks_david_family_with_wrong_identity(self):
+        for user in ("david2", "david3", "david4"):
+            r = self._run('ssh -i ~/.ssh/id_rsa %s@subdev "ls"' % user)
+            self.assertEqual(r.returncode, 2, user + " " + r.stdout)
+
     def test_blocks_scp_wrong_user(self):
         r = self._run("scp file.txt newlevel@subdev:/tmp/")
         self.assertEqual(r.returncode, 2, r.stdout)
@@ -11181,6 +11239,12 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 miva1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_david_family_with_gatekeeper_identity(self):
+        for user in ("david2", "david3", "david4"):
+            r = self._run(
+                'ssh -i ~/.secrets/gatekeeper_access_ed25519 %s@subdev "ls"' % user)
+            self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
 
     def test_allows_fused_identity_flag(self):
         r = self._run('ssh -i~/.secrets/gatekeeper_access_ed25519 david@subdev "ls"')

@@ -41,6 +41,12 @@ class TestAuthorityResolution(TestCase):
         for u in ("montalu2", "montalu3", "montalu4"):
             self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "branch-merge", u)
 
+    def test_david_family_streams_map_to_fork_no_merge(self):
+        # airuleset#326: david2/david3/david4 are three MORE clones of the
+        # david external-developer fork stream — same authority as david.
+        for u in ("david2", "david3", "david4"):
+            self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "fork-no-merge", u)
+
     def test_resolve_uses_the_map_for_simap(self):
         with m.patch.object(airuleset, "_current_user", return_value="simap"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
@@ -48,6 +54,11 @@ class TestAuthorityResolution(TestCase):
     def test_resolve_uses_the_map_for_miva1(self):
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    def test_resolve_uses_the_map_for_david_family(self):
+        for u in ("david2", "david3", "david4"):
+            with m.patch.object(airuleset, "_current_user", return_value=u):
+                self.assertEqual(airuleset.resolve_authority(), "fork-no-merge", u)
 
     def test_resolve_defaults_to_full_for_unknown_user(self):
         with m.patch.object(airuleset, "_current_user", return_value="newlevel"):
