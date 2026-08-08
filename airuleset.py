@@ -5024,7 +5024,21 @@ def _checkout_pane_owner(path, panes=None, owner_of=None):
         if here != target and not here.startswith(target.rstrip("/") + os.sep):
             continue
         try:
-            owner = (owner_of(pid) or "").strip().lower()
+            # #302: the raw owner (a tmux session name / unix account, e.g.
+            # a stream persona's own account) must be redirected through
+            # notify.STREAM_NOTIFY_OWNER the same way watchdog.run_once
+            # already redirects every pane-owner lookup — see
+            # TestPaneOwnerAlwaysRedirected / #212. Imported lazily, same
+            # reason `watchdog` itself is imported lazily above (a box
+            # without the package must still degrade to ""). The real
+            # production `owner_of` (watchdog.pane_owner) already returns a
+            # stripped/lowercased value, so redirecting first and
+            # normalizing the (possibly-passthrough) result after is exactly
+            # equivalent for every real caller, and keeps this the literal
+            # `stream_redirect(owner_of(...))` shape the structural lock
+            # (TestAirulesetOwnerResolutionAlwaysRedirected) requires.
+            from notify import stream_redirect
+            owner = stream_redirect(owner_of(pid) or "").strip().lower()
         except Exception:
             owner = ""
         if owner:
