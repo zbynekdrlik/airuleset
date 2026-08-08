@@ -402,6 +402,97 @@ class RefreshCLI(unittest.TestCase):
             calls = log.read_text() if log.exists() else ""
             self.assertNotIn("comments", calls, calls)
 
+    def test_refresh_excludes_a_bounced_ticket_from_the_comment_fallback(self):
+        # #313 pt 2 adversarial review MAJOR-1: `prio:bounce` is the
+        # gatekeeper's own "returned to the sub-dev, ready-for-review
+        # deliberately kept OFF until a re-hand-off" verdict
+        # (skills/process-subdev). The ticket's ORIGINAL hand-off comment
+        # never goes away, so a naive comment fallback would count a
+        # bounced ticket as permanently handed-off -- hiding exactly the
+        # active work the bounce lane exists to surface. This also proves
+        # the fallback never even QUERIES a bounced ticket's own comments
+        # (the exclusion happens BEFORE the per-issue `gh api` call).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            log = Path(bindir) / "calls.log"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "%s"\n' % log +
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[{"body":'
+                '"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active — bounced
+            self.assertEqual(cache["gk"], 0)
+            calls = log.read_text() if log.exists() else ""
+            self.assertNotIn("comments", calls, calls)
+
+    def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
+        # #313 pt 2 adversarial review MAJOR-2: `_is_readiness_comment` is
+        # the SAME precise, line-anchored matcher
+        # `skills/process-subdev/templates/subdev-handoff-match.sh` (#1500)
+        # already enforces — a bare substring check re-introduces THAT
+        # exact over-match incident. Two comments here would both trigger a
+        # naive `"ready-for-review" in body.lower()` check and must NOT
+        # recover the ticket: (1) the word merely MENTIONED mid-sentence,
+        # never at a line start; (2) a GATEKEEPER finding comment whose
+        # FIRST line starts with `**GATEKEEPER`, even though a later line
+        # quotes the marker.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "Note: earlier I said READY-FOR-REVIEW but that "
+                         "was premature, still fixing a bug."},
+                {"body": "**GATEKEEPER FINDING:** not ready.\n"
+                         "READY-FOR-REVIEW is NOT accurate here."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active
+            self.assertEqual(cache["gk"], 0)
+
     def test_refresh_reattributes_relabeled_handoff_for_shared_account(self):
         # #191 root cause 2 ("ownership relabel") + the issue's own literal
         # acceptance spec: a SHARED-gh-account stream's slice is

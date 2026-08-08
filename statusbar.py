@@ -550,7 +550,16 @@ def pane_width(run=None):
     let this call the REAL tmux binary -- this very box's own real
     $TMUX_PANE would make the query genuinely succeed, non-deterministically
     sizing the render against whatever pane the TEST happened to be running
-    inside."""
+    inside.
+
+    Adversarial review MINOR-4: this forks+execs `tmux` once per statusline
+    render (every prompt). Accepted, not fixed here -- the shim already
+    shells out several times per render (the caveman badge script, `gh`
+    refreshes when the tickets cache is stale), so one more short-lived
+    `tmux display-message` is consistent with the shim's existing cost
+    profile rather than a new class of overhead. A short-TTL cache would
+    trade a small, bounded correctness risk (a stale width across a live
+    terminal resize) for a saving too small to matter here."""
     pane = os.environ.get("TMUX_PANE")
     if not pane:
         return None

@@ -3671,6 +3671,49 @@ class TestStreamAuthorityHasNotifyRouting(TestCase):
         self.assertEqual(missing, set(), missing)
 
 
+class TestReadinessCommentMatcher(TestCase):
+    """`_is_readiness_comment` (#313 pt 2 adversarial review MAJOR-2) is a
+    precise, LINE-ANCHORED matcher — the SAME contract
+    `skills/process-subdev/templates/subdev-handoff-match.sh` (#1500)
+    already enforces for the repo's own hand-off-label GitHub Actions
+    workflow. A bare `"ready-for-review" in body.lower()` substring check
+    re-introduces the EXACT over-match incident #1500 was written to fix:
+    a comment merely MENTIONING the marker, or a GATEKEEPER finding
+    comment quoting it, is not a genuine hand-off."""
+
+    def test_a_genuine_bare_marker_matches(self):
+        self.assertTrue(airuleset._is_readiness_comment(
+            "READY-FOR-REVIEW: fork pushed, tests green"))
+
+    def test_a_markdown_heading_form_matches(self):
+        self.assertTrue(airuleset._is_readiness_comment(
+            "## READY-FOR-REVIEW — everything green"))
+
+    def test_the_cross_fork_review_phrase_matches(self):
+        self.assertTrue(airuleset._is_readiness_comment(
+            "Everything is green now.\nReady for gatekeeper cross-fork "
+            "review."))
+
+    def test_a_bare_mid_sentence_mention_does_not_match(self):
+        self.assertFalse(airuleset._is_readiness_comment(
+            "Note: earlier I said READY-FOR-REVIEW but that was premature, "
+            "still fixing a bug."))
+
+    def test_a_gatekeeper_finding_comment_never_matches(self):
+        # Even though its own SECOND line quotes the marker verbatim.
+        self.assertFalse(airuleset._is_readiness_comment(
+            "**GATEKEEPER FINDING:** not ready.\n"
+            "READY-FOR-REVIEW is NOT accurate here."))
+
+    def test_an_unrelated_comment_does_not_match(self):
+        self.assertFalse(airuleset._is_readiness_comment("still working on it"))
+
+    def test_non_string_body_does_not_match(self):
+        self.assertFalse(airuleset._is_readiness_comment(None))
+        self.assertFalse(airuleset._is_readiness_comment(123))
+        self.assertFalse(airuleset._is_readiness_comment(""))
+
+
 class TestPaneOwnerAlwaysRedirected(TestCase):
     """Structural lock (airuleset#212 adversarial-review finding F2): every
     `pane_owner(...)` CALL SITE in watchdog/__init__.py (other than its own

@@ -575,7 +575,7 @@ try:
     # overflowing. An unmeasurable pane width (no TMUX_PANE, tmux missing,
     # any failure) never trims -- a statusline segment must never guess. ---
     width = statusbar.pane_width()
-    budget = (width - statusbar.STATUSLINE_RESERVE_COLS) if width else None
+    budget = (width - statusbar.STATUSLINE_RESERVE_COLS) if width is not None else None
     line = statusbar.fit_statusline(segs, identity, cm_tag, cc_full, cc_short, budget)
 except Exception:
     pass
@@ -584,6 +584,14 @@ if not line:
 print(line)
 PY
 )
+# adversarial review MAJOR-3: moving `cm` into the python block via CM_TAG
+# dropped the bash-side "no meter at all -> at least show the caveman badge"
+# fallback the shim always had -- an early `raise SystemExit` (malformed
+# stdin, a broken {{REPO_DIR}} import, a missing python3) used to still
+# degrade to just the badge; it silently blanked the WHOLE row instead.
+# Restored explicitly, after the python block, so it covers every early-exit
+# path regardless of where inside that block it happened.
+[ -z "$meter" ] && [ -n "$cm" ] && meter="$cm"
 printf '%s' "$meter"
 exit 0
 """
@@ -4429,6 +4437,40 @@ def _gh_env():
 # unusually large "mine" slice can never blow the refresh's own budget.
 _HANDOFF_COMMENT_CHECK_LIMIT = 40
 
+# #313 pt 2 adversarial review MAJOR-2: a bare `"ready-for-review" in
+# body.lower()` substring check re-introduces the EXACT over-match incident
+# `skills/process-subdev/templates/subdev-handoff-match.sh` (#1500) was
+# written to fix -- a GATEKEEPER finding/review comment, or any comment
+# merely MENTIONING the marker mid-sentence (live incident 2026-07-14 on
+# odoo-erp#1489: "**Po READY-FOR-REVIEW pokračujem hneď.**"), falsely reads
+# as a hand-off. These three regexes are a direct Python port of that
+# script's own matching contract -- case-SENSITIVE and line-anchored, same
+# as its `grep -E` (no `-i`).
+_READINESS_GATEKEEPER_FIRST_LINE_RE = re.compile(r"^\s*\*\*GATEKEEPER")
+_READINESS_LINE_RE = re.compile(
+    r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+_READINESS_CROSS_FORK_RE = re.compile(
+    r"Ready for gatekeeper cross-fork review[.!]?\s*$", re.MULTILINE)
+
+
+def _is_readiness_comment(body):
+    """Is `body` a GENUINE hand-off comment, per the same contract
+    `subdev-handoff-match.sh` (#1500) already enforces for the repo's own
+    hand-off-label workflow? A GATEKEEPER-authored comment never counts,
+    whatever it contains; otherwise a hand-off needs either a line starting
+    with (optional markdown emphasis/header/list prefix +) READY-FOR-REVIEW,
+    or the closing cross-fork-review phrase ending a line. Anything else
+    (a mid-sentence mention, a quoted `> READY-FOR-REVIEW`, review prose
+    asking for one) is NOT a hand-off."""
+    if not isinstance(body, str) or not body:
+        return False
+    first_line = body.split("\n", 1)[0]
+    if _READINESS_GATEKEEPER_FIRST_LINE_RE.match(first_line):
+        return False
+    if _READINESS_LINE_RE.search(body):
+        return True
+    return bool(_READINESS_CROSS_FORK_RE.search(body))
+
 
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
@@ -4484,7 +4526,7 @@ def cmd_tickets_status(args):
             # account) must NOT use @me — author:@me matched every user-authored
             # ticket and the footer showed foreign streams' numbers (2026-07-20);
             # there the slice is the stream LABEL alone.
-            handed, mine, failed = {}, set(), False
+            handed, bounced, mine, failed = {}, {}, set(), False
             # SliceUnresolved (#181 I-2): an unresolvable gh identity is a gh
             # ERROR, and a gh error is never an empty slice — keep open=None,
             # exactly as a failed query already does. Guessing a qual set here
@@ -4513,6 +4555,17 @@ def cmd_tickets_status(args):
                         handed[n_num] = handed.get(n_num, False) or \
                             ("ready-for-review" in labels) or \
                             ("needs-gatekeeper" in labels)
+                        # #313 pt 2 adversarial review MAJOR-1: `prio:bounce`
+                        # is the gatekeeper's own "returned to the sub-dev,
+                        # ready-for-review deliberately kept OFF until a
+                        # re-hand-off" verdict (skills/process-subdev). The
+                        # comment fallback below must never override that —
+                        # the ORIGINAL hand-off comment never goes away, so a
+                        # naive comment check would count a bounced ticket as
+                        # permanently handed-off, hiding exactly the active
+                        # work the bounce lane exists to surface.
+                        if "prio:bounce" in labels:
+                            bounced[n_num] = True
                 except (ValueError, TypeError, KeyError):
                     failed = True   # gh error ≠ empty slice — keep open=None
             # #191 Part B ("ownership relabel"): a SHARED-account stream's
@@ -4588,21 +4641,42 @@ def cmd_tickets_status(args):
             # subdev-handoff-label workflow that is SUPPOSED to apply it
             # instead can itself be broken (live-confirmed for #313:
             # zbynekdrlik/odoo-erp#3239 carries only `stream:david`, no label
-            # at all, yet has real `READY-FOR-REVIEW:` comments -- tracked as
-            # odoo-erp#2584). The hand-off's PRIMARY signal is that comment
-            # (agents/autopilot-worker.md), which is always postable
-            # regardless of write access; a candidate the label missed is
-            # checked directly against its own comments -- an EXACT per-issue
-            # substring match in Python, never GitHub's tokenized full-text
-            # search (documented elsewhere in this repo to over-match on the
-            # bare words). Bounded so one large slice can never blow the
-            # refresh's own budget; this is a DISPLAY counter (unlike
-            # `core-quals`'s obligation set, which correctly REFUSES rather
-            # than risk over-counting a stop-proof), so a few extra
-            # comment-substring matches are harmless -- showing `gk 0` while
-            # tickets sit genuinely handed off is the actual harm.
-            if slug:
-                unhandled = [n_num for n_num in mine if not handed.get(n_num)]
+            # at all, yet has a real, GENUINE `## READY-FOR-REVIEW —` comment
+            # -- tracked as odoo-erp#2584). The hand-off's PRIMARY signal is
+            # that comment (agents/autopilot-worker.md), which is always
+            # postable regardless of write access; a candidate the label
+            # missed is checked directly against its own comments via
+            # `_is_readiness_comment` -- the SAME precise, line-anchored
+            # matcher this repo's own hand-off-label workflow enforces
+            # (#1500), never a bare substring (which re-introduces THAT
+            # exact over-match incident: a comment merely MENTIONING the
+            # marker, or a GATEKEEPER finding comment quoting it). Bounded so
+            # one large slice can never blow the refresh's own budget; this
+            # is a DISPLAY counter (unlike `core-quals`'s obligation set,
+            # which correctly REFUSES rather than risk over-counting a
+            # stop-proof), so a rare extra match is far less harmful than
+            # showing `gk 0` while tickets sit genuinely handed off.
+            #
+            # Two guards adversarial review added: (a) `not failed` -- a
+            # broken slice query already forces `open`/`gk` to `None`
+            # (below), so spending up to 40 extra `gh api` calls on a KNOWN
+            # gh-outage/rate-limit path only makes that outage worse for
+            # nothing. (b) `not bounced.get(n_num)` -- `prio:bounce` is the
+            # gatekeeper's own "returned to the sub-dev, ready-for-review
+            # deliberately kept OFF until a re-hand-off" verdict
+            # (skills/process-subdev). The ORIGINAL hand-off comment never
+            # goes away, so without this exclusion a bounced ticket would be
+            # permanently misread as handed-off forever -- hiding exactly
+            # the active work the bounce lane exists to surface. `sorted()`
+            # makes which candidates get checked, when the slice exceeds the
+            # bound, deterministic across refreshes (mine is an unordered
+            # set) and prefers the NEWEST tickets first (most likely to be a
+            # recent hand-off).
+            if slug and not failed:
+                unhandled = sorted(
+                    (n_num for n_num in mine
+                     if not handed.get(n_num) and not bounced.get(n_num)),
+                    reverse=True)
                 for n_num in unhandled[:_HANDOFF_COMMENT_CHECK_LIMIT]:
                     raw = _out(["gh", "api",
                                 "repos/%s/issues/%d/comments" % (slug, n_num)],
@@ -4615,8 +4689,7 @@ def cmd_tickets_status(args):
                         continue   # e.g. a bare int -- never a real answer
                     for c in comments:
                         body = c.get("body") if isinstance(c, dict) else None
-                        if isinstance(body, str) and \
-                                "ready-for-review" in body.lower():
+                        if _is_readiness_comment(body):
                             handed[n_num] = True
                             break
             gk = sum(1 for n_num in mine if handed.get(n_num))
