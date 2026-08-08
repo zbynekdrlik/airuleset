@@ -38,6 +38,76 @@ set -euo pipefail
 # `gh issue view` call on the named parent; a lookup failure degrades to
 # "cannot verify chain depth" and never blocks on its own.
 #
+# DEDUP GATE (#329, measured: odoo-erp's kvaskodev stream self-authored 143
+# issues, 45 still open = 76% of its own queue). A body must ALSO carry a
+# `Dedup-checked: <what you searched>` line (same logged-claim shape as
+# `Scope-gate:` — cheap, no network, forces a deliberate self-report) AND
+# independently the hook fetches the target repo's real OPEN issue titles
+# (bounded `gh issue list --state open --limit 200`, degrading to "cannot
+# verify" on ANY failure — offline, unauthenticated, rate-limited, `gh`
+# missing) and diffs the new title against every one of them using TOKEN-SET
+# JACCARD overlap (ratio >= 0.7), NOT a character-level ratio — a
+# character-level SequenceMatcher was tried first and PROVABLY cannot
+# separate this fleet's real duplicates from its real distinct tickets (see
+# the `_title_jaccard` docstring below for the measured numbers). A
+# near-duplicate BLOCKS naming the existing issue number (or "in-this-batch"
+# for a sibling filed earlier in the SAME command), UNLESS that number is
+# already referenced (`#N`) somewhere in the new title/body — an explicit
+# link is not a silent duplicate; this exemption is deliberately gameable by
+# an agent that already knows the duplicate's number (an accepted residual —
+# it still fails toward allowing, never toward a false block). Neither half
+# of this gate ever manufactures a block from an unmeasurable state: a
+# missing line is a real, structural gap (blocks); a failed `gh` lookup is
+# "couldn't check" (never blocks on its own). The near-dup check is NOT
+# exempt for `user-request`/`planned-work` (unlike the two caps below) — a
+# literal duplicate is never useful regardless of who asked for it.
+#
+# DAILY FILING CAP (#329, soft, per repo): counts today's own `verdict=PASS`
+# lines already written to ~/.claude/scope-gate.log for the SAME repo AND
+# whose own `criterion=` is NOT `user-request`/`planned-work` (plus filings
+# already classified PASS earlier in the same Bash call, since one batch can
+# file several issues before anything is written). Once that count reaches
+# 8, a filing whose `Scope-gate:` criterion is itself non-exempt is BLOCKED
+# — the intent is to push discovered work toward "fix it now, in this
+# branch" per no-dropped-work.md, never toward silently dropping it; the
+# block message says exactly that. `user-request`/`planned-work` filings
+# never COUNT toward the cap and never GET capped by it, because a user
+# directive or a converged-plan decomposition must always be able to file
+# (durable-decisions-to-tickets.md).
+#
+# CHAIN-WIDTH CAP (#329, extends #311's chain-DEPTH cap with the WIDTH half
+# of the same measured failure — odoo-erp's real #3250/#3251/#3252/#3258,
+# four siblings off ONE parent, #3224, in one burst, each individually
+# depth-1 and so invisible to the depth cap alone). Reuses the SAME
+# `_chain_parents()` "(#N follow-up)" extraction: once ANY parent a filing
+# references already has 2 other same-day PASS-logged, non-exempt siblings
+# on this repo, the 3rd+ is BLOCKED — every referenced parent is checked
+# (never just the first), mirroring the chain-depth cap's own "every
+# candidate is tried" discipline.
+#
+# Both new caps, and the near-dup check, are computed against a single
+# TARGET REPO resolved consistently per filing (explicit `-R`/`--repo`, else
+# parsed from a `gh api repos/<owner>/<repo>/issues` path, else the cwd's own
+# git remote) — the SAME value is what gets logged, so a future invocation's
+# cap count is never checked against a different repo than the one a past
+# filing was actually logged under.
+#
+# Both new caps are logged through the SAME scope-gate.log mechanism
+# (extended with `parents=`/`dedup=` fields, never a second log) and honour
+# the SAME `# airuleset:scope-gate-ok <reason>` bypass as every other gate
+# here — no new bypass syntax.
+#
+# PHANTOM-PASS FIX (#329 adversarial review, CRITICAL): a Bash command that
+# blocks on ANY segment blocks the WHOLE tool call — nothing in it actually
+# runs, including a sibling `gh issue create` that this hook itself
+# classified PASS. Logging that sibling as `verdict=PASS` would silently
+# burn cap budget for an issue that was never filed, and a batch retried
+# after fixing the one blocked item would then find EVERY item capped
+# despite zero real filings. So: once any segment in a command BLOCKS, every
+# other segment's PASS is logged as `verdict=NOTFILED` instead (still
+# visible for audit, but `_log_pass_count` only ever counts an EXACT
+# `verdict=PASS` token, so a NOTFILED entry never consumes cap budget).
+#
 # BODY RESOLUTION (same shape as block-gh-invalid-json-flag.sh's heredoc
 # handling, extended to CAPTURE the body instead of discarding it):
 #   - `-F <file>` / `--body-file <file>` where <file> was just written by a
@@ -52,16 +122,28 @@ set -euo pipefail
 #     conservatively (get this wrong toward strict, per no-dropped-work.md:
 #     a false block costs one line, a false pass costs nothing).
 #
-# Every PASS and BLOCK is logged to ~/.claude/scope-gate.log (repo, title,
-# criterion, session) — the log is what keeps a false criterion auditable.
+# Every PASS, NOTFILED and BLOCK is logged to ~/.claude/scope-gate.log, in a
+# field order that puts every COUNTING-RELEVANT field (verdict, repo,
+# criterion, session, parents) BEFORE the two free-text, attacker-influenced
+# fields (title, dedup) — so a `\bfield=(\S+)` search for any counting field
+# always finds the REAL one first, never a decoy the same value could spell
+# out inside a crafted title. The log is what keeps a false criterion
+# auditable AND is what the daily/width caps count against.
 #
 # Bypass (rare, logged): `# airuleset:scope-gate-ok <reason>` anywhere in the
-# command text.
+# command text — bypasses EVERY gate in this hook, not just Scope-gate.
 #
 # KNOWN LIMIT: cannot verify the criterion is TRUE, only that it was
 # affirmatively claimed. See modules/quality/no-dropped-work.md — filing
 # must never become impossible; this hook's job is to stop the SILENT
 # default, not to add a second judgment layer on top of the model's own.
+#
+# KNOWN RESIDUAL (accepted, documented rather than chased — #329 review): the
+# `--limit 200` on the near-dup `gh issue list` call truncates the comparison
+# set to the 200 most recently CREATED open issues (gh's default sort), so a
+# genuine duplicate of a much older issue on a repo with 200+ open issues can
+# be missed. This degrades toward ALLOWING, never toward a false block, which
+# matches this hook's own stated bias throughout.
 
 INPUT=$(cat 2>/dev/null || echo "")
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
@@ -85,22 +167,48 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 # python3 - "$CMD" <<'PYEOF' (argv, never a pipe into the heredoc's own
 # stdin — see the repo's own #96 gotcha).
 RC=0
-OUT=$(python3 - "$CMD" "$SID" "$(pwd)" <<'PYEOF' 2>/dev/null
+OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" <<'PYEOF' 2>/dev/null
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+from datetime import datetime
 
 cmd = sys.argv[1]
 sid = sys.argv[2]
 cwd = sys.argv[3]
+log_path = sys.argv[4]
 
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
     "cross-cutting", "needs-user-decision", "planned-work", "user-request",
 }
+
+# #329 -- these two criteria are the only ones exempt from the NEW soft caps
+# below (daily filing cap, chain-width cap) -- they never COUNT toward
+# either cap and never GET capped by either. A user directive or a
+# converged-plan decomposition must always be able to file
+# (durable-decisions-to-tickets.md); a discovered review-finding/cleanup
+# must not.
+EXEMPT_FROM_CAP = {"planned-work", "user-request"}
+
+# #329 -- soft per-day, per-repo cap on NON-EXEMPT agent-authored filings.
+# Measured worst days on the ticket's own real corpus: 19/16/14 filings in
+# ONE day on ONE repo; the user's own stated sane ceiling for the WHOLE
+# project's lifetime backlog was ~40 tickets. 8/day/repo sits comfortably
+# above what a genuinely active /autopilot day of bundled batches should
+# need (a handful of real out-of-scope discoveries across several PRs)
+# while being decisively below every measured storm day.
+DAILY_CAP = 8
+
+# #329 -- chain-WIDTH cap (siblings off ONE parent, same day, same repo).
+# The real corpus example is 4 siblings off one parent (#3224) in one
+# burst; 1-2 genuinely distinct findings off a single review is plausible
+# (e.g. a security finding + a schema finding from the same PR review), a
+# 3rd is the storm signature -- so 2 pass, the 3rd blocks.
+CHAIN_WIDTH_CAP = 2
 
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\s*$")
 CATFILE_RE = re.compile(r'^\s*cat\s*>>?\s*([^\s<>&;|]+)')
@@ -280,6 +388,12 @@ def resolve_body(tk, seg_line, is_api):
 
 CRITERION_RE = re.compile(r'(?m)^\s*Scope-gate:\s*(\S+)')
 
+# #329 -- the dedup-gate's structural half: a `Dedup-checked: <query>` line
+# proves the agent deliberately searched before filing, the SAME
+# logged-claim shape `Scope-gate:` already uses (cheap, no network, does
+# not verify truth -- only that it was affirmatively claimed).
+DEDUP_RE = re.compile(r'(?m)^\s*Dedup-checked:\s*(\S.*)$')
+
 # #311 point 3 -- Scope-gate verifiability, mechanical only where trivially
 # checkable. A body claiming `>300-loc` that ALSO states its own bare
 # number next to "loc"/"lines" is a self-contradiction when that number is
@@ -371,7 +485,242 @@ def _gh_view_text(parent, cwd, repo=None):
         return None
 
 
-results = []  # (verdict, title, criterion_or_none)
+# #329 -- cached per (cwd, repo) WITHIN THIS ONE hook invocation, since a
+# batch can file several issues into the same repo in one command and each
+# would otherwise repeat the identical `gh issue list` call.
+_issue_list_cache = {}
+
+
+def _fetch_open_issues(cwd, repo):
+    """Real open-issue (number, title) pairs for the target repo, bounded
+    and cached. Returns None on ANY failure -- offline, unauthenticated,
+    `gh` missing, rate-limited, malformed JSON -- so a lookup failure
+    degrades the near-duplicate check to "cannot verify"; it never
+    manufactures a block on its own. Empirically confirmed (this ticket):
+    an unauthenticated `gh issue list` fails in ~70ms with no network
+    hang, so this is safe to run unconditionally.
+
+    KNOWN RESIDUAL (documented, not chased): `--limit 200` truncates to
+    the 200 most-recently-CREATED open issues, so a duplicate of a much
+    older issue on a 200+-open-issue repo can be missed -- degrades
+    toward allowing, never toward a false block."""
+    key = (cwd, repo)
+    if key in _issue_list_cache:
+        return _issue_list_cache[key]
+    result = None
+    try:
+        argv = ["gh", "issue", "list", "--state", "open", "--limit", "200",
+                "--json", "number,title"]
+        if repo:
+            argv += ["-R", repo]
+        out = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=8, cwd=cwd)
+        if out.returncode == 0:
+            data = json.loads(out.stdout or "[]")
+            if isinstance(data, list):
+                result = data
+    except Exception:
+        result = None
+    _issue_list_cache[key] = result
+    return result
+
+
+# #329 adversarial review -- a character-level SequenceMatcher ratio CANNOT
+# separate this fleet's real duplicates from its real distinct tickets:
+# measured, the true-duplicate pair in this file's own test corpus ("Retry
+# queue drops messages under load" vs "... under heavy load") scores 0.925,
+# while genuinely DISTINCT real title pairs from this fleet's own naming
+# conventions score EQUAL OR HIGHER -- test_foo.py/test_bar.py 0.929, -R/-C
+# 0.978, dev1/dev2 0.978, montalu2/montalu3 0.980, cam4/cam5 0.983, job
+# 14/job 15 0.976 -- and camera-box/odoo-erp file per-box/per-job/
+# per-account tickets as their DOMINANT title shape, not an edge case.
+#
+# A TOKEN-SET Jaccard measure alone still isn't enough: two REALISTIC full
+# titles that differ ONLY in a box/job/account NUMBER but share every other
+# word ("cam4 restart loop blocks the E2E preflight" vs the identical
+# sentence for cam5) keep 6 of 8 tokens (Jaccard 0.75) -- ABOVE the
+# threshold below, and a real, live false-positive this hook's own test
+# suite caught (#329 adversarial review, TRIGGERED live during test
+# authoring). The fix: any token containing a DIGIT is an "identifying"
+# token (a specific box/job/account/PR number) -- if the SET of identifying
+# tokens differs AT ALL between the two titles, they can never be a
+# duplicate, REGARDLESS of the overall Jaccard ratio, since they concretely
+# name different targets. This is checked BEFORE the ratio, so it also
+# correctly handles a bare short comparison (cam4 vs cam5 alone: identifying
+# sets {cam4} != {cam5}, refused outright) and leaves the TRUE-duplicate
+# pair above untouched (neither title has ANY digit-bearing token, so both
+# identifying sets are empty and trivially equal) -- it still scores
+# 6/7 ~= 0.857 Jaccard, comfortably above the 0.7 threshold.
+TOKEN_RE = re.compile(r'[a-z0-9]+', re.I)
+IDENTIFYING_TOKEN_RE = re.compile(r'\d')
+TOKEN_JACCARD_THRESHOLD = 0.7
+
+
+def _tokenize(text):
+    return set(t.lower() for t in TOKEN_RE.findall(text or ""))
+
+
+def _identifying_tokens(tokens):
+    return {t for t in tokens if IDENTIFYING_TOKEN_RE.search(t)}
+
+
+def _title_jaccard(a, b):
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    if _identifying_tokens(ta) != _identifying_tokens(tb):
+        return 0.0
+    union = len(ta | tb)
+    if union == 0:
+        return 0.0
+    return len(ta & tb) / union
+
+
+def _near_duplicate(title, body, cwd, repo, batch_titles):
+    """Number (as a string) of an existing OPEN issue whose title
+    near-duplicates `title` (token-Jaccard >= TOKEN_JACCARD_THRESHOLD), or
+    the literal string "in-batch" if the duplicate is instead an earlier
+    sibling filed into the SAME target repo within THIS SAME Bash command
+    (checked first, cheap, no network -- #329 adversarial review: a remote
+    `gh issue list` fetch can never see a sibling that has not been filed
+    yet at PreToolUse time), or None if neither is found. An existing
+    issue already referenced by #N anywhere in title+body is skipped --
+    an explicit link is not a silent duplicate. Degrades to None whenever
+    the real remote lookup can't run at all (see _fetch_open_issues)."""
+    haystack = (title or "") + "\n" + (body or "")
+    if not _tokenize(title):
+        return None
+    for other_title in batch_titles:
+        if _title_jaccard(title, other_title) >= TOKEN_JACCARD_THRESHOLD:
+            return "in-batch"
+    issues = _fetch_open_issues(cwd, repo)
+    if not issues:
+        return None
+    best = None
+    for it in issues:
+        if not isinstance(it, dict):
+            continue
+        num = it.get("number")
+        other = it.get("title") or ""
+        if num is None or not other:
+            continue
+        if re.search(r'#%s\b' % re.escape(str(num)), haystack):
+            continue  # explicitly referenced -- not a silent duplicate
+        ratio = _title_jaccard(title, str(other))
+        if ratio >= TOKEN_JACCARD_THRESHOLD and (best is None or ratio > best[1]):
+            best = (num, ratio)
+    return str(best[0]) if best else None
+
+
+def _today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _clean_field(s):
+    """Collapse embedded tabs/newlines to single spaces before this value
+    crosses the tab-separated hand-off to bash (or gets embedded in the
+    persistent log) -- an embedded tab/newline in a TITLE would otherwise
+    shift every field after it (#329 adversarial-review finding: a title
+    containing a real tab/newline corrupted `criterion=`/`session=`/
+    `parents=` in the tab-separated OUT channel bash reads)."""
+    return re.sub(r'\s+', ' ', (s or '')).strip()
+
+
+def _log_pass_count(path, repo, today, parent=None):
+    """Count of PASS-verdict filings already WRITTEN to the scope-gate log
+    for `repo` on `today`, EXCLUDING any entry whose own `criterion=` is
+    exempt from the cap (#329 adversarial-review finding: `_log_pass_count`
+    used to count EVERY PASS line regardless of criterion, so an exempt
+    `planned-work`/`user-request` batch silently consumed the SAME budget
+    the block message promised was reserved for non-exempt filings) --
+    optionally further scoped to filings whose OWN logged `parents=` field
+    named `parent` (the chain-width count). A missing/unreadable log -> 0
+    (never invents a cap violation from unmeasurable state).
+
+    Every counting-relevant field (`verdict=`, `repo=`, `criterion=`,
+    `parents=`) is extracted with a plain `\\bfield=(\\S+)` search rather
+    than an end-of-line anchor -- safe because the LOG LINE FORMAT itself
+    places every one of these fields BEFORE the two free-text fields
+    (title, dedup), so the first match in the line is always the real one,
+    never a decoy value a crafted title could spell out later in the same
+    line (#329 adversarial-review finding: the original `parents=(\\S+)`
+    search had no such guarantee and a title containing literal text
+    "parents=999" could shift the extracted value)."""
+    count = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.startswith(today):
+                    continue
+                mv = re.search(r'\bverdict=(\S+)', line)
+                if not mv or mv.group(1) != "PASS":
+                    continue
+                mr = re.search(r'\brepo=(\S+)', line)
+                if not mr or mr.group(1) != repo:
+                    continue
+                mc = re.search(r'\bcriterion=(\S+)', line)
+                if mc and mc.group(1).lower() in EXEMPT_FROM_CAP:
+                    continue
+                if parent is not None:
+                    mp = re.search(r'\bparents=(\S+)', line)
+                    if not mp or parent not in mp.group(1).split(","):
+                        continue
+                count += 1
+    except OSError:
+        pass
+    return count
+
+
+API_ISSUES_REPO_RE = re.compile(
+    r'^(?:https?://api\.github\.com/)?repos/([^/]+/[^/]+)/issues\b')
+
+
+def _target_repo_for_segment(tk, api_call, cwd_repo):
+    """The repo THIS ONE filing actually targets: explicit -R/--repo, else
+    (for `gh api`) parsed from the `repos/<owner>/<repo>/issues` path
+    token, else the cwd-derived repo. Used consistently for the near-dup
+    fetch, BOTH caps, AND the logged `repo=` field, so a future
+    invocation's cap count is checked against the SAME repo a past
+    filing was actually logged under (#329 adversarial-review finding:
+    the caps were keyed on the cwd-derived repo while the near-dup check
+    used the filing's own -R target -- a cross-repo filing was capped
+    against the wrong bucket, and a `gh api` filing had no near-dup
+    protection at all since its target repo was never resolved)."""
+    explicit = flag_value(tk, ("-R", "--repo"))
+    if explicit:
+        return explicit
+    if api_call:
+        for t in tk:
+            m = API_ISSUES_REPO_RE.match(t)
+            if m:
+                return m.group(1)
+    return cwd_repo
+
+
+results = []  # (verdict, title, criterion_or_none, parents_str, target_repo, dedup_claim)
+
+# #329 -- resolve the cwd-derived repo BEFORE the per-segment loop (moved
+# up from the tail of the script) so the dedup/cap checks can use it as
+# their FALLBACK; the final print loop below uses each result's own
+# per-segment target_repo instead of this shared value directly.
+cwd_repo = os.path.basename(cwd.rstrip("/"))
+try:
+    _out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
+                          capture_output=True, text=True, timeout=3)
+    _url = (_out.stdout or "").strip()
+    _m = re.search(r'[:/]([^/]+/[^/]+?)(\.git)?$', _url)
+    if _m:
+        cwd_repo = _m.group(1)
+except Exception:
+    pass
+
+# #329 -- local running counters for a BATCH filing several issues in one
+# Bash call, before anything is written to the log. Keyed by target_repo
+# (a batch can target more than one repo) and, for the width cap, by
+# (target_repo, parent).
+_local_day_count = {}      # target_repo -> count
+_local_parent_count = {}   # (target_repo, parent) -> count
+_batch_titles_by_repo = {}  # target_repo -> [title, ...] already PASSed
 
 for seg in split_top_level(skeleton):
     if not seg.strip():
@@ -394,6 +743,10 @@ for seg in split_top_level(skeleton):
         m = CRITERION_RE.search(body)
         if m:
             crit = m.group(1)
+
+    repo_flag = flag_value(tk, ("-R", "--repo"))
+    target_repo = _target_repo_for_segment(tk, api_call, cwd_repo)
+
     # #311 -- a review-finding follow-up whose own PARENT is ITSELF such a
     # follow-up is a depth-2 review-finding chain -- a self-reinforcing
     # sequence the follow-up gate's PER-ISSUE criterion cannot see, since
@@ -404,13 +757,15 @@ for seg in split_top_level(skeleton):
     # checked with the backward-reference filter (finding F2: a root
     # ticket linking its own spawned children is not itself chained), in
     # the filing's OWN explicit repo when one is given (finding F8).
-    repo_flag = flag_value(tk, ("-R", "--repo"))
+    parents = _chain_parents((title or "") + "\n" + (body or ""))
+    parents_str = ",".join(parents) if parents else "none"
     chain_capped = False
-    for parent in _chain_parents((title or "") + "\n" + (body or "")):
+    for parent in parents:
         parent_text = _gh_view_text(parent, cwd, repo=repo_flag)
         if parent_text is not None and _chain_parent(parent_text, own_number=parent):
             chain_capped = True
             break
+
     # #311 point 3 -- a `>300-loc` claim whose own body confesses a
     # <=300 number next to "loc"/"lines" is self-contradicting; checked
     # ONLY for this one criterion, ONLY when a number is actually stated.
@@ -425,75 +780,165 @@ for seg in split_top_level(skeleton):
         nums = [int(x) for x in LOC_NUM_RE.findall(body)]
         if nums and max(nums) <= 300:
             loc_mismatch = True
+
+    clean_title = _clean_field(title)
+
     if chain_capped:
-        results.append(("BLOCK", title, "chain-depth-cap"))
+        results.append(("BLOCK", clean_title, "chain-depth-cap", parents_str,
+                         target_repo, ""))
     elif loc_mismatch:
-        results.append(("BLOCK", title, "loc-mismatch"))
-    elif crit and crit.lower() in ALLOWED:
-        results.append(("PASS", title, crit))
+        results.append(("BLOCK", clean_title, "loc-mismatch", parents_str,
+                         target_repo, ""))
+    elif not (crit and crit.lower() in ALLOWED):
+        # unchanged from before #329 -- missing/invalid Scope-gate blocks
+        # here, BEFORE the new dedup/cap checks below (keeps every
+        # pre-existing test's block reason unaffected).
+        results.append(("BLOCK", clean_title, _clean_field(crit), parents_str,
+                         target_repo, ""))
     else:
-        results.append(("BLOCK", title, crit))
+        dedup_match = DEDUP_RE.search(body) if body else None
+        if not dedup_match:
+            # #329 -- structural half of the dedup gate: prove you searched.
+            results.append(("BLOCK", clean_title, "no-dedup-line", parents_str,
+                             target_repo, ""))
+        else:
+            dedup_claim = _clean_field(dedup_match.group(1))[:80]
+            crit_l = crit.lower()
+            today = _today_str()
+            batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
+
+            # #329 -- cheap local checks BEFORE the network near-dup call
+            # (adversarial-review finding: a batch of N filings into N
+            # different repos previously paid N network round-trips even
+            # when the local caps alone would already refuse most of
+            # them -- reordering costs nothing for the common case and
+            # bounds the worst case).
+            width_blocked = False
+            if crit_l not in EXEMPT_FROM_CAP and parents:
+                for p in parents:
+                    n = (_log_pass_count(log_path, target_repo, today, parent=p)
+                         + _local_parent_count.get((target_repo, p), 0))
+                    if n >= CHAIN_WIDTH_CAP:
+                        width_blocked = True
+                        break
+            daily_blocked = False
+            if not width_blocked and crit_l not in EXEMPT_FROM_CAP:
+                n = (_log_pass_count(log_path, target_repo, today)
+                     + _local_day_count.get(target_repo, 0))
+                if n >= DAILY_CAP:
+                    daily_blocked = True
+
+            if width_blocked:
+                results.append(("BLOCK", clean_title, "chain-width-cap",
+                                 parents_str, target_repo, dedup_claim))
+            elif daily_blocked:
+                results.append(("BLOCK", clean_title, "daily-cap",
+                                 parents_str, target_repo, dedup_claim))
+            else:
+                near_dup = _near_duplicate(title, body, cwd, target_repo,
+                                            batch_titles)
+                if near_dup:
+                    if near_dup == "in-batch":
+                        reason = "near-duplicate:in-this-batch"
+                    else:
+                        reason = "near-duplicate:#%s" % near_dup
+                    results.append(("BLOCK", clean_title, reason, parents_str,
+                                     target_repo, dedup_claim))
+                else:
+                    results.append(("PASS", clean_title, crit, parents_str,
+                                     target_repo, dedup_claim))
+                    batch_titles.append(title or "")
+                    if crit_l not in EXEMPT_FROM_CAP:
+                        _local_day_count[target_repo] = \
+                            _local_day_count.get(target_repo, 0) + 1
+                        for p in parents:
+                            key = (target_repo, p)
+                            _local_parent_count[key] = \
+                                _local_parent_count.get(key, 0) + 1
 
 if not results:
     sys.exit(0)
 
-repo = os.path.basename(cwd.rstrip("/"))
-try:
-    out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                          capture_output=True, text=True, timeout=3)
-    url = (out.stdout or "").strip()
-    m = re.search(r'[:/]([^/]+/[^/]+?)(\.git)?$', url)
-    if m:
-        repo = m.group(1)
-except Exception:
-    pass
-
-blocked = [r for r in results if r[0] == "BLOCK"]
-for verdict, title, crit in results:
+has_block = any(r[0] == "BLOCK" for r in results)
+for verdict, title, crit, parents_str, target_repo, dedup_claim in results:
+    # #329 -- a PASS logged while ANY sibling in this same command BLOCKED
+    # is a phantom: the whole tool call is refused, so nothing was really
+    # filed. Log it as NOTFILED (never PASS) so `_log_pass_count` -- which
+    # only ever counts an EXACT "PASS" token -- never charges cap budget
+    # for a filing that never happened (#329 adversarial-review CRITICAL).
+    log_verdict = "NOTFILED" if (has_block and verdict == "PASS") else verdict
     # bash's `read` with IFS=<tab> still treats tab as "IFS whitespace" and
     # COLLAPSES consecutive delimiters, silently swallowing an empty field
     # (discovered live testing this hook) -- never emit an empty field.
-    print("%s\t%s\t%s\t%s\t%s" % (verdict, repo, title, crit or "none", sid))
+    print("%s\t%s\t%s\t%s\t%s\t%s\t%s" % (
+        log_verdict, target_repo, title, crit or "none", sid,
+        parents_str, dedup_claim or "none"))
 
-sys.exit(2 if blocked else 0)
+sys.exit(2 if has_block else 0)
 PYEOF
 ) || RC=$?
 
+SUMMARY=""
 if [ -n "$OUT" ]; then
-    while IFS=$'\t' read -r VERDICT REPO TITLE CRIT LOGSID; do
+    while IFS=$'\t' read -r VERDICT REPO TITLE CRIT LOGSID PARENTS DEDUP; do
         [ -z "$VERDICT" ] && continue
-        echo "$(date -Iseconds)  verdict=$VERDICT  repo=$REPO  title=\"$TITLE\"  criterion=${CRIT:-none}  session=$LOGSID" >> "$LOG" 2>/dev/null || true
+        # #329 -- log-line field ORDER is security-relevant: every
+        # counting field (verdict/repo/criterion/session/parents) is
+        # written BEFORE the two free-text fields (title/dedup), so a
+        # `\bfield=(\S+)` search on ANY counting field is guaranteed to
+        # find the real one first, never a value a crafted title/dedup
+        # claim could spell out later in the same line.
+        echo "$(date -Iseconds)  verdict=$VERDICT  repo=$REPO  criterion=${CRIT:-none}  session=$LOGSID  parents=${PARENTS:-none}  title=\"$TITLE\"  dedup=\"${DEDUP:-none}\"" >> "$LOG" 2>/dev/null || true
+        if [ "$VERDICT" = "BLOCK" ]; then
+            SUMMARY="${SUMMARY}  - \"$TITLE\" -> ${CRIT:-none}
+"
+        fi
     done <<< "$OUT"
 fi
 
 if [ "$RC" -eq 2 ]; then
+    if [ -n "$SUMMARY" ]; then
+        printf '🚫 BLOCKED — per-item reason:\n%s\n' "$SUMMARY" >&2
+    fi
     cat >&2 <<'MSG'
-🚫 BLOCKED: filing this issue.
-
 Either (a) no valid `Scope-gate:` line, (b) this issue's own PARENT (the
 "#N follow-up" it names) is ITSELF a review-finding follow-up -- a depth-2
 review-finding chain (#311: adversarial-review findings that keep spawning
 follow-up tickets of follow-up tickets, unbounded — a criterion honestly
-satisfied at each individual hop does not fix this) -- or (c) the body
-claims `Scope-gate: >300-loc` but its own text states a line count of 300
-or fewer, a self-contradicting claim (#311).
+satisfied at each individual hop does not fix this), (c) the body claims
+`Scope-gate: >300-loc` but its own text states a line count of 300 or
+fewer, a self-contradicting claim (#311), (d) no `Dedup-checked: <what you
+searched>` line proving you searched for an existing duplicate first
+(#329), (e) an existing OPEN issue (or an earlier sibling in THIS SAME
+batch) has a near-duplicate title and this one does not reference the
+existing issue by `#N` (#329), (f) this repo already has 2 other
+non-exempt findings filed today off the SAME parent ticket -- the
+chain-width cap (#329: a 3rd+ finding off one review belongs in that
+branch, not a new ticket), or (g) this repo has already reached today's
+soft filing cap of 8 non-exempt issues (#329).
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this
 PR/session — it does NOT get filed as a follow-up issue, EVEN when it
 technically sits outside your diff. Filing is for GENUINELY out-of-scope
 work only, and a review finding that would spawn a SECOND generation of
-follow-up must be fixed in THIS branch instead, never filed as a third
-ticket.
+follow-up, or a 3rd+ finding off one parent, or the day's 9th+ non-exempt
+filing on this repo, must be fixed in THIS branch instead of filed as
+another ticket.
 
 Fix NOW — one of:
   1. Fix it in this session/PR instead of filing it (mandatory once the
-     chain-depth cap above applies), OR
-  2. Add a line to the issue body naming why it is genuinely out of scope:
+     chain-depth cap, chain-width cap, or daily cap above applies), OR
+  2. Add a `Dedup-checked: <what you searched for>` line if it is missing, OR
+  3. Reference the existing near-duplicate issue by `#N` instead of filing
+     a new one, OR
+  4. Add a line to the issue body naming why it is genuinely out of scope:
        Scope-gate: <criterion>
      where <criterion> is one of:
        >300-loc | schema-migration | api-break | security-boundary |
        cross-cutting | needs-user-decision | planned-work | user-request
+     (only `planned-work`/`user-request` are exempt from the daily and
+     chain-width caps).
 
 This is a LOGGED, falsifiable claim (~/.claude/scope-gate.log) — it does not
 verify the criterion is true, only that you affirmatively claimed one instead
