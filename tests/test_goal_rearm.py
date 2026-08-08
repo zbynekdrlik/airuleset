@@ -833,6 +833,36 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
         self.assertTrue(tmux.typed(), logs)
         self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
 
+    def test_activity_is_never_read_when_nowhere_near_the_dark_cap(self):
+        # Adversarial-review finding MINOR-1 (this ticket's own review):
+        # `_last_real_turn_ts` (a 2 MB tail read + a json.loads per line)
+        # used to run UNCONDITIONALLY for every mark=="set" pane, every
+        # 60s sweep, even when the session is nowhere near the dark cap --
+        # its value is only ever consumed inside the dark `if`. The
+        # #320-review "cheap gates before an expensive read" lesson
+        # applies here too: gate the activity read behind the SAME cheap
+        # age comparison that already exists, so a healthy session pays
+        # nothing extra.
+        state = {}
+        base = time.time()
+        fresh_ts = _iso(base - 60)
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, fresh_ts)],
+                 state=state, now=base - 60)
+        calls = []
+        real_fn = wd._last_real_turn_ts
+
+        def counting(tpath, tail_bytes=2_000_000):
+            calls.append(tpath)
+            return real_fn(tpath, tail_bytes=tail_bytes)
+
+        with m.patch.object(wd, "_last_real_turn_ts", counting):
+            self._go(PANE_DARK, state=state, now=base + 60,
+                     cap_seq=self._typed_seq())
+        self.assertEqual(calls, [],
+                         "the activity read must be gated behind the "
+                         "cheap age check, never paid for a session that "
+                         "is not even candidate-dark")
+
 
 class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
     """#320 — dev1 live incident, sid `2d02a127-...`: `rec['last_armed']`
