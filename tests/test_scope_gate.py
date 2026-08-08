@@ -38,14 +38,40 @@ HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-ungated-issue-f
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(cmd, home=None, cwd=None):
+def run(cmd, home=None, cwd=None, gh_bin=None):
     payload = json.dumps({"tool_input": {"command": cmd}, "session_id": "test-scope-gate"})
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
+    if gh_bin:
+        env["PATH"] = gh_bin + os.pathsep + env.get("PATH", "")
     return subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
         env=env, cwd=cwd or str(REPO_ROOT),
     )
+
+
+def _fake_gh(tmpdir, responses):
+    """A minimal `gh` stub prepended onto PATH: `gh issue view <N> --json
+    title,body` prints the JSON in `responses[str(N)]` when present, else
+    exits 1 (simulating any real lookup failure -- offline, no auth, the
+    issue genuinely doesn't exist). Never touches the real network."""
+    bin_dir = Path(tmpdir) / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "gh"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "argv = sys.argv[1:]\n"
+        "responses = %r\n"
+        "if len(argv) >= 3 and argv[0] == 'issue' and argv[1] == 'view':\n"
+        "    n = argv[2]\n"
+        "    if n in responses:\n"
+        "        print(json.dumps(responses[n]))\n"
+        "        sys.exit(0)\n"
+        "sys.exit(1)\n" % responses
+    )
+    script.chmod(0o755)
+    return str(bin_dir)
 
 
 def body_cmd(title, body_text, scope_gate=None):
@@ -123,6 +149,72 @@ class TestBasicBehavior(TestCase):
         self.assertIn("logged-block", text)
         self.assertIn("logged-pass", text)
         self.assertIn("criterion=planned-work", text)
+
+
+class TestChainDepthCap(TestCase):
+    """#311 -- a review-finding follow-up (this issue names its own PARENT
+    issue as a "follow-up" -- the EXACT phrasing the real odoo-erp
+    scope-gate.log corpus already uses naturally: "(#3224 follow-up)")
+    whose PARENT is ITSELF such a follow-up is a depth-2 review-finding
+    chain -- the self-reinforcing sequence a criterion satisfied honestly
+    at each individual hop cannot see. Blocked regardless of whether a
+    Scope-gate criterion is present."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-chaindepth-test-")
+
+    def test_first_generation_followup_with_non_chained_parent_passes(self):
+        gh_bin = _fake_gh(self.tmp, {
+            "100": {"title": "original bug", "body": "Just a normal ticket."},
+        })
+        r = run(body_cmd("finding (#100 follow-up)",
+                         "Found while fixing #100.", scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_second_generation_followup_is_blocked_even_with_valid_criterion(self):
+        gh_bin = _fake_gh(self.tmp, {
+            "101": {"title": "child finding (#100 follow-up)",
+                    "body": "Found while fixing #100 (#100 follow-up)."},
+        })
+        r = run(body_cmd("grandchild finding (#101 follow-up)",
+                         "Found while fixing #101 (#101 follow-up).",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("chain", r.stderr.lower())
+
+    def test_no_followup_phrasing_is_unaffected(self):
+        gh_bin = _fake_gh(self.tmp, {})
+        r = run(body_cmd("ordinary ticket", "Just a normal cleanup finding.",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gh_lookup_failure_degrades_never_blocks_on_its_own(self):
+        # every `gh issue view` call fails (simulates offline / no auth /
+        # a genuinely nonexistent parent) -- the chain-depth check must
+        # degrade to "cannot verify", never block BY ITSELF when a valid
+        # Scope-gate criterion is already present.
+        gh_bin = _fake_gh(self.tmp, {})
+        r = run(body_cmd("finding (#999999 follow-up)",
+                         "Found while fixing #999999.",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_followup_wording_in_the_title_alone_is_detected(self):
+        # the real corpus signature: the parent reference lives in the
+        # TITLE ("(#N follow-up)"), not necessarily the body.
+        gh_bin = _fake_gh(self.tmp, {
+            "200": {"title": "parent (#50 follow-up)",
+                    "body": "Found while fixing #50 (#50 follow-up)."},
+        })
+        r = run(body_cmd("child (#200 follow-up)",
+                         "Some unrelated body text.",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 2, r.stderr)
 
 
 # --------------------------------------------------------------------------- #
