@@ -2557,6 +2557,53 @@ def _typed_landed(text, itext):
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
 
 
+# #322 — CC 2.1.226 introduced a SECOND, DIFFERENT paste-collapse shape: a
+# single long literal `send-keys -l` burst renders as `paste again to
+# expand` rather than `[Pasted text #N]` — an INCOMPLETE/unexpanded paste
+# that is never parsed as a slash command. Pressing Enter on it submits
+# whatever content IS committed as an ordinary chat message instead of
+# arming the goal — the exact live incident (dev1's own job 20, and
+# montalu2@subdev, both CC 2.1.226): the delivery "succeeds" with no error,
+# the model receives the `/goal ...` text as a normal prompt, and the goal
+# never arms. A controlled live experiment DISPROVED the earlier "busy
+# pane" hypothesis directly — a 23-char payload armed fine on a BUSY pane,
+# while a 3960-char one failed on an IDLE one; the only variable that
+# discriminated pass/fail was LENGTH, and typing the SAME long payload in
+# small chunks (instead of one burst) armed correctly every time.
+GOAL_TYPE_CHUNK_THRESHOLD = 200      # below this, unchanged single-burst
+                                     # send-keys (never observed to trigger
+                                     # the collapse at this size)
+GOAL_TYPE_CHUNK_SIZE = 120
+GOAL_TYPE_CHUNK_DELAY_S = 0.12
+_PASTE_EXPAND_HINT_RX = re.compile(r"paste again to expand", re.I)
+
+
+def _pane_shows_collapsed_paste(itext):
+    """True when the input box shows CC's 'paste again to expand' hint — an
+    incomplete/unexpanded paste. `_type_literal`'s chunking exists
+    specifically to avoid ever reaching this state; this check is a fast,
+    explicit abort for the case something still does (a coalesced terminal
+    write, a lower-than-expected collapse threshold), rather than relying
+    on the generic type-verify timeout to eventually give up."""
+    return bool(itext) and bool(_PASTE_EXPAND_HINT_RX.search(itext))
+
+
+def _type_literal(pid, run, text, sleep_fn=None):
+    """Send `text` into the pane's input box literally — in ONE burst below
+    `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
+    or in small CHUNKS at/above it (#322) so CC never treats the whole
+    payload as one terminal-paste event."""
+    sleep_fn = sleep_fn or time.sleep
+    if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
+        run(["tmux", "send-keys", "-t", pid, "-l", text])
+        return
+    for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
+        run(["tmux", "send-keys", "-t", pid, "-l",
+            text[i:i + GOAL_TYPE_CHUNK_SIZE]])
+        if i + GOAL_TYPE_CHUNK_SIZE < len(text):
+            sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
+
+
 STASH_VERIFY_SETTLE_POLLS = 3      # bounded: a `C-s` toggle's render can lag
 STASH_VERIFY_SETTLE_S = 0.3        # behind the keystroke actually landing (#176 F4)
 
@@ -3075,9 +3122,27 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
         _log("stash-abort: unresolved wrapped box")
         return False
     parked = outcome == STASH_PARKED
-    run(["tmux", "send-keys", "-t", pid, "-l", text])
+    _type_literal(pid, run, text, sleep_fn)
     cap = capture_pane(pid, run, lines=30)
     itext = _input_line_text(cap)
+    if _pane_shows_collapsed_paste(itext):
+        # #322 — CC's "paste again to expand" is a DIFFERENT collapse shape
+        # than `[Pasted text #N]` (which `_typed_landed` already treats as
+        # landed) — it is never parsed as a slash command, so submitting it
+        # would send whatever IS committed as an ordinary chat message.
+        # `_undo_typed_text`'s OWN docstring states its backspace-N-times
+        # proof depends on the box never being a collapsed buffer ("this
+        # never has to reason about a collapsed buffer") — that
+        # precondition does NOT hold for this shape, so routing it through
+        # the existing recovery below would send an unproven backspace
+        # count against a state this function was never designed to undo.
+        # No further keystrokes; the box is left exactly as CC rendered it.
+        # Known, deliberate residual: a PARKED draft stays in the single
+        # stash slot until a LATER sweep's own "slot occupied" check
+        # surfaces it — rare in practice, since `_type_literal`'s chunking
+        # exists specifically to avoid ever reaching this state.
+        _log("stash-abort: collapsed-paste")
+        return False
     landed = (_typed_exclusively(text, itext) if pre_text
               else _typed_landed(text, itext))
     if not landed:
@@ -9501,6 +9566,20 @@ GOAL_REARM_GIVEUP_RESET_S = 15 * 60  # #322 — a reachable exit condition for
                                     # streak window while staying long enough
                                     # that a genuinely-still-broken pane does
                                     # not ping-storm every few minutes.
+GOAL_REARM_GIVEUP_MAX_RESETS = 1    # #322 REOPENED (adversarial-review
+                                    # MAJOR-1) — bounds how many times ONE
+                                    # streak can retry off the give-up state:
+                                    # without this an idle-but-permanently-
+                                    # broken pane (idleness is its STEADY
+                                    # STATE) retries every
+                                    # GOAL_REARM_GIVEUP_RESET_S forever until
+                                    # the blind GOAL_REARM_STREAK_S reset —
+                                    # measured 10 pings / 152 multi-KB /goal
+                                    # submissions per 3h. One extra try, then
+                                    # the SAME permanent skip until the
+                                    # streak reset, is the only behavioural
+                                    # difference from before this ticket for
+                                    # a genuinely unrecoverable pane.
 
 # --- the SECOND shape (same job, opposite reading of the indicator) --------
 # The 2026-07-26 forensics (montalu + gatekeeper transcripts and journals,
@@ -10146,8 +10225,19 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
         # delivery failure. Zero keystrokes sent; must not consume the cap.
         _log("goal-verify-abort: raced-busy")
         return False                       # raced — a draft appeared since the caller's own check
-    run(["tmux", "send-keys", "-t", pid, "-l", text])
+    _type_literal(pid, run, text, sleep_fn)
     if not _await_typed(pid, text, run, sleep_fn, want=True):
+        # #322 — a clearer reason when the poll never confirmed landing
+        # because CC collapsed the burst into its "paste again to expand"
+        # hint (never parsed as a slash command) rather than a generic
+        # render timeout. `_type_literal`'s chunking exists to avoid ever
+        # reaching this state; checked HERE (after the poll already gave
+        # up, not before it) so a successful type pays no extra capture.
+        # Real keystrokes went out (this is NOT a pre-send refusal), so
+        # this reason is deliberately NOT in `_GOAL_REARM_TRANSIENT_REASONS`.
+        if _pane_shows_collapsed_paste(
+                _input_line_text(capture_pane(pid, run, lines=40))):
+            _log("goal-verify-abort: collapsed-paste")
         return False                       # never rendered — never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if _await_typed(pid, text, run, sleep_fn, want=False):
@@ -11131,7 +11221,11 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             continue
         h = _hash(payload)
         if rec.get("hash") != h or (now - rec.get("first", now)) > streak_s:
-            rec.update({"hash": h, "n": 0, "first": now, "pinged": False})
+            # #322 — a genuinely NEW streak also gets a fresh give-up-reset
+            # budget; otherwise a spent `giveup_resets` from a PRIOR streak
+            # would silently disable the reset for a session's whole life.
+            rec.update({"hash": h, "n": 0, "first": now, "pinged": False,
+                       "gaveup_at": None, "giveup_resets": 0})
             _save()
         # --- a delivery is in flight: confirm / expire it -------------------
         q = rec.get("queued_at")
@@ -11190,26 +11284,82 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # #322 — a REACHABLE exit condition for `skip gave-up`. It used to
             # be permanent: nothing ever cleared `pinged`/`n` except the blind
             # `GOAL_REARM_STREAK_S` (2h) full-state reset above, tied to
-            # elapsed time only, never to the pane actually recovering. Reset
-            # ONLY when BOTH (a) the give-up state has held long enough that
-            # a genuinely-still-broken pane won't ping-storm on a retry, and
-            # (b) the pane is PROVABLY idle RIGHT NOW — read fresh every
-            # sweep from `captured`, entirely independent of anything this
-            # give-up state itself blocks (the #134 test: name the event that
-            # releases the guard, then prove it's reachable without the
-            # guarded action). A negative/undetermined `gaveup_at` (missing,
-            # legacy record) never satisfies the elapsed-time check, so this
-            # never guesses.
+            # elapsed time only, never to the pane actually recovering.
+            #
+            # REOPENED (adversarial-review MAJOR-1): the first cut here
+            # re-stamped `first` on every reset — but `first` feeds the GAVE
+            # UP ping's own `dedup_key` above (deliberately, per #160
+            # defect 3's own comment: the payload hash `h` alone is STABLE
+            # across a reset, so folding in `first` is what makes each
+            # EPISODE's ping genuinely distinct from a repeat). Re-stamping
+            # it on every retry therefore minted a genuinely NEW dedup key
+            # every time, so the notify layer could never recognise a repeat
+            # give-up as a repeat — measured live-replay: 10 pings / 152
+            # multi-KB `/goal` submissions into a live pane over 3h on a
+            # genuinely-still-broken IDLE pane (idleness is the STEADY STATE
+            # there, so "idle + elapsed" alone reduces to a bare 15-minute
+            # timer), against 2 pings / 4 submissions before this ticket.
+            # Two changes close it: `first` is NEVER touched by this reset
+            # (so a repeat give-up within the SAME streak shares the FIRST
+            # give-up's dedup key and the notify layer's own dedup absorbs
+            # it, exactly as #160 intended), and the reset is BOUNDED to
+            # `GOAL_REARM_GIVEUP_MAX_RESETS` per streak — converting
+            # "retries every 15 min until the blind 2h streak reset" into
+            # "one extra try, then the SAME permanent skip until that 2h
+            # reset", the only behavioural difference from before this
+            # ticket for a pane that is genuinely, permanently unable to
+            # arm. `giveup_resets`/`gaveup_at` are cleared by the SAME
+            # streak-reset block above that already clears `n`/`pinged`, so
+            # a genuinely new streak starts with a fresh reset budget.
+            #
+            # `isinstance(gaveup_at, (int, float))` (adversarial-review T1):
+            # a corrupted/hand-edited state file could otherwise raise on
+            # `now - gaveup_at` and kill job 20 for every pane, every sweep.
+            # A future-dated `gaveup_at` (T2, clock skew) makes the elapsed
+            # delta negative, which already fails the `>=` check — the
+            # fail-safe direction needs no extra clamp.
+            #
+            # Reset fires ONLY when the give-up has held long enough that a
+            # genuinely-still-broken pane won't ping-storm on a retry, the
+            # reset budget is not yet spent, AND the pane is PROVABLY idle
+            # RIGHT NOW — read fresh every sweep from `captured`, entirely
+            # independent of anything this give-up state itself blocks (the
+            # #134 test: name the event that releases the guard, then prove
+            # it's reachable without the guarded action).
+            #
+            # Known, deliberate residual (adversarial-review MAJOR-2):
+            # `pane_at_idle_prompt` requires a BARE box. A pane whose own
+            # typed-but-never-confirmed `/goal` is still sitting in the
+            # input line (the `_await_typed(want=True)` timeout path, a few
+            # lines below) never reads as idle, so this reset never engages
+            # for that population — it self-heals only via the existing 2h
+            # streak window. Extending the idle gate to accept that shape
+            # would need its own delivery-recovery design (stash-style undo
+            # before a fresh type); out of this ticket's scope.
+            #
+            # `dry_run` (adversarial-review MINOR-1): the state mutation
+            # only happens for a real sweep — a `--dry-run` diagnostic must
+            # never consume the one-way-door reset budget or clear a
+            # genuine suppression with nothing actually sent.
             gaveup_at = rec.get("gaveup_at")
-            if (gaveup_at is not None
+            resets_used = rec.get("giveup_resets", 0)
+            ready = (isinstance(gaveup_at, (int, float))
                     and (now - gaveup_at) >= GOAL_REARM_GIVEUP_RESET_S
-                    and pane_at_idle_prompt(captured)):
+                    and resets_used < GOAL_REARM_GIVEUP_MAX_RESETS
+                    and pane_at_idle_prompt(captured))
+            if ready and not dry_run:
                 rec.update({"n": 0, "pinged": False, "gaveup_at": None,
-                           "first": now})
+                           "giveup_resets": resets_used + 1})
                 _save()
                 logs.append("RESET (goal-rearm) %s -> pane idle %ds after "
-                            "giving up, retrying" % (loc, int(now - gaveup_at)))
+                            "giving up (%d/%d resets used), retrying"
+                            % (loc, int(now - gaveup_at), resets_used + 1,
+                               GOAL_REARM_GIVEUP_MAX_RESETS))
                 # falls through — attempt delivery again this SAME sweep
+            elif ready and dry_run:
+                logs.append("RESET (goal-rearm) %s -> would retry "
+                            "(dry-run, not applied)" % loc)
+                continue
             else:
                 logs.append("skip gave-up (goal-rearm) %s" % loc)
                 continue
