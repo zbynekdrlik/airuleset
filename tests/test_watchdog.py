@@ -1767,6 +1767,32 @@ class RunOnceTailBudgetForJobs89(unittest.TestCase):
                         "the tail deadline must stay comfortably under "
                         "the 120s systemd hard kill")
 
+    def test_goal_templates_path_reaches_job_9_too(self):
+        # #320 shape 2 — job 9's virgin-candidate branch needs the SAME
+        # `goal_templates_path` job 20 already receives; `cmd_watchdog`
+        # already wires the real path unconditionally, so this only needs
+        # to prove `run_once` threads it through to `goal_autoarm`.
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        proj.mkdir(parents=True)
+        state_path = Path(tmp.name) / "state.json"
+        captured = {}
+
+        def goal_probe(*a, **kw):
+            captured["templates_path"] = kw.get("templates_path")
+            return []
+
+        with unittest.mock.patch.object(wd, "goal_autoarm",
+                                        side_effect=goal_probe):
+            wd.run_once(now=time.time(), dry_run=False,
+                       run=lambda *a, **k: "",
+                       send_fn=lambda *a, **k: None, projects_dir=proj,
+                       state_path=state_path,
+                       pending_prefix=str(Path(tmp.name) / "pending-"),
+                       goal_templates_path="/tmp/SKILL.md")
+        self.assertEqual(captured.get("templates_path"), "/tmp/SKILL.md")
+
 
 class RunOnceSubagentVisibility(unittest.TestCase):
     """(issue #6) run_once must apply job 1's api-error detector AND job 4a's
