@@ -35,6 +35,7 @@ Bidirectional claim under test:
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,12 +45,31 @@ HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-ungated-issue-f
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+_DEFAULT_EMPTY_GH_DIR = None
+
+
+def _default_gh_stub():
+    """A `gh` stub answering `issue list` with an EMPTY list (making the
+    #329 near-duplicate network check inert) and failing everything else
+    (`issue view`, etc.) -- the DEFAULT `gh` on PATH for every test that
+    doesn't explicitly pass its own `gh_bin`, so the suite never depends
+    on live GitHub state (adversarial-review finding, #329: without this,
+    every test using body_cmd()'s default made a REAL, if fast-failing,
+    `gh issue list` network call). Built once and reused -- cheap, and
+    matches the pre-existing per-test-dir convention `_fake_gh`/
+    `_fake_gh_list` already use."""
+    global _DEFAULT_EMPTY_GH_DIR
+    if _DEFAULT_EMPTY_GH_DIR is None:
+        tmp = tempfile.mkdtemp(prefix="airuleset-scopegate-defaultgh-")
+        _DEFAULT_EMPTY_GH_DIR = _fake_gh_list(tmp, [])
+    return _DEFAULT_EMPTY_GH_DIR
+
+
 def run(cmd, home=None, cwd=None, gh_bin=None):
     payload = json.dumps({"tool_input": {"command": cmd}, "session_id": "test-scope-gate"})
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
-    if gh_bin:
-        env["PATH"] = gh_bin + os.pathsep + env.get("PATH", "")
+    env["PATH"] = (gh_bin or _default_gh_stub()) + os.pathsep + env.get("PATH", "")
     return subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
         env=env, cwd=cwd or str(REPO_ROOT),
@@ -146,7 +166,23 @@ def _multi_body_cmd(items):
     its OWN body FILE NAME (body0.md, body1.md, ...) so the hook's
     heredoc-body extraction (keyed by filename) never collides between
     them -- a real batch would do the same. `items`: list of
-    (title, body_text, scope_gate)."""
+    (title, body_text, scope_gate).
+
+    Joined with `" &&\\n"` (a NEWLINE after `&&`), never a bare `" && "`
+    on one line -- the hook's own heredoc pass only registers a
+    `cat > FILE <<DELIM` trigger as FILE-attached when that exact text
+    starts its own line (`CATFILE_RE` is anchored at `^`). Joining two
+    items' heredocs on the SAME physical line (`... -F body0.md && cat >
+    body1.md <<'EOF'`) makes the SECOND item's trigger fail that anchor,
+    so its heredoc silently falls back to `direct_bodies` under a
+    filename nothing looks up -- `resolve_body` then finds no file on
+    disk and returns None, and every item past the first classifies as
+    "missing Scope-gate" instead of whatever it was actually testing.
+    Found live while testing the #329 in-batch near-dup fix, whose own
+    assertion (a SPECIFIC block reason on item 2) is exactly the shape
+    that would have caught this and previously did not, since
+    `test_batch_within_one_call_hits_the_cap_too` only ever asserted a
+    bare `returncode == 2` (true either way, for the wrong reason)."""
     parts = []
     for idx, (title, body_text, scope_gate) in enumerate(items):
         fname = "body%d.md" % idx
@@ -156,7 +192,7 @@ def _multi_body_cmd(items):
         parts.append(
             "cat > %s <<'EOF'\n%s\nEOF\ngh issue create -t %r -F %s" %
             (fname, body, title, fname))
-    return " && ".join(parts)
+    return " &&\n".join(parts)
 
 
 class TestBasicBehavior(TestCase):
@@ -219,6 +255,7 @@ class TestBasicBehavior(TestCase):
 
     def test_pass_and_block_both_logged(self):
         home = tempfile.mkdtemp(prefix="airuleset-scopegate-log-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         run(body_cmd("logged-block", "no criterion here"), home=home)
         run(body_cmd("logged-pass", "ok", scope_gate="planned-work"), home=home)
         log = Path(home) / ".claude" / "scope-gate.log"
@@ -427,10 +464,15 @@ class TestDedupGate(TestCase):
     "cannot verify" on any failure -- never blocking on its own)."""
 
     def test_blocks_filing_with_valid_criterion_but_no_dedup_line(self):
+        # #329 adversarial review: loose keyword checks (e.g. "dedup" in
+        # stderr) pass against the hook's own generic static message
+        # regardless of WHICH reason actually fired -- assert the exact
+        # per-item SUMMARY line the hook prints instead, which names the
+        # real classified reason.
         r = run(body_cmd("real finding", "A genuinely distinct thing.",
                           scope_gate="cross-cutting", dedup=None))
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("dedup", r.stderr.lower())
+        self.assertIn('"real finding" -> no-dedup-line', r.stderr)
 
     def test_allows_filing_with_dedup_line_present(self):
         r = run(body_cmd("real finding", "A genuinely distinct thing.",
@@ -439,6 +481,7 @@ class TestDedupGate(TestCase):
 
     def test_near_duplicate_title_blocks_naming_the_existing_issue(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-dedup-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh_list(tmp, [
             {"number": 500, "title": "Retry queue drops messages under load"},
         ])
@@ -446,11 +489,15 @@ class TestDedupGate(TestCase):
                           "Found this while testing.", scope_gate="cross-cutting"),
                 gh_bin=gh_bin)
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("duplicate", r.stderr.lower())
-        self.assertIn("#500", r.stderr)
+        # #329 adversarial review: assert the exact classified reason
+        # (naming the real duplicate issue number), not a loose keyword.
+        self.assertIn(
+            '"Retry queue drops messages under heavy load" -> '
+            "near-duplicate:#500", r.stderr)
 
     def test_near_duplicate_already_referenced_by_number_passes(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-dedup-test2-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh_list(tmp, [
             {"number": 500, "title": "Retry queue drops messages under load"},
         ])
@@ -462,6 +509,7 @@ class TestDedupGate(TestCase):
 
     def test_dissimilar_titles_pass(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-dedup-test3-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh_list(tmp, [
             {"number": 500, "title": "Unrelated dashboard rendering glitch"},
         ])
@@ -473,6 +521,7 @@ class TestDedupGate(TestCase):
 
     def test_gh_list_failure_degrades_never_blocks_on_its_own(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-dedup-test4-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh_list(tmp, None)  # simulates a real lookup failure
         r = run(body_cmd("real finding", "A genuinely distinct thing.",
                           scope_gate="cross-cutting"),
@@ -488,6 +537,7 @@ class TestDailyCap(TestCase):
 
     def test_ninth_non_exempt_filing_in_one_day_blocks(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
             for i in range(8):
                 r = run(body_cmd(
@@ -500,10 +550,12 @@ class TestDailyCap(TestCase):
                 "One more genuinely distinct topic: %s." % os.urandom(4).hex(),
                 scope_gate="cross-cutting"), home=home, cwd=d)
             self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("cap", r.stderr.lower())
+            # #329 adversarial review: assert the exact classified reason.
+            self.assertIn('"finding 9" -> daily-cap', r.stderr)
 
     def test_eighth_filing_in_one_day_still_passes(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
             for i in range(7):
                 r = run(body_cmd(
@@ -519,6 +571,7 @@ class TestDailyCap(TestCase):
 
     def test_exempt_criteria_bypass_the_cap(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test3-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
             for i in range(8):
                 r = run(body_cmd(
@@ -534,6 +587,7 @@ class TestDailyCap(TestCase):
 
     def test_cap_is_scoped_per_repo(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test4-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d1:
             for i in range(8):
                 r = run(body_cmd(
@@ -550,6 +604,7 @@ class TestDailyCap(TestCase):
 
     def test_batch_within_one_call_hits_the_cap_too(self):
         home = tempfile.mkdtemp(prefix="airuleset-dailycap-test5-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         with tempfile.TemporaryDirectory() as d:
             items = [
                 ("finding %d" % i,
@@ -571,6 +626,7 @@ class TestChainWidthCap(TestCase):
 
     def test_third_sibling_off_one_parent_same_day_blocks(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
@@ -586,10 +642,13 @@ class TestChainWidthCap(TestCase):
                 "Found while fixing #100 (#100 follow-up).",
                 scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
             self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("width", r.stderr.lower())
+            # #329 adversarial review: assert the exact classified reason.
+            self.assertIn(
+                '"sibling 2 (#100 follow-up)" -> chain-width-cap', r.stderr)
 
     def test_second_sibling_off_one_parent_still_passes(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test2-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
@@ -607,6 +666,7 @@ class TestChainWidthCap(TestCase):
 
     def test_width_cap_scoped_per_parent(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test3-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug A", "body": "Just a normal ticket."},
             "200": {"title": "original bug B", "body": "Just a normal ticket."},
@@ -626,6 +686,7 @@ class TestChainWidthCap(TestCase):
 
     def test_width_cap_exempt_for_user_request(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test4-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
@@ -644,6 +705,7 @@ class TestChainWidthCap(TestCase):
 
     def test_parents_field_is_written_to_the_log(self):
         tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-test5-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         gh_bin = _fake_gh(tmp, {
             "100": {"title": "original bug", "body": "Just a normal ticket."},
         })
@@ -656,6 +718,195 @@ class TestChainWidthCap(TestCase):
         log = Path(tmp) / ".claude" / "scope-gate.log"
         text = log.read_text()
         self.assertIn("parents=100", text)
+
+    def test_width_cap_checks_every_referenced_parent_not_just_the_first(self):
+        # #329 adversarial review MAJOR: the first cut only ever checked
+        # parents[0] while crediting ALL referenced parents on the PASS
+        # side -- a filing naming an early DECOY parent (with zero
+        # siblings) before its real, already-saturated parent would
+        # wrongly pass. `parents[0]` here is the decoy #999 (title comes
+        # before body in the concatenated text _chain_parents scans); the
+        # real, already-capped parent is #100, referenced second.
+        tmp = tempfile.mkdtemp(prefix="airuleset-widthcap-allparents-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        gh_bin = _fake_gh(tmp, {
+            "999": {"title": "decoy parent", "body": "An unrelated ticket."},
+            "100": {"title": "original bug", "body": "Just a normal ticket."},
+        })
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(2):
+                r = run(body_cmd(
+                    "sibling %d (#100 follow-up)" % i,
+                    "Found while fixing #100 (#100 follow-up).",
+                    scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
+                self.assertEqual(r.returncode, 0, "sibling %d: %s" % (i, r.stderr))
+            r = run(body_cmd(
+                "decoy first (#999 follow-up)",
+                "Also found while fixing #100 (#100 follow-up).",
+                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("chain-width-cap", r.stderr)
+
+
+class TestScopeGate329ReviewFixes(TestCase):
+    """#329 -- regression tests for the adversarial-review findings on the
+    original #329 implementation. Each test locks one specific finding
+    that was independently reproduced and fixed; see the hook's own
+    header comments for the full write-up of each."""
+
+    def test_phantom_pass_in_a_blocked_batch_never_counts_toward_the_cap(self):
+        # CRITICAL: a Bash command that blocks on ANY segment blocks the
+        # WHOLE tool call -- nothing in it runs, including a sibling this
+        # hook itself classified PASS. That sibling must be logged as
+        # NOTFILED, never PASS, or it silently burns cap budget for an
+        # issue that was never actually filed.
+        home = tempfile.mkdtemp(prefix="airuleset-dailycap-phantom-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with tempfile.TemporaryDirectory() as d:
+            cmd = (
+                "cat > body1.md <<'EOF'\n"
+                "Dedup-checked: searched, found none\n"
+                "A genuinely distinct phantom topic: %s.\n"
+                "Scope-gate: cross-cutting\n"
+                "EOF\n"
+                "gh issue create -t 'phantom finding' -F body1.md && "
+                "cat > body2.md <<'EOF'\n"
+                "No scope gate line at all here.\n"
+                "EOF\n"
+                "gh issue create -t 'blocked finding' -F body2.md"
+            ) % os.urandom(4).hex()
+            r = run(cmd, home=home, cwd=d)
+            self.assertEqual(r.returncode, 2, r.stderr)
+
+            log = Path(home) / ".claude" / "scope-gate.log"
+            text = log.read_text()
+            self.assertIn("verdict=NOTFILED", text)
+            self.assertNotIn("verdict=PASS", text)
+
+            # If the phantom entry had wrongly counted, only 7 of these 8
+            # genuinely distinct real filings would pass.
+            for i in range(8):
+                r = run(body_cmd(
+                    "real finding %d" % i,
+                    "A genuinely distinct real topic %d: %s." %
+                    (i, os.urandom(4).hex()),
+                    scope_gate="cross-cutting"), home=home, cwd=d)
+                self.assertEqual(r.returncode, 0, "real %d: %s" % (i, r.stderr))
+
+    def test_exempt_filings_never_consume_daily_cap_budget(self):
+        # MAJOR: `_log_pass_count` used to count EVERY PASS line
+        # regardless of criterion, so an exempt planned-work/user-request
+        # batch silently consumed the SAME budget the block message
+        # promises is reserved for non-exempt filings.
+        home = tempfile.mkdtemp(prefix="airuleset-dailycap-exempt-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(10):
+                r = run(body_cmd(
+                    "user request %d" % i,
+                    "The user explicitly asked for this %d: %s." %
+                    (i, os.urandom(4).hex()),
+                    scope_gate="user-request"), home=home, cwd=d)
+                self.assertEqual(r.returncode, 0, "exempt %d: %s" % (i, r.stderr))
+            # The FIRST non-exempt filing of the day must still pass --
+            # if any exempt filing had wrongly counted, the daily count
+            # would already be >= 8 by now.
+            r = run(body_cmd(
+                "first real finding",
+                "A genuinely distinct real topic: %s." % os.urandom(4).hex(),
+                scope_gate="cross-cutting"), home=home, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gh_api_issues_path_resolves_the_same_target_repo_as_dash_R(self):
+        # MAJOR: the caps used to be keyed on the cwd-derived repo while
+        # the near-dup check used the filing's own -R target -- a
+        # `gh api repos/<o>/<r>/issues` filing (no -R flag at all) had NO
+        # target-repo resolution whatsoever and was capped/checked
+        # against the wrong (cwd) repo. Seed the cap via an explicit -R,
+        # then confirm the SAME target repo is reached via the API path.
+        home = tempfile.mkdtemp(prefix="airuleset-targetrepo-api-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(8):
+                r = run(body_cmd(
+                    "finding %d" % i,
+                    "A genuinely distinct topic %d: %s." %
+                    (i, os.urandom(4).hex()),
+                    scope_gate="cross-cutting") + " -R owner/repo",
+                    home=home, cwd=d)
+                self.assertEqual(r.returncode, 0, "seed %d: %s" % (i, r.stderr))
+            r = run(
+                "gh api repos/owner/repo/issues -X POST -f title=x "
+                "-f body='Dedup-checked: searched, found none\n"
+                "One more distinct topic.\nScope-gate: cross-cutting'",
+                home=home, cwd=d)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("daily-cap", r.stderr)
+
+    def test_title_with_embedded_tab_does_not_corrupt_downstream_fields(self):
+        # MAJOR: an embedded tab/newline in a TITLE used to be able to
+        # shift every field after it in the tab-separated hand-off from
+        # the embedded python script to bash (criterion/session/parents).
+        tmp = tempfile.mkdtemp(prefix="airuleset-tabtitle-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        gh_bin = _fake_gh(tmp, {
+            "100": {"title": "original bug", "body": "Just a normal ticket."},
+        })
+        with tempfile.TemporaryDirectory() as d:
+            title_with_tab = "weird\ttitle (#100 follow-up)"
+            cmd = (
+                "cat > body.md <<'EOF'\n"
+                "Dedup-checked: searched, found none\n"
+                "Found while fixing #100 (#100 follow-up).\n"
+                "Scope-gate: cross-cutting\n"
+                "EOF\n"
+                "gh issue create -t '%s' -F body.md" % title_with_tab
+            )
+            r = run(cmd, home=tmp, cwd=d, gh_bin=gh_bin)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        log = Path(tmp) / ".claude" / "scope-gate.log"
+        text = log.read_text()
+        self.assertNotIn("\t", text)
+        self.assertIn("parents=100", text)
+
+    def test_two_near_identical_titles_in_one_batch_are_caught(self):
+        # MAJOR: the near-dup check only ever compared against REMOTE
+        # open issues, so two near-identical titles filed in the SAME
+        # Bash call never saw each other (neither exists yet at
+        # PreToolUse time).
+        home = tempfile.mkdtemp(prefix="airuleset-inbatch-dedup-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with tempfile.TemporaryDirectory() as d:
+            cmd = _multi_body_cmd([
+                ("Retry queue drops messages under load",
+                 "First filing of the pair.", "cross-cutting"),
+                ("Retry queue drops messages under heavy load",
+                 "Second filing, a near-duplicate of the first, same batch.",
+                 "cross-cutting"),
+            ])
+            r = run(cmd, home=home, cwd=d)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("near-duplicate:in-this-batch", r.stderr)
+
+    def test_token_jaccard_does_not_flag_distinct_box_numbered_titles(self):
+        # CRITICAL (root cause of the near-dup redesign): a
+        # character-level SequenceMatcher ratio cannot separate this
+        # fleet's real duplicates from its real distinct tickets --
+        # cam4/cam5-shaped titles measured at ratio 0.983, HIGHER than
+        # the corpus's own genuine duplicate pair (0.925). Token-Jaccard
+        # must correctly pass this (entirely different tokens, ratio 0).
+        tmp = tempfile.mkdtemp(prefix="airuleset-jaccard-boxnum-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        gh_bin = _fake_gh_list(tmp, [
+            {"number": 900,
+             "title": "cam4 restart loop blocks the E2E preflight"},
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            r = run(body_cmd(
+                "cam5 restart loop blocks the E2E preflight",
+                "A genuinely distinct box, cam5, has the identical symptom.",
+                scope_gate="cross-cutting"), home=tmp, cwd=d, gh_bin=gh_bin)
+            self.assertEqual(r.returncode, 0, r.stderr)
 
 
 # --------------------------------------------------------------------------- #
