@@ -409,7 +409,21 @@ def stale_msgfile_candidates(cmd):
     exact write-then-consume pattern that leaves a stale file behind
     whenever the whole compound gets blocked before any of it executes.
     First-seen order (sorted); empty list when there is nothing to
-    quarantine."""
+    quarantine.
+
+    Known, deliberate residual (same class REDIR/TEXTSINK in
+    hooks/lib_poll_payload.py already accept): neither regex is
+    quote-state-aware, so a decoy `-F`/`>` token merely QUOTED inside an
+    unrelated `-m "..."` message string ahead of the real flag can shadow
+    it (finditer only ever finds the FIRST `git commit ... -F` span). The
+    failure direction is always a MISS -- the real target then goes
+    un-quarantined, i.e. exactly the pre-#310 behaviour for that one
+    command -- never a wrong file getting quarantined. A `-m` and `-F`
+    combined on the SAME `git commit` is itself an unusual invocation this
+    repo's own recipes never produce, so this was judged not worth a real
+    shell-word scanner (see the #310 design comment's rejected
+    alternatives for the same cost/benefit reasoning applied one level
+    up)."""
     text = cmd or ""
     written = {os.path.normpath(m.group(2)) for m in _REDIR_RX.finditer(text)}
     committed = {os.path.normpath(m.group(2)) for m in _COMMIT_FILE_RX.finditer(text)}
