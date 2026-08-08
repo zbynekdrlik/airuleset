@@ -26,6 +26,7 @@ import sys
 import json
 import time
 import tempfile
+import contextlib
 import subprocess
 import urllib.request
 
@@ -422,18 +423,40 @@ def resolve_questions_channel(env=None, owner=None, spawn=None):
     hook itself timing out and the ❓ never reaching the user at all —
     strictly worse than today's silent-but-safe fallback, for a device whose
     entire purpose is guaranteeing a genuine question always reaches the
-    phone."""
+    phone.
+
+    Gated on `bot_token(env)` being present (#330 round-2 adversarial
+    review MINOR 6): a box with NO Discord bot token at all is ALREADY
+    going to fail delivery for a more fundamental reason
+    (`notify-discord-send.sh`'s own pre-existing `no-token` check) — a
+    "fallback ... q-thread-not-provisioned" line on top of that points the
+    operator at the wrong repair (`check_discord_notify_config()`'s job,
+    not a `-q` thread), and the self-heal spawn would be doomed before its
+    first network call anyway."""
     env = _read_env() if env is None else env
     owner = resolve_owner() if owner is None else owner
     chan = notification_channel(env=env, owner=owner, kind="questions")
-    if owner:
-        configured = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
-                     or "").strip()
-        if not configured:
-            log_delivery("fallback", kind="questions", key=owner,
-                         reason="q-thread-not-provisioned-on-this-host")
-            (spawn if spawn is not None
-             else _spawn_provision_question_thread)(owner)
+    # The whole log+spawn side effect is wrapped so a genuinely unexpected
+    # failure here can NEVER raise into the caller — this function sits on
+    # the live ❓ delivery's critical path, and `chan` above has ALREADY
+    # been resolved by the time this runs (#330 round-1 F8's own "must
+    # never raise into the live ❓ path" principle, applied structurally
+    # rather than by per-call inspection).
+    try:
+        if owner and bot_token(env):
+            configured = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()
+                                  + "_Q") or "").strip()
+            if not configured:
+                log_delivery("fallback", kind="questions", key=owner,
+                             reason="q-thread-not-provisioned-on-this-host")
+                (spawn if spawn is not None
+                 else _spawn_provision_question_thread)(owner)
+    except Exception as exc:
+        # stderr only — never log_delivery() itself here, to avoid a
+        # failure IN reporting the failure. `chan` is already resolved and
+        # returned below regardless; this side effect is purely diagnostic.
+        print("resolve_questions_channel: self-heal side effect failed: %r"
+             % exc, file=sys.stderr)
     return chan
 
 
@@ -605,9 +628,23 @@ def _env_upsert(path, key, value):
         fd, tmp = tempfile.mkstemp(
             dir=os.path.dirname(path) or ".",
             prefix=os.path.basename(path) + ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.writelines(lines)
-        os.replace(tmp, path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+            os.replace(tmp, path)
+        except OSError:
+            # #330 round-2 adversarial review MINOR 3: the OLD fixed tmp
+            # name (`path + ".tmp"`) leaked at most ONE stray file on a
+            # failed write (silently overwritten by the next successful
+            # call); the per-call UNIQUE name this function now uses (the
+            # F1 fix) leaks a NEW orphaned file on every failure instead.
+            # Best-effort cleanup on the way out — the ORIGINAL failure is
+            # re-raised and handled (-> False) by the outer except below;
+            # a failure to even unlink the orphan is not worth its own
+            # report on top of that.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
         return True
     except OSError:
         return False
