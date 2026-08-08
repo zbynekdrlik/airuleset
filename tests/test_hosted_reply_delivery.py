@@ -209,7 +209,10 @@ class DryRunNeverMutatesTheRealMap(unittest.TestCase):
             discord_fetch=lambda ch, t: [reply])
         self.assertIn("888001", notify.load_questions(self.qpath),
                       "dry-run must never mutate the real question map")
-        self.assertIn("repDRY", state.get("dreply_done", []))
+        # #304: a dry-run sweep must not mark the reply done in `state`
+        # either — run_once persists that dict unconditionally, so a mark
+        # left here would poison the real next sweep's dedup state.
+        self.assertNotIn("repDRY", state.get("dreply_done", []))
 
 
 class RunOnceHostedWiring(unittest.TestCase):

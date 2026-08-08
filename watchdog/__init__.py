@@ -3627,55 +3627,77 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             return
         if not dry_run:
             _react_ok(r["channel"], r["reply_id"], token)
-        acked_set.add(r["reply_id"])
-        acked.append(r["reply_id"])
+            # #304: a --dry-run sweep must NEVER mark the dedup set — this
+            # `acked`/`acked_set` pair is persisted into
+            # state["dreply_acked"] unconditionally by run_once, so a
+            # dry-run mark here would poison the REAL next sweep's dedup
+            # state exactly like the done_set/done leak below.
+            acked_set.add(r["reply_id"])
+            acked.append(r["reply_id"])
 
     def _delivered(r, via_ticket=None):
-        done_set.add(r["reply_id"])
-        done.append(r["reply_id"])
         # dry-run simulates delivery — it must NEVER mutate the real on-disk
-        # map (a dropped live question loses the answer). A FOREIGN question
-        # is dropped from its owner's map so their watchdog never re-handles.
+        # map (a dropped live question loses the answer), and it must NEVER
+        # mark the reply done either (#304): run_once persists `done`/
+        # `done_set` into state["dreply_done"] unconditionally, so a
+        # dry-run mark here would make the FOLLOWING real sweep believe the
+        # reply was already delivered and silently skip it.
         if not dry_run:
+            done_set.add(r["reply_id"])
+            done.append(r["reply_id"])
             fu = q_owner.get(r["referenced"])
             if fu:
                 f_drop(fu, r["referenced"])
             else:
                 drop_question(r["referenced"])
+            # #304 review MINOR-5: popping the reply's "first blocked at"
+            # timestamp is itself a real mutation of persisted state (the
+            # fallback-deadline clock) -- a dry-run simulating delivery via
+            # the idle-pane fast path must not silently wipe a REAL clock a
+            # concurrent/earlier real sweep already started.
+            blocked.pop(r["reply_id"], None)
         qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
-        blocked.pop(r["reply_id"], None)
         if via_ticket:
             logs.append("reply→ticket #%s [%s]" % (via_ticket, r["session"][:12]))
         else:
             logs.append("reply→%s [%s]" % (project_label(r["cwd"]), r["session"][:12]))
 
     def _pending(r, why):
-        blocked.setdefault(r["reply_id"], now)
+        # #304 review MINOR-5: creating the "first blocked at" timestamp is
+        # itself real persisted state (the fallback-deadline clock) — a
+        # dry-run must not create one that didn't already exist.
+        if not dry_run:
+            blocked.setdefault(r["reply_id"], now)
         # The durable lane once the keystroke path has been blocked long
         # enough. NO pane = we may not be the pane's HOST (a hosted stream's
         # session lives in another user's tmux) — defer longer so the host
         # delivers by keystroke first; a busy/wedged pane WE own keeps the
-        # tight deadline.
-        deadline = (DREPLY_NOPANE_FALLBACK_S if why == "no pane"
-                    else DREPLY_TICKET_FALLBACK_S)
-        if now - blocked[r["reply_id"]] >= deadline:
-            m = _TICKET_NUM_RX.search(r.get("question") or "")
-            if m:
-                fu = q_owner.get(r["referenced"])
-                if dry_run:
-                    ok = True
-                elif fu:
-                    ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r),
-                               user=fu)
-                else:
-                    ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r))
-                if ok:
-                    ptr = state.get("dreply_pointer")
-                    ptr = dict(ptr) if isinstance(ptr, dict) else {}
-                    ptr[r["session"]] = {"num": m.group(1), "ts": now}
-                    state["dreply_pointer"] = ptr
-                    _delivered(r, via_ticket=m.group(1))
-                    return
+        # tight deadline. #304 review MAJOR: this whole branch is a REAL
+        # mutation (a gh comment, plus a durable state["dreply_pointer"]
+        # entry that a LATER real sweep types into a live pane as an
+        # instruction to go read it) — a --dry-run diagnostic must never
+        # fake success here. The original code's `if dry_run: ok = True`
+        # did exactly that: a real keystroke telling a live session to read
+        # a ticket comment that was never actually posted.
+        if not dry_run:
+            deadline = (DREPLY_NOPANE_FALLBACK_S if why == "no pane"
+                        else DREPLY_TICKET_FALLBACK_S)
+            if now - blocked[r["reply_id"]] >= deadline:
+                m = _TICKET_NUM_RX.search(r.get("question") or "")
+                if m:
+                    fu = q_owner.get(r["referenced"])
+                    if fu:
+                        ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r),
+                                   user=fu)
+                    else:
+                        ok = gh_fn(r["cwd"], m.group(1), _ticket_fallback_text(r))
+                    if ok:
+                        ptr = state.get("dreply_pointer")
+                        ptr = dict(ptr) if isinstance(ptr, dict) else {}
+                        ptr[r["session"]] = {"num": m.group(1), "ts": now}
+                        state["dreply_pointer"] = ptr
+                        _delivered(r, via_ticket=m.group(1))
+                        return
         logs.append("reply pending (%s) %s" % (why, r["session"][:12]))
 
     for ch in sorted(channels):
@@ -3859,10 +3881,16 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                               dedup_key="inputdead:%s" % r["session"][:12],
                               dry_run=dry_run)
                     continue
-            idead = state.get("inputdead")
-            if isinstance(idead, dict):
-                idead.pop(r["session"], None)
-                state["inputdead"] = idead
+            # #304 review MINOR-5: clearing the wedge-episode counter is a
+            # real mutation of persisted alerting state — a dry-run
+            # simulating delivery via this idle-pane fast path must not
+            # silently reset a REAL wedge counter (delaying/hiding the
+            # 3-cycle alert threshold above).
+            if not dry_run:
+                idead = state.get("inputdead")
+                if isinstance(idead, dict):
+                    idead.pop(r["session"], None)
+                    state["inputdead"] = idead
             _delivered(r)
 
     # A ticket-fallback delivery is durable but INVISIBLE in the terminal —

@@ -1434,6 +1434,27 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
                 self.args(owner_name="zbynek"), self.send)
         self.assertEqual(self.sent_owners, ["zbynek"])
 
+    def test_a_stated_owner_that_is_a_raw_stream_persona_is_redirected(self):
+        # #302 review MAJOR: --owner-name is documented for exactly the "no
+        # live pane on this box" case (derived == "") -- so `stated` is the
+        # ONLY signal, and if it's a raw stream-persona account name (e.g.
+        # the operator typed the box's own unix account, not the person),
+        # it must still redirect through notify.STREAM_NOTIFY_OWNER, not
+        # reach send() as the raw account name.
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(self.a, "_checkout_pane_owner",
+                            lambda path: ""), \
+             m.patch.dict(notify.STREAM_NOTIFY_OWNER,
+                          {"montalu2": "zbynek"}, clear=False), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(
+                self.args(owner_name="montalu2"), self.send)
+        self.assertEqual(self.sent_owners, ["zbynek"])
+
     def test_a_stated_owner_that_AGREES_with_the_pane_is_not_refused(self):
         issues = json.dumps([{"number": 7, "title": "t",
                               "closedAt": "2026-07-24T00:00:00Z"}])
@@ -1487,6 +1508,43 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
             raise OSError("no tmux here")
         self.assertEqual(
             self.a._checkout_pane_owner("/home/x/devel/proj", panes=boom), "")
+
+    # --- #302: the raw owner must be redirected through STREAM_NOTIFY_OWNER
+    def test_the_pane_resolver_redirects_a_stream_persona_owner(self):
+        # airuleset#302: `_checkout_pane_owner`'s own `owner_of(pid)` call
+        # had NO knowledge of notify.STREAM_NOTIFY_OWNER (#259/#212) --
+        # unlike every OTHER pane-owner consumer in this codebase
+        # (watchdog's own run_once wraps every pane_owner() call in
+        # stream_redirect()). A stream persona's raw pane owner (its own
+        # unix account name, e.g. 'montalu2') must resolve to the real
+        # Discord identity it is configured to redirect to, not the raw
+        # account name.
+        with m.patch.dict(notify.STREAM_NOTIFY_OWNER,
+                          {"montalu2": "zbynek"}, clear=False):
+            got = self.a._checkout_pane_owner(
+                "/home/x/devel/proj",
+                panes=lambda: [("%4", "/home/x/devel/proj")],
+                owner_of=lambda pid: "montalu2")
+        self.assertEqual(got, "zbynek")
+
+    def test_the_digest_owner_is_redirected_through_stream_notify_owner(self):
+        # End-to-end through the REAL production code path (no owner_of/
+        # panes override) -- _notify_backfill_digest must send with the
+        # REDIRECTED owner, never the stream persona's raw unix account.
+        issues = json.dumps([{"number": 7, "title": "t",
+                              "closedAt": "2026-07-24T00:00:00Z"}])
+        with m.patch.object(self.a, "_local_checkout_for_repo",
+                            lambda name: "/home/x/devel/proj"), \
+             m.patch.object(wd, "list_claude_panes",
+                            lambda run=None: [("%4", "/home/x/devel/proj")]), \
+             m.patch.object(wd, "pane_owner",
+                            lambda pid, run=None: "montalu2"), \
+             m.patch.dict(notify.STREAM_NOTIFY_OWNER,
+                          {"montalu2": "zbynek"}, clear=False), \
+             m.patch.object(self.a, "_gh_out", lambda *a, **k: issues), \
+             m.patch.object(notify, "marker_delivered", lambda k: False):
+            self.a._notify_backfill_digest(self.args(), self.send)
+        self.assertEqual(self.sent_owners, ["zbynek"])
 
 
 class TestBackfillMarkerIsWrittenOnlyOnPROVENDelivery(unittest.TestCase):

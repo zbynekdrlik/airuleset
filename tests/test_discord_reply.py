@@ -235,10 +235,19 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
         # dry-run: delivery is SIMULATED — the real on-disk map must be kept
-        # (a dry-run diagnostic dropping the live question loses the answer);
-        # the reply id is still deduped in (unsaved) state
+        # (a dry-run diagnostic dropping the live question loses the answer).
         self.assertIn("888001", notify.load_questions(self.qpath))
-        self.assertIn("rep1", state["dreply_done"])
+        # #304: the reply id must NOT be dedup-marked either — this `state`
+        # dict IS what run_once persists to disk unconditionally at the end
+        # of every sweep (dry-run or not), so a mark left here by a
+        # `--dry-run` troubleshooting invocation poisons the REAL next
+        # sweep's dedup state and the user's actual answer is silently
+        # skipped. (This assertion used to be `assertIn` — the ORIGINAL
+        # comment here claimed "the reply id is still deduped in (unsaved)
+        # state", which was false: the state is not unsaved, run_once saves
+        # it every time.)
+        self.assertNotIn("rep1", state.get("dreply_done", []))
+        self.assertNotIn("rep1", state.get("dreply_acked", []))
 
     def test_delivers_from_a_channel_that_is_not_the_owners_normal_thread(self):
         # #296: a ❓ ping now routes to a SEPARATE per-owner questions thread
@@ -263,7 +272,11 @@ class DeliverDiscordReplies(unittest.TestCase):
             time.time(), self._run, state, panes, dry_run=True,
             discord_fetch=self._fetch([q_msg]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
-        self.assertIn("repQ", state["dreply_done"])
+        # #304: a dry-run sweep must not mark the reply done in `state`
+        # (that dict is persisted unconditionally by run_once) — the
+        # "reply→" log line above is the proof this test actually cares
+        # about (routing from the non-primary channel worked).
+        self.assertNotIn("repQ", state.get("dreply_done", []))
 
     def test_types_the_answer_when_not_dry_run(self):
         notify.record_question("888001", "777001", "sid-abc", "/p",
@@ -319,6 +332,43 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertFalse(any("-l" in a for a in self.sent))
         self.assertEqual(logs, [])
+
+    def test_a_dry_run_sweep_never_poisons_the_real_next_sweep(self):
+        # #304: the exact failure mode the ticket describes — a
+        # `python3 airuleset.py watchdog --once --dry-run` troubleshooting
+        # run must never make the FOLLOWING real (non-dry-run) sweep, on the
+        # SAME persisted `state`, believe the reply was already handled.
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=self.qpath)
+        state = {}
+        panes = {"sid-abc": ("%1", IDLE)}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=True,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=False,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        self.assertTrue(any("reply→" in ln for ln in logs), logs)
+        self.assertIn("rep1", state.get("dreply_done", []))
+
+    def test_dry_run_delivery_via_idle_path_does_not_clear_real_alert_state(self):
+        # #304 review MINOR-5: `_delivered`'s blocked.pop and the idle-path's
+        # inputdead.pop ran unconditionally, so a --dry-run sweep that
+        # happens to simulate delivery through the idle-pane fast path
+        # silently wiped a REAL fallback-deadline clock and a REAL
+        # wedge-episode alert counter — both persisted, both belonging to a
+        # genuine earlier real sweep, neither actually cleared by anything
+        # this dry-run call really did.
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=self.qpath)
+        state = {"dreply_blocked": {"rep1": time.time() - 5},
+                 "inputdead": {"sid-abc": 2}}
+        panes = {"sid-abc": ("%1", IDLE)}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=True,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        self.assertIn("rep1", state.get("dreply_blocked", {}))
+        self.assertEqual(state.get("inputdead", {}).get("sid-abc"), 2)
 
     def test_no_questions_is_a_noop(self):
         logs = wd.deliver_discord_replies(
@@ -672,6 +722,28 @@ class TicketFallbackDelivery(unittest.TestCase):
         self.assertIn("repX", state["dreply_done"])
         self.assertNotIn("repX", state.get("dreply_blocked", {}))
         self.assertTrue(any("ticket" in ln for ln in logs), logs)
+
+    def test_dry_run_never_fakes_ticket_fallback_success(self):
+        # #304 review MAJOR (found in adversarial review of the #304 fix
+        # itself): the original code's `if dry_run: ok = True` faked a
+        # successful gh comment post, then wrote a REAL, persisted
+        # state["dreply_pointer"] entry — which a FOLLOWING real sweep
+        # would type into the live pane as an instruction to go read a
+        # ticket comment that was never actually posted. A --dry-run
+        # troubleshooting call must make ZERO gh calls and leave
+        # dreply_pointer untouched.
+        self._record()
+        now = time.time()
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        logs = wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=True,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(self.gh_calls, [], logs)
+        self.assertFalse(state.get("dreply_pointer"))
+        self.assertNotIn("repX", state.get("dreply_done", []))
+        # the reply stays pending, not silently dropped
+        self.assertIn("888001", notify.load_questions(self.qpath))
 
     def test_blocked_reply_before_deadline_stays_pending(self):
         self._record()

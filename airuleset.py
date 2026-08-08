@@ -5024,7 +5024,21 @@ def _checkout_pane_owner(path, panes=None, owner_of=None):
         if here != target and not here.startswith(target.rstrip("/") + os.sep):
             continue
         try:
-            owner = (owner_of(pid) or "").strip().lower()
+            # #302: the raw owner (a tmux session name / unix account, e.g.
+            # a stream persona's own account) must be redirected through
+            # notify.STREAM_NOTIFY_OWNER the same way watchdog.run_once
+            # already redirects every pane-owner lookup — see
+            # TestPaneOwnerAlwaysRedirected / #212. Imported lazily, same
+            # reason `watchdog` itself is imported lazily above (a box
+            # without the package must still degrade to ""). The real
+            # production `owner_of` (watchdog.pane_owner) already returns a
+            # stripped/lowercased value, so redirecting first and
+            # normalizing the (possibly-passthrough) result after is exactly
+            # equivalent for every real caller, and keeps this the literal
+            # `stream_redirect(owner_of(...))` shape the structural lock
+            # (TestAirulesetOwnerResolutionAlwaysRedirected) requires.
+            from notify import stream_redirect
+            owner = stream_redirect(owner_of(pid) or "").strip().lower()
         except Exception:
             owner = ""
         if owner:
@@ -5046,7 +5060,7 @@ def _notify_backfill_digest(args, send):
     has no checkout here — under-reporting would produce a digest
     apologising for reports another box really delivered."""
     from notify import (backfill_marker_key, mark_backfill_reported,
-                        marker_delivered)
+                        marker_delivered, stream_redirect)
     repo = getattr(args, "repo", None)
     since = getattr(args, "since", None)
     if not repo or not since:
@@ -5095,7 +5109,13 @@ def _notify_backfill_digest(args, send):
     # pane, but it may no longer CONTRADICT one: obeying a flag over the pane
     # is exactly how a codex-bridge catch-up reached the wrong thread.
     derived = _checkout_pane_owner(checkout)
-    stated = (getattr(args, "owner_name", None) or "").strip().lower()
+    # #302 review MAJOR: `derived` is redirected (inside _checkout_pane_owner
+    # itself), but a raw `--owner-name` value was reaching notify.send()
+    # UN-redirected — exactly the documented use case for the flag (no live
+    # pane on this box), so a raw stream-persona account name (e.g.
+    # 'montalu2') would land in the wrong Discord thread every time.
+    stated = stream_redirect(
+        (getattr(args, "owner_name", None) or "").strip().lower())
     if derived and stated and derived != stated:
         print("notify --backfill-digest: --owner-name %s contradicts the "
               "checkout's own pane, which belongs to %s.\n'%s' is where this "
@@ -6629,6 +6649,42 @@ def _tmux_session_exists(name, run=None):
     return getattr(result, "returncode", 1) == 0
 
 
+def _tmux_session_pane_cwd(name, run=None):
+    """The pane cwd of the EXACT-match tmux session `name`, or None when it
+    can't be determined (tmux unreachable, no matching session/pane,
+    empty/failed output) -- the caller must treat None as "inconclusive,
+    stay quiet", never as a mismatch. Read-only: `list-panes` never mutates
+    anything, so this is safe to call even against a session
+    ensure_stream_tmux_session() will never touch (#308).
+
+    `list-panes -s -t "=<name>"`, NOT `display-message -t "=<name>"` (#308
+    review CRITICAL finding, live-verified against this box's own real
+    tmux 3.7b): `display-message`'s `-t` wants a PANE target -- a bare
+    `=<session>` with no `:<window>` qualifier resolves to no pane at all,
+    every `#{pane_*}` field expands to empty, and it STILL exits 0. That
+    made the mismatch check below permanently inert (every session, live
+    or not, read back as "can't determine" -> quiet). `list-panes -s`
+    correctly targets the session and exits non-zero for a genuinely
+    missing one, so "inconclusive" becomes a real, distinguishable signal.
+    A session can have multiple panes/windows with different cwds; the
+    FIRST non-empty line is the one compared (the common case is one
+    window, one pane)."""
+    run = run or _default_tmux_run
+    try:
+        result = run(["tmux", "list-panes", "-s", "-t", "=%s" % name,
+                      "-F", "#{pane_current_path}"])
+    except Exception:
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    out = getattr(result, "stdout", "") or ""
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return None
+
+
 STREAM_TMUX_BOOTSTRAP_SENTINEL = CLAUDE_DIR / ".airuleset-stream-session-bootstrapped"
 
 
@@ -6691,6 +6747,39 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
               "decision may repeat on the next install" % (sentinel, e),
               file=sys.stderr)
     if exists:
+        # #308 (the miva1 incident): a session created by ANY path other
+        # than this function's own bootstrap (manual account provisioning,
+        # before the stream's registration) silently wins the first login
+        # with the WRONG cwd forever -- ssh auto-attach's `-A` ignores `-c`
+        # on attach, and this function deliberately never touches an
+        # already-existing session. Report the mismatch LOUDLY; never
+        # auto-kill, never re-cwd, never send keys -- that is the standing,
+        # repeatedly-angry user rule ("never touch a session the user
+        # deliberately stopped"). `actual is None` (tmux unreachable for
+        # JUST this probe, no matching pane) stays quiet -- an inconclusive
+        # read must never manufacture a false WARNING.
+        expected = _stream_session_cwd()
+        actual = _tmux_session_pane_cwd(user, run)
+        if actual is not None:
+            # #308 review MAJOR: a raw string compare false-positives on a
+            # perfectly healthy session -- `cd`'d into a SUBDIRECTORY of
+            # the checkout (routine odoo-erp work), or a symlinked $HOME
+            # (tmux reads the pane cwd from /proc/<pid>/cwd, fully
+            # resolved; Path.home() is not). Resolve both sides and accept
+            # CONTAINMENT, not bare equality.
+            try:
+                exp_real = os.path.realpath(str(expected))
+                act_real = os.path.realpath(actual)
+            except Exception:
+                exp_real, act_real = str(expected), actual
+            contained = (act_real == exp_real
+                         or act_real.startswith(exp_real.rstrip("/") + os.sep))
+            if not contained:
+                return ("WARNING: session '%s' already exists with cwd %s "
+                         "(expected %s or a subdirectory of it) -- if this "
+                         "is a leftover pre-registration session, kill it "
+                         "manually and re-run push"
+                         % (user, actual, expected))
         return "session '%s' already exists -- left untouched" % user
     cwd = _stream_session_cwd()
     script = launch_script or CLAUDE_LAUNCH_SCRIPT_DEST

@@ -3706,6 +3706,47 @@ class TestPaneOwnerAlwaysRedirected(TestCase):
                          + "; ".join(offending))
 
 
+class TestAirulesetOwnerResolutionAlwaysRedirected(TestCase):
+    """Structural lock (airuleset#302): the SAME discipline
+    `TestPaneOwnerAlwaysRedirected` gives watchdog/__init__.py, extended to
+    airuleset.py's OWN independent owner-resolution path.
+    `_checkout_pane_owner`'s `owner_of(pid)` call (feeding
+    `_notify_backfill_digest`'s send) was never wrapped in
+    `notify.stream_redirect(...)` when #212 fixed every watchdog.py
+    `pane_owner(...)` call site — a rare, manual CLI path is exactly the
+    kind of call site that keeps getting missed (#212 itself needed FOUR
+    rounds to close every watchdog.py gap). Every `owner_of(`/`pane_owner(`
+    CALL SITE in airuleset.py (never a `def`/parameter-default line — those
+    never have an immediate `(` after the bare name) must be immediately
+    preceded by `stream_redirect(`."""
+
+    def test_no_bare_owner_resolution_call_reaches_the_source(self):
+        # #302 review MINOR-9: skipping ANY line starting with "def " (not
+        # just the function's OWN `def owner_of(`/`def pane_owner(` line) is
+        # materially broader than the sibling watchdog lock's exact-prefix
+        # check -- it would silently hide a real future violation shaped
+        # like `def go(): return owner_of(pid)`. Narrowed to match the
+        # sibling's own exact-prefix shape.
+        import re
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "airuleset.py").read_text(encoding="utf-8")
+        offending = []
+        for pat, def_prefix in ((r"\bowner_of\(", "def owner_of("),
+                                (r"\bpane_owner\(", "def pane_owner(")):
+            for mm in re.finditer(pat, src):
+                line_start = src.rfind("\n", 0, mm.start()) + 1
+                line = src[line_start:src.find("\n", mm.start())]
+                if line.lstrip().startswith(def_prefix):
+                    continue
+                before = src[:mm.start()]
+                if not re.search(r"stream_redirect\(\s*$", before):
+                    lineno = src.count("\n", 0, mm.start()) + 1
+                    offending.append("line %d: %s" % (lineno, line.strip()))
+        self.assertEqual(offending, [],
+                         "owner-resolution call(s) not wrapped in "
+                         "stream_redirect(): " + "; ".join(offending))
+
+
 class TestQuestionsThreadRouting(TestCase):
     """#296: a ❓ question ping routes to a SEPARATE per-owner thread
     (claude-<owner>-q) so it never mixes with ✅/card/api-error pings in the
