@@ -202,8 +202,8 @@ class TestEnsureStreamTmuxSession(TestCase):
 
     def test_never_touches_an_existing_session(self):
         # #308: a MATCHING cwd stays exactly as quiet as before -- the new
-        # read-only display-message cwd probe changes nothing observable
-        # for the healthy case, and NEITHER call ever mutates anything.
+        # read-only cwd probe changes nothing observable for the healthy
+        # case, and NEITHER call ever mutates anything.
         calls = []
         d = Path(tempfile.mkdtemp())
 
@@ -211,7 +211,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             calls.append(argv)
             if argv[:2] == ["tmux", "has-session"]:
                 return _FakeCP(returncode=0)   # has-session says: exists
-            if argv[:2] == ["tmux", "display-message"]:
+            if argv[:2] == ["tmux", "list-panes"]:
                 return _FakeCP(returncode=0, stdout=str(d) + "\n")
             return _FakeCP(returncode=0)
 
@@ -224,8 +224,32 @@ class TestEnsureStreamTmuxSession(TestCase):
         # new-session, no send-keys, ever.
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(c[:2] in (["tmux", "has-session"],
-                                      ["tmux", "display-message"])
+                                      ["tmux", "list-panes"])
                             for c in calls))
+
+    def test_the_cwd_probe_targets_the_session_with_list_panes(self):
+        # #308 review CRITICAL: `tmux display-message -t "=<session>"` (no
+        # `:<window>` qualifier) resolves to NO PANE at all -- every
+        # `#{pane_*}` field expands to empty and it STILL exits 0
+        # (live-verified against this box's own real tmux 3.7b), which made
+        # the mismatch check permanently inert: every session, live or not,
+        # read back as "can't determine". `list-panes -s -t "=<session>"`
+        # correctly targets the session. Lock the ARGV shape itself, not
+        # just canned stdout -- a garbage target string would otherwise
+        # pass every other test in this class unnoticed.
+        calls = []
+
+        def run(argv):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return _FakeCP(returncode=0)
+            return _FakeCP(returncode=1)   # inconclusive either way
+
+        airuleset.ensure_stream_tmux_session(
+            user="montalu2", run=run, sentinel_path=self._sentinel())
+        probe = next(c for c in calls if c[:2] == ["tmux", "list-panes"])
+        self.assertEqual(probe, ["tmux", "list-panes", "-s", "-t", "=montalu2",
+                                 "-F", "#{pane_current_path}"])
 
     def test_a_mismatched_cwd_on_an_existing_session_is_reported_loudly(self):
         # #308 (the miva1 incident): a session created by ANY path other
@@ -242,7 +266,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             calls.append(argv)
             if argv[:2] == ["tmux", "has-session"]:
                 return _FakeCP(returncode=0)
-            if argv[:2] == ["tmux", "display-message"]:
+            if argv[:2] == ["tmux", "list-panes"]:
                 return _FakeCP(returncode=0, stdout="/home/miva1\n")  # $HOME, wrong
             return _FakeCP(returncode=0)
 
@@ -260,6 +284,31 @@ class TestEnsureStreamTmuxSession(TestCase):
         self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
         self.assertFalse(any(c[:2] == ["tmux", "kill-session"] for c in calls))
 
+    def test_a_subdirectory_of_the_checkout_is_not_a_mismatch(self):
+        # #308 review MAJOR: a raw string compare false-positives on a
+        # perfectly healthy session that's simply `cd`'d into a
+        # SUBDIRECTORY of the checkout -- routine odoo-erp work (e.g.
+        # .../odoo-erp/addons). Containment, not just equality.
+        calls = []
+        d = Path(tempfile.mkdtemp())
+        checkout = d / "devel" / "odoo" / "odoo-erp"
+        subdir = checkout / "addons" / "montalu_install_config"
+        subdir.mkdir(parents=True)
+
+        def run(argv):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return _FakeCP(returncode=0)
+            if argv[:2] == ["tmux", "list-panes"]:
+                return _FakeCP(returncode=0, stdout=str(subdir) + "\n")
+            return _FakeCP(returncode=0)
+
+        with m.patch.object(Path, "home", return_value=d):
+            result = airuleset.ensure_stream_tmux_session(
+                user="montalu2", run=run, sentinel_path=self._sentinel())
+        self.assertNotIn("WARNING", result)
+        self.assertIn("already exists", result)
+
     def test_an_inconclusive_cwd_probe_stays_quiet(self):
         # tmux unreachable for JUST the cwd probe (a transient failure, a
         # session whose pane can't be queried) must never manufacture a
@@ -270,7 +319,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             calls.append(argv)
             if argv[:2] == ["tmux", "has-session"]:
                 return _FakeCP(returncode=0)
-            if argv[:2] == ["tmux", "display-message"]:
+            if argv[:2] == ["tmux", "list-panes"]:
                 return _FakeCP(returncode=1, stderr="can't find pane")
             return _FakeCP(returncode=0)
 

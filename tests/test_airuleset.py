@@ -3721,15 +3721,22 @@ class TestAirulesetOwnerResolutionAlwaysRedirected(TestCase):
     preceded by `stream_redirect(`."""
 
     def test_no_bare_owner_resolution_call_reaches_the_source(self):
+        # #302 review MINOR-9: skipping ANY line starting with "def " (not
+        # just the function's OWN `def owner_of(`/`def pane_owner(` line) is
+        # materially broader than the sibling watchdog lock's exact-prefix
+        # check -- it would silently hide a real future violation shaped
+        # like `def go(): return owner_of(pid)`. Narrowed to match the
+        # sibling's own exact-prefix shape.
         import re
         src = Path(__file__).resolve().parent.parent.joinpath(
             "airuleset.py").read_text(encoding="utf-8")
         offending = []
-        for pat in (r"\bowner_of\(", r"\bpane_owner\("):
+        for pat, def_prefix in ((r"\bowner_of\(", "def owner_of("),
+                                (r"\bpane_owner\(", "def pane_owner(")):
             for mm in re.finditer(pat, src):
                 line_start = src.rfind("\n", 0, mm.start()) + 1
                 line = src[line_start:src.find("\n", mm.start())]
-                if line.lstrip().startswith("def "):
+                if line.lstrip().startswith(def_prefix):
                     continue
                 before = src[:mm.start()]
                 if not re.search(r"stream_redirect\(\s*$", before):

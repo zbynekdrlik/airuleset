@@ -351,6 +351,25 @@ class DeliverDiscordReplies(unittest.TestCase):
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
         self.assertIn("rep1", state.get("dreply_done", []))
 
+    def test_dry_run_delivery_via_idle_path_does_not_clear_real_alert_state(self):
+        # #304 review MINOR-5: `_delivered`'s blocked.pop and the idle-path's
+        # inputdead.pop ran unconditionally, so a --dry-run sweep that
+        # happens to simulate delivery through the idle-pane fast path
+        # silently wiped a REAL fallback-deadline clock and a REAL
+        # wedge-episode alert counter — both persisted, both belonging to a
+        # genuine earlier real sweep, neither actually cleared by anything
+        # this dry-run call really did.
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=self.qpath)
+        state = {"dreply_blocked": {"rep1": time.time() - 5},
+                 "inputdead": {"sid-abc": 2}}
+        panes = {"sid-abc": ("%1", IDLE)}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=True,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        self.assertIn("rep1", state.get("dreply_blocked", {}))
+        self.assertEqual(state.get("inputdead", {}).get("sid-abc"), 2)
+
     def test_no_questions_is_a_noop(self):
         logs = wd.deliver_discord_replies(
             time.time(), self._run, {}, {"sid-abc": ("%1", IDLE)}, dry_run=False,
@@ -703,6 +722,28 @@ class TicketFallbackDelivery(unittest.TestCase):
         self.assertIn("repX", state["dreply_done"])
         self.assertNotIn("repX", state.get("dreply_blocked", {}))
         self.assertTrue(any("ticket" in ln for ln in logs), logs)
+
+    def test_dry_run_never_fakes_ticket_fallback_success(self):
+        # #304 review MAJOR (found in adversarial review of the #304 fix
+        # itself): the original code's `if dry_run: ok = True` faked a
+        # successful gh comment post, then wrote a REAL, persisted
+        # state["dreply_pointer"] entry — which a FOLLOWING real sweep
+        # would type into the live pane as an instruction to go read a
+        # ticket comment that was never actually posted. A --dry-run
+        # troubleshooting call must make ZERO gh calls and leave
+        # dreply_pointer untouched.
+        self._record()
+        now = time.time()
+        state = {"dreply_blocked": {"repX": now - wd.DREPLY_TICKET_FALLBACK_S - 5}}
+        run = ScriptedPaneRun([RUNNING_DRAFT])
+        logs = wd.deliver_discord_replies(
+            now, run, state, {"sid-abc": ("%1", RUNNING_DRAFT)}, dry_run=True,
+            discord_fetch=self._fetch([self._reply()]), gh_comment=self._gh)
+        self.assertEqual(self.gh_calls, [], logs)
+        self.assertFalse(state.get("dreply_pointer"))
+        self.assertNotIn("repX", state.get("dreply_done", []))
+        # the reply stays pending, not silently dropped
+        self.assertIn("888001", notify.load_questions(self.qpath))
 
     def test_blocked_reply_before_deadline_stays_pending(self):
         self._record()
