@@ -10323,14 +10323,173 @@ def _goal_dark_died_by_outage(tpath):
     return mark.get("state") == "set"
 
 
+GOAL_REARM_PROGRESS_WINDOW_S = 6 * 3600   # mirrors statusbar.py's own
+                                            # AUTOPILOT_RUN_WINDOW_S -- a
+                                            # progress-file heartbeat this
+                                            # fresh means an ACTIVE run, not
+                                            # week-old leftover state
+
+GOAL_ARMED_ACTIVITY_GRACE_S = 5 * 60   # #312-hardening (live pane evidence,
+                                        # 2026-08-08): CC's own `◎ /goal`
+                                        # footer glyph can be TRUNCATED off
+                                        # by a wide custom statusline row --
+                                        # live-confirmed on zbynek-4:2.0
+                                        # (width 176, the custom statusline
+                                        # consumes the full row and CC's own
+                                        # right-edge indicator area is cut
+                                        # off) -- so a genuinely-armed goal
+                                        # can read `pane_goal_armed() ==
+                                        # False` with NO way to tell that
+                                        # apart from a real dead goal by the
+                                        # footer alone. A transcript still
+                                        # being WRITTEN TO this recently is
+                                        # independent, strong evidence real
+                                        # work is still happening -- refuse
+                                        # to recover/re-arm on the strength
+                                        # of a missing glyph alone; defer to
+                                        # a later sweep instead of risking a
+                                        # duplicate `/goal` paste into a
+                                        # session that never actually died.
+
+
+def _live_autopilot_progress(cwd, progress_dir, now):
+    """True when `<progress_dir>/<repo>.json` (repo resolved from `cwd`'s
+    own git remote via `notify.repo_name_for(cwd)` -- NEVER the directory
+    basename, the marek/parovanie-produktov trap that module's own
+    docstring documents; `progress_dir` defaults to the REAL
+    `~/.claude/autopilot-progress` when not given, same "wired = on
+    optional test seam" convention as every other injected path/fetch in
+    this file) shows a genuinely ACTIVE, INCOMPLETE batch run: `done > 0`
+    (real progress already happened) AND `remaining > 0` (real work is
+    still outstanding) AND its `ts` heartbeat is fresher than
+    `GOAL_REARM_PROGRESS_WINDOW_S` (a stale file from a long-finished run
+    must never look like live evidence). Any failure -- an unresolvable
+    repo, a missing/malformed/non-dict file -- is UNMEASURABLE -> False,
+    never a guess -- #312's own recovery path only ever ACTS on a True
+    here, so the safe default is the one that never revives anything."""
+    try:
+        import notify
+        repo = notify.repo_name_for(cwd)
+    except Exception:
+        repo = ""
+    if not repo:
+        return False
+    d = Path(progress_dir) if progress_dir else (
+        Path.home() / ".claude" / "autopilot-progress")
+    try:
+        data = json.loads((d / ("%s.json" % repo)).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    try:
+        done = int(data.get("done") or 0)
+        remaining = int(data.get("remaining") or 0)
+        ts = float(data.get("ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    if done <= 0 or remaining <= 0:
+        return False
+    return (now - ts) < GOAL_REARM_PROGRESS_WINDOW_S
+
+
+def _goal_recover_untracked(now, rec, sid, cwd, tpath, loc,
+                            progress_dir=None):
+    """#312 -- `rec['mark']` used to collapse TWO structurally different
+    states into one silent-forever `continue` at `goal_rearm`'s own
+    `if rec.get("mark") != "set":` gate: an EXPLICIT `Goal cleared:` THIS
+    job itself scanned (`mark == "cleared"` -- the #170 class, the user's
+    own deliberate choice, MUST stay untouchable forever) versus this job
+    NEVER HAVING TRACKED THE SESSION'S GOAL HISTORY AT ALL (`mark is
+    None` -- e.g. a hand-adapted, non-fleet-template goal armed before
+    this sid was first swept, or any other coverage gap in an earlier
+    sweep's incremental `off` bootstrap). The second case is the real
+    "untouchable by construction" gap -- NOT, as first hypothesised,
+    `_goal_template_drift`'s own fleet-template-hash tracking (#64), which
+    only ever gates the SEPARATE stale-template re-sync sub-feature and
+    never this core dead-goal path at all (confirmed by direct code
+    reading + a live dry-run probe against this box's own real panes,
+    2026-08-08).
+
+    Recovery is a ONE-SHOT, cheap-gated full-file scan
+    (`scan_goal_markers(tpath, off=0)`, #173's own established discipline:
+    a bare-tail bootstrap can miss a marker already outside the last
+    `GOAL_MARK_TAIL_BYTES`) — but the (comparatively expensive) full scan
+    is ONLY ever paid for once there is independent, LIVE evidence of real
+    in-flight batch work (`_live_autopilot_progress`, checked FIRST,
+    cheap) — never for an ordinary interactive session whose `rec` simply
+    has no `mark` key yet because it has never run `/goal` in a batch
+    sense at all. `rec['recovery_scanned']` is set on a DEFINITIVE
+    full-scan result (a real marker found, of either state, or none found
+    at all) but NEVER on a merely "too fresh to trust right now" verdict
+    (below) — so a genuinely buried-but-recent marker gets retried on a
+    later sweep once it has aged, rather than being permanently excluded
+    by having consumed its one shot too early.
+
+    A recovered `"set"` marker is adopted verbatim (`rec['mark']`,
+    `rec['payload']`, `rec['mts']`) and the caller falls through into the
+    EXACT SAME dark-cap / outage-detection / hash-streak-attempt machinery
+    every other re-arm reason already uses -- reusing #173's own
+    outage-vs-stale distinction for free rather than inventing a parallel
+    one. A recovered `"cleared"` marker, or no marker at all, is left
+    alone (`rec['mark']` stays `None`) -- there is nothing here this job
+    ever missed that is safe to act on.
+
+    #312-hardening (supervisor, live pane evidence 2026-08-08): CC's own
+    `◎ /goal` footer glyph can be TRUNCATED off by a wide custom
+    statusline row -- live-confirmed on zbynek-4:2.0 (width 176, the
+    custom statusline consumes the full row and CC's own right-edge
+    indicator area is cut off) -- so a genuinely-armed goal can read
+    `pane_goal_armed() == False` with no way to tell that apart from a
+    real dead goal by the footer alone. The transcript's own marker
+    STATE cannot discriminate the two either (a crash-outage and a
+    truncated-but-alive session both read `mark == "set", no clear`
+    identically) -- but the recovered marker's own declared TIMESTAMP
+    can: one written within `GOAL_ARMED_ACTIVITY_GRACE_S` is treated as
+    still-plausibly-alive and is NEVER acted on this sweep (no delivery,
+    no mutation of `rec` beyond nothing) -- deferred to a later sweep
+    once it has genuinely aged, closing the exact "duplicate /goal
+    paste into a session that never actually died" risk."""
+    if rec.get("recovery_scanned"):
+        return []
+    if not _live_autopilot_progress(cwd, progress_dir, now):
+        return []
+    _, mark = scan_goal_markers(tpath, off=0)
+    if mark is None or mark.get("state") != "set":
+        rec["recovery_scanned"] = True
+        return []
+    mts = mark.get("ts")
+    if mts is not None and (now - mts) < GOAL_ARMED_ACTIVITY_GRACE_S:
+        return ["skip maybe-truncated-footer (goal-rearm) %s -> the "
+                "transcript's own recovered marker is only %ds old -- too "
+                "recent to trust a missing ◎ glyph as proof this goal is "
+                "actually dead (could be a TRUNCATED statusline render, "
+                "not a dead goal) -- deferring, not consuming the recovery"
+                % (loc, int(now - mts))]
+    rec["recovery_scanned"] = True
+    rec["mark"] = "set"
+    rec["payload"] = mark.get("payload")
+    rec["mts"] = mts
+    rec["mseen"] = now
+    return ["RECOVERED (goal-rearm) %s -> live autopilot-progress evidence "
+            "present and the transcript's own last /goal marker (never "
+            "scanned by this job before) was 'set' -- re-arm eligibility "
+            "restored" % loc]
+
+
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
                sleep_fn=None, templates_path=None, backlog_fetch=None,
                time_fn=None, sweep_deadline=None, questions_path=None,
-               persist=None):
+               persist=None, progress_dir=None):
     """Job 20 — see the section comment above (#76). Mutates
     `state['goal_rearm']`; returns log lines. Best-effort (exceptions are
     run_once's to catch, like every other job here).
+
+    `progress_dir` (optional, #312): the test seam for
+    `_goal_recover_untracked`'s own `_live_autopilot_progress` lookup —
+    production leaves it `None`, which resolves the REAL
+    `~/.claude/autopilot-progress/` dir.
 
     `handled` (optional): the SAME per-sweep set job 14 populates (jobs
     15/17 also populated it once, before both were REMOVED, #102) — a sid
@@ -10464,7 +10623,20 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             _save()
             continue
         if rec.get("mark") != "set":
-            continue                       # never armed here, or the user
+            # #312 -- `mark is None` (this job never tracked this session's
+            # goal history at all) is NOT the same state as `mark ==
+            # "cleared"` (an explicit clear THIS job itself scanned, the
+            # #170 class) -- only the former is ever worth a recovery
+            # attempt; a `"cleared"` mark falls straight through to the
+            # unchanged `continue` below, exactly as before this ticket.
+            if rec.get("mark") is None:
+                logs += _goal_recover_untracked(now, rec, sid, cwd,
+                                                tpath, loc,
+                                                progress_dir=progress_dir)
+                _save()
+            if rec.get("mark") != "set":
+                continue                   # never armed here, still nothing
+                                           # recoverable, or the user
                                            # deliberately cleared it
         last_seen_alive = rec.get("last_armed")
         if last_seen_alive is None:
@@ -10604,14 +10776,33 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # pane this sweep (this repo's own established rule: "resolve
             # a new name in its OWN try, fall back to None, and LOG the
             # degraded mode").
+            marker_const = "🏁 BACKLOG EMPTY:"
             try:
                 import backlog_marker_gate
+                marker_const = backlog_marker_gate.MARKER
                 claim_present, claim_reason = (
                     backlog_marker_gate.classify_backlog_empty_claim(
                         transcript_last_assistant_text(tpath)))
             except Exception as e:
                 claim_present, claim_reason = False, "classifier error: %r" % (e,)
-            if not claim_present:
+            # #312 item 3 -- a session's LAST turn failing to restate the
+            # claim cleanly (a truncated report, a plain one-line
+            # "✅ DONE:", the classifier missing a malformed line) must
+            # not, by itself, be trusted as proof this loop's own STOP
+            # CONDITIONS were never backlog-shaped. `rec['payload']` is
+            # THIS loop's own tracked goal text -- persists across dark
+            # cycles, independent of what the LAST turn said -- and every
+            # shipped `/goal` template's STOP CONDITIONS names the SAME
+            # marker verbatim, so its presence there is a reliable,
+            # session-specific "this loop DOES care about the backlog"
+            # signal that survives a missing/garbled final claim. A
+            # payload that never mentions the marker (a one-off, non-batch
+            # `/goal`) is untouched -- `claim_present` alone stays
+            # decisive there, exactly as before #312.
+            backlog_shaped = (
+                claim_present
+                or marker_const in (rec.get("payload") or ""))
+            if not backlog_shaped:
                 # no genuine claim to verify at all (mention-only, absent, or
                 # this goal's stop condition isn't backlog-shaped) -- nothing
                 # changes, same as before #160.
@@ -10620,9 +10811,12 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 continue
             backlog_open = _cached_backlog_open(cwd, backlog_fetch, state, now)
             if backlog_open is True:
-                logs.append("FALSE-ACHIEVED (goal-rearm) %s -> claimed backlog "
-                            "empty but the repo's backlog is not, re-arming"
-                            % loc)
+                logs.append("FALSE-ACHIEVED (goal-rearm) %s -> %s but the "
+                            "repo's backlog is not, re-arming"
+                            % (loc, "claimed backlog empty" if claim_present
+                               else "no fresh claim (%s), but this loop's "
+                                    "own tracked goal is backlog-shaped"
+                                    % claim_reason))
                 # #160-review-style finding 🔴F1 (this ticket's own review,
                 # proven live) — a stale CACHED `True` re-arms a loop whose
                 # backlog THIS RE-ARM just emptied: the loop closes the
@@ -11881,7 +12075,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              closed_fetch=None, compact_stall_enabled=False,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
              vault_purge=None, log_fn=None, reopen_fetch=None,
-             time_fn=None, sweep_budget_s=None, backlog_fetch=None):
+             time_fn=None, sweep_budget_s=None, backlog_fetch=None,
+             progress_dir=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 24 LIVE and 5
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102), whose numbers are
     kept addressable so historical log lines and code comments still resolve.
@@ -13465,7 +13660,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                templates_path=goal_templates_path,
                                backlog_fetch=backlog_fetch,
                                time_fn=time_fn, sweep_deadline=tail_deadline,
-                               persist=lambda: save_state(state_path, state))
+                               persist=lambda: save_state(state_path, state),
+                               progress_dir=progress_dir)
         except Exception as e:
             logs.append("goal-rearm error: %r" % (e,))
 
