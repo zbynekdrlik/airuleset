@@ -1385,10 +1385,20 @@ class RunOnceCompactRequestWiring(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class DeliverCompactNowFakeTmux:
-    def __init__(self, panes, captured, in_mode=False):
+    def __init__(self, panes, captured, in_mode=False, cap_seq=()):
         self.panes = panes          # [(pane_id, cmd, cwd, pid)]
         self.captured = captured
         self.in_mode = in_mode
+        # #333-review MAJOR-2 -- same shape as CompactFakeTmux's own
+        # cap_seq: an EMPTY sequence (every pre-#333 test) preserves the old
+        # fixed-`self.captured` behavior for every capture-pane call, incl.
+        # this function's own top-of-call resolve. A non-empty sequence lets
+        # a test simulate the pane having MOVED ON by the time of the
+        # fresh, pre-send re-capture #333 added -- each real capture-pane
+        # call (the initial resolve, then the pre-send re-verify) consumes
+        # the next entry.
+        self.cap_seq = list(cap_seq)
+        self._cap_calls = 0
         self.sent = []
 
     def __call__(self, argv, timeout=8):
@@ -1403,7 +1413,11 @@ class DeliverCompactNowFakeTmux:
             self.sent.append(argv)
             return ""
         if "capture-pane" in j:
-            return self.captured
+            if not self.cap_seq:
+                return self.captured
+            idx = min(self._cap_calls, len(self.cap_seq) - 1)
+            self._cap_calls += 1
+            return self.cap_seq[idx]
         return ""
 
     def typed_texts(self):
@@ -5797,16 +5811,25 @@ class TestCompactRequiresGenuineIdleBoundary(unittest.TestCase):
 
     def test_job14_never_types_into_a_busy_pane_even_with_grace_elapsed(self):
         # the THIRD occurrence's exact combination: live background tasks,
-        # PAST the #250 grace window, busy pane, plain working marker,
-        # proven-boundary origin. The old code's grace-elapsed branch fell
-        # straight through the busy check for this origin; it must not.
-        # Two sweeps, same shape as
+        # PAST the #250 grace window, busy pane, proven-boundary origin. The
+        # old code's grace-elapsed branch fell straight through the busy
+        # check for this origin; it must not. Two sweeps, same shape as
         # test_repeated_re_records_do_not_reset_the_grace_anchor above:
         # sweep 1 stamps `deferred_since`; sweep 2 (past grace) must STILL
         # refuse to type, because the pane is busy.
+        #
+        # #333-review MAJOR-1 -- uses `self.DONE` (a SAFE marker), not
+        # `self.WORKING_NO_ASK`: with a ⏳ marker, `_compact_not_at_boundary`
+        # ALREADY refuses before this test's busy-check-and-grace-elapsed
+        # interaction is ever reached, so the marker gate does the refusing
+        # and the busy/grace logic under test is never genuinely exercised
+        # -- confirmed by mutation: reverting the busy-check's `and not
+        # proven_boundary` exemption (the exact pre-#333 bug) still passed
+        # this test unmodified. A safe marker forces the refusal to come
+        # from the busy+grace path specifically.
         proj = self._proj()
         path = self._p()
-        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
         t0 = 1_000_000.0
         wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
                                   origin=self.PROVEN)
@@ -5824,6 +5847,7 @@ class TestCompactRequiresGenuineIdleBoundary(unittest.TestCase):
                 t1, tmux2, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
                 path=path, projects_dir=proj)
         self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip busy" in ln for ln in logs2), logs2)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_a_held_request_delivers_once_a_genuine_boundary_arrives(self):
@@ -5894,6 +5918,97 @@ class TestCompactRequiresGenuineIdleBoundary(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
         tmux = DeliverCompactNowFakeTmux(
             [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+
+# --------------------------------------------------------------------------- #
+# #333-review MAJOR-2 (adversarial review, fable) -- the busy-check above
+# reads a SWEEP-TOP (job 14) or CALL-TOP (deliver_compact_now) snapshot that
+# can be several tmux round-trips stale by the time control actually reaches
+# the send: every gate above it (marker re-read, #99/#48 substantiality,
+# #246 live-tasks, a git subprocess) spends real wall-clock time first. This
+# class proves the fix genuinely re-verifies against a FRESH capture
+# immediately before typing, not just at the top of the check chain --
+# mirroring `_goal_template_drift`/job 20's own established discipline for
+# the identical race (#176-F3/#266).
+# --------------------------------------------------------------------------- #
+
+class TestCompactRefusesAPaneThatRacedSinceTheSweep(unittest.TestCase):
+    SID = "sess-333-race"
+    CWD = "/home/x/proj333race"
+    PANE = "%34"
+    PROVEN = "subagent-stop"
+    DONE = "✅ DONE: kolo zmergované."
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_job14_refuses_a_pane_that_went_busy_between_sweep_and_send(self):
+        # the sweep-top `captured` (fed via panes_by_sid, same as production)
+        # reads IDLE -- every check up to the busy-skip passes -- but the
+        # FIRST real tmux capture-pane call job 14 issues (this fix's own
+        # fresh pre-send re-verify) now reports BUSY.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_IDLE_CAP, cap_seq=[CB_BUSY_CAP])
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any("skip raced" in ln for ln in logs), logs)
+        # a pre-send refusal is never consumed -- the next sweep retries
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_job14_still_delivers_when_the_fresh_recheck_confirms_idle(self):
+        # positive control -- the fresh re-check is not a blanket new skip,
+        # it only refuses when the pane GENUINELY moved on.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_IDLE_CAP, cap_seq=[CB_IDLE_CAP])
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_sync_path_refuses_a_pane_that_went_busy_between_resolve_and_send(self):
+        # cap_seq[0] serves deliver_compact_now's OWN top-of-call resolve
+        # (`captured = capture_pane(...)`, reading idle); cap_seq[1] serves
+        # this fix's fresh pre-send re-verify, reporting the pane has since
+        # gone busy.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
+            cap_seq=[CB_IDLE_CAP, CB_BUSY_CAP])
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
+
+    def test_sync_path_still_delivers_when_the_fresh_recheck_confirms_idle(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
+            cap_seq=[CB_IDLE_CAP, CB_IDLE_CAP])
         word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
                                       projects_dir=proj, min_context=1,
                                       origin=self.PROVEN)
