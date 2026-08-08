@@ -7360,7 +7360,10 @@ _COMPACT_PROVEN_BOUNDARY_ORIGIN = "subagent-stop"
 _COMPACT_SELF_CALLBACK_ORIGIN = "self-callback"
 _COMPACT_PROVEN_BOUNDARY_ORIGINS = frozenset(
     (_COMPACT_PROVEN_BOUNDARY_ORIGIN, _COMPACT_SELF_CALLBACK_ORIGIN))
-_COMPACT_NON_BOUNDARY_MARKERS_PROVEN = ("❓",)
+# #333 removed the sibling `_COMPACT_NON_BOUNDARY_MARKERS_PROVEN = ("❓",)`
+# constant here — every origin now shares the single
+# `_COMPACT_NON_BOUNDARY_MARKERS` set (`_compact_not_at_boundary` below); a
+# proven-boundary origin no longer gets a relaxed (⏳-exempt) marker set.
 
 # The `user` entry Claude Code writes when a Stop hook REFUSES a turn's final
 # message — verified against this box's own transcripts (2026-07-27): every
@@ -7386,19 +7389,26 @@ def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     retries once the session genuinely returns to a boundary — or the entry
     expires (`COMPACT_REQUEST_MAX_AGE_S`). Unmeasurable never blocks.
 
-    #121 — `origin` is the request's own PROOF of a boundary. For
-    `subagent-stop` (an autopilot-worker concluded with zero other live tasks
-    in this session's task registry) only `❓` still blocks; `⏳` does not,
-    because for a supervisor it refers to the NEXT batch and can never clear.
-    Every other origin keeps #109's gate exactly as written."""
+    #121 (REVERSED by #333) — `origin` used to relax the marker set for a
+    PROVEN-boundary origin (`⏳` no longer blocked, on the premise that a
+    supervisor's `⏳` refers only to the NEXT batch and can never clear). Live
+    forensic evidence on THIS box's own transcript (three occurrences in one
+    day, #333) disproved the premise directly: `/compact` was typed while the
+    pane was BUSY and only executed several turns later, at whatever turn's
+    Stop was first ACCEPTED — under an active `/goal` loop that turn is almost
+    always either a genuine completion or an ask-and-continue `❓`-block, and
+    BOTH of this box's own confirmed-CLEAN historical sends landed exactly on
+    a literal `✅ DONE` turn, never on `⏳`. So `⏳` is exactly as untrustworthy
+    a boundary as `❓` for EVERY origin, proven and unproven alike — every
+    origin now shares the single `_COMPACT_NON_BOUNDARY_MARKERS` set, with no
+    per-origin relaxation. `origin` is kept as a parameter (unused by this
+    function) only so callers don't need to change; the busy-pane send itself
+    is what #333 actually closes (see `deliver_compact_now`/job 14)."""
     pdir = projects_dir or PROJECTS_DIR
     tpath = _transcript_for_session(pdir, sid, cwd)
     if tpath is None:
         return False
-    markers = (_COMPACT_NON_BOUNDARY_MARKERS_PROVEN
-               if origin in _COMPACT_PROVEN_BOUNDARY_ORIGINS
-               else _COMPACT_NON_BOUNDARY_MARKERS)
-    return transcript_last_marker(tpath) in markers
+    return transcript_last_marker(tpath) in _COMPACT_NON_BOUNDARY_MARKERS
 
 
 def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
@@ -7647,27 +7657,22 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     completes. Best-effort: exceptions are the caller's (run_once's)
     responsibility to catch, same as every other job.
 
-    #122 (2026-07-28): a BUSY pane is no longer an unconditional skip. A
-    request whose `origin` is the proven-boundary one
-    (`_COMPACT_PROVEN_BOUNDARY_ORIGIN`, i.e. `"subagent-stop"` — #121's own
-    proof of a completed-ticket boundary) falls THROUGH the busy
-    classification into the same chain every other kind already goes
-    through (the #99/#48 substantiality gates, `_pane_has_queued_compact`
-    dedup, then a send that skips only the final `pane_at_idle_prompt`
-    gate a busy pane can never pass) — reusing the SAME "a short send-keys
-    reliably queues even into a busy pane" finding #65 already validated
-    for `deliver_compact_now`. This is safe here in a way it is NOT inside
-    a live Stop-hook batch (#109/#84's own caution, which is about parked
-    keystrokes firing at some arbitrary LATER accepted Stop when typed
-    DURING a Stop hook's own execution): job 14 is an independent ~60s
-    poll, never running inside a Stop-hook batch, and
-    `_compact_not_at_boundary` above has already re-confirmed at delivery
-    time that the session isn't `❓`-blocked. Every OTHER origin (the plain
-    Stop-hook channel) keeps the unconditional busy-skip unchanged. Job
-    14's own separate copies of the #99/#48 gates are deliberately left
-    untouched by this — #126 already scoped that parity gap out
-    explicitly ("job 14's own separate copy of these same two gates is
-    untouched"); this ticket does not fold it back in.
+    #122 (2026-07-28, REVERSED by #333): used to let a BUSY pane fall
+    THROUGH for a proven-boundary origin instead of being an unconditional
+    skip, on the "a short send-keys reliably queues even into a busy pane"
+    finding (#65). #333's live forensic trace (three same-day incidents on
+    this box's own supervisor session) proved that finding's SAFETY claim
+    was too narrow: the queued keystrokes are mechanically safe to TYPE,
+    but they only DRAIN (execute) at whatever LATER turn's Stop is first
+    genuinely ACCEPTED — a moment the marker check at type-time cannot see
+    or prevent — so a busy-typed `/compact` for a proven-boundary origin
+    reproduced the identical incident job 14 was already safe from for
+    every OTHER origin. A BUSY pane is once again an unconditional skip,
+    for every origin, with no exemption. Job 14's own separate copies of
+    the #99/#48 gates remain deliberately untouched by this reversal too —
+    #126 scoped that parity gap out explicitly ("job 14's own separate
+    copy of these same two gates is untouched"); #333 does not fold it
+    back in either.
 
     #122 also fixes the OTHER half of the same ticket: a request that
     lapses via `COMPACT_REQUEST_MAX_AGE_S` (below) with no delivery, of
@@ -7779,9 +7784,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # only in context) is NOT a boundary, and the ❓-only gate above waved
         # exactly that case through. Left in place, never consumed -- the next
         # sweep retries once the session is genuinely back at a boundary, or
-        # the entry expires. #121 — a request that carries its OWN boundary
-        # proof (`origin="subagent-stop"`) is exempt from the `⏳` half; `❓`
-        # still holds it, here and in `_compact_blocked_by_question` above.
+        # the entry expires. #121 used to exempt a request carrying its own
+        # boundary proof (`origin="subagent-stop"`) from the `⏳` half; #333
+        # REVERSED that -- `⏳` blocks for EVERY origin now, here and in
+        # `_compact_blocked_by_question` above (which was never relaxed by
+        # #121 in the first place).
         if _compact_not_at_boundary(cwd, sid, projects_dir=pdir,
                                     origin=str(entry.get("origin") or "")):
             logs.append("skip not-a-boundary (compact-request) %s" % loc)
@@ -7798,23 +7805,20 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if kind == "no-input-line":
             logs.append("skip no-input-line (compact-request) %s" % loc)
             continue
-        # #122 — a request carrying its OWN proof of a boundary
-        # (origin=="subagent-stop") is no longer bounced on "busy": the same
-        # "a short send-keys reliably queues even into a busy pane" finding
-        # #65 already validated for the synchronous path (deliver_compact_now)
-        # applies here too. It is SAFE here in a way it would NOT be inside a
-        # live Stop-hook batch (#109/#84's own caution): that risk is about
-        # typing DURING a Stop hook's own execution, before that turn's
-        # accept/reject verdict exists so parked keystrokes fire at some
-        # arbitrary LATER accepted Stop. Job 14 is an independent ~60s poll,
-        # never running inside a Stop-hook batch — by the time it reaches
-        # here, `_compact_not_at_boundary` above has ALREADY re-confirmed
-        # (moments ago, at delivery time) that this session's current last
-        # turn is not blocked by `❓`. Every OTHER origin keeps the
-        # unconditional busy-skip unchanged (see the #122 issue comment).
+        # #122 (REVERSED by #333) — used to let a proven-boundary origin
+        # bypass the busy-skip below, on the premise that "a short send-keys
+        # reliably queues even into a busy pane" (#65) made typing into a
+        # busy pane safe here. It IS mechanically safe to TYPE — but #333's
+        # live forensic trace proved the real hazard is not about the TYPE,
+        # it's that a busy-typed `/compact` sits QUEUED and only DRAINS
+        # (executes) at whatever LATER turn's Stop is first genuinely
+        # ACCEPTED — which the marker check at type-time cannot see or
+        # prevent. So `/compact` is now only ever TYPED when the pane is
+        # observably at rest RIGHT NOW, for every origin, with no exemption:
+        # `kind == "busy"` always skips, regardless of `proven_boundary`.
         proven_boundary = (str(entry.get("origin") or "")
                            in _COMPACT_PROVEN_BOUNDARY_ORIGINS)
-        if kind == "busy" and not proven_boundary:
+        if kind == "busy":
             logs.append("skip busy (compact-request) %s" % loc)
             continue
         # #238 — the thin-context gate, UNCONDITIONAL (never skipped for a
@@ -7989,18 +7993,36 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 logs.append("skip draft (stash occupied) %s: %r"
                             % (loc, draft[:40]))
             continue
-        # #122 — kind=="busy" only reaches here when proven_boundary is True
-        # (the non-proven case already `continue`d above); the idle-prompt
-        # gate is deliberately skipped for it, mirroring
-        # deliver_compact_now's own "no pane_at_idle_prompt gate on this
-        # path" reasoning — a busy pane can never pass it.
-        if kind != "busy" and not pane_at_idle_prompt(captured):
+        # #333 -- `kind == "busy"` was `continue`d unconditionally above, so
+        # `kind` here is ALWAYS "input" (the pre-#333 #122 dead-code branch
+        # exempting a busy pane from this gate is gone; every request that
+        # reaches here has a real idle-prompt to check, same as the plain
+        # Stop-hook channel always had).
+        if not pane_at_idle_prompt(captured):
             logs.append("skip not-idle (compact-request) %s" % loc)
             continue
-        busy_tag = ", busy" if kind == "busy" else ""
         if dry_run:
-            logs.append("READY (compact-request%s%s) %s"
-                        % (busy_tag, grace_tag, loc))
+            logs.append("READY (compact-request%s) %s" % (grace_tag, loc))
+            continue
+        # #333-review MAJOR-2 -- `captured` is the SWEEP-TOP snapshot handed
+        # in via `panes_by_sid`, taken before this job even ran (job 14 runs
+        # late in `run_once`'s per-sweep pane loop, after every other job's
+        # own keystroke sends and a git subprocess in this same request's
+        # own substantiality check above); it can be several tmux
+        # round-trips stale by the time control reaches here. Re-verify
+        # against a FRESH capture immediately before typing -- the same
+        # discipline `_goal_template_drift`/job 20 and job 9's plain-branch
+        # rescue already use for exactly this race (#176-F3/#266) -- so the
+        # "only ever TYPED when the pane is observably at rest RIGHT NOW"
+        # claim above is actually true at the moment of the send, not just
+        # at the moment of the sweep-top read. A pane that moved on in the
+        # interim is a PRE-SEND refusal (zero keystrokes sent) and must NOT
+        # consume the request -- the next sweep retries.
+        fresh = capture_pane(pid, run, lines=40)
+        fresh_kind, fresh_draft = _classify_boundary(fresh)
+        if fresh_kind != "input" or fresh_draft:
+            logs.append("skip raced (compact-request) %s -> pane moved "
+                        "since the sweep" % loc)
             continue
         send_continue(pid, COMPACT_TEXT, run)
         reqs.pop(sid, None)
@@ -8011,7 +8033,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
-        logs.append("OK (compact-request%s%s) %s" % (busy_tag, grace_tag, loc))
+        logs.append("OK (compact-request%s) %s" % (grace_tag, loc))
     if changed:
         _save_compact_requests(reqs, path)
     return logs
@@ -8135,7 +8157,11 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
-    block (#102 — `_compact_blocked_by_question`), the session STILL has
+    OR `⏳` block (#102 — `_compact_blocked_by_question`; #109/#333 —
+    `_compact_not_at_boundary`, unrelaxed for every origin), the pane is
+    currently BUSY (mid-turn — #333 REVERSED this function's own earlier
+    "busy is safe to type into" premise, see the `kind == "busy"` check's
+    own section comment below for the live evidence), the session STILL has
     live background work of its own (#246 —
     `_session_has_live_bg_tasks`, checked LAST, right before the send), the
     #238 thin-context gate reads zero real assistant activity since the
@@ -8147,9 +8173,6 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     pane holds a genuine unsent DRAFT (job 14's `_compact_stash_attempt`,
     #67, handles that on retry; a synchronous multi-round-trip stash dance
     at Stop-hook time is unnecessary risk for what should be a rare case).
-    A pane merely BUSY (mid-turn) is NOT a reason to fall back — that is
-    exactly the case this function exists to handle, per the section
-    comment's queuing behavior.
 
     #78 — checks the SHARED `/compact` claim FIRST, before anything else
     (no pane resolution, no tmux round-trip needed): if another sender
@@ -8194,8 +8217,10 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         return ""
     # #109 -- the general form of the gate above: never deliver while the
     # session's CURRENT last turn positively says "not a boundary" (`⏳` too,
-    # not just `❓`). #121 -- unless the request carries its OWN proof of a
-    # boundary (`origin="subagent-stop"`), for which `⏳` says nothing.
+    # not just `❓`). #121 used to relax this for a request carrying its own
+    # proof of a boundary (`origin="subagent-stop"`); #333 REVERSED that --
+    # `⏳` blocks for EVERY origin now, proven or not (see
+    # `_compact_not_at_boundary`'s own docstring for the live evidence).
     if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir,
                                 origin=origin):
         _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
@@ -8237,6 +8262,20 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         return ""
     if draft:
         _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #333 -- `kind == "busy"` used to be considered SAFE to type into here
+    # (a short send-keys reliably queues even into a busy pane, #65) -- true
+    # mechanically, but this box's own forensic trace proved the real
+    # hazard: a busy-typed `/compact` sits QUEUED and only DRAINS (executes)
+    # at whatever LATER turn's Stop is first genuinely ACCEPTED, which under
+    # an active `/goal` loop is almost always either a real completion or an
+    # ask-and-continue `❓`/`⏳`-blocked turn -- exactly the boundary this
+    # whole gate exists to refuse. The marker check above cannot see what a
+    # currently-busy generation will eventually produce, so it cannot
+    # prevent this. Refuse now and fall back to job 14's polled retry, which
+    # re-checks the session's then-current (later, hopefully idle) state.
+    if kind == "busy":
+        _log_compact_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return ""
     if _pane_has_queued_compact(captured):
         # #84 — the pane already holds an unexecuted `/compact`; a second one
@@ -8293,10 +8332,12 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         if substantial is False:
             _log_compact_sync("DROP no-work sid=%s cwd=%s" % (sid, cwd))
             return "dropped-no-work"   # #99 gate: nothing durable happened
-    # kind is "input" (bare, or the queued-messages placeholder already
-    # normalized to bare) or "busy" — BOTH are safe to send into here (see
-    # the section comment: a short send-keys queues reliably even on a busy
-    # pane), so there is no `pane_at_idle_prompt` gate on this path.
+    # #333 -- `kind` is ALWAYS "input" by this point (bare, or the
+    # queued-messages placeholder already normalized to bare): "no-input-line"
+    # and "draft" both already returned above, and "busy" is now refused
+    # above too (see that section comment for why "busy is safe to type
+    # into" was reversed) -- so there is nothing left for a
+    # `pane_at_idle_prompt` gate to add here.
     if not proven_boundary:
         if min_context is None:
             try:
@@ -8350,6 +8391,22 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         # later) clears this gate on real elapsed time, no exemption
         # needed. One gate, every origin, no prose to keep correct.
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #333-review MAJOR-2 -- `captured` was resolved once, near the top of
+    # this call, before every check above (the marker re-read, the #238/
+    # #99/#48 gates, and the `_session_has_live_bg_tasks` subprocess check
+    # immediately above) each spent real wall-clock time. Re-verify against
+    # a FRESH capture immediately before typing -- the same discipline job
+    # 14's own send point now uses (see its section comment) and
+    # `_goal_template_drift`/job 20 established first (#176-F3/#266) -- so
+    # the "only ever TYPED when the pane is observably at rest RIGHT NOW"
+    # claim is true at the actual moment of the send, not just at this
+    # call's own entry. A pane that moved on in the interim is a PRE-SEND
+    # refusal (zero keystrokes sent) -- fall back to job 14's polled retry.
+    fresh = capture_pane(pid, run, lines=40)
+    fresh_kind, fresh_draft = _classify_boundary(fresh)
+    if fresh_kind != "input" or fresh_draft:
+        _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return ""
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
