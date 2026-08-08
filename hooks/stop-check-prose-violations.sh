@@ -504,6 +504,126 @@ if msg_has "$MSG_NOGOAL_MENTION" -qiE "review the (spec|plan|design|brainstorm|a
     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
 
+# Check for the SAME spec/plan-approval pause, stated in SLOVAK (#316).
+# Every question this repo ships to a real user is written in Slovak
+# (user-questions-slovak.md) — an English-only regex for this class is
+# BLIND on every stream/away box, and montalu2 proved it live: "schvaľuješ
+# zapísaný design spec?" sailed through this gate untouched and the user
+# had to answer it himself. Scoped NARROWLY on purpose, four required
+# structural signals:
+#   1. a Slovak APPROVAL VERB attached to a design-artifact NOUN — the
+#      exact verb/noun families the incident named, either word order —
+#      found ON THE ❓ MARKER LINE ITSELF (#316-review finding: scanning
+#      the whole message let an UNRELATED approval mention anywhere
+#      combine with an UNRELATED real ❓ question elsewhere and false-
+#      block it; the real incident's own verb+noun sat directly on the
+#      marker line, so anchoring there closes the gap with no loss);
+#   2. the ❓ NEEDS YOU / ❓ ASKED marker this repo's own question
+#      convention always carries on a real question turn — QLINE_ALL
+#      non-empty IS this signal now, since (1) already requires it;
+#   3. no bullet-option lines present ANYWHERE in the message — the SAME
+#      shape stop-check-question-quality.sh's own Check 4 mandates on a
+#      genuine design fork ("Odrážky s možnosťami sú POVINNÉ"), including
+#      its NUMBERED-list form (`1.`/`2.`) — the regex is copied from
+#      Check 4 verbatim (#316-review) so the two gates cannot drift apart
+#      again, exactly the drift that let a numbered fork false-block;
+#   4. the user is NOT PRESENT — Check 4 itself disables ALL shape
+#      enforcement for a present user (`stop-check-question-quality.sh`'s
+#      own "PRESENT USER → no shape enforcement", the camera-box "Hruza"
+#      incident, 2026-07-05); this check's own safety argument rests on
+#      Check 4, so it must be scoped to the SAME population Check 4
+#      actually enforces on (#316-review), or the guarantee is false for
+#      half the population.
+# A genuine design fork (choice between options, real consequences) is
+# exempt by construction even if it happens to use the SAME verb ("Ktorý
+# návrh schvaľuješ — A alebo B?" with real `• `/`1.` option lines passes;
+# a bare "schvaľuješ zapísaný spec?" gate with no options does not). The
+# banned shape is specifically "approve my already-written artifact
+# before I continue", never a real fork.
+#
+# Accepted residuals (#316-review, not chased — narrow-on-purpose):
+# verb/noun on DIFFERENT lines (grep is line-oriented, `.{0,40}` cannot
+# span a newline); a gap over 40 chars; "súhlasíš s návrhom?" (a genuinely
+# common phrasing, no verb in the declared list); noun-less phrasings
+# ("čakám na tvoje schválenie", "potrebujem tvoje potvrdenie"); an
+# unrelated bullet/numbered line ANYWHERE in the message granting the
+# exemption to an otherwise-real violation (message-scoped on purpose,
+# matching NO_COMPANION_URL's own established scope above).
+SK_APPROVAL_RX="\b(schva[ľl]uje[sš]|schv[áa]li[sš]|ods[úu]hlas[íi][sš]|potvrd[íi][sš]|odobr[íi][sš])\b"
+SK_ARTIFACT_RX="\b([sš]pec(u|om|ifik[áa]ci[a-záäéíóôúýčďľňšťž]*)?|pl[áa]n(u|om)?|n[áa]vrh(u|om)?|dizajn(u|om)?|design)\b"
+# EVERY ❓ marker line — MSG_MENTION so a mere quoted/backticked mention of
+# the marker text is never read as a real question turn. A here-string, never
+# a pipe (test_prose_gate_pipeline_race.py's own structural lock forbids
+# feeding grep from a process at all, #190/#194) — `grep <pattern> <<<"$var"`
+# has no writer PROCESS to race. #316-review MINOR: this used to keep only
+# the LAST marker line (`tail -1`) before scanning it for verb+noun — a
+# montalu2-shaped question BURIED under a later, unrelated ❓ line escaped
+# detection entirely. `grep -E` (no `-z`) matches per LINE, never across a
+# newline, so handing the WHOLE multi-line QLINE_ALL to msg_has below is
+# exactly equivalent to "does ANY marker line contain verb+noun" with zero
+# cross-line false-positive risk — no narrower `tail -1` selection needed.
+_QLINE_RC=0
+QLINE_ALL=$(grep -iE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)[[:space:]]*\**[[:space:]]*:' <<<"$MSG_MENTION") || _QLINE_RC=$?
+if [ "$_QLINE_RC" -ge 2 ]; then
+    # #316-review MINOR: this used to collapse a genuine grep ERROR into the
+    # same "" as a real no-match, with no record_undet call at all — the
+    # exact fabricated 141->0 verdict shape #194 removed, one level up (a
+    # SELECTOR, not a pattern). Per #194's own taxonomy an unanswerable
+    # SELECTOR must WIDEN the scope for the pattern that reads it, never
+    # shrink to "absent": fall back to the whole message (still able to
+    # fire) and assume a marker is present, rather than silently disarming
+    # this check for every message from here on.
+    record_undet "$_QLINE_RC" "marker-line grep (SK approval-pause, #316)"
+    QLINE_ALL="$MSG_MENTION"
+    HAS_QMARKER=1
+else
+    if [ -n "$QLINE_ALL" ]; then HAS_QMARKER=1; else HAS_QMARKER=0; fi
+fi
+# #316-review CRITICAL: SK_APPROVAL_RX/SK_ARTIFACT_RX embed diacritics inside
+# bracket classes (`[ľl]`, `[sš]`, `[áa]`, `[íi]`, `[úu]`) with `\b` anchors
+# immediately adjacent — both are locale-dependent under a bare C/POSIX
+# locale (no LANG/LC_ALL set), the exact gotcha stop-check-question-
+# quality.sh and notify-discord-pending.sh already document twice in this
+# repo. Reproduced live: under LC_ALL=C every diacritic verb spelling MISSES
+# (schvaľuješ/schváliš/odsúhlasíš/potvrdíš/odobríš all fail to match) and
+# rewriting the classes as plain alternation does NOT fix it either — `\b`
+# next to a multibyte character is itself locale-dependent, in both the
+# miss AND the false-positive direction. Forcing a UTF-8 locale on just this
+# ONE grep call is the actual, verified fix (C.UTF-8 is present on every
+# managed box's glibc); a plain `VAR=val funcname` prefix exports the
+# override for the whole function call, including the `grep` subprocess it
+# execs, and scopes to ONLY this command (never leaking into the following
+# `&& echo 1 || echo 0`).
+HAS_SK_APPROVAL=$(LC_ALL=C.UTF-8 msg_has "$QLINE_ALL" -qiE "${SK_APPROVAL_RX}.{0,40}${SK_ARTIFACT_RX}|${SK_ARTIFACT_RX}.{0,40}${SK_APPROVAL_RX}" && echo 1 || echo 0)
+# The exemption (real options offered) EXONERATES, so ask whether it is
+# MISSING — an unanswerable check must not grant the exemption (same
+# fail-closed shape as NO_COMPANION_URL above). MSG_MENTION, not raw MSG:
+# a fenced code block (e.g. a quoted diff with `- old line`) must not
+# grant the exemption just by containing a leading `- `.
+NO_OPTION_BULLETS=$(msg_missing "$MSG_MENTION" -qE '^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])' && echo 1 || echo 0)
+# Presence gate, mirroring stop-check-question-quality.sh's own ACTIVE
+# marker check verbatim (signal 4 above). RETRY_KEY is already validated
+# safe-path-component-or-empty by the retry-throttle block further up —
+# an empty/unsafe id simply means this check can never find a marker, so
+# it degrades to "not present" (checked normally), never to a false skip.
+IS_PRESENT=0
+if [ -n "$RETRY_KEY" ]; then
+    SK_ACTIVE_MARKER="/tmp/claude-user-active-${RETRY_KEY}"
+    if [ -f "$SK_ACTIVE_MARKER" ]; then
+        _SK_AM=$(stat -c %Y "$SK_ACTIVE_MARKER" 2>/dev/null || echo 0)
+        _SK_NOW=$(date +%s 2>/dev/null || echo 0)
+        case "$_SK_AM" in "" | *[!0123456789]*) _SK_AM=0 ;; esac
+        case "$_SK_NOW" in "" | *[!0123456789]*) _SK_NOW=0 ;; esac
+        if [ "$_SK_AM" -le "$_SK_NOW" ] && [ "$((_SK_NOW - _SK_AM))" -lt 600 ]; then
+            IS_PRESENT=1
+        fi
+    fi
+fi
+if [ "$HAS_SK_APPROVAL" = "1" ] && [ "$HAS_QMARKER" = "1" ] && [ "$NO_OPTION_BULLETS" = "1" ] && [ "$IS_PRESENT" = "0" ]; then
+    echo "VIOLATION: Spýtal si sa po slovensky 'schvaľuješ zapísaný spec/plán/návrh?' — presne trieda 'spec/plan/design review handoff' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: napíš rozhodnutie na ticket ('spec committed, pokračujem') a pokračuj na implementačný plán, nečakaj na schválenie. Genuine dizajnová rozvetvená otázka (voľba medzi možnosťami s reálnymi dôsledkami, s odrážkami • alebo číslovaním 1./2. pre každú možnosť) je vítaná a nie je toto — ale 'schváľ mi hotový spec, inak nepokračujem' bez ponúknutých alternatív áno. Prepíš správu: vynechaj otázku, zapíš rozhodnutie a pokračuj. See ask-before-assuming.md pre-answered table." >&2
+    add_hard "Pre-answered Slovak prose question: spec/plan/design approval pause (schvaľuješ/schváliš/odsúhlasíš/potvrdíš/odobríš + spec/plán/návrh/dizajn)"
+fi
+
 # === Unified completion-report detection ===
 # Agents sometimes write prose completion reports without the canonical heading,
 # silently bypassing every audit check below (slovnormal-mcp session shipped

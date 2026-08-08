@@ -4,14 +4,25 @@ ask-before-assuming.md was trimmed from 26 rows to 9 (+ one pointer line).
 Every dropped row's justification was "a real hook already hard-blocks this
 question" — proven empirically (real hook invocation, real STDIN payload,
 never a re-implementation of the hook's own regex) BEFORE the row was
-removed. This test is the durable version of that empirical check: it
-re-runs the SAME hooks against a representative phrase from each dropped
-row, so a future edit that narrows hook coverage (e.g. a regex refactor
-that accidentally drops a clause) is caught here instead of silently
-reopening a question the file no longer documents as pre-answered.
+removed, but ONLY ever against an ENGLISH fixture.
+
+#316 (2026-08-08) audited all 17 dropped rows against a realistic SLOVAK
+rendering of the SAME banned intent — this repo's own questions are always
+Slovak (`user-questions-slovak.md`), so an English-only coverage proof was a
+felt difference waiting to happen (montalu2's `schvaľuješ zapísaný design
+spec?` sailed through untouched). Only 3 of the 17 dropped rows genuinely
+hold in BOTH languages — their Slovak rendering happens to retain the
+literal English jargon (`admin-merge`, `subagent-driven-development`) the
+existing regex keys on. The other 14 were reverted back into the table, in
+their original relative position and their original text unchanged (ONE
+row — "review the spec/plan before hand-off" — also gained a deliberate
+new item-3 reinforcement sentence in this same PR; every other reverted
+row's text is byte-for-byte its pre-`a89024a` original). This file now
+locks only the 3 rows that survived the audit, in both languages.
 
 Full row-by-row mapping (hook file + exact regex fragment per row):
 https://github.com/zbynekdrlik/airuleset/issues/95 (design comment).
+Slovak audit (per-row pass/fail): https://github.com/zbynekdrlik/airuleset/issues/316
 """
 
 import json
@@ -80,30 +91,8 @@ def _run_stop_untracked_work(text):
 
 
 class TestPreAskAutoAnswerCoversDroppedRows(TestCase):
-    """Rows dropped because hooks/pre-ask-auto-answer.sh hard-blocks the
-    AskUserQuestion tool call itself (exit code 2)."""
-
-    def test_subagent_vs_inline_blocked(self):
-        self.assertTrue(_run_pre_ask("Subagent or sequential/inline?"))
-
-    def test_visual_companion_question_blocked(self):
-        self.assertTrue(_run_pre_ask("Want visual companion / mockups?"))
-
-    def test_ready_to_execute_say_go_blocked(self):
-        self.assertTrue(_run_pre_ask("Ready to execute — say go"))
-
-    def test_ready_for_next_step_blocked(self):
-        self.assertTrue(_run_pre_ask("ready for next step?"))
-
-    def test_spec_plan_review_handoff_blocked(self):
-        self.assertTrue(_run_pre_ask(
-            "Please review the spec/plan/design and let me know if you "
-            "want changes before I hand off to writing-plans"))
-
-    def test_does_this_design_look_right_blocked(self):
-        self.assertTrue(_run_pre_ask(
-            "Does this design look right? Specifically the X core. "
-            "If yes, I'll write the spec to docs/.../spec.md and commit."))
+    """The 3 rows that GENUINELY stayed dropped — hooks/pre-ask-auto-answer.sh
+    hard-blocks the AskUserQuestion tool call itself (exit code 2)."""
 
     def test_dispatch_now_or_hold_for_review_blocked(self):
         self.assertTrue(_run_pre_ask(
@@ -118,93 +107,110 @@ class TestPreAskAutoAnswerCoversDroppedRows(TestCase):
     def test_merge_despite_failing_check_blocked(self):
         self.assertTrue(_run_pre_ask("Should I merge despite the failing check?"))
 
-    def test_investigate_or_merge_despite_blocked(self):
-        self.assertTrue(_run_pre_ask(
-            "Want me to investigate the codecov issue, or merge despite it?"))
-
-    def test_functionally_ready_unstable_blocked(self):
-        self.assertTrue(_run_pre_ask(
-            "PR is functionally ready but UNSTABLE — you decide on merge?"))
-
-    def test_approve_merge_question_blocked(self):
-        self.assertTrue(_run_pre_ask("Approve merge?"))
-
 
 class TestStopCheckProseCoversDroppedRows(TestCase):
-    """Rows dropped because hooks/stop-check-prose-violations.sh hard-blocks
-    the SAME question asked in prose (a Stop-gate, not the AskUserQuestion
-    tool — the constraint 4 case: Stop-gate coverage counts too)."""
+    """The same 2 of the 3 surviving rows that ALSO hard-block as prose
+    (a Stop-gate, not the AskUserQuestion tool)."""
 
-    def test_subagent_vs_inline_prose_blocked(self):
-        self.assertTrue(_run_stop_prose("Subagent or sequential/inline?"))
-
-    def test_design_review_handoff_prose_blocked(self):
+    def test_admin_merge_realistic_options_prose_blocked(self):
         self.assertTrue(_run_stop_prose(
-            "Please review the spec/plan/design and let me know if you "
-            "want changes before I hand off to writing-plans"))
+            "Realistic options: admin-merge / close PR / stop runner"))
 
     def test_merge_despite_prose_blocked(self):
         self.assertTrue(_run_stop_prose("Should I merge despite the failing check?"))
 
-    def test_ascii_art_layout_mockup_blocked(self):
-        # ASCII-art ban for a layout/position question — the mechanical
-        # half of the dropped visual-companion row's "never ASCII art".
-        msg = (
-            "Where should the version label go? Here's the header layout:\n"
-            "┌─────────────┐\n"
-            "│ header  logo │\n"
-            "└─────────────┘"
-        )
+
+class TestSurvivingRowsAlsoCoverSlovak(TestCase):
+    """#316's own audit evidence, made durable: a realistic Slovak rendering
+    of each of the 3 surviving rows' SAME banned intent, run against the
+    real hook. Each one blocks ONLY because its Slovak rendering retains
+    the literal English jargon term the existing regex keys on
+    (`subagent-driven-development`, `admin-merge`) — this is what makes the
+    row safe to leave OUT of the table rather than reverting it too."""
+
+    def test_dispatch_now_or_hold_slovak_blocked(self):
+        self.assertTrue(_run_pre_ask(
+            "Plán je commitnutý ako abc123. Mám hneď spustiť subagentov "
+            "cez subagent-driven-development, alebo počkať na tvoju "
+            "kontrolu plánu?"))
+
+    def test_admin_merge_slovak_blocked(self):
+        self.assertTrue(_run_pre_ask(
+            "Ako naložiť s týmto gated PR? Reálne možnosti: admin-merge "
+            "/ zavrieť PR / zastaviť runner."))
+        self.assertTrue(_run_stop_prose(
+            "Ako naložiť s týmto gated PR? Reálne možnosti: admin-merge "
+            "/ zavrieť PR / zastaviť runner."))
+
+    def test_merge_despite_slovak_blocked(self):
+        msg = "Mám to zmergovať napriek zlyhávajúcej kontrole? Chceš aby som spravil admin-merge?"
+        self.assertTrue(_run_pre_ask(msg))
         self.assertTrue(_run_stop_prose(msg))
 
-    def test_tester_handoff_can_you_test_blocked(self):
-        self.assertTrue(_run_stop_prose("Can you test it on your end?"))
 
-    def test_tester_handoff_please_verify_blocked(self):
-        self.assertTrue(_run_stop_prose("Please verify it works"))
+class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
+    """The 14 rows reverted back into the table by #316 — their Slovak
+    rendering is NOT blocked by any of the 3 hooks. This is not a bug: it
+    is exactly WHY they were reverted (prose-only guidance now, no hook
+    claim behind them). Locked here so a future re-trim of the table
+    cannot silently drop them again without re-proving Slovak coverage."""
 
-    def test_tester_handoff_next_user_test_blocked(self):
-        self.assertTrue(_run_stop_prose("Next user test"))
+    REVERTED_SLOVAK_PHRASES = [
+        # row 1 — subagent-vs-inline
+        "Mám to spraviť cez subagenta alebo sekvenčne/inline? "
+        "Dve možnosti vykonania.",
+        # row 2 — visual companion
+        "Chceš vizuálneho spoločníka / mockup pre túto layoutovú otázku?",
+        # row 3 — say go
+        "Pripravený spustiť — povedz go.",
+        # row 4 — ready for next step
+        "Ak je to dobré, povedz a ja to spustím. Pripravený na ďalší krok?",
+        # row 5 — review-the-spec-before-handoff
+        "Prosím skontroluj spec/plán a daj mi vedieť, ak chceš zmeny, "
+        "predtým než to odovzdám writing-plans.",
+        # row 6 — does this design look right
+        "Vyzerá tento návrh dobre? Ak áno, zapíšem spec do "
+        "docs/.../spec.md a commitnem.",
+        # row 10 — investigate or merge despite
+        "Mám preskúmať problém s codecov, alebo to radšej zmergovať "
+        "napriek tomu?",
+        # row 11 — functionally ready but unstable
+        "PR je funkčne pripravený ale UNSTABLE — rozhodneš o mergnutí?",
+        # row 12 — should I merge / approve merge
+        "PR je zelený — mám ho zmergovať? Alebo počkať?",
+        # row 13 — follow-up cleanup or do it now
+        "Mám tento cleanup zapísať ako follow-up issue, alebo to "
+        "spraviť teraz?",
+        # row 14 — give the word, create the issues
+        "Daj mi znamenie a vytvorím tie issues. Si pripravený "
+        "schváliť ten backlog?",
+        # row 15 — can you test it on your end
+        "Môžeš mi to otestovať na svojej strane? Daj mi vedieť, "
+        "či to funguje.",
+        # row 16 — fix locally before next user test
+        "Opravím to lokálne pred ďalším user testom. Prestávam ťa "
+        "používať ako testera.",
+        # row 17 — tool missing, could you try on staging
+        "Mohol by si to vyskúšať na staging prostredí? Chýba mi na "
+        "to nástroj.",
+    ]
 
-    def test_tester_handoff_stop_using_you_as_tester_blocked(self):
-        self.assertTrue(_run_stop_prose("stop using you as tester"))
-
-    def test_tester_handoff_fix_locally_before_next_test_blocked(self):
-        self.assertTrue(_run_stop_prose("I'll fix locally before next user test"))
-
-    def test_tester_handoff_could_you_try_on_staging_blocked(self):
-        # This is the "blocked-by-a-missing-tool" phrasing — the same
-        # hard block fires, and its own violation message already carries
-        # the ask-for-the-tool-not-the-test decision tree.
-        self.assertTrue(_run_stop_prose("Could you try it on staging?"))
-
-
-class TestStopCheckUntrackedWorkCoversDroppedRows(TestCase):
-    """Rows dropped because hooks/stop-check-untracked-work.sh hard-blocks
-    asking permission to file GitHub issues (Group 3 of that hook)."""
-
-    def test_follow_up_or_do_it_now_blocked(self):
-        self.assertTrue(_run_stop_untracked_work(
-            "Should I file this cleanup as a follow-up issue, or do it now?"))
-
-    def test_give_the_word_to_create_issues_blocked(self):
-        self.assertTrue(_run_stop_untracked_work(
-            "Give the word and I'll create the issues"))
-
-    def test_should_i_file_these_or_hold_blocked(self):
-        self.assertTrue(_run_stop_untracked_work(
-            "Should I file these issues or hold?"))
-
-    def test_want_me_to_open_the_issues_blocked(self):
-        self.assertTrue(_run_stop_untracked_work(
-            "Want me to open the issues?"))
+    def test_reverted_slovak_phrases_not_blocked_by_any_hook(self):
+        for phrase in self.REVERTED_SLOVAK_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertFalse(_run_pre_ask(phrase), f"pre-ask blocked: {phrase!r}")
+                self.assertFalse(_run_stop_prose(phrase), f"stop-prose blocked: {phrase!r}")
+                self.assertFalse(
+                    _run_stop_untracked_work(phrase),
+                    f"stop-untracked-work blocked: {phrase!r}")
 
 
 class TestKeptRowsRemainUncoveredByHooks(TestCase):
-    """The 9 rows that STAYED are the ones with NO matching hook pattern —
-    this is the negative control proving the drop decisions above weren't
-    just "every row blocks something": these representative phrases must
-    NOT be hard-blocked by any of the three hooks."""
+    """The 9 rows that STAYED KEPT since a89024a are the ones with NO
+    matching hook pattern — this is the negative control proving the drop
+    decisions above weren't just "every row blocks something": these
+    representative phrases must NOT be hard-blocked by any of the three
+    hooks."""
 
     KEPT_PHRASES = [
         "Where should I place the diagnostic QR code?",
@@ -241,7 +247,7 @@ class TestNoLeftoverCounterFiles(TestCase):
     drive a REAL hook that writes a retry-counter file for a session that
     just blocked — by far the largest generator of the ~2418 leaked
     `/tmp/airuleset-*-block-*` files measured on this box in one real day
-    (2026-07-30), since every one of the ~20 "must block" assertions above
+    (2026-07-30), since every one of the "must block" assertions above
     leaves its own counter behind (both hooks only clear it on a CLEAN
     stop). A fixed uuid makes the exact counter path predictable so its
     presence/absence can be asserted directly."""
