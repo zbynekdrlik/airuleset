@@ -1801,7 +1801,140 @@ class TestGoalRecoverUntrackedAlternativeEvidence(GoalRearmBase):
         self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
         self.assertTrue(tmux.typed(), logs)
 
+    def test_a_stale_goalarm_record_is_never_alternative_evidence(self):
+        # #324-review MAJOR-4 -- a `state['goalarm']` entry has no
+        # freshness bound of its own (the store is never pruned and its
+        # key, a tmux pane id, can be reused across a server restart) —
+        # bound it by the SAME `GOAL_REARM_PROGRESS_WINDOW_S` window
+        # `_live_autopilot_progress` already uses, or a genuinely stale
+        # entry left over from an unrelated, long-gone session wrongly
+        # unlocks recovery and types a payload into today's pane.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {"goalarm": {"%1": future - wd.GOAL_REARM_PROGRESS_WINDOW_S
+                             - 3600}}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, state=state, now=future,
+                                   progress_dir=empty_dir.name)
+        self.assertFalse(tmux.typed())
+
+    def test_a_future_dated_goalarm_record_is_never_alternative_evidence(self):
+        # #324-review MAJOR-4's own `0 <=` lower clamp — a clock-skewed
+        # FUTURE timestamp must never look "already fresh" either.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {"goalarm": {"%1": future + 3600}}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, state=state, now=future,
+                                   progress_dir=empty_dir.name)
+        self.assertFalse(tmux.typed())
+
+    def test_a_legacy_bool_first_seen_does_not_ping_on_the_first_sweep(self):
+        # #324-review CRITICAL-2 — a pre-#324 record stored a bare `True`
+        # for `goalrearm_noprogress[sid]` (never a timestamp). Since bool
+        # is a subclass of int in Python, `now - True` == `now - 1`,
+        # which clears the 30-min bound by decades and would ping on the
+        # very FIRST sweep after this fix deploys, quoting a nonsense
+        # "vyše decades of minutes" age — reproduced live against dev1's
+        # own real persisted state before this fix. A legacy/garbage
+        # value must be treated as unset and re-stamped to `now`, exactly
+        # like a genuinely first sighting.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {"goalrearm_noprogress": {SID: True}}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            _tmux, logs = self._go(PANE_DARK, state=state, now=future,
+                                   progress_dir=empty_dir.name)
+        self.assertFalse(self.pings, self.pings)
+        self.assertFalse(any("ESCALATED" in ln for ln in logs), logs)
+        self.assertIsInstance(
+            state.get("goalrearm_noprogress", {}).get(SID), float,
+            "a legacy bool must be re-stamped to a real timestamp, not "
+            "trusted verbatim")
+
+    def test_a_future_dated_first_seen_never_escalates(self):
+        # #324-review MINOR-5 — the same re-stamp guard, the other
+        # direction: a future-dated `first_seen` (clock skew, a restored
+        # snapshot) must never silently disable the escalation forever
+        # by making `now - first_seen` permanently negative.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {"goalrearm_noprogress": {SID: future + 3600}}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            _tmux2, logs2 = self._go(
+                PANE_DARK, state=state,
+                now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                progress_dir=empty_dir.name)
+        self.assertTrue(any("ESCALATED" in ln for ln in logs2), logs2)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+    def test_two_separate_dark_episodes_get_distinct_dedup_keys(self):
+        # #324-review MAJOR-3 — `dedup_key` used to be `sid` alone, which
+        # is STABLE across a revival: a session whose bookkeeping clears
+        # (evidence flickered briefly true, or the state was otherwise
+        # reset), then goes dark again with no evidence a SECOND time,
+        # would produce the IDENTICAL dedup key for the genuinely new
+        # episode — silently suppressed at the notify layer for
+        # `notify._DEDUP_TTL_S` (14 days). Folding in `first_seen` (each
+        # episode's own anchor) makes every episode's key distinct.
+        #
+        # This drives the escalation branch directly TWICE with the
+        # bookkeeping cleared in between (never letting `has_progress`
+        # go true, which would permanently resolve `rec['mark']` and
+        # route the session out of `_goal_recover_untracked` for good —
+        # a genuinely unrelated code path, not what this test is about).
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            # Episode 1: dark, no evidence, escalates.
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            self._go(PANE_DARK, state=state,
+                    now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                    progress_dir=empty_dir.name)
+            self.assertEqual(len(self.pings), 1, self.pings)
+            # The bookkeeping clears (whatever real cause resolved it —
+            # this test isolates the DEDUP-KEY claim, not the exact
+            # clearing trigger).
+            state.get("goalrearm_noprogress", {}).pop(SID, None)
+            state.get("goalrearm_untracked_pinged", {}).pop(SID, None)
+            # Episode 2: genuinely NEW dark stretch, no evidence again.
+            ep2_start = future + wd.GOAL_REARM_UNTRACKED_PING_S + 200
+            self._go(PANE_DARK, state=state, now=ep2_start,
+                     progress_dir=empty_dir.name)
+            self._go(PANE_DARK, state=state,
+                    now=ep2_start + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                    progress_dir=empty_dir.name)
+        self.assertEqual(len(self.pings), 2, self.pings)
+        key1 = self.pings[0][1].get("dedup_key")
+        key2 = self.pings[1][1].get("dedup_key")
+        self.assertIsNotNone(key1)
+        self.assertIsNotNone(key2)
+        self.assertNotEqual(key1, key2,
+                            "each dark episode must get its own dedup key")
+
     def test_dry_run_never_sends_a_real_ping(self):
+        # #324-review CRITICAL-1 -- a `--dry-run` sweep (this repo's own
+        # documented manual diagnostic, routinely run against REAL
+        # persisted state) must NEVER mark `pinged` — only report READY.
+        # Assert on the FLAG itself, not just on `self.pings`: the
+        # original bug marked `pinged[sid] = True` BEFORE checking
+        # `dry_run`, which permanently consumed the one-shot escalation
+        # even though nothing was ever actually sent — `self.pings`
+        # alone stayed empty either way and could not catch it.
         self._buried_marker_transcript()
         future = self._future_now()
         empty_dir = TemporaryDirectory()
@@ -1815,7 +1948,20 @@ class TestGoalRecoverUntrackedAlternativeEvidence(GoalRearmBase):
                 now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
                 progress_dir=empty_dir.name, dry_run=True)
         self.assertFalse(self.pings, self.pings)
-        self.assertTrue(any("ESCALATED" in ln for ln in logs2), logs2)
+        self.assertTrue(any("READY" in ln for ln in logs2), logs2)
+        self.assertFalse(
+            state.get("goalrearm_untracked_pinged", {}).get(SID),
+            "a dry-run sweep must never mark the one-shot ping consumed")
+        # A REAL sweep afterward, still past the grace window, must
+        # still escalate for real — proving the dry-run runs above never
+        # permanently disabled it.
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            _tmux3, logs3 = self._go(
+                PANE_DARK, state=state,
+                now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 120,
+                progress_dir=empty_dir.name)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(any("ESCALATED" in ln for ln in logs3), logs3)
 
     def _live_progress_dir(self, ts):
         d = TemporaryDirectory()
