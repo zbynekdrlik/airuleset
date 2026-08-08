@@ -158,6 +158,39 @@ at STEP 0 (before proceeding to code) and the review comment at CYCLE step 6 (af
 `/requesting-code-review` pass) — plain `gh issue comment <N> --body "..."` calls, same mechanism,
 same file, zero new hooks.
 
+## WORKTREE AWARENESS (fleet dispatch is the DEFAULT — #317, 2026-08-08)
+
+By default you run in an **isolated git worktree** (`isolation: "worktree"`) — a separate checkout
+of the repo, sharing only `.git` with the main tree and with any sibling worktrees the supervisor
+dispatched alongside you in the SAME round. You can tell from your own `cwd` (something like
+`<repo>/.claude/worktrees/agent-<id>`, distinct from the repo's main checkout path) and from the
+dispatch prompt naming it explicitly. This changes what "done" looks like for you:
+
+- **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path. If any tool
+  call refuses with "this command changes directory to the shared checkout" or "too complex to
+  verify it stays inside the worktree", that guard is correct — stay inside your own worktree,
+  never `cd` out of it, and prefer the simplest command shape (a plain command, or a small
+  literal-list loop) over anything the checker might read as ambiguous.
+- **NEVER `push`, NEVER run `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER
+  open or merge the PR yourself.** All of that is INTEGRATION, and integration is the
+  SUPERVISOR's job, done ONCE for the whole round after every worker in it has returned
+  (`skills/autopilot/SKILL.md` Step 4). Doing any of it yourself from inside a worktree would race
+  or duplicate whatever the other workers in the same round are doing.
+- **Your job stops at a green LOCAL result on your OWN branch**, committed inside your worktree:
+  version bump → per-issue TDD (RED→GREEN, each member its own `Closes #<n>` commit) → local
+  `/review` + `/requesting-code-review` clean → the local test suite green. Do NOT wait for CI —
+  there is no CI to wait for yet; the supervisor's ONE integration wave triggers it after merging
+  every worker's branch.
+- **Return your branch name AND worktree path in your evidence block**, not a PR link or merge
+  SHA — the supervisor merges directly from your branch REF (a worktree's branch is a normal git
+  ref, visible and mergeable from the main checkout via the shared `.git` even without your
+  worktree still existing) and does not need your worktree to still be present to do it.
+- **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
+  prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
+  checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and
+  fire your own run-card yourself, exactly as documented in the rest of this file (CYCLE, below).
+  When in doubt about which mode you're in, check your `cwd` first — it is unambiguous.
+
 ## READ FIRST (durable context — never skip)
 
 1. The repo's `CLAUDE.md` (project conventions + the merge mode marker `airuleset:merge=manual`).
@@ -201,7 +234,9 @@ supervisor acquired the repo's lock via `airuleset.py autopilot-lock acquire --r
 one session) and releases it after verifying your evidence block. You never call `autopilot-lock`
 yourself — just do your work; the lock is the supervisor's concern.
 
-1. `git fetch origin`; confirm you are on `dev` with a clean tree. **RESUME, don't restart:** you may
+1. `git fetch origin`; confirm you are on `dev` with a clean tree (worktree mode: your worktree's
+   OWN branch, created off `dev`/`main` — not literally the shared `dev` ref, but based on it).
+   **RESUME, don't restart:** you may
    be a RE-DISPATCH of an earlier worker on this same issue (a worker that stopped invoking the
    supervisor is presumed DEAD and the supervisor cold-starts a fresh one from durable state —
    that's expected, not an error; `subagent-continuation.md`).
@@ -240,6 +275,15 @@ yourself — just do your work; the lock is the supervisor's concern.
    up the batch. A dropped member simply gets no merge card (you only card members whose PR merges).
 4. **Search the codebase before assuming anything is missing** — never re-implement what
    already exists. NO placeholder or stub implementations.
+**Worktree-mode STOP POINT: steps 5–10 below describe the SERIAL-FALLBACK flow (push, PR, merge,
+deploy, your own run-card).** In `isolation: "worktree"` mode (the default — see WORKTREE
+AWARENESS above), you STOP after step 4 once every member is committed on your OWN worktree
+branch and local `/review` + `/requesting-code-review` + the local test suite are clean — do
+NOT push, open a PR, merge, wait for CI, deploy, or fire a run-card yourself. Report your branch
+name + worktree path and RETURN; the supervisor's Step 4 (`skills/autopilot/SKILL.md`) does
+steps 5–10 below ONCE for the whole round. Continue with steps 5–10 yourself ONLY in the
+documented serial fallback (no `isolation:`).
+
 5. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
    push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
    **CRITICAL — NEVER wait with `Bash(run_in_background=True)`. You are a SUBAGENT: a subagent that
@@ -363,6 +407,27 @@ ready_for_review: <#A: comment posted ✓, label added/403; #B: …>  (the READY
 cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
 issue_state: <#A=OPEN (handed off), #B=OPEN (handed off), …>   ← NEVER closed by you
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
+unverified: <list | "none">
+filed: <#K list | "none">
+```
+
+**Worktree-mode variant of the FINAL MESSAGE** (`isolation: "worktree"`, full authority — the
+default, #317: you stopped at CYCLE step 4 per the WORKTREE AWARENESS section above; no push, no
+PR, no merge, no deploy, no run-card exist yet — the supervisor's own round-integration produces
+all of those, ONCE, for the whole round):
+
+```
+issues: #<A> <title>, #<B> <title>, … (one PR closes all — opened by the SUPERVISOR at round integration)
+plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audit>
+validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
+approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a".>
+review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
+achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into the round's run-card>
+worktree: <your worktree's absolute path>
+branch: <your worktree branch name — the supervisor merges directly from this ref>
+local_verify: <local test suite + lint command → result (green) — the proof the supervisor's round-integration will re-check before merging>
+dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
+obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">
 filed: <#K list | "none">
 ```

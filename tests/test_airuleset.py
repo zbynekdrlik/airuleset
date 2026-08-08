@@ -224,8 +224,12 @@ class TestAutopilotBatching(TestCase):
     def test_skill_dispatches_one_worker_for_a_batch(self):
         s = self._skill()
         self.assertIn("as ONE bundled PR", s)
-        # serial-per-repo invariant must be reaffirmed (batch != parallel workers)
-        self.assertIn("serial per repo", s.lower())
+        # #317 (2026-08-08): fleet dispatch (parallel isolation:worktree workers) is
+        # now the DEFAULT — the old "serial per repo" (one worker at a time, full
+        # stop) invariant this test used to require is exactly what #317 overturns.
+        # What must still hold is INTEGRATION staying strictly serial per repo.
+        self.assertIn("serial integration per repo", s.lower())
+        self.assertIn('isolation: "worktree"', s)
 
     def test_skill_no_longer_says_one_issue_only_weak_line(self):
         # the old weak "2-3 trivially-related small issues MAY share one worker"

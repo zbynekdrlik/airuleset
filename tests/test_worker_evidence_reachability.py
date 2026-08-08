@@ -199,6 +199,7 @@ COVERAGE_TABLE = {
     "unverified": ("self-audit", ()),
     "filed": ("self-audit", ()),
     "branch": ("supervisor-reverify", ()),
+    "worktree": ("supervisor-reverify", ()),
     "local_verify": ("self-audit", ()),
     "ready_for_review": ("supervisor-reverify", ()),
     "obsolete_handed_off": ("supervisor-reverify", ()),

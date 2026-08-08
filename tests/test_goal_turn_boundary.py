@@ -88,23 +88,23 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
 class TestStep5NamesReducedAuthority_Shape(TestCase):
     def test_step5_mentions_branch_merge_and_fork_no_merge(self):
         t = read(SKILL)
-        idx = t.index("5. **Report the batch")
-        step5 = t[idx:idx + 2500]
+        idx = t.index("5. **Report the ROUND")
+        step5 = t[idx:idx + 2800]
         self.assertIn("branch-merge", step5)
         self.assertIn("fork-no-merge", step5)
         self.assertIn("completion-report.md", step5)
 
     def test_step5_names_the_hand_off_fields_not_just_merge_fields(self):
         t = read(SKILL)
-        idx = t.index("5. **Report the batch")
-        step5 = t[idx:idx + 2500]
+        idx = t.index("5. **Report the ROUND")
+        step5 = t[idx:idx + 2800]
         self.assertIn("READY-FOR-REVIEW", step5)
         self.assertIn("Lokálne overenie", step5)
 
     def test_step5_references_the_2129_incident(self):
         t = read(SKILL)
-        idx = t.index("5. **Report the batch")
-        step5 = t[idx:idx + 2500]
+        idx = t.index("5. **Report the ROUND")
+        step5 = t[idx:idx + 2800]
         self.assertIn("2129", step5)
 
 
