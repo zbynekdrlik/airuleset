@@ -52,6 +52,22 @@ set -euo pipefail
 # $HOME/devel/airuleset/audits/no-design-skips.log — same fixed-path
 # convention and bare-tag-rejected/reasoned-tag-logged shape as
 # pre-push-test-check.sh's `[no-test: <reason>]`.
+#
+# #310 -- STALE-MSGFILE QUARANTINE. A worker composing
+# `cat > path <<EOF ... EOF && git commit -F path` in ONE Bash call has this
+# WHOLE compound denied atomically the instant this hook blocks — nothing in
+# it executes, so a leftover file already sitting at `path` from an earlier,
+# unrelated attempt survives untouched. A LATER bare `git commit -F path`
+# retry then carries no issue-number TEXT at all (the reference lives only
+# inside the file's own content, invisible to design_gate.issue_refs), so
+# THIS gate never blocks it either — the stale content commits silently
+# (the incident this ticket documents). Whenever this hook is about to
+# BLOCK, `design_gate.stale_msgfile_candidates(cmd)` finds every path this
+# SAME command text both (over)writes AND passes to `git commit -F`, and
+# each one is quarantined (renamed aside) before the block message prints —
+# see that function's own docstring for why this needs no persisted state
+# at all: the compound never executed, so any content already at that path
+# provably predates this attempt.
 
 INPUT=$(cat 2>/dev/null || echo "")
 [ -n "$INPUT" ] || exit 0
@@ -101,6 +117,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 # Data via ARGV, never a pipe into a `python3 -` heredoc (this repo's own
 # recurring trap — see subagent-stop-check-run-card.sh).
 OUT=$(python3 - "$REPO_ROOT" "$CMD" "$CWD" <<'PYEOF' 2>/dev/null || true
+import os
 import sys
 
 repo_root, cmd, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -138,6 +155,25 @@ missing = dg.required_refs(missing, work_cwd)
 if missing:
     print(repo_key)
     print(" ".join(str(n) for n in missing))
+    # #310 -- quarantine every write-then-consume target THIS command tried
+    # to touch, now that we know for certain the block prevents the whole
+    # compound (including any `cat >`) from ever executing. Adversarial-
+    # review finding #1: the write/commit-file regexes scan INDEPENDENTLY
+    # over the whole command text, so a `-m` message merely PROSE-mentioning
+    # the pattern can match too -- is_git_tracked() is what keeps a real
+    # tracked project file from ever being moved.
+    quarantined = []
+    for p in dg.stale_msgfile_candidates(cmd):
+        abs_p = p if os.path.isabs(p) else os.path.join(work_cwd, p)
+        if dg.is_git_tracked(abs_p, work_cwd):
+            continue
+        dest = dg.quarantine_stale_msgfile(abs_p)
+        if dest:
+            quarantined.append((p, dest))
+    if quarantined:
+        dg.ensure_stale_pattern_excluded(work_cwd)
+        for p, dest in quarantined:
+            print("STALE\t%s\t%s" % (p, dest))
 PYEOF
 )
 [ -n "$OUT" ] || exit 0
@@ -148,10 +184,32 @@ NUMS=$(printf '%s\n' "$OUT" | sed -n '2p')
 
 LIST=$(printf '%s' "$NUMS" | sed 's/\([0-9][0-9]*\)/#\1/g')
 
+# #310 -- lines 3+ of $OUT are "STALE\t<original>\t<quarantine-path>"
+# entries (see the embedded Python above). Process substitution (never
+# `cmd | while read`) so STALE_NOTE survives past the loop instead of
+# being scoped to a lost subshell.
+STALE_NOTE=""
+while IFS=$'\t' read -r _TAG _ORIG _DEST; do
+    [ "$_TAG" = "STALE" ] || continue
+    STALE_NOTE="${STALE_NOTE}
+  ${_ORIG} -> ${_DEST}"
+done < <(printf '%s\n' "$OUT" | sed -n '3,$p')
+
+STALE_SECTION=""
+if [ -n "$STALE_NOTE" ]; then
+    STALE_SECTION="
+Leftover scratch file(s) quarantined — stale content this SAME blocked
+command never got the chance to (re)write. A later bare \`git commit -F\`
+retry against the ORIGINAL path below will now fail loud (file not found)
+instead of silently committing the stale content:
+${STALE_NOTE}
+"
+fi
+
 cat >&2 <<MSG
 
 🚫 BLOCKED: no design comment posted yet for ${LIST} (repo ${REPO}).
-
+${STALE_SECTION}
 Per autonomous-batch-issue-development.md's design-before-code step, post
 root cause + chosen approach + rejected alternative to the ticket BEFORE
 this commit:

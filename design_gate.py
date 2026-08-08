@@ -374,6 +374,154 @@ def _gh_issue_state(n, cwd, timeout=8):
     return state if state in ("OPEN", "CLOSED") else None
 
 
+# --------------------------------------------------------------------------- #
+# #310 -- stale scratch-msgfile quarantine. A worker composing
+# `cat > path <<EOF ... EOF && git commit -F path` in ONE Bash call has the
+# WHOLE compound denied atomically by block-commit-without-design.sh when the
+# gate fires -- nothing in it executes, so the intended `cat >` write never
+# lands. A file already sitting at `path` from an unrelated earlier attempt
+# survives untouched, and a LATER bare `git commit -F path` retry carries no
+# issue-number TEXT at all (the reference lives only inside the file's own
+# content, invisible to ISSUE_REF_RE), so the gate never blocks IT either --
+# the stale content commits silently. See the #310 design comment on the
+# issue for the full incident and the two rejected alternatives (re-printing
+# the file's content, and a stateful "provably predates the command"
+# freshness marker).
+# --------------------------------------------------------------------------- #
+
+# Any `>`/`>>` redirect target -- the standard `cat > path <<EOF` recipe.
+# Deliberately simple (documented limitation, same "cost of a miss is low"
+# tradeoff ISSUE_REF_RE already makes elsewhere in this module): no
+# shell-quote/heredoc-body awareness.
+_REDIR_RX = re.compile(
+    r"(?:^|[\s;&|(])(?:\d?>>?)\s*(['\"]?)([^\s'\">|;&]+)\1")
+# `git commit` specifically -- the whitespace/end-of-string lookahead (not a
+# bare `\b`) is what keeps a DIFFERENT subcommand sharing the same prefix
+# (`git commit-graph write --file X`) from being mistaken for `git commit`.
+_COMMIT_FILE_RX = re.compile(
+    r"git\s+commit(?=\s|$)[^\n;&|]*?(?:-F|--file)(?:=|\s+)"
+    r"(['\"]?)([^\s'\"><|;&]+)\1")
+
+
+def stale_msgfile_candidates(cmd):
+    """Paths this SAME command text tries to (over)WRITE (a `>`/`>>`
+    redirect target) AND ALSO passes to `git commit -F`/`--file` -- the
+    write-then-consume SIGNATURE that leaves a stale file behind whenever
+    the whole compound gets blocked before any of it executes. First-seen
+    order (sorted); empty list when there is nothing to quarantine.
+
+    Known, deliberate residual (adversarial-review finding #1, #310):
+    NEITHER regex requires its match to be REAL shell syntax outside
+    quotes, and the two are scanned INDEPENDENTLY -- so a `-m "..."`
+    message merely PROSE-DESCRIBING the pattern (e.g. documenting this
+    very bug: "cat > README.md ... git commit -F README.md") satisfies
+    both just as well as genuine shell syntax, with no requirement that
+    the two matches even belong to the same statement. This function
+    stays a pure text-signature detector on purpose (no filesystem/git
+    access, same offline-testable shape every other regex in this module
+    has) -- the caller is what closes the DANGEROUS half of this false-
+    positive class: `is_git_tracked()` refuses to let anything git
+    already tracks be quarantined, so the worst a decoy match can do is
+    move aside a path that was already UNTRACKED -- never a real project
+    file. See hooks/block-commit-without-design.sh for the wiring."""
+    text = cmd or ""
+    written = {os.path.normpath(m.group(2)) for m in _REDIR_RX.finditer(text)}
+    committed = {os.path.normpath(m.group(2)) for m in _COMMIT_FILE_RX.finditer(text)}
+    return sorted(written & committed)
+
+
+def is_git_tracked(path, cwd):
+    """True iff `path` is a file git ALREADY tracks in `cwd`'s repo -- a
+    genuine scratch msgfile is NEVER tracked, so this is the discriminator
+    stale_msgfile_candidates' own docstring promises: refuse to quarantine
+    anything that could plausibly be a real project file. Fails toward
+    TRACKED (never quarantine) on ANY unmeasurable result -- git missing,
+    not a repo, timeout, unexpected output -- the same "never guess toward
+    the more consequential action" direction `required_refs` already uses
+    one function up, just applied to a destructive action instead of a
+    block decision. `git ls-files --error-unmatch` has THREE outcomes, not
+    two: rc=0 (tracked), rc=1 (git ran fine and specifically confirmed the
+    path is untracked -- "did not match any file(s) known to git"), and
+    anything else (128 for "not a git repository", or any other failure --
+    genuinely unmeasurable, never a confirmed answer either way). Only
+    rc=1 is a real, positive "safe to quarantine" signal."""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            cwd=cwd, capture_output=True, text=True, timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return out.returncode != 1
+
+
+def quarantine_stale_msgfile(path, ts=None):
+    """Best-effort: rename `path` aside (a `.stale-<epoch-ms>` sibling,
+    never deleted -- the content is kept for inspection, only the ORIGINAL
+    path is made to disappear) so a LATER bare `git commit -F path` retry
+    fails LOUD (file not found) instead of silently reading content this
+    SAME blocked command never got the chance to (re)write. A destination
+    collision (adversarial-review finding #2: two candidates quarantined
+    in the same millisecond) is never clobbered -- a numeric suffix is
+    appended until the destination is free. Returns the quarantine path on
+    success, else None (nothing existed there, it is a directory, or the
+    rename failed) -- NEVER raises. The CALLER is responsible for checking
+    `is_git_tracked()` first; this function only ever moves a file, it has
+    no opinion on whether that was the right file."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        stamp = int((ts if ts is not None else time.time()) * 1000)
+        dest = "%s.stale-%d" % (path, stamp)
+        n = 0
+        while os.path.lexists(dest):
+            n += 1
+            dest = "%s.stale-%d-%d" % (path, stamp, n)
+        os.rename(path, dest)
+        return dest
+    except OSError:
+        return None
+
+
+def ensure_stale_pattern_excluded(cwd):
+    """Best-effort, idempotent: appends a `*.stale-*` line to the repo's
+    LOCAL (never committed, never git-tracked) `.git/info/exclude`, so a
+    quarantined msgfile never gets swept into `git add -A` / shown as an
+    untracked file waiting to be staged (adversarial-review finding #3,
+    #310). Resolved via `git rev-parse --git-common-dir` -- NOT a naive
+    `cwd/.git` join -- so this lands in the SHARED exclude file even when
+    `cwd` is a linked WORKTREE checkout (`.git` there is a FILE pointing
+    elsewhere, exactly this repo's own autopilot-worker dispatch shape).
+    Pure hygiene, never load-bearing for the actual quarantine: a missing/
+    unwritable/non-repo `cwd` is silently skipped, never raises."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                              cwd=cwd, capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if out.returncode != 0:
+        return
+    git_common_dir = (out.stdout or "").strip()
+    if not git_common_dir:
+        return
+    if not os.path.isabs(git_common_dir):
+        git_common_dir = os.path.join(cwd, git_common_dir)
+    pattern = "*.stale-*"
+    try:
+        info_dir = os.path.join(git_common_dir, "info")
+        os.makedirs(info_dir, exist_ok=True)
+        exclude_path = os.path.join(info_dir, "exclude")
+        existing_lines = []
+        if os.path.isfile(exclude_path):
+            with open(exclude_path, encoding="utf-8", errors="replace") as fh:
+                existing_lines = fh.read().splitlines()
+        if pattern not in existing_lines:
+            with open(exclude_path, "a", encoding="utf-8") as fh:
+                fh.write(pattern + "\n")
+    except OSError:
+        return
+
+
 def required_refs(refs, cwd, state_of=None):
     """Filter `refs` (issue numbers with no marker yet) down to the ones
     that STILL require a design-comment marker: drop any that are already

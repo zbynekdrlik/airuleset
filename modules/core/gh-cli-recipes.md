@@ -18,6 +18,8 @@ EOF
 gh issue create -t "Title" -F body.md          # or: -F - to read body from stdin
 ```
 
+**Write the scratch body/message file in its OWN Bash call, never chained with the command that consumes it.** A PreToolUse hook can deny a WHOLE compound command atomically — if it fires on `cat > body.md <<'EOF' ... EOF && gh issue create -F body.md` (or the equivalent `git commit -F msg.txt` shape), the block prevents the `cat >` write from ever running too, so a leftover file from an earlier attempt survives untouched at that path. A LATER, differently-composed retry (e.g. a bare `gh issue create -F body.md` / `git commit -F msg.txt`, assuming the file is "already written") can then silently consume that stale content, since the retry's own command text carries none of the context the original write intended. Compose the file in its own call, confirm it, THEN run the consuming command in a second call.
+
 **Read fields back — THIS is where `--json` belongs:**
 
 ```bash
