@@ -790,6 +790,191 @@ class TestQuarantineStaleMsgfile(unittest.TestCase):
         finally:
             self.tmp.chmod(0o700)
 
+    def test_a_symlink_is_renamed_never_followed(self):
+        # adversarial-review M12 gap: os.rename on a symlink renames the
+        # LINK ITSELF, never the target -- lock this in explicitly.
+        target = self.tmp / "important.txt"
+        target.write_text("do not touch\n")
+        link = self.tmp / "msg.txt"
+        link.symlink_to(target)
+        dest = dg.quarantine_stale_msgfile(str(link))
+        self.assertIsNotNone(dest)
+        self.assertFalse(link.exists())
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_text(), "do not touch\n")
+        self.assertTrue(os.path.islink(dest))
+        self.assertEqual(os.readlink(dest), str(target))
+
+    def test_a_collision_on_the_destination_is_never_clobbered(self):
+        # adversarial-review finding #2: a same-millisecond collision on
+        # the ".stale-<ts>" destination used to silently OVERWRITE
+        # whatever was already quarantined there.
+        p = self.tmp / "msg.txt"
+        p.write_text("second\n")
+        existing_dest = str(p) + ".stale-1000"
+        Path(existing_dest).write_text("FIRST QUARANTINE -- must survive\n")
+        dest = dg.quarantine_stale_msgfile(str(p), ts=1.0)
+        self.assertNotEqual(dest, existing_dest)
+        self.assertEqual(Path(existing_dest).read_text(),
+                          "FIRST QUARANTINE -- must survive\n")
+        self.assertEqual(Path(dest).read_text(), "second\n")
+
+
+class TestIsGitTracked(unittest.TestCase):
+    """#310 adversarial-review finding #1 (BLOCKING): stale_msgfile_candidates
+    scans `>`/`>>` write targets and `git commit -F` targets INDEPENDENTLY
+    over the WHOLE command text -- a `-m "..."` message merely DESCRIBING the
+    write-then-consume pattern in PROSE (no real shell write, no real -F
+    flag) satisfies both regexes just as well as genuine shell syntax. A
+    real tracked project file (e.g. README.md) merely MENTIONED that way
+    must never be quarantined -- is_git_tracked() is the discriminator the
+    caller applies before ever calling quarantine_stale_msgfile()."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="airuleset-designgate-tracked-"))
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        env = dict(os.environ)
+        env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        self._env = env
+        self._git("init", "-q", "-b", "main")
+
+    def _git(self, *args):
+        import subprocess
+        return subprocess.run(["git", "-C", str(self.repo)] + list(args),
+                               check=True, capture_output=True, text=True, env=self._env)
+
+    def test_a_tracked_file_is_tracked(self):
+        (self.repo / "README.md").write_text("hello\n")
+        self._git("add", "README.md")
+        self._git("commit", "-q", "-m", "initial")
+        self.assertTrue(dg.is_git_tracked(str(self.repo / "README.md"), str(self.repo)))
+
+    def test_an_untracked_file_is_not_tracked(self):
+        (self.repo / "msg.txt").write_text("scratch\n")
+        self.assertFalse(dg.is_git_tracked(str(self.repo / "msg.txt"), str(self.repo)))
+
+    def test_a_committed_then_deleted_file_is_no_longer_tracked(self):
+        (self.repo / "gone.txt").write_text("x\n")
+        self._git("add", "gone.txt")
+        self._git("commit", "-q", "-m", "add then rm")
+        self._git("rm", "-q", "gone.txt")
+        self._git("commit", "-q", "-m", "rm")
+        self.assertFalse(dg.is_git_tracked(str(self.repo / "gone.txt"), str(self.repo)))
+
+    def test_a_nonexistent_path_is_not_tracked(self):
+        self.assertFalse(dg.is_git_tracked(str(self.repo / "never-existed.txt"), str(self.repo)))
+
+    def test_unmeasurable_fails_toward_tracked_never_guesses(self):
+        # a non-repo cwd (git ls-files errors) must NOT be read as "safe to
+        # quarantine" -- fail toward the conservative, non-destructive answer.
+        other = Path(tempfile.mkdtemp(prefix="airuleset-designgate-notrepo-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        (other / "msg.txt").write_text("x\n")
+        self.assertTrue(dg.is_git_tracked(str(other / "msg.txt"), str(other)))
+
+    def test_subprocess_exception_is_unmeasurable_fails_toward_tracked(self):
+        import unittest.mock as m
+        with m.patch.object(dg.subprocess, "run", side_effect=OSError("no git")):
+            self.assertTrue(dg.is_git_tracked(str(self.repo / "x"), str(self.repo)))
+
+
+class TestStaleMsgfileEndToEndTrackedFileNeverQuarantined(TestIsGitTracked):
+    """The exact adversarial-review reproduction: a `-m` message merely
+    PROSE-describing the write-then-consume pattern must never lose a
+    real tracked file, end to end through the real hook."""
+
+    HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-commit-without-design.sh"
+
+    def test_readme_mentioned_in_commit_prose_is_never_quarantined(self):
+        import json
+        import subprocess
+        (self.repo / "README.md").write_text("real project content\n")
+        self._git("add", "README.md")
+        self._git("commit", "-q", "-m", "initial")
+        self._git("remote", "add", "origin",
+                   "https://github.com/zbynekdrlik/airuleset.git")
+        cmd = (
+            'git commit -m "docs: explain the trap (#41)\n\n'
+            'When you write cat > README.md <<EOF then run '
+            'git commit -F README.md in one call, the block eats the write."'
+        )
+        payload = {"tool_input": {"command": cmd}, "session_id": "e2e-310",
+                   "cwd": str(self.repo), "agent_type": "autopilot-worker",
+                   "agent_id": "aW1"}
+        bindir = Path(tempfile.mkdtemp(prefix="airuleset-designgate-e2egh-"))
+        self.addCleanup(shutil.rmtree, bindir, True)
+        fake_gh = bindir / "gh"
+        fake_gh.write_text("#!/usr/bin/env bash\necho OPEN\nexit 0\n")
+        fake_gh.chmod(0o755)
+        env = dict(self._env)
+        env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+        home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-e2ehome-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".claude").mkdir(parents=True)
+        env["HOME"] = str(home)
+        r = subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload),
+                            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertTrue((self.repo / "README.md").exists(),
+                         "a real TRACKED file merely mentioned in commit "
+                         "prose must never be quarantined")
+        self.assertEqual((self.repo / "README.md").read_text(),
+                          "real project content\n")
+        siblings = [f for f in self.repo.iterdir()
+                    if f.name.startswith("README.md.stale-")]
+        self.assertEqual(siblings, [])
+
+
+class TestEnsureStalePatternExcluded(unittest.TestCase):
+    """#310 adversarial-review finding #3: a quarantined `.stale-*` file
+    must never get swept into `git add -A` / show up as an untracked
+    file -- appended once to the repo's LOCAL (never committed)
+    .git/info/exclude, resolved via `git rev-parse --git-common-dir` so
+    it lands in the SHARED dir even from inside a worktree checkout."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="airuleset-designgate-exclude-"))
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        env = dict(os.environ)
+        env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        import subprocess
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)],
+                        check=True, capture_output=True, env=env)
+
+    def test_appends_the_pattern_once(self):
+        dg.ensure_stale_pattern_excluded(str(self.repo))
+        exclude = self.repo / ".git" / "info" / "exclude"
+        self.assertTrue(exclude.exists())
+        self.assertIn("*.stale-*", exclude.read_text())
+
+    def test_calling_it_twice_does_not_duplicate_the_line(self):
+        dg.ensure_stale_pattern_excluded(str(self.repo))
+        dg.ensure_stale_pattern_excluded(str(self.repo))
+        exclude = self.repo / ".git" / "info" / "exclude"
+        self.assertEqual(exclude.read_text().count("*.stale-*"), 1)
+
+    def test_a_quarantined_file_is_actually_ignored_afterward(self):
+        dg.ensure_stale_pattern_excluded(str(self.repo))
+        (self.repo / "msg.txt.stale-123").write_text("x\n")
+        import subprocess
+        env = dict(os.environ)
+        env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=str(self.repo),
+                              capture_output=True, text=True, env=env)
+        self.assertNotIn("msg.txt.stale-123", out.stdout)
+
+    def test_a_non_repo_cwd_is_a_silent_noop(self):
+        other = Path(tempfile.mkdtemp(prefix="airuleset-designgate-notrepo2-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        dg.ensure_stale_pattern_excluded(str(other))  # must not raise
+
+    def test_never_raises_on_a_subprocess_failure(self):
+        import unittest.mock as m
+        with m.patch.object(dg.subprocess, "run", side_effect=OSError("no git")):
+            dg.ensure_stale_pattern_excluded(str(self.repo))  # must not raise
+
 
 class TestGhIssueState(unittest.TestCase):
     """`_gh_issue_state` never raises and never guesses -- any failure
