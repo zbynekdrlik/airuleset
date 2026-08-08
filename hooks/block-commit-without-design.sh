@@ -157,11 +157,22 @@ if missing:
     print(" ".join(str(n) for n in missing))
     # #310 -- quarantine every write-then-consume target THIS command tried
     # to touch, now that we know for certain the block prevents the whole
-    # compound (including any `cat >`) from ever executing.
+    # compound (including any `cat >`) from ever executing. Adversarial-
+    # review finding #1: the write/commit-file regexes scan INDEPENDENTLY
+    # over the whole command text, so a `-m` message merely PROSE-mentioning
+    # the pattern can match too -- is_git_tracked() is what keeps a real
+    # tracked project file from ever being moved.
+    quarantined = []
     for p in dg.stale_msgfile_candidates(cmd):
         abs_p = p if os.path.isabs(p) else os.path.join(work_cwd, p)
+        if dg.is_git_tracked(abs_p, work_cwd):
+            continue
         dest = dg.quarantine_stale_msgfile(abs_p)
         if dest:
+            quarantined.append((p, dest))
+    if quarantined:
+        dg.ensure_stale_pattern_excluded(work_cwd)
+        for p, dest in quarantined:
             print("STALE\t%s\t%s" % (p, dest))
 PYEOF
 )
