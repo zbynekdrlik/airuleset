@@ -10496,6 +10496,27 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
             "restored" % loc]
 
 
+def _goal_cleared_stale(rec):
+    """True when THIS job's own REALITY observation (`rec['last_armed']`,
+    the pane footer read LIVE, independent of the transcript) proves a
+    genuine arm happened AFTER the transcript's newest tracked marker was a
+    'cleared' one (#320) -- the transcript alone cannot see this: a
+    busy-pane arm (or, per #320's own dev1 forensics, an arm CC silently
+    failed to write ANY marker for at all) leaves `rec['mark']` stuck at
+    'cleared' forever, which used to permanently block this session even
+    though it plainly was re-armed afterward.
+
+    #170's own invariant survives untouched by construction: a genuine,
+    never-re-armed clear has no `last_armed` postdating it at all, so this
+    stays False for it. Unmeasurable (either field absent) never guesses
+    -> False, never True."""
+    last_armed = rec.get("last_armed")
+    mts = rec.get("mts")
+    if last_armed is None or mts is None:
+        return False
+    return last_armed > mts
+
+
 def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                handled=None, max_attempts=None, streak_s=None, confirm_s=None,
                sleep_fn=None, templates_path=None, backlog_fetch=None,
@@ -10652,6 +10673,22 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs += _goal_recover_untracked(now, rec, sid, cwd,
                                                 tpath, tmtime, loc,
                                                 progress_dir=progress_dir)
+                _save()
+            elif _goal_cleared_stale(rec):
+                # #320 -- REALITY (this job's OWN direct footer-lit
+                # observation, `rec['last_armed']`) proves a genuine arm
+                # happened AFTER the transcript's newest 'cleared' marker,
+                # even though NO transcript marker of any shape records it
+                # (dev1 2d02a127, live: three `goal-autoarm OK` sends after
+                # the clear, zero resulting markers anywhere in the whole
+                # file). Treat the cleared state as STALE, never #170's
+                # standing user-off signal, and fall through into the SAME
+                # dark-check / re-arm machinery every other tracked session
+                # already uses below -- never a new, parallel path.
+                logs.append("stale-cleared-but-rearmed (goal-rearm) %s -> "
+                            "last_armed postdates the transcript's own "
+                            "'cleared' marker; treating as armed" % loc)
+                rec["mark"] = "set"
                 _save()
             if rec.get("mark") != "set":
                 continue                   # never armed here, still nothing
