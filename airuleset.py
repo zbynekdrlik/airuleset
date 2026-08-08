@@ -4781,8 +4781,22 @@ def cmd_notify(args):
         # explicitly, bypassing tmux detection entirely. Omitting it keeps
         # today's exact behavior — send(owner=None) resolves internally.
         owner_name = getattr(args, "owner_name", None)
-        owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
-                if owner_name else None)
+        owner = None
+        if owner_name:
+            owner = re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+            if not owner:
+                # #334 adversarial-review MINOR-2: a normalized-empty
+                # value (punctuation-only, etc.) must be REFUSED, never
+                # silently passed through as owner="" — "" is not None,
+                # so it would skip resolve_owner() entirely and send
+                # mention-less to the shared channel, even overriding an
+                # otherwise-correct AIRULESET_NOTIFY_OWNER. Validate and
+                # refuse, never mangle (#198's own established rule).
+                print("notify: --owner-name %r has no usable characters "
+                     "after normalization — refusing rather than silently "
+                     "falling back to no-owner routing" % owner_name,
+                     file=sys.stderr)
+                sys.exit(1)
         print(send(args.body, owner=owner, dedup_key=args.dedup_key,
                    dry_run=args.dry_run))
         return
