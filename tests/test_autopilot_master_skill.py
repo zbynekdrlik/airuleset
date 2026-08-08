@@ -102,8 +102,13 @@ class TestCanonicalBodiesReused(TestCase):
         self.assertIn("autopilot", t)
         self.assertIn("ticket-validator", t)
         self.assertIn("autopilot-worker", t)
-        # serial-per-repo worker guard survives under the master
-        self.assertIn("serial per repo", t.lower())
+        # #325: LANE 3 mirrors #317's parallel isolation:worktree fleet-dispatch
+        # DEFAULT (several autopilot-workers per ROUND, integrated SERIALLY by the
+        # supervisor) instead of the pre-#317 "serial per repo, never a second
+        # worker" shape — the stale phrase this test used to pin is retired.
+        self.assertIn("worktree", t.lower())
+        self.assertIn("serial single-worker shape", t.lower())
+        self.assertNotIn("serial per repo", t.lower())
 
     def test_anti_degradation_clause_ported(self):
         self.assertIn("depth NEVER degrades", read(SKILL))
