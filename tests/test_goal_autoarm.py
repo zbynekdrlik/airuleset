@@ -374,6 +374,209 @@ class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
         self.assertEqual(n, [1, 0, 0], "the skip must be logged once")
 
 
+class TestAnExitedSessionIsNotReArmed(unittest.TestCase):
+    """#335 -- the user's OWN stated way of stopping a session (`ja ked
+    nerobim v niektorom projekte exitnem sa z claude`) leaves NO
+    `Goal cleared:` (or any other goal-marker) that
+    `_goal_was_cleared_by_user` would ever see, so without this an exited
+    session gets re-armed on the very next sweep exactly like a healthy
+    resolved cycle. Mirrors `TestAGoalTheUserClearedIsNotReArmed` verbatim,
+    substituting an explicit `/exit` slash-command entry for the
+    `Goal cleared:` marker."""
+
+    def _projects(self, cwd, *lines):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        d = root / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True)
+        (d / "sess-exit.jsonl").write_text("\n".join(lines) + "\n",
+                                           encoding="utf-8")
+        return root
+
+    @staticmethod
+    def _marker(state, payload="STOP CONDITIONS — the loop is DONE ...",
+                ts="2026-07-29T09:00:00.000Z"):
+        return _json.dumps({
+            "type": "system",
+            "timestamp": ts,
+            "content": "<local-command-stdout>Goal %s: %s</local-command-stdout>"
+                       % (state, payload),
+        })
+
+    @staticmethod
+    def _exit(ts):
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<command-name>/exit</command-name>\n"
+                        "            <command-message>exit</command-message>\n"
+                        "            <command-args></command-args>"}})
+
+    @staticmethod
+    def _exit_caveat(ts):
+        # #335-review F1 ROUND 2 -- the real, live-verified companion CC
+        # writes IMMEDIATELY BEFORE the actual /exit command entry, also
+        # type=="user" -- the shape this repo's own real corpus shows.
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<local-command-caveat>Caution: /exit ends this "
+                        "session.</local-command-caveat>"}})
+
+    @staticmethod
+    def _exit_stdout(ts):
+        # the companion CC writes IMMEDIATELY AFTER the exit command,
+        # routinely a few milliseconds LATER than the command entry itself
+        # -- the exact reason the round-1 release check (built on the
+        # shared _last_real_turn_ts) was defeated on the exit's own
+        # bookkeeping.
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<local-command-stdout>Bye!</local-command-stdout>"}})
+
+    def test_exited_session_is_left_alone(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("set"),
+                            self._exit("2026-07-29T09:05:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a session the user exited must not be re-armed")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_an_exit_before_a_later_set_marker_does_not_block(self):
+        # something happened AFTER the exit (a fresh arm) -- the exit no
+        # longer governs, the SAME release the `Goal cleared:` case gets.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd,
+                            self._marker("set", ts="2026-07-29T08:00:00.000Z"),
+                            self._exit("2026-07-29T08:30:00.000Z"),
+                            self._marker("set", ts="2026-07-29T09:00:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed())
+
+    def test_a_nested_exit_inside_a_tool_result_is_never_treated_as_real(self):
+        cwd = "/home/x/devel/demo"
+        nested = _json.dumps({
+            "type": "user", "timestamp": "2026-07-29T09:05:00.000Z",
+            "message": {"content": [
+                {"type": "tool_result", "content": [
+                    {"type": "text",
+                     "text": "<command-name>/exit</command-name>"}]}]}})
+        pd = self._projects(cwd, self._marker("set"), nested)
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed(),
+                        "a QUOTED /exit inside a tool_result must never "
+                        "count as this session's own exit")
+
+    @staticmethod
+    def _turn(ts, role="assistant"):
+        # a genuine, real transcript turn (never a `/goal` marker) -- the
+        # #335-review F1 release signal, distinct from `_marker` above.
+        return _json.dumps({"type": role, "timestamp": ts,
+                            "message": {"content": "ordinary conversation"}})
+
+    def test_an_exit_released_by_a_later_real_turn_with_no_new_marker(self):
+        # #335-review F1 (CRITICAL) -- the FIRST shipped version had no
+        # release condition at all besides a NEWER goal marker, and `/exit`
+        # itself writes no marker, so this exact case (the session comes
+        # back and does ordinary work, no `/goal`/`/goal clear` involved)
+        # was permanently blocked forever. A later real turn (user OR
+        # assistant) postdating the exit must release it, same as a
+        # `Goal clear:`'s own `arm_after` release.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd,
+                            self._marker("set", ts="2026-07-29T09:00:00.000Z"),
+                            self._exit("2026-07-29T09:05:00.000Z"),
+                            self._turn("2026-07-29T09:10:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed(),
+                        "ordinary activity after the exit must release it, "
+                        "even with no new /goal marker of any kind")
+
+    def test_an_exit_with_no_later_activity_stays_blocked(self):
+        # the companion control: the SAME transcript, minus the trailing
+        # real turn, must still refuse -- proves the release above is
+        # genuinely conditional on the later activity, not a side effect
+        # of anything else in the fixture.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd,
+                            self._marker("set", ts="2026-07-29T09:00:00.000Z"),
+                            self._exit("2026-07-29T09:05:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed())
+
+    def test_a_marker_with_an_unmeasurable_timestamp_never_lets_the_exit_stand(
+            self):
+        # #335-review F1 sub-finding -- a marker exists but its own `ts`
+        # cannot be parsed, so whether it postdates the exit is genuinely
+        # unknown either way; the function must fail OPEN (never block)
+        # rather than trust an ordering it cannot establish, matching its
+        # own documented default.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd,
+                            self._marker("set", ts="not-a-real-timestamp"),
+                            self._exit("2026-07-29T09:05:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed(),
+                        "an unmeasurable marker timestamp must never make "
+                        "the exit look decisive")
+
+    def test_a_message_merely_quoting_the_exit_marker_is_never_a_real_exit(
+            self):
+        # #335-review F4 (MINOR) -- `startswith`, not `in`: a longer
+        # message merely QUOTING the marker text (a pasted runbook
+        # excerpt, a review comment) must never count as a real /exit.
+        cwd = "/home/x/devel/demo"
+        quoting = _json.dumps({
+            "type": "user", "timestamp": "2026-07-29T09:05:00.000Z",
+            "message": {"content":
+                        "See the docs: <command-name>/exit</command-name> "
+                        "is how you stop a session."}})
+        pd = self._projects(cwd, self._marker("set"), quoting)
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed(),
+                        "a message merely QUOTING the /exit marker text "
+                        "must never count as a real exit")
+
+    def test_a_real_exit_triple_is_not_defeated_by_its_own_companions(self):
+        # #335-review F1 ROUND 2 (fresh-context adversarial review, executed
+        # proof over the real transcript corpus) -- a genuine /exit is
+        # written as a TRIPLE of type=="user" entries: a
+        # <local-command-caveat>, the actual <command-name>/exit</...> the
+        # marker matches, and a <local-command-stdout>Bye!</...> -- and the
+        # stdout companion routinely carries a timestamp a few
+        # MILLISECONDS NEWER than the exit command entry itself (same
+        # command batch). The round-1 release check (built on the SHARED
+        # _last_real_turn_ts, which counts ANY real turn) read that
+        # companion as "activity postdating the exit" and released the
+        # suppression on the exit's own bookkeeping -- measured against
+        # the real corpus, this defeated the protection on 13 of 15
+        # genuinely-exited-and-never-resumed sessions. This fixture
+        # reproduces the exact real shape: caveat 100ms BEFORE the exit
+        # command, stdout 50ms AFTER it -- and the session must still stay
+        # blocked.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("set"),
+                            self._exit_caveat("2026-07-29T09:04:59.900Z"),
+                            self._exit("2026-07-29T09:05:00.000Z"),
+                            self._exit_stdout("2026-07-29T09:05:00.050Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "the exit's own companion bookkeeping entries "
+                         "must never count as activity that releases the "
+                         "suppression")
+
+
 class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
         unittest.TestCase):
     """The #170 suppression had no exit condition, so it never expired.
@@ -1033,6 +1236,49 @@ class TestGoalAutoarmVirginCandidate(unittest.TestCase):
             tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
                              templates_path=self.templates_path)
         self.assertFalse(tmux.typed())
+
+    def test_an_exited_session_with_no_prior_goal_history_is_never_touched(
+            self):
+        # #335-review F2 (MAJOR) -- this whole path is reachable for a
+        # session that has NEVER shown a `/goal` marker of any kind, which
+        # includes a session the user deliberately `/exit`ed (CC writes no
+        # marker for that either) -- without this, an exited-but-never-
+        # armed session sailed straight through `_goal_never_armed`'s own
+        # check untouched, bypassing #335's whole fix one path over.
+        self._write([{"type": "user",
+                     "timestamp": "2026-08-01T09:00:00.000Z",
+                     "message": {"content":
+                                 "<command-name>/exit</command-name>\n"
+                                 "            <command-message>exit"
+                                 "</command-message>\n"
+                                 "            <command-args></command-args>"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed(),
+                         "a session the user exited, even one that never "
+                         "had a /goal before, must never be auto-armed")
+
+    def test_an_exited_virgin_session_arms_once_released_by_later_activity(
+            self):
+        # the companion control: the SAME exit, released by a later real
+        # turn (no `/goal` marker involved at all) -- proves the refusal
+        # above is genuinely conditional, not a side effect of anything
+        # else in the fixture.
+        self._write([
+            {"type": "user", "timestamp": "2026-08-01T09:00:00.000Z",
+             "message": {"content":
+                         "<command-name>/exit</command-name>\n"
+                         "            <command-message>exit</command-message>\n"
+                         "            <command-args></command-args>"}},
+            {"type": "assistant", "timestamp": "2026-08-01T09:30:00.000Z",
+             "message": {"content": "ordinary conversation"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
 
     def test_no_transcript_at_all_is_never_touched(self):
         with m.patch.object(airuleset, "resolve_authority",

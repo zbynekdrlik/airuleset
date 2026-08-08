@@ -103,6 +103,32 @@ def nested_marker_entry(payload):
                                       "</local-command-stdout>" % payload}]}]}}
 
 
+def exit_entry(ts=None):
+    """The EXACT shape CC writes an explicit `/exit` slash-command as — a
+    TOP-LEVEL `user` entry whose `.message.content` is a plain STRING
+    (verified live against simap@subdev's own real transcript, #335)."""
+    if ts is None:
+        ts = _iso(time.time())
+    return {"type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<command-name>/exit</command-name>\n"
+                        "            <command-message>exit</command-message>\n"
+                        "            <command-args></command-args>"}}
+
+
+def nested_exit_entry(ts=None):
+    """The SAME `/exit` text nested inside a `tool_result` — a session that
+    grepped/pasted ANOTHER session's transcript. Structurally never this
+    session's own exit."""
+    if ts is None:
+        ts = _iso(time.time())
+    return {"type": "user", "timestamp": ts,
+            "message": {"content": [
+                {"type": "tool_result",
+                 "content": [{"type": "text",
+                              "text": "<command-name>/exit</command-name>"}]}]}}
+
+
 def summary_entry(payload):
     """A compaction SUMMARY narrating the goal in prose — mentions the words,
     is not a marker."""
@@ -1451,6 +1477,102 @@ class TestGoalDarkDiedByOutage(unittest.TestCase):
                                      "<local-command-stdout>Goal cleared: %s"
                                      "</local-command-stdout>" % PAYLOAD}})
         self.assertFalse(wd._goal_dark_died_by_outage(p, time.time()))
+
+    # ------------------------------------------------------------------ #
+    # #335 -- an explicit `/exit` (the user's OWN stated way of stopping a
+    # session) is an EQUALLY durable "user stopped this" signal as a
+    # `Goal cleared:` marker, but CC writes NO goal-marker for it at all --
+    # without this, a deliberate exit is invisible here and re-armed
+    # exactly like a genuine technical outage.
+    # ------------------------------------------------------------------ #
+
+    def test_an_exit_after_the_set_marker_is_not_an_outage(self):
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        exit_entry("2026-07-26T10:05:00.000Z"))
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_an_exit_before_a_later_set_marker_is_stale(self):
+        # something happened AFTER the exit (a fresh arm) -- the exit no
+        # longer governs, mirroring the existing set/cleared/set precedent.
+        p = self._write(exit_entry("2026-07-26T10:00:00.000Z"),
+                        marker_entry("set", PAYLOAD,
+                                     "2026-07-26T11:00:00.000Z"))
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_last_armed_postdating_the_exit_makes_it_stale_too(self):
+        # the SAME staleness rule `_goal_cleared_stale`/`last_armed`
+        # already apply to a `Goal cleared:` marker applies to an exit too
+        # -- a genuine arm (seen live by THIS job, no marker required)
+        # after the exit means the exit no longer governs.
+        exit_ts = time.time() - 100
+        p = self._write(marker_entry("set", PAYLOAD, _iso(exit_ts - 200)),
+                        exit_entry(_iso(exit_ts)))
+        last_armed = exit_ts + 50
+        self.assertTrue(wd._goal_dark_died_by_outage(p, last_armed))
+
+    def test_an_exit_after_last_armed_is_still_not_an_outage(self):
+        exit_ts = time.time()
+        p = self._write(marker_entry("set", PAYLOAD, _iso(exit_ts - 200)),
+                        exit_entry(_iso(exit_ts)))
+        last_armed = exit_ts - 50
+        self.assertFalse(wd._goal_dark_died_by_outage(p, last_armed))
+
+    def test_a_nested_exit_inside_a_tool_result_is_never_treated_as_real(self):
+        # a session grepping/pasting ANOTHER session's transcript must
+        # never be misread as having exited itself.
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        nested_exit_entry("2026-07-26T10:05:00.000Z"))
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_a_non_user_entry_carrying_the_exit_text_is_never_a_real_exit(
+            self):
+        # #335-review F6 (test gap, M5) -- `_goal_user_exit_ts`'s own
+        # `entry.get("type") != "user"` guard: only a genuine slash-command
+        # entry (always `type=="user"`) is a real exit. An `assistant`
+        # entry that happens to carry the identical marker text (echoing
+        # it back in a message, e.g. quoting the incident in conversation)
+        # must never count.
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        {"type": "assistant",
+                         "timestamp": "2026-07-26T10:05:00.000Z",
+                         "message": {"content":
+                                     "<command-name>/exit</command-name>\n"
+                                     "            <command-message>exit"
+                                     "</command-message>\n"
+                                     "            <command-args></command-args>"}})
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_no_exit_anywhere_keeps_the_old_behaviour(self):
+        p = self._write(marker_entry("set", PAYLOAD))
+        self.assertTrue(wd._goal_dark_died_by_outage(p))
+
+    def test_an_exit_buried_past_the_tail_window_is_still_found(self):
+        # #335-review F6 (test gap, M7) -- `_goal_dark_died_by_outage`'s
+        # OWN `/exit` check must use `off=0` (the whole file), never fall
+        # back to a tail-bootstrap read: a long-lived busy session can
+        # push its own final `/exit` far past `GOAL_MARK_TAIL_BYTES` (4 MB)
+        # before it dies, exactly like the marker-burial case above (this
+        # class's own `test_a_set_marker_buried_past_the_old_tail_window_
+        # is_still_an_outage`). Both the `set` marker AND the `/exit` are
+        # written FIRST, near the start of the file -- the filler comes
+        # AFTER both, pushing them well past the tail window measured from
+        # EOF. If the exit check silently regressed to a tail-bootstrap
+        # default, this buried `/exit` would go unseen and the function
+        # would wrongly return True.
+        p = self._write(marker_entry("set", PAYLOAD,
+                                     "2026-07-26T10:00:00.000Z"),
+                        exit_entry("2026-07-26T10:05:00.000Z"))
+        with open(p, "a") as f:
+            filler = json.dumps({"type": "assistant",
+                                 "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
+                f.write(filler)
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
 
 
 class TestGoalRecoverUntracked(GoalRearmBase):
@@ -3642,6 +3764,234 @@ class TestGoalAchievedBacklogVerification(GoalRearmBase):
         self.assertFalse(tmux.typed(), logs)
         self.assertEqual(calls, [],
                          "a non-backlog-shaped payload must never spend gh")
+
+
+class TestGoalAchievedNeverAutoResumesAfterAbandonment(GoalRearmBase):
+    """#335 P0 -- live-reproduced on simap@subdev: a `/goal` loop that
+    legitimately FINISHED (a genuine achieved banner, not a crash) and then
+    sat completely untouched for well over `GOAL_REARM_MAX_DARK_S` (66.5h
+    in the real incident) is, from every signal this job has,
+    indistinguishable from the user having deliberately stepped away and
+    considered the work done. The moment new backlog appeared, #160's
+    FALSE-ACHIEVED path silently re-armed it and dispatched a fresh
+    autopilot-worker -- with zero user action, 66.5 hours after the user
+    last touched the session.
+
+    The comment above the outage branch (`_goal_dark_died_by_outage`'s own
+    call site) justifies re-arming a stale achieved banner on the premise
+    that the user "kept using the session for other work" -- but
+    `active_now` (computed immediately above that check, from the
+    transcript's own last real turn) has ALREADY disproven that by the time
+    this branch is reached: `dark_by_age and not active_now` means there
+    has been NO activity of any kind. The re-arm must not fire here; it
+    gets the SAME one-shot ping the sibling "skip stale-goal" branch
+    already uses, never a silent, automatic resume.
+
+    A session whose achieved banner is FRESH (not past the dark cap) is
+    completely unaffected -- `TestGoalAchievedBacklogVerification`'s own
+    tests never enter the dark branch at all (`dark_by_age` is False, so
+    the whole `if dark_by_age and not active_now:` block, including this
+    one's new gate, is skipped) and keep re-arming promptly, exactly as
+    before this ticket."""
+
+    ACHIEVED_PANE = ("● Hotovo.\n"
+                     "✔ Goal achieved (3s · 1 turn · 56 tokens)\n" + FOOTER_DARK)
+
+    def _old_ts(self, base):
+        return _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+
+    def test_stale_achieved_banner_with_new_backlog_is_never_rearmed(self):
+        base = time.time()
+        old_ts = self._old_ts(base)
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  assistant_entry("Some work happened.\n"
+                                  "🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, now=base,
+            backlog_fetch=lambda cwd: 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertFalse(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+        self.assertTrue(any("skip stale-achieved" in ln for ln in logs), logs)
+
+    def test_a_ping_fires_once_never_twice_for_the_stale_achieved_case(self):
+        base = time.time()
+        old_ts = self._old_ts(base)
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        state = {}
+        self._go(self.ACHIEVED_PANE, entries=entries, state=state, now=base,
+                 backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self._go(self.ACHIEVED_PANE, state=state, now=base + 60,
+                 backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+    def test_the_ping_text_states_the_real_elapsed_hours_not_the_cap(self):
+        # #335-review F7 (MINOR) -- the ping text used to hardcode
+        # `GOAL_REARM_MAX_DARK_S // 3600` ("vyše 6 hodín") regardless of
+        # how long the session had ACTUALLY been dark — the real
+        # simap@subdev incident this ticket was filed over was 66.5h, not
+        # 6h. Uses a gap far past the cap so the real vs hardcoded value
+        # cannot coincide by chance.
+        base = time.time()
+        old_ts = _iso(base - 70 * 3600)          # 70h dark, well past the 6h cap
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        self._go(self.ACHIEVED_PANE, entries=entries, now=base,
+                 backlog_fetch=lambda cwd: 3)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        text = self.pings[0][0]
+        self.assertIn("70 hodín", text, text)
+        self.assertNotIn("6 hodín", text, text)
+
+    def test_a_fresh_achieved_banner_still_rearms_promptly_unaffected(self):
+        # the control -- a session that just finished (well within the dark
+        # cap) keeps the CURRENT, intended "resume when new work appears"
+        # behavior, exactly as `TestGoalAchievedBacklogVerification`
+        # already proves; `revived_from_dark_outage` is never set for it.
+        entries = [marker_entry("set", PAYLOAD),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo")]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_a_genuinely_still_empty_backlog_still_skips_legitimately(self):
+        # backlog_open is False -- nothing to re-arm regardless of
+        # staleness; the ORIGINAL "finished legitimately" logging is
+        # unaffected by `revived_from_dark_outage`.
+        base = time.time()
+        old_ts = self._old_ts(base)
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, now=base,
+            backlog_fetch=lambda cwd: 0)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("verified empty" in ln for ln in logs), logs)
+
+    def test_an_exit_before_the_stale_achieved_banner_still_never_rearms(self):
+        # #335-review F3 (MAJOR, S3) -- an explicit exit postdating the
+        # last confirmed arm is now caught by `goal_rearm`'s OWN
+        # unconditional, EARLY exit-check (added by that finding's fix),
+        # before `dark_by_age`/`active_now` are even computed -- so this
+        # session never reaches the dark-outage machinery at all any more,
+        # let alone the achieved-banner check. `_goal_dark_died_by_
+        # outage`'s own #335 exit-check (unchanged) remains the fallback
+        # for a HARDER case (an exit buried past the cheap early check's
+        # own tail-bootstrap window) -- see that function's own tests.
+        base = time.time()
+        old_ts = self._old_ts(base)
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  exit_entry(_iso(base - wd.GOAL_REARM_MAX_DARK_S - 1800)),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, now=base,
+            backlog_fetch=lambda cwd: 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("skip exited" in ln for ln in logs), logs)
+
+    def test_a_fresh_exit_blocks_the_achieved_rearm_well_inside_the_dark_cap(
+            self):
+        # #335-review F3 (MAJOR, S3) -- `_goal_dark_died_by_outage`'s own
+        # exit-check only ever runs once `dark_by_age and not active_now`
+        # (>= GOAL_REARM_MAX_DARK_S dark) -- a FRESH exit, well INSIDE the
+        # dark cap, got ZERO protection at all before this fix: the
+        # achieved-banner re-arm below is reachable regardless of
+        # `dark_by_age`, unlike `/goal clear`'s own unconditional-at-any-
+        # darkness protection. `goal_rearm`'s new early exit-check (added
+        # by this finding's fix) runs BEFORE `dark_by_age` is even
+        # computed, closing this gap directly.
+        base = time.time()
+        entries = [marker_entry("set", PAYLOAD, _iso(base - 3600)),
+                  exit_entry(_iso(base - 1800)),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=_iso(base - 3600))]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, now=base,
+            backlog_fetch=lambda cwd: 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("skip exited" in ln for ln in logs), logs)
+
+    def test_a_recent_exit_on_an_otherwise_dark_session_is_never_read_as_activity(
+            self):
+        # #335-review F3 (MAJOR, S4) -- `_last_real_turn_ts` (job 10's own
+        # #177-hardened reader) deliberately counts a plain `/exit` entry
+        # as "real activity" for ITS purpose; without this fix, a `/exit`
+        # that happens to be the transcript's NEWEST entry would make
+        # `active_now` wrongly True -- skipping the WHOLE `dark_by_age and
+        # not active_now` block (and so `_goal_dark_died_by_outage`'s own
+        # exit-check) entirely, letting the achieved-banner re-arm proceed
+        # completely unguarded. `goal_rearm`'s new unconditional early
+        # exit-check runs BEFORE `active_now` is ever computed, so this
+        # never even reaches that interaction.
+        base = time.time()
+        old_ts = self._old_ts(base)
+        entries = [marker_entry("set", PAYLOAD, old_ts),
+                  exit_entry(_iso(base - 10)),
+                  assistant_entry("🏁 BACKLOG EMPTY: 0 open, main green\n"
+                                  "✅ DONE: hotovo", ts=old_ts)]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries, now=base,
+            backlog_fetch=lambda cwd: 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("skip exited" in ln for ln in logs), logs)
+        self.assertFalse(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+
+class TestExitSupersededByANewerMarkerReleasesTheSkipExitedCheck(
+        GoalRearmBase):
+    """#335-review NEW-1 (round 2, MINOR) -- `last_seen_alive` prefers
+    `rec['last_armed']` (this job's own live-footer confirmation) over
+    `rec['mts']` (the transcript marker's own timestamp) whenever
+    `last_armed` is present at all -- correct in general (#321 shape A2),
+    but STALE relative to a genuine later re-arm: the user exits, then
+    re-arms with a fresh `/goal` (a real marker, `mts > exit_ts`), and if
+    that new goal dies again before the pane's footer is ever sampled
+    showing it armed, `last_armed` never advances to reflect the re-arm.
+    Without the fix, `exit_ts > last_seen_alive` (built on the STALE
+    `last_armed`) would treat the already-superseded exit as still
+    decisive forever -- the session's own goal-rearm backstop would
+    refuse to ever heal it again, silently, with a `skip exited` log line
+    each sweep."""
+
+    def test_a_newer_marker_than_the_exit_releases_the_check_even_with_a_stale_last_armed(
+            self):
+        base = time.time()
+        stale_last_armed = base - 3600     # 1h stale, predates the exit
+        t0 = base - 3500                   # the ORIGINAL (now-superseded) arm
+        exit_ts = base - 3000               # the user's own /exit
+        t2 = base - 100                     # a GENUINE re-arm, after the exit
+        entries = [marker_entry("set", PAYLOAD, _iso(t0)),
+                  exit_entry(_iso(exit_ts)),
+                  marker_entry("set", PAYLOAD, _iso(t2))]
+        state = {"goal_rearm": {SID: {"last_armed": stale_last_armed}}}
+        tmux, logs = self._go(PANE_DARK, entries=entries, state=state,
+                              now=base)
+        self.assertFalse(any("skip exited" in ln for ln in logs), logs)
+
+    def test_the_control_an_exit_with_no_later_marker_still_skips(self):
+        # same stale-last_armed shape, but WITHOUT the later re-arm marker
+        # -- proves the release above is genuinely conditional on the
+        # newer marker, not a side effect of the stale last_armed alone.
+        base = time.time()
+        stale_last_armed = base - 3600
+        t0 = base - 3500
+        exit_ts = base - 3000
+        entries = [marker_entry("set", PAYLOAD, _iso(t0)),
+                  exit_entry(_iso(exit_ts))]
+        state = {"goal_rearm": {SID: {"last_armed": stale_last_armed}}}
+        tmux, logs = self._go(PANE_DARK, entries=entries, state=state,
+                              now=base)
+        self.assertTrue(any("skip exited" in ln for ln in logs), logs)
 
 
 class TestCachedBacklogOpen(unittest.TestCase):
