@@ -2511,6 +2511,75 @@ def _last_real_turn_ts(tpath, tail_bytes=2_000_000):
     return best
 
 
+_LOCAL_COMMAND_BOOKKEEPING_PREFIXES = ("<local-command-caveat>",
+                                       "<local-command-stdout>")
+
+
+def _last_real_turn_ts_excluding_command_bookkeeping(tpath, tail_bytes=None):
+    """#335-review F1, ROUND 2 (fresh-context adversarial review, executed
+    proof over the real transcript corpus): a genuine `/exit` is NOT one
+    transcript entry — it is a TRIPLE, all `type=="user"`: a
+    `<local-command-caveat>` entry, the `<command-name>/exit</command-name>`
+    entry `_goal_user_exit_ts` matches, and a
+    `<local-command-stdout>Bye!</local-command-stdout>` entry. The caveat
+    and stdout companions routinely carry a timestamp a few MILLISECONDS
+    NEWER than the exit command entry itself (same command batch, written
+    microseconds apart) — so `_last_real_turn_ts` (which deliberately
+    counts ANY real turn, by design, for job 10's own #177 purpose) reads
+    the exit's own bookkeeping as "activity postdating the exit" and
+    releases `_goal_was_cleared_by_user`'s round-1 suppression the instant
+    it is written. Measured against the real corpus: 13 of 15
+    genuinely-exited-and-never-resumed sessions read as released through
+    this exact defect — the protection was a millisecond-timestamp-
+    coincidence lottery, not a real release condition.
+
+    This is a SEPARATE reader, never a change to `_last_real_turn_ts`
+    itself — job 10 genuinely wants those companion entries counted as
+    activity for ITS OWN, different purpose (idle-clock staleness), and
+    widening the shared function would silently change job 10's own
+    behaviour for a reason job 10 has nothing to do with.
+
+    Same read-window contract as `_last_real_turn_ts` (mirrors it exactly,
+    including the tail-bootstrap default), so any caller pays the
+    identical cost profile. A REAL user turn (a fresh chat message, an
+    assistant reply, a genuinely different slash command) still releases
+    the suppression normally — only the two named bookkeeping prefixes are
+    excluded, never anything else."""
+    if tail_bytes is None:
+        tail_bytes = 2_000_000
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return None
+    best = None
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") not in _REAL_TURN_TYPES:
+            continue
+        msg = e.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if (isinstance(content, str)
+                and content.startswith(_LOCAL_COMMAND_BOOKKEEPING_PREFIXES)):
+            continue
+        try:
+            ep = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ep > best:
+            best = ep
+    return best
+
+
 def _transcript_for_session(projects_dir, sid, cwd):
     """Path of the session's transcript, or None. The cwd-encoded dir is only
     a HINT: the ❓ hook records the session's CURRENT dir while CC keys the
@@ -5387,7 +5456,16 @@ def _goal_was_cleared_by_user(tpath):
             return False            # unmeasurable ordering — never guess
         if mark_ts >= exit_ts:
             return False            # a marker newer than the exit — stale
-    activity_ts = _last_real_turn_ts(tpath)
+    # #335-review F1 ROUND 2 -- `_last_real_turn_ts` (job 10's own #177
+    # reader) deliberately counts the exit's OWN companion bookkeeping
+    # entries (`<local-command-caveat>`, `<local-command-stdout>Bye!`) as
+    # "activity", and those companions routinely carry a timestamp a few
+    # milliseconds NEWER than the exit command entry itself -- defeating
+    # this release check on the exit's own bookkeeping the instant it is
+    # written. `_last_real_turn_ts_excluding_command_bookkeeping` is the
+    # dedicated sibling reader that excludes exactly those two prefixes;
+    # see its own docstring for the measured blast radius.
+    activity_ts = _last_real_turn_ts_excluding_command_bookkeeping(tpath)
     if activity_ts is not None and activity_ts > exit_ts:
         return False                # real activity postdates the exit
     return True
@@ -11628,9 +11706,45 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         # check's own docstring already documents). Unmeasurable
         # (`last_seen_alive` absent) never guesses -- matches this ticket's
         # own established fail-open convention throughout.
+        #
+        # #335-review NEW-2 (round 2, MINOR, accepted disclosed cost): this
+        # tail-bootstrap read (up to `GOAL_MARK_TAIL_BYTES`, 4 MB) now runs
+        # UNCONDITIONALLY every ~60s sweep for every tracked `mark=="set"`,
+        # non-armed pane -- including the common steady state of a
+        # finished-goal session still in ordinary use, not just the rare
+        # dark-past-the-cap population `_goal_dark_died_by_outage`'s own
+        # `off=0` fallback is reserved for. It cannot be gated behind
+        # `dark_by_age` the way that fallback is, since S3's whole point is
+        # protecting the NON-dark population too. It is page-cached and far
+        # cheaper than the `off=0` full-file reads this repo's prior
+        # reviews have already gated behind stricter cost discipline
+        # elsewhere in this same function, so it is accepted here rather
+        # than optimized -- matching the F5 revert's own precedent
+        # (documented at this file's `revived_from_dark_outage` branch) of
+        # stating a cost explicitly rather than risking a masked-recovery
+        # regression from a premature cache.
         exit_ts = _goal_user_exit_ts(tpath)
+        # #335-review NEW-1 (round 2) -- `last_seen_alive` prefers
+        # `rec['last_armed']` (WHEN this job last CONFIRMED an arm via the
+        # live footer) over `rec['mts']` (the transcript marker's own
+        # timestamp) whenever `last_armed` is present at all -- correct in
+        # general (#321 shape A2), but it can be STALE relative to a
+        # GENUINE re-arm: the user exits, then re-arms with a fresh
+        # `/goal` (a real marker, `mts > exit_ts`), and if that new goal
+        # dies again before the pane's footer is ever sampled with it
+        # showing armed, `last_armed` never advances to reflect the
+        # re-arm at all. Without this guard, `exit_ts > last_seen_alive`
+        # (built on the STALE `last_armed`) would wrongly treat the
+        # already-superseded exit as still decisive forever. Mirrors the
+        # IDENTICAL "a marker newer than the exit is stale" rule
+        # `_goal_was_cleared_by_user` already applies one function over.
+        mts = rec.get("mts")
+        exit_superseded_by_newer_marker = (mts is not None
+                                           and mts >= exit_ts) \
+            if exit_ts is not None else False
         if (exit_ts is not None and last_seen_alive is not None
-                and exit_ts > last_seen_alive):
+                and exit_ts > last_seen_alive
+                and not exit_superseded_by_newer_marker):
             logs.append("skip exited (goal-rearm) %s -> an explicit /exit "
                         "postdates the last confirmed arm; never re-arming "
                         "without the user's own action" % loc)
