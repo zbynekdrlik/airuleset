@@ -5314,7 +5314,15 @@ class TestClaudeHistoryPopupScript(TestCase):
         # a mutant dropping the guard from just ONE of the three would
         # survive the narrower, `next()`-based sibling tests unnoticed.
         content = airuleset.render_claude_history_popup_script()
-        assign_lines = [ln for ln in content.splitlines() if "=$(" in ln]
+        # `.strip().startswith("#")` excludes this script's own COMMENTS --
+        # two of them legitimately quote the literal shape `VAR=$(failing_
+        # cmd)` in prose (explaining the `set -e` gotcha), which a bare
+        # `"=$(" in ln` substring scan would otherwise wrongly count as
+        # real assignment statements (caught live: without this exclusion
+        # the test failed against its OWN explanatory comment, not real
+        # code).
+        assign_lines = [ln for ln in content.splitlines()
+                        if "=$(" in ln and not ln.strip().startswith("#")]
         self.assertGreaterEqual(len(assign_lines), 3, assign_lines)
         for ln in assign_lines:
             self.assertRegex(ln, r"\|\| \w+_RC=\$\?", ln)
@@ -5372,6 +5380,18 @@ class TestClaudeHistoryPopupScript(TestCase):
             'if [ "$MODE" = "%s" ]; then' % airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY,
             content)
 
+    def _capture_pane_invocation_line(self, content):
+        # ANCHORED on the real STATEMENT shape (`CP_OUT=$(tmux
+        # capture-pane`), never a bare "capture-pane" substring search --
+        # this script's own comments legitimately NAME "capture-pane"
+        # several times (explaining what the call does, citing the sibling
+        # #327 ticket, the M5 failure message text) and a `next()` over a
+        # bare substring match returns the FIRST such comment line, not
+        # the real invocation (caught live: this test originally asserted
+        # against a comment sentence and passed only by accident).
+        return next(ln for ln in content.splitlines()
+                    if "CP_OUT=$(tmux capture-pane" in ln)
+
     def test_capture_pane_fallback_call_has_no_explicit_target(self):
         # LOAD-BEARING: a bare (no `-t`) capture-pane call issued from
         # WITHIN a display-popup's own shell-command resolves against the
@@ -5379,13 +5399,13 @@ class TestClaudeHistoryPopupScript(TestCase):
         # module comment above TMUX_POPUP_KEY). Adding `-t` here would
         # break that resolution outright.
         content = airuleset.render_claude_history_popup_script()
-        cp_line = next(ln for ln in content.splitlines() if "capture-pane" in ln)
+        cp_line = self._capture_pane_invocation_line(content)
         self.assertNotIn(" -t ", cp_line, cp_line)
         self.assertNotIn(" -t", cp_line, cp_line)
 
     def test_capture_pane_uses_dash_e_for_colors_and_dash_p_for_stdout(self):
         content = airuleset.render_claude_history_popup_script()
-        cp_line = next(ln for ln in content.splitlines() if "capture-pane" in ln)
+        cp_line = self._capture_pane_invocation_line(content)
         self.assertIn(" -e ", cp_line, cp_line)
         self.assertIn(" -p ", cp_line, cp_line)
 
