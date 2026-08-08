@@ -10924,15 +10924,57 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
     never permanently suppressed by an old one's ping."""
     if rec.get("recovery_scanned"):
         return []
-    has_progress = _live_autopilot_progress(cwd, progress_dir, now)
-    has_goalarm_record = bool(
-        pid and state is not None
-        and (state.get("goalarm") or {}).get(pid))
-    if not (has_progress or has_goalarm_record):
+    # #324-review (cost note) -- the goalarm-record check is a plain dict
+    # lookup (no I/O); `_live_autopilot_progress` is a real file read.
+    # Try the cheap one FIRST so it can short-circuit the expensive one,
+    # mirroring the #320-review "cheap gates before an expensive read"
+    # discipline this file already applies elsewhere.
+    #
+    # #324-review MAJOR-4 -- a bare `state['goalarm'][pid]` truthiness
+    # check has NO freshness bound at all, unlike `_live_autopilot_
+    # progress`'s own explicit `< GOAL_REARM_PROGRESS_WINDOW_S` window
+    # (whose comment already says "fresh means an ACTIVE run, not
+    # week-old leftover state"). `state['goalarm']` is a NAMED store the
+    # cleanup loop deliberately never prunes, and its key is a tmux PANE
+    # ID -- unique within one tmux server generation, but reused from
+    # `%0` after a server restart while the state file persists across
+    # it. Reproduced live on dev1: entries up to 16.9 days old, several
+    # colliding with CURRENTLY live, unrelated panes. Bound it by the
+    # SAME window `_live_autopilot_progress` already uses, with the same
+    # `0 <=` lower clamp #312 uses for its own two clocks (a future-dated
+    # entry -- clock skew -- must never look "already fresh").
+    has_goalarm_record = False
+    if pid and state is not None:
+        ga_ts = (state.get("goalarm") or {}).get(pid)
+        if isinstance(ga_ts, (int, float)) and not isinstance(ga_ts, bool):
+            has_goalarm_record = (
+                0 <= (now - ga_ts) < GOAL_REARM_PROGRESS_WINDOW_S)
+    has_progress = (has_goalarm_record
+                    or _live_autopilot_progress(cwd, progress_dir, now))
+    if not has_progress:
         logs = []
         if state is not None:
             nr = state.setdefault("goalrearm_noprogress", {})
             first_seen = nr.get(sid)
+            # #324-review CRITICAL-2/MINOR-5 -- `first_seen` used to be
+            # trusted verbatim the moment it was non-None. Two ways that
+            # is unsafe: (a) a LEGACY entry written by the pre-#324 code
+            # is the bare bool `True` -- `now - True` is `now - 1`
+            # (Python treats `bool` as `int`), which clears the 30-min
+            # bound by ~56 years and pings on the very first sweep after
+            # deploy with a nonsense "vyše 29770187 minút" claim
+            # (reproduced live against dev1's own real persisted state);
+            # (b) a FUTURE-dated value (clock skew, a restored snapshot)
+            # would never clear the bound at all, silently reproducing
+            # the exact permanent-silence defect this whole branch
+            # exists to remove. Re-stamp to `now` whenever the stored
+            # value isn't a genuinely usable, non-future number --
+            # mirrors #312's own `0 <=` future-date guard on its two
+            # clocks, one level up.
+            if (not isinstance(first_seen, (int, float))
+                    or isinstance(first_seen, bool)
+                    or first_seen > now):
+                first_seen = None
             if first_seen is None:
                 nr[sid] = now
                 first_seen = now
@@ -10948,9 +10990,31 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
             pinged = state.setdefault("goalrearm_untracked_pinged", {})
             if (not pinged.get(sid)
                     and (now - first_seen) > GOAL_REARM_UNTRACKED_PING_S):
-                pinged[sid] = True
-                if send_fn is not None and not dry_run:
+                if dry_run:
+                    # #324-review CRITICAL-1 -- a `--dry-run` sweep run
+                    # against REAL persisted state (this repo's own
+                    # documented manual diagnostic) must NEVER mark
+                    # `pinged` -- the exact `dark_pinged` #238-review
+                    # 🟡F4 fix already made this job's OTHER give-up
+                    # ping immune to: setting the flag before checking
+                    # `send_fn`/`dry_run` would permanently consume the
+                    # one-shot escalation with nothing ever actually
+                    # sent, silently reproducing the very defect this
+                    # branch exists to remove. (The unfixed sibling,
+                    # `_goal_stall_nudge`, still has the pre-#324 shape
+                    # -- a pre-existing, out-of-scope defect under this
+                    # repo's own FREEZE policy, never a precedent to
+                    # copy.) READY here is diagnostic-only: it neither
+                    # marks `pinged` nor calls `send_fn`, so a later
+                    # REAL sweep still escalates normally.
+                    logs.append(
+                        "READY (goal-rearm untracked-escalate) %s -> "
+                        "would ping the owner -- no evidence this goal "
+                        "was ever armed after %ds dark"
+                        % (loc, int(now - first_seen)))
+                elif send_fn is not None:
                     from notify import stream_redirect
+                    pinged[sid] = True
                     send_fn(
                         "⚠️ **%s** — `/goal` v tejto relácii nemá žiadnu "
                         "dohľadateľnú stopu (pätička nesvieti, žiadny "
@@ -10959,12 +11023,25 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
                         % (project_label(cwd),
                            int((now - first_seen) // 60), loc),
                         owner=stream_redirect(pane_owner(pid, run)) or None,
-                        dedup_key="goalrearm-untracked:%s" % sid,
+                        # #324-review MAJOR-3 -- `sid` ALONE is stable
+                        # across a revival: a session whose evidence
+                        # resolves (popping this bookkeeping), then
+                        # goes dark again with NO evidence a second
+                        # time, would produce the IDENTICAL dedup key
+                        # for the genuinely new episode -- the same
+                        # class `dark_pinged`'s own dedup fix already
+                        # closed one job above. Folding in `first_seen`
+                        # (this episode's own anchor, re-stamped fresh
+                        # whenever the episode genuinely restarts,
+                        # per the CRITICAL-2/MINOR-5 fix above) makes
+                        # each episode's ping distinct.
+                        dedup_key="goalrearm-untracked:%s:%d"
+                                  % (sid, int(first_seen)),
                         dry_run=dry_run)
-                logs.append(
-                    "ESCALATED (goal-rearm) %s -> no evidence this goal "
-                    "was ever armed after %ds dark; pinged the owner"
-                    % (loc, int(now - first_seen)))
+                    logs.append(
+                        "ESCALATED (goal-rearm) %s -> no evidence this "
+                        "goal was ever armed after %ds dark; pinged the "
+                        "owner" % (loc, int(now - first_seen)))
         return logs
     if state is not None:
         state.get("goalrearm_noprogress", {}).pop(sid, None)
@@ -10993,9 +11070,9 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
     return ["RECOVERED (goal-rearm) %s -> %s and the transcript's own "
             "last /goal marker (never scanned by this job before) was "
             "'set' -- re-arm eligibility restored"
-            % (loc, "live autopilot-progress evidence present"
-               if has_progress else "a job-9 goalarm record for this "
-               "pane is present")]
+            % (loc, "a job-9 goalarm record for this pane is present"
+               if has_goalarm_record else
+               "live autopilot-progress evidence present")]
 
 
 def _goal_cleared_stale(rec):
