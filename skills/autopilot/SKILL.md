@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). Each run is an in-session BACKGROUND autopilot-worker subagent (run_in_background — your main session stays FREE + thin, the worker stays visible in the agent strip) that can still ASK YOU the important questions directly. Never pre-filters needs-input issues and never refuses to start; after each run (incl. after merge) it picks the next batch. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT each round dispatches SEVERAL such bundled batches as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker subagents at once (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates the whole round SERIALLY into one merge/PR/CI/deploy (falls back to one-worker-at-a-time when worktree isolation isn't available). Never pre-filters needs-input issues and never refuses to start; after each round (incl. after merge) it picks the next. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
@@ -8,13 +8,16 @@ disable-model-invocation: true
 
 # Autopilot — Hands-off Backlog Loop
 
-> Solves the **ENTIRE** open backlog, one issue at a time. Each issue is handed to an
-> **in-session background `autopilot-worker` subagent** (`run_in_background: true`) — fresh
-> context (your main session stays thin AND interactive — you can keep messaging it), visible in
-> the agent strip, and **able to ask you the genuinely-important questions directly**. After each issue completes (merged + deployed, or a question resolved), the loop
-> picks the **next** — including right after a merge. It **NEVER** pre-filters "needs input"
-> issues and **NEVER** refuses to start. The goal is to finish everything; your only job is to
-> answer the important per-issue questions when a worker raises one.
+> Solves the **ENTIRE** open backlog, one ROUND at a time — by DEFAULT a small FLEET of PARALLEL
+> `isolation: "worktree"` workers per round (#317, 2026-08-08), one per solo ticket or
+> bundle-safe batch, integrated SERIALLY by the supervisor once the round returns. Each batch is
+> handed to an **in-session background `autopilot-worker` subagent** (`run_in_background: true`)
+> — fresh context (your main session stays thin AND interactive — you can keep messaging it),
+> visible in the agent strip, and **able to ask you the genuinely-important questions directly**.
+> After each round completes (merged + deployed, or a question resolved), the loop picks the
+> **next** — including right after a merge. It **NEVER** pre-filters "needs input" issues and
+> **NEVER** refuses to start. The goal is to finish everything; your only job is to answer the
+> important per-issue questions when a worker raises one.
 
 > **Usage:** `/autopilot [status] [manual] [dialog]`
 > • *(no arg)* — **default: ZERO questions at start.** Preflight → banner → print the `/goal`
@@ -48,16 +51,24 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 ## How it works
 
-- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles the next BATCH
-  (one bundle-safe issue, or several bundled into one PR — see Step 3.1) and dispatches ONE
-  in-session BACKGROUND `autopilot-worker` (`run_in_background: true`) for it; the dispatch returns
-  IMMEDIATELY so your main session stays FREE, and the worker RE-INVOKES the loop when it finishes.
-  The worker runs the full cycle on one `dev` branch / one PR / one CI run (and asks you if needed,
-  its prompts surfacing in your main session); on completion the main agent verifies the result from
-  GitHub; the next turn picks the next batch — until the backlog is empty.
-- **Bundling cuts CI cost.** CI is long here, so the loop spends ONE CI cycle on as many
-  bundle-safe issues as the gate allows (`autonomous-batch-issue-development.md`) instead of
-  one-PR-per-issue. Issues that fail the gate (large / schema / API / security / cross-cut) run solo.
+- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles a ROUND — by
+  DEFAULT several bundle-safe BATCHES (each one bundle-safe issue, or several bundled into one PR
+  — see Step 3.1) — and dispatches ONE in-session BACKGROUND `autopilot-worker` PER batch,
+  `isolation: "worktree"`, ALL IN PARALLEL (`run_in_background: true`, Step 3.2, #317); every
+  dispatch returns IMMEDIATELY so your main session stays FREE, and the last worker to finish
+  RE-INVOKES the loop. Each worker runs its cycle to a green LOCAL result on its own worktree
+  branch; the main agent then integrates the whole round SERIALLY — one merge at a time, ONE
+  `dev` branch / ONE PR / ONE CI run for the round, ONE deploy — and verifies from GitHub. The
+  next turn picks the next round — until the backlog is empty. (Worktree isolation unavailable, or
+  a round's candidates overlap too heavily to parallelize? Dispatch falls back to the documented
+  single-worker serial shape — same mechanics, no `isolation:`, one batch at a time.)
+- **Bundling AND fleet dispatch both cut cost — different axes.** CI is long here, so bundling
+  spends ONE CI cycle on as many bundle-safe issues as the gate allows
+  (`autonomous-batch-issue-development.md`) instead of one-PR-per-issue — this cuts CI cost per
+  worker. Fleet dispatch (several worktree-isolated workers per round, running concurrently) cuts
+  WALL-CLOCK by working several bundled batches at once instead of one after another. Issues that
+  fail the bundling gate (large / schema / API / security / cross-cut) still run solo — as their
+  own single-member batch within a round, or alone in the serial fallback.
 - **Worker = in-session BACKGROUND `autopilot-worker` subagent** (`run_in_background: true`, user-
   level, installed by airuleset). Background so your MAIN session stays FREE (you can keep messaging
   it) and THIN while the worker runs — and since Claude Code's 2026-W26 change the worker's prompts
@@ -299,11 +310,60 @@ the `/goal` line, the loop never starts.
 > You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
 > The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
 
-Each loop turn:
+Each loop turn assembles and dispatches a **ROUND** — by DEFAULT a small FLEET of `isolation:
+"worktree"`-isolated `autopilot-worker`s running in PARALLEL, one worker per solo ticket or
+bundle-safe batch — then integrates the whole round SERIALLY once every worker in it has returned.
+Fleet dispatch is the default dispatch shape (2026-08-08, #317): the `Agent` tool's
+`isolation: "worktree"` gives each worker its OWN checkout sharing only `.git`, so the collision
+risk that used to force one-worker-at-a-time dispatch (two workers editing the SAME `dev` tree) no
+longer applies once each worker has its own worktree — this repo's own 2026-08-08 session already
+ran #313+#315+#316 as three parallel worktree workers alongside a #311+#312 batch in the shared
+tree, four concurrent workers, zero collisions. What stays STRICTLY serial is INTEGRATION: merging
+N worktree branches, running the one CI/test cycle, and pushing — always ONE AT A TIME, always
+supervisor-owned, never by a worker itself (Step 4 below). Bundling (packing more issues into one
+worker's PR, `autonomous-batch-issue-development.md`) and fleet-parallelism (running several
+bundled batches at once) are COMPLEMENTARY levers, not substitutes: bundling cuts CI cost per
+worker, fleet dispatch cuts wall-clock by running several bundled batches concurrently.
 
-1. **Assemble the next BATCH — bundle by default to spend ONE CI cycle on many issues**
+**Concurrency cap + serialize-on-overlap.** Cap a round at **3–5** parallel workers — more than
+that is real CPU load on a shared box running that many full test suites in parallel worktrees at
+once, not a free lunch; a worker should also prefer running a SCOPED test subset first before the
+full suite where the project supports it, same discipline as any single worker. When assembling a
+candidate batch for a round slot (repeat the per-slot procedure below once per slot, up to the
+cap), SKIP — don't add to this round — any issue whose bundling-relevant files heavily overlap a
+batch ALREADY claimed by an earlier slot in the SAME round (today's live example: #311/#316/#317
+all edited `agents/autopilot-worker.md` and had to be sequenced, not parallelized). Two workers
+independently editing the same file in two separate worktrees is a guaranteed merge conflict at
+integration — worse than simply doing it next round. An overlapping issue is not lost — it seeds a
+LATER round, exactly like any issue that fails the bundling gate today.
+
+**Serial fallback (documented, not an improvisation).** Dispatch stays the single-worker,
+shared-tree, cross-session-locked shape (unchanged, described in full below) whenever: worktree
+isolation is genuinely unavailable in this environment, or every remaining round candidate this
+turn overlaps a batch already claimed this round (nothing left to safely parallelize). Never force
+a worktree merge you can already see will conflict — serialize instead. A round of size 1 (fleet
+dispatch with a single worker) and the serial fallback are behaviorally identical except for the
+`isolation:` flag; the fallback exists for the environments/situations where even THAT flag is
+unsafe to use.
+
+**Repo-flow policy — which target a round's branches integrate into:**
+- **Local-merge repo** (pushes straight to `main`, no PR/CI — e.g. airuleset itself): the round's
+  worktree branches each merge `--no-ff` into local `main` ONE AT A TIME (Step 4), THEN one full
+  test suite, THEN one `push`. Still ONE integration wave per round, never one per worker.
+- **`dev`→`main` PR repo** (the ordinary two-branch flow): the round's worktree branches each
+  merge `--no-ff` into local `dev` one at a time, THEN the existing bundling model applies
+  UNCHANGED — ONE `dev`→`main` PR closing every member across the WHOLE round, ONE CI cycle.
+  Parallel worktree DEVELOPMENT does not relax "one PR per round" — it only parallelizes how the
+  branches feeding that one PR get built.
+- **Reduced-authority streams** (branch-merge / fork-no-merge) follow their own authority profile
+  exactly as today — a fork-no-merge worker's worktree branch IS its own fork branch: pushed and
+  handed off by the worker itself, never merged by the supervisor, never folded into a round-wide
+  integration wave.
+
+1. **Per round SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
-   is the main lever to cut CI cost.
+   is the main lever to cut CI cost per worker (fleet dispatch, above, is the lever that cuts
+   wall-clock across workers).
    - **Seed — PRIORITY LANE first (`prio:bounce`).** Open non-skip issues labeled `prio:bounce`
      (a reviewer/gatekeeper-INJECTED priority ticket — the bounce lane from odoo-erp #1599, but the
      label is a GENERIC cross-repo convention every repo/stream honors, never an odoo-specific
@@ -351,12 +411,19 @@ Each loop turn:
    (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
    After validation, the batch = the surviving STILL_VALID / PARTIAL members. This stops the recurring
    failure (working / re-asking on an already-overcome ticket).
-2. **Dispatch ONE in-session BACKGROUND `autopilot-worker`** via the Agent tool for the WHOLE batch:
-   `subagent_type: autopilot-worker`, **`run_in_background: true`** — this keeps your main session
-   FREE + thin while the worker runs, the worker stays VISIBLE in the agent strip, and (per CC's
-   2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in <repo>
-   as ONE bundled PR (Closes all).` (or `Work issue #<N> in <repo>.` for a solo batch) plus any
-   repo-specific note. ONE worker, ONE `dev` branch, ONE PR, ONE CI cycle.
+2. **Dispatch the ROUND — one in-session BACKGROUND `autopilot-worker` PER assembled batch, each
+   `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
+   is what makes them run concurrently rather than one-after-another).** For each batch:
+   `subagent_type: autopilot-worker`, **`run_in_background: true`**, **`isolation: "worktree"`**
+   (the default; omit it only for the documented serial fallback above) — this keeps your main
+   session FREE + thin while every worker runs, each worker stays VISIBLE in the agent strip, and
+   (per CC's 2026-W26 change) its prompts still reach you. prompt = `Work issues #A #B #C in
+   <repo> as ONE bundled PR (Closes all). You are running in an isolated git worktree — see
+   agents/autopilot-worker.md's worktree-awareness section: never touch the shared tree, never
+   push/install, never fire your own run-card — return your branch name + worktree path instead.`
+   (or `Work issue #<N> in <repo>.` for a solo batch) plus any repo-specific note. ONE PR per
+   ROUND (not per worker), ONE CI cycle per round — see the repo-flow policy above for exactly
+   which branch each worker's worktree branch integrates into.
    - **Include the Step 1b validator verdict in the dispatch prompt when you ran it** (`Validator:
      STILL_VALID — <one-line note>` per member) — it saves the worker re-deriving what you already
      found. This is a courtesy, not the enforcement mechanism (#213): even when Step 1b was skipped
@@ -387,22 +454,29 @@ Each loop turn:
      hand-off point (`--achieved "... pripravené na review"`). Step 4 verification then checks the
      PROFILE's done-point (PR merged into integration / READY-FOR-REVIEW: comment present),
      NOT a merge to main.
-   - **The dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting. End the turn
-     `⏳ WORKING`; the worker RE-INVOKES this loop when it completes (then you do Step 4).
-   - **Serial per repo (hard) — session-local check PLUS a cross-session lock (issue #8).** Before
-     dispatching, if a background `autopilot-worker` for THIS repo is STILL running in THIS session
-     (check the agent strip / running tasks), do **NOTHING** this turn — end `⏳ WORKING` and let it
-     finish (it re-invokes you). That check alone has NO visibility into a SEPARATE `/autopilot`
-     session on the same repo (another terminal/tmux window) — the proven root cause of camera-box
-     #495 and the #499/#500-vs-#505 collision. So ALSO acquire the cross-session lock immediately
-     before dispatch: `python3 ~/devel/airuleset/airuleset.py autopilot-lock acquire --repo <repo
-     path>` (exit 0 = acquired, proceed to dispatch; exit 1 = a DIFFERENT live session already holds
-     it — do **NOTHING** this turn, same as the session-local case, end `⏳ WORKING`, it re-invokes
-     you and you retry). NEVER dispatch a second worker on the same repo while either check says
-     busy — two would collide on `dev`. (A batch is still ONE worker, one lock.) **Release the lock**
-     after the worker's evidence block is verified in Step 4 — see the release step there — so a
-     crashed/never-returning worker doesn't wedge the lock forever (a dead holder's lock is also
-     auto-stolen by the NEXT `acquire`, logged to `audits/autopilot-lock-steals.log`, as a backstop).
+   - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on any of them. End
+     the turn `⏳ WORKING`; the LAST worker in the round to finish RE-INVOKES this loop (then you
+     do Step 4 — the round's serial integration — once ALL workers in the round have returned).
+   - **Round-level lock (hard) — session-local check PLUS a cross-session lock (issue #8), scoped
+     to the WHOLE ROUND, never to one worker.** Before dispatching the round, if a background
+     `autopilot-worker` (or a round already in flight, worktree or serial) for THIS repo is STILL
+     running in THIS session (check the agent strip / running tasks), do **NOTHING** this turn —
+     end `⏳ WORKING` and let it finish (it re-invokes you). That check alone has NO visibility into
+     a SEPARATE `/autopilot` session on the same repo (another terminal/tmux window) — the proven
+     root cause of camera-box #495 and the #499/#500-vs-#505 collision. So ALSO acquire the
+     cross-session lock ONCE, before dispatching ANY worker in the round: `python3
+     ~/devel/airuleset/airuleset.py autopilot-lock acquire --repo <repo path>` (exit 0 = acquired,
+     proceed to dispatch the WHOLE round; exit 1 = a DIFFERENT live session already holds it — do
+     **NOTHING** this turn, same as the session-local case, end `⏳ WORKING`, it re-invokes you and
+     you retry). NEVER dispatch a second ROUND on the same repo while either check says busy — N
+     workers running WITHIN one already-dispatched round sharing the one lock is exactly the point;
+     what's forbidden is a SECOND, independent round starting on the same repo mid-integration.
+     (A serial-fallback batch is still a round of size 1, one lock.) **Release the lock** only after
+     the WHOLE round's evidence is verified AND its integration (Step 4) has landed — a round with
+     even one worker still running, or still un-integrated, must never release early. A
+     crashed/never-returning worker doesn't wedge the lock forever regardless (a dead holder's lock
+     is also auto-stolen by the NEXT `acquire`, logged to `audits/autopilot-lock-steals.log`, as a
+     backstop).
 3. The worker re-validates each batched issue is still real (`verify-issue-still-valid.md` — defense
    in depth on top of 1b), then runs ONE cycle for the whole batch on one `dev` branch: version bump
    → per-issue TDD (each bug RED→GREEN, each member committed with its own `Closes #<n>`) → ONE push
@@ -417,6 +491,18 @@ Each loop turn:
    out to violate the gate mid-flight (schema/API/security/cross-cut discovered), the worker DROPS it
    from this PR (leaves its issue open) and finishes the rest — the loop re-dispatches the dropped one
    solo later.
+
+   > **Worktree/fleet mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
+   > integrates.** In `isolation: "worktree"` mode a worker does version bump → per-issue TDD
+   > (RED→GREEN, each member committed with its own `Closes #<n>`) → local `/review` +
+   > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — then
+   > RETURNS (branch name + worktree path in its evidence block). It does **NOT** push, does
+   > **NOT** open or merge the PR, does **NOT** deploy, and does **NOT** fire its own run-card —
+   > it cannot: it never sees the round's final merged/deployed state, because that only exists
+   > after the supervisor integrates every worker in the round (Step 4 below does all of this,
+   > ONCE, for the whole round). In the documented serial fallback (no `isolation:`), the
+   > worker's full self-contained cycle above — push → PR → merge → deploy → its own run-card —
+   > is UNCHANGED, exactly as it always was.
 
    > **Prefer durable-state resumption over `SendMessage` for a worker that has already ended.**
    > `SendMessage` (the subagent-continuation tool, loadable via `ToolSearch` on current builds, no
@@ -445,61 +531,92 @@ Each loop turn:
    > bounded poll (you ARE the long-lived component — `run_in_background` re-invokes you and
    > `--resume` continues you, exactly why the wait is safe here and fatal inside a subagent), and
    > when CI is green dispatch the next short-lived worker for the next promotion (develop→staging,
-   > staging→main, merge→deploy-verify). Serial-per-repo still holds (one active worker at a time);
-   > each worker's lifetime just shrinks. This is the SANCTIONED pattern — not an improvisation. For a
+   > staging→main, merge→deploy-verify). The round-level lock still holds across the whole
+   > multi-stage sequence (one round in flight per repo, same as always); each worker's lifetime
+   > just shrinks. This is the SANCTIONED pattern — not an improvisation. For a
    > plain 2-branch single-CI repo it isn't needed: the worker waits FOREGROUND through the one short
    > CI and runs the whole cycle itself.
-4. When the worker returns its evidence block, **independently verify** from primary sources
-   (never trust the claim). First read the worker's `dropped:` and `obsolete_closed:` lines and
-   compute the **SURVIVING set** = batch members MINUS dropped MINUS obsolete-closed. Verify the ONE
-   shared PR closed exactly the surviving set — a dropped / obsolete member is NOT a verify failure:
-   - `gh pr view <PR> --json state,mergedAt,mergeCommit,closingIssuesReferences` — confirm EVERY
-     **surviving** member is in `closingIssuesReferences` (dropped/obsolete members are NOT expected here)
-   - `gh run list -b main -L 1 --json conclusion`
-   - deployed version read from the live target (if there is a deploy)
-   - `gh issue view <N> --json state` for EACH member: **surviving** → `closed`; **obsolete-closed**
-     → `closed` (closed-with-evidence outside the PR, fine); **dropped** → `open` is CORRECT (it is
-     re-dispatched solo next, not a failure)
-   Confirmed → one line per surviving issue to `docs/autopilot-log.md`.
-   > **The per-ticket Discord completion card is fired by the WORKER, after merge + post-deploy
-   > verification — you do NOT send it by hand.** The worker runs `airuleset.py notify --run-card
-   > --repo <owner/name> --issue <N> --goal "<plain goal>" --achieved "<plain what landed>" --version
-   > "<deployed version read from the DOM>" --url "<Label=URL where the change shows>"` (one per member).
-   > The card header is just `🎫 #N`; `--goal`/`--achieved` are PLAIN, simple, non-technical Slovak (NOT
-   > the technical issue title); `--version` is the 📦 line; `--url` is the 🔗 deep link to SEE the change
-   > live (the page/dashboard sub-page it's visible on — NOT a PR/diff link, the user doesn't want it).
-   > `notify --run-card` gathers the remaining backlog from gh, takes `--achieved` as ✅ Dosiahnuté,
-   > @mentions the tmux owner (zbynek/marek), and posts ONE Slovak card — deduped on repo-name#issue
-   > (one card per ticket, re-dispatches never double-post). So the supervisor does NOT call `notify`;
-   > just confirm the worker carded each merged member.
-   > **Release the cross-session lock now that verification is done:** `python3
-   > ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees the repo
-   > for another `/autopilot` session's `acquire` to succeed. Release even when the batch was
-   > partially dropped (Step 3 note) or the worker's evidence looked wrong — the lock's job is
-   > "is a worker actively running", not "did the batch fully succeed". If a worker never returns at
-   > all (crashed mid-run), do NOT hand-release from a DIFFERENT campaign — the NEXT `acquire` attempt
-   > (this session or another) auto-steals a dead holder's lock (logged to
-   > `audits/autopilot-lock-steals.log`), so a stuck lock self-heals without manual intervention.
-5. **Report the batch as a REAL completion, then STOP the turn — the ARMED GOAL, not `⏳`, continues
-   the loop (2026-07-25 revision).** Once verification + the per-member run-cards are done and the
-   lock is released, end THIS turn with the FULL `## ✅ Work Complete` template
-   (`completion-report.md`) for the batch: audits — `✅ CI: green`, `✅ /plan-check: <N>/<N> fulfilled`
-   (RELAYS the worker's own `plan:` field — a per-issue self-audit; you never independently re-run
-   plan-check yourself, #215/#216), `✅ /review: clean — 0 🔴
-   0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what the worker already
-   confirmed before merging (its own PR gate, `agents/autopilot-worker.md`), never re-running the
+4. **Once EVERY worker in the round has returned**, independently verify each one's evidence block
+   from primary sources (never trust the claim). For each worker, read its `dropped:` and
+   `obsolete_closed:` lines and compute that worker's **SURVIVING set** = its batch members MINUS
+   dropped MINUS obsolete-closed — a dropped / obsolete member is **NOT a verify failure**. The
+   ROUND's surviving set is the union across all workers.
+
+   > **Serial fallback (no `isolation:`): unchanged, per-batch, exactly as before.** The worker
+   > already pushed, opened, and merged its OWN PR — verify it directly:
+   > - `gh pr view <PR> --json state,mergedAt,mergeCommit,closingIssuesReferences` — confirm EVERY
+   >   surviving member is in `closingIssuesReferences`
+   > - `gh run list -b main -L 1 --json conclusion`
+   > - deployed version read from the live target (if there is a deploy)
+   > - `gh issue view <N> --json state` for EACH member: surviving → `closed`; obsolete-closed →
+   >   `closed`; dropped → `open` is CORRECT
+   > Confirmed → one line per surviving issue to `docs/autopilot-log.md`, then the run-card /
+   > lock-release paragraphs below — the per-ticket Discord completion card is fired by the WORKER
+   > itself in this mode, directly at merge (`notify --run-card`), NOT by the supervisor; just
+   > confirm the worker carded each merged member.
+
+   > **Fleet/worktree mode: ROUND INTEGRATION — serial, supervisor-owned, run ONCE for the whole
+   > round.** This is what replaces the worker's own push→PR→merge→deploy for every batch in the
+   > round simultaneously:
+   > 1. For each worker (any order), spot-check its evidence against its own worktree: `git -C
+   >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
+   >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
+   >    results genuinely exist on that branch before trusting it enough to merge.
+   > 2. Merge each worker's branch **`--no-ff`** into the round's target — local `main` for a
+   >    local-merge repo, local `dev` for a `dev`→`main` PR repo (repo-flow policy above) — ONE AT
+   >    A TIME, in a fixed order (e.g. lowest issue number first). Resolve any conflict yourself; a
+   >    worktree's branch is a normal ref shared via the ONE `.git`, so it merges cleanly even after
+   >    the worktree itself is later removed.
+   > 3. Run **ONE full test/CI cycle** against the round's fully-merged result — never one per
+   >    worker.
+   > 4. **ONE push wave, integrating every worker's changes at once**: local-merge repo → one
+   >    `push` after all merges + the one green suite; `dev`→`main` PR repo → open (or update) ONE
+   >    PR whose body lists `Closes #<n>` for EVERY surviving member across EVERY worker in the
+   >    round, then `pr-merge-policy.md`'s normal gate→merge→deploy flow, ONCE.
+   > 5. `git worktree remove` each worker's worktree once its branch is safely merged (or leave it
+   >    for salvage per `salvage-before-discarding-work.md` if anything looked wrong — never delete
+   >    a worktree whose branch you have not yet confirmed merged).
+   > Then run the SAME per-member verification bullets as the serial-fallback box above, against
+   > the ONE round PR/push instead of a per-worker one, before writing `docs/autopilot-log.md`.
+   > **Fire the per-ticket run-card yourself, for EACH surviving member, right after this ONE
+   > integration lands** — `airuleset.py notify --run-card --repo <owner/name> --issue <N> --goal
+   > "<plain goal>" --achieved "<plain what landed>" --version "<deployed version read from the
+   > DOM>" --url "<Label=URL where the change shows>"` (never the worker's own call in this mode —
+   > it never sees the final deployed state). The card header/format is unchanged (🎫/🎯/✅/📦/🔗),
+   > deduped on repo-name#issue exactly as when the worker fires it itself.
+
+   > **Release the cross-session lock now that the round's verification (and, in fleet mode,
+   > integration) is done:** `python3 ~/devel/airuleset/airuleset.py autopilot-lock release --repo
+   > <repo path>` — this frees the repo for another `/autopilot` session's `acquire` to succeed.
+   > Release even when a member was partially dropped (Step 3 note) or a worker's evidence looked
+   > wrong — the lock's job is "is a round actively running", not "did the round fully succeed". If
+   > a worker never returns at all (crashed mid-run), do NOT hand-release from a DIFFERENT
+   > campaign — the NEXT `acquire` attempt (this session or another) auto-steals a dead holder's
+   > lock (logged to `audits/autopilot-lock-steals.log`), so a stuck lock self-heals without manual
+   > intervention.
+5. **Report the ROUND as a REAL completion, then STOP the turn — the ARMED GOAL, not `⏳`, continues
+   the loop (2026-07-25 revision).** Once every worker's verification + integration + the per-member
+   run-cards are done and the lock is released, end THIS turn with the FULL `## ✅ Work Complete`
+   template (`completion-report.md`) for the whole round: audits — `✅ CI: green`,
+   `✅ /plan-check: <N>/<N> fulfilled` (RELAYS each worker's own `plan:` field — a per-issue
+   self-audit; you never independently re-run plan-check yourself, #215/#216), `✅ /review: clean —
+   0 🔴 0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what
+   each worker already confirmed locally before its branch was merged (its own PR gate in serial
+   mode, its own local run in worktree mode — `agents/autopilot-worker.md`), never re-running the
    skills yourself), `✅ Deploy: <version>`
-   — then Goal/What changed in plain language, the 🌐 URL(s) from the worker's `--url`, and the PR
-   title/link/merge SHA — terminating in `✅ DONE: <plain outcome, e.g. "#41+#43 merged -> v1.2.3, CI
-   green">`. This is a GENUINELY full completion of the batch (the worker already returned, nothing is
-   in flight at that instant) — not a lie, and NOT the general "something will wake me up" case
-   (`message-status-marker.md`): the signal that MORE work follows is the **ARMED GOAL** Claude Code
-   shows in its footer (`◎ /goal`), never a `⏳ WORKING` tail bolted onto an already-finished batch.
-   This is also what lets the ticket-boundary `/compact` (job 14, `notify-compact-request.sh`) fire
-   PER BATCH instead of once for the whole backlog — a completed batch's durable state already lives
-   in git/GitHub, so it is a safe compaction boundary every time. The idle Discord ping is separately
-   guarded while the goal stays armed (`milestone-notifications.md`) — the run-card already gave phone
-   visibility for this batch, so nothing double-pings.
+   — then Goal/What changed in plain language (covering every member of the round, not just one
+   worker's batch), the 🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (the
+   round's ONE PR, per the repo-flow policy) — terminating in `✅ DONE: <plain outcome, e.g.
+   "#41+#43+#317 merged -> v1.2.3, CI green">`. This is a GENUINELY full completion of the round
+   (every worker already returned, nothing is in flight at that instant) — not a lie, and NOT the
+   general "something will wake me up" case (`message-status-marker.md`): the signal that MORE work
+   follows is the **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`), never a `⏳ WORKING`
+   tail bolted onto an already-finished round. This is also what lets the ticket-boundary `/compact`
+   (job 14, `notify-compact-request.sh`) fire PER ROUND instead of once for the whole backlog — a
+   completed round's durable state already lives in git/GitHub, so it is a safe compaction boundary
+   every time. The idle Discord ping is separately guarded while the goal stays armed
+   (`milestone-notifications.md`) — the run-cards already gave phone visibility for this round, so
+   nothing double-pings.
    **Reduced-authority streams (branch-merge / fork-no-merge) carry the SAME Step 5 mandate — never
    silence (#58, the david #2129 incident).** There is no PR-to-main, no merge, no deploy for these
    streams — replace the PR-title/merge-SHA/`✅ Deploy:`/🌐 lines with `completion-report.md`'s
@@ -787,10 +904,20 @@ worker discovers go into the repo `CLAUDE.md`. If the session ends, `--resume` c
 
 ## Guardrails (hard — never relax)
 
-- **Serial per repo.** ONE worker at a time — the two-branch workflow makes parallel same-repo
-  workers collide on `dev`. The CI-cost win comes from BUNDLING many issues into that ONE worker's
-  single PR/CI cycle (Step 3.1), **not** from running workers in parallel. (Different repos can each
-  run their own `/autopilot`.)
+- **Serial INTEGRATION per repo, PARALLEL dispatch by default (#317, 2026-08-08).** ONE round in
+  flight per repo at a time (the round-level lock, Step 3.2), and integration inside that round is
+  STRICTLY serial — merges, the one test/CI cycle, and the push all happen ONE AT A TIME,
+  supervisor-owned, never simultaneously. DISPATCH, by contrast, defaults to a small FLEET of
+  `isolation: "worktree"`-isolated workers running IN PARALLEL, one per solo ticket or bundle-safe
+  batch — the collision risk that used to force one-worker-at-a-time DISPATCH was two workers
+  sharing the SAME `dev` tree; a worktree gives each worker its own checkout sharing only `.git`,
+  so that risk is gone for dispatch specifically. Falling back to the old fully-serial single-worker
+  shape (no `isolation:`) is documented and still correct whenever worktree isolation is unavailable
+  or a round's candidates overlap too heavily to safely parallelize (Step 3). Two INDEPENDENT
+  levers cut cost here, and neither replaces the other: BUNDLING many issues into ONE worker's
+  single PR/CI cycle (Step 3.1) cuts CI cost per worker; FLEET DISPATCH (Step 3.2) cuts wall-clock
+  by running several bundled batches at once. (Different repos can each run their own `/autopilot`
+  independently, exactly as before.)
 - **Independent verification is mandatory** — a worker's "merged and deployed" counts only after
   the main loop re-reads PR/CI/version/issue state from primary sources (premature-done is the #1
   long-running-agent failure).
