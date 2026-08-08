@@ -4043,6 +4043,16 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
                          "create=False must NEVER issue a create POST")
 
     def test_provision_question_thread_find_only_still_finds_an_existing_thread(self):
+        # env_path= is MANDATORY here (and in every sibling test that can
+        # reach _env_upsert's WRITE branch) — omitting it defaults to the
+        # REAL ~/.claude/channels/discord/.env (_env_path()'s own default)
+        # and this call's `create=False` still reaches an _env_upsert once
+        # `find` succeeds. A prior version of this test omitted it and
+        # genuinely OVERWROTE this box's live DISCORD_NOTIFICATION_CHANNEL_
+        # ZBYNEK_Q with the fake "found1" fixture value — caught live via
+        # #330's own end-to-end verification (a real ❓ send then failed
+        # with HTTP 400, posting to the bogus "found1" "channel"). Repaired
+        # via a real, read-only find_owner_question_thread rediscovery.
         def fake_http(token, method, path, payload=None):
             if method == "GET" and path == "channels/zthread":
                 return {"parent_id": "parentchan", "guild_id": "g1"}
@@ -4051,25 +4061,38 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
                                      "name": "claude-zbynek-q"}]}
             return None
 
-        env = {"DISCORD_BOT_TOKEN": "tok",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
-        result = self.notify.provision_question_thread(
-            "zbynek", env=env, create=False, http=fake_http)
-        self.assertEqual(result, "found1")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n"
+                               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread\n")
+            env = {"DISCORD_BOT_TOKEN": "tok",
+                   "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+            result = self.notify.provision_question_thread(
+                "zbynek", env=env, env_path=p, create=False, http=fake_http)
+            self.assertEqual(result, "found1")
+            self.assertIn("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=found1",
+                          Path(p).read_text())
 
     def test_provision_question_thread_default_still_creates(self):
         # The explicit, human-typed CLI path (create=True, the default)
         # must be COMPLETELY unaffected by adding the create= parameter.
+        # env_path= isolation — see the comment on the sibling test above.
         def fake_http(token, method, path, payload=None):
             if method == "GET":
                 return {"parent_id": "parentchan"}
             return {"id": "createdid"}
 
-        env = {"DISCORD_BOT_TOKEN": "tok",
-               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
-        result = self.notify.provision_question_thread(
-            "zbynek", env=env, http=fake_http)
-        self.assertEqual(result, "createdid")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n"
+                               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=zthread\n")
+            env = {"DISCORD_BOT_TOKEN": "tok",
+                   "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+            result = self.notify.provision_question_thread(
+                "zbynek", env=env, env_path=p, http=fake_http)
+            self.assertEqual(result, "createdid")
+            self.assertIn("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=createdid",
+                          Path(p).read_text())
 
     # --- find_owner_question_thread (adversarial-review MAJOR fix) --------
     def test_find_owner_question_thread_matches_active_thread(self):
