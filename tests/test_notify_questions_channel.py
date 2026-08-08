@@ -24,7 +24,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 import unittest.mock as m
 from pathlib import Path

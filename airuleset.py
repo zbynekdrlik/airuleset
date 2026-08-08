@@ -4623,7 +4623,8 @@ def cmd_notify(args):
       --body "<markdown>"  send arbitrary markdown (the general primitive).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
-                        notification_channel, resolve_owner, send)
+                        notification_channel, resolve_owner, resolve_questions_channel,
+                        send)
 
     if getattr(args, "record_question", False):
         # Record a ❓ ping's Discord message id → the session that asked, so the
@@ -4669,8 +4670,17 @@ def cmd_notify(args):
     if getattr(args, "channel_id", False):
         # #296: --kind questions resolves the owner's SEPARATE questions
         # thread; omitted/--kind default is the pre-#296 behaviour unchanged.
-        sys.stdout.write(notification_channel(kind=getattr(args, "kind", None)
-                                              or "default"))
+        # #330: "questions" goes through resolve_questions_channel(), which
+        # additionally makes a not-yet-provisioned "-q" thread LOUD (a
+        # distinguishable delivery-log line, not an indistinguishable "sent")
+        # and SELF-HEALING (a guarded background provision attempt) instead
+        # of silently falling back forever — the exact gap that let
+        # gatekeeper's ❓ history route to the wrong thread with zero trace.
+        kind = getattr(args, "kind", None) or "default"
+        if kind == "questions":
+            sys.stdout.write(resolve_questions_channel())
+        else:
+            sys.stdout.write(notification_channel(kind=kind))
         return
 
     if getattr(args, "mirror_owners", False):

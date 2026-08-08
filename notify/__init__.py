@@ -22,6 +22,7 @@ unknown owner, or a network error degrades to "no mention / no send", never rais
 """
 import os
 import re
+import sys
 import json
 import time
 import subprocess
@@ -277,6 +278,103 @@ def notification_channel(env=None, owner=None, kind="default"):
         if per:
             return per
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
+
+
+# Min seconds between background provision-thread spawns, PER OWNER (#330) —
+# mirrors statusbar.SPAWN_GUARD_S's own marker-mtime shape, just a wider
+# window: provisioning is a one-time-until-persisted repair, not a routine
+# per-render refresh, so there is no benefit to retrying every few seconds.
+_QTHREAD_SPAWN_GUARD_S = 300
+
+
+def _qthread_spawn_guard_path(owner):
+    return os.path.join(_claude_dir(), "notify-qthread-spawn", owner)
+
+
+def _spawn_provision_question_thread(owner):
+    """Kick a DETACHED, background `notify --provision-question-thread` for
+    `owner` (#330) — guarded by a marker mtime (mirrors
+    `statusbar._spawn_refresh`'s own shape verbatim, no new mechanism) so a
+    burst of ❓ deliveries for the same not-yet-provisioned owner spawns at
+    most one attempt per `_QTHREAD_SPAWN_GUARD_S`. Never raises: a failure to
+    even SPAWN the attempt just means the box stays on the (already safe,
+    already logged) fallback a little longer — never a lost ping, since the
+    delivery this rides alongside has ALREADY been resolved by the caller
+    using the same fallback channel it always has."""
+    guard = _qthread_spawn_guard_path(owner)
+    try:
+        if (os.path.exists(guard)
+                and time.time() - os.path.getmtime(guard) < _QTHREAD_SPAWN_GUARD_S):
+            return
+        os.makedirs(os.path.dirname(guard), exist_ok=True)
+        with open(guard, "w"):
+            pass
+    except OSError:
+        return
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "airuleset.py")
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "notify", "--provision-question-thread",
+             "--owner-name", owner],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        # Could not even LAUNCH the self-heal attempt (e.g. python3 not on
+        # PATH for this process) — the fallback delivery this rides
+        # alongside already happened safely (see resolve_questions_channel);
+        # log the degraded state instead of guessing whether a retry helps.
+        log_delivery("spawn-error", kind="questions", key=owner, reason=repr(exc))
+
+
+def resolve_questions_channel(env=None, owner=None, spawn=None):
+    """The channel id a REAL ❓ delivery should POST to (#330) — the single
+    call site `--channel-id --kind questions` (and so
+    `hooks/notify-discord-send.sh`'s `emit_one()`, the ONLY path that ever
+    delivers a genuine question) should use, in place of calling
+    `notification_channel(kind="questions")` directly.
+
+    The RETURNED value is byte-identical to `notification_channel`'s own —
+    this never changes WHICH channel a fallback delivery lands in, only
+    whether the fallback is silent. When the owner's `-q` thread IS already
+    configured on this box (the fast, common path — dev1, and any box
+    someone has run `--provision-question-thread` on), this is a pure,
+    zero-network read with NO side effect at all, identical to before.
+
+    Only when the owner's `_Q` key is genuinely ABSENT locally does this
+    additionally (1) write a LOUD, DISTINGUISHABLE delivery-log line
+    (`status="fallback"`, `reason="q-thread-not-provisioned-on-this-host"`)
+    — so a silent fallback (100% of gatekeeper's ❓ history, live-confirmed
+    #330) is a `grep fallback notify-delivery.log` away instead of hiding
+    inside an identical `sent` line — and (2) kick a GUARDED, DETACHED
+    background attempt (`_spawn_provision_question_thread`, default; a test
+    double via `spawn=`) to provision it, so the NEXT ❓ for that owner on
+    that box self-heals with no manual per-box step ever needed again.
+
+    A fully SYNCHRONOUS provisioning attempt before falling back was
+    considered and rejected here: `find_owner_question_thread` /
+    `create_owner_question_thread` can need up to 3-5 sequential Discord
+    REST round-trips (`_discord_api`'s own per-call timeout is 6s) against a
+    Stop-hook budget of only 15s total for `notify-discord-pending.sh`
+    (`settings/hooks.json`) — a budget the EXISTING code already spends ~3s
+    of on its own pre-send settle sleep plus up to 5s on the real POST's own
+    `--max-time`. Blocking the in-flight delivery on that risks the Stop
+    hook itself timing out and the ❓ never reaching the user at all —
+    strictly worse than today's silent-but-safe fallback, for a device whose
+    entire purpose is guaranteeing a genuine question always reaches the
+    phone."""
+    env = _read_env() if env is None else env
+    owner = resolve_owner() if owner is None else owner
+    chan = notification_channel(env=env, owner=owner, kind="questions")
+    if owner:
+        configured = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q")
+                     or "").strip()
+        if not configured:
+            log_delivery("fallback", kind="questions", key=owner,
+                         reason="q-thread-not-provisioned-on-this-host")
+            (spawn if spawn is not None
+             else _spawn_provision_question_thread)(owner)
+    return chan
 
 
 # --------------------------------------------------------------------------- #
