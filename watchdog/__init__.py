@@ -10824,6 +10824,21 @@ GOAL_REARM_PROGRESS_WINDOW_S = 6 * 3600   # mirrors statusbar.py's own
                                             # fresh means an ACTIVE run, not
                                             # week-old leftover state
 
+GOAL_REARM_UNTRACKED_PING_S = 30 * 60  # #324 -- how long a session may sit
+                                        # in the untracked-no-evidence state
+                                        # (footer dark, `rec['mark']` never
+                                        # resolved, no live autopilot-
+                                        # progress heartbeat, no job-9
+                                        # goalarm record for this pane
+                                        # either) before this job stops
+                                        # merely LOGGING it once and instead
+                                        # tells a human -- montalu2@subdev's
+                                        # own #324 incident was already past
+                                        # this (30 real minutes, per #321's
+                                        # own evidence) by the time it was
+                                        # filed, so this is not a
+                                        # speculative bound.
+
 GOAL_ARMED_ACTIVITY_GRACE_S = 5 * 60   # #312-hardening (live pane evidence,
                                         # 2026-08-08): CC's own `◎ /goal`
                                         # footer glyph can be TRUNCATED off
@@ -10889,7 +10904,8 @@ def _live_autopilot_progress(cwd, progress_dir, now):
 
 
 def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
-                            progress_dir=None, state=None):
+                            progress_dir=None, state=None, pid=None,
+                            run=None, send_fn=None, dry_run=False):
     """#312 -- `rec['mark']` used to collapse TWO structurally different
     states into one silent-forever `continue` at `goal_rearm`'s own
     `if rec.get("mark") != "set":` gate: an EXPLICIT `Goal cleared:` THIS
@@ -10971,27 +10987,180 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
     minutes, for a session with a dark footer and two untracked recs).
     Logged ONCE per session (`state['goalrearm_noprogress'][sid]`, mirrors
     the `goalarm_cleared`/`goalarm_noresolve` log-once-then-quiet shape
-    already used elsewhere in this file), popped the moment progress
-    genuinely becomes live -- the recovery DECISION itself is UNCHANGED
-    (still never acts without live batch-progress evidence); only the
-    silence is fixed."""
+    already used elsewhere in this file), popped the moment EITHER
+    evidence source below genuinely becomes live -- the recovery DECISION
+    itself is UNCHANGED (still never acts without independent evidence);
+    only the silence was fixed by #321.
+
+    #324 -- `_live_autopilot_progress` used to be the ONLY evidence this
+    function would ever pay the (comparatively expensive) full-file scan
+    for, which permanently excludes a manually-armed `/goal` loop (no
+    batch `/autopilot` progress heartbeat exists for that shape of
+    session at all, by design) -- exactly montalu2@subdev's own live
+    incident. `state['goalarm']` (job 9's own per-pane dedup record,
+    `ga[pid] = int(now)`, set on every REAL -- non-transient-skip -- arm
+    attempt) is a second, independent, CHEAP (plain dict lookup, no
+    filesystem I/O) piece of evidence that a `/goal` really was sent to
+    THIS pane at some point -- the "goalarm record of a genuinely-sent
+    arm" alternative the ticket names. Either evidence source unlocks the
+    one-shot scan below; the existing `rec['recovery_scanned']` one-shot
+    bound already caps its cost regardless of which one triggered it.
+    (The ticket's OTHER named alternative, "footer `◎ /goal` read from the
+    pane", needs no code here at all -- `goal_rearm`'s own per-session
+    loop already reads `pane_goal_armed(captured)` BEFORE this function is
+    ever reached, and a lit footer short-circuits straight into the armed
+    branch below, never landing here.)
+
+    If NEITHER evidence source ever resolves, this must not end in silent
+    waiting either (the ticket's second requirement -- "nesmie to skončiť
+    tichým čakaním na človeka"): `state['goalrearm_noprogress'][sid]` now
+    stores the WALL-CLOCK TIMESTAMP of the first sighting (not a bare
+    `True`), so a later sweep can measure real elapsed dark time; once
+    that clears `GOAL_REARM_UNTRACKED_PING_S`, ONE deduped Discord ping
+    fires (`state['goalrearm_untracked_pinged'][sid]`, mirrors
+    `_goal_stall_nudge`'s own give-up shape verbatim: the owner resolved
+    via `stream_redirect` over the pane's raw owner, a stable
+    `dedup_key`, silent under `dry_run`), telling the human this
+    session's `/goal` has no
+    recoverable trace and needs a manual re-arm. Rejected alternative --
+    the ticket's OTHER option, an AUTOMATIC re-arm reusing job 9's own
+    delivery machinery ("rovnaká cesta, akou job 9 armuje po banneri"):
+    this function has none of job 9's own fresh-capture/busy/draft
+    classification (`_classify_boundary`/`pane_in_mode`, always re-checked
+    immediately before job 9 ever types), and blindly retyping a `/goal`
+    into a session with zero live evidence it is even safe to type into
+    risks the #35/#36 stash/collapse hazard class this file has hit
+    repeatedly; the ticket itself offers the ping as an equally acceptable
+    alternative ("alebo sa to eskaluje pingom"), and today NEITHER
+    happens ("dnes sa nedeje ani jedno") -- a bounded, deduped, human-
+    facing ping closes exactly that gap without any new keystroke-sending
+    code path. Both new bookkeeping keys are popped the moment EITHER
+    evidence source resolves, so a later, genuinely NEW dark episode is
+    never permanently suppressed by an old one's ping."""
     if rec.get("recovery_scanned"):
         return []
-    if not _live_autopilot_progress(cwd, progress_dir, now):
+    # #324-review (cost note) -- the goalarm-record check is a plain dict
+    # lookup (no I/O); `_live_autopilot_progress` is a real file read.
+    # Try the cheap one FIRST so it can short-circuit the expensive one,
+    # mirroring the #320-review "cheap gates before an expensive read"
+    # discipline this file already applies elsewhere.
+    #
+    # #324-review MAJOR-4 -- a bare `state['goalarm'][pid]` truthiness
+    # check has NO freshness bound at all, unlike `_live_autopilot_
+    # progress`'s own explicit `< GOAL_REARM_PROGRESS_WINDOW_S` window
+    # (whose comment already says "fresh means an ACTIVE run, not
+    # week-old leftover state"). `state['goalarm']` is a NAMED store the
+    # cleanup loop deliberately never prunes, and its key is a tmux PANE
+    # ID -- unique within one tmux server generation, but reused from
+    # `%0` after a server restart while the state file persists across
+    # it. Reproduced live on dev1: entries up to 16.9 days old, several
+    # colliding with CURRENTLY live, unrelated panes. Bound it by the
+    # SAME window `_live_autopilot_progress` already uses, with the same
+    # `0 <=` lower clamp #312 uses for its own two clocks (a future-dated
+    # entry -- clock skew -- must never look "already fresh").
+    has_goalarm_record = False
+    if pid and state is not None:
+        ga_ts = (state.get("goalarm") or {}).get(pid)
+        if isinstance(ga_ts, (int, float)) and not isinstance(ga_ts, bool):
+            has_goalarm_record = (
+                0 <= (now - ga_ts) < GOAL_REARM_PROGRESS_WINDOW_S)
+    has_progress = (has_goalarm_record
+                    or _live_autopilot_progress(cwd, progress_dir, now))
+    if not has_progress:
+        logs = []
         if state is not None:
             nr = state.setdefault("goalrearm_noprogress", {})
-            if not nr.get(sid):
-                nr[sid] = True
-                return ["skip untracked-no-progress (goal-rearm) %s -> "
-                        "this session's /goal marker was never tracked and "
-                        "there is no live autopilot-progress evidence for "
-                        "this repo -- recovery only ever acts on a batch "
-                        "loop's own heartbeat, so a manually-armed /goal "
-                        "with a lost transcript marker stays dark until a "
-                        "human re-arms it" % loc]
-        return []
+            first_seen = nr.get(sid)
+            # #324-review CRITICAL-2/MINOR-5 -- `first_seen` used to be
+            # trusted verbatim the moment it was non-None. Two ways that
+            # is unsafe: (a) a LEGACY entry written by the pre-#324 code
+            # is the bare bool `True` -- `now - True` is `now - 1`
+            # (Python treats `bool` as `int`), which clears the 30-min
+            # bound by ~56 years and pings on the very first sweep after
+            # deploy with a nonsense "vyše 29770187 minút" claim
+            # (reproduced live against dev1's own real persisted state);
+            # (b) a FUTURE-dated value (clock skew, a restored snapshot)
+            # would never clear the bound at all, silently reproducing
+            # the exact permanent-silence defect this whole branch
+            # exists to remove. Re-stamp to `now` whenever the stored
+            # value isn't a genuinely usable, non-future number --
+            # mirrors #312's own `0 <=` future-date guard on its two
+            # clocks, one level up.
+            if (not isinstance(first_seen, (int, float))
+                    or isinstance(first_seen, bool)
+                    or first_seen > now):
+                first_seen = None
+            if first_seen is None:
+                nr[sid] = now
+                first_seen = now
+                logs.append(
+                    "skip untracked-no-progress (goal-rearm) %s -> this "
+                    "session's /goal marker was never tracked and there "
+                    "is no live autopilot-progress evidence, nor a job-9 "
+                    "arm record, for this repo -- recovery only ever acts "
+                    "on one of those two, so a manually-armed /goal with a "
+                    "lost transcript marker stays dark until either "
+                    "resolves or the %ds escalation ping fires"
+                    % (loc, GOAL_REARM_UNTRACKED_PING_S))
+            pinged = state.setdefault("goalrearm_untracked_pinged", {})
+            if (not pinged.get(sid)
+                    and (now - first_seen) > GOAL_REARM_UNTRACKED_PING_S):
+                if dry_run:
+                    # #324-review CRITICAL-1 -- a `--dry-run` sweep run
+                    # against REAL persisted state (this repo's own
+                    # documented manual diagnostic) must NEVER mark
+                    # `pinged` -- the exact `dark_pinged` #238-review
+                    # 🟡F4 fix already made this job's OTHER give-up
+                    # ping immune to: setting the flag before checking
+                    # `send_fn`/`dry_run` would permanently consume the
+                    # one-shot escalation with nothing ever actually
+                    # sent, silently reproducing the very defect this
+                    # branch exists to remove. (The unfixed sibling,
+                    # `_goal_stall_nudge`, still has the pre-#324 shape
+                    # -- a pre-existing, out-of-scope defect under this
+                    # repo's own FREEZE policy, never a precedent to
+                    # copy.) READY here is diagnostic-only: it neither
+                    # marks `pinged` nor calls `send_fn`, so a later
+                    # REAL sweep still escalates normally.
+                    logs.append(
+                        "READY (goal-rearm untracked-escalate) %s -> "
+                        "would ping the owner -- no evidence this goal "
+                        "was ever armed after %ds dark"
+                        % (loc, int(now - first_seen)))
+                elif send_fn is not None:
+                    from notify import stream_redirect
+                    pinged[sid] = True
+                    send_fn(
+                        "⚠️ **%s** — `/goal` v tejto relácii nemá žiadnu "
+                        "dohľadateľnú stopu (pätička nesvieti, žiadny "
+                        "priebeh dávky, ani záznam o odoslanom arme) už "
+                        "vyše %d minút. Treba ju ručne prearmovať (%s)."
+                        % (project_label(cwd),
+                           int((now - first_seen) // 60), loc),
+                        owner=stream_redirect(pane_owner(pid, run)) or None,
+                        # #324-review MAJOR-3 -- `sid` ALONE is stable
+                        # across a revival: a session whose evidence
+                        # resolves (popping this bookkeeping), then
+                        # goes dark again with NO evidence a second
+                        # time, would produce the IDENTICAL dedup key
+                        # for the genuinely new episode -- the same
+                        # class `dark_pinged`'s own dedup fix already
+                        # closed one job above. Folding in `first_seen`
+                        # (this episode's own anchor, re-stamped fresh
+                        # whenever the episode genuinely restarts,
+                        # per the CRITICAL-2/MINOR-5 fix above) makes
+                        # each episode's ping distinct.
+                        dedup_key="goalrearm-untracked:%s:%d"
+                                  % (sid, int(first_seen)),
+                        dry_run=dry_run)
+                    logs.append(
+                        "ESCALATED (goal-rearm) %s -> no evidence this "
+                        "goal was ever armed after %ds dark; pinged the "
+                        "owner" % (loc, int(now - first_seen)))
+        return logs
     if state is not None:
         state.get("goalrearm_noprogress", {}).pop(sid, None)
+        state.get("goalrearm_untracked_pinged", {}).pop(sid, None)
     _, mark = scan_goal_markers(tpath, off=0)
     if mark is None or mark.get("state") != "set":
         rec["recovery_scanned"] = True
@@ -11013,10 +11182,12 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
     rec["payload"] = mark.get("payload")
     rec["mts"] = mts
     rec["mseen"] = now
-    return ["RECOVERED (goal-rearm) %s -> live autopilot-progress evidence "
-            "present and the transcript's own last /goal marker (never "
-            "scanned by this job before) was 'set' -- re-arm eligibility "
-            "restored" % loc]
+    return ["RECOVERED (goal-rearm) %s -> %s and the transcript's own "
+            "last /goal marker (never scanned by this job before) was "
+            "'set' -- re-arm eligibility restored"
+            % (loc, "a job-9 goalarm record for this pane is present"
+               if has_goalarm_record else
+               "live autopilot-progress evidence present")]
 
 
 def _goal_cleared_stale(rec):
@@ -11160,6 +11331,14 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # #160 — genuinely alive again; a FUTURE dark episode (a
                 # different death) must be able to ping once more.
                 rec["dark_pinged"] = False
+            if state is not None:
+                # #324 — the footer is proof of REALITY that is stronger
+                # than anything `_goal_recover_untracked` itself could ever
+                # observe; drop its own untracked-no-evidence bookkeeping
+                # so a LATER, genuinely new dark episode gets its own fresh
+                # escalation rather than being silently gated by this one.
+                state.get("goalrearm_noprogress", {}).pop(sid, None)
+                state.get("goalrearm_untracked_pinged", {}).pop(sid, None)
             if rec.get("queued_at"):
                 rec["queued_at"] = None
                 logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
@@ -11196,7 +11375,9 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs += _goal_recover_untracked(now, rec, sid, cwd,
                                                 tpath, tmtime, loc,
                                                 progress_dir=progress_dir,
-                                                state=state)
+                                                state=state, pid=pid,
+                                                run=run, send_fn=send_fn,
+                                                dry_run=dry_run)
                 _save()
             elif _goal_cleared_stale(rec):
                 # #320 -- REALITY (this job's OWN direct footer-lit
