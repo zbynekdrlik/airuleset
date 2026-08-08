@@ -5649,5 +5649,213 @@ class TestThinContextNeverStrandsAClaim(unittest.TestCase):
         self.assertIn("/compact", tmux2.typed_texts())
 
 
+# --------------------------------------------------------------------------- #
+# #333 (2026-08-08, three same-day live incidents on dev1's own supervisor
+# session, forensically traced against its real transcript JSONL +
+# compact-sync.log + journalctl — see the issue's design comment for the
+# full trace) — `/compact` landed right after a `❓ ASKED`/`⏳ WORKING` turn,
+# TWICE, then a THIRD time after a plain `⏳ WORKING` turn with no question
+# at all (5 background workers in flight, no Work Complete).
+#
+# Root cause, confirmed from the transcript's own `queue-operation`
+# entries: `/compact` was TYPED into a BUSY pane (permitted for a
+# `proven_boundary` origin — #122/#301 — and unconditionally in
+# `deliver_compact_now` — #65) at a moment when the marker read was safe,
+# then sat QUEUED through several `/goal`-loop-rejected continuations, and
+# only DRAINED (executed) at whichever turn's Stop was next genuinely
+# ACCEPTED — which, under an actively-working `/goal` loop, is essentially
+# always either true completion or a `❓`/`⏳`-blocked turn. The
+# marker-freshness check at TYPE time cannot see what the CURRENTLY-BUSY
+# generation will eventually produce, so it cannot prevent this. The THIRD
+# occurrence additionally exposed `_COMPACT_NON_BOUNDARY_MARKERS_PROVEN`
+# (only `❓`, not `⏳`, blocked a proven-boundary origin — #121) combined
+# with `COMPACT_DEFER_GRACE_S`'s "deliver anyway" grace-elapsed override:
+# together they let a plain, question-free `⏳ WORKING` progress turn get
+# compacted the instant the live-tasks grace window ran out.
+#
+# THE FIX (user directive, overrides #121's own reasoning — #121 assumed a
+# supervisor session "never ends any other way than ⏳"; live evidence
+# refutes it: this exact session's two confirmed-clean compacts both
+# landed on a literal `✅ DONE` terminal turn):
+#
+#   1. `_compact_not_at_boundary` no longer special-cases a proven-boundary
+#      origin's marker set — `❓` AND `⏳` block delivery for EVERY origin.
+#   2. `kind == "busy"` ALWAYS blocks delivery (job 14's own busy-bypass
+#      for `proven_boundary`, AND `deliver_compact_now`'s unconditional
+#      "busy is safe to type into" premise, are both removed) — `/compact`
+#      is only ever TYPED when the pane is observably at rest right now,
+#      so there is no window between "marker looked safe" and "keystrokes
+#      actually executed" for the state to have moved on.
+#
+# A parked request is never lost: it stays in `compact-requests.json`
+# (job 14) or falls back to the polled retry (`deliver_compact_now`), and
+# fires at the next sweep that finds the session genuinely idle on a
+# `✅`/no-marker turn — proven by
+# `test_a_held_request_delivers_once_a_genuine_boundary_arrives` below.
+# --------------------------------------------------------------------------- #
+
+class TestCompactRequiresGenuineIdleBoundary(unittest.TestCase):
+    """#333 — extends #109/#102's marker gate (❓/⏳ block) and #122/#301's
+    busy-bypass to apply IDENTICALLY regardless of origin. The historical
+    #121/#122/#301 exemptions for `proven_boundary` origins are REVERSED
+    here on direct user instruction, with the live evidence that motivated
+    the reversal recorded in the section comment above and in the #333
+    issue's own design comment."""
+
+    SID = "sess-333"
+    CWD = "/home/x/proj333"
+    PANE = "%33"
+    PROVEN = "subagent-stop"
+    SELF = "self-callback"
+    WORKING_NO_ASK = "⏳ WORKING: 5 workerov beží — hlásim sa pri dokončení."
+    DONE = "✅ DONE: kolo zmergované, backlog pokračuje."
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    # -- job 14 (compact_ticket_boundary) ------------------------------- #
+
+    def test_job14_holds_a_plain_working_turn_even_for_a_proven_boundary(self):
+        # the THIRD occurrence, exactly: no ❓ anywhere, no Work Complete,
+        # just an ordinary mid-work progress report — must NOT compact.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)   # pane itself is idle right now
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_job14_never_types_into_a_busy_pane_for_a_proven_boundary(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_BUSY_CAP)
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_job14_never_types_into_a_busy_pane_even_with_grace_elapsed(self):
+        # the THIRD occurrence's exact combination: live background tasks,
+        # PAST the #250 grace window, busy pane, plain working marker,
+        # proven-boundary origin. The old code's grace-elapsed branch fell
+        # straight through the busy check for this origin; it must not.
+        # Two sweeps, same shape as
+        # test_repeated_re_records_do_not_reset_the_grace_anchor above:
+        # sweep 1 stamps `deferred_since`; sweep 2 (past grace) must STILL
+        # refuse to type, because the pane is busy.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+        tmux1 = CompactFakeTmux(CB_BUSY_CAP)
+        with m.patch.object(wd, "_session_has_live_bg_tasks", return_value=True):
+            wd.compact_ticket_boundary(
+                t0, tmux1, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+                path=path, projects_dir=proj)
+        self.assertEqual(tmux1.sent, [])
+
+        t1 = t0 + wd.COMPACT_DEFER_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_BUSY_CAP)
+        with m.patch.object(wd, "_session_has_live_bg_tasks", return_value=True):
+            logs2 = wd.compact_ticket_boundary(
+                t1, tmux2, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+                path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_held_request_delivers_once_a_genuine_boundary_arrives(self):
+        # nothing is ever LOST — a held request fires on the very next
+        # sweep that finds the session genuinely idle on a safe marker.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        _write_request(path, self.SID, self.CWD, origin=self.PROVEN)
+        held_tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            time.time(), held_tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(held_tmux.typed_texts(), [])
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+        # the ticket lands: the session's last real turn is now a genuine
+        # `✅ DONE` boundary, pane idle.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        deliver_tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            time.time(), deliver_tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", deliver_tmux.typed_texts())
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    # -- deliver_compact_now (the synchronous #65 path) ------------------ #
+
+    def test_sync_path_holds_a_plain_working_turn_for_a_proven_boundary(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.SELF)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
+
+    def test_sync_path_never_types_into_a_busy_pane_for_any_origin(self):
+        # #65's own original claim ("busy is safe to type into") is the
+        # confirmed root cause of #333's queue-drain race — reversed for
+        # EVERY origin, not just non-proven ones.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
+
+    def test_sync_path_never_types_into_a_busy_pane_for_a_proven_boundary(self):
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
+
+    def test_sync_path_still_delivers_on_a_genuinely_idle_boundary(self):
+        # positive control -- the fix narrows WHEN, it does not disable
+        # delivery outright.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+
 if __name__ == "__main__":
     unittest.main()
