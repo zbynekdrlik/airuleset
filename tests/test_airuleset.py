@@ -4490,8 +4490,14 @@ class TestTmuxHistoryLimit(TestCase):
         # never the resize-window/list-windows shape this ticket's incident
         # history explicitly rejected -- see TestTmuxWindowSizeNoResize.
         self.assertNotIn("resize-window", text)
-        # #267: the Shift+PgUp/PgDn keyboard-scrollback bindings.
-        self.assertIn("bind-key -n S-PageUp copy-mode -eu", text)
+        # #267: the Shift+PgUp/PgDn keyboard-scrollback bindings. #338:
+        # S-PageUp is now conditional (native Ctrl+O inside a claude pane,
+        # else the byte-identical copy-mode -eu fallback) -- see
+        # TestTmuxScrollbackKeybinds for the dedicated lock + live proof.
+        self.assertIn(
+            'bind-key -n S-PageUp if -F '
+            '"#{==:#{pane_current_command},claude}" '
+            '"send-keys C-o" "copy-mode -eu"', text)
         self.assertIn(
             "bind-key -T copy-mode S-PageDown send-keys -X page-down", text)
         self.assertIn(
@@ -4575,7 +4581,9 @@ class TestTmuxHistoryLimit(TestCase):
             "set-option -g history-limit 50000\n"
             "set-option -g destroy-unattached keep-last\n"
             "set-option -g default-size 176x50\n"
-            "bind-key -n S-PageUp copy-mode -eu\n"
+            'bind-key -n S-PageUp if -F '
+            '"#{==:#{pane_current_command},claude}" '
+            '"send-keys C-o" "copy-mode -eu"\n'
             "bind-key -T copy-mode S-PageDown send-keys -X page-down\n"
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
             f'bind-key -n S-F1 display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
@@ -4643,7 +4651,10 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(len(calls), 8)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
-        self.assertEqual(calls[2], ["tmux", "bind-key", "-n", "S-PageUp", "copy-mode", "-eu"])
+        self.assertEqual(calls[2], [
+            "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
+            "#{==:#{pane_current_command},claude}",
+            "send-keys C-o", "copy-mode -eu"])
         self.assertEqual(calls[3], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[4], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",

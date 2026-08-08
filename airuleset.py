@@ -1787,8 +1787,54 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # call is a pure key-table registration -- see the incident-history comment
 # above for why that makes it safe to live-apply, unlike window-size/
 # default-size.
+#
+# #338: the user repeatedly asked whether Claude Code's OWN native
+# transcript viewer (Ctrl+O, CC v2.1.226+ -- reads the session's clean
+# internal history, immune to the tmux-scrollback frame-duplication defect
+# #267's own bind only ever scrolls INTO; PgUp/PgDn already work natively
+# once it's open, no further wiring needed) could be reached via the same
+# Shift+PageUp muscle memory #267 already trained. S-PageUp is now
+# CONDITIONAL, via tmux's own `if -F` (alias of `if-shell -F`): inside a
+# pane whose `pane_current_command` is literally `claude` it sends `C-o`;
+# everywhere else it falls through to the ORIGINAL, byte-identical
+# `copy-mode -eu`. `if -F`'s format string is evaluated by tmux PER
+# KEYPRESS against the CURRENT client's pane, never once at conf-parse/
+# bind time -- verified LIVE (not read from docs): a real attached pty
+# client fed the real xterm CSI bytes for Shift+PageUp (`\x1b[5;2~`)
+# against two different panes bound to the SAME key on an isolated
+# scratch server -- a pane whose `pane_current_command` was `claude` (a
+# real fixture: `bash -c 'stty raw -echo; exec -a claude cat > <file>'` --
+# the `stty raw -echo` is load-bearing, a canonical-mode pty buffers a
+# lone control byte with no trailing newline and never delivers it)
+# received exactly one byte `0x0f` (Ctrl+O); a plain `sleep` pane on the
+# identical bind entered copy-mode (`#{pane_in_mode}` flipped 0->1),
+# unchanged from #267's own pre-#338 behaviour. `tmux send-keys -t <pane>`
+# was deliberately NEVER used to exercise the binding itself -- it
+# bypasses key-table dispatch and writes straight into the pty, proving
+# nothing about whether a real keypress reaches the bound command (see
+# the incident-history comment above TMUX_SCROLLBACK_KEYBINDS' own #267
+# entry for the same lesson). Also confirmed live: the RENDERED
+# (`_tmux_conf_quote`d) conf line starts cleanly from a COLD conf file,
+# and live-applies cleanly against an already-running server, on BOTH the
+# fleet's real deployed `/usr/bin/tmux` (3.4) and `/usr/local/bin/tmux`
+# (3.7b) -- no crash-at-parse-time hazard of the `window-size manual`
+# (#241) kind. `S-NPage` (Shift+PageDown) is deliberately left untouched
+# -- no existing root-table bind, and the native viewer's own PgDn already
+# works once it's open.
+#
+# This is the FIRST entry whose argv holds multi-word NESTED-COMMAND
+# tokens (`"send-keys C-o"`, `"copy-mode -eu"`, each one single tmux
+# argument tmux itself re-parses as an embedded command string) -- live
+# apply passes them straight through subprocess argv (no shell, no
+# quoting needed), but the RENDERED conf line now needs the same
+# per-token `_tmux_conf_quote` the popup binds (TMUX_POPUP_BIND_ARGVS)
+# already use, or the unquoted "send-keys C-o" would parse as FOUR
+# separate tmux words instead of one, silently corrupting the `if -F`
+# command's own argument count (see render_tmux_history_block below).
 TMUX_SCROLLBACK_KEYBINDS = [
-    ["bind-key", "-n", "S-PageUp", "copy-mode", "-eu"],
+    ["bind-key", "-n", "S-PageUp", "if", "-F",
+     "#{==:#{pane_current_command},claude}",
+     "send-keys C-o", "copy-mode -eu"],
     ["bind-key", "-T", "copy-mode", "S-PageDown", "send-keys", "-X", "page-down"],
     ["bind-key", "-T", "copy-mode-vi", "S-PageDown", "send-keys", "-X", "page-down"],
 ]
@@ -1997,7 +2043,14 @@ def _tmux_conf_quote(word):
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE,
                                destroy_unattached=TMUX_DESTROY_UNATTACHED):
-    keybind_lines = "\n".join(" ".join(argv) for argv in TMUX_SCROLLBACK_KEYBINDS)
+    # #338: per-token _tmux_conf_quote (not a bare " ".join) -- required
+    # the moment the S-PageUp entry's `"send-keys C-o"`/`"copy-mode -eu"`
+    # nested-command tokens (each ONE tmux argv element, containing a
+    # space) need to survive as single words in the rendered conf line.
+    # No-op for the two S-PageDown entries (no token there needs quoting).
+    keybind_lines = "\n".join(
+        " ".join(_tmux_conf_quote(tok) for tok in argv)
+        for argv in TMUX_SCROLLBACK_KEYBINDS)
     popup_lines = "\n".join(
         " ".join(_tmux_conf_quote(tok) for tok in argv)
         for argv in TMUX_POPUP_BIND_ARGVS)
