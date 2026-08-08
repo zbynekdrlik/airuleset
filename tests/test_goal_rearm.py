@@ -1016,14 +1016,28 @@ class TestGoalRecoverUntracked(GoalRearmBase):
         # the #170 guard survives the recovery scan -- a session whose
         # LATEST buried marker is a deliberate clear is never re-armed,
         # even once live progress evidence makes it eligible for the scan.
+        #
+        # Adversarial-review finding F4 (this ticket's own review, verified
+        # by mutation): the ORIGINAL fixture wrote the "cleared" marker
+        # AFTER the filler, i.e. right at EOF -- squarely INSIDE the
+        # ordinary tail-bootstrap window, so the REGULAR per-sweep scan
+        # (not this recovery path at all) already resolves `rec['mark'] ==
+        # "cleared"` on the very first sweep, and `_goal_recover_untracked`
+        # is never even called (instrumented proof: 0 calls). The test
+        # passed for the wrong reason -- mutating away the recovery path's
+        # own `mark.get("state") != "set"` guard left it green. Both
+        # markers must be BURIED past the tail window for this test to
+        # actually exercise the recovery scan's own #170 guard.
         p = self._write([marker_entry("set", PAYLOAD,
                                       _iso(time.time() - 7200))])
         with open(p, "a") as f:
+            f.write(json.dumps(marker_entry("cleared", PAYLOAD)) + "\n")
             filler = json.dumps({"type": "assistant",
                                  "message": {"content": "x" * 900}}) + "\n"
             while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
                 f.write(filler)
-            f.write(json.dumps(marker_entry("cleared", PAYLOAD)) + "\n")
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
         self._wrote = True
         future = self._future_now()
         pd = self._live_progress_dir(future)

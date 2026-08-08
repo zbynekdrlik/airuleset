@@ -50,11 +50,19 @@ def run(cmd, home=None, cwd=None, gh_bin=None):
     )
 
 
-def _fake_gh(tmpdir, responses):
+def _fake_gh(tmpdir, responses, require_repo=None):
     """A minimal `gh` stub prepended onto PATH: `gh issue view <N> --json
     title,body` prints the JSON in `responses[str(N)]` when present, else
     exits 1 (simulating any real lookup failure -- offline, no auth, the
-    issue genuinely doesn't exist). Never touches the real network."""
+    issue genuinely doesn't exist). Never touches the real network.
+
+    `require_repo` (optional): when given, the stub ONLY answers when the
+    invocation's own `-R <require_repo>` flag is present and matches --
+    any other repo (or no `-R` at all) exits 1, exactly like a real `gh`
+    resolving the WRONG repo would find no such issue there. This is what
+    gives a cross-repo test real teeth: a caller that silently drops `-R`
+    gets the SAME failure a real mismatched lookup would, not a
+    repo-blind stand-in that answers regardless."""
     bin_dir = Path(tmpdir) / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     script = bin_dir / "gh"
@@ -63,12 +71,22 @@ def _fake_gh(tmpdir, responses):
         "import sys, json\n"
         "argv = sys.argv[1:]\n"
         "responses = %r\n"
+        "require_repo = %r\n"
+        "if require_repo is not None:\n"
+        "    repo = None\n"
+        "    for i, a in enumerate(argv):\n"
+        "        if a in ('-R', '--repo') and i + 1 < len(argv):\n"
+        "            repo = argv[i + 1]\n"
+        "        elif a.startswith('--repo='):\n"
+        "            repo = a.split('=', 1)[1]\n"
+        "    if repo != require_repo:\n"
+        "        sys.exit(1)\n"
         "if len(argv) >= 3 and argv[0] == 'issue' and argv[1] == 'view':\n"
         "    n = argv[2]\n"
         "    if n in responses:\n"
         "        print(json.dumps(responses[n]))\n"
         "        sys.exit(0)\n"
-        "sys.exit(1)\n" % responses
+        "sys.exit(1)\n" % (responses, require_repo)
     )
     script.chmod(0o755)
     return str(bin_dir)
@@ -256,6 +274,87 @@ class TestLocMismatch(TestCase):
                                              "unrelated config note.",
                          scope_gate="cross-cutting"))
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_quoting_the_gate_threshold_before_the_real_count_still_passes(self):
+        # adversarial-review finding F1 (this batch's own review, TRIGGERED
+        # live) -- a `.search()`-only match takes the FIRST number next to
+        # "loc"/"lines", and quoting the follow-up gate's OWN threshold text
+        # (the natural way to justify the criterion) is a real, common
+        # shape: "under ~100 LoC ... roughly 620 LoC across 5 modules."
+        # matched the FIRST number (100) and false-blocked the honest,
+        # correctly-labelled filing. Every stated number must clear 300,
+        # not just the first one found.
+        r = run(body_cmd(
+            "big rework",
+            "The follow-up gate says a cleanup under ~100 LoC must be "
+            "fixed in-PR. This one is not: roughly 620 LoC across 5 "
+            "modules.", scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_quoting_the_threshold_itself_before_the_real_count_still_passes(self):
+        # the second F1 example: "Well over the 300 line threshold: ~740
+        # lines total." matched "300 line" first and false-blocked exactly
+        # the author who is being MOST honest about clearing the gate.
+        r = run(body_cmd(
+            "big rework 2",
+            "Well over the 300 line threshold: ~740 lines total.",
+            scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestChainDepthCapReviewFixes(TestCase):
+    """#311 -- adversarial-review findings on the chain-depth cap itself
+    (this batch's own review, all TRIGGERED live against the real hook)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-chaindepth-review-test-")
+
+    def test_a_root_ticket_linking_its_own_children_is_not_a_followup_itself(self):
+        # finding F2 -- a root/umbrella ticket's body naturally LINKS the
+        # follow-ups it spawned ("Spawned work: #3250 follow-up, #3251
+        # follow-up.") -- that FORWARD reference must never be misread as
+        # THIS ticket itself being a follow-up of something. Only a
+        # BACKWARD reference (to a lower issue number) is a genuine
+        # ancestry link.
+        gh_bin = _fake_gh(self.tmp, {
+            "3035": {"title": "root ticket",
+                     "body": "Spawned work: #3250 follow-up, #3251 follow-up."},
+        })
+        r = run(body_cmd("real child (#3035 follow-up)",
+                         "Found while fixing #3035.",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_plural_followups_wording_is_detected(self):
+        # finding F7 -- `\bfollow[- ]?up\b` misses the plural "follow-ups".
+        gh_bin = _fake_gh(self.tmp, {
+            "101": {"title": "child finding (#100 follow-up)",
+                    "body": "Found while fixing #100 (#100 follow-up)."},
+        })
+        r = run(body_cmd("grandchild finding (#101 follow-ups)",
+                         "Found while fixing #101 (#101 follow-up).",
+                         scope_gate="cross-cutting"),
+               gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_cross_repo_parent_is_looked_up_in_the_named_repo(self):
+        # finding F8 -- `_gh_view_text` ignored an explicit `-R owner/repo`
+        # and always resolved the parent against the LOCAL cwd's repo,
+        # silently looking up the WRONG issue #101 when the real parent
+        # lives in a different repo. The stub ONLY answers when `-R
+        # other-owner/other-repo` is actually passed through -- a caller
+        # that drops it gets a lookup failure, same as a real mismatch.
+        gh_bin = _fake_gh(self.tmp, {
+            "101": {"title": "child finding (#100 follow-up)",
+                    "body": "Found while fixing #100 (#100 follow-up)."},
+        }, require_repo="other-owner/other-repo")
+        cmd = ("cat > body.md <<'EOF'\nFound while fixing #101 "
+               "(#101 follow-up).\nScope-gate: cross-cutting\nEOF\n"
+               "gh issue create -R other-owner/other-repo "
+               "-t 'grandchild finding (#101 follow-up)' -F body.md")
+        r = run(cmd, gh_bin=gh_bin)
+        self.assertEqual(r.returncode, 2, r.stderr)
 
 
 # --------------------------------------------------------------------------- #

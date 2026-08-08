@@ -294,29 +294,75 @@ LOC_NUM_RE = re.compile(r'(\d+)\s*(?:loc|lines?)\b', re.I)
 # chain member in the odoo-erp scope-gate.log corpus independently converged
 # on ("(#3224 follow-up)", "cross-screen half of #3224 is still open"), so
 # detecting THIS phrasing needs no new discipline for workers to adopt, only
-# a mechanical check on what they already write.
+# a mechanical check on what they already write. The window is 40 chars and
+# the wording accepts the plural ("follow-ups") -- both widened after
+# adversarial-review finding F7 (this ticket's own review, TRIGGERED live)
+# found the original 20-char singular-only pattern missed real phrasings.
 FOLLOWUP_RE = re.compile(
-    r'#(\d+)[^\n]{0,20}\bfollow[- ]?up\b|\bfollow[- ]?up\b[^\n]{0,20}#(\d+)',
+    r'#(\d+)[^\n]{0,40}\bfollow[-\s]?ups?\b|\bfollow[-\s]?ups?\b[^\n]{0,40}#(\d+)',
     re.I)
 
 
-def _chain_parent(text):
-    m = FOLLOWUP_RE.search(text or "")
-    if not m:
-        return None
-    return m.group(1) or m.group(2)
+def _chain_parents(text):
+    """Every issue number referenced near "follow-up"/"follow-ups" wording
+    in `text`, in order of appearance, deduplicated. A `.search()`-only
+    match takes only the FIRST such reference, which lets an earlier decoy
+    (e.g. a title mentioning one ticket while the body's real parent
+    reference comes later) hide the genuine parent (#311 adversarial-
+    review finding F7, TRIGGERED live) -- every candidate is tried."""
+    seen = []
+    for m in FOLLOWUP_RE.finditer(text or ""):
+        ref = m.group(1) or m.group(2)
+        if ref not in seen:
+            seen.append(ref)
+    return seen
 
 
-def _gh_view_text(parent, cwd):
+def _chain_parent(text, own_number=None):
+    """The first candidate parent reference in `text`, honouring
+    `own_number` when given: `own_number=None` (resolving THIS filing's
+    own parent) accepts any reference verbatim. `own_number=<N>` (checking
+    whether a candidate PARENT's own text makes IT a follow-up too)
+    rejects a FORWARD reference (`ref >= own_number`) -- an umbrella/root
+    ticket's body naturally LINKS the follow-ups it spawned ("Spawned
+    work: #3250 follow-up, #3251 follow-up"), which is the root citing
+    its own CHILDREN, never proof the root itself is a follow-up of
+    something. Real GitHub issue numbers only ever increase over time, so
+    a genuine ANCESTOR reference is always a LOWER number than its child
+    (#311 adversarial-review finding F2, TRIGGERED live: a root ticket
+    linking its own spawned children was wrongly read as itself being a
+    depth-2 follow-up)."""
+    for ref in _chain_parents(text):
+        if own_number is not None:
+            try:
+                if int(ref) >= int(own_number):
+                    continue
+            except ValueError:
+                continue
+        return ref
+    return None
+
+
+def _gh_view_text(parent, cwd, repo=None):
     """title + "\\n" + body of issue `parent`, or None on ANY failure
     (offline, no `gh` auth, the issue genuinely doesn't exist, `gh` not on
     PATH). A failure here degrades the chain-depth check to "cannot
     verify" -- it must NEVER block on its own; the existing Scope-gate
-    criterion still decides, exactly as before this ticket."""
+    criterion still decides, exactly as before this ticket.
+
+    `repo` (optional): this filing's own explicit `-R`/`--repo` value, if
+    any. Without it, `gh issue view` resolves the parent against the
+    INVOKING cwd's own git remote regardless of which repo the filing
+    itself targets -- a cross-repo filing (`-R other/repo`, a shape this
+    ruleset actively encourages for cross-project references) would
+    silently look up an unrelated same-numbered issue in the WRONG repo
+    (#311 adversarial-review finding F8, TRIGGERED live)."""
     try:
-        out = subprocess.run(
-            ["gh", "issue", "view", str(parent), "--json", "title,body"],
-            capture_output=True, text=True, timeout=8, cwd=cwd)
+        argv = ["gh", "issue", "view", str(parent), "--json", "title,body"]
+        if repo:
+            argv += ["-R", repo]
+        out = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=8, cwd=cwd)
         if out.returncode != 0:
             return None
         data = json.loads(out.stdout or "{}")
@@ -352,21 +398,32 @@ for seg in split_top_level(skeleton):
     # follow-up is a depth-2 review-finding chain -- a self-reinforcing
     # sequence the follow-up gate's PER-ISSUE criterion cannot see, since
     # each individual hop can honestly claim its own criterion. Cheap text
-    # match first; the ONE bounded `gh` call only fires once a candidate
-    # parent is actually named.
+    # match first; a bounded `gh` call only fires once a candidate parent
+    # is actually named -- EVERY candidate is tried (finding F7: a decoy
+    # reference earlier in the text must not hide the real one), each
+    # checked with the backward-reference filter (finding F2: a root
+    # ticket linking its own spawned children is not itself chained), in
+    # the filing's OWN explicit repo when one is given (finding F8).
+    repo_flag = flag_value(tk, ("-R", "--repo"))
     chain_capped = False
-    parent = _chain_parent((title or "") + "\n" + (body or ""))
-    if parent:
-        parent_text = _gh_view_text(parent, cwd)
-        if parent_text is not None and _chain_parent(parent_text):
+    for parent in _chain_parents((title or "") + "\n" + (body or "")):
+        parent_text = _gh_view_text(parent, cwd, repo=repo_flag)
+        if parent_text is not None and _chain_parent(parent_text, own_number=parent):
             chain_capped = True
+            break
     # #311 point 3 -- a `>300-loc` claim whose own body confesses a
     # <=300 number next to "loc"/"lines" is self-contradicting; checked
     # ONLY for this one criterion, ONLY when a number is actually stated.
+    # EVERY stated number must clear 300, not just the first one found
+    # (finding F1, TRIGGERED live: a body honestly quoting the follow-up
+    # gate's OWN threshold text before stating its real, genuinely-large
+    # count -- "under ~100 LoC ... roughly 620 LoC across 5 modules" --
+    # matched the FIRST number and false-blocked exactly the author being
+    # most honest about clearing the gate).
     loc_mismatch = False
     if crit and crit.lower() == ">300-loc" and body:
-        lm = LOC_NUM_RE.search(body)
-        if lm and int(lm.group(1)) <= 300:
+        nums = [int(x) for x in LOC_NUM_RE.findall(body)]
+        if nums and max(nums) <= 300:
             loc_mismatch = True
     if chain_capped:
         results.append(("BLOCK", title, "chain-depth-cap"))

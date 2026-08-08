@@ -10393,7 +10393,7 @@ def _live_autopilot_progress(cwd, progress_dir, now):
     return (now - ts) < GOAL_REARM_PROGRESS_WINDOW_S
 
 
-def _goal_recover_untracked(now, rec, sid, cwd, tpath, loc,
+def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
                             progress_dir=None):
     """#312 -- `rec['mark']` used to collapse TWO structurally different
     states into one silent-forever `continue` at `goal_rearm`'s own
@@ -10444,12 +10444,27 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, loc,
     real dead goal by the footer alone. The transcript's own marker
     STATE cannot discriminate the two either (a crash-outage and a
     truncated-but-alive session both read `mark == "set", no clear`
-    identically) -- but the recovered marker's own declared TIMESTAMP
-    can: one written within `GOAL_ARMED_ACTIVITY_GRACE_S` is treated as
-    still-plausibly-alive and is NEVER acted on this sweep (no delivery,
-    no mutation of `rec` beyond nothing) -- deferred to a later sweep
-    once it has genuinely aged, closing the exact "duplicate /goal
-    paste into a session that never actually died" risk."""
+    identically) -- but two INDEPENDENT clocks can: the recovered
+    marker's own declared arm TIMESTAMP (`mts`), and the transcript
+    FILE's own mtime (`tmtime` -- adversarial-review finding F3, this
+    ticket's own review, TRIGGERED live: checking `mts` ALONE never
+    actually verifies "is the session still ACTIVE", only "how long ago
+    did it arm" -- a session armed hours ago but still busy working
+    passes `mts` staleness trivially, since `_live_autopilot_progress`
+    already requires `done > 0`, i.e. real elapsed batch work, which by
+    construction means the arm itself is never recent for this gated
+    population. `tmtime` is what actually answers "is anything still
+    being written right now"). EITHER clock reading within
+    `GOAL_ARMED_ACTIVITY_GRACE_S` defers -- never acted on this sweep (no
+    delivery, no mutation of `rec` beyond nothing) -- to a later sweep
+    once BOTH have genuinely aged, closing the exact "duplicate /goal
+    paste into a session that never actually died" risk. The staleness
+    test is also explicitly bounded to `0 <=` (finding F5: a
+    FUTURE-dated marker -- clock skew, a transcript synced from another
+    box -- must never look "already old enough", which an unbounded `<`
+    comparison against a negative delta would wrongly accept forever,
+    and never a marker whose `recovery_scanned` gets silently skipped
+    sweep after sweep)."""
     if rec.get("recovery_scanned"):
         return []
     if not _live_autopilot_progress(cwd, progress_dir, now):
@@ -10459,13 +10474,17 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, loc,
         rec["recovery_scanned"] = True
         return []
     mts = mark.get("ts")
-    if mts is not None and (now - mts) < GOAL_ARMED_ACTIVITY_GRACE_S:
+    mts_fresh = mts is not None and 0 <= (now - mts) < GOAL_ARMED_ACTIVITY_GRACE_S
+    tmtime_fresh = 0 <= (now - tmtime) < GOAL_ARMED_ACTIVITY_GRACE_S
+    if mts_fresh or tmtime_fresh:
+        age = int(now - mts) if mts is not None else int(now - tmtime)
         return ["skip maybe-truncated-footer (goal-rearm) %s -> the "
-                "transcript's own recovered marker is only %ds old -- too "
-                "recent to trust a missing ◎ glyph as proof this goal is "
-                "actually dead (could be a TRUNCATED statusline render, "
-                "not a dead goal) -- deferring, not consuming the recovery"
-                % (loc, int(now - mts))]
+                "transcript's own recovered marker (or the transcript "
+                "file itself) is only %ds old -- too recent to trust a "
+                "missing ◎ glyph as proof this goal is actually dead "
+                "(could be a TRUNCATED statusline render, not a dead "
+                "goal) -- deferring, not consuming the recovery"
+                % (loc, age)]
     rec["recovery_scanned"] = True
     rec["mark"] = "set"
     rec["payload"] = mark.get("payload")
@@ -10631,7 +10650,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # unchanged `continue` below, exactly as before this ticket.
             if rec.get("mark") is None:
                 logs += _goal_recover_untracked(now, rec, sid, cwd,
-                                                tpath, loc,
+                                                tpath, tmtime, loc,
                                                 progress_dir=progress_dir)
                 _save()
             if rec.get("mark") != "set":
