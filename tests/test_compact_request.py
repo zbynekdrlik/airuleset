@@ -331,32 +331,33 @@ class TestCompactTicketBoundary(unittest.TestCase):
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
     # ------------------------------------------------------------------- #
-    # #122 (2026-07-28) — a request carrying its OWN proof of a boundary
-    # (origin=="subagent-stop") is no longer bounced to job 14's busy-skip
-    # retry loop, where it could keep re-observing "busy" every sweep until
-    # COMPACT_REQUEST_MAX_AGE_S silently lapses it. The same "a short
-    # send-keys reliably queues even into a busy pane" finding #65 already
-    # validated for the synchronous path (deliver_compact_now) applies here
-    # too — job 14 is not running inside a Stop-hook batch, so #109/#84's
-    # parked-keystrokes risk does not apply to a polled job. Every OTHER
-    # origin (the plain Stop-hook channel) keeps the pre-#122 behavior,
-    # locked by test_busy_pane_is_skipped_and_request_kept_for_retry above.
+    # #122 (2026-07-28, REVERSED by #333) — used to let a request carrying
+    # its OWN proof of a boundary (origin=="subagent-stop") bypass job 14's
+    # busy-skip, on the premise that "a short send-keys reliably queues even
+    # into a busy pane" (#65) made typing into a busy pane safe. #333's live
+    # forensic trace (three same-day incidents on this box's own supervisor
+    # session) proved the real hazard is not the TYPE, it is that a
+    # busy-typed `/compact` sits QUEUED and only DRAINS (executes) at
+    # whatever LATER turn's Stop is first genuinely ACCEPTED — under an
+    # active `/goal` loop that is almost always either a real completion or
+    # an ask-and-continue `❓`/`⏳`-blocked turn, exactly the boundary this
+    # gate exists to refuse. So the exemption is gone: EVERY origin, proven
+    # or not, now behaves like test_busy_pane_is_skipped_and_request_kept_
+    # for_retry above.
     # ------------------------------------------------------------------- #
 
-    def test_busy_pane_with_proven_boundary_origin_still_delivers(self):
+    def test_busy_pane_with_proven_boundary_origin_is_also_skipped(self):
         tmux, logs, path, _ = self._go(CB_BUSY_CAP, origin="subagent-stop")
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertTrue(any(ln.startswith("OK (compact-request, busy)")
-                            for ln in logs), logs)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip busy" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
 
-    def test_busy_pane_with_proven_boundary_origin_sets_the_shared_claim(self):
-        # #78/#82 -- the busy exemption must still thread the sending pane
-        # into the shared claim, same as the idle send path.
+    def test_busy_pane_with_proven_boundary_origin_never_sets_the_shared_claim(self):
+        # #333 -- since the busy skip above fires before any send is even
+        # attempted, the shared claim (#78/#82) must never be touched.
         with m.patch.object(wd, "compact_claim_set") as claim_mock:
             self._go(CB_BUSY_CAP, origin="subagent-stop")
-        self.assertTrue(claim_mock.called)
-        self.assertEqual(claim_mock.call_args.kwargs.get("pane_id"), self.PANE)
+        self.assertFalse(claim_mock.called)
 
     # ------------------------------------------------------------------- #
     # #67 (2026-07-26) — a draft-holding pane is no longer a dead end: job 14
@@ -1493,12 +1494,17 @@ class TestDeliverCompactNow(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("/compact", tmux.typed_texts())
 
-    def test_busy_pane_ALSO_delivers_this_is_the_whole_point_of_65(self):
-        # the exact fix: a busy pane is no longer a reason to fall back to
-        # the polled retry — a short send-keys queues reliably even here.
+    def test_busy_pane_now_falls_back_REVERSES_65(self):
+        # #333 REVERSES #65's own premise: a short send-keys DOES queue
+        # reliably even into a busy pane, but the queued `/compact` then
+        # only DRAINS (executes) at whatever LATER turn's Stop is first
+        # accepted — under an active `/goal` loop that is almost always a
+        # real completion or a `❓`/`⏳`-blocked turn, exactly the boundary
+        # this whole gate exists to refuse. A busy pane is now a reason to
+        # fall back to job 14's polled retry, same as a genuine draft.
         ok, tmux = self._go(CB_BUSY_CAP)
-        self.assertTrue(ok)
-        self.assertIn("/compact", tmux.typed_texts())
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
 
     def test_queued_placeholder_pane_delivers(self):
         cap = "● Predošlá práca hotová.\n❯ Press up to edit queued messages\n  ctx ███░\n"
@@ -2563,9 +2569,9 @@ class TestDeliverCompactNowRefusesRejectedBoundary(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _call(self, proj):
+    def _call(self, proj, captured=CB_BUSY_CAP):
         tmux = DeliverCompactNowFakeTmux(
-            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+            [("%9", "claude", self.CWD, "111")], captured)
         handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
                                          projects_dir=proj, min_context=1)
         return handled, tmux
@@ -2578,9 +2584,14 @@ class TestDeliverCompactNowRefusesRejectedBoundary(unittest.TestCase):
         self.assertFalse(handled)
 
     def test_accepted_boundary_is_still_typed(self):
+        # #333 -- this test is about the REJECTED-vs-ACCEPTED stop gate
+        # specifically, so it needs an IDLE capture (CB_BUSY_CAP would now
+        # correctly refuse for the SEPARATE, unconditional busy-skip reason
+        # #333 added -- see TestBusyPaneNoLongerDelivers -- which would
+        # confound this test's own claim).
         proj = self._proj()
         _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
-        handled, tmux = self._call(proj)
+        handled, tmux = self._call(proj, captured=CB_IDLE_CAP)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertTrue(handled)
 
@@ -2592,10 +2603,16 @@ class TestDeliverCompactNowRefusesRejectedBoundary(unittest.TestCase):
         # almost always carries a rejected-stop entry (that's what keeps the
         # loop going), which would otherwise refuse every retry for the
         # WHOLE hold window. Exempt self-callback specifically.
+        #
+        # #333 -- uses CB_IDLE_CAP (not CB_BUSY_CAP): this test's claim is
+        # specifically about the rejected-stop gate, and a busy capture
+        # would now ALSO be refused for the separate, unconditional
+        # busy-skip #333 added -- confounding which gate the assertion is
+        # actually proving passed.
         proj = self._proj()
         _write_rejected_boundary_transcript(proj, self.CWD, self.SID)
         tmux = DeliverCompactNowFakeTmux(
-            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
                                          projects_dir=proj, min_context=1,
                                          origin="self-callback")
@@ -3025,12 +3042,23 @@ class TestProvenBoundaryOriginIsStored(unittest.TestCase):
 
 
 class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
-    """THE regression this ticket is about. A supervisor's `⏳` refers to the
-    NEXT batch, never to the ticket that just landed — so it must not hold a
-    request whose own origin already proved the boundary. #109's gate is
-    UNCHANGED for every other origin, and #102's `❓` gate
-    (`_compact_blocked_by_question`, which runs first at both send points) is
-    not touched at all."""
+    """#121 (2026-07-28) shipped this class's own original premise: a
+    supervisor's `⏳` refers to the NEXT batch, never to the ticket that just
+    landed, so it must not hold a request whose own origin already proved
+    the boundary.
+
+    #333 (2026-08-08) REVERSES that premise with live forensic evidence:
+    this box's own transcript showed `/compact` typed while BUSY, sitting
+    QUEUED, and only draining several turns later at whatever turn's Stop
+    was first ACCEPTED — under an active `/goal` loop that is almost always
+    either a genuine completion or an ask-and-continue `❓`/`⏳`-blocked
+    turn. Both of this box's own confirmed-clean historical sends landed on
+    a literal `✅ DONE` turn, never on `⏳`. So `⏳` now blocks delivery for
+    EVERY origin, proven or not — the class name is kept (searchability for
+    the #121→#333 history) but every "proven boundary bypasses ⏳" test
+    below is INVERTED. #102's `❓` gate (`_compact_blocked_by_question`,
+    which runs first at both send points and was NEVER relaxed by #121 in
+    the first place) is untouched either way."""
 
     SID = "sess-121"
     CWD = "/home/x/proj121"
@@ -3060,9 +3088,12 @@ class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
             path=path, projects_dir=proj)
         return tmux, logs
 
-    def test_job14_delivers_on_a_working_turn_when_the_entry_proves_it(self):
+    def test_job14_STILL_holds_a_working_turn_even_with_the_proof(self):
+        # #333 -- inverted from the pre-reversal "delivers" assertion: a
+        # proven origin no longer bypasses the `⏳` marker gate at all.
         tmux, logs = self._job14(self.WORKING, _PROVEN)
-        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
 
     def test_job14_still_holds_a_working_turn_without_that_proof(self):
         # the control — #109's gate must NOT be weakened for its own path
@@ -3077,16 +3108,19 @@ class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
         self.assertEqual(tmux.typed_texts(), [])
         self.assertTrue(any("blocked-question" in ln for ln in logs), logs)
 
-    def test_sync_path_delivers_on_a_working_turn_for_a_proven_boundary(self):
+    def test_sync_path_STILL_holds_a_working_turn_even_for_a_proven_boundary(self):
+        # #333 -- inverted; uses CB_IDLE_CAP (not CB_BUSY_CAP) so the marker
+        # gate is what refuses this, unconfounded with the separate,
+        # unconditional busy-skip #333 also added.
         proj = self._proj()
         _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
         tmux = DeliverCompactNowFakeTmux(
-            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
                                          projects_dir=proj, min_context=1,
                                          origin=_PROVEN)
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertTrue(handled)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
 
     def test_sync_path_still_holds_a_working_turn_without_the_proof(self):
         proj = self._proj()
@@ -4377,7 +4411,10 @@ class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def test_job14_delivers_on_a_working_turn_for_self_callback_origin(self):
+    def test_job14_STILL_holds_a_working_turn_for_self_callback_origin(self):
+        # #333 -- inverted: `⏳` now blocks self-callback exactly like every
+        # other origin (see TestWorkingMarkerNoLongerVetoesAProvenBoundary's
+        # own class docstring for the full #121→#333 reversal history).
         proj = self._proj()
         _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
         path = _write_request(self._p(), self.SID, self.CWD, origin=self.SELF)
@@ -4385,9 +4422,13 @@ class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
         logs = wd.compact_ticket_boundary(
             time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
             path=path, projects_dir=proj)
-        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
 
-    def test_job14_delivers_into_a_busy_pane_for_self_callback_origin(self):
+    def test_job14_STILL_skips_a_busy_pane_for_self_callback_origin(self):
+        # #333 -- inverted: a busy pane no longer bypasses the busy-skip for
+        # ANY origin, including self-callback (see #122/#333's own reversal
+        # comment above TestCompactTicketBoundary's busy-pane tests).
         proj = self._proj()
         _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
         path = _write_request(self._p(), self.SID, self.CWD, origin=self.SELF)
@@ -4395,18 +4436,21 @@ class TestSelfCallbackOriginTrustedLikeSubagentStop(unittest.TestCase):
         logs = wd.compact_ticket_boundary(
             time.time(), tmux, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
             path=path, projects_dir=proj)
-        self.assertIn("/compact", tmux.typed_texts(), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("skip busy" in ln for ln in logs), logs)
 
-    def test_sync_path_delivers_on_a_working_turn_for_self_callback_origin(self):
+    def test_sync_path_STILL_holds_a_working_turn_for_self_callback_origin(self):
+        # #333 -- inverted; uses CB_IDLE_CAP so the marker gate (not the
+        # separate busy-skip) is unambiguously what refuses this.
         proj = self._proj()
         _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING)
         tmux = DeliverCompactNowFakeTmux(
-            [("%9", "claude", self.CWD, "111")], CB_BUSY_CAP)
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
                                          projects_dir=proj, min_context=1,
                                          origin=self.SELF)
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertTrue(handled)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
 
     def test_substantiality_gates_are_exempt_for_self_callback_origin(self):
         proj = self._proj()
