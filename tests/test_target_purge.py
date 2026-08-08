@@ -19,6 +19,7 @@ apart with nothing to catch it (per test-strictness.md: no mocking real
 internal code).
 """
 
+import json
 import os
 import sys
 import unittest
@@ -154,6 +155,28 @@ class TestDiscoverTargetPurgeCandidates(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0][0].resolve(), (repo / "target").resolve())
 
+    def test_nested_checkout_attributes_to_the_more_specific_root(self):
+        """A nested git repo (its own `.git`) inside an outer Tier-0 repo is
+        discovered TWICE by the outer walk's own bounded scan (once
+        attributed to the OUTER root, once to its own root when
+        `_checkout_roots()` reaches it directly) — #315 adversarial-review
+        finding 1's secondary cleanup. Only the MORE SPECIFIC (nested)
+        attribution must survive; a LATER discovery for the same target/
+        realpath always IS the more specific one, since `_checkout_roots()`
+        (a topdown walk) always yields an ancestor before any descendant."""
+        outer = _mkrepo(self.root, "monorepo")
+        nested = outer / "vendored-tool"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        (nested / "Cargo.toml").write_text('[package]\nname = "vendored-tool"\n')
+        _mktarget(nested, "target")
+        found = airuleset.discover_target_purge_candidates(home=self.root)
+        matches = [(t, r) for t, r in found if t.resolve() == (nested / "target").resolve()]
+        self.assertEqual(len(matches), 1, "the same target/ must be discovered only once")
+        self.assertEqual(
+            matches[0][1].resolve(), nested.resolve(),
+            "must be attributed to its OWN (more specific) repo root, not the outer one")
+
 
 # ---------------------------------------------------------------------------
 # _tier0_via_hook — reuses the REAL, shipped hook (never mocked)
@@ -249,6 +272,17 @@ class TestTargetInLiveUse(unittest.TestCase):
         ])
         self.assertFalse(airuleset._target_in_live_use(self.target, proc_dir=proc))
 
+    def test_process_cwd_exactly_equal_to_target_dir_is_in_use(self):
+        """#315 adversarial-review finding 8: a process whose cwd/fd/exe
+        link is EXACTLY `target_dir` (no trailing component) was missed —
+        `"/repo/target".startswith("/repo/target/")` is False. A shell
+        parked in target/, or a backup/file-manager process holding the
+        bare directory open, must still count as in-use."""
+        proc = _mkfakeproc(self.root, [
+            {"pid": "666", "exe": "/usr/bin/bash", "cwd": str(self.target)},
+        ])
+        self.assertTrue(airuleset._target_in_live_use(self.target, proc_dir=proc))
+
 
 # ---------------------------------------------------------------------------
 # purge_stale_tier0_targets — the full integration
@@ -330,6 +364,48 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         self.assertFalse(results[0]["purged"])
         self.assertTrue(t.exists())
 
+    def test_member_crate_with_own_tier1_marker_is_never_touched(self):
+        """CRITICAL (#315 adversarial-review finding 1): tier MUST be
+        resolved against the CRATE directory (`target_dir.parent`) — where
+        a real `cargo build` actually runs — never the outer `repo_root`.
+        A member crate carrying its OWN `=allowed` marker, nested inside a
+        markerless (Tier-0) PARENT, must never be purged just because the
+        parent lacks a marker — the hook itself would ALLOW a real build
+        there, so purging it directly contradicts the single-source-of-
+        truth requirement."""
+        repo = _mkrepo(self.root, "monorepo")  # no marker at root -> Tier 0
+        crate = repo / "gpu-tool"
+        crate.mkdir()
+        (crate / "Cargo.toml").write_text('[package]\nname = "gpu-tool"\n')
+        (crate / "CLAUDE.md").write_text("<!-- airuleset:local-builds=allowed -->\n")
+        t = _mktarget(crate, age_days=999)
+        results = self._purge(max_age_days=7, dry_run=False)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["purged"],
+                         "a Tier-1 member crate must never be purged, even "
+                         "when its outer repo root has no marker of its own")
+        self.assertTrue(t.exists())
+
+    def test_nested_tier2_repo_inside_a_tier0_parent_is_never_touched(self):
+        """CRITICAL (#315 adversarial-review finding 1, "Repro D"): a NESTED
+        git repo (its own `.git`) carrying its own `=fast-iterate` marker,
+        sitting inside a markerless (Tier-0) outer repo, is discoverable
+        TWICE (once mis-attributed to the outer root by its own bounded
+        walk, once correctly attributed to itself) — exercised via REAL
+        discovery (no `candidates=` injection), which is what actually
+        reproduced the live wrong-deletion bug."""
+        outer = _mkrepo(self.root, "monorepo")
+        nested = outer / "vendored-tool"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+        (nested / "Cargo.toml").write_text('[package]\nname = "vendored-tool"\n')
+        (nested / "CLAUDE.md").write_text("<!-- airuleset:local-builds=fast-iterate -->\n")
+        t = _mktarget(nested, age_days=999)
+        results = self._purge(max_age_days=7, dry_run=False)
+        self.assertTrue(t.exists(), "a Tier-2 nested repo's target/ must never be deleted")
+        self.assertFalse(any(r.get("purged") for r in results),
+                         "no result may report a purge for the nested Tier-2 target/")
+
     # --- hotswap marker/process ⇒ skip -----------------------------------
     def test_live_process_using_target_is_skipped(self):
         repo = _mkrepo(self.root, "camera-box")
@@ -351,6 +427,20 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
                               proc_dir=self.root / "no-such-proc-dir")
         self.assertFalse(results[0]["purged"])
         self.assertTrue(t.exists())
+
+    def test_pre_delete_recheck_catches_a_process_that_started_mid_walk(self):
+        """#315 adversarial-review finding 2: `_dir_stats` can take a while
+        on a large tree — re-verify nothing started using target/ in that
+        window, immediately before the actual delete, not just once at the
+        top. Simulated via `side_effect`: the FIRST call (the initial gate)
+        says "not in use", the SECOND call (right before rmtree) says "now
+        in use"."""
+        repo = _mkrepo(self.root, "camera-box")
+        t = _mktarget(repo, age_days=45)
+        with m.patch.object(airuleset, "_target_in_live_use", side_effect=[False, True]):
+            results = self._purge(max_age_days=7, dry_run=False)
+        self.assertFalse(results[0]["purged"])
+        self.assertTrue(t.exists(), "a process starting mid-walk must still block the delete")
 
     # --- non-cargo repo ⇒ skip -------------------------------------------
     def test_non_cargo_repo_is_never_scanned(self):
@@ -496,6 +586,39 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         second = self._purge(max_age_days=7, dry_run=True, force=False,
                              now=NOW + 3600)
         self.assertEqual(len(second), 1)
+
+    def test_future_cadence_stamp_does_not_wedge_the_gate_forever(self):
+        """#315 adversarial-review finding 5: a `last_run` stamp in the
+        FUTURE (an NTP correction, a restored VM snapshot — this fleet
+        runs VPSes) must not close the gate indefinitely — `now - last`
+        being negative is always `< INTERVAL`, so an unbounded comparison
+        wedges the feature dead forever with no way to recover."""
+        repo = _mkrepo(self.root, "songplayer")
+        t = _mktarget(repo, age_days=45)
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps({"last_run": NOW + 30 * DAY}))
+        results = self._purge(max_age_days=7, dry_run=False, force=False)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["purged"], "a future-dated stamp must not permanently disable the sweep")
+        self.assertFalse(t.exists())
+
+    def test_discovery_error_is_logged_and_does_not_stamp_cadence(self):
+        """#315 adversarial-review finding 7: a discovery failure must be
+        LOGGED (comprehensive-logging.md: log everything, this repo's own
+        mandate for a destructive-action feature) and must NOT stamp the
+        cadence gate — a persistent discovery bug would otherwise go
+        completely silent (no log line anywhere) and be retried at most
+        once a day forever with zero trace."""
+        _mkrepo(self.root, "songplayer")
+        with m.patch.object(airuleset, "discover_target_purge_candidates",
+                            side_effect=RuntimeError("boom")):
+            results = self._purge(max_age_days=7, dry_run=False, force=False)
+        self.assertEqual(len(results), 1)
+        self.assertIn("discovery error", results[0]["reason"])
+        log_text = self.log_path.read_text()
+        self.assertIn("discovery error", log_text)
+        self.assertFalse(self.state_path.exists(),
+                         "must not stamp the cadence gate when discovery itself failed")
 
 
 # ---------------------------------------------------------------------------

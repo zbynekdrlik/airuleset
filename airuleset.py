@@ -2810,10 +2810,20 @@ def discover_target_purge_candidates(home=None, max_depth: int = 4):
     `followlinks=False` default means this can never leave the repo by
     following a symlinked directory.
 
+    A NESTED checkout (its own `.git` inside an outer repo) is discovered
+    TWICE -- once mis-attributed to the OUTER root by that root's own
+    bounded walk, once correctly attributed to itself once
+    `_checkout_roots()` reaches it directly -- so results are deduped by
+    the target's own realpath, keeping the LAST attribution seen (#315
+    adversarial-review finding 1's secondary cleanup). This is always the
+    MORE SPECIFIC one: `_checkout_roots()` is a single topdown walk, which
+    always yields an ancestor directory before any of its descendants, so
+    the outer (less specific) attribution is always discovered FIRST.
+
     Returns a list of (target_dir, repo_root) Path pairs.
     """
     home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
-    out = []
+    seen = {}
     for root in _checkout_roots(str(home)):
         root_p = Path(root)
         base_depth = str(root_p).rstrip("/").count("/")
@@ -2826,8 +2836,13 @@ def discover_target_purge_candidates(home=None, max_depth: int = 4):
             has_target = "target" in dirnames
             dirnames[:] = [d for d in dirnames if d not in _TARGET_PURGE_SKIP_DIRS]
             if has_target and "Cargo.toml" in filenames:
-                out.append((Path(dirpath) / "target", root_p))
-    return out
+                target_dir = Path(dirpath) / "target"
+                try:
+                    key = os.path.realpath(str(target_dir))
+                except OSError:
+                    key = str(target_dir)
+                seen[key] = (target_dir, root_p)
+    return list(seen.values())
 
 
 def _tier0_via_hook(cwd, hook_path=None, timeout: int = 10) -> bool:
@@ -2844,6 +2859,20 @@ def _tier0_via_hook(cwd, hook_path=None, timeout: int = 10) -> bool:
     implementation of the same check). The hook is pure bash + jq (no
     python dependency), fires in milliseconds, and is already the ONE
     place `no-local-builds.md`'s policy is enforced.
+
+    Deliberate, accepted consequence (#315 adversarial-review finding 9,
+    THEORETICAL, matches real `cargo build` behaviour exactly): a repo
+    with NO CLAUDE.md of its own inherits the tier of the nearest ANCESTOR
+    CLAUDE.md, same as a real build there would -- this is a property of
+    the hook's own upward walk, not a gap specific to this caller.
+
+    `cwd` must be the directory a real `cargo build` would actually run
+    from (the crate directory holding the target/ in question, i.e.
+    `target_dir.parent`) -- NEVER the enclosing checkout root, which can
+    differ for a member crate or a nested checkout carrying its own tier
+    marker (#315 adversarial-review finding 1, CRITICAL: passing the
+    checkout root silently purged a Tier-1/2 crate's target/ whenever its
+    own tier disagreed with its outer repo's).
     """
     hook_path = Path(hook_path) if hook_path else (REPO_DIR / "hooks" / "block-tier0-local-build.sh")
     if not hook_path.exists():
@@ -2852,6 +2881,10 @@ def _tier0_via_hook(cwd, hook_path=None, timeout: int = 10) -> bool:
     import subprocess
     payload = _json.dumps({"tool_input": {"command": "cargo build"}, "cwd": str(cwd)})
     env = dict(os.environ)
+    # Strips every bypass env var the hook itself honours (currently just
+    # this one) so the verdict is deterministic regardless of the CALLING
+    # process's own environment -- grep hooks/block-tier0-local-build.sh
+    # for `AIRULESET_ALLOW_` if it ever grows a second one.
     env.pop("AIRULESET_ALLOW_LOCAL_BUILD", None)  # deterministic regardless of caller's shell
     try:
         r = subprocess.run(["bash", str(hook_path)], input=payload,
@@ -2872,11 +2905,27 @@ def _target_in_live_use(target_dir, proc_dir=None) -> bool:
     the caller SKIPS the whole target/, exactly the camera-box "never
     touch build artefacts while an event/hot-swap runs" rule, applied
     mechanically rather than by asking.
+
+    Matches BOTH a link strictly INSIDE `target_dir` (the `startswith`
+    check) and a link EQUAL to `target_dir` itself (#315 adversarial-
+    review finding 8: a process whose `cwd`/`fd`/`exe` link is exactly
+    `target_dir`, no trailing component -- a shell parked in target/, or a
+    backup/file-manager process holding the bare directory open --
+    `"/repo/target".startswith("/repo/target/")` alone is False and would
+    have missed it).
+
+    Known accepted residual (#315 adversarial-review finding 8,
+    THEORETICAL): a per-PID `EACCES` (a foreign-uid process on a
+    shared-uid box, or a root-owned service) is skipped individually and
+    reads as "not using it" for THAT pid -- only a TOTAL /proc failure
+    returns True. Unprivileged scanning cannot see into another uid's
+    `/proc/<pid>/fd`; this is a structural limit, not a bug to fix here.
     """
     try:
-        resolved = os.path.realpath(str(target_dir)) + os.sep
+        resolved_bare = os.path.realpath(str(target_dir))
     except OSError:
         return True
+    resolved = resolved_bare + os.sep
     proc_dir = Path(proc_dir) if proc_dir is not None else Path("/proc")
     if not proc_dir.is_dir():
         return True
@@ -2891,7 +2940,7 @@ def _target_in_live_use(target_dir, proc_dir=None) -> bool:
                 link = os.readlink(pdir / name)
             except OSError:
                 continue
-            if link.startswith(resolved):
+            if link == resolved_bare or link.startswith(resolved):
                 return True
         fd_dir = pdir / "fd"
         try:
@@ -2903,7 +2952,7 @@ def _target_in_live_use(target_dir, proc_dir=None) -> bool:
                 link = os.readlink(fd_dir / fd)
             except OSError:
                 continue
-            if link.startswith(resolved):
+            if link == resolved_bare or link.startswith(resolved):
                 return True
     return False
 
@@ -2933,12 +2982,18 @@ def _log_target_purge_results(results, log_path, now, dry_run: bool):
     """Append one line per candidate examined (never silent -- comprehensive-
     logging.md: this is a destructive action, log everything, purge AND
     skip alike) to `log_path`. Best-effort: a log write failure never
-    blocks the purge itself, but is reported (never a bare silent pass)."""
+    blocks the purge itself, but is reported (never a bare silent pass).
+
+    A `target is None` entry (a DISCOVERY error -- the sweep never even
+    got a candidate list) is logged too, as `target=-` (#315 adversarial-
+    review finding 7: previously silently dropped, so a persistent
+    discovery bug went completely untraceable)."""
     import datetime as _dt
     ts = _dt.datetime.fromtimestamp(now, tz=_dt.timezone.utc).isoformat()
     lines = []
     for r in results:
         if r.get("target") is None:
+            lines.append("%s ERROR - repo=- reason=%s" % (ts, r.get("reason", "")))
             continue
         if r["purged"]:
             action = "DRYRUN-WOULD-PURGE" if dry_run else "PURGED"
@@ -3008,15 +3063,23 @@ def purge_stale_tier0_targets(home=None, max_age_days=None, dry_run: bool = Fals
             last = float(st.get("last_run", 0))
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             last = 0
+        # #315 adversarial-review finding 5: a stamp in the FUTURE (an NTP
+        # correction, a restored VM snapshot) makes `now - last` negative,
+        # unconditionally < the interval -- clamp it to "no prior run"
+        # rather than let a bad clock wedge the gate closed forever.
+        if last > now:
+            last = 0
         if now - last < TARGET_PURGE_MIN_INTERVAL_S:
             return []
 
     results = []
+    discovery_failed = False
     if candidates is None:
         try:
             candidates = discover_target_purge_candidates(home, max_depth=max_depth)
         except Exception as e:
             candidates = []
+            discovery_failed = True
             results.append({"target": None, "purged": False,
                             "reason": "discovery error: %s" % e})
 
@@ -3037,7 +3100,16 @@ def purge_stale_tier0_targets(home=None, max_age_days=None, dry_run: bool = Fals
                 results.append(entry)
                 continue
 
-            if not _tier0_via_hook(str(repo_root), hook_path=hook_path):
+            # #315 adversarial-review finding 1 (CRITICAL): tier must be
+            # resolved against the directory a REAL `cargo build` would
+            # actually run from -- target_dir.parent (the crate directory)
+            # -- never repo_root. A member crate (or a nested checkout)
+            # carrying its OWN marker, inside a markerless outer repo,
+            # must be classified by ITS OWN CLAUDE.md, exactly like a real
+            # build there would be; using repo_root silently deletes a
+            # Tier-1/2 crate's target/ whenever its OWN tier differs from
+            # its outer repo's.
+            if not _tier0_via_hook(str(target_dir.parent), hook_path=hook_path):
                 entry["reason"] = "not Tier 0 (allowed/fast-iterate marker, or unmanaged)"
                 results.append(entry)
                 continue
@@ -3057,6 +3129,15 @@ def purge_stale_tier0_targets(home=None, max_age_days=None, dry_run: bool = Fals
                 results.append(entry)
                 continue
 
+            # #315 adversarial-review finding 2: _dir_stats can take a
+            # while on a large tree -- re-verify nothing started using
+            # target/ in that window, immediately before the actual
+            # delete, rather than trusting the check made before the walk.
+            if _target_in_live_use(target_dir, proc_dir=proc_dir):
+                entry["reason"] = "in live use (or undeterminable) -- skipped (re-checked before delete)"
+                results.append(entry)
+                continue
+
             age_txt = "empty" if age_days == float("inf") else "%.1fd" % age_days
             entry["reason"] = "stale (%s >= %sd), %s" % (
                 age_txt, max_age_days, _human_size(size_bytes))
@@ -3070,7 +3151,11 @@ def purge_stale_tier0_targets(home=None, max_age_days=None, dry_run: bool = Fals
 
     _log_target_purge_results(results, log_path, now, dry_run)
 
-    if not dry_run:
+    # #315 adversarial-review finding 7: never stamp the cadence gate when
+    # discovery itself failed -- nothing was actually examined, so the
+    # sweep must retry on the VERY NEXT tick rather than sitting silent
+    # (at most once/day) behind a stamp that claims a real run happened.
+    if not dry_run and not discovery_failed:
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state_path.write_text(json.dumps({"last_run": now}))
