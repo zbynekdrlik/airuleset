@@ -19,6 +19,18 @@ against a scratch `TMUX_TMPDIR`, rather than mocking that helper — so the
 RED proof is a genuine behavioral mismatch (list_claude_panes wrongly
 returns `[]` for a session that IS alive), not merely "the new function
 doesn't exist yet".
+
+A fresh-context adversarial review of the first cut (see the #318 GitHub
+issue) found real, executed bugs the original tests could not catch: the
+first version picked the FIRST `tmux: server` line from `ps -e` with no
+uid filter, which live-measured is wrong on a shared box (a foreign uid's
+own server) and even on a single-uid box (this repo's own scripts/tests
+run a second `-L` tmux server alongside the default one, and dev2 runs a
+real `-L t2` server right now) — signaling the wrong same-uid server never
+recreates the DEFAULT socket. `_FakeTmux` here therefore models `ps -eo
+pid,uid,comm` (three columns, matching real `ps` exactly) and supports
+MULTIPLE candidate rows so a test can prove the fix tries every same-uid
+candidate in turn, not just the first.
 """
 
 import os
@@ -37,14 +49,25 @@ REAL_PANES = "%7\tclaude\t/home/david/devel/odoo/odoo-erp\t8901\n"
 
 class _FakeTmux:
     """Models `tmux list-panes -a` returning empty until a `kill -USR1`
-    lands, then returning real pane data — the orphaned-socket-then-recovered
-    shape. `server_pid=None` models "no tmux server process at all"."""
+    lands on the pid that actually owns the DEFAULT socket, then returns
+    real pane data — the orphaned-socket-then-recovered shape.
 
-    def __init__(self, server_pid=1371, panes_after_recovery=REAL_PANES,
-                 recovers=True):
-        self.server_pid = server_pid
+    `server_rows` is a list of `(pid, uid, comm)` triples mirroring real
+    `ps -eo pid,uid,comm` output (three columns) — lets a test model
+    several candidate tmux servers (same-uid siblings, foreign-uid decoys)
+    and pick exactly which ONE pid actually owns the default socket
+    (`recovers_on`). Defaults to a single same-uid `tmux: server` row so
+    the common-case tests stay short."""
+
+    def __init__(self, server_rows=None, recovers_on="__first__",
+                 panes_after_recovery=REAL_PANES):
+        if server_rows is None:
+            server_rows = [(1371, os.getuid(), "tmux: server")]
+        self.server_rows = server_rows
+        if recovers_on == "__first__":
+            recovers_on = server_rows[0][0] if server_rows else None
+        self.recovers_on = recovers_on
         self.panes_after_recovery = panes_after_recovery
-        self.recovers = recovers
         self.calls = []
         self.recovered = False
 
@@ -56,17 +79,22 @@ class _FakeTmux:
                 return self.panes_after_recovery
             return ""
         if argv[:1] == ["ps"]:
-            if self.server_pid is None:
-                return "1\tsystemd\n2\tbash\n"
-            return "%d\ttmux: server\n" % self.server_pid
+            lines = ["    PID   UID COMMAND"]
+            for pid, uid, comm in self.server_rows:
+                lines.append("%d\t%d\t%s" % (pid, uid, comm))
+            return "\n".join(lines) + "\n"
         if argv[:2] == ["kill", "-USR1"]:
-            if self.recovers:
+            signaled = int(argv[2])
+            if self.recovers_on is not None and signaled == self.recovers_on:
                 self.recovered = True
             return ""
         return ""
 
     def kill_calls(self):
         return [a for a in self.calls if a[:2] == ["kill", "-USR1"]]
+
+    def killed_pids(self):
+        return [int(a[2]) for a in self.kill_calls()]
 
     def ps_calls(self):
         return [a for a in self.calls if a[:1] == ["ps"]]
@@ -97,10 +125,10 @@ class TestOrphanedSocketRecovery(unittest.TestCase):
                 m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
             res = wd.list_claude_panes(tmux)
         self.assertEqual(res, [("%7", "/home/david/devel/odoo/odoo-erp")])
-        self.assertEqual(tmux.kill_calls(), [["kill", "-USR1", "1371"]])
+        self.assertEqual(tmux.killed_pids(), [1371])
 
     def test_no_tmux_server_at_all_is_unchanged_no_recovery_attempted(self):
-        tmux = _FakeTmux(server_pid=None)
+        tmux = _FakeTmux(server_rows=[])
         with _ScratchSocketDir(present=False) as tdir, \
                 m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
             res = wd.list_claude_panes(tmux)
@@ -110,13 +138,15 @@ class TestOrphanedSocketRecovery(unittest.TestCase):
     def test_socket_present_pid_found_no_recovery_attempted(self):
         # server process is alive AND the socket file genuinely exists —
         # some OTHER reason list-panes failed (permissions, a transient
-        # blip) — must never fire SIGUSR1 at a healthy server.
+        # blip) — must never fire SIGUSR1 at a healthy server, and (the
+        # #318 review's MINOR-1) must never even pay for a `ps -e` scan.
         tmux = _FakeTmux()
         with _ScratchSocketDir(present=True) as tdir, \
                 m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
             res = wd.list_claude_panes(tmux)
         self.assertEqual(res, [])
         self.assertEqual(tmux.kill_calls(), [])
+        self.assertEqual(tmux.ps_calls(), [])
 
     def test_healthy_output_never_probes_ps_at_all(self):
         tmux = _FakeTmux()
@@ -125,6 +155,41 @@ class TestOrphanedSocketRecovery(unittest.TestCase):
         self.assertEqual(res, [("%7", "/home/david/devel/odoo/odoo-erp")])
         self.assertEqual(tmux.ps_calls(), [])
         self.assertEqual(tmux.kill_calls(), [])
+
+    def test_foreign_uid_server_is_never_signaled(self):
+        # a decoy row for a DIFFERENT uid (the subdev shared-box shape —
+        # montalu/marek/david all show up in a bare `ps -e`) must be
+        # filtered out entirely, never signaled.
+        foreign = os.getuid() + 9999
+        tmux = _FakeTmux(
+            server_rows=[(999, foreign, "tmux: server"),
+                         (1371, os.getuid(), "tmux: server")],
+            recovers_on=1371)
+        with _ScratchSocketDir(present=False) as tdir, \
+                m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
+            res = wd.list_claude_panes(tmux)
+        self.assertEqual(res, [("%7", "/home/david/devel/odoo/odoo-erp")])
+        self.assertNotIn(999, tmux.killed_pids())
+        self.assertIn(1371, tmux.killed_pids())
+
+    def test_tries_every_same_uid_candidate_until_one_recovers(self):
+        # two SAME-uid servers (e.g. the default socket + this repo's own
+        # `-L` test sockets) — the FIRST one in `ps` order does not own the
+        # default socket at all, so signaling it alone must not be trusted;
+        # the fix must retry the real query and try the NEXT candidate.
+        tmux = _FakeTmux(
+            server_rows=[(2001, os.getuid(), "tmux: server"),
+                         (1371, os.getuid(), "tmux: server")],
+            recovers_on=1371)
+        logs = []
+        with _ScratchSocketDir(present=False) as tdir, \
+                m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
+            res = wd.list_claude_panes(tmux, logs=logs)
+        self.assertEqual(res, [("%7", "/home/david/devel/odoo/odoo-erp")])
+        self.assertEqual(tmux.killed_pids(), [2001, 1371])
+        self.assertTrue(any("server-pid=2001" in ln for ln in logs), logs)
+        self.assertTrue(any("server-pid=1371" in ln for ln in logs), logs)
+        self.assertTrue(any("tmux-socket-recovered" in ln for ln in logs), logs)
 
     def test_logs_capture_recovery_attempt_and_success(self):
         tmux = _FakeTmux()
@@ -136,7 +201,7 @@ class TestOrphanedSocketRecovery(unittest.TestCase):
         self.assertTrue(any("tmux-socket-recovered" in ln for ln in logs), logs)
 
     def test_logs_capture_recovery_failure(self):
-        tmux = _FakeTmux(recovers=False)
+        tmux = _FakeTmux(recovers_on=None)
         logs = []
         with _ScratchSocketDir(present=False) as tdir, \
                 m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
@@ -154,21 +219,55 @@ class TestOrphanedSocketRecovery(unittest.TestCase):
         self.assertEqual(res, [("%7", "/home/david/devel/odoo/odoo-erp")])
 
 
-class TestTmuxServerPidHelper(unittest.TestCase):
-    def test_finds_real_server_pid(self):
-        run = _FakeTmux(server_pid=4242)
-        self.assertEqual(wd._tmux_server_pid(run), 4242)
+class TestDryRun(unittest.TestCase):
+    """#318 adversarial-review MAJOR-2: `list_claude_panes` had no `dry_run`
+    of its own, so `bounce_backstop(..., dry_run=True)` still sent a REAL
+    SIGUSR1 — `watchdog --once --dry-run` must stay genuinely side-effect
+    free."""
 
-    def test_returns_none_when_absent(self):
-        run = _FakeTmux(server_pid=None)
-        self.assertIsNone(wd._tmux_server_pid(run))
+    def test_dry_run_never_signals_and_logs_would_recover(self):
+        tmux = _FakeTmux()
+        logs = []
+        with _ScratchSocketDir(present=False) as tdir, \
+                m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
+            res = wd.list_claude_panes(tmux, logs=logs, dry_run=True)
+        self.assertEqual(res, [])
+        self.assertEqual(tmux.kill_calls(), [])
+        self.assertTrue(any("would recover" in ln for ln in logs), logs)
+
+    def test_dry_run_with_no_logs_param_is_still_a_no_op(self):
+        tmux = _FakeTmux()
+        with _ScratchSocketDir(present=False) as tdir, \
+                m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
+            res = wd.list_claude_panes(tmux, dry_run=True)
+        self.assertEqual(res, [])
+        self.assertEqual(tmux.kill_calls(), [])
+
+
+class TestTmuxServerPidsHelper(unittest.TestCase):
+    def test_finds_real_server_pid(self):
+        run = _FakeTmux(server_rows=[(4242, os.getuid(), "tmux: server")])
+        self.assertEqual(wd._tmux_server_pids(run), [4242])
+
+    def test_returns_empty_when_absent(self):
+        run = _FakeTmux(server_rows=[])
+        self.assertEqual(wd._tmux_server_pids(run), [])
+
+    def test_filters_out_foreign_uid_and_keeps_order(self):
+        foreign = os.getuid() + 9999
+        run = _FakeTmux(server_rows=[
+            (999, foreign, "tmux: server"),
+            (2001, os.getuid(), "tmux: server"),
+            (1371, os.getuid(), "tmux: server"),
+        ])
+        self.assertEqual(wd._tmux_server_pids(run), [2001, 1371])
 
     def test_malformed_ps_line_is_ignored(self):
         def run(argv, timeout=8):
             if argv[:1] == ["ps"]:
-                return "not-a-pid\ttmux: server\n"
+                return "not-a-pid\tnot-a-uid\ttmux: server\n"
             return ""
-        self.assertIsNone(wd._tmux_server_pid(run))
+        self.assertEqual(wd._tmux_server_pids(run), [])
 
 
 class TestTmuxSocketMissingHelper(unittest.TestCase):
@@ -209,6 +308,7 @@ class TestBounceBackstopSurfacesSocketRecovery(unittest.TestCase):
                  "ts": int(time.time())}))
 
             idle = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+            my_uid = os.getuid()
 
             class Tmux:
                 def __init__(self):
@@ -223,7 +323,7 @@ class TestBounceBackstopSurfacesSocketRecovery(unittest.TestCase):
                             return "%%1\tclaude\t%s\t9001" % root
                         return ""
                     if argv[:1] == ["ps"]:
-                        return "1371\ttmux: server\n"
+                        return "1371\t%d\ttmux: server\n" % my_uid
                     if argv[:2] == ["kill", "-USR1"]:
                         self.recovered = True
                         return ""
@@ -250,6 +350,19 @@ class TestBounceBackstopSurfacesSocketRecovery(unittest.TestCase):
             # the pane was found (post-recovery) — nudged directly, never
             # the false "no session" Discord ping
             self.assertFalse(pings, pings)
+
+    def test_dry_run_reaches_list_claude_panes_and_never_signals(self):
+        import time
+
+        with _ScratchSocketDir(present=False) as tdir, \
+                m.patch.dict(os.environ, {"TMUX_TMPDIR": tdir}):
+            tmux = _FakeTmux()
+            wd.bounce_backstop(
+                time.time(), tmux, {}, lambda body, **kw: "sent",
+                home=str(Path(tdir) / "home"), dry_run=True,
+                gh_fetch=lambda root: [1705],
+                cross_stream_repos={"odoo-erp"})
+        self.assertEqual(tmux.kill_calls(), [])
 
 
 if __name__ == "__main__":

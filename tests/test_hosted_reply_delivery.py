@@ -238,7 +238,8 @@ class RunOnceHostedWiring(unittest.TestCase):
                            "question": "Ticket #1638 — výdajky?"}}
         for tgt, val in [
                 ("_react_ok", lambda *a, **k: True),
-                ("list_claude_panes", lambda run=None: [("%7", self.F_CWD)]),
+                ("list_claude_panes",
+                 lambda run=None, **kw: [("%7", self.F_CWD)]),
                 ("_foreign_session_info",
                  lambda user, cwd: ("sid-m", time.time() - 5)),
                 ("_foreign_questions", lambda user: dict(fmap)),
