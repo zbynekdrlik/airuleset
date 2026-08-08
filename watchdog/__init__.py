@@ -5397,7 +5397,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
                 continue
             dlogs = []
             ok = deliver_with_stash(pid, full, run, captured=cap, logs=dlogs)
-            if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_STASH_REASONS:
+            if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_REASONS:
                 # never touched the pane (still mid-typing, another stash in
                 # flight) — NOT counted against the per-pane dedup window, so
                 # it is retried next sweep instead of waiting out the full
@@ -5437,7 +5437,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         # gets typed into at all and (b) is a PRE-SEND refusal — zero
         # keystrokes sent — so it must NOT consume the 10-minute dedup
         # window, the same carve-out the stash branch above already gets
-        # via `_GOAL_REARM_TRANSIENT_STASH_REASONS` (the #101 lesson).
+        # via `_GOAL_REARM_TRANSIENT_REASONS` (the #101 lesson).
         fresh = run(["tmux", "capture-pane", "-p", "-J", "-t", pid]) or ""
         if _input_line_text(fresh) != "":
             logs.append("goal-autoarm SKIP-TRANSIENT %s (%s) -> pane no "
@@ -9457,13 +9457,32 @@ GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
 # `✔ Goal achieved` line out of the visible viewport. Live: a marker from
 # `2026-07-25T20:07:21Z`, three days old, from an already-closed run, was
 # still the only one on record and got typed at as if it were current.
-_GOAL_REARM_TRANSIENT_STASH_REASONS = frozenset((
+#
+# #322 widened this from a STASH-only set to a genuinely GENERAL one: the
+# plain (non-draft) branch's own `_send_goal_verified` has the identical
+# pre-send-refusal shape (it takes a FRESH, LIVE re-capture right before
+# typing — the pane can race from idle, at the caller's stale top-of-sweep
+# capture, to busy in that gap — same #176-F3 pattern) but used to `return
+# False` from both its pre-send checks with an EMPTY `logs` list, so this
+# carve-out's own `dlogs[-1] in ...` test could never recognise it. Live on
+# dev1: two such races (a blocking foreground pytest call straddling the
+# sweep boundary) permanently exhausted the 2-attempt cap even though the
+# pane was demonstrably idle again a minute later.
+_GOAL_REARM_TRANSIENT_REASONS = frozenset((
     "stash-abort: slot occupied",
     "stash-abort: no free prompt",       # #189 renamed: emptiness is no longer
                                          # a precondition, so the old
                                          # "not idle-with-draft" no longer
                                          # describes what this refusal means
     "stash-abort: live turn",
+    "goal-verify-abort: not-bare",       # #322 — `_send_goal_verified`'s
+                                         # entry check found the box already
+                                         # occupied/unreadable; zero keystrokes
+    "goal-verify-abort: raced-busy",     # #322 — the SECOND, live re-capture
+                                         # (taken immediately before typing)
+                                         # found the pane had already gone
+                                         # busy since the caller's own stale
+                                         # capture; zero keystrokes
 ))
 GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
                                     # actually saw `◎ /goal` lit, whichever is
@@ -9471,6 +9490,17 @@ GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
                                     # already resolved and is never revived —
                                     # generous past any normal watchdog-state
                                     # gap, far short of the incident's 3 days
+GOAL_REARM_GIVEUP_RESET_S = 15 * 60  # #322 — a reachable exit condition for
+                                    # the give-up state: once GAVE UP has held
+                                    # this long AND the pane is PROVABLY idle
+                                    # right now (read live, every sweep,
+                                    # independent of anything the give-up
+                                    # state itself blocks — the #134 test),
+                                    # retry instead of skipping forever. 15
+                                    # min is drastically shorter than the 2h
+                                    # streak window while staying long enough
+                                    # that a genuinely-still-broken pane does
+                                    # not ping-storm every few minutes.
 
 # --- the SECOND shape (same job, opposite reading of the indicator) --------
 # The 2026-07-26 forensics (montalu + gatekeeper transcripts and journals,
@@ -10099,12 +10129,22 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
     cap = captured if captured is not None else capture_pane(pid, run, lines=40)
     if _input_line_text(cap) != "":
         _draft_rescue_persist(pid, cap, logs=logs)
+        # #322 — zero keystrokes sent yet; the caller's own #101 carve-out
+        # (`dlogs[-1] in _GOAL_REARM_TRANSIENT_REASONS`) needs a reason to
+        # recognise, or this pre-send refusal is silently counted as a real
+        # attempt.
+        _log("goal-verify-abort: not-bare")
         return False                       # not a bare box — caller's problem
     if _strip_selected(cap):
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     fresh = capture_pane(pid, run, lines=40)
     if _input_line_text(fresh) != "":
         _draft_rescue_persist(pid, fresh, logs=logs)
+        # #322 — the LIVE incident shape: the caller's own outer capture was
+        # idle, but this fresh, live re-read (taken immediately before
+        # typing, #176-F3) shows the pane already busy — a real race, never a
+        # delivery failure. Zero keystrokes sent; must not consume the cap.
+        _log("goal-verify-abort: raced-busy")
         return False                       # raced — a draft appeared since the caller's own check
     run(["tmux", "send-keys", "-t", pid, "-l", text])
     if not _await_typed(pid, text, run, sleep_fn, want=True):
@@ -11116,6 +11156,10 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         if rec.get("n", 0) >= max_attempts:
             if not rec.get("pinged"):
                 rec["pinged"] = True
+                rec["gaveup_at"] = now     # #322 — the give-up state's own
+                                            # anchor for the reachable reset
+                                            # below; never touched by anything
+                                            # the give-up state itself blocks
                 _save()
                 if send_fn is not None and not dry_run:
                     from notify import stream_redirect  # #212: STREAM_NOTIFY_OWNER-aware
@@ -11142,9 +11186,33 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                             dry_run=dry_run)
                 logs.append("GAVE UP (goal-rearm) %s after %d attempts"
                             % (loc, max_attempts))
+                continue
+            # #322 — a REACHABLE exit condition for `skip gave-up`. It used to
+            # be permanent: nothing ever cleared `pinged`/`n` except the blind
+            # `GOAL_REARM_STREAK_S` (2h) full-state reset above, tied to
+            # elapsed time only, never to the pane actually recovering. Reset
+            # ONLY when BOTH (a) the give-up state has held long enough that
+            # a genuinely-still-broken pane won't ping-storm on a retry, and
+            # (b) the pane is PROVABLY idle RIGHT NOW — read fresh every
+            # sweep from `captured`, entirely independent of anything this
+            # give-up state itself blocks (the #134 test: name the event that
+            # releases the guard, then prove it's reachable without the
+            # guarded action). A negative/undetermined `gaveup_at` (missing,
+            # legacy record) never satisfies the elapsed-time check, so this
+            # never guesses.
+            gaveup_at = rec.get("gaveup_at")
+            if (gaveup_at is not None
+                    and (now - gaveup_at) >= GOAL_REARM_GIVEUP_RESET_S
+                    and pane_at_idle_prompt(captured)):
+                rec.update({"n": 0, "pinged": False, "gaveup_at": None,
+                           "first": now})
+                _save()
+                logs.append("RESET (goal-rearm) %s -> pane idle %ds after "
+                            "giving up, retrying" % (loc, int(now - gaveup_at)))
+                # falls through — attempt delivery again this SAME sweep
             else:
                 logs.append("skip gave-up (goal-rearm) %s" % loc)
-            continue
+                continue
         # --- coordination with the /compact senders (#69 / #78) -------------
         if handled is not None and sid in handled:
             logs.append("skip just-compacted (goal-rearm) %s" % loc)
@@ -11180,7 +11248,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             ok = _send_goal_verified(pid, text, run, captured=captured,
                                      sleep_fn=sleep_fn, logs=dlogs)
             tag = "goal-rearm"
-        if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_STASH_REASONS:
+        if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_REASONS:
             # #101 — deliver_with_stash bailed BEFORE sending a single
             # keystroke (still holding the foreign draft, mid-turn, or
             # another stash already in flight): the pane is alive and well,
