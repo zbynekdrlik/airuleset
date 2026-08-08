@@ -10396,9 +10396,11 @@ class TestStatuslineVocabularyModule(TestCase):
         # #223 -- every label was abbreviated on the actual footer; the doc
         # must name the CURRENT rendered forms, not just the spoken/historical
         # ones the test above already locks. #307 replaced `I D/T` with
-        # `run N done`, distinct from the live `I N` form on purpose.
+        # `run N done`, distinct from the live `I N` form on purpose; #313
+        # then reversed the "done" wording back to a ratio, `run N/T`
+        # (keeping the `run`-vs-`I` label split #307 introduced).
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("`I N`", "`run N done`", "`run D/T`", "`· skip K`",
+        for phrase in ("`I N`", "`run N/T`", "`run D/T`", "`· skip K`",
                        "`· gkq N`", "`Q N`", "sub <D.M.>"):
             self.assertIn(phrase, t, phrase)
 
@@ -10408,6 +10410,20 @@ class TestStatuslineVocabularyModule(TestCase):
         t = self.MODULE.read_text(encoding="utf-8")
         self.assertIn("tickets-status", t)
         self.assertIn("autopilot-progress", t)
+
+    def test_module_no_longer_documents_the_removed_inde_bucket(self):
+        # #313 pt 5 removed the cross-project '· inde M' form entirely from
+        # the RENDERED forms bullet -- the doc must not claim it still exists.
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertNotIn("`Q N · inde M`", t)
+        self.assertNotIn("`Q inde M`", t)
+
+    def test_module_documents_the_width_budget(self):
+        # #313 pt 4 -- the doc must explain the new width-budget trim, so a
+        # future session reading it understands why a segment can be missing.
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertIn("width", t.lower())
+        self.assertIn("◎ /goal", t)
 
 
 class TestProseHookIgnoresGoalTemplateLines(TestCase):

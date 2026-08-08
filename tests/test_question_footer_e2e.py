@@ -158,13 +158,16 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         seg = statusbar.questions_segment(str(self.cwd), home=self.home)
         self.assertIn("Q 1", seg, seg)
 
-    def test_a_different_project_shows_up_as_elsewhere(self):
-        sid = self._sid("inde")
+    def test_a_different_project_renders_nothing(self):
+        # #313 pt 5: the cross-project 'inde' bucket was removed entirely --
+        # a question recorded for a DIFFERENT project is simply invisible
+        # from this one's footer (it already pinged its own project's phone).
+        sid = self._sid("other-proj")
         self._fire(sid, "❓ NEEDS YOU: nasadiť teraz?", msg_id="777004")
         other_cwd = tempfile.mkdtemp(prefix="airuleset-q-e2e-other-")
         try:
             seg = statusbar.questions_segment(other_cwd, home=self.home)
-            self.assertIn("inde 1", seg, seg)
+            self.assertEqual(seg, "")
         finally:
             shutil.rmtree(other_cwd, ignore_errors=True)
 

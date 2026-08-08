@@ -152,6 +152,14 @@ class TestCavemanShimBehavior(TestCase):
                 fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
             env = dict(os.environ)
             env["HOME"] = home
+            # #313 pt 4: TMUX_PANE MUST NOT leak from this real process into
+            # the shim subprocess -- this worker's own session genuinely
+            # runs inside a live tmux pane, and an inherited TMUX_PANE would
+            # make statusbar.pane_width() shell out to the REAL tmux binary,
+            # non-deterministically sizing (and possibly trimming) the
+            # render against whatever pane the TEST happens to run in. Every
+            # test that needs width-budget trimming sets it back explicitly.
+            env.pop("TMUX_PANE", None)
             r = subprocess.run(
                 ["bash", shim],
                 input=json.dumps(payload),
@@ -296,11 +304,14 @@ class TestCavemanShimAccountSegments(TestCase):
                 fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
             env = dict(_os.environ)
             env["HOME"] = home
+            env.pop("TMUX_PANE", None)   # #313 pt 4 -- see _run's own note
             return _subprocess.run(["bash", shim], input=_json.dumps(payload),
                                    capture_output=True, text=True, env=env)
 
     def test_sub_and_email_render_together_in_order(self):
-        # Target line order (#223): ... I ...  Q ...  ctx ...  <email>  caveman
+        # #313 pt 6: 'sub' moved NEXT TO the email, single space, EMAIL
+        # first ("drlik.marek@gmail.com sub 12.8.(4d)") -- reversed from the
+        # #223-era order (sub mid-footer, email trailing separately).
         r = self._render(
             {"workspace": {"current_dir": "/tmp/nowhere"}},
             claude_json={"oauthAccount": {
@@ -309,9 +320,9 @@ class TestCavemanShimAccountSegments(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("sub ", r.stdout)
         self.assertIn("drlik.marek@gmail.com", r.stdout)
-        # the email comes AFTER the sub segment in the rendered line
-        self.assertLess(r.stdout.index("sub "),
-                        r.stdout.index("drlik.marek@gmail.com"))
+        # the email comes BEFORE the sub segment in the rendered line (#313 pt 6)
+        self.assertLess(r.stdout.index("drlik.marek@gmail.com"),
+                        r.stdout.index("sub "))
 
     def test_missing_claude_json_omits_both_but_renders_the_rest(self):
         r = self._render({"rate_limits": {
@@ -368,6 +379,7 @@ class TestCavemanShimAccountSegments(TestCase):
                 fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
             env = dict(_os.environ)
             env["HOME"] = home
+            env.pop("TMUX_PANE", None)   # #313 pt 4 -- see _run's own note
             r = _subprocess.run(["bash", shim],
                                 input=_json.dumps({"rate_limits": {
                                     "five_hour": {"used_percentage": 13}}}),
@@ -434,16 +446,18 @@ class TestCavemanShimTickets(TestCase):
             shim = _os.path.join(home, "shim.sh")
             with open(shim, "w") as fh:
                 fh.write(airuleset.render_caveman_shim())
+            env = {**_os.environ, "HOME": home}
+            env.pop("TMUX_PANE", None)   # #313 pt 4 -- see _run's own note
             r = subprocess.run(
                 ["bash", shim],
                 input=_json.dumps({"workspace": {"current_dir": cwd},
                                    "context_window": {"used_percentage": 10}}),
                 capture_output=True, text=True,
-                env={**_os.environ, "HOME": home})
+                env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
-            # #307: the run-progress badge is `run N done`, distinct from the
-            # `I N` live-count form it now shows alongside.
-            self.assertIn("run 3 done", r.stdout)
+            # #313 pt 1: the run-progress badge is `run <done>/<total>`,
+            # distinct from the `I N` live-count form it shows alongside.
+            self.assertIn("run 3/17", r.stdout)
             self.assertIn("I 14", r.stdout)
 
 
@@ -476,10 +490,12 @@ class TestCavemanNewCacheLayout(TestCase):
             shim = os.path.join(home, "shim.sh")
             with open(shim, "w") as fh:
                 fh.write(airuleset.CAVEMAN_SHIM_CONTENT)
+            env = {**os.environ, "HOME": home}
+            env.pop("TMUX_PANE", None)   # #313 pt 4 -- see _run's own note
             r = subprocess.run(
                 ["bash", shim], input=json.dumps({}),
                 capture_output=True, text=True,
-                env={**os.environ, "HOME": home})
+                env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("caveman:lite", r.stdout)
 
