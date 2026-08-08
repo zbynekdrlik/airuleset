@@ -6823,7 +6823,13 @@ COMPACT_TEXT = "/compact"
 # the context can still grow, so reading it fresh here is the most accurate
 # and the recording hook stays dumb/fast. Env override lets a box tune the
 # floor without a code change.
-COMPACT_BOUNDARY_MIN_CONTEXT = 200_000
+# 2026-08-08 (user directive, #333 recurrence): raised 200_000 -> 250_000.
+# The always-on prefix (system prompt + rules + skills + agent-strip blocks)
+# grew to the point where a supervisor session's POST-compact context already
+# exceeds 200K, so the old floor never dropped anything — every recorded
+# request delivered and the user saw "random" compacts all day. 250K gives
+# real headroom between the post-compact baseline and the floor.
+COMPACT_BOUNDARY_MIN_CONTEXT = 250_000
 
 # #109 point 3 — a request that never found a safe delivery moment must LAPSE,
 # not fire hours after the boundary that justified it. A request is only ever

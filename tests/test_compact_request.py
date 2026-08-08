@@ -1207,7 +1207,9 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
         return tmux, logs, reqpath
 
     def test_constant_value(self):
-        self.assertEqual(wd.COMPACT_BOUNDARY_MIN_CONTEXT, 200_000)
+        # 250_000 since 2026-08-08 (user directive — post-compact baseline of a
+        # supervisor session already exceeds 200K, so the old floor was inert)
+        self.assertEqual(wd.COMPACT_BOUNDARY_MIN_CONTEXT, 250_000)
 
     def test_small_context_is_never_sent_and_request_is_cleared(self):
         tmux, logs, reqpath = self._go(120_000)
@@ -1224,7 +1226,7 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
 
     def test_context_equal_to_threshold_sends_not_skips(self):
         # only STRICTLY below the floor skips
-        tmux, logs, reqpath = self._go(200_000)
+        tmux, logs, reqpath = self._go(250_000)
         self.assertIn("/compact", tmux.typed_texts())
 
     def test_env_override_lowers_the_threshold(self):
