@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import sys
 import tempfile
@@ -4023,6 +4024,53 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
             self.assertEqual(result, "")
             self.assertEqual(Path(p).read_text(), "X=1\n")   # untouched
 
+    # --- create=False (#330 F3: the automatic self-heal's own mode) -------
+    def test_provision_question_thread_find_only_never_issues_a_create_post(self):
+        calls = []
+
+        def fake_http(token, method, path, payload=None):
+            calls.append((method, path))
+            if method == "GET" and path == "channels/zthread":
+                return {"parent_id": "parentchan", "guild_id": "g1"}
+            return {"threads": []}   # genuinely nothing to find anywhere
+
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        result = self.notify.provision_question_thread(
+            "zbynek", env=env, create=False, http=fake_http)
+        self.assertEqual(result, "")
+        self.assertFalse(any(meth == "POST" for meth, _ in calls),
+                         "create=False must NEVER issue a create POST")
+
+    def test_provision_question_thread_find_only_still_finds_an_existing_thread(self):
+        def fake_http(token, method, path, payload=None):
+            if method == "GET" and path == "channels/zthread":
+                return {"parent_id": "parentchan", "guild_id": "g1"}
+            if method == "GET" and path == "guilds/g1/threads/active":
+                return {"threads": [{"id": "found1", "parent_id": "parentchan",
+                                     "name": "claude-zbynek-q"}]}
+            return None
+
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        result = self.notify.provision_question_thread(
+            "zbynek", env=env, create=False, http=fake_http)
+        self.assertEqual(result, "found1")
+
+    def test_provision_question_thread_default_still_creates(self):
+        # The explicit, human-typed CLI path (create=True, the default)
+        # must be COMPLETELY unaffected by adding the create= parameter.
+        def fake_http(token, method, path, payload=None):
+            if method == "GET":
+                return {"parent_id": "parentchan"}
+            return {"id": "createdid"}
+
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "zthread"}
+        result = self.notify.provision_question_thread(
+            "zbynek", env=env, http=fake_http)
+        self.assertEqual(result, "createdid")
+
     # --- find_owner_question_thread (adversarial-review MAJOR fix) --------
     def test_find_owner_question_thread_matches_active_thread(self):
         def fake_http(token, method, path, payload=None):
@@ -4155,8 +4203,13 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
             p = os.path.join(d, ".env")
             Path(p).write_text("X=1\n")
             self.notify._env_upsert(p, "Y", "2")
-            self.assertFalse(
-                os.path.exists(p + ".tmp"),
+            # A DIRECTORY listing, not a fixed `p + ".tmp"` literal — #330's
+            # concurrency fix (below) gives every call its OWN unique tmp
+            # name (tempfile.mkstemp), so a leftover under any OTHER name
+            # would slip past a check anchored on the old fixed literal.
+            leftovers = [f for f in os.listdir(d) if f != os.path.basename(p)]
+            self.assertEqual(
+                leftovers, [],
                 "the atomic tmp file must not survive a successful write")
 
     def test_env_upsert_writes_via_os_replace(self):
@@ -4174,6 +4227,47 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
             src, dst = fake_replace.call_args[0]
             self.assertTrue(str(src).endswith(".tmp"), src)
             self.assertEqual(dst, p)
+
+    def test_env_upsert_concurrent_writers_never_publish_a_corrupted_file(self):
+        # #330 adversarial-review F1 (CRITICAL): the OLD implementation
+        # shared ONE FIXED tmp path (`path + ".tmp"`) across every caller —
+        # two overlapping writers could interleave so a LATER writer's
+        # os.replace published an EARLIER writer's still-being-written
+        # (truncated/empty) tmp, destroying every key in the file including
+        # DISCORD_BOT_TOKEN. Measured live: ~3.2% empty-file rate at 2
+        # concurrent writers x 3000 upserts each. This reproduces the SAME
+        # shape against the REAL function with genuine OS threads and real
+        # file I/O — no mocking, because the defect is specifically about
+        # real concurrent filesystem operations racing. The rep count
+        # (2000/thread) is EMPIRICALLY calibrated on this box: 300/thread
+        # never reproduced it in several tries (this filesystem's race
+        # window is narrower than the reviewer's own environment), while
+        # 2000/thread reproduced a corrupted (token-destroyed) file on the
+        # unfixed code every time it was tried.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n")
+
+            def hammer(owner):
+                for i in range(2000):
+                    self.notify._env_upsert(
+                        p, "DISCORD_NOTIFICATION_CHANNEL_%s_Q" % owner,
+                        "id%d" % i)
+
+            threads = [threading.Thread(target=hammer, args=("ZBYNEK",)),
+                      threading.Thread(target=hammer, args=("MAREK",))]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            content = Path(p).read_text()
+            self.assertGreater(
+                len(content), 0,
+                "the .env must never end up EMPTY from concurrent writers")
+            self.assertIn(
+                "DISCORD_BOT_TOKEN=tok", content,
+                "the bot token must survive concurrent, unrelated writers")
 
 
 class TestTmuxHistoryLimit(TestCase):
@@ -6840,7 +6934,8 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertEqual(r3.stdout, "mthread222")
 
     def test_cli_provision_question_thread_success(self):
-        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
                       mention_prefix=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
@@ -6857,7 +6952,8 @@ class TestDiscordAutopilotNotify(TestCase):
         fake.assert_called_once_with("zbynek")
 
     def test_cli_provision_question_thread_defaults_to_resolved_owner(self):
-        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
                       mention_prefix=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
@@ -6870,7 +6966,8 @@ class TestDiscordAutopilotNotify(TestCase):
         fake.assert_called_once_with("marek")
 
     def test_cli_provision_question_thread_failure_exits_nonzero(self):
-        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
                       mention_prefix=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
@@ -6881,13 +6978,73 @@ class TestDiscordAutopilotNotify(TestCase):
                 airuleset.cmd_notify(args)
             self.assertEqual(cm.exception.code, 1)
 
+    def test_cli_provision_question_thread_failure_logs_provision_failed(self):
+        # #330 F7: the AUTOMATIC background self-heal runs fully detached
+        # (stdout/stderr both DEVNULL'd) — before this, a failed self-heal
+        # attempt left NO trace anywhere, forever, even though the loud
+        # "fallback" line already told the operator one was attempted.
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="zbynek")
+        with m.patch("notify.provision_question_thread", return_value=""), \
+                m.patch("notify.log_delivery") as fake_log:
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_notify(args)
+        fake_log.assert_called_once()
+        call_args, call_kwargs = fake_log.call_args
+        self.assertEqual(call_args[0], "provision-failed")
+        self.assertEqual(call_kwargs.get("key"), "zbynek")
+
+    def test_cli_provision_question_thread_find_only_never_creates(self):
+        # #330 F3: --find-only is the flag `_spawn_provision_question_thread`
+        # itself passes — the AUTOMATIC background self-heal must never
+        # spin up a brand-new Discord thread on its own.
+        args = m.Mock(provision_question_thread=True, find_only=True,
+                      autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="zbynek")
+        import io
+        import contextlib
+        with m.patch("notify.provision_question_thread",
+                     return_value="foundid") as fake:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_notify(args)
+        self.assertEqual(buf.getvalue(), "foundid")
+        fake.assert_called_once_with("zbynek", create=False)
+
+    def test_cli_provision_question_thread_default_omits_create_kwarg(self):
+        # The pre-#330 default path must call provision_question_thread
+        # with EXACTLY ONE positional arg, byte-identical to before —
+        # never a `create=True` kwarg that changes the call SIGNATURE for
+        # every existing caller/mock.
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
+                      mention_prefix=False, repo_name=False, newest_card=False,
+                      backfill_digest=False, record_question=False,
+                      edit_question=False, channel_id=False, owner=False,
+                      mirror_owners=False, run_card=False, api_error=False,
+                      body=None, owner_name="zbynek")
+        with m.patch("notify.provision_question_thread",
+                     return_value="q1") as fake:
+            airuleset.cmd_notify(args)
+        fake.assert_called_once_with("zbynek")
+
     def test_cli_provision_question_thread_normalizes_owner_name(self):
         # Adversarial-review THEORETICAL finding: an un-normalized
         # --owner-name typo (mixed case, a trailing space) must resolve to
         # the SAME normalized key resolve_owner() itself would produce —
         # otherwise it silently creates a real Discord thread and persists
         # it under a DEAD .env key nothing ever reads.
-        args = m.Mock(provision_question_thread=True, autopilot_done=False,
+        args = m.Mock(provision_question_thread=True, find_only=False,
+                      autopilot_done=False,
                       mention_prefix=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,

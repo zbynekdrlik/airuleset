@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -147,14 +148,67 @@ class TestSpawnProvisionQuestionThreadGuard(_HomeIsolated):
         self.assertEqual(len(calls), 2)
 
     def test_spawn_calls_provision_question_thread_for_the_owner(self):
+        # #330 adversarial-review F4/F5: the ORIGINAL version of this test
+        # only asserted argv MEMBERSHIP, which four real mutants survived
+        # (dropping `stdout=DEVNULL` — losing a live ❓ to a stray line on
+        # the shell hook's channel-id read; dropping `start_new_session`
+        # — the detached child dies with the hook's own process group;
+        # a wrong `script` path — silently never self-heals; the
+        # `--owner-name` FLAG dropped in favour of a bare positional
+        # argument, which argparse rejects). Assert the exact argv AND the
+        # exact kwargs so all four regressions fail loudly.
         calls = []
-        with m.patch.object(notify.subprocess, "Popen",
-                            lambda *a, **k: calls.append(a)):
+
+        def fake_popen(*a, **k):
+            calls.append((a, k))
+            return m.Mock()
+
+        with m.patch.object(notify.subprocess, "Popen", fake_popen):
             notify._spawn_provision_question_thread("zbynek")
         self.assertEqual(len(calls), 1)
-        argv = calls[0][0]
-        self.assertIn("--provision-question-thread", argv)
-        self.assertIn("zbynek", argv)
+        (argv,), kwargs = calls[0]
+        self.assertEqual(argv[0], notify.sys.executable)
+        self.assertTrue(argv[1].endswith("airuleset.py"), argv[1])
+        self.assertTrue(os.path.isfile(argv[1]),
+                        "the resolved script path must be the real file")
+        self.assertEqual(
+            argv[2:],
+            ["notify", "--provision-question-thread", "--owner-name",
+             "zbynek", "--find-only"],
+            "the AUTOMATIC self-heal must be FIND-only (#330 F3) — never "
+            "auto-CREATE a new Discord thread unattended")
+        self.assertIs(kwargs.get("stdout"), subprocess.DEVNULL)
+        self.assertIs(kwargs.get("stderr"), subprocess.DEVNULL)
+        self.assertIs(kwargs.get("stdin"), subprocess.DEVNULL)
+        self.assertIs(kwargs.get("start_new_session"), True)
+
+    def test_concurrent_spawns_for_the_same_owner_yield_exactly_one(self):
+        # #330 adversarial-review F2 (MAJOR): the OLD guard was a plain
+        # exists()+mtime check followed by a SEPARATE open() — a TOCTOU
+        # race. Measured live: 8 concurrent callers for the same owner
+        # produced 4-5 real spawns, not 1 — which both feeds F1 (many
+        # concurrent .env writers) and can fork a SECOND real Discord
+        # thread (the exact duplicate-thread bug #296's own
+        # find-before-create was built to prevent).
+        calls = []
+        lock = threading.Lock()
+
+        def fake_popen(*a, **k):
+            with lock:
+                calls.append(a)
+            return m.Mock()
+
+        with m.patch.object(notify.subprocess, "Popen", fake_popen):
+            threads = [threading.Thread(
+                target=notify._spawn_provision_question_thread,
+                args=("zbynek",)) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(
+            len(calls), 1,
+            "an atomic guard must admit exactly ONE spawn from a burst")
 
 
 class TestChannelIdCliWiresTheFallback(_HomeIsolated):
@@ -163,11 +217,24 @@ class TestChannelIdCliWiresTheFallback(_HomeIsolated):
     emit_one()) -- proves the WIRING end to end via subprocess, not just the
     function in isolation."""
 
-    def _write_env(self, q=False):
+    def _write_env(self, q=False, token=True):
+        # token=False (#330 adversarial-review F6): the "unconfigured"
+        # scenario's own background self-heal spawn is REAL (this test
+        # never patches subprocess.Popen, since it is proving the
+        # subprocess-level CLI wiring) — with no bot token, BOTH
+        # find_owner_question_thread and create_owner_question_thread
+        # bail out before their first network call
+        # (`token = bot_token(env); if not token: return ""`), so the
+        # spawned grandchild does real, fast, LOCAL work only. Without
+        # this, the grandchild makes genuine outbound HTTPS requests to
+        # discord.com from every test run (measured live: ~12s against a
+        # blackholed network) — a real defect, not a hypothetical one.
         d = self.home / ".claude" / "channels" / "discord"
         d.mkdir(parents=True, exist_ok=True)
-        lines = ["DISCORD_BOT_TOKEN=xxtokenxx",
-                 "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=111"]
+        lines = []
+        if token:
+            lines.append("DISCORD_BOT_TOKEN=xxtokenxx")
+        lines.append("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=111")
         if q:
             lines.append("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=222")
         (d / ".env").write_text("\n".join(lines) + "\n")
@@ -188,7 +255,7 @@ class TestChannelIdCliWiresTheFallback(_HomeIsolated):
         self.assertEqual(self.log_lines(), [])
 
     def test_unconfigured_falls_back_and_logs(self):
-        self._write_env(q=False)
+        self._write_env(q=False, token=False)
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "111")
