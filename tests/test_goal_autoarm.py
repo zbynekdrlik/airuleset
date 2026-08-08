@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
 import statusbar
+import airuleset
 import json as _json
 
 # #266 Defect 1: goal_autoarm's plain (bare-box) branch now calls
@@ -148,10 +149,12 @@ class FakeTmux:
         return [a[-1] for a in self.sent if "-l" in a]
 
 
-def go(captured, state=None, now=None, model_stash=False):
-    tmux = FakeTmux(captured, model_stash=model_stash)
+def go(captured, state=None, now=None, model_stash=False, projects_dir=None,
+      templates_path=None, dry_run=False, capture_seq=()):
+    tmux = FakeTmux(captured, model_stash=model_stash, capture_seq=capture_seq)
     logs = wd.goal_autoarm(now or time.time(), tmux, state if state is not None
-                           else {})
+                           else {}, dry_run=dry_run, projects_dir=projects_dir,
+                           templates_path=templates_path)
     return tmux, logs
 
 
@@ -907,6 +910,226 @@ class TestGoalsOnScreenGateNoLongerPermanentlyVetoes(unittest.TestCase):
         self.assertFalse(tmux.typed(),
                          "a truncated wrapped fragment must never be armed")
         self.assertTrue(any("wrap" in ln.lower() for ln in logs), logs)
+
+
+def write_transcript(entries, root, cwd, sid):
+    d = Path(root) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    with open(p, "w") as f:
+        for e in entries:
+            f.write(_json.dumps(e) + "\n")
+    return p
+
+
+def goal_marker(kind, payload="x", ts="2026-08-01T09:00:00.000Z"):
+    body = "<local-command-stdout>Goal %s: %s</local-command-stdout>" % (
+        kind, payload)
+    return {"type": "user", "timestamp": ts, "message": {"content": body}}
+
+
+TEMPLATE_FULL = "/goal FULL-AUTHORITY TEMPLATE TEXT"
+TEMPLATE_BM = "/goal BRANCH-MERGE TEMPLATE TEXT"
+TEMPLATE_FNM = "/goal FORK-NO-MERGE TEMPLATE TEXT"
+
+
+def write_templates(root):
+    """A minimal stand-in SKILL.md carrying the 3 `/goal ` lines in the SAME
+    order as `airuleset.AUTHORITY_PROFILES` (full, branch-merge,
+    fork-no-merge) -- exactly what `load_goal_templates` reads."""
+    p = Path(root) / "SKILL.md"
+    p.write_text("\n".join([TEMPLATE_FULL, "", TEMPLATE_BM, "",
+                            TEMPLATE_FNM]) + "\n")
+    return p
+
+
+VIRGIN_CWD = "/home/x/devel/demo"      # matches FakeTmux's hardcoded cwd
+
+
+class TestGoalAutoarmVirginCandidate(unittest.TestCase):
+    """#320 shape 2 (montalu2): job 9's arm-question branch only ever fires
+    for a session that PRINTS the `/autopilot` arm question -- a session
+    doing ORDINARY work never does, so it never reaches ANY arming path at
+    all and sits idle, silently, once its current work concludes. This is
+    the companion candidate path job 9 takes instead, ONLY when the arm
+    question does not match: a genuinely at-rest pane whose WHOLE
+    transcript has NEVER shown a `/goal` marker of any kind gets armed
+    ONCE with the authority-appropriate template. #170 stays untouched by
+    construction: ANY prior arm or clear permanently excludes a session,
+    forever, from this path."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tpl_dir = TemporaryDirectory()
+        self.addCleanup(self.tpl_dir.cleanup)
+        self.templates_path = write_templates(self.tpl_dir.name)
+        self.sid = "virginsess"
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    def test_never_touched_session_gets_armed_with_full_authority_template(self):
+        self._write([{"type": "assistant",
+                     "timestamp": "2026-08-01T09:00:00.000Z",
+                     "message": {"content": "hi"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL], logs)
+        self.assertTrue(any("virgin" in ln for ln in logs), logs)
+
+    def test_branch_merge_authority_picks_the_second_template(self):
+        self._write([])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="branch-merge"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_BM])
+
+    def test_fork_no_merge_authority_picks_the_third_template(self):
+        self._write([])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="fork-no-merge"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FNM])
+
+    def test_a_session_that_was_ever_armed_before_is_never_touched(self):
+        self._write([goal_marker("set")])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_a_session_that_was_ever_cleared_before_is_never_touched(self):
+        # #170 -- a genuine standing user-off signal must never be re-armed
+        # by this NEW path either, no matter how idle the pane looks now.
+        self._write([goal_marker("cleared")])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_no_transcript_at_all_is_never_touched(self):
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_busy_pane_is_never_a_candidate(self):
+        self._write([])
+        busy = "✳ Baking… (2m · esc to interrupt)\n  ctx ███░\n"
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(busy, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_a_pane_holding_a_draft_is_never_a_candidate(self):
+        self._write([])
+        draft = "❯ rozpisany draft\n  ctx ███░\n"
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(draft, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_busy_pane_is_refused_even_under_dry_run(self):
+        # #320-review — the busy/draft fixtures above are ALSO caught by
+        # the later fresh-recapture SKIP-TRANSIENT guard (a busy/draft
+        # capture has no bare `❯` box, which THAT guard independently
+        # refuses too), so removing the PRIMARY `kind != "input" or draft`
+        # gate left both tests above green for the wrong reason. `dry_run`
+        # returns BEFORE that later guard is ever reached, isolating the
+        # primary gate specifically.
+        self._write([])
+        busy = "✳ Baking… (2m · esc to interrupt)\n  ctx ███░\n"
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = go(busy, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertFalse(any("READY" in ln for ln in logs), logs)
+
+    def test_a_draft_pane_is_refused_even_under_dry_run(self):
+        self._write([])
+        draft = "❯ rozpisany draft\n  ctx ███░\n"
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = go(draft, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertFalse(any("READY" in ln for ln in logs), logs)
+
+    def test_one_shot_never_retried_even_past_the_dedup_window(self):
+        # #320's own open marker-writing mystery: if the arm itself never
+        # produces a marker, the transcript stays "virgin" forever -- this
+        # must NOT become an infinite retry loop. Proven PAST the ordinary
+        # 10-minute dedup window, to isolate the one-shot flag specifically.
+        self._write([])
+        state = {}
+        now0 = time.time()
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            t1, _ = go(NO_QUESTION_PANE, state=state, now=now0,
+                      projects_dir=self.tmp.name,
+                      templates_path=self.templates_path)
+            self.assertTrue(t1.typed())
+            t2, _ = go(NO_QUESTION_PANE, state=state,
+                      now=now0 + wd.GOAL_ARM_WINDOW_S + 5,
+                      projects_dir=self.tmp.name,
+                      templates_path=self.templates_path)
+        self.assertFalse(t2.typed(),
+                         "never retried once already attempted, even past "
+                         "the ordinary re-arm window")
+
+    def test_a_confirmed_non_virgin_session_is_never_rescanned(self):
+        # Cost discipline (#320's own design rationale): the full-file scan
+        # must be paid AT MOST ONCE per session's lifetime -- this branch
+        # runs for basically every idle non-arm-question pane fleet-wide,
+        # so a session already known to have SOME goal history must never
+        # be rescanned on a later sweep.
+        self._write([goal_marker("set")])
+        calls = []
+        real = wd._goal_never_armed
+
+        def spy(tpath):
+            calls.append(tpath)
+            return real(tpath)
+
+        state = {}
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"), \
+             m.patch.object(wd, "_goal_never_armed", side_effect=spy):
+            go(NO_QUESTION_PANE, state=state, projects_dir=self.tmp.name,
+              templates_path=self.templates_path)
+            go(NO_QUESTION_PANE, state=state,
+              now=time.time() + wd.GOAL_ARM_WINDOW_S + 5,
+              projects_dir=self.tmp.name,
+              templates_path=self.templates_path)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_no_templates_loaded_is_never_a_candidate(self):
+        self._write([])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                             templates_path=None)
+        self.assertFalse(tmux.typed())
+
+    def test_dry_run_never_types_but_still_logs_ready(self):
+        self._write([])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = go(NO_QUESTION_PANE, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("READY" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
