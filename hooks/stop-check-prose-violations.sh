@@ -504,6 +504,45 @@ if msg_has "$MSG_NOGOAL_MENTION" -qiE "review the (spec|plan|design|brainstorm|a
     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
 
+# Check for the SAME "dispatch subagents now, or hold for plan review"
+# pause, stated in SLOVAK (#319). ask-before-assuming.md's own row for
+# this shape ("Plan committed locally as <sha>. Dispatch all tasks via
+# subagent-driven-development now, or hold for your review of the plan
+# first?") stayed OUT of the pre-answered table on the reasoning that its
+# Slovak rendering already blocks — but #316's own audit of that claim
+# only ever tested a fixture that RETAINS the literal English loanword
+# "subagent-driven-development"; a genuinely natural Slovak rendering,
+# with the loanword replaced by ordinary Slovak words, was NOT blocked by
+# ANY hook (#319). Unlike #316's spec/plan-approval detector below, this
+# shape has NO legitimate fork to protect (the row's own guidance: "the
+# review-first branch is banned for ALL plan sizes"), so no bullet-option
+# exemption is needed — the check mirrors the SCOPE of the English clause
+# it is a sibling of (immediately above), not #316's different-shaped
+# exemption machinery. Four required tokens: a Slovak "start" verb near a
+# "now" word (either order), "alebo"/"či", a Slovak "wait" verb, and a
+# plán/kontrola/review word nearby the wait verb — proven against 5
+# negative-control fixtures (an unrelated "started tests, waiting for
+# results" sentence, a live-hardware-timing question with the SAME 4-token
+# shape but no plan/review word, an already-legitimate design question, a
+# genuine bulleted design fork, and the SAME "napriek" word used for an
+# unrelated deploy-status sentence) — see issue #319 comment.
+SK_DISPATCH_RX="(spusti[ťt]|rozbehn[úu][ťt]|zača[ťt])"
+SK_NOW_RX="(hne[ďd]|teraz|ihne[ďd])"
+SK_HOLD_RX="(poč(ka[ťt]|kaj)|čaka[ťt])"
+SK_PLANWORD_RX="(pl[áa]n|kontrol[uy]|review)"
+# #316-review CRITICAL (reproduced again here, live): `\b` immediately
+# adjacent to a diacritic is itself locale-dependent under a bare
+# C/POSIX locale (no LANG/LC_ALL set) — rewriting to plain alternation
+# (already done above; no embedded bracket classes with diacritics) does
+# NOT fix it by itself. Forcing LC_ALL=C.UTF-8 on just this one grep call
+# is the verified fix (present on every managed box's glibc); a plain
+# `VAR=val funcname` prefix scopes the override to this command only.
+if LC_ALL=C.UTF-8 msg_has "$MSG_NOGOAL_MENTION" -qiE \
+    "(\b${SK_NOW_RX}\b.{0,40}\b${SK_DISPATCH_RX}\b|\b${SK_DISPATCH_RX}\b.{0,40}\b${SK_NOW_RX}\b).{0,60}\b(alebo|či)\b.{0,60}\b${SK_HOLD_RX}\b.{0,40}\b${SK_PLANWORD_RX}\b"; then
+    echo "VIOLATION: Spýtal si sa po slovensky, či máš spustiť prácu/podúlohy hneď, alebo počkať na kontrolu plánu — presne trieda 'dispatch now or hold for review' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: vetva 'počkať na review' je zakázaná pre plány akejkoľvek veľkosti. Ak chce používateľ prerušiť, urobí to sám. Prepíš správu: vynechaj otázku, spusti hneď. See ask-before-assuming.md pre-answered table." >&2
+    add_hard "Pre-answered Slovak prose question: dispatch-now-or-hold-for-review (spustiť/rozbehnúť/začať + hneď/teraz/ihneď + alebo/či + počkať + plán/kontrolu/review)"
+fi
+
 # Check for the SAME spec/plan-approval pause, stated in SLOVAK (#316).
 # Every question this repo ships to a real user is written in Slovak
 # (user-questions-slovak.md) — an English-only regex for this class is
@@ -899,6 +938,36 @@ fi
 if msg_has "$MSG_MENTION" -qiE "admin.?merge|merge --admin|--admin.*merge|bypass.*(branch.?protection|gate)|merge.*despite|merge.*broken.*(code|ci)|close.*pr.*roll.*into|roll.*into.*next.*pr|stop.*runner.*(to|so).*merge|realistic options.*[12]\.|investigate.*(or|vs).*merge|merge.*(or|vs).*investigate|functionally ready|essentially (clean|ready|mergeable)|good enough to merge|won.?t claim.*clean|UNSTABLE.*merge|merge.*UNSTABLE|informational (check|failure).*(merge|skip|ignore)|advisory only.*(merge|skip|ignore)|project precedent.*merg|previous pr.*merged.*same"; then
     echo "VIOLATION: You offered a quality-bypass shortcut (admin-merge / bypass branch protection / close PR and roll into the next one / 'merge despite' / 'functionally ready' / 'good enough to merge' / 'UNSTABLE but merge anyway' / 'informational check, merge it' / 'project precedent'). These are NEVER options. A failing gate or UNSTABLE state = fix the root cause, autonomously. Hours of overnight agentic work require autonomous decisions. The user wants the harder, correct path EVERY time — never the cheaper/quicker shortcut. See autonomous-quality-discipline.md, pr-merge-policy.md, ask-before-assuming.md." >&2
     add_hard "Quality-bypass shortcut offered (admin-merge / merge despite / functionally ready / UNSTABLE-but-merge / informational-check dismissal) — fix the gate instead"
+fi
+
+# Check for the SAME "merge despite the failing check" / quality-bypass
+# shortcut, stated in SLOVAK (#319). Two of ask-before-assuming.md's rows
+# for this shape ("Realistic options: admin-merge / close PR / stop
+# runner" and "Should I merge despite the failing check? / admin-merge?")
+# stayed OUT of the pre-answered table on the reasoning that their Slovak
+# rendering already blocks — but #316's own audit of that claim only ever
+# tested a fixture that RETAINS the literal English loanword
+# "admin-merge"; a genuinely natural Slovak rendering, with the loanword
+# replaced by ordinary Slovak words, was NOT blocked by ANY hook (#319).
+# One required pair: a Slovak "merge" verb near "napriek" (despite),
+# either order — narrow and high-signal on purpose (the SAME rigor level
+# as the English sibling immediately above, whose own "merge.*despite"
+# alternative is an equally bare 2-word requirement with no PR/CI-context
+# anchor — this is an accepted, already-shipped trade-off in this file,
+# not a NEW one). Proven against negative-control fixtures where "napriek"
+# appears without a nearby merge-verb (an unrelated deploy-status
+# sentence) — see issue #319 comment.
+SK_MERGE_RX="(zl[úu]či[ťt]|zmergova[ťt]|zmerguj)"
+# #316-review CRITICAL (reproduced again here, live): `\b` immediately
+# adjacent to a diacritic is itself locale-dependent under a bare
+# C/POSIX locale — forcing LC_ALL=C.UTF-8 on just this one grep call is
+# the verified fix, scoped to this command only via a plain
+# `VAR=val funcname` prefix. See the SAME finding on the Slovak
+# dispatch-now-or-hold check above for the full explanation.
+if LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE \
+    "\b${SK_MERGE_RX}\b.{0,60}\bnapriek\b|\bnapriek\b.{0,60}\b${SK_MERGE_RX}\b"; then
+    echo "VIOLATION: Ponúkol si po slovensky quality-bypass skratku ('zlúčiť/zmergovať napriek zlyhaniu') — presne trieda 'merge despite the failing check' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: zlyhávajúca kontrola = over branch protection sa nedá obísť. Preskúmaj skutočnú príčinu a oprav ju. NIKDY nenavrhuj admin-merge ani obídenie kontroly. See autonomous-quality-discipline.md, ask-before-assuming.md." >&2
+    add_hard "Pre-answered Slovak prose question: quality-bypass shortcut / merge despite (zlúčiť/zmergovať + napriek) — fix the gate instead"
 fi
 
 # SOFT — bare delegation phrases carry real non-bypass uses ("the cheaper

@@ -320,9 +320,16 @@ class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
         # row 6 — does this design look right
         "Vyzerá tento návrh dobre? Ak áno, zapíšem spec do "
         "docs/.../spec.md a commitnem.",
-        # row 10 — investigate or merge despite
-        "Mám preskúmať problém s codecov, alebo to radšej zmergovať "
-        "napriek tomu?",
+        # row 10 — investigate or merge despite. #319: NOT "...alebo to
+        # radšej zmergovať napriek tomu?" — that phrasing also happens to
+        # carry row 8/9's OWN banned shape (a Slovak merge-verb near
+        # "napriek") and is now correctly blocked by #319's new merge-
+        # despite detector too; this is a genuine, welcome overlap (the
+        # SAME banned intent), not a bug in that detector — but it makes
+        # THIS row's own phrasing a bad negative-control fixture. Picked a
+        # different, equally natural rendering of row 10's intent that
+        # does not carry rows 8/9's shape at all.
+        "Mám preskúmať problém s codecov, alebo to radšej preskočiť?",
         # row 11 — functionally ready but unstable
         "PR je funkčne pripravený ale UNSTABLE — rozhodneš o mergnutí?",
         # row 12 — should I merge / approve merge
