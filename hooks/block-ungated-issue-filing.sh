@@ -27,6 +27,17 @@ set -euo pipefail
 #   planned-work   — converged-plan decomposition (durable-decisions-to-tickets.md)
 #   user-request   — the user explicitly asked for this ticket
 #
+# CHAIN-DEPTH CAP (#311, added after odoo-erp's #3035→#3220→#3224→#3250→
+# #3251→#3252→#3258 seven-ticket review-finding chain — each hop honestly
+# satisfied its OWN Scope-gate criterion, which is exactly why a per-issue
+# criterion alone cannot stop this): a new issue naming its own PARENT as a
+# "follow-up" (`#N follow-up`, the exact phrasing real chain members already
+# use) is ALSO BLOCKED when that PARENT is itself such a follow-up — a
+# depth-2 review-finding chain — regardless of whether a Scope-gate
+# criterion is present. Detected via a cheap text match plus ONE bounded
+# `gh issue view` call on the named parent; a lookup failure degrades to
+# "cannot verify chain depth" and never blocks on its own.
+#
 # BODY RESOLUTION (same shape as block-gh-invalid-json-flag.sh's heredoc
 # handling, extended to CAPTURE the body instead of discarding it):
 #   - `-F <file>` / `--body-file <file>` where <file> was just written by a
@@ -75,6 +86,7 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 # stdin — see the repo's own #96 gotcha).
 RC=0
 OUT=$(python3 - "$CMD" "$SID" "$(pwd)" <<'PYEOF' 2>/dev/null
+import json
 import os
 import re
 import shlex
@@ -268,6 +280,42 @@ def resolve_body(tk, seg_line, is_api):
 
 CRITERION_RE = re.compile(r'(?m)^\s*Scope-gate:\s*(\S+)')
 
+# #311 -- chain-depth cap. A review-finding follow-up NAMES its own PARENT
+# issue as a "follow-up" -- confirmed to be the naming convention every real
+# chain member in the odoo-erp scope-gate.log corpus independently converged
+# on ("(#3224 follow-up)", "cross-screen half of #3224 is still open"), so
+# detecting THIS phrasing needs no new discipline for workers to adopt, only
+# a mechanical check on what they already write.
+FOLLOWUP_RE = re.compile(
+    r'#(\d+)[^\n]{0,20}\bfollow[- ]?up\b|\bfollow[- ]?up\b[^\n]{0,20}#(\d+)',
+    re.I)
+
+
+def _chain_parent(text):
+    m = FOLLOWUP_RE.search(text or "")
+    if not m:
+        return None
+    return m.group(1) or m.group(2)
+
+
+def _gh_view_text(parent, cwd):
+    """title + "\\n" + body of issue `parent`, or None on ANY failure
+    (offline, no `gh` auth, the issue genuinely doesn't exist, `gh` not on
+    PATH). A failure here degrades the chain-depth check to "cannot
+    verify" -- it must NEVER block on its own; the existing Scope-gate
+    criterion still decides, exactly as before this ticket."""
+    try:
+        out = subprocess.run(
+            ["gh", "issue", "view", str(parent), "--json", "title,body"],
+            capture_output=True, text=True, timeout=8, cwd=cwd)
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout or "{}")
+        return (data.get("title") or "") + "\n" + (data.get("body") or "")
+    except Exception:
+        return None
+
+
 results = []  # (verdict, title, criterion_or_none)
 
 for seg in split_top_level(skeleton):
@@ -291,7 +339,21 @@ for seg in split_top_level(skeleton):
         m = CRITERION_RE.search(body)
         if m:
             crit = m.group(1)
-    if crit and crit.lower() in ALLOWED:
+    # #311 -- a review-finding follow-up whose own PARENT is ITSELF such a
+    # follow-up is a depth-2 review-finding chain -- a self-reinforcing
+    # sequence the follow-up gate's PER-ISSUE criterion cannot see, since
+    # each individual hop can honestly claim its own criterion. Cheap text
+    # match first; the ONE bounded `gh` call only fires once a candidate
+    # parent is actually named.
+    chain_capped = False
+    parent = _chain_parent((title or "") + "\n" + (body or ""))
+    if parent:
+        parent_text = _gh_view_text(parent, cwd)
+        if parent_text is not None and _chain_parent(parent_text):
+            chain_capped = True
+    if chain_capped:
+        results.append(("BLOCK", title, "chain-depth-cap"))
+    elif crit and crit.lower() in ALLOWED:
         results.append(("PASS", title, crit))
     else:
         results.append(("BLOCK", title, crit))
@@ -330,15 +392,25 @@ fi
 
 if [ "$RC" -eq 2 ]; then
     cat >&2 <<'MSG'
-🚫 BLOCKED: filing this issue with no `Scope-gate:` line.
+🚫 BLOCKED: filing this issue.
+
+Either (a) no valid `Scope-gate:` line, or (b) this issue's own PARENT (the
+"#N follow-up" it names) is ITSELF a review-finding follow-up -- a depth-2
+review-finding chain (#311: adversarial-review findings that keep spawning
+follow-up tickets of follow-up tickets, unbounded — a criterion honestly
+satisfied at each individual hop does not fix this).
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this
-PR/session — it does NOT get filed as a follow-up issue. Filing is for
-GENUINELY out-of-scope work only.
+PR/session — it does NOT get filed as a follow-up issue, EVEN when it
+technically sits outside your diff. Filing is for GENUINELY out-of-scope
+work only, and a review finding that would spawn a SECOND generation of
+follow-up must be fixed in THIS branch instead, never filed as a third
+ticket.
 
 Fix NOW — one of:
-  1. Fix it in this session/PR instead of filing it, OR
+  1. Fix it in this session/PR instead of filing it (mandatory once the
+     chain-depth cap above applies), OR
   2. Add a line to the issue body naming why it is genuinely out of scope:
        Scope-gate: <criterion>
      where <criterion> is one of:

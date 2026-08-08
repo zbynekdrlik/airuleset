@@ -266,6 +266,16 @@ yourself — just do your work; the lock is the supervisor's concern.
    requesting-code-review> ... <N findings, fixed in commit <sha> / clean, 0 🔴 0 🟡 0 🔵> ..."` —
    this is what `review:` on your evidence block points at, checked by the SAME extended
    `subagent-stop-check-design.sh` gate as `validated:`/`approach:`.
+   **Same-branch-fix mandate (#311):** every finding from `/review` / `/requesting-code-review` —
+   INCLUDING one in code adjacent to your diff, not just inside it — is fixed in THIS SAME branch
+   before you merge, or dropped with your own stated reasoning posted on the ticket. A NEW follow-up
+   ticket is filed ONLY when the finding honestly clears one of the six bundling-gate criteria
+   (`complete-planned-work.md` — >300 LoC, schema migration, API break, security boundary,
+   cross-cutting, or a genuine user decision) — name the criterion in the `Scope-gate:` line, and
+   never file one that names THIS ticket as its own origin unless that criterion genuinely holds.
+   "The finding is technically outside the diff" is NOT a criterion by itself — a <100 LoC
+   adjacent-code finding is DO NOW, same branch, same PR, per `complete-planned-work.md`'s own
+   follow-up gate.
 7. Merge per `pr-merge-policy.md`: default auto-merge (merge it yourself); a
    `airuleset:merge=manual` marker → STOP at the green PR and report it instead of merging.
    Then monitor main CI + any deploy workflow to terminal. **Fire the per-ticket Discord card for EACH
