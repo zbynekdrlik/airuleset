@@ -13,9 +13,12 @@ felt difference waiting to happen (montalu2's `schvaľuješ zapísaný design
 spec?` sailed through untouched). Only 3 of the 17 dropped rows genuinely
 hold in BOTH languages — their Slovak rendering happens to retain the
 literal English jargon (`admin-merge`, `subagent-driven-development`) the
-existing regex keys on. The other 14 were reverted VERBATIM back into the
-table. This file now locks only the 3 rows that survived the audit, in
-both languages.
+existing regex keys on. The other 14 were reverted back into the table, in
+their original relative position and their original text unchanged (ONE
+row — "review the spec/plan before hand-off" — also gained a deliberate
+new item-3 reinforcement sentence in this same PR; every other reverted
+row's text is byte-for-byte its pre-`a89024a` original). This file now
+locks only the 3 rows that survived the audit, in both languages.
 
 Full row-by-row mapping (hook file + exact regex fragment per row):
 https://github.com/zbynekdrlik/airuleset/issues/95 (design comment).
@@ -156,20 +159,40 @@ class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
         # row 1 — subagent-vs-inline
         "Mám to spraviť cez subagenta alebo sekvenčne/inline? "
         "Dve možnosti vykonania.",
+        # row 2 — visual companion
+        "Chceš vizuálneho spoločníka / mockup pre túto layoutovú otázku?",
+        # row 3 — say go
+        "Pripravený spustiť — povedz go.",
+        # row 4 — ready for next step
+        "Ak je to dobré, povedz a ja to spustím. Pripravený na ďalší krok?",
         # row 5 — review-the-spec-before-handoff
         "Prosím skontroluj spec/plán a daj mi vedieť, ak chceš zmeny, "
         "predtým než to odovzdám writing-plans.",
         # row 6 — does this design look right
         "Vyzerá tento návrh dobre? Ak áno, zapíšem spec do "
         "docs/.../spec.md a commitnem.",
+        # row 10 — investigate or merge despite
+        "Mám preskúmať problém s codecov, alebo to radšej zmergovať "
+        "napriek tomu?",
+        # row 11 — functionally ready but unstable
+        "PR je funkčne pripravený ale UNSTABLE — rozhodneš o mergnutí?",
         # row 12 — should I merge / approve merge
         "PR je zelený — mám ho zmergovať? Alebo počkať?",
+        # row 13 — follow-up cleanup or do it now
+        "Mám tento cleanup zapísať ako follow-up issue, alebo to "
+        "spraviť teraz?",
         # row 14 — give the word, create the issues
         "Daj mi znamenie a vytvorím tie issues. Si pripravený "
         "schváliť ten backlog?",
         # row 15 — can you test it on your end
         "Môžeš mi to otestovať na svojej strane? Daj mi vedieť, "
         "či to funguje.",
+        # row 16 — fix locally before next user test
+        "Opravím to lokálne pred ďalším user testom. Prestávam ťa "
+        "používať ako testera.",
+        # row 17 — tool missing, could you try on staging
+        "Mohol by si to vyskúšať na staging prostredí? Chýba mi na "
+        "to nástroj.",
     ]
 
     def test_reverted_slovak_phrases_not_blocked_by_any_hook(self):
