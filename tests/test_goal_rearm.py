@@ -823,6 +823,25 @@ class TestGoalRearmGiveUpHasAReachableExit(GoalRearmBase):
         self.assertTrue(t.typed(), "the NEW streak's own reset must still "
                         "be reachable: %r" % logs)
 
+    def test_a_corrupt_giveup_resets_never_crashes_and_is_treated_as_spent(self):
+        # #322 REOPENED (2nd adversarial-review MINOR-1) -- `.get(..., 0)`
+        # only supplies the default when the key is ABSENT; a PRESENT but
+        # corrupt `giveup_resets` (a hand-edited/pruned state file, the same
+        # class T1 guarded `gaveup_at` against) reaches the `<` comparison
+        # uncaught -- symmetric fail-safe: never crash, never guess, treat
+        # an unreadable budget as already spent (never resets).
+        state = {}
+        now = time.time()
+        self._give_up(state, now)
+        state["goal_rearm"][SID]["giveup_resets"] = "not-a-number"
+        late = now + 3 * wd.GOAL_REARM_GIVEUP_RESET_S
+        # keep the run well inside the streak window, same discipline as
+        # the sibling corrupt-gaveup_at test above.
+        self.assertLess(late - now, wd.GOAL_REARM_STREAK_S)
+        t, logs = self._go(PANE_DARK, state=state, now=late)
+        self.assertFalse(t.typed(), logs)
+        self.assertTrue(any("skip gave-up" in ln for ln in logs), logs)
+
 
 class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     """#101 live incident (dev2, 2026-07-27): two `deliver_with_stash`
@@ -886,6 +905,63 @@ class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
                                cap_seq=[PANE_DRAFT])
         self.assertFalse(t.typed())
         self.assertTrue(any("GAVE UP" in ln.upper() for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+    def test_slot_occupied_is_bounded_then_counts_as_a_real_failure(self):
+        # #322 REOPENED (2nd adversarial-review MAJOR-1) -- a slot our OWN
+        # collapsed-paste early return stranded (parked draft, zero further
+        # keystrokes -- deliver_with_stash cannot safely recover an unproven
+        # collapsed buffer) refuses every LATER sweep with this SAME
+        # "stash-abort: slot occupied" reason, which the generic #101
+        # carve-out above treats as transient FOREVER -- unlike a genuinely
+        # foreign occupant, a slot WE stranded never self-resolves, so `n`
+        # would never advance and GAVE UP would never fire. Past
+        # GOAL_REARM_SLOT_STUCK_MAX CONSECUTIVE occurrences it must stop
+        # being transient.
+        state = {}
+        now = time.time()
+        with self._stub("stash-abort: slot occupied"):
+            for i in range(wd.GOAL_REARM_SLOT_STUCK_MAX - 1):
+                t, logs = self._go(PANE_DRAFT, state=state, now=now + i * 5,
+                                   cap_seq=[PANE_DRAFT])
+                self.assertFalse(t.typed(), "attempt %d" % i)
+                self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs),
+                                logs)
+            rec = state.get("goal_rearm", {}).get(SID, {})
+            self.assertEqual(rec.get("n", 0), 0,
+                             "still under the bound -- must not count yet: %r"
+                             % rec)
+            # the Nth (bound-exceeding) occurrence stops being transient
+            t, logs = self._go(
+                PANE_DRAFT, state=state,
+                now=now + (wd.GOAL_REARM_SLOT_STUCK_MAX - 1) * 5,
+                cap_seq=[PANE_DRAFT])
+            self.assertFalse(t.typed())
+            self.assertFalse(any("SKIP-TRANSIENT" in ln for ln in logs), logs)
+            self.assertTrue(any("FAIL" in ln for ln in logs), logs)
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec.get("n", 0), 1,
+                         "the bound-exceeding occurrence must count as a "
+                         "real failure: %r" % rec)
+        self.assertEqual(rec.get("slot_stuck_n", 0), 0,
+                         "the consecutive counter resets once it fires: %r"
+                         % rec)
+
+    def test_slot_occupied_eventually_reaches_gave_up(self):
+        # A permanently-stranded slot must still surface GAVE UP -- the
+        # user gets told, instead of the reachable give-up-reset mechanism
+        # (this round's own feature) being silently unreachable forever.
+        state = {}
+        now = time.time()
+        with self._stub("stash-abort: slot occupied"):
+            for i in range(50):
+                t, logs = self._go(PANE_DRAFT, state=state, now=now + i * 5,
+                                   cap_seq=[PANE_DRAFT])
+                self.assertFalse(t.typed(), "attempt %d" % i)
+                if any("GAVE UP" in ln.upper() for ln in logs):
+                    break
+            else:
+                self.fail("never reached GAVE UP within 50 sweeps")
         self.assertEqual(len(self.pings), 1, self.pings)
 
 
@@ -1685,6 +1761,55 @@ class TestTypeLiteralChunking(unittest.TestCase):
         text = "z" * wd.GOAL_TYPE_CHUNK_THRESHOLD
         sent, _sleeps = self._run(text)
         self.assertGreater(len(sent), 1, sent)
+
+    def test_every_emitted_argv_has_the_end_of_options_guard(self):
+        # #322 REOPENED (adversarial-review CRITICAL-1) -- a chunk (or a
+        # short single-burst payload) whose FIRST character is `-` is read
+        # by real tmux getopt as an unknown FLAG, not literal text --
+        # verified live: `send-keys -l '-DASH'` fails with "unknown flag",
+        # `send-keys -l -- '-DASH'` lands it correctly. Structural check:
+        # `--` must sit immediately before the payload in EVERY emitted
+        # argv, for both the short and the chunked path.
+        for text in ("x" * (wd.GOAL_TYPE_CHUNK_THRESHOLD - 1),
+                    "y" * (wd.GOAL_TYPE_CHUNK_THRESHOLD * 3)):
+            sent, _sleeps = self._run(text)
+            self.assertTrue(sent, text[:20])
+            for a in sent:
+                self.assertEqual(a[-2], "--",
+                                 "the payload must be end-of-options guarded: %r" % a)
+
+    def test_a_dash_leading_chunk_is_never_silently_dropped(self):
+        # #322 REOPENED (adversarial-review CRITICAL-1) -- reproduced live
+        # against a real tmux 3.7b pane: 2 of 7 shipped `/goal` templates
+        # have a chunk boundary landing mid-word on a literal `-` (e.g.
+        # "...`-self` (holds..."), which real tmux rejects as an unknown
+        # flag when sent without `--`. `_default_run` swallows a non-zero
+        # exit as `""` with NO exception and NO log -- the chunk vanishes
+        # silently, every LATER chunk still lands, and the tail-based
+        # `_typed_landed` check is satisfied by the (now internally
+        # corrupted) remainder -- a GOAL WITH A 120-CHAR HOLE gets armed.
+        # A fake `run` that models real tmux's getopt behavior (reject a
+        # send-keys -l call whose literal text starts with `-` UNLESS `--`
+        # immediately precedes it) is the "missing tooth" a plain
+        # argv-recording lambda cannot provide.
+        def tmux_like_run(argv, timeout=8):
+            if argv[:2] == ["tmux", "send-keys"] and "-l" in argv:
+                text = argv[-1]
+                guarded = len(argv) >= 2 and argv[-2] == "--"
+                if text.startswith("-") and not guarded:
+                    return None          # real tmux: "unknown flag", rc != 0
+            landed.append(argv[-1])
+            return ""
+
+        landed = []
+        # a payload whose SECOND chunk boundary lands exactly on a dash --
+        # chunk 0 is GOAL_TYPE_CHUNK_SIZE 'a's, chunk 1 starts with '-'.
+        text = ("a" * wd.GOAL_TYPE_CHUNK_SIZE + "-leading-chunk-text"
+                + "b" * wd.GOAL_TYPE_CHUNK_SIZE)
+        wd._type_literal("%1", tmux_like_run, text, sleep_fn=lambda s: None)
+        self.assertEqual("".join(landed), text,
+                         "every chunk must land -- a dash-leading one must "
+                         "never be silently dropped: %r" % landed)
 
 
 class TestCollapsedPasteNeverSubmits(unittest.TestCase):
