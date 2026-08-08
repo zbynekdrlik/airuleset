@@ -65,14 +65,14 @@ class TicketsSegment(unittest.TestCase):
         self.assertIn("I 14", self._seg())
 
     def test_autopilot_progress_wins_when_fresh(self):
-        # #307: the run-progress badge is `run <done> done`, textually
+        # #313 pt 1: `run <done>/<total>` (done/total THIS run) is textually
         # distinct from the bare `I N` live-count form so a run can never be
         # misread as the live backlog -- followed by the SAME live `I N`
         # count the idle render would show (open=14, live).
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         _seed_progress(self.home, "demo", done=3, remaining=14)
         seg = self._seg()
-        self.assertIn("run 3 done", seg)
+        self.assertIn("run 3/17", seg)
         self.assertIn("I 14", seg)
         self.assertNotIn("I 3", seg)   # never a combined ratio using "I"
 
@@ -86,7 +86,7 @@ class TicketsSegment(unittest.TestCase):
         _seed_cache(self.home, self.cwd, open_n=0, name="demo")
         _seed_progress(self.home, "demo", done=17, remaining=0)
         seg = self._seg()
-        self.assertIn("run 17 done", seg)
+        self.assertIn("run 17/17", seg)
         self.assertIn("I 0", seg)
         self.assertIn("38;5;40m", seg)          # green
 
@@ -198,18 +198,17 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("I 0", seg)
             self.assertIn("gk 5", seg)
 
-    def test_scoped_render_gk_zero_is_still_shown(self):
-        # gk=0 MUST render too ("Issues 4 · gk 0"): hiding the zero bucket looks
-        # exactly like a broken/regressed counter — the user panicked when the
-        # gatekeeper returned tickets (labels off → gk 0 → "gk" vanished):
-        # "zase tam ukazuje issues 6 a ziadne gk N!!!" (2026-07-11). On a scoped
-        # box the split is ALWAYS visible so it's clear the mechanism lives.
+    def test_scoped_render_gk_zero_is_hidden(self):
+        # #313 pt 3 REVERSES the #164 "gk 0 must render too" call above: the
+        # user reads a bare '· gk 0' as noise on every repo where it is
+        # routinely 0 ("nechapem na co vidim str 0"). Hide it like every
+        # other zero-value bucket on this line already does.
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=4, name="demo", gk=0, scope="mine")
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
             self.assertIn("I 4", seg)
-            self.assertIn("gk 0", seg)
+            self.assertNotIn("gk", seg)
 
     def test_full_authority_render_has_no_gk(self):
         # A full box's cache has no gk key → plain single number, never "gk".
@@ -295,6 +294,324 @@ class RefreshCLI(unittest.TestCase):
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
             self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
+
+    def test_refresh_skips_the_comment_fallback_entirely_when_the_slice_query_failed(self):
+        # #313 pt 2 adversarial review MAJOR-4: a broken slice query already
+        # forces open/gk to None -- spending up to 40 extra `gh api` calls
+        # on a KNOWN gh-outage/rate-limit path only makes that outage worse
+        # for nothing. `assignee:@me` returns malformed JSON here so the
+        # slice loop's own exception handler sets `failed = True`; a
+        # DIFFERENT qual (`author:@me`) still adds a real, unhandled ticket
+        # to `mine` (otherwise the fallback loop has nothing to iterate
+        # regardless of the guard, and this test would prove nothing) --
+        # the comment fallback must never run for it in this state.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            log = Path(bindir) / "calls.log"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "%s"\n' % log +
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'not-json{{{\';;\n'
+                '  *author:@me*)   echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[{"body":'
+                '"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertIsNone(cache["open"])       # gh error, never a wrong number
+            self.assertIsNone(cache["gk"])
+            calls = log.read_text() if log.exists() else ""
+            self.assertNotIn("comments", calls, calls)
+
+    def test_refresh_recovers_a_comment_only_handoff_when_the_label_never_landed(self):
+        # #313 pt 2, live-verified against zbynekdrlik/odoo-erp#3239: a
+        # fork-no-merge collaborator's own `gh issue edit --add-label`
+        # 403s, and the repo's own hand-off-label workflow can independently
+        # be broken -- so a genuinely handed-off ticket can carry NO label
+        # at all while still having a real READY-FOR-REVIEW comment. The
+        # counter must recover it directly from that comment.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[{"body":"looks good"},'
+                '{"body":"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)      # recovered -- not active
+            self.assertEqual(cache["gk"], 1)
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("I 0", seg)
+            self.assertIn("gk 1", seg)
+
+    def test_refresh_does_not_recover_a_ticket_with_no_ready_for_review_comment(self):
+        # Negative control for the fix above: a ticket with no label and no
+        # matching comment stays counted as ACTIVE -- never swept into gk.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[{"body":"still working on it"}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active
+            self.assertEqual(cache["gk"], 0)
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("I 1", seg)
+            self.assertNotIn("gk", seg)   # hidden at 0 (#313 pt 3)
+
+    def test_refresh_never_calls_the_comment_fallback_for_an_already_labeled_ticket(self):
+        # Cost discipline: a ticket ALREADY handed off via the label needs no
+        # extra `gh api .../comments` call at all.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            log = Path(bindir) / "calls.log"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "%s"\n' % log +
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"ready-for-review"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            calls = log.read_text() if log.exists() else ""
+            self.assertNotIn("comments", calls, calls)
+
+    def test_refresh_a_bounce_label_overrides_a_stale_ready_for_review_label(self):
+        # #313 pt 2 adversarial review round 2, F3: `prio:bounce` is the
+        # gatekeeper's own "returned to the sub-dev, not ready" verdict —
+        # it must override a stale/lagged `ready-for-review` LABEL too
+        # (a case the round-1 fix left open: a ticket carrying BOTH labels
+        # at once still counted as handed-off via the label OR-chain
+        # alone). No comments needed here — the label alone is decisive.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":['
+                '{"name":"ready-for-review"},{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active — bounced
+            self.assertEqual(cache["gk"], 0)
+
+    def test_refresh_invalidates_a_stale_hand_off_once_a_bounce_finding_follows_it(self):
+        # #313 pt 2 adversarial review round 2, F1/F2: a stale, PRE-bounce
+        # hand-off comment must not read as still current once a LATER
+        # GATEKEEPER-authored finding/bounce comment supersedes it — the
+        # comment-order walk keeps the LAST signal, not the first match.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                         "bouncing back."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active — bounced
+            self.assertEqual(cache["gk"], 0)
+
+    def test_refresh_recovers_a_genuine_re_hand_off_after_a_bounce_finding(self):
+        # #313 pt 2 adversarial review round 2, F2 (the positive control for
+        # the test above): a genuine RE-hand-off comment posted AFTER the
+        # bounce's own GATEKEEPER finding comment must be recognised — this
+        # is the exact scenario round 1's hard exclusion of bounced tickets
+        # broke (odoo-erp#2584's broken hand-off-label workflow means the
+        # label alone never updates, so this comment is the ONLY signal).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                         "bouncing back."},
+                {"body": "READY-FOR-REVIEW: addressed the finding, fixed "
+                         "and re-pushed."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)      # recovered -- re-handed
+            self.assertEqual(cache["gk"], 1)
+
+    def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
+        # #313 pt 2 adversarial review MAJOR-2: `_is_readiness_comment` is
+        # the SAME precise, line-anchored matcher
+        # `skills/process-subdev/templates/subdev-handoff-match.sh` (#1500)
+        # already enforces — a bare substring check re-introduces THAT
+        # exact over-match incident. Two comments here would both trigger a
+        # naive `"ready-for-review" in body.lower()` check and must NOT
+        # recover the ticket: (1) the word merely MENTIONED mid-sentence,
+        # never at a line start; (2) a GATEKEEPER finding comment whose
+        # FIRST line starts with `**GATEKEEPER`, even though a later line
+        # quotes the marker.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "Note: earlier I said READY-FOR-REVIEW but that "
+                         "was premature, still fixing a bug."},
+                {"body": "**GATEKEEPER FINDING:** not ready.\n"
+                         "READY-FOR-REVIEW is NOT accurate here."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active
+            self.assertEqual(cache["gk"], 0)
 
     def test_refresh_reattributes_relabeled_handoff_for_shared_account(self):
         # #191 root cause 2 ("ownership relabel") + the issue's own literal
@@ -605,9 +922,9 @@ class RefreshCLI(unittest.TestCase):
         window = src[i:i + 2000]
         self.assertNotIn('"-L", "200"', window)
 
-    def test_streamy_bucket_still_renders_at_zero(self):
-        # Same reasoning as the gk-zero rule: a hidden zero looks exactly
-        # like a broken counter.
+    def test_streamy_bucket_hidden_at_zero(self):
+        # #313 pt 3 REVERSES the "same reasoning as gk-zero" rule above --
+        # the user now reads a bare '· str 0' as noise too.
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=12, name="demo", scope="core")
@@ -618,7 +935,7 @@ class RefreshCLI(unittest.TestCase):
              (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(d))
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
             self.assertIn("I 12 core", seg)
-            self.assertIn("str 0", seg)
+            self.assertNotIn("str", seg)
 
     def test_refresh_subdev_slice_includes_own_stream_label(self):
         # Consistency with the ownership convention: a ticket labeled
@@ -822,7 +1139,7 @@ class SkippedBucket(unittest.TestCase):
             _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
             _seed_progress(home, "demo", done=1, remaining=3)
             seg = self._seg(home, cwd)
-            self.assertIn("run 1 done", seg)
+            self.assertIn("run 1/4", seg)
             self.assertIn("I 9", seg)   # live open count, not the stale 3
             self.assertIn("skip 2", seg)
 
@@ -913,7 +1230,7 @@ class RunModeShowsTheStreamSplit(unittest.TestCase):
                  "ts": int(time.time()), "scope": "core", "streamy": 98}))
             _seed_progress(home, "demo", done=41, remaining=62)
             seg = self._seg(home, cwd)
-            self.assertIn("run 41 done", seg)
+            self.assertIn("run 41/103", seg)
             self.assertIn("I 63 core", seg)
             self.assertIn("str 98", seg)
 
@@ -923,7 +1240,7 @@ class RunModeShowsTheStreamSplit(unittest.TestCase):
             _seed_cache(home, cwd, open_n=2, name="demo", gk=5, scope="mine")
             _seed_progress(home, "demo", done=1, remaining=1)
             seg = self._seg(home, cwd)
-            self.assertIn("run 1 done", seg)
+            self.assertIn("run 1/2", seg)
             self.assertIn("I 2", seg)
             self.assertIn("gk 5", seg)
 
@@ -937,7 +1254,7 @@ class RunModeShowsTheStreamSplit(unittest.TestCase):
             seg = self._seg(home, cwd)
             self.assertNotIn("I 41", seg)
             self.assertNotIn("I 41/103", seg)
-            self.assertIn("run 41 done", seg)
+            self.assertIn("run 41/103", seg)
 
 
 class AutopilotProgressFeed(unittest.TestCase):
@@ -1068,7 +1385,7 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=0, name="demo")
             _seed_progress(home, "demo", done=1, remaining=1)   # stale card
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("run 1 done", seg)
+            self.assertIn("run 1/2", seg)
             self.assertIn("I 0", seg)
             self.assertIn("38;5;40m", seg)                      # green
 
@@ -1078,7 +1395,7 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
             _seed_cache(home, cwd, open_n=5, name="demo")
             _seed_progress(home, "demo", done=2, remaining=1)   # stale low
             seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("run 2 done", seg)
+            self.assertIn("run 2/3", seg)
             self.assertIn("I 5", seg)   # the LIVE count, not the stale 1
 
     def test_unknown_open_falls_back_to_card_remaining(self):
@@ -1094,10 +1411,12 @@ class RunModeTracksLiveOpenCount(unittest.TestCase):
 
 
 class QuestionsSegment(unittest.TestCase):
-    """'otazky N (· inde M)' badge — unanswered ❓ pings SCOPED to the
-    session's project (2026-07-22 complaint: a machine-global count showed 14
-    questions in a project that had zero). Hidden at 0, TTL-matched to the
-    map's own prune window."""
+    """'Q N' badge — unanswered ❓ pings SCOPED to the session's project
+    (2026-07-22 complaint: a machine-global count showed 14 questions in a
+    project that had zero). Hidden at 0, TTL-matched to the map's own prune
+    window. #313 pt 5 REMOVED the cross-project '· inde M' form entirely —
+    a pending question anywhere already pings the phone via Discord
+    regardless of which project's footer is on screen."""
 
     CWD = "/home/x/devel/demo"
 
@@ -1116,21 +1435,24 @@ class QuestionsSegment(unittest.TestCase):
                                            now=now, home=self.home)
 
     def test_counts_only_this_projects_questions(self):
+        # #313 pt 5: a question recorded against a DIFFERENT project must
+        # not be counted at all -- no 'inde' bucket any more, it is simply
+        # invisible from here (it already pinged its own project's phone).
         now = time.time()
         self._seed({"1": {"cwd": self.CWD, "ts": now - 60},
                     "2": {"cwd": self.CWD, "ts": now - 3600},
                     "3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
         seg = self._seg(now=now)
         self.assertIn("Q 2", seg)
-        self.assertIn("inde 1", seg)
+        self.assertNotIn("inde", seg)
         self.assertIn("38;5;214m", seg)               # local count = orange
 
-    def test_only_foreign_questions_render_grey_inde(self):
+    def test_foreign_project_questions_render_nothing(self):
+        # #313 pt 5: with ZERO local questions and one foreign one, the
+        # segment is now simply empty -- no 'Q inde M' fallback form.
         now = time.time()
         self._seed({"3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
-        seg = self._seg(now=now)
-        self.assertIn("Q inde 1", seg)
-        self.assertNotIn("38;5;214m", seg)            # nothing local → no orange
+        self.assertEqual(self._seg(now=now), "")
 
     def test_trailing_slash_cwd_still_matches(self):
         now = time.time()
@@ -1261,6 +1583,135 @@ class ContextCostSegment(unittest.TestCase):
 
     def test_shim_renders_the_context_cost_segment(self):
         self.assertIn("context_cost_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_show_cost_false_drops_the_dollar_suffix(self):
+        # #313 pt 4: the width-budget trim's last-resort shortening -- keep
+        # the size, drop only the '~$<cost>' tail.
+        full = statusbar.context_cost_segment(
+            self._payload("claude-opus-5", cr=50000))
+        short = statusbar.context_cost_segment(
+            self._payload("claude-opus-5", cr=50000), show_cost=False)
+        self.assertIn("ctx 50K", short)
+        self.assertNotIn("~$", short)
+        self.assertIn("~$", full)
+        self.assertLess(statusbar.visible_len(short), statusbar.visible_len(full))
+        self.assertIn("\033[38;5;40m", short)   # same colour as the full form
+
+
+class WidthBudget(unittest.TestCase):
+    """#313 pt 4: fit the statusline inside the pane width MINUS a reserve
+    for Claude Code's own right-edge indicators (live evidence: a 176-col
+    row fully consumed truncated the armed-'/goal' glyph clean off, twice
+    misread as "the goal died"). `pane_width()` is the one live input
+    (tmux); `fit_statusline()` is the pure trimming logic, tested here with
+    synthetic segments and no tmux/subprocess involved at all."""
+
+    def test_visible_len_ignores_ansi_codes(self):
+        self.assertEqual(statusbar.visible_len("\033[38;5;40mI 5\033[0m"), 3)
+        self.assertEqual(statusbar.visible_len(""), 0)
+        self.assertEqual(statusbar.visible_len(None), 0)
+
+    def test_pane_width_none_without_tmux_pane(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TMUX_PANE", None)
+            self.assertIsNone(statusbar.pane_width())
+
+    def test_pane_width_reads_the_injected_runner_never_the_real_tmux(self):
+        # A test must NEVER let this call the REAL tmux binary -- this box's
+        # own live $TMUX_PANE would make the query genuinely succeed,
+        # sizing the render non-deterministically against whatever pane the
+        # TEST happens to run in.
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return unittest.mock.Mock(returncode=0, stdout="176\n")
+
+        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}):
+            self.assertEqual(statusbar.pane_width(run=fake_run), 176)
+        self.assertEqual(calls[0][:3], ["tmux", "display-message", "-p"])
+
+    def test_pane_width_none_on_a_failed_call(self):
+        def fake_run(argv, **kw):
+            raise OSError("no tmux binary")
+        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}):
+            self.assertIsNone(statusbar.pane_width(run=fake_run))
+
+    def test_pane_width_none_on_nonzero_exit_or_garbage_stdout(self):
+        def bad_rc(argv, **kw):
+            return unittest.mock.Mock(returncode=1, stdout="176\n")
+
+        def garbage(argv, **kw):
+            return unittest.mock.Mock(returncode=0, stdout="not-a-number\n")
+
+        with unittest.mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}):
+            self.assertIsNone(statusbar.pane_width(run=bad_rc))
+            self.assertIsNone(statusbar.pane_width(run=garbage))
+
+    def test_fit_statusline_untrimmed_when_it_fits(self):
+        segs = ["\033[38;5;75mI 5\033[0m"]
+        line = statusbar.fit_statusline(segs, "email sub", "cm", "", "", 999)
+        self.assertIn("I 5", line)
+        self.assertIn("email sub", line)
+        self.assertIn("cm", line)
+
+    def test_fit_statusline_none_width_never_trims(self):
+        segs = ["I 5"]
+        line = statusbar.fit_statusline(segs, "email sub", "cm", "", "", None)
+        self.assertIn("email sub", line)
+        self.assertIn("cm", line)
+
+    def test_shim_clamps_the_budget_at_zero_for_a_measured_width_this_small(self):
+        # #313 pt 4 adversarial review round 2, THEORETICAL F7: `width` is
+        # `is not None` (measured), so a genuinely tiny width no longer
+        # falls into the "unmeasurable, never trim" branch (round-1 fix)
+        # -- but an UNCLAMPED `width - RESERVE` could still go negative,
+        # which `fit_statusline` would then treat as an already-overflowed
+        # budget. Locks that the shim clamps it at 0 instead of computing a
+        # bare, possibly-negative subtraction.
+        self.assertIn("max(0, width - statusbar.STATUSLINE_RESERVE_COLS)",
+                       airuleset.CAVEMAN_SHIM_CONTENT)
+
+    def test_fit_statusline_drops_identity_first(self):
+        segs = ["I 5"]
+        identity = "drlik.marek@gmail.com sub 12.8.(4d)"
+        # width fits segs+cm but not segs+identity+cm
+        width = statusbar.visible_len("  ".join(["I 5", "cm"]))
+        line = statusbar.fit_statusline(segs, identity, "cm", "", "", width)
+        self.assertIn("I 5", line)
+        self.assertIn("cm", line)
+        self.assertNotIn("drlik.marek", line)
+
+    def test_fit_statusline_drops_caveman_tag_next(self):
+        segs = ["I 5"]
+        identity = "drlik.marek@gmail.com sub 12.8.(4d)"
+        width = statusbar.visible_len("I 5")   # only the core segment fits
+        line = statusbar.fit_statusline(segs, identity, "cm", "", "", width)
+        self.assertIn("I 5", line)
+        self.assertNotIn("cm", line)
+        self.assertNotIn("drlik.marek", line)
+
+    def test_fit_statusline_shortens_ctx_as_last_resort(self):
+        ctx_full = "ctx 50K ~$0.05"
+        ctx_short = "ctx 50K"
+        segs = ["I 5", ctx_full]
+        # width fits everything except identity/cm AND fits the SHORT ctx
+        # form but not the full one alongside "I 5"
+        width = statusbar.visible_len("  ".join(["I 5", ctx_short]))
+        line = statusbar.fit_statusline(segs, "email sub", "cm",
+                                        ctx_full, ctx_short, width)
+        self.assertIn("I 5", line)
+        self.assertIn(ctx_short, line)
+        self.assertNotIn("~$", line)
+        self.assertNotIn("email sub", line)
+        self.assertNotIn("cm", line)
+
+    def test_fit_statusline_gives_up_gracefully_when_nothing_fits(self):
+        # Even the core segments alone don't fit -- returns the smallest
+        # composed form it has (never raises, never returns garbage).
+        segs = ["a very very very long core segment that does not fit"]
+        line = statusbar.fit_statusline(segs, "identity", "cm", "", "", 3)
+        self.assertIsInstance(line, str)
 
 
 class ModelSegment(unittest.TestCase):
@@ -1487,15 +1938,18 @@ class SubscriptionSegment(unittest.TestCase):
 class AccountEmailSegment(unittest.TestCase):
     """The Claude account's login email (~/.claude.json ->
     oauthAccount.emailAddress, #223) -- WHICH account this box is logged in
-    as. Rendered faint. Fails silently on any missing/malformed input."""
+    as. #313 pt 6: rendered in a READABLE color (the SGR dim attribute used
+    to make it near-invisible on many real terminals). Fails silently on any
+    missing/malformed input."""
 
-    def test_renders_the_email_faint(self):
+    def test_renders_the_email_readable(self):
         with TemporaryDirectory() as home:
             _write_claude_json(home, {"oauthAccount": {
                 "emailAddress": "drlik.marek@gmail.com"}})
             seg = statusbar.account_email_segment(home=home)
             self.assertIn("drlik.marek@gmail.com", seg)
-            self.assertIn("\033[2m", seg)
+            self.assertNotIn("\033[2m", seg)     # no longer the dim attribute
+            self.assertIn("\033[38;5;250m", seg)  # a real, readable colour
 
     def test_missing_claude_json_is_silent(self):
         with TemporaryDirectory() as home:

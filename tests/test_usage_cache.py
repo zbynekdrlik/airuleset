@@ -133,6 +133,11 @@ class TestStatuslineRendersEndToEnd(TestCase):
         shim = os.path.join(home, "shim.sh")
         Path(shim).write_text(airuleset.CAVEMAN_SHIM_CONTENT)
         env = dict(os.environ, HOME=home)
+        # #313 pt 4 width-budget: this box's own sandbox runs inside a REAL
+        # tmux pane (a genuine TMUX_PANE is set) -- leaking it into the shim
+        # subprocess would make statusbar.pane_width() query the real pane
+        # and make the rendered line's trim behaviour non-deterministic here.
+        env.pop("TMUX_PANE", None)
         out = subprocess.run(["bash", shim], input=stdin_json, env=env,
                              capture_output=True, text=True, timeout=20).stdout
         # strip ANSI
