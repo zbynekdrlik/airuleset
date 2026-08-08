@@ -10448,7 +10448,7 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     return logs
 
 
-def _goal_dark_died_by_outage(tpath):
+def _goal_dark_died_by_outage(tpath, last_armed=None):
     """True when job 20's dark-goal check (#173) should treat a goal that
     has been dark past `GOAL_REARM_MAX_DARK_S` as a technical OUTAGE (a
     crash, a binary update, an API error during the dark stretch — or the
@@ -10501,14 +10501,40 @@ def _goal_dark_died_by_outage(tpath):
     outage), leaving the existing skip+ping in place. Multiple set/clear
     cycles: `scan_goal_markers` already returns only the NEWEST marker in
     the bytes it reads, so only the LAST set/clear pair is ever consulted
-    -- exactly the ticket's own edge case."""
+    -- exactly the ticket's own edge case.
+
+    `last_armed` (#321, optional -- every existing caller passes only
+    `tpath`, unaffected): THIS job's own REALITY observation
+    (`rec['last_armed']`), the SAME signal `_goal_cleared_stale` already
+    uses to prove a genuine arm happened AFTER the transcript's newest
+    tracked 'cleared' marker even though CC wrote no marker for it (#320's
+    own dev1 forensics). Without it, this function's OWN fresh re-read can
+    independently re-discover that exact stale 'cleared' marker and
+    disbelieve the caller's own #320 determination -- two mechanisms in the
+    SAME sweep contradicting each other (#321, live: dev1 2d02a127's `mark`
+    correctly flipped 'cleared' -> 'set' via #320, but this function still
+    found the transcript's newest marker was 'cleared' and returned False,
+    permanently re-skipping the very session #320 had just revived, every
+    sweep, forever). A 'cleared' marker whose own `ts` PREDATES
+    `last_armed` is stale by the IDENTICAL rule `_goal_cleared_stale`
+    already applies -- treated as no real clear (True, outage-like), never
+    re-derived independently only to contradict a decision this exact
+    sweep already made. Unmeasurable (either `last_armed` or the marker's
+    own `ts` absent) never guesses -- a genuine `set` verdict, or a
+    'cleared' marker with no comparable timestamp, is unaffected either
+    way."""
     try:
         _off, mark = scan_goal_markers(tpath, off=0)
     except Exception:
         return False
     if not mark:
         return False
-    return mark.get("state") == "set"
+    if mark.get("state") == "set":
+        return True
+    if (last_armed is not None and mark.get("ts") is not None
+            and last_armed > mark.get("ts")):
+        return True
+    return False
 
 
 GOAL_REARM_PROGRESS_WINDOW_S = 6 * 3600   # mirrors statusbar.py's own
@@ -10582,7 +10608,7 @@ def _live_autopilot_progress(cwd, progress_dir, now):
 
 
 def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
-                            progress_dir=None):
+                            progress_dir=None, state=None):
     """#312 -- `rec['mark']` used to collapse TWO structurally different
     states into one silent-forever `continue` at `goal_rearm`'s own
     `if rec.get("mark") != "set":` gate: an EXPLICIT `Goal cleared:` THIS
@@ -10652,11 +10678,39 @@ def _goal_recover_untracked(now, rec, sid, cwd, tpath, tmtime, loc,
     box -- must never look "already old enough", which an unbounded `<`
     comparison against a negative delta would wrongly accept forever,
     and never a marker whose `recovery_scanned` gets silently skipped
-    sweep after sweep)."""
+    sweep after sweep).
+
+    `state` (#321 shape B, optional -- every existing caller/test omits it,
+    unaffected): the `_live_autopilot_progress` bail-out used to be
+    TOTALLY SILENT, every sweep, forever, for any session whose `/goal` is
+    not a batch `/autopilot` loop with a live progress heartbeat -- an
+    ordinary, manually-armed `/goal` has none of that by design, so this
+    branch fires unconditionally for it (live: montalu2@subdev pane `%0`,
+    odoo-erp -- zero journal lines containing "goal" across 30 real
+    minutes, for a session with a dark footer and two untracked recs).
+    Logged ONCE per session (`state['goalrearm_noprogress'][sid]`, mirrors
+    the `goalarm_cleared`/`goalarm_noresolve` log-once-then-quiet shape
+    already used elsewhere in this file), popped the moment progress
+    genuinely becomes live -- the recovery DECISION itself is UNCHANGED
+    (still never acts without live batch-progress evidence); only the
+    silence is fixed."""
     if rec.get("recovery_scanned"):
         return []
     if not _live_autopilot_progress(cwd, progress_dir, now):
+        if state is not None:
+            nr = state.setdefault("goalrearm_noprogress", {})
+            if not nr.get(sid):
+                nr[sid] = True
+                return ["skip untracked-no-progress (goal-rearm) %s -> "
+                        "this session's /goal marker was never tracked and "
+                        "there is no live autopilot-progress evidence for "
+                        "this repo -- recovery only ever acts on a batch "
+                        "loop's own heartbeat, so a manually-armed /goal "
+                        "with a lost transcript marker stays dark until a "
+                        "human re-arms it" % loc]
         return []
+    if state is not None:
+        state.get("goalrearm_noprogress", {}).pop(sid, None)
     _, mark = scan_goal_markers(tpath, off=0)
     if mark is None or mark.get("state") != "set":
         rec["recovery_scanned"] = True
@@ -10860,7 +10914,8 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             if rec.get("mark") is None:
                 logs += _goal_recover_untracked(now, rec, sid, cwd,
                                                 tpath, tmtime, loc,
-                                                progress_dir=progress_dir)
+                                                progress_dir=progress_dir,
+                                                state=state)
                 _save()
             elif _goal_cleared_stale(rec):
                 # #320 -- REALITY (this job's OWN direct footer-lit
@@ -10885,9 +10940,45 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         last_seen_alive = rec.get("last_armed")
         if last_seen_alive is None:
             last_seen_alive = rec.get("mts")
-        if (last_seen_alive is not None
-                and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S):
-            if _goal_dark_died_by_outage(tpath):
+        # #321 shape A2 -- `last_armed`/`mts` is WHEN this job last
+        # CONFIRMED an arm, never a measure of whether the session is alive
+        # NOW. A continuously busy loop (live, dev1: transcript mtime in
+        # seconds, `run 12/19` in the footer -- never "dark" by any real
+        # measure) can run for hours without a fresh confirmation (the SAME
+        # truncated-`◎`-glyph class `GOAL_ARMED_ACTIVITY_GRACE_S`/
+        # `_goal_recover_untracked` already guard for a DIFFERENT branch)
+        # while the dark cap's own premise -- "typing into a pane whose
+        # CURRENT purpose is unknown after this long dark" -- is flatly
+        # false for it. Measure darkness by TRANSCRIPT ACTIVITY too (mirrors
+        # #177's job-10 fix verbatim: the transcript's own last REAL turn,
+        # clamped to <= the file's raw mtime so a future-dated/clock-skewed
+        # entry can never read as "more recent than the OS itself observed"
+        # -- a `min()` only ever REMOVES that violation, never introduces
+        # one). Genuine, recent activity means the whole dark branch is
+        # skipped entirely -- never a new re-arm path, just the SAME
+        # machinery every other non-dark session already falls through to
+        # below.
+        #
+        # Adversarial-review finding MINOR-1 (this ticket's own review):
+        # the activity read (a 2 MB tail read + a json.loads per line) is
+        # only ever CONSUMED inside the dark `if` below -- gated behind the
+        # SAME cheap age comparison that already decides candidacy, not
+        # paid unconditionally for every mark=="set" pane on every sweep
+        # (the #320-review "cheap gates before an expensive read" lesson,
+        # applied here too).
+        dark_by_age = (last_seen_alive is not None
+                       and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S)
+        active_now = False
+        if dark_by_age:
+            activity_ts = _last_real_turn_ts(tpath)
+            if activity_ts is None:
+                activity_ts = tmtime
+            elif tmtime is not None:
+                activity_ts = min(activity_ts, tmtime)
+            active_now = (activity_ts is not None
+                         and 0 <= (now - activity_ts) <= GOAL_REARM_MAX_DARK_S)
+        if dark_by_age and not active_now:
+            if _goal_dark_died_by_outage(tpath, last_seen_alive):
                 # #173 — a fresh, independent re-read of the transcript
                 # finds NO `Goal cleared:` after the last `Goal set:`, so
                 # this darkness is presumed a technical OUTAGE (a crash, a

@@ -792,6 +792,77 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
                               cap_seq=self._typed_seq())
         self.assertTrue(tmux.typed(), logs)
 
+    def test_active_transcript_overrides_a_stale_last_armed(self):
+        # #321 shape A2 -- `last_armed`/`mts` measures WHEN this job last
+        # CONFIRMED an arm, never WHETHER the session is alive right now. A
+        # continuously busy loop (live, dev1: transcript mtime in seconds,
+        # `run 12/19` in the footer -- never "dark" by any real measure) can
+        # run for hours without a fresh footer confirmation (the SAME
+        # truncated-◎-glyph class `_goal_recover_untracked`'s own
+        # `GOAL_ARMED_ACTIVITY_GRACE_S` already guards for a DIFFERENT
+        # branch) -- treating that as "dark" would type a stale payload
+        # into a pane whose real state is "still working". A genuine REAL
+        # transcript turn (`type: user`/`assistant`, declared timestamp
+        # recent) within the dark cap must be trusted OVER a stale
+        # last_armed, and the session falls through to the SAME re-arm
+        # machinery every non-dark session already uses -- never a new,
+        # separate code path.
+        state = {}
+        base = time.time()
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD)],
+                 state=state, now=base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        self._write([assistant_entry("still working", _iso(base))])
+        tmux, logs = self._go(PANE_DARK, state=state, now=base,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertFalse(any("stale-but-outage" in ln for ln in logs), logs)
+        self.assertFalse(any("skip stale-goal" in ln for ln in logs), logs)
+
+    def test_stale_activity_still_reaches_the_dark_cap_normally(self):
+        # the control: when the transcript's OWN newest real turn is ALSO
+        # past the dark cap (no recent activity at all), the activity
+        # signal must not manufacture a false "still alive" verdict --
+        # this is the ordinary #173 outage path, unaffected by #321.
+        state = {}
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, old_ts)],
+                 state=state, now=base - wd.GOAL_REARM_MAX_DARK_S - 3600)
+        tmux, logs = self._go(PANE_DARK, state=state, now=base,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
+
+    def test_activity_is_never_read_when_nowhere_near_the_dark_cap(self):
+        # Adversarial-review finding MINOR-1 (this ticket's own review):
+        # `_last_real_turn_ts` (a 2 MB tail read + a json.loads per line)
+        # used to run UNCONDITIONALLY for every mark=="set" pane, every
+        # 60s sweep, even when the session is nowhere near the dark cap --
+        # its value is only ever consumed inside the dark `if`. The
+        # #320-review "cheap gates before an expensive read" lesson
+        # applies here too: gate the activity read behind the SAME cheap
+        # age comparison that already exists, so a healthy session pays
+        # nothing extra.
+        state = {}
+        base = time.time()
+        fresh_ts = _iso(base - 60)
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, fresh_ts)],
+                 state=state, now=base - 60)
+        calls = []
+        real_fn = wd._last_real_turn_ts
+
+        def counting(tpath, tail_bytes=2_000_000):
+            calls.append(tpath)
+            return real_fn(tpath, tail_bytes=tail_bytes)
+
+        with m.patch.object(wd, "_last_real_turn_ts", counting):
+            self._go(PANE_DARK, state=state, now=base + 60,
+                     cap_seq=self._typed_seq())
+        self.assertEqual(calls, [],
+                         "the activity read must be gated behind the "
+                         "cheap age check, never paid for a session that "
+                         "is not even candidate-dark")
+
 
 class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
     """#320 — dev1 live incident, sid `2d02a127-...`: `rec['last_armed']`
@@ -854,13 +925,29 @@ class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
         self.assertFalse(tmux.typed())
         self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
 
-    def test_dev1_incident_replayed_stale_and_dark_still_flips_and_pings(self):
-        # The REAL live shape (2d02a127, verified 2026-08-08): the
-        # contradiction is confirmed, but `last_armed` is itself already
-        # past the dark cap by the time this sweep checks -- the fix must
-        # still flip `mark` to "set" (the ticket's own validation
-        # criterion) even though the SAFE outcome from there is a one-shot
-        # ping, never a blind re-arm of a possibly-ancient payload.
+    def test_dev1_incident_replayed_stale_and_dark_now_rearms_past_the_cap(self):
+        # The REAL live shape (2d02a127, verified 2026-08-08, #320) -- AND
+        # its own aftermath (#321, live: 15h+ of "skip stale-goal
+        # (goal-rearm) zbynek-4:2.0 (54886 s since last confirmed armed)"
+        # repeating in the journal every 60s WITHOUT interruption, despite
+        # `mark` having already correctly flipped to "set" via #320).
+        #
+        # This test used to assert the OPPOSITE outcome
+        # (`test_dev1_incident_replayed_stale_and_dark_still_flips_and_pings`,
+        # `assertFalse(tmux.typed())` + "skip stale-goal") -- that was the
+        # exact #321 bug encoded as expected behaviour: `_goal_cleared_stale`
+        # flips `mark` to "set" this sweep, but `_goal_dark_died_by_outage`'s
+        # OWN independent fresh re-read finds the SAME newest 'cleared'
+        # marker and disbelieves it, permanently re-skipping the session
+        # #320 had just revived (never a one-shot ping -- the JOURNAL LINE
+        # itself repeats every sweep forever, only the Discord ping is
+        # one-shot). #321 fixes it by passing `last_armed` through so
+        # `_goal_dark_died_by_outage` applies the IDENTICAL staleness rule
+        # `_goal_cleared_stale` already used, instead of a second one that
+        # can contradict it -- the session now falls through into the SAME
+        # outage/re-arm machinery every other tracked session already uses,
+        # exactly as #173's own decided semantics require ("re-arm continues
+        # normally past the cap", never a permanent stale-goal skip).
         state = {}
         now0 = time.time()
         set_ts = _iso(now0 - wd.GOAL_REARM_MAX_DARK_S - 7200)
@@ -872,12 +959,18 @@ class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
                                                    _iso(clear_ts))],
                 state=state, now=clear_ts + 10)
         self._go(PANE_LIT, state=state, now=arm2_ts)
-        tmux, logs = self._go(PANE_DARK, state=state, now=now0)
-        self.assertFalse(tmux.typed(), "payload this old is never blind-typed")
+        tmux, logs = self._go(PANE_DARK, state=state, now=now0,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
         self.assertEqual(state["goal_rearm"][SID]["mark"], "set")
-        self.assertTrue(state["goal_rearm"][SID]["dark_pinged"])
-        self.assertTrue(any("skip stale-goal" in ln for ln in logs), logs)
-        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertFalse(state["goal_rearm"][SID].get("dark_pinged"),
+                         "the outage branch never pings -- only the "
+                         "permanent-skip branch does")
+        self.assertTrue(any("stale-cleared-but-rearmed" in ln for ln in logs),
+                        logs)
+        self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
+        self.assertFalse(any("skip stale-goal" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 0, self.pings)
 
 
 class TestGoalDarkDiedByOutage(unittest.TestCase):
@@ -969,6 +1062,50 @@ class TestGoalDarkDiedByOutage(unittest.TestCase):
                            "fixture must genuinely exceed the tail window")
         self.assertTrue(wd._goal_dark_died_by_outage(p))
 
+    def test_last_armed_is_ignored_by_default_unchanged_behaviour(self):
+        # every existing caller (this whole test class) calls with a single
+        # positional arg -- the new param must default to a no-op so none of
+        # them need to change.
+        p = self._write(marker_entry("cleared", PAYLOAD))
+        self.assertFalse(wd._goal_dark_died_by_outage(p))
+
+    def test_a_stale_cleared_marker_is_not_a_real_clear_when_last_armed_postdates_it(self):
+        # #321 shape A1 -- the caller's OWN #320 determination
+        # (`_goal_cleared_stale`: a genuine arm happened AFTER this exact
+        # marker, even though CC wrote no marker for it) must not be
+        # independently disbelieved by this function's own fresh re-read of
+        # the SAME marker -- reusing the IDENTICAL staleness rule, not a
+        # second contradicting one.
+        cleared_ts = time.time() - 100
+        p = self._write(marker_entry("cleared", PAYLOAD, _iso(cleared_ts)))
+        last_armed = cleared_ts + 50
+        self.assertTrue(wd._goal_dark_died_by_outage(p, last_armed))
+
+    def test_a_genuine_clear_after_last_armed_is_still_not_an_outage(self):
+        # #170's own control, re-derived with `last_armed` now in play: the
+        # arm predates the clear (the well-behaved, deliberate case) -> this
+        # function must still refuse to treat it as an outage.
+        cleared_ts = time.time()
+        p = self._write(marker_entry("cleared", PAYLOAD, _iso(cleared_ts)))
+        last_armed = cleared_ts - 50
+        self.assertFalse(wd._goal_dark_died_by_outage(p, last_armed))
+
+    def test_last_armed_never_overrides_a_genuine_set_marker_result(self):
+        # a "set" marker is already an outage on its own merits (no clear at
+        # all) -- passing last_armed must not change that verdict either way.
+        p = self._write(marker_entry("set", PAYLOAD))
+        self.assertTrue(wd._goal_dark_died_by_outage(p, time.time()))
+
+    def test_last_armed_without_a_marker_ts_is_never_guessed(self):
+        # an unparsed/missing marker timestamp is unmeasurable -- never
+        # treated as "stale" just because SOME last_armed value was passed.
+        p = self._write({"type": "user",
+                         "timestamp": "not-a-real-timestamp",
+                         "message": {"content":
+                                     "<local-command-stdout>Goal cleared: %s"
+                                     "</local-command-stdout>" % PAYLOAD}})
+        self.assertFalse(wd._goal_dark_died_by_outage(p, time.time()))
+
 
 class TestGoalRecoverUntracked(GoalRearmBase):
     """#312 -- `goal_rearm`'s `rec.get("mark")` used to collapse TWO
@@ -1036,6 +1173,68 @@ class TestGoalRecoverUntracked(GoalRearmBase):
             tmux, _logs = self._go(PANE_DARK, now=future,
                                    progress_dir=empty_dir.name)
         self.assertFalse(tmux.typed())
+
+    def test_no_progress_logs_once_then_stays_quiet(self):
+        # #321 shape B (montalu2@subdev %0, odoo-erp): this bail-out used to
+        # be TOTALLY SILENT every sweep, forever, for any session whose
+        # /goal is not a batch /autopilot loop with a live progress
+        # heartbeat (an ordinary, manually-armed /goal has none by design)
+        # -- live evidence: zero journal lines containing "goal" across 30
+        # real minutes for a session with a dark footer and two goal_rearm
+        # recs that never got a `mark`. Logged ONCE per session (mirrors
+        # the `goalarm_cleared`/`goalarm_noresolve` log-once-then-quiet
+        # shape already used elsewhere in this file) so a human can SEE why
+        # nothing is happening, without a line every 60s forever -- the
+        # recovery decision itself is UNCHANGED (still never acts without
+        # live batch-progress evidence).
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux1, logs1 = self._go(PANE_DARK, state=state, now=future,
+                                    progress_dir=empty_dir.name)
+            tmux2, logs2 = self._go(PANE_DARK, state=state, now=future + 60,
+                                    progress_dir=empty_dir.name)
+        self.assertFalse(tmux1.typed())
+        self.assertFalse(tmux2.typed())
+        self.assertTrue(any("skip untracked-no-progress" in ln
+                            for ln in logs1), logs1)
+        self.assertFalse(any("skip untracked-no-progress" in ln
+                             for ln in logs2), logs2)
+
+    def test_no_progress_marker_clears_once_progress_becomes_live(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        state = {}
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            self.assertTrue(
+                state.get("goalrearm_noprogress", {}).get(SID))
+            pd = self._live_progress_dir(future)
+            tmux, logs = self._go(PANE_DARK, state=state, now=future + 60,
+                                  cap_seq=self._typed_seq(), progress_dir=pd)
+        self.assertNotIn(SID, state.get("goalrearm_noprogress", {}))
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+        self.assertTrue(tmux.typed(), logs)
+
+    def test_no_state_seam_never_logs_and_never_crashes(self):
+        # `state` is optional -- a caller that never wires it must behave
+        # exactly as before this ticket: silent, no crash.
+        self._buried_marker_transcript()
+        p = (Path(self.tmp.name) / wd.encode_project_dir(CWD)
+             / (SID + ".jsonl"))
+        rec = {}
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        logs = wd._goal_recover_untracked(
+            self._future_now(), rec, SID, CWD, p, time.time(), "demo",
+            progress_dir=empty_dir.name)
+        self.assertEqual(logs, [])
 
     def test_stale_progress_file_never_recovers(self):
         self._buried_marker_transcript()
