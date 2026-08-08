@@ -696,6 +696,101 @@ class TestRequiredRefs(unittest.TestCase):
         self.assertIn("_gh_issue_state", src)
 
 
+# --------------------------------------------------------------------------- #
+# #310 -- stale scratch-msgfile quarantine. A worker composing
+# `cat > path <<EOF ... EOF && git commit -F path` in ONE Bash call has the
+# WHOLE compound denied atomically by block-commit-without-design.sh when the
+# gate fires -- so a stale file already sitting at `path` from an unrelated
+# earlier attempt survives the block untouched, and a LATER bare
+# `git commit -F path` retry carries no issue-number TEXT at all (invisible
+# to ISSUE_REF_RE), so the gate never blocks it either. See the #310 design
+# comment for the full incident.
+# --------------------------------------------------------------------------- #
+
+class TestStaleMsgfileCandidates(unittest.TestCase):
+
+    def test_a_written_and_committed_path_is_a_candidate(self):
+        cmd = "cat > msg.txt <<'EOF'\nfoo (#41)\nEOF\ngit commit -F msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), ["msg.txt"])
+
+    def test_a_committed_only_path_with_no_write_is_not_a_candidate(self):
+        # the LEGITIMATE two-step pattern -- msgfile written correctly in an
+        # earlier, separate call, this command only consumes it.
+        cmd = "git commit -F msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), [])
+
+    def test_a_written_only_path_with_no_commit_is_not_a_candidate(self):
+        cmd = "cat > msg.txt <<'EOF'\nfoo\nEOF\n"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), [])
+
+    def test_different_paths_written_and_committed_are_not_a_match(self):
+        cmd = "cat > other.txt <<'EOF'\nfoo\nEOF\ngit commit -F msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), [])
+
+    def test_append_redirect_also_counts(self):
+        cmd = "cat >> msg.txt <<'EOF'\nfoo\nEOF\ngit commit -F msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), ["msg.txt"])
+
+    def test_double_dash_file_form_also_matches(self):
+        cmd = "cat > msg.txt <<'EOF'\nfoo\nEOF\ngit commit --file msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), ["msg.txt"])
+
+    def test_a_relative_dot_prefix_normalizes_to_the_same_target(self):
+        cmd = "cat > ./msg.txt <<'EOF'\nfoo\nEOF\ngit commit -F msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), ["msg.txt"])
+
+    def test_no_command_is_empty(self):
+        self.assertEqual(dg.stale_msgfile_candidates(""), [])
+        self.assertEqual(dg.stale_msgfile_candidates(None), [])
+
+    def test_a_non_commit_git_subcommand_is_never_matched(self):
+        cmd = "cat > msg.txt <<'EOF'\nfoo\nEOF\ngit commit-graph write --file msg.txt"
+        self.assertEqual(dg.stale_msgfile_candidates(cmd), [])
+
+
+class TestQuarantineStaleMsgfile(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-designgate-quarantine-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_an_existing_file_is_renamed_aside(self):
+        p = self.tmp / "msg.txt"
+        p.write_text("stale\n")
+        dest = dg.quarantine_stale_msgfile(str(p))
+        self.assertIsNotNone(dest)
+        self.assertFalse(p.exists())
+        self.assertTrue(Path(dest).exists())
+        self.assertEqual(Path(dest).read_text(), "stale\n")
+
+    def test_the_quarantine_path_carries_a_timestamp_suffix(self):
+        p = self.tmp / "msg.txt"
+        p.write_text("stale\n")
+        dest = dg.quarantine_stale_msgfile(str(p), ts=1234.5)
+        self.assertEqual(dest, str(p) + ".stale-1234500")
+
+    def test_a_missing_file_is_a_noop(self):
+        p = self.tmp / "does-not-exist.txt"
+        self.assertIsNone(dg.quarantine_stale_msgfile(str(p)))
+
+    def test_a_directory_is_never_touched(self):
+        d = self.tmp / "adir"
+        d.mkdir()
+        self.assertIsNone(dg.quarantine_stale_msgfile(str(d)))
+        self.assertTrue(d.is_dir())
+
+    def test_never_raises_on_a_permission_error(self):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses permission bits")
+        p = self.tmp / "msg.txt"
+        p.write_text("x\n")
+        self.tmp.chmod(0o500)  # read+execute only -> rename inside it fails
+        try:
+            self.assertIsNone(dg.quarantine_stale_msgfile(str(p)))
+        finally:
+            self.tmp.chmod(0o700)
+
+
 class TestGhIssueState(unittest.TestCase):
     """`_gh_issue_state` never raises and never guesses -- any failure
     (missing gh, timeout, bad JSON, unexpected value) is None (unmeasurable),

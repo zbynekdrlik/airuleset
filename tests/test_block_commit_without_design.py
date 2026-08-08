@@ -407,6 +407,96 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
         self.assertIn("airuleset", r.stderr)
 
 
+# --------------------------------------------------------------------------- #
+# #310 -- a blocked compound `cat > path <<EOF ... && git commit -F path`
+# must never leave a stale file at `path` for a later bare retry to silently
+# consume. See design_gate.py's own #310 section + the design comment on the
+# ticket for the full incident.
+# --------------------------------------------------------------------------- #
+
+class TestStaleMsgfileQuarantine(_Base):
+
+    COMPOUND_41 = (
+        "cat > msg.txt <<'EOF'\n"
+        "fix(hook): thing (#41) [green]\n"
+        "EOF\n"
+        "git commit -F msg.txt"
+    )
+
+    def _seed(self, content="STALE PRE-EXISTING CONTENT\n"):
+        p = self.repo / "msg.txt"
+        p.write_text(content)
+        return p
+
+    def test_a_blocked_compound_quarantines_the_stale_write_target(self):
+        p = self._seed()
+        r = self.run_hook(self.COMPOUND_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(p.exists(),
+                          "the stale content must no longer sit at the "
+                          "original path once the compound that meant to "
+                          "rewrite it gets blocked")
+        siblings = [f for f in self.repo.iterdir()
+                    if f.name.startswith("msg.txt.stale-")]
+        self.assertEqual(len(siblings), 1, siblings)
+        self.assertEqual(siblings[0].read_text(), "STALE PRE-EXISTING CONTENT\n")
+
+    def test_the_block_message_names_the_quarantine(self):
+        self._seed()
+        r = self.run_hook(self.COMPOUND_41)
+        self.assertIn("msg.txt", r.stderr)
+        self.assertIn("quarantin", r.stderr.lower())
+
+    def test_a_bare_retry_against_the_quarantined_path_fails_loud(self):
+        # the whole point: a later, differently-shaped retry that assumes
+        # the earlier cat already wrote the file must NOT silently succeed
+        # with the stale content -- prove it end to end against a REAL git
+        # commit, not just the hook's own verdict.
+        self._seed()
+        r = self.run_hook(self.COMPOUND_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        env = dict(os.environ)
+        env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        retry = subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "--allow-empty", "-F", "msg.txt"],
+            capture_output=True, text=True, env=env)
+        self.assertNotEqual(retry.returncode, 0,
+                             "a bare retry against the quarantined path must "
+                             "fail -- never silently commit stale content")
+
+    def test_a_marked_issue_is_never_quarantined_since_no_block_occurs(self):
+        self.mark(41)
+        p = self._seed()
+        r = self.run_hook(self.COMPOUND_41)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(p.exists())
+        self.assertEqual(p.read_text(), "STALE PRE-EXISTING CONTENT\n")
+
+    def test_a_path_only_committed_not_written_in_this_command_is_left_alone(self):
+        # the LEGITIMATE two-step pattern this ticket itself recommends: the
+        # msgfile was written correctly by an EARLIER, separate call, and
+        # THIS command only consumes it via -F -- must survive a block
+        # untouched, never mistaken for the same-command write-then-consume
+        # shape.
+        p = self._seed("a genuinely correct message (#41)\n")
+        cmd = 'echo "context note (#41)" >/dev/null; git commit -F msg.txt'
+        r = self.run_hook(cmd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertTrue(p.exists())
+        self.assertEqual(p.read_text(), "a genuinely correct message (#41)\n")
+
+    def test_no_stale_file_present_still_blocks_cleanly_with_nothing_to_quarantine(self):
+        r = self.run_hook(self.COMPOUND_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse((self.repo / "msg.txt").exists())
+        siblings = [f for f in self.repo.iterdir()
+                    if f.name.startswith("msg.txt.stale-")]
+        self.assertEqual(siblings, [])
+        self.assertNotIn("quarantin", r.stderr.lower())
+
+
 class TestBypass(_Base):
 
     def test_bare_bypass_without_reason_is_rejected(self):
