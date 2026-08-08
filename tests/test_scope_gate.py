@@ -217,6 +217,47 @@ class TestChainDepthCap(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
+class TestLocMismatch(TestCase):
+    """#311 point 3 -- Scope-gate verifiability. `>300-loc` is checked
+    mechanically ONLY where trivially checkable: the body's OWN text
+    states a bare number next to "loc"/"lines" (the exact "violation
+    CONFESSED in the issue body itself" shape #137 already established as
+    this hook's founding evidence). A body with no such number is left
+    exactly as before -- the claim cannot be verified, so it is trusted,
+    matching the hook's own documented limit."""
+
+    def test_body_confessing_a_small_loc_count_is_blocked(self):
+        r = run(body_cmd("small change", "This is a small ~50 loc fix.",
+                         scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("loc", r.stderr.lower())
+
+    def test_body_confessing_exactly_300_lines_is_blocked(self):
+        # the criterion is literally spelled ">300-loc" -- exactly 300 does
+        # not clear it.
+        r = run(body_cmd("borderline", "About 300 lines of changes.",
+                         scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_body_stating_a_genuinely_large_count_passes(self):
+        r = run(body_cmd("big rework", "Roughly 850 lines across 6 files.",
+                         scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_stated_number_is_unaffected_trusted_as_before(self):
+        r = run(body_cmd("no number", "A genuinely large rework, no count "
+                                      "given.", scope_gate=">300-loc"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_check_only_applies_to_the_loc_criterion(self):
+        # a small number mentioned in a body filed under a DIFFERENT
+        # criterion must never be misread as a >300-loc self-contradiction.
+        r = run(body_cmd("unrelated number", "Affects 12 lines in an "
+                                             "unrelated config note.",
+                         scope_gate="cross-cutting"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 # --------------------------------------------------------------------------- #
 # CORPUS REPLAY — real issue bodies, fetched once via `gh issue view --json
 # body`. Excerpts below are unmodified substrings of the real text (never
