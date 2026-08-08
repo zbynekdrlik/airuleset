@@ -10958,16 +10958,26 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         # skipped entirely -- never a new re-arm path, just the SAME
         # machinery every other non-dark session already falls through to
         # below.
-        activity_ts = _last_real_turn_ts(tpath)
-        if activity_ts is None:
-            activity_ts = tmtime
-        elif tmtime is not None:
-            activity_ts = min(activity_ts, tmtime)
-        active_now = (activity_ts is not None
-                     and 0 <= (now - activity_ts) <= GOAL_REARM_MAX_DARK_S)
-        if (last_seen_alive is not None
-                and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S
-                and not active_now):
+        #
+        # Adversarial-review finding MINOR-1 (this ticket's own review):
+        # the activity read (a 2 MB tail read + a json.loads per line) is
+        # only ever CONSUMED inside the dark `if` below -- gated behind the
+        # SAME cheap age comparison that already decides candidacy, not
+        # paid unconditionally for every mark=="set" pane on every sweep
+        # (the #320-review "cheap gates before an expensive read" lesson,
+        # applied here too).
+        dark_by_age = (last_seen_alive is not None
+                       and (now - last_seen_alive) > GOAL_REARM_MAX_DARK_S)
+        active_now = False
+        if dark_by_age:
+            activity_ts = _last_real_turn_ts(tpath)
+            if activity_ts is None:
+                activity_ts = tmtime
+            elif tmtime is not None:
+                activity_ts = min(activity_ts, tmtime)
+            active_now = (activity_ts is not None
+                         and 0 <= (now - activity_ts) <= GOAL_REARM_MAX_DARK_S)
+        if dark_by_age and not active_now:
             if _goal_dark_died_by_outage(tpath, last_seen_alive):
                 # #173 — a fresh, independent re-read of the transcript
                 # finds NO `Goal cleared:` after the last `Goal set:`, so
