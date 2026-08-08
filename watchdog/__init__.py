@@ -1514,11 +1514,21 @@ def session_user_stopped(tpath, since_ts=None):
     signal than "the reset clock passed" and always wins.
 
     Scans the transcript's recent tail for a top-level, plain-STRING
-    `<command-name>/exit</command-name>` entry — Claude Code's own literal
-    marker for the user's `/exit` command (the same shape #335's own design
-    comment names, and the shape this repo's `/goal`/`/compact` markers
-    already use elsewhere) — whose `timestamp` is >= `since_ts` (no lower
-    bound at all when `since_ts` is None).
+    `/exit` command entry — Claude Code's own literal marker for the user's
+    `/exit` command, the same top-level shape #335's own design comment
+    names. Matched by PREFIX (`<command-name>/exit</command-name>`), never
+    strict equality: a real `/exit` entry's `message.content` is a
+    COMPOSITE string, e.g.
+    `"<command-name>/exit</command-name>\n            <command-message>exit`
+    `</command-message>\n            <command-args></command-args>"`
+    (verified against real Claude Code transcripts, #336's own adversarial
+    review, finding F1) — a strict-equality check against the bare marker
+    alone NEVER matches a real transcript, which made this whole predicate
+    inert against every genuine `/exit`. The closing `</command-name>` tag
+    is part of the required prefix, so a DIFFERENT command name that merely
+    starts with the same letters (never a real Claude Code shape, but
+    checked defensively) is still correctly refused. `timestamp` must be
+    `>= since_ts` (no lower bound at all when `since_ts` is None).
 
     Fail-SAFE in the direction that never strands a healthy session: an
     unreadable/missing transcript, or any parse error, returns False —
@@ -1534,7 +1544,7 @@ def session_user_stopped(tpath, since_ts=None):
             content = msg.get("content") if isinstance(msg, dict) else None
             if not isinstance(content, str):
                 continue
-            if content.strip() != "<command-name>/exit</command-name>":
+            if not content.lstrip().startswith("<command-name>/exit</command-name>"):
                 continue
             if since_ts is None:
                 return True
@@ -1542,7 +1552,11 @@ def session_user_stopped(tpath, since_ts=None):
                 ts = datetime.fromisoformat(
                     str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
             except Exception:
-                continue          # unparseable timestamp — keep scanning back
+                continue          # unparseable timestamp — this is an ANY
+                                  # over the whole window (oldest-to-newest
+                                  # file order, not reversed), so a single
+                                  # bad timestamp just moves on to the next
+                                  # candidate entry, in either direction
             if ts >= since_ts:
                 return True
         return False
@@ -13739,8 +13753,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                          "attempts": 0, "gave_up": False}
                     state[skey] = s
                 elif s.get("resets_at") is None:
-                    # an earlier poll couldn't read the clock — try again to refine it.
-                    s["resets_at"] = parse_reset_epoch(captured, now)
+                    # an earlier poll couldn't read the clock — try again to
+                    # refine it, from whichever surface THIS episode's own
+                    # evidence actually comes from (adversarial review, F3):
+                    # the PANE when it currently shows the banner, the
+                    # TRANSCRIPT's own error text otherwise. Refining a
+                    # transcript-only episode from the pane would read
+                    # whatever the session's own SUBSEQUENT, unrelated reply
+                    # happens to render near the bottom of the screen —
+                    # including a stray "resets 17:00"-shaped phrase — and
+                    # inject a bogus epoch, up to SESSLIMIT_MAX_TRIES
+                    # premature `continue`s.
+                    if pane_session_limited(captured):
+                        s["resets_at"] = parse_reset_epoch(captured, now)
+                    else:
+                        cur_err = transcript_last_error(tpath)
+                        if cur_err and is_usage_cap(cur_err):
+                            s["resets_at"] = parse_reset_epoch_from_error_text(
+                                cur_err, now)
                 s["last_seen"] = int(now)
                 ra = s.get("resets_at")
                 if not s.get("pinged"):
@@ -14032,8 +14062,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     entry["nudges"], entry["escalated"], entry["dormant"] = [], True, True
                     state[key] = entry
                     logs.append("usage-cap %s — ping only, no continue" % project)
-                    send_fn(compose_api_error_alert(project, err_text)
-                            + "\n> (usage cap — `continue` nepomôže; CC sa obnoví po resete)",
+                    # #336 (adversarial review, messaging drift): the ping text
+                    # must reflect what job 6's own widened tracking actually
+                    # promises — a resume time it genuinely parsed means the
+                    # watchdog itself WILL deliver `continue` after the reset
+                    # (never "CC sa obnoví" on its own); a clock it could NOT
+                    # parse means the episode is only pinged, never auto-
+                    # resumed, and the user should intervene manually.
+                    if state.get(sk, {}).get("resets_at"):
+                        resume_note = ("\n> (usage cap — po resete pošlem `continue` "
+                                       "automaticky — nič nemusíš robiť)")
+                    else:
+                        resume_note = ("\n> (usage cap — `continue` teraz nepomôže a "
+                                       "čas resetu sa nepodarilo rozpoznať z chybovej "
+                                       "hlášky — obnov session prosím ručne po resete)")
+                    send_fn(compose_api_error_alert(project, err_text) + resume_note,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge":
                     n = len(entry["nudges"])

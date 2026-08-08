@@ -1435,6 +1435,46 @@ class SessionUserStoppedPredicate(unittest.TestCase):
                                          "content": "<command-name>/compact</command-name>"}}])
         self.assertFalse(wd.session_user_stopped(tpath))
 
+    def test_real_transcript_exit_marker_shape_is_detected(self):
+        # (adversarial review of this ticket's own fix, F1 — CRITICAL) Claude
+        # Code writes a real `/exit` entry as a COMPOSITE string, never the
+        # bare marker this predicate's own fixtures elsewhere in this file
+        # use — verified live against real transcripts on this box:
+        #   <command-name>/exit</command-name>\n            <command-message>
+        #   exit</command-message>\n            <command-args></command-args>
+        # A strict `content.strip() == "<command-name>/exit</command-name>"`
+        # equality check NEVER matches this real shape, so the whole
+        # user-stop safety gate was inert against every genuine `/exit` a
+        # user ever types — the exact harm class (auto-resuming a session
+        # the user explicitly stopped) this predicate exists to prevent.
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        real_exit_content = (
+            "<command-name>/exit</command-name>\n"
+            "            <command-message>exit</command-message>\n"
+            "            <command-args></command-args>")
+        tpath = self._tpath([{"type": "user", "timestamp": ts,
+                              "message": {"role": "user",
+                                         "content": real_exit_content}}])
+        self.assertTrue(wd.session_user_stopped(tpath),
+                        "must detect the REAL composite /exit shape, not "
+                        "only the bare marker no real transcript ever "
+                        "actually writes")
+
+    def test_exit_foo_lookalike_command_name_does_not_false_match(self):
+        # The fix for the finding above widens the match from strict
+        # equality to a PREFIX check -- must not become so loose that an
+        # unrelated command sharing the "/exit" substring false-matches.
+        # The closing tag is part of the required prefix, so a DIFFERENT
+        # command name (never a real Claude Code shape, but the fix must
+        # not accidentally accept it) is correctly refused.
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        tpath = self._tpath([{"type": "user", "timestamp": ts,
+                              "message": {"role": "user",
+                                         "content": "<command-name>/exit-foo</command-name>"}}])
+        self.assertFalse(wd.session_user_stopped(tpath))
+
 
 NO_BANNER_IDLE_PANE = "● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
 
@@ -1565,6 +1605,37 @@ class SessionLimitTranscriptSeeded(unittest.TestCase):
         self.assertNotIn("sesslimit:" + self.SID, st,
                          "tracking must be dropped once the user-stop invariant fires")
 
+    def test_resets_at_refines_from_transcript_not_pane_when_banner_absent(self):
+        # (adversarial review of this ticket's own fix, F3) An earlier poll
+        # could not parse a resume time (`resets_at is None`) -- the
+        # refinement attempt must read whichever surface THIS episode's own
+        # evidence actually comes from: the transcript for a transcript-only
+        # episode, never the live pane (which, for a transcript-only
+        # episode, never shows the banner at all -- refining from it would
+        # only ever find whatever the session's own SUBSEQUENT, unrelated
+        # reply happens to render near the bottom of the screen).
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": None, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        logs, sent, keys, _, _ = self._harness(now, entries, state_path=sp)
+        self.assertEqual(keys, [], "no continue before the (now-refined) reset")
+        st = json.loads(sp.read_text())
+        self.assertIsNotNone(
+            st["sesslimit:" + self.SID]["resets_at"],
+            "the refinement must have parsed the clock from the "
+            "TRANSCRIPT's own error text, since the pane (NO_BANNER_IDLE_PANE) "
+            "never carries a clock to find")
+
     def test_still_erroring_without_a_banner_keeps_retrying_bounded(self):
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -1611,6 +1682,76 @@ class SessionLimitTranscriptSeeded(unittest.TestCase):
                          "tracking must clear the moment the transcript shows "
                          "recovery, not leak forever (the pane never had a "
                          "banner to lose in the first place)")
+
+    def test_job1_bare_uuid_tracking_survives_a_sweep_job6_owns(self):
+        # (adversarial review finding 6b) Job 6 owning a parked episode
+        # (via `continue` at the end of its own block) means job 1's code
+        # never runs for THIS session on THIS sweep -- without
+        # `stalled.add(key)`, the end-of-sweep generic cleanup pass would
+        # prune job 1's own bare-UUID dormant-tracking entry every single
+        # sweep job 6 manages, since it never gets a chance to protect
+        # itself via its OWN `stalled.add(key)` call (which only runs when
+        # job 1's own code path is reached).
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 15, 0, tzinfo=tz).timestamp()   # before 18:10 reset
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {
+            self.SID: {"hash": "deadbeef0000", "first_seen": int(now - 3600),
+                      "nudges": [], "escalated": True, "dormant": True},
+            "sesslimit:" + self.SID: {
+                "resets_at": now + 10000, "pinged": True, "continued": False,
+                "attempts": 0, "first_seen": int(now - 3600),
+                "last_seen": int(now - 60)},
+        }
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        self._harness(now, entries, state_path=sp)
+        st = json.loads(sp.read_text())
+        self.assertIn(self.SID, st,
+                     "job 6 owning this session's poll must not let job 1's "
+                     "own bare-UUID tracking entry get pruned by the "
+                     "end-of-sweep cleanup pass")
+
+    def test_transcript_only_episode_state_persists_across_multiple_sweeps(self):
+        # (adversarial review finding 6a) `last_seen` must be refreshed on
+        # EVERY sweep job 6 manages, even for a transcript-only episode
+        # that never shows the pane banner -- otherwise the end-of-sweep
+        # generic cleanup pass (wait_clear=90s) would prune the parked
+        # episode BETWEEN two SESSLIMIT_RETRY_S-spaced (300s) retry
+        # sweeps, silently collapsing the whole bounded-retry mechanism
+        # down to a single attempt.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now0 = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()   # past 18:10
+        entries = [_assistant_usage_cap(
+            "You've hit your session limit · resets 6:10pm (Europe/Prague)")]
+        seed = {"sesslimit:" + self.SID: {
+            "resets_at": now0 - 300, "pinged": True, "continued": False,
+            "attempts": 0, "first_seen": int(now0 - 3600),
+            "last_seen": int(now0 - 60)}}
+        tmp2 = TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        sp = Path(tmp2.name) / "state.json"
+        sp.write_text(json.dumps(seed))
+        now = now0
+        for _ in range(3):
+            self._harness(now, entries, state_path=sp)
+            now += wd.SESSLIMIT_RETRY_S
+        st = json.loads(sp.read_text())
+        self.assertIn("sesslimit:" + self.SID, st,
+                     "tracking must survive across SESSLIMIT_RETRY_S-spaced "
+                     "sweeps -- last_seen must be refreshed every sweep, "
+                     "not just at creation")
+        self.assertEqual(
+            st["sesslimit:" + self.SID]["attempts"], 3,
+            "expected exactly 3 delivered retries across the 3 sweeps: %r"
+            % st["sesslimit:" + self.SID])
 
 
 class RunOnceLoopIsolation(unittest.TestCase):
