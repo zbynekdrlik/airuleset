@@ -575,7 +575,15 @@ try:
     # overflowing. An unmeasurable pane width (no TMUX_PANE, tmux missing,
     # any failure) never trims -- a statusline segment must never guess. ---
     width = statusbar.pane_width()
-    budget = (width - statusbar.STATUSLINE_RESERVE_COLS) if width is not None else None
+    # adversarial review MINOR-3 (round 1: `width` measured as `0` must
+    # count as MEASURED, `is not None` not truthiness) + round-2 THEORETICAL
+    # follow-up: clamp the reserve subtraction at 0 -- an unclamped
+    # `width - RESERVE` on a genuinely tiny/degenerate measured width would
+    # otherwise go negative, which `fit_statusline` would then treat as
+    # "trim everything, and the line still overflows anyway" rather than
+    # the more honest "nothing fits, so just don't add the reserve on top."
+    budget = max(0, width - statusbar.STATUSLINE_RESERVE_COLS) \
+        if width is not None else None
     line = statusbar.fit_statusline(segs, identity, cm_tag, cc_full, cc_short, budget)
 except Exception:
     pass
@@ -584,14 +592,26 @@ if not line:
 print(line)
 PY
 )
-# adversarial review MAJOR-3: moving `cm` into the python block via CM_TAG
-# dropped the bash-side "no meter at all -> at least show the caveman badge"
-# fallback the shim always had -- an early `raise SystemExit` (malformed
-# stdin, a broken {{REPO_DIR}} import, a missing python3) used to still
-# degrade to just the badge; it silently blanked the WHOLE row instead.
-# Restored explicitly, after the python block, so it covers every early-exit
-# path regardless of where inside that block it happened.
-[ -z "$meter" ] && [ -n "$cm" ] && meter="$cm"
+# adversarial review MAJOR-3 (round 1) + round-2 re-review: moving `cm`
+# into the python block via CM_TAG dropped the bash-side "no meter at all
+# -> at least show the caveman badge" fallback the shim always had -- an
+# early `raise SystemExit` (malformed stdin, a broken {{REPO_DIR}} import,
+# a missing python3) used to still degrade to just the badge. The FIRST
+# fix here only restored it for a totally-empty `$meter`, which is
+# unreachable for the REALISTIC failure the comment names: `line` is
+# pre-seeded from the rate-limit segments BEFORE the `try:` block ever
+# runs, so `meter` is already non-empty on almost every render (Claude
+# Code sends `rate_limits` on essentially every prompt) even when the
+# python block's LATER statusbar-dependent half throws -- the
+# `[ -z "$meter" ]` guard then never fires and the badge is silently lost.
+# Fixed to be ADDITIVE instead of exclusive: append `$cm` whenever it
+# is not ALREADY part of `$meter` (the happy path, where python composed
+# it itself), covering every early-exit shape regardless of whether
+# anything else rendered first.
+case "$meter" in
+  *"$cm"*) ;;
+  *) [ -n "$cm" ] && meter="${meter:+$meter  }$cm" ;;
+esac
 printf '%s' "$meter"
 exit 0
 """
@@ -4472,6 +4492,28 @@ def _is_readiness_comment(body):
     return bool(_READINESS_CROSS_FORK_RE.search(body))
 
 
+def _comment_readiness_signal(body):
+    """Per-comment signal for the fallback's LAST-VERDICT-WINS walk over a
+    ticket's comments, in creation order (#313 pt 2 adversarial review
+    round 2, F1/F2): True = a genuine hand-off comment; False = an
+    EXPLICIT GATEKEEPER-authored rejection (a bounce's own review/finding
+    comment, which overrides an EARLIER True from a now-stale hand-off);
+    None = neutral -- an unrelated comment ("still working on it") must
+    NEVER reset an already-established verdict, only a GATEKEEPER-authored
+    one is a genuine negative signal. Reading comments in order and
+    keeping the LAST signal (rather than stopping at the first match) is
+    what lets a genuine post-bounce re-hand-off comment correctly override
+    a stale pre-bounce one, without needing the bounce's own timestamp."""
+    if not isinstance(body, str) or not body:
+        return None
+    first_line = body.split("\n", 1)[0]
+    if _READINESS_GATEKEEPER_FIRST_LINE_RE.match(first_line):
+        return False
+    if _is_readiness_comment(body):
+        return True
+    return None
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -4526,7 +4568,7 @@ def cmd_tickets_status(args):
             # account) must NOT use @me — author:@me matched every user-authored
             # ticket and the footer showed foreign streams' numbers (2026-07-20);
             # there the slice is the stream LABEL alone.
-            handed, bounced, mine, failed = {}, {}, set(), False
+            handed, mine, failed = {}, set(), False
             # SliceUnresolved (#181 I-2): an unresolvable gh identity is a gh
             # ERROR, and a gh error is never an empty slice — keep open=None,
             # exactly as a failed query already does. Guessing a qual set here
@@ -4552,20 +4594,35 @@ def cmd_tickets_status(args):
                         # so both fold into the SAME gk bucket (no new badge;
                         # #223 already shortened every label to keep the
                         # footer on one line).
-                        handed[n_num] = handed.get(n_num, False) or \
-                            ("ready-for-review" in labels) or \
+                        label_handed = ("ready-for-review" in labels) or \
                             ("needs-gatekeeper" in labels)
-                        # #313 pt 2 adversarial review MAJOR-1: `prio:bounce`
-                        # is the gatekeeper's own "returned to the sub-dev,
-                        # ready-for-review deliberately kept OFF until a
-                        # re-hand-off" verdict (skills/process-subdev). The
-                        # comment fallback below must never override that —
-                        # the ORIGINAL hand-off comment never goes away, so a
-                        # naive comment check would count a bounced ticket as
-                        # permanently handed-off, hiding exactly the active
-                        # work the bounce lane exists to surface.
+                        # #313 pt 2 adversarial review round 2 (findings F2 +
+                        # F3): `prio:bounce` is the gatekeeper's own "returned
+                        # to the sub-dev, not ready" verdict — round 1's fix
+                        # HARD-EXCLUDED a bounced ticket from the comment
+                        # fallback below entirely, which fixed the label-side
+                        # concern (a stale hand-off comment must not read as
+                        # forever handed-off) but reintroduced the opposite
+                        # bug in the exact broken-workflow scenario this
+                        # whole point exists for: a sub-dev who genuinely
+                        # RE-hands-off after a bounce (a fresh comment) was
+                        # then permanently invisible too, because the repo's
+                        # own subdev-handoff-label workflow (which is
+                        # SUPPOSED to add ready-for-review + drop prio:bounce
+                        # in the SAME step) is precisely what's broken here.
+                        # Fixed instead by having the bounce verdict override
+                        # a stale/lagged LABEL (F3) rather than gate the
+                        # fallback — this also makes a bounced ticket reach
+                        # `unhandled` below naturally (its own label-derived
+                        # `handed` state is now correctly False), so the
+                        # comment fallback's own in-order, GATEKEEPER-reset
+                        # walk (see below) is what actually resolves both a
+                        # stale pre-bounce comment AND a genuine post-bounce
+                        # re-submission correctly, with no separate
+                        # exclusion or extra API call needed.
                         if "prio:bounce" in labels:
-                            bounced[n_num] = True
+                            label_handed = False
+                        handed[n_num] = handed.get(n_num, False) or label_handed
                 except (ValueError, TypeError, KeyError):
                     failed = True   # gh error ≠ empty slice — keep open=None
             # #191 Part B ("ownership relabel"): a SHARED-account stream's
@@ -4646,7 +4703,7 @@ def cmd_tickets_status(args):
             # that comment (agents/autopilot-worker.md), which is always
             # postable regardless of write access; a candidate the label
             # missed is checked directly against its own comments via
-            # `_is_readiness_comment` -- the SAME precise, line-anchored
+            # `_comment_readiness_signal` -- the SAME precise, line-anchored
             # matcher this repo's own hand-off-label workflow enforces
             # (#1500), never a bare substring (which re-introduces THAT
             # exact over-match incident: a comment merely MENTIONING the
@@ -4657,25 +4714,36 @@ def cmd_tickets_status(args):
             # stop-proof), so a rare extra match is far less harmful than
             # showing `gk 0` while tickets sit genuinely handed off.
             #
-            # Two guards adversarial review added: (a) `not failed` -- a
-            # broken slice query already forces `open`/`gk` to `None`
-            # (below), so spending up to 40 extra `gh api` calls on a KNOWN
-            # gh-outage/rate-limit path only makes that outage worse for
-            # nothing. (b) `not bounced.get(n_num)` -- `prio:bounce` is the
-            # gatekeeper's own "returned to the sub-dev, ready-for-review
-            # deliberately kept OFF until a re-hand-off" verdict
-            # (skills/process-subdev). The ORIGINAL hand-off comment never
-            # goes away, so without this exclusion a bounced ticket would be
-            # permanently misread as handed-off forever -- hiding exactly
-            # the active work the bounce lane exists to surface. `sorted()`
-            # makes which candidates get checked, when the slice exceeds the
-            # bound, deterministic across refreshes (mine is an unordered
-            # set) and prefers the NEWEST tickets first (most likely to be a
-            # recent hand-off).
+            # `not failed` -- a broken slice query already forces `open`/`gk`
+            # to `None` (below), so spending up to 40 extra `gh api` calls on
+            # a KNOWN gh-outage/rate-limit path only makes that outage worse
+            # for nothing. `sorted()` makes which candidates get checked,
+            # when the slice exceeds the bound, deterministic across
+            # refreshes (mine is an unordered set) and prefers the NEWEST
+            # tickets first (most likely to be a recent hand-off).
+            #
+            # Round-2 adversarial review (F1/F2): a bounced ticket now
+            # reaches `unhandled` naturally too (its own `handed` value is
+            # already False from the label override above) -- round 1's
+            # SEPARATE hard exclusion of bounced tickets here fixed the
+            # stale-comment concern but reintroduced the opposite bug: a
+            # genuine RE-hand-off comment posted after a bounce was then
+            # never seen either. The walk below reads comments in creation
+            # order and keeps the LAST signal (`_comment_readiness_signal`)
+            # instead of breaking on the FIRST match — a stale pre-bounce
+            # hand-off comment is correctly invalidated by a LATER
+            # GATEKEEPER-authored finding/bounce comment, and a genuine
+            # POST-bounce re-submission correctly overrides that again,
+            # with no separate bounce-timestamp lookup needed. The one
+            # residual (documented, deliberately accepted): a bounce
+            # applied as a bare label with NO accompanying comment at all
+            # leaves the stale original comment as the only signal, which
+            # still reads as handed-off -- the same "a rare extra match is
+            # far less harmful than showing gk 0" trade-off already stated
+            # above.
             if slug and not failed:
                 unhandled = sorted(
-                    (n_num for n_num in mine
-                     if not handed.get(n_num) and not bounced.get(n_num)),
+                    (n_num for n_num in mine if not handed.get(n_num)),
                     reverse=True)
                 for n_num in unhandled[:_HANDOFF_COMMENT_CHECK_LIMIT]:
                     raw = _out(["gh", "api",
@@ -4687,11 +4755,14 @@ def cmd_tickets_status(args):
                         comments = []
                     if not isinstance(comments, list):
                         continue   # e.g. a bare int -- never a real answer
+                    verdict = False
                     for c in comments:
                         body = c.get("body") if isinstance(c, dict) else None
-                        if _is_readiness_comment(body):
-                            handed[n_num] = True
-                            break
+                        sig = _comment_readiness_signal(body)
+                        if sig is not None:
+                            verdict = sig
+                    if verdict:
+                        handed[n_num] = True
             gk = sum(1 for n_num in mine if handed.get(n_num))
             entry["open"] = None if failed else len(mine) - gk
             entry["gk"] = None if failed else gk

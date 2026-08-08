@@ -295,6 +295,50 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
 
+    def test_refresh_skips_the_comment_fallback_entirely_when_the_slice_query_failed(self):
+        # #313 pt 2 adversarial review MAJOR-4: a broken slice query already
+        # forces open/gk to None -- spending up to 40 extra `gh api` calls
+        # on a KNOWN gh-outage/rate-limit path only makes that outage worse
+        # for nothing. `assignee:@me` returns malformed JSON here so the
+        # slice loop's own exception handler sets `failed = True`; a
+        # DIFFERENT qual (`author:@me`) still adds a real, unhandled ticket
+        # to `mine` (otherwise the fallback loop has nothing to iterate
+        # regardless of the guard, and this test would prove nothing) --
+        # the comment fallback must never run for it in this state.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            log = Path(bindir) / "calls.log"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "%s"\n' % log +
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'not-json{{{\';;\n'
+                '  *author:@me*)   echo \'[{"number":1,"labels":[]}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[{"body":'
+                '"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertIsNone(cache["open"])       # gh error, never a wrong number
+            self.assertIsNone(cache["gk"])
+            calls = log.read_text() if log.exists() else ""
+            self.assertNotIn("comments", calls, calls)
+
     def test_refresh_recovers_a_comment_only_handoff_when_the_label_never_landed(self):
         # #313 pt 2, live-verified against zbynekdrlik/odoo-erp#3239: a
         # fork-no-merge collaborator's own `gh issue edit --add-label`
@@ -402,34 +446,28 @@ class RefreshCLI(unittest.TestCase):
             calls = log.read_text() if log.exists() else ""
             self.assertNotIn("comments", calls, calls)
 
-    def test_refresh_excludes_a_bounced_ticket_from_the_comment_fallback(self):
-        # #313 pt 2 adversarial review MAJOR-1: `prio:bounce` is the
-        # gatekeeper's own "returned to the sub-dev, ready-for-review
-        # deliberately kept OFF until a re-hand-off" verdict
-        # (skills/process-subdev). The ticket's ORIGINAL hand-off comment
-        # never goes away, so a naive comment fallback would count a
-        # bounced ticket as permanently handed-off -- hiding exactly the
-        # active work the bounce lane exists to surface. This also proves
-        # the fallback never even QUERIES a bounced ticket's own comments
-        # (the exclusion happens BEFORE the per-issue `gh api` call).
+    def test_refresh_a_bounce_label_overrides_a_stale_ready_for_review_label(self):
+        # #313 pt 2 adversarial review round 2, F3: `prio:bounce` is the
+        # gatekeeper's own "returned to the sub-dev, not ready" verdict —
+        # it must override a stale/lagged `ready-for-review` LABEL too
+        # (a case the round-1 fix left open: a ticket carrying BOTH labels
+        # at once still counted as handed-off via the label OR-chain
+        # alone). No comments needed here — the label alone is decisive.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
-            log = Path(bindir) / "calls.log"
             fake_gh = Path(bindir) / "gh"
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
-                'echo "$*" >> "%s"\n' % log +
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
-                '  *assignee:@me*) echo \'[{"number":1,'
-                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":['
+                '{"name":"ready-for-review"},{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[{"body":'
-                '"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *"issues/1/comments"*) echo \'[]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -444,8 +482,90 @@ class RefreshCLI(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 1)      # still active — bounced
             self.assertEqual(cache["gk"], 0)
-            calls = log.read_text() if log.exists() else ""
-            self.assertNotIn("comments", calls, calls)
+
+    def test_refresh_invalidates_a_stale_hand_off_once_a_bounce_finding_follows_it(self):
+        # #313 pt 2 adversarial review round 2, F1/F2: a stale, PRE-bounce
+        # hand-off comment must not read as still current once a LATER
+        # GATEKEEPER-authored finding/bounce comment supersedes it — the
+        # comment-order walk keeps the LAST signal, not the first match.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                         "bouncing back."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 1)      # still active — bounced
+            self.assertEqual(cache["gk"], 0)
+
+    def test_refresh_recovers_a_genuine_re_hand_off_after_a_bounce_finding(self):
+        # #313 pt 2 adversarial review round 2, F2 (the positive control for
+        # the test above): a genuine RE-hand-off comment posted AFTER the
+        # bounce's own GATEKEEPER finding comment must be recognised — this
+        # is the exact scenario round 1's hard exclusion of bounced tickets
+        # broke (odoo-erp#2584's broken hand-off-label workflow means the
+        # label alone never updates, so this comment is the ONLY signal).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                         "bouncing back."},
+                {"body": "READY-FOR-REVIEW: addressed the finding, fixed "
+                         "and re-pushed."},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 0)      # recovered -- re-handed
+            self.assertEqual(cache["gk"], 1)
 
     def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
         # #313 pt 2 adversarial review MAJOR-2: `_is_readiness_comment` is
@@ -1540,6 +1660,17 @@ class WidthBudget(unittest.TestCase):
         line = statusbar.fit_statusline(segs, "email sub", "cm", "", "", None)
         self.assertIn("email sub", line)
         self.assertIn("cm", line)
+
+    def test_shim_clamps_the_budget_at_zero_for_a_measured_width_this_small(self):
+        # #313 pt 4 adversarial review round 2, THEORETICAL F7: `width` is
+        # `is not None` (measured), so a genuinely tiny width no longer
+        # falls into the "unmeasurable, never trim" branch (round-1 fix)
+        # -- but an UNCLAMPED `width - RESERVE` could still go negative,
+        # which `fit_statusline` would then treat as an already-overflowed
+        # budget. Locks that the shim clamps it at 0 instead of computing a
+        # bare, possibly-negative subtraction.
+        self.assertIn("max(0, width - statusbar.STATUSLINE_RESERVE_COLS)",
+                       airuleset.CAVEMAN_SHIM_CONTENT)
 
     def test_fit_statusline_drops_identity_first(self):
         segs = ["I 5"]
