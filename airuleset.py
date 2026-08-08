@@ -1375,8 +1375,12 @@ CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.
 # TEMPLATE-SUBSTITUTED literal (never a second, hand-typed copy that could
 # silently drift out of sync with the argv side -- see
 # render_claude_history_popup_script). S-F1/prefix-h get no `-e` flag at
-# all, so MODE is empty for them and they take the LEGACY branch, which is
-# the pre-#337 script content byte-for-byte.
+# all -- their BIND-KEY ARGV is unchanged byte-for-byte -- so MODE is
+# empty for them and they take the LEGACY branch, whose STATEMENTS are
+# the pre-#337 code verbatim (same commands, same flags, same order);
+# the branch is re-indented one level inside the new `if`/`else` and the
+# whole SCRIPT FILE around it changed, so "byte-for-byte" describes the
+# argv and the branch's own code, never the rendered file as a whole.
 TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY = "transcript-primary"
 CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) -- claude-history popup companion (#289).
@@ -1395,9 +1399,10 @@ CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
 # with a real `tmux capture-pane` of the ORIGINATING pane as ITS OWN
 # fallback for when the transcript resolves nothing at all. S-F1 and
 # prefix-h receive NO `-e AIRULESET_POPUP_MODE=` flag whatsoever -- their
-# argv, and therefore this script's LEGACY branch below (the `else`),
-# stay byte-for-byte the pre-#337 shape: single-source claude-history,
-# FAILS LOUDLY on its own failure, no capture-pane involvement at all.
+# argv stays byte-for-byte unchanged, and this script's LEGACY branch
+# below (the `else`) keeps the exact same pre-#337 STATEMENTS (single-
+# source claude-history, FAILS LOUDLY on its own failure, no capture-
+# pane involvement at all) -- only re-indented inside the new `if`/`else`.
 set -euo pipefail
 
 MODE="${AIRULESET_POPUP_MODE:-}"
@@ -1445,8 +1450,9 @@ ${CP_OUT}"
     fi
   fi
 else
-  # LEGACY (S-F1 / prefix-h -- #337 leaves this branch byte-for-byte the
-  # pre-#337 shape): `set -e` + `VAR=$(failing_cmd)` would otherwise exit
+  # LEGACY (S-F1 / prefix-h -- #337 leaves this branch's own STATEMENTS
+  # byte-for-byte the pre-#337 shape, only re-indented one level inside
+  # the new `if`/`else`): `set -e` + `VAR=$(failing_cmd)` would otherwise exit
   # this script BEFORE the next line ever runs (a failing command
   # substitution used in a plain assignment is an unhandled failure under
   # -e) -- the `|| CH_RC=$?` form is the established fix: it captures the
@@ -1913,6 +1919,24 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # render time) directly -- never the `claude-history` bashrc FUNCTION,
 # since `display-popup` runs its shell-command non-interactively and
 # `~/.bashrc` (where the function lives) is never sourced.
+#
+# CAPTURE-PANE RESOLUTION (#337, used by S-DC's own capture-pane
+# fallback -- see CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT below): a bare
+# (no `-t`) `tmux capture-pane` call issued from WITHIN a display-popup
+# job's own shell-command resolves against the ORIGINATING pane -- the
+# one the popup key was actually pressed in -- never the popup's own
+# freshly-created pseudo-pane. Verified live, twice, independently, on
+# both tmux 3.4 and 3.7b: an isolated multi-window/multi-client server
+# with the raw popup-key bytes injected into a real attached pty client
+# confirmed the resolution correctly follows whichever client pressed
+# the key, including a run where the popup job's own `$TMUX_PANE`
+# carried the popup's OWN pane id (e.g. `%3`) while the bare capture
+# still returned the ORIGINATING pane's content -- proof this does not
+# rely on `$TMUX_PANE` at all. Two proven ways to BREAK this
+# resolution, never do either: adding `-c <client>` to `display-popup`
+# (routes to the wrong session's pane when the popup is opened from an
+# outside command client), or invoking the script via `tmux run-shell`
+# instead of directly as the popup's own shell-command.
 #
 # ADVERSARIAL-REVIEW-CLASS FINDING (self-caught via live verification,
 # #289): the shell-command argument was ORIGINALLY inlined directly on

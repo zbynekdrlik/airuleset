@@ -5596,6 +5596,44 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertIn(marker, r.stdout)
         self.assertNotIn("also produced nothing", r.stdout)
 
+    def test_real_execution_transcript_primary_mode_falls_back_when_claude_history_exits_zero_but_empty(self):
+        # #337-review MINOR-2: real-execution proof for the OTHER half of
+        # the fallback trigger guard (`[ "$CH_RC" -ne 0 ] || [ -z
+        # "$CH_OUT" ]`) -- so far only exercised via a string-presence
+        # unit test, never via genuine execution. The REAL claude-history
+        # script can never actually produce "rc=0, empty stdout" on its
+        # own (a genuine success always prints at least a header line),
+        # so this substitutes a trivial stand-in AT THE EXACT SAME
+        # invocation path the popup script shells out to -- the same
+        # technique the "missing less" test above already uses (a narrow
+        # real-environment substitution to engineer one specific,
+        # otherwise-unreachable edge condition, never a mock of the
+        # popup script's OWN logic) -- then proves the REAL fallback
+        # still fires end-to-end via a real tmux capture-pane read.
+        home = Path(tempfile.mkdtemp())
+        claude_dir = home / ".claude"
+        claude_dir.mkdir(parents=True)
+        hscript = claude_dir / airuleset.CLAUDE_HISTORY_SCRIPT_DEST.name
+        hscript.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+        os.chmod(hscript, 0o755)
+        pscript = claude_dir / airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST.name
+        pscript.write_text(airuleset.render_claude_history_popup_script())
+        os.chmod(pscript, 0o755)
+        cwd = home / "proj"
+        cwd.mkdir()
+        marker = "RC0-EMPTY-FALLBACK-MARKER-337"
+        scratch = tempfile.mkdtemp()
+        self._spawn_isolated_tmux_pane(
+            ["bash", "-c", "echo %s; sleep 60" % marker], scratch)
+        env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin",
+               "HOME": str(home),
+               "AIRULESET_POPUP_MODE": airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(marker, r.stdout)
+        self.assertNotIn("also produced nothing", r.stdout)
+
     def test_real_execution_transcript_primary_mode_fails_loudly_when_capture_pane_is_blank(self):
         # Mirrors #327's own blank-pane test (see this repo's playbook): a
         # pane running `sleep` DIRECTLY (never a shell) renders
