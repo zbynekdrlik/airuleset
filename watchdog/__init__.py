@@ -11736,8 +11736,18 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         # re-arm at all. Without this guard, `exit_ts > last_seen_alive`
         # (built on the STALE `last_armed`) would wrongly treat the
         # already-superseded exit as still decisive forever. Mirrors the
-        # IDENTICAL "a marker newer than the exit is stale" rule
-        # `_goal_was_cleared_by_user` already applies one function over.
+        # SAME `mts >= exit_ts` comparison `_goal_was_cleared_by_user`
+        # already applies one function over -- but NOT its fail direction
+        # on an unmeasurable `mts`: that function fails OPEN (unparseable
+        # marker ts -> never treat the exit as decisive), while this guard
+        # deliberately fails CLOSED (`mts is None` -> not superseded ->
+        # `skip exited` can still fire on `last_armed` alone) -- matching
+        # THIS function's own established opposite fail-direction
+        # convention (`_goal_dark_died_by_outage`'s docstring: a re-arm
+        # here types into a pane whose current use is unknown, so an
+        # unmeasurable input must stay conservative, never guess toward
+        # re-arming). #335-review round-3 confirmed this asymmetry is
+        # deliberate and correct, not a bug (round-3 review comment).
         mts = rec.get("mts")
         exit_superseded_by_newer_marker = (mts is not None
                                            and mts >= exit_ts) \
