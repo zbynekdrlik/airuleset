@@ -374,6 +374,67 @@ def _gh_issue_state(n, cwd, timeout=8):
     return state if state in ("OPEN", "CLOSED") else None
 
 
+# --------------------------------------------------------------------------- #
+# #310 -- stale scratch-msgfile quarantine. A worker composing
+# `cat > path <<EOF ... EOF && git commit -F path` in ONE Bash call has the
+# WHOLE compound denied atomically by block-commit-without-design.sh when the
+# gate fires -- nothing in it executes, so the intended `cat >` write never
+# lands. A file already sitting at `path` from an unrelated earlier attempt
+# survives untouched, and a LATER bare `git commit -F path` retry carries no
+# issue-number TEXT at all (the reference lives only inside the file's own
+# content, invisible to ISSUE_REF_RE), so the gate never blocks IT either --
+# the stale content commits silently. See the #310 design comment on the
+# issue for the full incident and the two rejected alternatives (re-printing
+# the file's content, and a stateful "provably predates the command"
+# freshness marker).
+# --------------------------------------------------------------------------- #
+
+# Any `>`/`>>` redirect target -- the standard `cat > path <<EOF` recipe.
+# Deliberately simple (documented limitation, same "cost of a miss is low"
+# tradeoff ISSUE_REF_RE already makes elsewhere in this module): no
+# shell-quote/heredoc-body awareness.
+_REDIR_RX = re.compile(
+    r"(?:^|[\s;&|(])(?:\d?>>?)\s*(['\"]?)([^\s'\">|;&]+)\1")
+# `git commit` specifically -- the whitespace/end-of-string lookahead (not a
+# bare `\b`) is what keeps a DIFFERENT subcommand sharing the same prefix
+# (`git commit-graph write --file X`) from being mistaken for `git commit`.
+_COMMIT_FILE_RX = re.compile(
+    r"git\s+commit(?=\s|$)[^\n;&|]*?(?:-F|--file)(?:=|\s+)"
+    r"(['\"]?)([^\s'\"><|;&]+)\1")
+
+
+def stale_msgfile_candidates(cmd):
+    """Paths this SAME command text tries to (over)WRITE (a `>`/`>>`
+    redirect target) AND ALSO passes to `git commit -F`/`--file` -- the
+    exact write-then-consume pattern that leaves a stale file behind
+    whenever the whole compound gets blocked before any of it executes.
+    First-seen order (sorted); empty list when there is nothing to
+    quarantine."""
+    text = cmd or ""
+    written = {os.path.normpath(m.group(2)) for m in _REDIR_RX.finditer(text)}
+    committed = {os.path.normpath(m.group(2)) for m in _COMMIT_FILE_RX.finditer(text)}
+    return sorted(written & committed)
+
+
+def quarantine_stale_msgfile(path, ts=None):
+    """Best-effort: rename `path` aside (a `.stale-<epoch-ms>` sibling,
+    never deleted -- the content is kept for inspection, only the ORIGINAL
+    path is made to disappear) so a LATER bare `git commit -F path` retry
+    fails LOUD (file not found) instead of silently reading content this
+    SAME blocked command never got the chance to (re)write. Returns the
+    quarantine path on success, else None (nothing existed there, it is a
+    directory, or the rename failed) -- NEVER raises."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        stamp = int((ts if ts is not None else time.time()) * 1000)
+        dest = "%s.stale-%d" % (path, stamp)
+        os.rename(path, dest)
+        return dest
+    except OSError:
+        return None
+
+
 def required_refs(refs, cwd, state_of=None):
     """Filter `refs` (issue numbers with no marker yet) down to the ones
     that STILL require a design-comment marker: drop any that are already
