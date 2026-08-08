@@ -137,7 +137,11 @@ flowing. The loop **NEVER idles while ANY lane has work**.
 worktree-isolated workers, integrated serially) per repo (LANE 3) — never a second
 round dispatched while one is still in flight; one release in flight per
 instance (LANE 2); a review (LANE 1) and a running core round coexist — the review
-object is the pinned slice, per the parallel-run rule in `process-subdev`.
+object is the pinned slice, per the parallel-run rule in `process-subdev`. **The
+round's TOTAL concurrent agent cap (workers + every Step 1b `ticket-validator`
+dispatch combined) is 8, staggered into waves above that — the canonical, measured
+rule lives in the `autopilot` skill's own "Total concurrent agent cap" section
+(#332); never re-derive it here.**
 
 **Single-lane commands stay:** `/process-subdev <stream>` and `/autopilot` remain valid
 for a deliberate single-lane run; on the gatekeeper the master is the default because
