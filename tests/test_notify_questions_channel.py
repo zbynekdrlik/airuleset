@@ -81,13 +81,15 @@ class TestResolveQuestionsChannel(_HomeIsolated):
         # The RETURNED channel is unchanged from notification_channel's own
         # existing, deliberate fallback cascade -- this ticket does not touch
         # WHICH channel a fallback delivery uses, only whether it is silent.
-        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
         chan = notify.resolve_questions_channel(
             env=env, owner="zbynek", spawn=lambda o: None)
         self.assertEqual(chan, "111")
 
     def test_missing_q_thread_logs_the_fallback_loudly(self):
-        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
         notify.resolve_questions_channel(env=env, owner="zbynek",
                                          spawn=lambda o: None)
         lines = self.log_lines()
@@ -98,7 +100,8 @@ class TestResolveQuestionsChannel(_HomeIsolated):
             lines)
 
     def test_missing_q_thread_spawns_a_provision_attempt(self):
-        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
         calls = []
         notify.resolve_questions_channel(env=env, owner="zbynek",
                                          spawn=lambda o: calls.append(o))
@@ -108,7 +111,7 @@ class TestResolveQuestionsChannel(_HomeIsolated):
         # notification_channel() itself falls back to the shared channel
         # when the owner can't be resolved at all -- there is no PER-OWNER
         # fact to log or self-heal in that case.
-        env = {"DISCORD_NOTIFICATION_CHANNEL_ID": "999"}
+        env = {"DISCORD_BOT_TOKEN": "tok", "DISCORD_NOTIFICATION_CHANNEL_ID": "999"}
         calls = []
         chan = notify.resolve_questions_channel(
             env=env, owner="", spawn=lambda o: calls.append(o))
@@ -116,10 +119,29 @@ class TestResolveQuestionsChannel(_HomeIsolated):
         self.assertEqual(calls, [])
         self.assertEqual(self.log_lines(), [])
 
+    def test_no_bot_token_never_logs_fallback_or_spawns(self):
+        # #330 round-2 adversarial review MINOR 6: a box with NO Discord
+        # bot token at all is ALREADY going to fail delivery for a more
+        # fundamental reason (notify-discord-send.sh's own pre-existing
+        # "no-token" check) -- logging "fallback ... q-thread-not-
+        # provisioned" on TOP of that points the operator at the WRONG
+        # repair (it needs check_discord_notify_config()'s fix, not a -q
+        # thread) and the self-heal spawn is doomed before its first
+        # network call anyway. Gate on having a token -- something worth
+        # actually self-healing FOR.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}   # no token
+        calls = []
+        chan = notify.resolve_questions_channel(
+            env=env, owner="zbynek", spawn=lambda o: calls.append(o))
+        self.assertEqual(chan, "111")   # delivery-channel resolution unaffected
+        self.assertEqual(calls, [])
+        self.assertEqual(self.log_lines(), [])
+
     def test_default_spawn_is_the_real_provisioner(self):
         # Calling with NO spawn= at all must resolve the module-level
         # default -- proving the wiring, not just the injected-callable shape.
-        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "111"}
         with m.patch.object(notify, "_spawn_provision_question_thread") as fake:
             notify.resolve_questions_channel(env=env, owner="zbynek")
         fake.assert_called_once_with("zbynek")
@@ -254,15 +276,23 @@ class TestChannelIdCliWiresTheFallback(_HomeIsolated):
         self.assertEqual(r.stdout.strip(), "222")
         self.assertEqual(self.log_lines(), [])
 
-    def test_unconfigured_falls_back_and_logs(self):
+    def test_unconfigured_no_token_falls_back_but_does_not_log(self):
+        # #330 round-2 adversarial review MINOR 6: a box with NO bot token
+        # is ALREADY doomed to fail delivery for a more fundamental reason
+        # (notify-discord-send.sh's own "no-token" check) -- logging
+        # "fallback ... q-thread-not-provisioned" on top of that would
+        # point the operator at the wrong repair. This is ALSO the
+        # network-safety fixture from #330 round-1 F6 (no token -> the
+        # self-heal's own find/create both bail before any HTTP call) --
+        # the "token present -> fallback IS logged + spawns" case is
+        # covered at the Python-function level in
+        # TestResolveQuestionsChannel (deliberately, to avoid a real
+        # network-touching subprocess call in a unit test).
         self._write_env(q=False, token=False)
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "111")
-        lines = self.log_lines()
-        self.assertTrue(
-            any("fallback" in ln and "q-thread-not-provisioned" in ln
-                for ln in lines), lines)
+        self.assertEqual(self.log_lines(), [])
 
 
 if __name__ == "__main__":
