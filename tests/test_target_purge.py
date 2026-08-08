@@ -433,7 +433,7 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
     # --- cadence gate (automatic install/push wiring only) ----------------
     def test_second_call_within_a_day_is_a_noop_without_force(self):
         repo = _mkrepo(self.root, "songplayer")
-        t = _mktarget(repo, age_days=45)
+        _mktarget(repo, age_days=45)
         first = self._purge(max_age_days=7, dry_run=False, force=False)
         self.assertTrue(first[0]["purged"])
         # A second stale repo appears; the cadence gate must still say "no"
