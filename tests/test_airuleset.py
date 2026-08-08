@@ -2234,6 +2234,270 @@ class TestHookScriptsExist(TestCase):
             self.assertTrue(os.access(path, os.X_OK), f"Not executable: {path}")
 
 
+class TestSessionStartFetchHook(TestCase):
+    """hooks/session-start-fetch.sh (#314) — the SessionStart hook used to only
+    `git fetch` (updates the invisible origin/<branch> ref) and print a
+    WARNING when behind, never actually moving the local branch/working
+    tree. A long-lived, mostly-passive session (a sub-dev stream account's
+    persistent tmux, cwd = a project checkout) reads its CLAUDE.md straight
+    off that tree at boot — if the tree never advances, that content can
+    sit weeks stale even though the hook "fetched" every single session.
+
+    These tests lock the fix: fast-forward the local branch to
+    origin/<branch> automatically, but ONLY when it is provably safe (clean
+    tree, real branch, no in-progress git operation, and HEAD is a genuine
+    ancestor of origin/<branch> — never a reset/checkout -f/history rewrite,
+    only `git merge --ff-only`)."""
+
+    HOOK = airuleset.REPO_DIR / "hooks" / "session-start-fetch.sh"
+
+    def _g(self, cwd, *args):
+        import subprocess
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+    def _base_repo(self):
+        """Remote (bare) + a clone on 'main', origin/HEAD set, one commit."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        bare = os.path.join(root, "rem.git")
+        self._g(root, "init", "-q", "--bare", bare)
+        repo = os.path.join(root, "repo")
+        self._g(root, "clone", "-q", bare, repo)
+        self._g(repo, "config", "user.email", "t@t")
+        self._g(repo, "config", "user.name", "t")
+        self._g(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+        open(os.path.join(repo, "f"), "w").write("v1\n")
+        self._g(repo, "add", "f")
+        self._g(repo, "commit", "-qm", "init")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._g(repo, "remote", "set-head", "origin", "-a")
+        return repo
+
+    def _advance_origin(self, repo, text="v2\n"):
+        """Push one more commit to origin/main from a SEPARATE clone, so the
+        local `repo` checkout falls behind without touching its own tree.
+        `--branch main` forces checkout of `main` explicitly — the bare
+        remote's own HEAD symref defaults to whatever `init.defaultBranch`
+        is (often unrelated to "main"), so relying on the default checkout
+        is not reliable across git configs."""
+        import shutil
+        parent = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        other = os.path.join(parent, "other")
+        origin_url = self._g(repo, "remote", "get-url", "origin").stdout.strip()
+        clone = self._g(parent, "clone", "-q", "--branch", "main", origin_url, other)
+        assert clone.returncode == 0, clone.stderr
+        self._g(other, "config", "user.email", "t@t")
+        self._g(other, "config", "user.name", "t")
+        open(os.path.join(other, "f"), "w").write(text)
+        commit = self._g(other, "commit", "-qam", "advance")
+        assert commit.returncode == 0, commit.stderr
+        push = self._g(other, "push", "-q", "origin", "main")
+        assert push.returncode == 0, push.stderr
+
+    def _run(self, repo):
+        import subprocess
+        return subprocess.run(["bash", str(self.HOOK)], cwd=repo,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_clean_behind_fast_forwards(self):
+        repo = self._base_repo()
+        self._advance_origin(repo)
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        origin_head = self._g(repo, "rev-parse", "origin/main").stdout.strip()
+        self.assertNotEqual(before, after, r.stdout + r.stderr)
+        self.assertEqual(after, origin_head, "local HEAD must equal origin/main")
+        self.assertEqual(
+            open(os.path.join(repo, "f")).read(), "v2\n",
+            "working tree content must reflect the fast-forwarded commit")
+
+    def test_up_to_date_no_op(self):
+        repo = self._base_repo()
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after)
+        self.assertNotIn("WARNING", r.stdout)
+
+    def test_dirty_tree_not_fast_forwarded(self):
+        # #314 adversarial-review F2: the ORIGINAL version of this test dirtied
+        # the SAME file ("f") the incoming commit also touches — so with the
+        # dirty-tree guard REMOVED entirely, `git merge --ff-only` still
+        # refuses on its own (local changes would be overwritten by the
+        # incoming commit), and the test passed for the WRONG reason (a
+        # mutant that drops the dirty-tree check survives this test
+        # unchanged). Dirty an UNRELATED tracked file the incoming commit
+        # never touches: WITHOUT the guard, `--ff-only` genuinely succeeds
+        # (an unrelated uncommitted change does not block a real
+        # fast-forward), so this version can actually distinguish "the
+        # guard ran" from "the merge would have failed anyway".
+        repo = self._base_repo()
+        open(os.path.join(repo, "other"), "w").write("tracked\n")
+        self._g(repo, "add", "other")
+        self._g(repo, "commit", "-qm", "add other")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._advance_origin(repo)
+        # local uncommitted edit to an UNRELATED path — must never be
+        # touched by the hook, and must be what actually blocks it (not a
+        # coincidental merge conflict on the file origin also changed)
+        open(os.path.join(repo, "other"), "w").write("LOCAL UNCOMMITTED\n")
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "dirty tree must never be fast-forwarded")
+        self.assertEqual(open(os.path.join(repo, "other")).read(), "LOCAL UNCOMMITTED\n")
+        self.assertIn("working tree dirty", r.stdout + r.stderr)
+
+    def test_diverged_branch_not_fast_forwarded(self):
+        repo = self._base_repo()
+        self._advance_origin(repo)
+        # a genuine local commit that conflicts with origin's advance —
+        # HEAD is NOT an ancestor of origin/main anymore
+        open(os.path.join(repo, "f"), "w").write("LOCAL DIVERGED\n")
+        self._g(repo, "commit", "-qam", "local divergent commit")
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "diverged branch must never be fast-forwarded")
+        # #314 adversarial review F2: divergence always defeats `--ff-only`
+        # on its own (real HEAD movement can never discriminate "the
+        # ancestor guard ran" from "the merge just failed anyway"), so this
+        # asserts the guard's OWN wording specifically — a mutant that
+        # drops the `merge-base --is-ancestor` check entirely would fall
+        # through to the generic "fast-forward attempt failed" message
+        # instead, which this assertion catches.
+        self.assertIn("has diverged", r.stdout + r.stderr)
+
+    def test_mid_revert_not_fast_forwarded(self):
+        # #314 adversarial review F3: REVERT_HEAD is CHERRY_PICK_HEAD's exact
+        # twin for `git revert` — a clean-tree mid-revert (tree restored to
+        # clean after `revert --no-commit`, REVERT_HEAD still present) is
+        # reachable and must be refused exactly like mid-cherry-pick/rebase.
+        repo = self._base_repo()
+        # a second commit to revert against
+        open(os.path.join(repo, "f"), "w").write("v2\n")
+        self._g(repo, "commit", "-qam", "second commit")
+        self._g(repo, "push", "-q", "origin", "main")
+        self._advance_origin(repo, text="v3\n")
+        self._g(repo, "fetch", "-q", "origin")
+        # start a revert of the second commit, then restore the tree to
+        # clean while leaving REVERT_HEAD behind — no --no-edit needed
+        # since --no-commit never opens an editor
+        self._g(repo, "revert", "--no-commit", "HEAD")
+        self._g(repo, "restore", "--source=HEAD", "--staged", "--worktree", ".")
+        git_dir = self._g(repo, "rev-parse", "--git-dir").stdout.strip()
+        git_dir = git_dir if os.path.isabs(git_dir) else os.path.join(repo, git_dir)
+        self.assertTrue(
+            os.path.exists(os.path.join(git_dir, "REVERT_HEAD")),
+            "test setup must actually produce a mid-revert state")
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "mid-revert repo must never be touched")
+        self.assertIn("WARNING", r.stdout + r.stderr)
+        self._g(repo, "revert", "--abort")
+
+    def test_ignored_file_collision_not_fast_forwarded(self):
+        # #314 adversarial review F1 (CRITICAL, reproduced live): the
+        # dirty-tree check is BLIND to ignored files (`git status
+        # --porcelain` never lists them), and `--ff-only` treats an
+        # ignored/untracked file as expendable relative to an incoming
+        # tracked file at the SAME path — so without this guard, a local
+        # gitignored file (a real secret, a scratch note) is silently
+        # OVERWRITTEN the moment origin adds a tracked file of that name.
+        repo = self._base_repo()
+        open(os.path.join(repo, ".gitignore"), "w").write("secret.env\n")
+        self._g(repo, "add", ".gitignore")
+        self._g(repo, "commit", "-qm", "add gitignore")
+        self._g(repo, "push", "-q", "origin", "main")
+        # a real local file matching the ignored pattern — never committed
+        open(os.path.join(repo, "secret.env"), "w").write("MY PRECIOUS LOCAL SECRET\n")
+        # origin independently adds a TRACKED file at the same path
+        import shutil
+        parent = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        other = os.path.join(parent, "other")
+        origin_url = self._g(repo, "remote", "get-url", "origin").stdout.strip()
+        self._g(parent, "clone", "-q", "--branch", "main", origin_url, other)
+        self._g(other, "config", "user.email", "t@t")
+        self._g(other, "config", "user.name", "t")
+        open(os.path.join(other, "secret.env"), "w").write("ORIGIN VERSION\n")
+        self._g(other, "add", "-f", "secret.env")
+        self._g(other, "commit", "-qm", "origin adds secret.env")
+        self._g(other, "push", "-q", "origin", "main")
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "must never fast-forward past a local/origin path collision")
+        self.assertEqual(
+            open(os.path.join(repo, "secret.env")).read(), "MY PRECIOUS LOCAL SECRET\n",
+            "the local gitignored file's content must survive untouched")
+        self.assertIn("WARNING", r.stdout + r.stderr)
+
+    def test_unmeasurable_status_refuses_rather_than_guesses_clean(self):
+        # #314 adversarial review F4: a failing `git status` (e.g. an
+        # unreadable .git/index) must never silently read as "clean" — an
+        # unmeasurable state is treated the same as dirty, never guessed.
+        #
+        # An unreadable .git/index makes EVERY git command that touches it
+        # fail with rc=128, including the hook's OWN internal `git fetch`
+        # (verified live) — so `origin/$BRANCH` must already be fetched to
+        # its final position BEFORE the chmod, or the hook's BEHIND
+        # computation reads a stale (not-yet-advanced) tracking ref and
+        # exits early as "up to date" before ever reaching the status
+        # check this test is about. `git rev-list --count` itself does not
+        # touch the index (verified live), so BEHIND still resolves
+        # correctly once fetched.
+        repo = self._base_repo()
+        self._advance_origin(repo)
+        self._g(repo, "fetch", "-q", "origin")
+        index_path = os.path.join(repo, ".git", "index")
+        os.chmod(index_path, 0o000)
+        self.addCleanup(os.chmod, index_path, 0o644)
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "an unmeasurable working-tree state must never be fast-forwarded")
+        self.assertIn("could not determine working tree state", r.stdout + r.stderr)
+
+    def test_mid_rebase_not_fast_forwarded(self):
+        repo = self._base_repo()
+        self._advance_origin(repo)
+        open(os.path.join(repo, "f"), "w").write("REBASE CONFLICT\n")
+        self._g(repo, "commit", "-qam", "local commit that will conflict")
+        # local origin/main tracking ref is stale until an explicit fetch —
+        # without this, `rebase origin/main` below is a silent no-op
+        self._g(repo, "fetch", "-q", "origin")
+        # start a rebase onto origin/main that WILL conflict, leaving the
+        # repo mid-rebase (rebase-merge/ or rebase-apply/ present)
+        self._g(repo, "rebase", "origin/main")
+        git_dir = self._g(repo, "rev-parse", "--git-dir").stdout.strip()
+        git_dir = git_dir if os.path.isabs(git_dir) else os.path.join(repo, git_dir)
+        mid_rebase = (os.path.exists(os.path.join(git_dir, "rebase-merge"))
+                      or os.path.exists(os.path.join(git_dir, "rebase-apply")))
+        self.assertTrue(mid_rebase, "test setup must actually produce a mid-rebase state")
+        before = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(before, after, "mid-rebase repo must never be touched")
+        self.assertIn("WARNING", r.stdout + r.stderr)
+        # cleanup so tempdir removal doesn't choke on rebase state
+        self._g(repo, "rebase", "--abort")
+
+    def test_detached_head_not_fast_forwarded(self):
+        repo = self._base_repo()
+        first = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self._advance_origin(repo)
+        self._g(repo, "checkout", "-q", first)
+        r = self._run(repo)
+        after = self._g(repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(first, after, "detached HEAD must never be moved")
+        self.assertEqual(r.returncode, 0)
+
+
 class TestProdGatingHook(TestCase):
     """hooks/stop-check-prod-gating.sh — blocks prod-usage/event/off-air/hardware
     gating (approval-scope.md, the user's hardest rule), in English AND Slovak,
