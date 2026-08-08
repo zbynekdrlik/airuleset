@@ -372,6 +372,83 @@ class TestAGoalTheUserClearedIsNotReArmed(unittest.TestCase):
         self.assertEqual(n, [1, 0, 0], "the skip must be logged once")
 
 
+class TestAnExitedSessionIsNotReArmed(unittest.TestCase):
+    """#335 -- the user's OWN stated way of stopping a session (`ja ked
+    nerobim v niektorom projekte exitnem sa z claude`) leaves NO
+    `Goal cleared:` (or any other goal-marker) that
+    `_goal_was_cleared_by_user` would ever see, so without this an exited
+    session gets re-armed on the very next sweep exactly like a healthy
+    resolved cycle. Mirrors `TestAGoalTheUserClearedIsNotReArmed` verbatim,
+    substituting an explicit `/exit` slash-command entry for the
+    `Goal cleared:` marker."""
+
+    def _projects(self, cwd, *lines):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        d = root / wd.encode_project_dir(cwd)
+        d.mkdir(parents=True)
+        (d / "sess-exit.jsonl").write_text("\n".join(lines) + "\n",
+                                           encoding="utf-8")
+        return root
+
+    @staticmethod
+    def _marker(state, payload="STOP CONDITIONS — the loop is DONE ...",
+                ts="2026-07-29T09:00:00.000Z"):
+        return _json.dumps({
+            "type": "system",
+            "timestamp": ts,
+            "content": "<local-command-stdout>Goal %s: %s</local-command-stdout>"
+                       % (state, payload),
+        })
+
+    @staticmethod
+    def _exit(ts):
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<command-name>/exit</command-name>\n"
+                        "            <command-message>exit</command-message>\n"
+                        "            <command-args></command-args>"}})
+
+    def test_exited_session_is_left_alone(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("set"),
+                            self._exit("2026-07-29T09:05:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a session the user exited must not be re-armed")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_an_exit_before_a_later_set_marker_does_not_block(self):
+        # something happened AFTER the exit (a fresh arm) -- the exit no
+        # longer governs, the SAME release the `Goal cleared:` case gets.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd,
+                            self._marker("set", ts="2026-07-29T08:00:00.000Z"),
+                            self._exit("2026-07-29T08:30:00.000Z"),
+                            self._marker("set", ts="2026-07-29T09:00:00.000Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed())
+
+    def test_a_nested_exit_inside_a_tool_result_is_never_treated_as_real(self):
+        cwd = "/home/x/devel/demo"
+        nested = _json.dumps({
+            "type": "user", "timestamp": "2026-07-29T09:05:00.000Z",
+            "message": {"content": [
+                {"type": "tool_result", "content": [
+                    {"type": "text",
+                     "text": "<command-name>/exit</command-name>"}]}]}})
+        pd = self._projects(cwd, self._marker("set"), nested)
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(tmux.typed(),
+                        "a QUOTED /exit inside a tool_result must never "
+                        "count as this session's own exit")
+
+
 class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
         unittest.TestCase):
     """The #170 suppression had no exit condition, so it never expired.
