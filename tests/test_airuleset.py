@@ -4569,6 +4569,7 @@ class TestTmuxHistoryLimit(TestCase):
         # just placement -- a self-referential expected string would pass
         # even if the two set-option lines were emitted out of order.
         popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
+        mode_flag = "-e AIRULESET_POPUP_MODE=%s" % airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY
         expected = (
             "set -g mouse on\n\n"
             f"{airuleset.TMUX_MARK_START}\n"
@@ -4580,8 +4581,10 @@ class TestTmuxHistoryLimit(TestCase):
             "bind-key -T copy-mode-vi S-PageDown send-keys -X page-down\n"
             f'bind-key -n S-F1 display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
-            f'bind-key -n S-DC display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
-            f'-T claude-history {popup_script}\n'
+            # #337: S-DC ALONE carries the mode flag -- S-F1 (above) and
+            # prefix+h (below) stay byte-for-byte the pre-#337 shape.
+            f'bind-key -n S-DC display-popup -E -w 90% -h 90% {mode_flag} '
+            f'-d "#{{pane_current_path}}" -T claude-history {popup_script}\n'
             f'bind-key h display-popup -E -w 90% -h 90% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
             f"{airuleset.TMUX_MARK_END}"
@@ -5226,6 +5229,57 @@ class TestTmuxPopupBind(TestCase):
         for line in popup_lines:
             self.assertNotIn("$", line)
 
+    # -- #337: S-DC's own transcript-primary/capture-pane-fallback mode --
+
+    def test_s_dc_bind_carries_the_transcript_primary_mode_flag(self):
+        # S-DC ALONE gets `-e AIRULESET_POPUP_MODE=<value>` -- the ONLY
+        # thing that differentiates its argv from S-F1/prefix+h at all.
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[1]
+        self.assertIn("-e", argv)
+        idx = argv.index("-e")
+        self.assertEqual(
+            argv[idx + 1],
+            "AIRULESET_POPUP_MODE=%s" % airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY)
+
+    def test_s_f1_bind_carries_no_mode_flag_at_all(self):
+        # "S-F1 unchanged" is a STRUCTURAL guarantee here, not a promise:
+        # its argv must be byte-identical to the pre-#337 shape.
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[0]
+        self.assertNotIn("-e", argv)
+        self.assertNotIn("AIRULESET_POPUP_MODE", " ".join(argv))
+
+    def test_prefix_h_bind_carries_no_mode_flag_at_all(self):
+        argv = airuleset.TMUX_POPUP_BIND_ARGVS[2]
+        self.assertNotIn("-e", argv)
+        self.assertNotIn("AIRULESET_POPUP_MODE", " ".join(argv))
+
+    def test_only_one_of_the_three_binds_carries_a_mode_flag(self):
+        with_mode = [argv for argv in airuleset.TMUX_POPUP_BIND_ARGVS if "-e" in argv]
+        self.assertEqual(len(with_mode), 1)
+
+    def test_mode_flag_value_is_no_dollar_no_whitespace(self):
+        # Must survive BOTH `_tmux_conf_quote` (never render bare unquoted
+        # if it contained a `$`, per that function's own M1 refusal) and a
+        # plain live-apply subprocess argv element (no shell involved --
+        # whitespace inside one token would silently become two tmux words).
+        value = airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY
+        self.assertNotIn("$", value)
+        self.assertNotIn(" ", value)
+
+    def test_rendered_conf_line_for_s_dc_carries_the_mode_flag_unquoted(self):
+        # The value contains only letters/digits/hyphen -- none of
+        # `_tmux_conf_quote`'s trigger characters -- so it renders bare,
+        # exactly like every other simple token on this line.
+        text = airuleset.render_tmux_history_block()
+        dc_line = next(ln for ln in text.splitlines()
+                        if ln.startswith("bind-key -n S-DC"))
+        self.assertIn(
+            "-e AIRULESET_POPUP_MODE=%s" % airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY,
+            dc_line)
+        f1_line = next(ln for ln in text.splitlines()
+                        if ln.startswith("bind-key -n S-F1"))
+        self.assertNotIn("AIRULESET_POPUP_MODE", f1_line)
+
 
 class TestClaudeHistoryPopupScript(TestCase):
     """CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT -- the standalone script the
@@ -5250,6 +5304,21 @@ class TestClaudeHistoryPopupScript(TestCase):
         # line consisting of exactly `CH_RC=$?` with no `||` before it.
         self.assertNotIn("CH_RC=$?", [ln.strip() for ln in content.splitlines()])
 
+    def test_every_command_substitution_assignment_uses_the_safe_set_e_form(self):
+        # #337 adds a SECOND `CH_OUT=$(` line (the transcript-primary
+        # branch's own primary attempt) plus a NEW `CP_OUT=$(` line (its
+        # capture-pane fallback) -- `next()`-based checks like the sibling
+        # test above only ever prove the FIRST match of a given prefix, so
+        # this iterates EVERY `=$(` assignment in the whole rendered script
+        # and requires each one to use the safe `|| <NAME>_RC=$?` form --
+        # a mutant dropping the guard from just ONE of the three would
+        # survive the narrower, `next()`-based sibling tests unnoticed.
+        content = airuleset.render_claude_history_popup_script()
+        assign_lines = [ln for ln in content.splitlines() if "=$(" in ln]
+        self.assertGreaterEqual(len(assign_lines), 3, assign_lines)
+        for ln in assign_lines:
+            self.assertRegex(ln, r"\|\| \w+_RC=\$\?", ln)
+
     def test_pipes_success_output_into_less_dash_r_plus_g(self):
         # #294: -R added so `less` renders raw ANSI color bytes as color
         # instead of visibly escaping them; +G (jump to end) and less's
@@ -5266,6 +5335,19 @@ class TestClaudeHistoryPopupScript(TestCase):
         assign_line = next(ln for ln in content.splitlines() if "CH_OUT=$(" in ln)
         self.assertIn("--color", assign_line, assign_line)
 
+    def test_every_claude_history_invocation_forces_color_on(self):
+        # #337: the transcript-primary branch's OWN primary attempt is a
+        # SECOND claude-history invocation (the legacy branch's is the
+        # first) -- the `next()`-based sibling test above only proves the
+        # FIRST one; this proves BOTH, so a mutant dropping --color from
+        # just the new branch cannot survive unnoticed.
+        content = airuleset.render_claude_history_popup_script()
+        ch_lines = [ln for ln in content.splitlines()
+                    if "airuleset-claude-history.py" in ln]
+        self.assertGreaterEqual(len(ch_lines), 2, ch_lines)
+        for ln in ch_lines:
+            self.assertIn("--color", ln, ln)
+
     def test_failure_branch_waits_for_a_keypress_before_closing(self):
         # No silent instant-close: on a nonzero exit, the script prints
         # the error and waits for input rather than handing `less` an
@@ -5273,6 +5355,60 @@ class TestClaudeHistoryPopupScript(TestCase):
         content = airuleset.render_claude_history_popup_script()
         self.assertIn("press any key to close", content)
         self.assertIn("read -n 1", content)
+
+    # -- #337: S-DC's transcript-primary mode + capture-pane fallback --
+
+    def test_mode_var_is_read_from_the_environment_defaulting_empty(self):
+        content = airuleset.render_claude_history_popup_script()
+        self.assertIn('MODE="${AIRULESET_POPUP_MODE:-}"', content)
+
+    def test_mode_branch_compares_against_the_shared_constant(self):
+        # The bash literal is TEMPLATE-SUBSTITUTED from the same Python
+        # constant TMUX_POPUP_BIND_ARGVS[1] (S-DC's own argv) is built
+        # from -- never a second, hand-typed copy that could silently
+        # drift out of sync with the argv side.
+        content = airuleset.render_claude_history_popup_script()
+        self.assertIn(
+            'if [ "$MODE" = "%s" ]; then' % airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY,
+            content)
+
+    def test_capture_pane_fallback_call_has_no_explicit_target(self):
+        # LOAD-BEARING: a bare (no `-t`) capture-pane call issued from
+        # WITHIN a display-popup's own shell-command resolves against the
+        # ORIGINATING pane (live-verified, twice, independently -- see the
+        # module comment above TMUX_POPUP_KEY). Adding `-t` here would
+        # break that resolution outright.
+        content = airuleset.render_claude_history_popup_script()
+        cp_line = next(ln for ln in content.splitlines() if "capture-pane" in ln)
+        self.assertNotIn(" -t ", cp_line, cp_line)
+        self.assertNotIn(" -t", cp_line, cp_line)
+
+    def test_capture_pane_uses_dash_e_for_colors_and_dash_p_for_stdout(self):
+        content = airuleset.render_claude_history_popup_script()
+        cp_line = next(ln for ln in content.splitlines() if "capture-pane" in ln)
+        self.assertIn(" -e ", cp_line, cp_line)
+        self.assertIn(" -p ", cp_line, cp_line)
+
+    def test_capture_pane_scrollback_window_tracks_the_configured_history_limit(self):
+        # ADVERSARIAL-REVIEW-CLASS finding this repo's own playbook already
+        # documents for the sibling #327 ticket: a hardcoded `-S -50000`
+        # literal passes even a test that only checks the DEFAULT value --
+        # rendering with a DIFFERENT limit must produce a DIFFERENT `-S`
+        # value, proving it is genuinely parameterized, not coincidentally
+        # matching today's TMUX_HISTORY_LIMIT.
+        default_content = airuleset.render_claude_history_popup_script()
+        self.assertIn("-S -%d" % airuleset.TMUX_HISTORY_LIMIT, default_content)
+        custom = airuleset.render_claude_history_popup_script(limit=12345)
+        self.assertIn("-S -12345", custom)
+        self.assertNotIn("-S -%d" % airuleset.TMUX_HISTORY_LIMIT, custom)
+
+    def test_fallback_only_triggers_on_failure_or_empty_transcript_output(self):
+        content = airuleset.render_claude_history_popup_script()
+        # The fallback lives inside a guard testing BOTH the primary
+        # attempt's exit code and its emptiness -- never RC alone (that
+        # would miss the real "rc=0 but $(...) stripped to empty" case
+        # #327's own review found for the mirror scenario).
+        self.assertIn('[ "$CH_RC" -ne 0 ] || [ -z "$CH_OUT" ]', content)
 
     def _deploy(self, home):
         claude_dir = home / ".claude"
@@ -5367,6 +5503,147 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertIn("MISSING-LESS-MARKER", r.stdout)
         self.assertIn('"less" is not installed', r.stdout)
         self.assertIn("press any key to close", r.stdout)
+
+    # -- #337: S-DC's transcript-primary mode, real execution --
+
+    def _spawn_isolated_tmux_pane(self, session_argv, scratch):
+        """A throwaway tmux server on an isolated TMUX_TMPDIR -- NEVER this
+        worker's own real $TMUX (confirmed live: this Bash tool's own
+        process environment carries a genuine $TMUX pointing at a live
+        session on this box), so env is built EXPLICITLY here, never
+        `{**os.environ}`, and the "TMUX" key is never included at all.
+        `session_argv` runs directly as the session's own command."""
+        env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin"}
+        r = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", "t337", "-x", "80", "-y", "24"]
+            + session_argv,
+            env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.addCleanup(subprocess.run, ["tmux", "kill-server"], env=env,
+                         capture_output=True, text=True, timeout=10)
+        return env
+
+    def test_real_execution_transcript_primary_mode_prefers_transcript_when_available(self):
+        # A real seeded transcript, mode=transcript-primary, and NO `tmux`
+        # binary anywhere on PATH at all -- if the fallback were ever even
+        # ATTEMPTED it would hit "tmux: command not found" and trigger the
+        # M5 both-failed message, so a clean success here is direct proof
+        # the fallback was never reached.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "TRANSCRIPT-PRIMARY-MARKER-337"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        narrow_bin = Path(tempfile.mkdtemp())
+        for tool in ("python3", "bash", "less"):
+            real_tool = shutil.which(tool)
+            os.symlink(real_tool, narrow_bin / tool)
+        env = {"HOME": str(home), "PATH": str(narrow_bin),
+               "AIRULESET_POPUP_MODE": airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("TRANSCRIPT-PRIMARY-MARKER-337", r.stdout)
+        self.assertNotIn("also produced nothing", r.stdout)
+
+    def test_real_execution_transcript_primary_mode_falls_back_to_real_capture_pane(self):
+        # No transcript for this cwd (claude-history fails) -- falls back
+        # to a REAL `tmux capture-pane` of the originating pane, spun up
+        # on an isolated throwaway server.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        marker = "CAPTURE-PANE-FALLBACK-MARKER-337"
+        scratch = tempfile.mkdtemp()
+        self._spawn_isolated_tmux_pane(
+            ["bash", "-c", "echo %s; sleep 60" % marker], scratch)
+        env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin",
+               "HOME": str(home),
+               "AIRULESET_POPUP_MODE": airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(marker, r.stdout)
+        self.assertNotIn("also produced nothing", r.stdout)
+
+    def test_real_execution_transcript_primary_mode_fails_loudly_when_capture_pane_is_blank(self):
+        # Mirrors #327's own blank-pane test (see this repo's playbook): a
+        # pane running `sleep` DIRECTLY (never a shell) renders
+        # deterministically blank -- capture-pane succeeds (rc=0) but
+        # $(...) strips it to an empty string, and the M5 FAILS-LOUDLY
+        # guard must still trigger (both sources genuinely produced
+        # nothing), never a silent instant-close.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        scratch = tempfile.mkdtemp()
+        self._spawn_isolated_tmux_pane(["sleep", "60"], scratch)
+        env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin",
+               "HOME": str(home),
+               "AIRULESET_POPUP_MODE": airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)  # the || true guard absorbs read's EOF
+        self.assertIn("press any key to close", r.stdout)
+        self.assertIn("also produced nothing", r.stdout)
+
+    def test_real_execution_transcript_primary_mode_fails_loudly_when_neither_source_works(self):
+        # No transcript, and no reachable tmux server at all (an empty,
+        # real TMUX_TMPDIR with no socket ever created in it) -- both
+        # sources genuinely fail; the SAME shared M5 guard must fire.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        unreachable = tempfile.mkdtemp()
+        env = {"TMUX_TMPDIR": unreachable, "PATH": "/usr/local/bin:/usr/bin:/bin",
+               "HOME": str(home),
+               "AIRULESET_POPUP_MODE": airuleset.TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY}
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15, input="")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("press any key to close", r.stdout)
+        self.assertIn("also produced nothing", r.stdout)
+
+    def test_real_execution_legacy_mode_never_calls_tmux_at_all(self):
+        # S-F1/prefix+h (no AIRULESET_POPUP_MODE set at all): the legacy
+        # branch must never even try to invoke `tmux` -- proven the same
+        # way as the transcript-primary-success test above (no `tmux` on
+        # PATH; a clean pass proves it was never reached).
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "LEGACY-NO-TMUX-MARKER-337"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+        narrow_bin = Path(tempfile.mkdtemp())
+        for tool in ("python3", "bash", "less"):
+            real_tool = shutil.which(tool)
+            os.symlink(real_tool, narrow_bin / tool)
+        env = {"HOME": str(home), "PATH": str(narrow_bin)}  # no mode var at all
+        r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                            capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("LEGACY-NO-TMUX-MARKER-337", r.stdout)
 
 
 class TestApplyUltracodeLauncherDeploysPopupScript(TestCase):
