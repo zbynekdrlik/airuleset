@@ -3893,6 +3893,23 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
     def setUp(self):
         import notify
         self.notify = notify
+        # #330 round-2 adversarial review MAJOR: a test in THIS class that
+        # calls provision_question_thread()/_env_upsert() without an
+        # explicit env_path= used to fall through to _env_path()'s own
+        # REAL default — this box's live
+        # ~/.claude/channels/discord/.env — and genuinely corrupted it (a
+        # fake fixture id silently overwrote the real
+        # DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q, caught live via #330's
+        # own end-to-end verification: a real ❓ send then failed with
+        # HTTP 400). Patching _env_path() here makes an omitted env_path=
+        # STRUCTURALLY harmless for every test in this class, present and
+        # future — no longer "remember to pass env_path=" discipline.
+        tmpdir = tempfile.mkdtemp(prefix="airuleset-envpath-isolation-")
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        patcher = m.patch.object(notify, "_env_path",
+                                 return_value=os.path.join(tmpdir, ".env"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_create_owner_question_thread_anchors_off_the_existing_thread(self):
         calls = []
@@ -4250,6 +4267,26 @@ class TestCreateAndProvisionQuestionsThread(TestCase):
             src, dst = fake_replace.call_args[0]
             self.assertTrue(str(src).endswith(".tmp"), src)
             self.assertEqual(dst, p)
+
+    def test_env_upsert_unlinks_the_tmp_file_on_a_failed_replace(self):
+        # #330 round-2 adversarial review MINOR 3: the per-call unique
+        # tempfile.mkstemp fix (F1) means a FAILED write now leaves an
+        # ORPHANED, uniquely-named tmp file behind forever — the old
+        # fixed-name implementation leaked at most ONE stray file (silently
+        # overwritten by the next successful call); the new one leaks a
+        # NEW file on every failure. Measured: 3 simulated failures ->
+        # 3 distinct leftover .tmp files. os.replace failing here (e.g. a
+        # cross-device rename, a permissions wobble) must not litter.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("X=1\n")
+            with m.patch("notify.os.replace", side_effect=OSError("boom")):
+                result = self.notify._env_upsert(p, "Y", "2")
+            self.assertFalse(result)
+            leftovers = [f for f in os.listdir(d) if f != os.path.basename(p)]
+            self.assertEqual(
+                leftovers, [],
+                "a failed os.replace must not leave an orphaned tmp file")
 
     def test_env_upsert_concurrent_writers_never_publish_a_corrupted_file(self):
         # #330 adversarial-review F1 (CRITICAL): the OLD implementation
@@ -6989,6 +7026,14 @@ class TestDiscordAutopilotNotify(TestCase):
         fake.assert_called_once_with("marek")
 
     def test_cli_provision_question_thread_failure_exits_nonzero(self):
+        # #330 round-2 adversarial review MAJOR: this test predates #330's
+        # own F7 fix, which added a real `log_delivery("provision-failed",
+        # ...)` call to exactly this failure path — an UNMOCKED
+        # log_delivery here appends a real line to THIS box's live
+        # ~/.claude/notify-delivery.log on every full-suite run (caught
+        # live: 7 fake "provision-failed key=zbynek" lines had already
+        # landed there before this fix). Mirrors the sibling
+        # ...failure_logs_provision_failed test's own isolation.
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
                       mention_prefix=False, repo_name=False, newest_card=False,
@@ -6996,7 +7041,8 @@ class TestDiscordAutopilotNotify(TestCase):
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
-        with m.patch("notify.provision_question_thread", return_value=""):
+        with m.patch("notify.provision_question_thread", return_value=""), \
+                m.patch("notify.log_delivery"):
             with self.assertRaises(SystemExit) as cm:
                 airuleset.cmd_notify(args)
             self.assertEqual(cm.exception.code, 1)
