@@ -5207,8 +5207,95 @@ def _viewport_goal_wrapped(cap, frag):
     return False
 
 
+_EXIT_CMD_MARKER = "<command-name>/exit</command-name>"
+
+
+def _goal_user_exit_ts(tpath, off=None, tail_bytes=None):
+    """The epoch timestamp of the NEWEST explicit `/exit` slash-command
+    anywhere in the bytes read, or `None` if unreadable/absent/never found
+    (#335).
+
+    `/exit` is the user's OWN stated way of deliberately ending a session
+    ("ja ked nerobim v niektorom projekte exitnem sa z claude") -- but
+    unlike `/goal clear` (#170), Claude Code writes NO special marker for
+    it that `scan_goal_markers` would ever see. The ONLY durable trace is
+    the ordinary `<command-name>/exit</command-name>` slash-command entry
+    any local command leaves — a TOP-LEVEL `type=="user"` entry whose
+    `message.content` is a plain STRING (verified live against
+    simap@subdev's own real transcript). Matched ONLY on that shape, never
+    inside a `tool_result` array — the SAME quoted-transcript exclusion
+    `scan_goal_markers` already applies (a `tool_result` is always a list,
+    never a bare string), so a session reading/pasting ANOTHER session's
+    transcript (a review, an audit) is never misread as having exited
+    itself.
+
+    `off`/`tail_bytes` mirror `scan_goal_markers`'s OWN read-window
+    contract exactly, so each caller pays the SAME cost profile it already
+    accepts for its own marker read: `off=None` (the default) bootstraps
+    from the file's TAIL — cheap, matching `_goal_was_cleared_by_user`'s
+    existing per-sweep cost (job 9 calls this on every candidate, every
+    60s sweep); `off=0` forces a FULL read — matching
+    `_goal_dark_died_by_outage`'s own established correctness-over-cost
+    choice for its rare, already-expensive dark-past-cap population (a
+    long-lived busy loop can push its own final `/exit` far past a tail
+    window before it dies).
+
+    Fail-safe: unreadable/absent/never-found returns `None` — never
+    guessed as "definitely no exit happened"; the caller must treat `None`
+    the same conservative way an absent `Goal cleared:` marker already is
+    (no positive evidence of a deliberate exit does not, by itself, prove
+    one never happened, but it also must never become a NEW reason to
+    suppress a re-arm the caller has other, independent grounds for)."""
+    if tail_bytes is None:
+        # `GOAL_MARK_TAIL_BYTES` is defined LATER in this module (it lives
+        # beside `scan_goal_markers`) -- resolved here, at CALL time, never
+        # as a default-parameter-value expression (which Python evaluates
+        # at DEF time, still module-load-order-before the constant exists).
+        tail_bytes = GOAL_MARK_TAIL_BYTES
+    try:
+        size = os.path.getsize(tpath)
+    except OSError:
+        return None
+    start = off
+    if start is None or start > size or start < 0:
+        start = max(0, size - tail_bytes)
+    try:
+        with open(tpath, "rb") as f:
+            f.seek(start)
+            raw = f.read()
+    except OSError:
+        return None
+    from datetime import datetime
+    marker = _EXIT_CMD_MARKER.encode()
+    best = None
+    for ln in raw.splitlines():
+        if marker not in ln:
+            continue
+        try:
+            entry = json.loads(ln)
+        except Exception:
+            continue
+        if entry.get("type") != "user":
+            continue
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, str) or _EXIT_CMD_MARKER not in content:
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                str(entry.get("timestamp")).replace(
+                    "Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if best is None or ts > best:
+            best = ts
+    return best
+
+
 def _goal_was_cleared_by_user(tpath):
-    """True when this session's NEWEST `/goal` marker is a CLEAR (#170).
+    """True when this session's NEWEST `/goal` marker is a CLEAR (#170), OR
+    when an explicit `/exit` postdates the newest goal marker (#335 —
+    "kým to používateľ sám nespustí": the user's own stated stop mechanism
+    must carry the SAME force as an explicit clear).
 
     Claude Code writes `Goal cleared:` ONLY for an explicit `/goal clear`; a
     goal that finishes on its own prints `✔ Goal achieved` to the screen and
@@ -5234,14 +5321,29 @@ def _goal_was_cleared_by_user(tpath):
     question was printed BEFORE the clear and merely survives on screen,
     which is exactly why the viewport could not decide it.
 
+    #335's `/exit` check applies the IDENTICAL release logic: a goal marker
+    (set OR cleared) whose own `ts` postdates the exit means something
+    happened AFTERWARDS (a fresh arm, or an even later explicit clear) and
+    the exit no longer governs — never a second, independent suppression
+    that could itself go stale.
+
     Fail-open: unreadable, absent or markerless returns False, so a pane that
     used to arm keeps arming. Not provably cleared must never start blocking."""
     try:
         _off, mark = scan_goal_markers(tpath)
     except Exception:
+        mark = None
+    cleared = (bool(mark) and mark.get("state") == "cleared"
+               and not mark.get("arm_after"))
+    if cleared:
+        return True
+    exit_ts = _goal_user_exit_ts(tpath)
+    if exit_ts is None:
         return False
-    return (bool(mark) and mark.get("state") == "cleared"
-            and not mark.get("arm_after"))
+    mark_ts = mark.get("ts") if mark else None
+    if mark_ts is not None and mark_ts >= exit_ts:
+        return False               # a marker newer than the exit — stale
+    return True
 
 
 def _goal_never_armed(tpath):
@@ -10803,13 +10905,34 @@ def _goal_dark_died_by_outage(tpath, last_armed=None):
     sweep already made. Unmeasurable (either `last_armed` or the marker's
     own `ts` absent) never guesses -- a genuine `set` verdict, or a
     'cleared' marker with no comparable timestamp, is unaffected either
-    way."""
+    way.
+
+    #335 -- an explicit `/exit` (the user's OWN stated way of stopping a
+    session) postdating the anchor (`last_armed` when confirmed, else the
+    marker's own `ts`) makes this False too, exactly like a `Goal cleared:`
+    marker: Claude Code writes no goal-marker for `/exit` at all, so
+    without this check a deliberate exit was completely invisible here and
+    a `set`-only transcript re-armed it past the cap regardless — live on
+    simap@subdev, the ACTUAL incident this ticket was filed over never even
+    involved an `/exit` (the loop simply finished naturally and sat
+    abandoned — see `goal_rearm`'s own `revived_from_dark_outage` gate for
+    THAT half), but a future session that DOES exit deserves the identical
+    protection `/goal clear` already has. `off=0` (the SAME full-file read
+    this function already does for its own marker scan) for the identical
+    reason: a long-lived loop can push even its OWN final `/exit` far past
+    a tail-bootstrap window before this rare, already-expensive check
+    ever runs."""
     try:
         _off, mark = scan_goal_markers(tpath, off=0)
     except Exception:
         return False
     if not mark:
         return False
+    exit_ts = _goal_user_exit_ts(tpath, off=0)
+    if exit_ts is not None:
+        anchor = last_armed if last_armed is not None else mark.get("ts")
+        if anchor is None or exit_ts > anchor:
+            return False
     if mark.get("state") == "set":
         return True
     if (last_armed is not None and mark.get("ts") is not None
@@ -11331,6 +11454,17 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # #160 — genuinely alive again; a FUTURE dark episode (a
                 # different death) must be able to ping once more.
                 rec["dark_pinged"] = False
+            if rec.get("stale_achieved_pinged"):
+                # #335 — the SAME "genuinely alive again, a future episode
+                # gets its own fresh ping" reset, for the SEPARATE
+                # stale-achieved ping's own dedicated flag (never
+                # `dark_pinged` — that one is owned by the sibling
+                # "skip stale-goal" branch, and its OWN reset inside the
+                # "stale-but-outage" branch fires on every sweep this
+                # session stays dark-and-outage-presumed, which would
+                # otherwise silently re-arm this ping's one-shot dedup
+                # every single sweep).
+                rec["stale_achieved_pinged"] = False
             if state is not None:
                 # #324 — the footer is proof of REALITY that is stronger
                 # than anything `_goal_recover_untracked` itself could ever
@@ -11439,6 +11573,19 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 activity_ts = min(activity_ts, tmtime)
             active_now = (activity_ts is not None
                          and 0 <= (now - activity_ts) <= GOAL_REARM_MAX_DARK_S)
+        # #335 — set True only inside the "presumed outage, keep re-arming
+        # past the cap" branch just below; consumed by the ACHIEVED-marker
+        # check further down to decide whether a `backlog_open is True`
+        # verdict may actually RE-ARM or must instead get the SAME
+        # one-shot-ping-never-retype treatment the sibling "skip
+        # stale-goal" branch already uses. See that check's own comment
+        # for why: the paragraph directly below this one ((a)) reasoned
+        # that a stale achieved banner is safe to re-arm because the user
+        # "kept using the session for other work" — but by construction
+        # this whole `if` only runs when `active_now` is ALREADY False,
+        # i.e. there has been no activity of any kind, so that premise
+        # never held for the population this flag actually gates.
+        revived_from_dark_outage = False
         if dark_by_age and not active_now:
             if _goal_dark_died_by_outage(tpath, last_seen_alive):
                 # #173 — a fresh, independent re-read of the transcript
@@ -11462,17 +11609,24 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # (typically: they kept using the same session for other
                 # work) can be re-armed once more, self-terminating on
                 # the next sweep once its own fresh `✔ Goal achieved` or
-                # `Goal set:` becomes the newest signal again; (b) the
-                # dark cap used to be this cycle's only permanent
-                # terminator — a session that revives-and-fails
-                # repeatedly now gets a GAVE UP ping roughly every
-                # `GOAL_REARM_STREAK_S` (2h) instead of exactly once,
-                # which is the direct, accepted cost of "re-arm continues
-                # normally" (the ticket's own words) rather than a new
-                # cap invented here.
+                # `Goal set:` becomes the newest signal again — CORRECTED
+                # by #335 (live P0 on simap@subdev, 66.5h dark, zero
+                # activity of ANY kind the whole time): that "kept using
+                # it for other work" premise is exactly what `active_now`
+                # has already disproven by the time this branch runs, so
+                # `revived_from_dark_outage` (set below) now BLOCKS the
+                # achieved-marker check's own re-arm for precisely this
+                # case — see its own comment; (b) the dark cap used to be
+                # this cycle's only permanent terminator — a session that
+                # revives-and-fails repeatedly now gets a GAVE UP ping
+                # roughly every `GOAL_REARM_STREAK_S` (2h) instead of
+                # exactly once, which is the direct, accepted cost of
+                # "re-arm continues normally" (the ticket's own words)
+                # rather than a new cap invented here.
                 logs.append("stale-but-outage (goal-rearm) %s (%d s dark, "
                             "no explicit clear -> re-arming past the cap)"
                             % (loc, int(now - last_seen_alive)))
+                revived_from_dark_outage = True
                 if rec.get("dark_pinged"):
                     # a later genuinely-unconfirmable dark episode must
                     # still be able to ping once more (mirrors the ARMED
@@ -11607,6 +11761,61 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                             "legitimately (%s)" % (loc, claim_reason))
                 continue
             backlog_open = _cached_backlog_open(cwd, backlog_fetch, state, now)
+            if backlog_open is True and revived_from_dark_outage:
+                # #335 P0 -- live-reproduced on simap@subdev: an achieved
+                # banner that has been sitting DARK past
+                # `GOAL_REARM_MAX_DARK_S` (66.5h in the real incident) with
+                # NO activity of any kind since (this whole `if` only ran
+                # because `active_now` was ALREADY False -- see the
+                # comment above `revived_from_dark_outage`'s own
+                # assignment) is, for every purpose here, the user having
+                # stepped away from a session that finished ALL its
+                # available work -- indistinguishable from a deliberate
+                # stop. Re-arming it the moment new backlog appears would
+                # violate the user-stop invariant just as directly as
+                # re-arming an explicit `/goal clear` would. Treat it
+                # EXACTLY like the sibling "skip stale-goal" branch: a
+                # bounded, ONE-SHOT ping (reusing the SAME `dark_pinged`
+                # bookkeeping -- this is the identical "dark past the cap,
+                # no positive signal to act automatically" state, just
+                # discovered via the achieved-marker path instead of the
+                # outage path), never an automatic re-arm. A FRESH achieved
+                # banner (`revived_from_dark_outage` False, i.e. `not
+                # dark_by_age` or `active_now`) is completely unaffected —
+                # #160's own "resume promptly once new work appears"
+                # behavior for an actively-cycling loop stays exactly as
+                # before this ticket.
+                logs.append(
+                    "skip stale-achieved (goal-rearm) %s -> achieved %d+ s "
+                    "ago with no activity since and new backlog available, "
+                    "but re-arming a session this stale without the user's "
+                    "own action would violate the user-stop invariant"
+                    % (loc, int(now - last_seen_alive)))
+                # #335 -- a DEDICATED flag, never `dark_pinged` (that one is
+                # owned by the sibling "skip stale-goal" branch, and its own
+                # reset inside the "stale-but-outage" branch above fires on
+                # EVERY sweep this session stays dark-and-outage-presumed --
+                # reusing it here would silently re-arm THIS ping's one-shot
+                # dedup every single sweep instead of firing once).
+                if not rec.get("stale_achieved_pinged"):
+                    if send_fn is not None and not dry_run:
+                        from notify import stream_redirect  # #212: STREAM_NOTIFY_OWNER-aware
+                        rec["stale_achieved_pinged"] = True
+                        _save()
+                        send_fn("⚠️ **%s** — `/goal` slučka dokončila celý "
+                                "backlog a je ticho už vyše %d hodín, no "
+                                "medzitým pribudla nová práca; automaticky "
+                                "ju znova NEspúšťam (rešpektujem, že si ju "
+                                "mohol zámerne nechať tak) — spusti ju "
+                                "prosím ručne, ak má pokračovať (%s)."
+                                % (project_label(cwd),
+                                   GOAL_REARM_MAX_DARK_S // 3600, loc),
+                                owner=stream_redirect(pane_owner(pid, run)) or None,
+                                dedup_key="goalstaleachieved:%s:%s:%d"
+                                          % (sid, rec.get("hash") or rec.get("mts"),
+                                             int(last_seen_alive or 0)),
+                                dry_run=dry_run)
+                continue
             if backlog_open is True:
                 logs.append("FALSE-ACHIEVED (goal-rearm) %s -> %s but the "
                             "repo's backlog is not, re-arming"
