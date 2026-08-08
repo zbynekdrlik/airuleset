@@ -1788,14 +1788,129 @@ def _hosted_claude_cwd(claude_pid, pane_cwd):
     return pane_cwd
 
 
-def list_claude_panes(run=None):
+def _tmux_default_socket_path():
+    """The tmux server's DEFAULT control socket path -- `$TMUX_TMPDIR` (or
+    `/tmp` when unset) + `tmux-<uid>/default` -- what every managed session
+    (the one hosting a `claude` pane) uses. A project MAY run OTHER tmux
+    servers on `-L`/`-S` sockets alongside it (this repo's own scripts/tests
+    do, and dev2 runs a real `-L t2` server right now) -- those are simply a
+    DIFFERENT server this function has no opinion about; the recovery this
+    module performs only ever targets the DEFAULT socket, since that is the
+    one a managed Claude Code session's tmux actually binds to."""
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(base, "tmux-%d" % os.getuid(), "default")
+
+
+def _tmux_socket_missing(path=None):
+    """True when the tmux control socket the server should be listening on
+    is absent from disk -- the orphaned-server shape (#318): a `tmpfiles.d`
+    age-based reap (or any other removal) of `/tmp/tmux-*` deletes the
+    socket FILE while the server PROCESS keeps running, so every NEW client
+    connection to it fails from then on, although the session itself is
+    alive. `path` is overridable for tests; production always resolves the
+    real default socket path."""
+    return not os.path.exists(path or _tmux_default_socket_path())
+
+
+def _tmux_server_pids(run=None):
+    """PIDs of every live `tmux: server` process OWNED BY THIS UID, found
+    via `ps` (never the tmux socket itself -- the whole point is this must
+    still resolve even when the socket is unreachable). Adversarial review
+    of #318 measured live: `ps -e` also lists OTHER users' tmux servers on
+    a shared box (subdev's montalu/marek/david), and a box can genuinely
+    run MORE THAN ONE server for the SAME uid (dev2 right now: a default
+    socket AND a `-L t2` one) -- picking just the first candidate can
+    signal the WRONG server (a foreign uid's SIGUSR1 attempt just EPERMs
+    silently; a same-uid `-L` server's own SIGUSR1 only ever recreates ITS
+    OWN socket, never the default one, confirmed live). So this returns
+    EVERY same-uid candidate, in `ps`'s own order, for the caller to try
+    each in turn until the DEFAULT socket actually comes back. Empty when
+    no such process is running at all (the ordinary "tmux genuinely isn't
+    up" case -- nothing to recover, behavior unchanged from before #318).
+    Injectable via `run` like every other tmux shim in this module."""
+    run = run or _default_run
+    out = run(["ps", "-eo", "pid,uid,comm"])
+    my_uid = os.getuid()
+    pids = []
+    for line in (out or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3 or parts[2].strip() != "tmux: server":
+            continue
+        try:
+            pid, uid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if uid == my_uid:
+            pids.append(pid)
+    return pids
+
+
+def _tmux_socket_recover(pid, run=None):
+    """SIGUSR1 to a tmux server whose socket was removed out from under it
+    re-creates the socket at its configured path (tmux(1) SIGNALS: "If the
+    socket is accidentally removed, the SIGUSR1 signal may be sent to the
+    tmux server process to recreate it") -- the SAME recovery the #318
+    incident applied by hand (`kill -USR1 <server-pid>`). Only ever called
+    after `_tmux_socket_missing()` has already confirmed the DEFAULT socket
+    is genuinely gone, so this never signals a healthy default-socket
+    server -- it CAN still be sent to the wrong same-uid candidate (a `-L`
+    server) when several exist, which is why `list_claude_panes` retries
+    the real query after EACH candidate rather than trusting the first."""
+    run = run or _default_run
+    run(["kill", "-USR1", str(pid)])
+
+
+def list_claude_panes(run=None, logs=None, dry_run=False):
     """[(pane_id, cwd)] for every tmux pane running `claude` — directly, or
     hosted under sudo/su (the montalu-in-newlevel-tmux stream shape) — deduped
-    by pane_id (grouped sessions share the same pane_id)."""
+    by pane_id (grouped sessions share the same pane_id).
+
+    Self-heals the orphaned-tmux-server shape (#318): `tmux list-panes -a`
+    returning EMPTY is structurally ambiguous on its own -- a live server
+    always hosts >=1 pane, so empty means EITHER genuinely no tmux server is
+    running, OR the server is alive but its socket FILE was reaped out from
+    under it (the live incident: subdev's `/tmp/tmux-1000/` was recreated by
+    a tmpfiles-clean-shaped age-based sweep while both the tmux server and
+    david's claude session kept running -- every watchdog job funnels
+    through THIS function, so recovering here fixes job 8's false "no
+    session" bounce ping and every other pane-reading job at once, instead
+    of teaching each one to special-case it). `logs`, if a list, gets one
+    line describing the recovery attempt and its outcome -- best-effort,
+    callers that don't care about it (nearly all of them) just omit it.
+    `dry_run=True` (adversarial-review finding) logs what WOULD be tried
+    but never sends the real SIGUSR1, so a `watchdog --once --dry-run` stays
+    genuinely side-effect-free through every caller that threads it here."""
     run = run or _default_run
-    out = run(["tmux", "list-panes", "-a", "-F",
-               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
-               "\t#{pane_pid}"])
+    query = ["tmux", "list-panes", "-a", "-F",
+             "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
+             "\t#{pane_pid}"]
+    out = run(query)
+    if not (out or "").strip() and _tmux_socket_missing():
+        # `_tmux_socket_missing()` is a cheap stat -- checked BEFORE the
+        # `ps -e` process-table scan below (MINOR-1, #318 review) so a box
+        # whose socket is intact never pays that cost, even when
+        # list-panes came back empty for some other, unrelated reason.
+        pids = _tmux_server_pids(run)
+        if pids and dry_run:
+            if logs is not None:
+                logs.append("tmux-socket-orphaned server-pid=%d -- "
+                            "would recover via SIGUSR1 (dry-run)" % pids[0])
+        elif pids:
+            recovered = False
+            for pid in pids:
+                if logs is not None:
+                    logs.append("tmux-socket-orphaned server-pid=%d -- "
+                                "recovering via SIGUSR1" % pid)
+                _tmux_socket_recover(pid, run)
+                out = run(query)
+                if (out or "").strip():
+                    if logs is not None:
+                        logs.append("tmux-socket-recovered")
+                    recovered = True
+                    break
+            if not recovered and logs is not None:
+                logs.append("tmux-socket-recovery-failed server-pids=%s"
+                            % ",".join(str(p) for p in pids))
     seen, res = set(), []
     for line in (out or "").splitlines():
         parts = line.split("\t")
@@ -4320,7 +4435,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     persist()                                  # cadence stamp survives a kill
     logs = []
 
-    panes = list_claude_panes(run)
+    panes = list_claude_panes(run, logs=logs, dry_run=dry_run)
     # candidate repos: every live pane cwd (nudge path) + cached roots (Discord
     # fallback for repos whose session is gone)
     targets = {}                               # root -> (name, pane_id | None)
@@ -4527,7 +4642,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     persist()                                  # cadence stamp survives a kill
     logs = []
 
-    panes = list_claude_panes(run)
+    panes = list_claude_panes(run, logs=logs, dry_run=dry_run)
     targets = {}                               # root -> (name, pane_id | None)
     for pid, cwd in panes:
         targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
@@ -5321,7 +5436,7 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     sleep_fn = sleep_fn or time.sleep
     templates = load_goal_templates(templates_path)
-    panes = list_claude_panes(run)
+    panes = list_claude_panes(run, dry_run=dry_run)
     # #320-review MAJOR-2 -- computed ONCE from this sweep's own full pane
     # list (cheap, no new tmux call): a cwd shared by MORE THAN ONE live
     # pane makes "the newest transcript in this cwd's dir" an ambiguous
@@ -13189,7 +13304,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                          # shared transcript, or a sudo-hosted one, is
                                          # still genuinely LIVE even though job 10 skips
                                          # it this particular sweep.
-    for pid, cwd in list_claude_panes(run):
+    for pid, cwd in list_claude_panes(run, dry_run=dry_run):
         live_pane_ids.add(pid)
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
