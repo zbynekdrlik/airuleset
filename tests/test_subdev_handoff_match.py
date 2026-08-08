@@ -20,7 +20,6 @@ consumer's own independently-hardened copy.
 """
 
 import subprocess
-import sys
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -72,7 +71,6 @@ class TestSigpipeRaceFix(TestCase):
         # never the mere mention of "printf"/"grep" (both appear in the
         # header prose explaining the fix).
         src = MATCHER.read_text(encoding="utf-8")
-        import re
         # No live statement pipes printf's output into grep.
         self.assertNotIn('printf \'%s\\n\' "$BODY" | grep', src)
         for line in src.splitlines():
