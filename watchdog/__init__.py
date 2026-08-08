@@ -3627,16 +3627,24 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             return
         if not dry_run:
             _react_ok(r["channel"], r["reply_id"], token)
-        acked_set.add(r["reply_id"])
-        acked.append(r["reply_id"])
+            # #304: a --dry-run sweep must NEVER mark the dedup set — this
+            # `acked`/`acked_set` pair is persisted into
+            # state["dreply_acked"] unconditionally by run_once, so a
+            # dry-run mark here would poison the REAL next sweep's dedup
+            # state exactly like the done_set/done leak below.
+            acked_set.add(r["reply_id"])
+            acked.append(r["reply_id"])
 
     def _delivered(r, via_ticket=None):
-        done_set.add(r["reply_id"])
-        done.append(r["reply_id"])
         # dry-run simulates delivery — it must NEVER mutate the real on-disk
-        # map (a dropped live question loses the answer). A FOREIGN question
-        # is dropped from its owner's map so their watchdog never re-handles.
+        # map (a dropped live question loses the answer), and it must NEVER
+        # mark the reply done either (#304): run_once persists `done`/
+        # `done_set` into state["dreply_done"] unconditionally, so a
+        # dry-run mark here would make the FOLLOWING real sweep believe the
+        # reply was already delivered and silently skip it.
         if not dry_run:
+            done_set.add(r["reply_id"])
+            done.append(r["reply_id"])
             fu = q_owner.get(r["referenced"])
             if fu:
                 f_drop(fu, r["referenced"])

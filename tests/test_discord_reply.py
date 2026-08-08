@@ -272,7 +272,11 @@ class DeliverDiscordReplies(unittest.TestCase):
             time.time(), self._run, state, panes, dry_run=True,
             discord_fetch=self._fetch([q_msg]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
-        self.assertIn("repQ", state["dreply_done"])
+        # #304: a dry-run sweep must not mark the reply done in `state`
+        # (that dict is persisted unconditionally by run_once) — the
+        # "reply→" log line above is the proof this test actually cares
+        # about (routing from the non-primary channel worked).
+        self.assertNotIn("repQ", state.get("dreply_done", []))
 
     def test_types_the_answer_when_not_dry_run(self):
         notify.record_question("888001", "777001", "sid-abc", "/p",
