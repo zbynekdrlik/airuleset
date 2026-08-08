@@ -504,6 +504,39 @@ if msg_has "$MSG_NOGOAL_MENTION" -qiE "review the (spec|plan|design|brainstorm|a
     add_hard "Pre-answered prose question: spec/plan/design review handoff or pre-implementation pause"
 fi
 
+# Check for the SAME spec/plan-approval pause, stated in SLOVAK (#316).
+# Every question this repo ships to a real user is written in Slovak
+# (user-questions-slovak.md) — an English-only regex for this class is
+# BLIND on every stream/away box, and montalu2 proved it live: "schvaľuješ
+# zapísaný design spec?" sailed through this gate untouched and the user
+# had to answer it himself. Scoped NARROWLY on purpose, two required
+# structural signals (mirrors the box-drawing AND-of-flags shape above):
+#   1. a Slovak APPROVAL VERB attached to a design-artifact NOUN — the
+#      exact verb/noun families the incident named, either word order;
+#   2. the ❓ NEEDS YOU / ❓ ASKED marker this repo's own question
+#      convention always carries on a real question turn (the structural
+#      anchor), AND no bullet-option lines present.
+# A genuine design fork (choice between options, real consequences) is
+# MANDATED to carry bullet options by stop-check-question-quality.sh's own
+# Check 4 ("Odrážky s možnosťami sú POVINNÉ") — so a well-formed
+# alternative-choice question is exempt by construction even if it happens
+# to use the SAME verb ("Ktorý návrh schvaľuješ — A alebo B?" with real
+# `• ` option lines passes; a bare "schvaľuješ zapísaný spec?" gate with no
+# options does not). The banned shape is specifically "approve my already-
+# written artifact before I continue", never a real fork.
+SK_APPROVAL_RX="(schva[ľl]uje[sš]|schv[áa]li[sš]|odsúhlas[íi][sš]|potvrd[íi][sš]|odobr[íi][sš])"
+SK_ARTIFACT_RX="(spec(u|om|ifik[áa]ci[ae])?|pl[áa]n(u|om)?|n[áa]vrh(u|om)?|dizajn(u|om)?|design)"
+HAS_SK_APPROVAL=$(msg_has "$MSG_NOGOAL_MENTION" -qiE "${SK_APPROVAL_RX}.{0,40}${SK_ARTIFACT_RX}|${SK_ARTIFACT_RX}.{0,40}${SK_APPROVAL_RX}" && echo 1 || echo 0)
+HAS_QMARKER=$(msg_has "$MSG_MENTION" -qE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)[[:space:]]*\**[[:space:]]*:' && echo 1 || echo 0)
+# The exemption (real options offered) EXONERATES, so ask whether it is
+# MISSING — an unanswerable check must not grant the exemption (same
+# fail-closed shape as NO_COMPANION_URL above).
+NO_OPTION_BULLETS=$(msg_missing "$MSG" -qE '^[[:space:]]*(•|-)[[:space:]]' && echo 1 || echo 0)
+if [ "$HAS_SK_APPROVAL" = "1" ] && [ "$HAS_QMARKER" = "1" ] && [ "$NO_OPTION_BULLETS" = "1" ]; then
+    echo "VIOLATION: Spýtal si sa po slovensky 'schvaľuješ zapísaný spec/plán/návrh?' — presne trieda 'spec/plan/design review handoff' z ask-before-assuming.md, len v jazyku ktorý anglický regex nezachytáva. Toto je PRE-ANSWERED: napíš rozhodnutie na ticket ('spec committed, pokračujem') a pokračuj na implementačný plán, nečakaj na schválenie. Genuine dizajnová rozvetvená otázka (voľba medzi možnosťami s reálnymi dôsledkami, s odrážkami • pre každú možnosť) je vítaná a nie je toto — ale 'schváľ mi hotový spec, inak nepokračujem' bez ponúknutých alternatív áno. Prepíš správu: vynechaj otázku, zapíš rozhodnutie a pokračuj. See ask-before-assuming.md pre-answered table." >&2
+    add_hard "Pre-answered Slovak prose question: spec/plan/design approval pause (schvaľuješ/schváliš/odsúhlasíš/potvrdíš/odobríš + spec/plán/návrh/dizajn)"
+fi
+
 # === Unified completion-report detection ===
 # Agents sometimes write prose completion reports without the canonical heading,
 # silently bypassing every audit check below (slovnormal-mcp session shipped
