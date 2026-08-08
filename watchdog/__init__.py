@@ -4359,6 +4359,15 @@ BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this of
 # stream has ever produced that failure in production (this repo's own FREEZE:
 # "the same defect exists in N more places" is not fixed pre-emptively) --
 # if it ever does, start here.
+#
+# david2/david3/david4 (airuleset#326, 2026-08-08) are ALSO deliberately NOT
+# in this tuple, following the SAME simap/miva1 precedent above -- even
+# though they DO work on odoo-erp (a _CROSS_STREAM_REPOS member, same as
+# david itself, which IS in this tuple). Widening the tuple for a stream
+# this ticket's own scope didn't cover would be exactly the pre-emptive fix
+# FREEZE forbids; the identical failure shape this bullet already describes
+# for simap/miva1 applies to david2/3/4 too, unrevisited until it produces
+# a real incident.
 _REDUCED_STREAM_USERS = ("david", "marek", "montalu",
                          "montalu2", "montalu3", "montalu4")
 

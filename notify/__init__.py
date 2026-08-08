@@ -83,6 +83,18 @@ STREAM_NOTIFY_OWNER = {
     # anything but fail-safe silently; check_discord_notify_config() already
     # surfaces that gap loudly at install time, same as for every stream.
     "miva1": "zbynek",
+    # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
+    # david streams -- additional capacity for the SAME external developer
+    # david already is, so they redirect to david's own already-self-mapped
+    # thread (never a NEW DISCORD_MIRROR_DAVID2/3/4 local .env key, which
+    # this repo's code cannot provision or deploy at all -- the ticket's own
+    # suggested shape, rejected in favour of this code-side redirect, the
+    # same #300 precedent already established for miva1). This also
+    # inherits david's own real DISCORD_MIRROR_DAVID=zbynek local mirror
+    # config for free, once resolved -- no extra config needed for that.
+    "david2": "david",
+    "david3": "david",
+    "david4": "david",
 }
 
 
