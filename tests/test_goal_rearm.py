@@ -793,6 +793,93 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
         self.assertTrue(tmux.typed(), logs)
 
 
+class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
+    """#320 — dev1 live incident, sid `2d02a127-...`: `rec['last_armed']`
+    (job 20's own DIRECT footer-lit observation, independent of the
+    transcript) can postdate `rec['mts']` (the newest transcript marker's
+    own timestamp, a 'cleared' one) when a real busy-pane arm never
+    produces ANY transcript marker at all — confirmed live on dev1's real
+    state/transcript: three `goal-autoarm OK` sends after the clear, zero
+    resulting markers of either shape anywhere in the whole file. The state
+    machine used to have no way to notice this contradiction and skipped
+    the session forever at `if rec.get("mark") != "set": continue`."""
+
+    def test_last_armed_after_the_clear_is_treated_as_a_rearm(self):
+        state = {}
+        now0 = time.time()
+        set_ts = _iso(now0)
+        arm1_ts = now0 + 60
+        clear_ts = now0 + 120
+        arm2_ts = now0 + 180
+        # Step 1: a genuine early arm -- last_armed=arm1_ts, mark="set".
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, set_ts)],
+                state=state, now=arm1_ts)
+        # Step 2: a genuine clear AFTER that arm -- mark flips to "cleared",
+        # last_armed stays arm1_ts (< clear_ts) -- #170 intact so far.
+        self._go(PANE_DARK, entries=[marker_entry("cleared", PAYLOAD,
+                                                   _iso(clear_ts))],
+                state=state, now=clear_ts + 10)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+        # Step 3: the footer shows armed AGAIN, AFTER the clear (a real
+        # busy-pane arm producing NO new transcript marker at all --
+        # dev1's own live shape) -- last_armed becomes arm2_ts > clear_ts.
+        self._go(PANE_LIT, state=state, now=arm2_ts)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared",
+                         "still cleared per the transcript's own view")
+        self.assertGreater(state["goal_rearm"][SID]["last_armed"],
+                           state["goal_rearm"][SID]["mts"])
+        # Step 4: footer goes dark again, well within the dark cap -- the
+        # contradiction (last_armed > mts while mark == "cleared") must now
+        # be treated as a re-arm, not a permanent #170 skip.
+        tmux, logs = self._go(PANE_DARK, state=state, now=arm2_ts + 30,
+                              cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "set")
+        self.assertTrue(any("stale-cleared-but-rearmed" in ln for ln in logs),
+                        logs)
+
+    def test_a_clean_clear_with_no_later_arm_is_still_never_revived(self):
+        # #170's own control: last_armed predates the clear (the arm was
+        # BEFORE the clear, the well-behaved case) -> unchanged behaviour.
+        state = {}
+        now0 = time.time()
+        set_ts = _iso(now0)
+        clear_ts = now0 + 120
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, set_ts)],
+                state=state, now=now0 + 60)
+        tmux, _logs = self._go(PANE_DARK,
+                               entries=[marker_entry("cleared", PAYLOAD,
+                                                     _iso(clear_ts))],
+                               state=state, now=clear_ts + 10)
+        self.assertFalse(tmux.typed())
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+
+    def test_dev1_incident_replayed_stale_and_dark_still_flips_and_pings(self):
+        # The REAL live shape (2d02a127, verified 2026-08-08): the
+        # contradiction is confirmed, but `last_armed` is itself already
+        # past the dark cap by the time this sweep checks -- the fix must
+        # still flip `mark` to "set" (the ticket's own validation
+        # criterion) even though the SAFE outcome from there is a one-shot
+        # ping, never a blind re-arm of a possibly-ancient payload.
+        state = {}
+        now0 = time.time()
+        set_ts = _iso(now0 - wd.GOAL_REARM_MAX_DARK_S - 7200)
+        clear_ts = now0 - wd.GOAL_REARM_MAX_DARK_S - 3600
+        arm2_ts = now0 - wd.GOAL_REARM_MAX_DARK_S - 1800
+        self._go(PANE_LIT, entries=[marker_entry("set", PAYLOAD, set_ts)],
+                state=state, now=now0 - wd.GOAL_REARM_MAX_DARK_S - 7100)
+        self._go(PANE_DARK, entries=[marker_entry("cleared", PAYLOAD,
+                                                   _iso(clear_ts))],
+                state=state, now=clear_ts + 10)
+        self._go(PANE_LIT, state=state, now=arm2_ts)
+        tmux, logs = self._go(PANE_DARK, state=state, now=now0)
+        self.assertFalse(tmux.typed(), "payload this old is never blind-typed")
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "set")
+        self.assertTrue(state["goal_rearm"][SID]["dark_pinged"])
+        self.assertTrue(any("skip stale-goal" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+
 class TestGoalDarkDiedByOutage(unittest.TestCase):
     """Direct unit coverage of `_goal_dark_died_by_outage` (#173) — the
     reused #266 transcript mechanism `goal_rearm`'s dark-cap decision now
