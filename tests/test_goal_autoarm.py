@@ -411,6 +411,29 @@ class TestAnExitedSessionIsNotReArmed(unittest.TestCase):
                         "            <command-message>exit</command-message>\n"
                         "            <command-args></command-args>"}})
 
+    @staticmethod
+    def _exit_caveat(ts):
+        # #335-review F1 ROUND 2 -- the real, live-verified companion CC
+        # writes IMMEDIATELY BEFORE the actual /exit command entry, also
+        # type=="user" -- the shape this repo's own real corpus shows.
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<local-command-caveat>Caution: /exit ends this "
+                        "session.</local-command-caveat>"}})
+
+    @staticmethod
+    def _exit_stdout(ts):
+        # the companion CC writes IMMEDIATELY AFTER the exit command,
+        # routinely a few milliseconds LATER than the command entry itself
+        # -- the exact reason the round-1 release check (built on the
+        # shared _last_real_turn_ts) was defeated on the exit's own
+        # bookkeeping.
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<local-command-stdout>Bye!</local-command-stdout>"}})
+
     def test_exited_session_is_left_alone(self):
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("set"),
@@ -521,6 +544,35 @@ class TestAnExitedSessionIsNotReArmed(unittest.TestCase):
         self.assertTrue(tmux.typed(),
                         "a message merely QUOTING the /exit marker text "
                         "must never count as a real exit")
+
+    def test_a_real_exit_triple_is_not_defeated_by_its_own_companions(self):
+        # #335-review F1 ROUND 2 (fresh-context adversarial review, executed
+        # proof over the real transcript corpus) -- a genuine /exit is
+        # written as a TRIPLE of type=="user" entries: a
+        # <local-command-caveat>, the actual <command-name>/exit</...> the
+        # marker matches, and a <local-command-stdout>Bye!</...> -- and the
+        # stdout companion routinely carries a timestamp a few
+        # MILLISECONDS NEWER than the exit command entry itself (same
+        # command batch). The round-1 release check (built on the SHARED
+        # _last_real_turn_ts, which counts ANY real turn) read that
+        # companion as "activity postdating the exit" and released the
+        # suppression on the exit's own bookkeeping -- measured against
+        # the real corpus, this defeated the protection on 13 of 15
+        # genuinely-exited-and-never-resumed sessions. This fixture
+        # reproduces the exact real shape: caveat 100ms BEFORE the exit
+        # command, stdout 50ms AFTER it -- and the session must still stay
+        # blocked.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("set"),
+                            self._exit_caveat("2026-07-29T09:04:59.900Z"),
+                            self._exit("2026-07-29T09:05:00.000Z"),
+                            self._exit_stdout("2026-07-29T09:05:00.050Z"))
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "the exit's own companion bookkeeping entries "
+                         "must never count as activity that releases the "
+                         "suppression")
 
 
 class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(

@@ -3947,6 +3947,53 @@ class TestGoalAchievedNeverAutoResumesAfterAbandonment(GoalRearmBase):
         self.assertFalse(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
 
 
+class TestExitSupersededByANewerMarkerReleasesTheSkipExitedCheck(
+        GoalRearmBase):
+    """#335-review NEW-1 (round 2, MINOR) -- `last_seen_alive` prefers
+    `rec['last_armed']` (this job's own live-footer confirmation) over
+    `rec['mts']` (the transcript marker's own timestamp) whenever
+    `last_armed` is present at all -- correct in general (#321 shape A2),
+    but STALE relative to a genuine later re-arm: the user exits, then
+    re-arms with a fresh `/goal` (a real marker, `mts > exit_ts`), and if
+    that new goal dies again before the pane's footer is ever sampled
+    showing it armed, `last_armed` never advances to reflect the re-arm.
+    Without the fix, `exit_ts > last_seen_alive` (built on the STALE
+    `last_armed`) would treat the already-superseded exit as still
+    decisive forever -- the session's own goal-rearm backstop would
+    refuse to ever heal it again, silently, with a `skip exited` log line
+    each sweep."""
+
+    def test_a_newer_marker_than_the_exit_releases_the_check_even_with_a_stale_last_armed(
+            self):
+        base = time.time()
+        stale_last_armed = base - 3600     # 1h stale, predates the exit
+        t0 = base - 3500                   # the ORIGINAL (now-superseded) arm
+        exit_ts = base - 3000               # the user's own /exit
+        t2 = base - 100                     # a GENUINE re-arm, after the exit
+        entries = [marker_entry("set", PAYLOAD, _iso(t0)),
+                  exit_entry(_iso(exit_ts)),
+                  marker_entry("set", PAYLOAD, _iso(t2))]
+        state = {"goal_rearm": {SID: {"last_armed": stale_last_armed}}}
+        tmux, logs = self._go(PANE_DARK, entries=entries, state=state,
+                              now=base)
+        self.assertFalse(any("skip exited" in ln for ln in logs), logs)
+
+    def test_the_control_an_exit_with_no_later_marker_still_skips(self):
+        # same stale-last_armed shape, but WITHOUT the later re-arm marker
+        # -- proves the release above is genuinely conditional on the
+        # newer marker, not a side effect of the stale last_armed alone.
+        base = time.time()
+        stale_last_armed = base - 3600
+        t0 = base - 3500
+        exit_ts = base - 3000
+        entries = [marker_entry("set", PAYLOAD, _iso(t0)),
+                  exit_entry(_iso(exit_ts))]
+        state = {"goal_rearm": {SID: {"last_armed": stale_last_armed}}}
+        tmux, logs = self._go(PANE_DARK, entries=entries, state=state,
+                              now=base)
+        self.assertTrue(any("skip exited" in ln for ln in logs), logs)
+
+
 class TestCachedBacklogOpen(unittest.TestCase):
     """`_cached_backlog_open` — the shared per-cwd cache both job 10 and
     job 20 read. Covers #160-review-style findings 🔵F5 (a failed/refused
