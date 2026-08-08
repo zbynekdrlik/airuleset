@@ -1374,11 +1374,23 @@ CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.
 # (#289) for the mechanism this relies on: a BARE `tmux capture-pane`/
 # `display-message` call with NO explicit `-t`, issued from WITHIN THIS
 # popup's own shell, resolves against the ORIGINATING pane (the one the
-# popup key was pressed in) -- confirmed live (isolated `-L` socket, a
-# real attached pty client switched across THREE windows, never the real
-# fleet server) that this is genuinely the CLIENT's current pane, not
-# just "the only pane on the server" -- a decoy window's content never
-# leaked into the capture. `-e` preserves the pane's own real SGR/ANSI
+# popup key was pressed in) -- confirmed live TWICE, independently: once
+# via an isolated `-L` socket with a real attached pty client switched
+# across THREE windows (a decoy window's content never leaked into the
+# capture), and again via a fresh-context adversarial review's own,
+# stronger repro -- a genuine 2-SESSION/2-CLIENT server with the raw
+# popup-key bytes injected into each client's own pty, confirming the
+# resolution follows the PRESSING client correctly in both directions.
+# ADVERSARIAL-REVIEW FINDING (#327): the mechanism is `display-popup`
+# setting the popup job's own `$TMUX` to the PRESSING client's target
+# session -- never rely on `$TMUX_PANE` inside a popup as a shortcut for
+# this (its value is unreliable/environment-dependent, not a documented
+# tmux guarantee); the bare-target resolution above is the only proven
+# path. The ONE proven way to break this: adding `-c <client>` to
+# `display-popup`, or invoking this script via `run-shell` instead of as
+# the popup's own shell-command -- NEVER do either; both were shown live
+# to route the capture to the WRONG session's pane.
+# `-e` preserves the pane's own real SGR/ANSI
 # bytes (same colors CC's TUI actually painted); `-S -{{HISTORY_LIMIT}}`
 # matches TMUX_HISTORY_LIMIT (#235's own scrollback-retention mitigation)
 # so this reaches everything tmux's own history buffer could possibly

@@ -4990,8 +4990,19 @@ class TestClaudeHistoryPopupScript(TestCase):
         # #294: -R added so `less` renders raw ANSI color bytes as color
         # instead of visibly escaping them; +G (jump to end) and less's
         # own default incremental search are both unaffected by -R.
+        # #327 ADVERSARIAL-REVIEW FINDING: a bare `assertIn` only ever
+        # proves ONE branch has -R -- since `less` acts cat-like on a
+        # non-tty stdout (the real-exec tests' own established fact), a
+        # mutant that drops -R from JUST the PRIMARY (capture-pane)
+        # branch survived every existing test, because the real-exec
+        # tests never feed the primary branch raw ANSI to actually render
+        # differently. Without -R the primary branch would show raw
+        # ESC[...m garbage on a real terminal instead of color -- the
+        # exact opposite of #327's own goal. Require BOTH branches (the
+        # primary capture-pane pipe AND the fallback claude-history pipe)
+        # to carry it, by exact count.
         content = airuleset.render_claude_history_popup_script()
-        self.assertIn("| less -R +G", content)
+        self.assertEqual(content.count("| less -R +G"), 2, content)
 
     def test_falls_back_to_claude_history_with_plain_forced_neutral(self):
         # #327 INVERTS #294's own "--color forced on" choice: the user
@@ -5008,6 +5019,13 @@ class TestClaudeHistoryPopupScript(TestCase):
         assign_line = next(ln for ln in content.splitlines() if "CH_OUT=$(" in ln)
         self.assertIn("--plain", assign_line, assign_line)
         self.assertNotIn("--color", assign_line, assign_line)
+        # #327 ADVERSARIAL-REVIEW FINDING: dropping --full from the
+        # fallback line (the ORIGINAL claude-history invocation always
+        # had it -- this diff only touched the color flag) survived every
+        # existing test; --full is what shows the WHOLE session rather
+        # than only the last N turns, and its silent loss would be a
+        # real, easy-to-miss regression on this specific rewritten line.
+        self.assertIn("--full", assign_line, assign_line)
 
     def test_tries_capture_pane_before_falling_back_to_claude_history(self):
         # #327: the PRIMARY source is now a real tmux capture -- see the
@@ -5037,6 +5055,19 @@ class TestClaudeHistoryPopupScript(TestCase):
         content = airuleset.render_claude_history_popup_script()
         self.assertIn("-S -%d" % airuleset.TMUX_HISTORY_LIMIT, content)
 
+    def test_capture_pane_history_limit_is_wired_not_hardcoded(self):
+        # #327 ADVERSARIAL-REVIEW FINDING: the sibling test above passes
+        # even against a mutant that hardcodes the literal "-S -50000"
+        # instead of genuinely reading TMUX_HISTORY_LIMIT -- it happens
+        # to match today's value coincidentally. Patch the CONSTANT and
+        # require the rendered script to track it, proving the
+        # {{HISTORY_LIMIT}} substitution is real, not a coincidence.
+        with m.patch.object(airuleset, "TMUX_HISTORY_LIMIT", 1234):
+            content = airuleset.render_claude_history_popup_script()
+        self.assertIn("-S -1234", content)
+        self.assertNotIn("-S -50000", content)
+        self.assertNotIn("{{HISTORY_LIMIT}}", content)
+
     def test_captures_pane_exit_code_without_the_set_e_assignment_trap(self):
         # Same established idiom as CH_RC (below) -- `set -e` + a bare
         # `VAR=$(failing_cmd)` would exit the script before the next line
@@ -5062,6 +5093,21 @@ class TestClaudeHistoryPopupScript(TestCase):
                          if lines[i].strip() == "exit 0")
         self.assertLess(exit_idx, ch_idx)
         self.assertGreater(exit_idx, cond_idx)
+        # #327 ADVERSARIAL-REVIEW FINDING: the check above alone passes
+        # even if `exit 0` were moved INSIDE the "less is present"
+        # sub-branch -- on a box genuinely missing `less`, that mutant
+        # would show the captured content + wait for a keypress, then
+        # (never having exited) fall through and layer the claude-history
+        # transcript on top of it. `exit 0` must sit at the SAME
+        # indentation as the enclosing `if [ "$CP_RC" ...` line -- i.e.
+        # OUTSIDE the nested less-vs-no-less sub-if -- so it is reached
+        # on EITHER sub-branch.
+        cond_indent = len(lines[cond_idx]) - len(lines[cond_idx].lstrip())
+        exit_indent = len(lines[exit_idx]) - len(lines[exit_idx].lstrip())
+        self.assertEqual(exit_indent, cond_indent + 2,
+                          "exit 0 must be a direct child of the outer "
+                          "capture-pane-succeeded if, not nested one "
+                          "level deeper inside the less-present branch")
 
     def test_failure_branch_waits_for_a_keypress_before_closing(self):
         # No silent instant-close: on a nonzero exit, the script prints
@@ -5187,6 +5233,53 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertIn("CAPTURE-PANE-PRIMARY-MARKER", r2.stdout)
         self.assertNotIn("no Claude Code session transcript found", r2.stdout)
 
+    def test_real_execution_blank_pane_falls_back_to_transcript(self):
+        # #327 ADVERSARIAL-REVIEW FINDING: capture-pane SUCCEEDING (rc=0)
+        # on a genuinely blank pane returns N blank rows -- real bytes,
+        # not an error -- but `$(...)` strips ALL trailing newlines, so
+        # CP_OUT ends up the empty string and `[ -n "$CP_OUT" ]` must
+        # still route to the transcript fallback. A pane running `sleep`
+        # directly as its command (no shell, no prompt ever drawn) is a
+        # deterministic way to get a truly content-free pane -- unlike a
+        # freshly-created shell pane, which draws its own prompt almost
+        # immediately and would make this test racy.
+        home = Path(tempfile.mkdtemp())
+        pscript = self._deploy(home)
+        cwd = home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        proj_dir = home / ".claude" / "projects" / enc
+        proj_dir.mkdir(parents=True)
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "BLANK-PANE-FALLBACK-MARKER"}]}},
+        ]
+        (proj_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n")
+
+        tmux_tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmux_tmpdir), True)
+        tmux_env = {"TMUX_TMPDIR": str(tmux_tmpdir),
+                    "PATH": os.environ.get("PATH", "")}
+
+        def tmux(*args):
+            return subprocess.run(["tmux", *args], env=tmux_env,
+                                   capture_output=True, text=True, timeout=10)
+
+        self.addCleanup(tmux, "kill-server")
+        r = tmux("new-session", "-d", "-s", "t", "-x", "80", "-y", "20",
+                  "sleep", "100")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        time.sleep(0.3)
+
+        env = {"HOME": str(home), "PATH": os.environ.get("PATH", ""),
+               "TMUX_TMPDIR": str(tmux_tmpdir)}
+        r2 = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
+                             capture_output=True, text=True, timeout=15)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("BLANK-PANE-FALLBACK-MARKER", r2.stdout)
+
     def test_real_execution_missing_less_shows_transcript_then_waits(self):
         # ADVERSARIAL-REVIEW FINDING (#289, M5): a box genuinely missing
         # `less` must fail LOUDLY (show the transcript + wait for a
@@ -5208,12 +5301,24 @@ class TestClaudeHistoryPopupScript(TestCase):
             "\n".join(json.dumps(x) for x in lines) + "\n")
         # A PATH containing ONLY a symlink to the real python3 -- no
         # `less` anywhere on it -- reproduces "less is not installed"
-        # without touching the box's own real less binary.
+        # without touching the box's own real less binary. #327
+        # ADVERSARIAL-REVIEW FINDING: this test currently passes only
+        # because `tmux` ALSO happens to be absent from narrow_bin (so
+        # capture-pane fails with "command not found" and falls through
+        # to claude-history) -- a future edit that added `tmux` here
+        # would silently connect to THIS BOX'S OWN real default tmux
+        # server (capture-pane needs no `less` at all) and print a real
+        # user pane's content into test output. TMUX_TMPDIR pinned to a
+        # no-server scratch dir makes the isolation explicit and
+        # deliberate, not an accident of what narrow_bin omits.
         narrow_bin = Path(tempfile.mkdtemp())
         for tool in ("python3", "bash"):
             real_tool = shutil.which(tool)
             os.symlink(real_tool, narrow_bin / tool)
-        env = {"HOME": str(home), "PATH": str(narrow_bin)}
+        no_server_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(no_server_dir), True)
+        env = {"HOME": str(home), "PATH": str(narrow_bin),
+               "TMUX_TMPDIR": str(no_server_dir)}
         r = subprocess.run(["bash", str(pscript)], cwd=str(cwd), env=env,
                             capture_output=True, text=True, timeout=15, input="")
         self.assertEqual(r.returncode, 0)  # the || true guard absorbs read's EOF
