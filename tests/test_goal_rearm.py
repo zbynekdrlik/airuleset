@@ -1680,6 +1680,151 @@ class TestGoalRecoverUntracked(GoalRearmBase):
                          "re-armed even after a full-file recovery scan")
 
 
+class TestGoalRecoverUntrackedAlternativeEvidence(GoalRearmBase):
+    """#324 — montalu2@subdev's own live incident: footer dark,
+    `rec['mark']` never tracked, no live autopilot-progress heartbeat for
+    a manually-armed (non-`/autopilot`-batch) `/goal` loop — a shape for
+    which `_live_autopilot_progress` can NEVER become true, so recovery
+    used to have no reachable exit at all. Two fixes: (1) a `goalarm`
+    record (job 9's own per-pane dedup, proving a real arm was attempted
+    at some point) is a second, independent, cheap evidence source that
+    unlocks the SAME one-shot scan; (2) when NEITHER evidence source ever
+    resolves, this no longer waits silently forever — it escalates with
+    ONE deduped Discord ping past `GOAL_REARM_UNTRACKED_PING_S`."""
+
+    def _buried_marker_transcript(self, kind="set", ts=None):
+        p = self._write([marker_entry(kind, PAYLOAD, ts)])
+        with open(p, "a") as f:
+            filler = json.dumps({"type": "assistant",
+                                 "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < wd.GOAL_MARK_TAIL_BYTES + 200_000:
+                f.write(filler)
+        self.assertGreater(p.stat().st_size, wd.GOAL_MARK_TAIL_BYTES,
+                           "fixture must genuinely exceed the tail window")
+        self._wrote = True
+        return p
+
+    def _future_now(self):
+        return time.time() + wd.GOAL_ARMED_ACTIVITY_GRACE_S + 3600
+
+    def _typed_seq(self, text=GOAL_LINE):
+        typed_pane = CONV + FOOTER_DARK.replace(
+            "❯ \n", "❯ " + text[-40:] + "\n")
+        return [PANE_DARK, PANE_DARK, typed_pane, PANE_DARK]
+
+    def test_goalarm_record_is_alternative_evidence_for_recovery(self):
+        # no live autopilot-progress file at all (progress_dir defaults to
+        # the real, almost-certainly-empty ~/.claude/autopilot-progress for
+        # a repo named "demo") — but `state['goalarm']` DOES carry an entry
+        # for this exact pane (`%1`, the pid FakeTmux reports), proving
+        # job 9 genuinely attempted a real arm against it at some point.
+        # That alone must be enough to unlock the recovery scan.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        state = {"goalarm": {"%1": future - 3600}}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, logs = self._go(PANE_DARK, state=state, now=future,
+                                  cap_seq=self._typed_seq())
+        self.assertIn(GOAL_LINE, tmux.typed(), logs)
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+        self.assertTrue(any("goalarm record" in ln for ln in logs), logs)
+
+    def test_no_goalarm_record_and_no_progress_never_recovers(self):
+        # neither evidence source present — the scan must never be paid
+        # for, and nothing gets typed.
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            tmux, _logs = self._go(PANE_DARK, state=state, now=future,
+                                   progress_dir=empty_dir.name)
+        self.assertFalse(tmux.typed())
+
+    def test_untracked_with_no_evidence_pings_after_the_grace_window(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            tmux2, logs2 = self._go(
+                PANE_DARK, state=state,
+                now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                progress_dir=empty_dir.name)
+        self.assertFalse(tmux2.typed(), logs2)
+        self.assertTrue(any("ESCALATED" in ln for ln in logs2), logs2)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+    def test_untracked_ping_fires_only_once(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            self._go(PANE_DARK, state=state,
+                    now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                    progress_dir=empty_dir.name)
+            self._go(PANE_DARK, state=state,
+                    now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 600,
+                    progress_dir=empty_dir.name)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+    def test_untracked_state_clears_once_evidence_appears(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name)
+            self._go(PANE_DARK, state=state,
+                    now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                    progress_dir=empty_dir.name)
+            self.assertTrue(
+                state.get("goalrearm_untracked_pinged", {}).get(SID))
+            pd = self._live_progress_dir(
+                future + wd.GOAL_REARM_UNTRACKED_PING_S + 120)
+            tmux, logs = self._go(
+                PANE_DARK, state=state,
+                now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 120,
+                cap_seq=self._typed_seq(), progress_dir=pd)
+        self.assertNotIn(SID, state.get("goalrearm_noprogress", {}))
+        self.assertNotIn(SID, state.get("goalrearm_untracked_pinged", {}))
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+        self.assertTrue(tmux.typed(), logs)
+
+    def test_dry_run_never_sends_a_real_ping(self):
+        self._buried_marker_transcript()
+        future = self._future_now()
+        empty_dir = TemporaryDirectory()
+        self.addCleanup(empty_dir.cleanup)
+        state = {}
+        with m.patch("notify.repo_name_for", return_value="demo"):
+            self._go(PANE_DARK, state=state, now=future,
+                     progress_dir=empty_dir.name, dry_run=True)
+            _tmux2, logs2 = self._go(
+                PANE_DARK, state=state,
+                now=future + wd.GOAL_REARM_UNTRACKED_PING_S + 60,
+                progress_dir=empty_dir.name, dry_run=True)
+        self.assertFalse(self.pings, self.pings)
+        self.assertTrue(any("ESCALATED" in ln for ln in logs2), logs2)
+
+    def _live_progress_dir(self, ts):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "demo.json").write_text(
+            json.dumps({"done": 3, "remaining": 2, "ts": ts}))
+        return d.name
+
+
 class TestLongPasteVerification(GoalRearmBase):
     """LIVE 2026-07-26, first automatic run of this job on dev1: it correctly
     detected a real victim (`parovanie_produktov` — transcript marker `set`,
