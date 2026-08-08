@@ -4681,7 +4681,14 @@ def cmd_notify(args):
       --autopilot-done     compose + send the canonical per-ticket completion card
                            from fields (--repo --pr --merge-sha --version --review
                            --done --remaining --tickets-json). Deduped on repo#pr.
-      --body "<markdown>"  send arbitrary markdown (the general primitive).
+      --body "<markdown>"  send arbitrary markdown (the general primitive,
+                           used by external/foreign callers e.g. codex-bridge
+                           — never by anything inside this repo). With no
+                           --owner-name, falls through to resolve_owner()'s
+                           tmux auto-detect, which is correct ONLY for a
+                           caller genuinely tied to the current pane; a
+                           headless/detached caller must pass --owner-name
+                           to pin the real owner explicitly (#334).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
                         notification_channel, resolve_owner, resolve_questions_channel,
@@ -4847,7 +4854,37 @@ def cmd_notify(args):
         return
 
     if args.body is not None:
-        print(send(args.body, dedup_key=args.dedup_key, dry_run=args.dry_run))
+        # #334: --body is the general-purpose EXTERNAL send primitive (no
+        # caller inside this repo itself uses it — only foreign scripts like
+        # codex-bridge shell out to it). With no explicit owner it falls
+        # entirely through to resolve_owner()'s tmux auto-detect, which is
+        # correct for a caller genuinely tied to the current pane (the
+        # ❓/✅ idle pings, autopilot cards) but WRONG for a headless/
+        # detached caller whose ancestor process merely inherited an
+        # unrelated pane's $TMUX — the claude-david misroute regression.
+        # --owner-name (normalized the same way provision_question_thread
+        # already normalizes it) lets such a caller pin the real owner
+        # explicitly, bypassing tmux detection entirely. Omitting it keeps
+        # today's exact behavior — send(owner=None) resolves internally.
+        owner_name = getattr(args, "owner_name", None)
+        owner = None
+        if owner_name:
+            owner = re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+            if not owner:
+                # #334 adversarial-review MINOR-2: a normalized-empty
+                # value (punctuation-only, etc.) must be REFUSED, never
+                # silently passed through as owner="" — "" is not None,
+                # so it would skip resolve_owner() entirely and send
+                # mention-less to the shared channel, even overriding an
+                # otherwise-correct AIRULESET_NOTIFY_OWNER. Validate and
+                # refuse, never mangle (#198's own established rule).
+                print("notify: --owner-name %r has no usable characters "
+                     "after normalization — refusing rather than silently "
+                     "falling back to no-owner routing" % owner_name,
+                     file=sys.stderr)
+                sys.exit(1)
+        print(send(args.body, owner=owner, dedup_key=args.dedup_key,
+                   dry_run=args.dry_run))
         return
 
     print("notify: nothing to send (use --autopilot-done, --run-card, --body, "
@@ -10065,13 +10102,18 @@ def main():
                                "reporting gap must never be impossible on "
                                "the box that holds it")
     p_notify.add_argument("--owner-name", dest="owner_name",
-                          help="Deliver to this owner's thread "
-                               "(--backfill-digest). Rarely needed: the owner "
+                          help="Deliver to this owner's thread. With "
+                               "--backfill-digest: rarely needed, the owner "
                                "is read from the checkout's own live pane, "
                                "which is the only thing that actually knows "
-                               "whose repo it is. Use it only when the repo "
-                               "has no pane here — a value contradicting the "
-                               "pane is refused, not obeyed")
+                               "whose repo it is — a value contradicting the "
+                               "pane is refused, not obeyed. With --body "
+                               "(#334): pins the owner explicitly, bypassing "
+                               "tmux auto-detection entirely — the caller's "
+                               "choice is trusted unconditionally (no pane "
+                               "to validate against), for a headless/foreign "
+                               "caller whose notification is not about the "
+                               "current tmux pane's own state at all")
     p_notify.add_argument("--repo-name", dest="repo_name", action="store_true",
                           help="Print the GitHub repo NAME for --cwd, from its "
                                "origin remote (never the directory basename)")
