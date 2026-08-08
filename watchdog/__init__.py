@@ -1788,14 +1788,90 @@ def _hosted_claude_cwd(claude_pid, pane_cwd):
     return pane_cwd
 
 
-def list_claude_panes(run=None):
+def _tmux_default_socket_path():
+    """The tmux server's DEFAULT control socket path -- `$TMUX_TMPDIR` (or
+    `/tmp` when unset) + `tmux-<uid>/default` -- exactly what every managed
+    session uses (no project runs tmux with an explicit -L/-S override)."""
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(base, "tmux-%d" % os.getuid(), "default")
+
+
+def _tmux_socket_missing(path=None):
+    """True when the tmux control socket the server should be listening on
+    is absent from disk -- the orphaned-server shape (#318): a `tmpfiles.d`
+    age-based reap (or any other removal) of `/tmp/tmux-*` deletes the
+    socket FILE while the server PROCESS keeps running, so every NEW client
+    connection to it fails from then on, although the session itself is
+    alive. `path` is overridable for tests; production always resolves the
+    real default socket path."""
+    return not os.path.exists(path or _tmux_default_socket_path())
+
+
+def _tmux_server_pid(run=None):
+    """PID of a live `tmux: server` process, found via `ps` (never the tmux
+    socket itself -- the whole point is this must still resolve even when
+    the socket is unreachable). None when no such process is running at all
+    (the ordinary "tmux genuinely isn't up" case -- nothing to recover, and
+    behavior stays exactly as it was before #318). Injectable via `run`
+    like every other tmux shim in this module."""
+    run = run or _default_run
+    out = run(["ps", "-eo", "pid,comm"])
+    for line in (out or "").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip() == "tmux: server":
+            try:
+                return int(parts[0])
+            except ValueError:
+                continue
+    return None
+
+
+def _tmux_socket_recover(pid, run=None):
+    """SIGUSR1 to a tmux server whose socket was removed out from under it
+    re-creates the socket at its configured path (tmux(1) SIGNALS: "If the
+    socket is accidentally removed, the SIGUSR1 signal may be sent to the
+    tmux server process to recreate it") -- the SAME recovery the #318
+    incident applied by hand (`kill -USR1 <server-pid>`). Only ever called
+    after `_tmux_socket_missing()` has already confirmed the socket is
+    genuinely gone, so this never signals a healthy server."""
+    run = run or _default_run
+    run(["kill", "-USR1", str(pid)])
+
+
+def list_claude_panes(run=None, logs=None):
     """[(pane_id, cwd)] for every tmux pane running `claude` — directly, or
     hosted under sudo/su (the montalu-in-newlevel-tmux stream shape) — deduped
-    by pane_id (grouped sessions share the same pane_id)."""
+    by pane_id (grouped sessions share the same pane_id).
+
+    Self-heals the orphaned-tmux-server shape (#318): `tmux list-panes -a`
+    returning EMPTY is structurally ambiguous on its own -- a live server
+    always hosts >=1 pane, so empty means EITHER genuinely no tmux server is
+    running, OR the server is alive but its socket FILE was reaped out from
+    under it (the live incident: subdev's `/tmp/tmux-1000/` was recreated by
+    a tmpfiles-clean-shaped age-based sweep while both the tmux server and
+    david's claude session kept running -- every watchdog job funnels
+    through THIS function, so recovering here fixes job 8's false "no
+    session" bounce ping and every other pane-reading job at once, instead
+    of teaching each one to special-case it). `logs`, if a list, gets one
+    line describing the recovery attempt and its outcome -- best-effort,
+    callers that don't care about it (nearly all of them) just omit it."""
     run = run or _default_run
-    out = run(["tmux", "list-panes", "-a", "-F",
-               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
-               "\t#{pane_pid}"])
+    query = ["tmux", "list-panes", "-a", "-F",
+             "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
+             "\t#{pane_pid}"]
+    out = run(query)
+    if not (out or "").strip():
+        pid = _tmux_server_pid(run)
+        if pid is not None and _tmux_socket_missing():
+            if logs is not None:
+                logs.append("tmux-socket-orphaned server-pid=%d -- "
+                            "recovering via SIGUSR1" % pid)
+            _tmux_socket_recover(pid, run)
+            out = run(query)
+            if logs is not None:
+                logs.append("tmux-socket-recovered" if (out or "").strip()
+                            else "tmux-socket-recovery-failed server-pid=%d"
+                            % pid)
     seen, res = set(), []
     for line in (out or "").splitlines():
         parts = line.split("\t")
@@ -4320,7 +4396,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     persist()                                  # cadence stamp survives a kill
     logs = []
 
-    panes = list_claude_panes(run)
+    panes = list_claude_panes(run, logs=logs)
     # candidate repos: every live pane cwd (nudge path) + cached roots (Discord
     # fallback for repos whose session is gone)
     targets = {}                               # root -> (name, pane_id | None)
@@ -4527,7 +4603,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     persist()                                  # cadence stamp survives a kill
     logs = []
 
-    panes = list_claude_panes(run)
+    panes = list_claude_panes(run, logs=logs)
     targets = {}                               # root -> (name, pane_id | None)
     for pid, cwd in panes:
         targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
