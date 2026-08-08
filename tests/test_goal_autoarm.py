@@ -1360,12 +1360,17 @@ class TestGoalAutoarmVirginCandidateRecentHuman(unittest.TestCase):
             tmux, _logs = self._go(now=now)
         self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
 
-    def test_a_future_dated_marker_never_counts_as_recent(self):
+    def test_a_grossly_future_dated_marker_beyond_the_window_still_arms(self):
+        # #339-review MAJOR -- the clamp is SYMMETRIC now (a near-future
+        # value counts as recent, see the mid-sweep-drift tests below), but
+        # a value well BEYOND the window in the future (clock skew, a
+        # transcript synced off another box) must still be bounded, never
+        # treated as recent forever.
         now = time.time()
         self._write([])
         f = "/tmp/claude-user-active-%s" % self.sid
         Path(f).write_text("")
-        future = now + 3600
+        future = now + 3600  # 1h, well past the 30-min window either side
         os.utime(f, (future, future))
         self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
         with m.patch.object(airuleset, "resolve_authority",
@@ -1373,9 +1378,61 @@ class TestGoalAutoarmVirginCandidateRecentHuman(unittest.TestCase):
             tmux, _logs = self._go(now=now)
         self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
 
-    def test_a_future_dated_transcript_prompt_never_counts_as_recent(self):
+    def test_a_grossly_future_dated_transcript_prompt_still_arms(self):
         now = time.time()
         self._write([human_entry(now + 3600)])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_a_near_future_marker_from_mid_sweep_drift_refuses(self):
+        # #339-review MAJOR (the CRITICAL live-reproduced finding): `now`
+        # is captured once at sweep start; job 9 runs at the sweep's TAIL,
+        # so a human prompt landing seconds AFTER `now` was captured (but
+        # before this pane's own turn in the per-pane loop) stamps a
+        # timestamp NEWER than `now` -- a small NEGATIVE age. The old
+        # asymmetric `0 <= age` clamp read that as "not recent" and armed
+        # into a conversation that had, in wall-clock terms, already
+        # started. The fix must refuse here.
+        now = time.time()
+        self._write([])
+        f = "/tmp/claude-user-active-%s" % self.sid
+        Path(f).write_text("")
+        near_future = now + 10  # the incident's own observed ~2min gap
+                                 # scaled down -- well inside the window
+        os.utime(f, (near_future, near_future))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "presence marker" in ln
+               for ln in logs), logs)
+
+    def test_a_near_future_transcript_prompt_from_mid_sweep_drift_refuses(self):
+        now = time.time()
+        self._write([human_entry(now + 10)])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "transcript human prompt" in ln
+               for ln in logs), logs)
+
+    def test_a_stop_hook_feedback_entry_is_never_read_as_human(self):
+        # #339-review MINOR -- a Stop-hook-rejected turn writes a real,
+        # routine top-level `user` entry starting "Stop hook feedback:"
+        # (#108/#109 measured thousands of these corpus-wide). It is
+        # machine-injected, not human-typed, and must never delay a
+        # genuinely-headless virgin arm.
+        now = time.time()
+        self._write([{
+            "type": "user", "timestamp": _iso(now - 5),
+            "message": {"content": "Stop hook feedback: [some-hook.sh] "
+                                    "blocked this turn"}}])
         with m.patch.object(airuleset, "resolve_authority",
                            return_value="full"):
             tmux, _logs = self._go(now=now)
