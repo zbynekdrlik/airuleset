@@ -235,10 +235,19 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertTrue(any("reply→" in ln for ln in logs), logs)
         # dry-run: delivery is SIMULATED — the real on-disk map must be kept
-        # (a dry-run diagnostic dropping the live question loses the answer);
-        # the reply id is still deduped in (unsaved) state
+        # (a dry-run diagnostic dropping the live question loses the answer).
         self.assertIn("888001", notify.load_questions(self.qpath))
-        self.assertIn("rep1", state["dreply_done"])
+        # #304: the reply id must NOT be dedup-marked either — this `state`
+        # dict IS what run_once persists to disk unconditionally at the end
+        # of every sweep (dry-run or not), so a mark left here by a
+        # `--dry-run` troubleshooting invocation poisons the REAL next
+        # sweep's dedup state and the user's actual answer is silently
+        # skipped. (This assertion used to be `assertIn` — the ORIGINAL
+        # comment here claimed "the reply id is still deduped in (unsaved)
+        # state", which was false: the state is not unsaved, run_once saves
+        # it every time.)
+        self.assertNotIn("rep1", state.get("dreply_done", []))
+        self.assertNotIn("rep1", state.get("dreply_acked", []))
 
     def test_delivers_from_a_channel_that_is_not_the_owners_normal_thread(self):
         # #296: a ❓ ping now routes to a SEPARATE per-owner questions thread
@@ -319,6 +328,24 @@ class DeliverDiscordReplies(unittest.TestCase):
             discord_fetch=self._fetch([self._reply_msg()]))
         self.assertFalse(any("-l" in a for a in self.sent))
         self.assertEqual(logs, [])
+
+    def test_a_dry_run_sweep_never_poisons_the_real_next_sweep(self):
+        # #304: the exact failure mode the ticket describes — a
+        # `python3 airuleset.py watchdog --once --dry-run` troubleshooting
+        # run must never make the FOLLOWING real (non-dry-run) sweep, on the
+        # SAME persisted `state`, believe the reply was already handled.
+        notify.record_question("888001", "777001", "sid-abc", "/p",
+                               now=time.time(), path=self.qpath)
+        state = {}
+        panes = {"sid-abc": ("%1", IDLE)}
+        wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=True,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        logs = wd.deliver_discord_replies(
+            time.time(), self._run, state, panes, dry_run=False,
+            discord_fetch=self._fetch([self._reply_msg()]))
+        self.assertTrue(any("reply→" in ln for ln in logs), logs)
+        self.assertIn("rep1", state.get("dreply_done", []))
 
     def test_no_questions_is_a_noop(self):
         logs = wd.deliver_discord_replies(
